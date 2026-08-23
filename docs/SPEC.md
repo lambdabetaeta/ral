@@ -3931,7 +3931,7 @@ For tools that pass traditional shell flags blindly, ral accepts:
 - `-u` — accepted with no effect;
 - `-i`, `-s`, and `-l` — with the meanings above.
 
-ral seeds a stable dynamic environment at boot. Inherited values win; otherwise it supplies defaults for `HOME`, `USER`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, and `LANG`. It increments `SHLVL` and supplies `OS_NAME`, `OS_ARCH`, and `OS_FAMILY`. Recognised terminal and multiplexer variables are retained when present.
+ral seeds a stable dynamic environment at boot. Inherited values win; otherwise it supplies defaults for `PATH`, `SHELL`, `TERM`, and `LANG`. `HOME`, `USER`, and `LOGNAME` are seeded from the host alone: where the host binds none, the variable stays unbound rather than taking an invented value, and `~` is then an error naming `HOME` rather than a directory. It increments `SHLVL` and supplies `OS_NAME`, `OS_ARCH`, and `OS_FAMILY`. Recognised terminal and multiplexer variables are retained when present.
 
 `PWD` and `OLDPWD` are not exposed through `$ENV`. ral owns the current and previous directories as shell state so parallel work cannot race through the process-wide current directory. Each external child receives the correct `PWD`, `OLDPWD`, and actual launch directory.
 

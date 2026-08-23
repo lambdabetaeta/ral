@@ -363,13 +363,20 @@ impl App {
     /// This app's directory under an XDG base: `$XDG_<kind>_HOME/<app>/`.  The
     /// one spelling of that convention — [`App::project_dir`] and
     /// `provider::models`'s cache path both build on it.
+    ///
+    /// With no home and no absolute override the base is the temp dir, so a
+    /// run still records and configures — losing that state on reboot, where
+    /// defaulting under the cwd would instead scatter it through the working
+    /// tree the agent is editing.
     #[must_use]
     #[allow(
         clippy::disallowed_methods,
         reason = "host-env: exarch's own config/state directories live under the launching user's XDG bases"
     )]
     pub fn xdg_dir(self, kind: ral_core::path::basedir::XdgKind) -> PathBuf {
-        ral_core::path::basedir::resolve_xdg(kind, &ral_core::host::home()).join(self.0)
+        ral_core::path::basedir::resolve_xdg(kind, ral_core::host::home().as_deref())
+            .unwrap_or_else(std::env::temp_dir)
+            .join(self.0)
     }
 
     /// `$XDG_STATE_HOME/<app>/<project>/`, `<project>` being the slugified

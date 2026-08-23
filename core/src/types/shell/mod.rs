@@ -396,10 +396,12 @@ impl Shell {
                     }
                 },
             ))),
+            // A pseudo-var is total, so these two name their own placeholder for
+            // a host fact that is absent — the reader hands back no stand-in.
             "CWD" => {
                 let p = self.cwd();
                 let home = self.mobile.context.home();
-                let cwd_str = crate::path::abbreviate_home(&p, &home);
+                let cwd_str = crate::path::abbreviate_home(&p, home.as_deref());
                 let cwd_str = if cwd_str.is_empty() {
                     "?".into()
                 } else {
@@ -407,9 +409,10 @@ impl Shell {
                 };
                 Some(Value::String(cwd_str))
             }
-            "USER" => Some(Value::String(crate::path::user_name(
-                self.mobile.context.env_overrides(),
-            ))),
+            "USER" => Some(Value::String(
+                crate::path::user_name(self.mobile.context.env_overrides())
+                    .unwrap_or_else(|| "?".into()),
+            )),
             _ => None,
         }
     }

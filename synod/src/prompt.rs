@@ -37,7 +37,7 @@ const HOUSE_RULES: &str = "house-rules.md";
 ///    Synod's documents are `.xlsx` and `.docx` — opaque to a line editor
 ///    and manipulated wholesale through Python and `LibreOffice` — and its
 ///    text edits are few, targeted, and to files it usually just wrote.
-///    String-replace needs no prior `view-text` to obtain a witness, which
+///    String-replace needs no prior `view-hash` to obtain a witness, which
 ///    is one fewer step on every edit, and half the prompt weight for a
 ///    peripheral capability.
 /// 4. **Toolbox** (`data/toolbox.md`) — how office work is actually done
@@ -271,8 +271,7 @@ mod tests {
             "the guest scratch is named"
         );
         assert!(p.contains("- cwd: /work"));
-        let home = ral_core::host::home();
-        if !home.is_empty() {
+        if let Some(home) = ral_core::host::home() {
             assert!(
                 !p.contains(&home),
                 "the host home directory must not leak into the guest's prompt"

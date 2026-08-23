@@ -47,8 +47,8 @@ impl Context {
     }
 
     /// Effective `$HOME` via [`crate::path::home`]: these overrides first, then
-    /// the host env, empty string when neither binds.
-    pub(crate) fn home(&self) -> String {
+    /// the host env, `None` when neither binds.
+    pub(crate) fn home(&self) -> Option<String> {
         crate::path::home(&self.env_overrides)
     }
 

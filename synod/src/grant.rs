@@ -243,11 +243,10 @@ impl Grant {
             ));
         }
 
-        let home = ral_core::host::home();
+        let Some(home) = ral_core::host::home() else {
+            return Ok(()); // No home to contain: nothing for this law to say.
+        };
         let home = std::fs::canonicalize(&home).unwrap_or_else(|_| PathBuf::from(&home));
-        if home.as_os_str().is_empty() {
-            return Ok(());
-        }
         if home == root {
             return Err(format!(
                 "{} is your whole home folder — your entire computer's worth of files. \
@@ -440,8 +439,7 @@ mod tests {
     /// than a synthetic one, so no test has to mutate the environment.
     #[test]
     fn the_home_folder_and_its_parents_are_refused() {
-        let home = ral_core::host::home();
-        let Ok(home) = std::fs::canonicalize(&home) else {
+        let Some(home) = ral_core::host::home().and_then(|h| std::fs::canonicalize(h).ok()) else {
             return; // No usable home on this host; nothing to assert.
         };
         assert!(
@@ -555,10 +553,9 @@ mod tests {
     #[test]
     fn the_home_folder_is_unreachable_from_inside_a_grant() {
         let (_dir, grant) = granted("grant-home-unreachable");
-        let home = ral_core::host::home();
-        if home.is_empty() {
+        let Some(home) = ral_core::host::home() else {
             return;
-        }
+        };
         let mut shell = Shell::default();
         shell.with_capabilities(grant.capabilities(), |sh| {
             let path = sh.resolve(&format!("{home}/.ssh/id_ed25519"));

@@ -24,7 +24,14 @@ fn root(tag: &str) -> PathBuf {
 }
 
 fn freeze(entry: &str, cwd: &Path) -> Result<String, PolicyError> {
-    freeze_one(entry, &FreezeCtx { home: "/h", cwd }).map(|p| p.as_str().to_string())
+    freeze_one(
+        entry,
+        &FreezeCtx {
+            home: Some("/h"),
+            cwd,
+        },
+    )
+    .map(|p| p.as_str().to_string())
 }
 
 fn frozen(entry: &str, cwd: &Path) -> String {

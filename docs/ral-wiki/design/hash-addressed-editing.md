@@ -6,6 +6,11 @@ line together with the smallest window of neighbours that makes it unique in the
 file. An edit is a batch of `[hash: …, line: …]` records, each naming one line
 and the text that replaces it.
 
+This is the scheme `--edit hash` teaches. The taught default is literal string
+replacement — `edit-replace path from to`, one unique occurrence — and only the
+prompt section switches: `edit-hash` stays registered either way, so everything
+below remains live ([[map/exarch|exarch]]).
+
 The witness has two jobs ([[map/exarch/builtins|builtins]] is the *where*):
 
 - *Content + context* identifies the line by what it is and what surrounds it,
@@ -77,17 +82,19 @@ context is what exarch adds to it.
 
 ## The surface: three tools, one witness, one door
 
-`view-text`, `view-text-around`, and `edit-hash` are the whole editing
+`view-hash`, `view-hash-around`, and `edit-hash` are the whole editing
 surface. All three are **path-based**: each takes a path and reads the *whole*
 file in Rust, through one grant-checked read door, and computes witnesses with
 the same `window_hashes`. Nothing in the surface takes a line list or a stream.
 
-- `view-text PATH START END` — show `[START, END)` as one record per line,
+- `view-hash PATH START END` — show `[START, END)` as one record per line,
   `[line: Int, hash: Str, text: Str]`. Records rather than tagged text, so one
   read serves both eyes and script: the rows a sweep means to change go straight
   into `edit-hash`, which is why no programmatic twin stands beside it.
-- `view-text-around PATH LINE PEEK` — the `2*PEEK + 1` lines centred on `LINE`,
-  in the same records. A thin ral helper over `view-text`.
+  `view-text`/`view-text-around` show the same ranges without the witness
+  column, for the string-replace scheme, which needs no handle.
+- `view-hash-around PATH LINE PEEK` — the `2*PEEK + 1` lines centred on `LINE`,
+  in the same records. A thin ral helper over `view-hash`.
 - `edit-hash PATH EDITS` — apply the batch.
 
 This shape is forced, and it is what makes the witness trustworthy:
@@ -100,7 +107,7 @@ This shape is forced, and it is what makes the witness trustworthy:
   against nothing — a quiet, confusing footgun. Path-based reads close it: there
   is no slice to get wrong.
 - **Each tool is one logical surface.** The reads sink below the ral line;
-  `view-text` and `view-text-around` raise exactly one `read` card, and
+  `view-hash` and `view-hash-around` raise exactly one `read` card, and
   `edit-hash` raises exactly one diff card — never a separate read or write card. This is why `edit-hash`
   is a path builtin and not a `< file > file` stream filter: a filter's read and
   write would each ride the redirect frame and surface their own card, fracturing
@@ -135,7 +142,7 @@ content at the moment of edit; there is no map of anchors to keep in sync.
   suffer on every insertion.
 
 **Uniqueness is by construction, so the model never sees an ambiguous hash.** The
-window grows until each line's witness is unique, so a `view-text`
+window grows until each line's witness is unique, so a `view-hash`
 read hands back handles that each name exactly one line. The only residual is a
 24-bit accidental Blake3 collision (a stale-edit check, not an authority
 boundary — the actual authority is ral's [[design/grant|grant]] frame) or the
@@ -161,13 +168,13 @@ of `[hash: HASH, line: NEWTEXT]` records.
 
 **A grep hit is a location, not an edit handle.** `grep-files` returns
 `[{file, line, text}]` with no witness: search finds *where*, and turning a
-location into an edit handle is a deliberate second step — `view-text-around` over the hit to read its witness by eye.
+location into an edit handle is a deliberate second step — `view-hash-around` over the hit to read its witness by eye.
 
 **The witness layer is ral over small atoms.** `line_hash` and `window_hashes`
 are private Rust — the witness is never something the model constructs, only one
 it copies out of a read — and `_search-files` (the ignore-aware ripgrep walk) is
-`_`-prefixed so `help` hides it. `view-text`, `grep-files`, and
-`edit-hash` are the host builtins; `view-text-around` is the one thin ral helper. This
+`_`-prefixed so `help` hides it. `view-text`, `view-hash`, `grep-files`, and
+`edit-hash` are the host builtins; `view-hash-around` is its thin ral helper. This
 keeps exarch's [[design/exarch-architecture|thin architecture]]: editing is a few
 host atoms reading whole files below the ral line, not a separate edit protocol.
 

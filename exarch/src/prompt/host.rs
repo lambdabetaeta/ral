@@ -23,12 +23,10 @@ pub fn snapshot(exarch_state: &std::path::Path) -> String {
     if let Some(cwd) = ral_core::host::cwd() {
         let _ = writeln!(out, "- cwd: {}", cwd.display());
     }
-    let user = ral_core::host::user();
-    if user != "?" {
+    if let Some(user) = ral_core::host::user() {
         let _ = writeln!(out, "- user: {user}");
     }
-    let home = ral_core::host::home();
-    if !home.is_empty() {
+    if let Some(home) = ral_core::host::home() {
         let _ = writeln!(out, "- home: {home}");
     }
     if let Some(g) = git_line() {

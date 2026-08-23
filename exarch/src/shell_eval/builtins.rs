@@ -77,6 +77,7 @@ pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Va
 pub(crate) fn agent_library_docs() -> Vec<(String, String)> {
     [
         ("view-text-around", "view-text-around PATH LINE PEEK  — show the 2*PEEK+1 lines of PATH centred on LINE, in `view-text`'s records, clamped at the top of the file."),
+        ("view-hash-around", "view-hash-around PATH LINE PEEK  — the same window in `view-hash`'s records, each carrying its witness."),
         ("pin-set", "pin-set <key> <card>  — overwrite the register slot under key with card."),
         ("pin-clear", "pin-clear <key>  — empty the register slot under key."),
         ("clear-tasks", "clear-tasks  — empty the task list."),
@@ -127,7 +128,7 @@ enum Witness {
 /// symmetric window — at least ±[`MIN_RADIUS`], at most ±[`MAX_RADIUS`] — that no
 /// other line shares, folded together with that radius and the target's offset in
 /// the (clamped) window.  Carrying no line number, a witness goes stale on a
-/// *local* change, not on every insertion elsewhere.  `view-text` and `edit-hash`
+/// *local* change, not on every insertion elsewhere.  `view-hash` and `edit-hash`
 /// both derive theirs here, so a read and the edit that follows it agree.
 ///
 /// Computed by partition refinement, the shape of DFA minimisation: group at the
@@ -206,8 +207,8 @@ fn rows_of(body: &str) -> Vec<String> {
     body.split('\n').map(str::to_string).collect()
 }
 
-/// Raise the one read observation for a whole-file read: `view-text` reads in
-/// Rust below the ral line, so no redirect frame speaks for it.
+/// Raise the one read observation for a whole-file read: the readers read in
+/// Rust below the ral line, so no redirect frame speaks for them.
 fn surface_read(shell: &Shell, mooring: &Mooring, path: &str) {
     mooring.surface(
         &Observation::instant(
@@ -221,7 +222,7 @@ fn surface_read(shell: &Shell, mooring: &Mooring, path: &str) {
     );
 }
 
-fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
+fn view_bound(arg: &Value, which: &str, tool: &str) -> Settled<usize> {
     match arg.as_int() {
         Some(n) if n >= 1 => {
             #[allow(
@@ -233,44 +234,76 @@ fn view_bound(arg: &Value, which: &str) -> Settled<usize> {
             Ok(bound)
         }
         _ => Err(sig(format!(
-            "view-text: {which} must be an Int >= 1 (range is half-open: end > start), got {}",
+            "{tool}: {which} must be an Int >= 1 (range is half-open: end > start), got {}",
             arg.type_name()
         ))),
     }
 }
 
-/// `view-text PATH START END` — the half-open line range `[START, END)`, each row
-/// carrying its witness.  Reads and hashes the whole file even for a small
-/// slice, since a witness depends on file-wide uniqueness.
-fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+/// The lines of `PATH` and the half-open slice of them `[START, END)` names,
+/// clamped to the file — what both readers show, differing only in what each
+/// row carries.
+fn view_range(
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+    tool: &str,
+) -> Settled<(Vec<String>, std::ops::Range<usize>)> {
     let path = args[0].to_string();
-    let start = view_bound(&args[1], "start")?;
-    let end = view_bound(&args[2], "end")?;
+    let start = view_bound(&args[1], "start", tool)?;
+    let end = view_bound(&args[2], "end", tool)?;
 
-    let body = read_text_file(shell, &path, "view-text")?;
+    let body = read_text_file(shell, &path, tool)?;
     surface_read(shell, mooring, &path);
     let rows = rows_of(&body);
-    let hashes = window_hashes(&rows);
-    let n = rows.len();
-    let lo = start - 1;
-    let hi = (end - 1).min(n);
+    let hi = (end - 1).min(rows.len());
+    Ok((rows, start - 1..hi))
+}
 
-    let mut result_rows = Vec::new();
-    if lo < hi {
-        for i in lo..hi {
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "line index bounded by file length; no i64 wrap"
-            )]
-            let line = i as i64 + 1;
-            result_rows.push(Value::map(vec![
-                ("line".into(), Value::Int(line)),
-                ("hash".into(), Value::String(hashes[i].clone())),
-                ("text".into(), Value::String(rows[i].clone())),
-            ]));
-        }
-    }
-    Ok(Value::list(result_rows))
+/// A row index as the 1-based line number the model reads.
+fn line_no(i: usize) -> Value {
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "line index bounded by file length; no i64 wrap"
+    )]
+    let line = i as i64 + 1;
+    Value::Int(line)
+}
+
+/// `view-text PATH START END` — the half-open line range `[START, END)` as
+/// `[line, text]` rows.  The text is the whole address here: `edit-replace`
+/// matches it verbatim, so a row is copied as it stands.
+fn builtin_view_text(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let (rows, range) = view_range(args, mooring, shell, "view-text")?;
+    Ok(Value::list(
+        range
+            .map(|i| {
+                Value::map(vec![
+                    ("line".into(), line_no(i)),
+                    ("text".into(), Value::String(rows[i].clone())),
+                ])
+            })
+            .collect(),
+    ))
+}
+
+/// `view-hash PATH START END` — the same range with each row's witness, the
+/// handle `edit-hash` checks.  Hashes the whole file even for a small slice,
+/// since a witness depends on file-wide uniqueness.
+fn builtin_view_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let (rows, range) = view_range(args, mooring, shell, "view-hash")?;
+    let hashes = window_hashes(&rows);
+    Ok(Value::list(
+        range
+            .map(|i| {
+                Value::map(vec![
+                    ("line".into(), line_no(i)),
+                    ("hash".into(), Value::String(hashes[i].clone())),
+                    ("text".into(), Value::String(rows[i].clone())),
+                ])
+            })
+            .collect(),
+    ))
 }
 
 /// The one sanctioned `WalkBuilder::build` site, backed by a clippy ban: an
@@ -465,7 +498,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             Some(v) => v.to_string(),
             None => {
                 return Err(sig(
-                    "edit-hash: each edit needs a `hash` field — the witness from view-text/view-text-around."
+                    "edit-hash: each edit needs a `hash` field — the witness from view-hash/view-hash-around."
                         .to_string(),
                 ));
             }
@@ -482,7 +515,7 @@ fn builtin_edit_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
         match idxs.len() {
             0 => {
                 return Err(sig(format!(
-                    "edit-hash: no line in {path} hashes to {want} — did the file change? Re-read with view-text/view-text-around before editing."
+                    "edit-hash: no line in {path} hashes to {want} — did the file change? Re-read with view-hash/view-hash-around before editing."
                 )));
             }
             1 => resolved.push(ResolvedEdit { at: idxs[0], new }),
@@ -563,46 +596,53 @@ fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
 /// owns its own surface.  `tool` names the calling builtin in the error.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:witness-read] The witness layer's read door (view-text/edit-hash/edit-replace), in Rust below the ral line so it never reaches the redirect frame. view-text surfaces its own read card; edit-hash/edit-replace read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
+    reason = "[io-door:surface:witness-read] The readers' and editors' shared read door (view-text/view-hash/edit-hash/edit-replace), in Rust below the ral line so it never reaches the redirect frame. The readers surface their own read card; edit-hash/edit-replace read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
 )]
 fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> {
     let rp = shell.resolve(path);
     shell.check_fs_read(&rp)?;
-    let bytes =
-        fs::read(rp.as_path()).map_err(|e| sig(format!("{tool}: cannot read {path}: {e}")))?;
+    let bytes = fs::read(rp.as_path()).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            sig(format!(
+                "{tool}: {path} does not exist — {tool} never creates a file; \
+                 `to-string BODY > path` writes a new one."
+            ))
+        } else {
+            sig(format!("{tool}: cannot read {path}: {e}"))
+        }
+    })?;
     String::from_utf8(bytes).map_err(|_| {
         sig(format!(
-            "{tool}: '{path}' is not valid UTF-8, so its lines cannot be witnessed."
+            "{tool}: '{path}' is not valid UTF-8 — these tools read and edit text only."
         ))
     })
 }
 
-/// `edit-replace PATH FROM TO` — replace the one literal occurrence of `FROM`,
-/// borrowing `string-replace`'s match/error logic, so 0 or >1 matches errors and
-/// leaves the file untouched.  Composed over the same doors as `edit-hash`: a
-/// silent read, then [`Shell::atomic_write`], surfacing one whole-file diff.
+/// `edit-replace PATH FROM TO` — replace the one literal occurrence of `FROM`, so
+/// 0 or >1 matches errors and leaves the file untouched.  Composed over the same
+/// doors as `edit-hash`: a silent read, then [`Shell::atomic_write`], surfacing
+/// one whole-file diff.
 fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = args[0].to_string();
     let from = args[1].to_string();
     let to = args[2].to_string();
+    if from.is_empty() {
+        return Err(sig("edit-replace: FROM must be non-empty."));
+    }
     let body = read_text_file(shell, &path, "edit-replace")?;
-    let replaced = ral_core::builtins::strings::builtin_string_replace(&[
-        Value::String(from.clone()),
-        Value::String(to.clone()),
-        Value::String(body.clone()),
-    ])
-    .map_err(relabel_string_replace)?;
-    let final_text = replaced.to_string();
+    let starts = ral_core::builtins::strings::occurrence_starts(&body, &from);
+    let &[start] = starts.as_slice() else {
+        return Err(no_unique_match(&body, &from, &path, &starts));
+    };
+
+    let final_text = body.replacen(&from, &to, 1);
     shell.atomic_write(&path, final_text.as_bytes())?;
     surface_edit(mooring, &path, &body, &final_text);
 
-    // `string_replace` above already proved `from` matches exactly once, so this
-    // relocation for the line-range note needs no second uniqueness check.
-    let start = body
-        .find(&from)
-        .expect("edit-replace: match vanished after string_replace confirmed it");
-    let start_line = body[..start].matches('\n').count() + 1;
-    let end_line = start_line + from.matches('\n').count();
+    let start_line = line_of(&body, start);
+    // A FROM ending in a newline claims that terminator but no content on the
+    // line after it, so the range stops short of it.
+    let end_line = start_line + from.matches('\n').count() - usize::from(from.ends_with('\n'));
     let lines = if start_line == end_line {
         start_line.to_string()
     } else {
@@ -619,18 +659,65 @@ fn builtin_edit_replace(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     Ok(Value::Unit)
 }
 
-/// Re-label a borrowed `string-replace:` diagnostic, so the model reads back the
-/// verb it actually called.
-fn relabel_string_replace(b: Break) -> Break {
-    match b {
-        Break::Error(mut e) => {
-            if let Some(rest) = e.message.strip_prefix("string-replace:") {
-                e.message = format!("edit-replace:{rest}");
+/// The 1-based line that byte offset `at` falls on.
+fn line_of(body: &str, at: usize) -> usize {
+    body[..at].matches('\n').count() + 1
+}
+
+/// Why `FROM` named no single occurrence.  A miss is nearly always a mangled
+/// `FROM`, so each arm names the mangling it can prove; several matches name the
+/// lines, which is where the model has to widen.
+fn no_unique_match(body: &str, from: &str, path: &str, starts: &[usize]) -> Break {
+    if starts.len() > 1 {
+        // Ascending offsets, so several matches on one line collapse next to
+        // each other: name the line once rather than once per match.
+        let mut lines: Vec<String> = Vec::new();
+        for &at in starts {
+            let line = line_of(body, at).to_string();
+            if lines.last() != Some(&line) {
+                lines.push(line);
             }
-            Break::Error(e)
         }
-        escape @ Break::Escape(_) => escape,
+        return sig(format!(
+            "edit-replace: FROM matches {} times in {path}, on line{} {} — must match exactly \
+             once. Widen FROM with a neighbouring line to make it unique, or change every \
+             occurrence by composing string-replace / re-replace-all over from-string and \
+             to-string.",
+            starts.len(),
+            if lines.len() == 1 { "" } else { "s" },
+            lines.join(", ")
+        ));
     }
+    if has_suspicious_escapes(from) {
+        return sig(format!(
+            "edit-replace: FROM was not found in {path}, and FROM carries a literal backslash \
+             escape — ral strings are verbatim, so \\n is a backslash and an n. Write real \
+             newlines inside a raw #'…'# string."
+        ));
+    }
+    if let Some(line) = unindented_match(body, from) {
+        return sig(format!(
+            "edit-replace: FROM was not found in {path}, but line {line} matches it apart from \
+             leading whitespace — copy the exact text, indentation included, from \
+             view-text-around."
+        ));
+    }
+    sig(format!(
+        "edit-replace: FROM was not found in {path} — is the file already what you intended? \
+         Re-read it with view-text-around before editing."
+    ))
+}
+
+/// The 1-based line equal to `from`'s first non-empty line once both are trimmed,
+/// but indented differently — the slip a `FROM` copied by eye makes.  Equal
+/// indentation is no near-miss: something further down `from` differs, and
+/// blaming whitespace would misdirect.
+fn unindented_match(body: &str, from: &str) -> Option<usize> {
+    let raw = from.lines().find(|l| !l.trim().is_empty())?;
+    let needle = raw.trim();
+    body.lines()
+        .position(|l| l.trim() == needle && l != raw)
+        .map(|i| i + 1)
 }
 
 /// `explore-dir DEPTH` — list the cwd's tree (ignore-aware) to `DEPTH`, through
@@ -712,8 +799,22 @@ fn scheme_grep_files(_u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `view-text :: Str → Int → Int → F [[line: Int, hash: Str, text: Str]]`
+/// `view-text :: Str → Int → Int → F [[line: Int, text: Str]]`
 fn scheme_view_text(_u: &mut Unifier) -> Scheme {
+    scheme_view_range(&[("line", Ty::Int), ("text", Ty::String)])
+}
+
+/// `view-hash :: Str → Int → Int → F [[line: Int, hash: Str, text: Str]]`
+fn scheme_view_hash(_u: &mut Unifier) -> Scheme {
+    scheme_view_range(&[
+        ("line", Ty::Int),
+        ("hash", Ty::String),
+        ("text", Ty::String),
+    ])
+}
+
+/// `Str → Int → Int → F [row]` — both readers' shape, over the row each carries.
+fn scheme_view_range(row: &[(&str, Ty)]) -> Scheme {
     scheme(
         &[],
         &[],
@@ -722,14 +823,7 @@ fn scheme_view_text(_u: &mut Unifier) -> Scheme {
             Ty::String,
             fun(
                 Ty::Int,
-                fun(
-                    Ty::Int,
-                    pure(Ty::List(Box::new(closed_record(&[
-                        ("line", Ty::Int),
-                        ("hash", Ty::String),
-                        ("text", Ty::String),
-                    ])))),
-                ),
+                fun(Ty::Int, pure(Ty::List(Box::new(closed_record(row))))),
             ),
         )),
     )
@@ -942,12 +1036,18 @@ fn builtin_service_handle(args: &[Value], _mooring: &Mooring, shell: &mut Shell)
 
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static EXARCH_BUILTINS_ARR: [BuiltinEntry; 9] = [
+static EXARCH_BUILTINS_ARR: [BuiltinEntry; 10] = [
     BuiltinEntry::new(
         Cow::Borrowed("view-text"),
         BuiltinTypeRule::Scheme(scheme_view_text),
-        "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH as one record per line, [{line: Int, hash: String, text: String}]. The hash is the witness `edit-hash` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness).",
+        "view-text <path> <start> <end>  — show the half-open line range [start, end) of PATH as one record per line, [{line: Int, text: String}]. The text is verbatim, which is what `edit-replace` matches on: copy a row as it stands, indentation included.",
         BuiltinBody::Static(builtin_view_text),
+    ),
+    BuiltinEntry::new(
+        Cow::Borrowed("view-hash"),
+        BuiltinTypeRule::Scheme(scheme_view_hash),
+        "view-hash <path> <start> <end>  — the same range as `view-text`, each record carrying [{line: Int, hash: String, text: String}]. The hash is the witness `edit-hash` checks; copy it, never recompute it. Reads the whole file (the witness depends on file-wide uniqueness).",
+        BuiltinBody::Static(builtin_view_hash),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("grep-files"),
@@ -964,7 +1064,7 @@ static EXARCH_BUILTINS_ARR: [BuiltinEntry; 9] = [
     BuiltinEntry::new(
         Cow::Borrowed("edit-replace"),
         BuiltinTypeRule::Scheme(scheme_edit_replace),
-        "edit-replace <path> <from> <to>  — read PATH, replace the one literal occurrence of FROM with TO, write the result back. Errors, leaving the file untouched, if FROM matches zero times or more than once.",
+        "edit-replace <path> <from> <to>  — read PATH, replace the one literal occurrence of FROM with TO, write the result back; errors leaving the file untouched on zero or several matches, naming the count and the lines. FROM and TO are verbatim: \\n is a backslash and an n, so write real newlines inside a raw #'…'# string, which may span lines — so may FROM. It never creates a file (`to-string BODY > path` does). For a target that repeats, compose string-replace / re-replace-all over from-string and to-string instead.",
         BuiltinBody::Static(builtin_edit_replace),
     ),
     BuiltinEntry::new(

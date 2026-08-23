@@ -1,17 +1,23 @@
 # exarch agent helper library — sourced into the shell at boot
 
-## `view-text`, `grep-files`, `edit-hash`, and `edit-replace` are exarch host builtins
-## (`exarch/src/shell_eval/builtins.rs`): each reads the whole file in Rust, below the
-## redirect frame, and is a single logical surface.  `view-text`/`edit-hash` share one
-## witness algorithm, so the hash a read shows is exactly the handle `edit-hash`
-## checks.  `view-text-around` is the one thin ral helper over them.
+## `view-text`, `view-hash`, `grep-files`, `edit-hash`, and `edit-replace` are exarch
+## host builtins (`exarch/src/shell_eval/builtins.rs`): each reads the whole file in
+## Rust, below the redirect frame, and is a single logical surface.  `view-hash` and
+## `edit-hash` share one witness algorithm, so the hash a read shows is exactly the
+## handle `edit-hash` checks; `view-text` is the same range without the witness,
+## which `edit-replace` does not need.  The two helpers below re-centre each range.
 
-## Around a file, show `peek` hashed lines on each side of `line`
-## (`2*peek + 1` total), clamped at the top of the file.  Reads `path` the way
-## `view-text` does: `view-text-around foo.rs 120 3`.
+## Around a file, show `peek` lines on each side of `line` (`2*peek + 1` total),
+## clamped at the top of the file: `view-text-around foo.rs 120 3`.
 let view-text-around = { |path line peek|
     let lo = if $[$line > $peek] { return $[$line - $peek] } else { return 1 }
     view-text $path $lo $[$line + $peek + 1]
+}
+
+## The same window with each line's witness, for an `edit-hash` that follows.
+let view-hash-around = { |path line peek|
+    let lo = if $[$line > $peek] { return $[$line - $peek] } else { return 1 }
+    view-hash $path $lo $[$line + $peek + 1]
 }
 
 # --- the pin family -----------------------------------------------------------

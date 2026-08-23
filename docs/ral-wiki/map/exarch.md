@@ -160,8 +160,9 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   per-command `handlers:` entries are unary `{ |args| … }`, the catch-all
   `handler:` binary `{ |name args| … }`.
 - **`Editing`** documents the file-editing scheme the `--edit` flag selects:
-  line-hash (`data/edit-hash.md`) or string-replace (`data/edit-replace.md`);
-  only the prompt text switches, both builtins stay registered
+  string-replace over `view-text` (`data/edit-replace.md`, the default) or
+  line-hash over `view-hash` (`data/edit-hash.md`, `--edit hash`); only the
+  prompt text switches, every reader and editor stays registered
   ([[design/hash-addressed-editing|hash-addressed-editing]]).
 - **`Builtins`** (`builtin_index`) lists every builtin and prelude function by
   *name only* — a progressive-disclosure index the agent expands at runtime with

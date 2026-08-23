@@ -7,8 +7,11 @@ covers_paths: [core/src/prelude.ral]
 # Map: core / prelude
 
 `core/src/prelude.ral` is the standard library, written in ral and baked into the
-binary at build time. `build.rs` reads it, scans its top-level `let` bindings
-into `PRELUDE_EXPORTS`, and the consumer build scripts serialise the annotated
+binary at build time. `build.rs` reads it once, scanning its top-level `let`
+bindings into `PRELUDE_EXPORTS` and the `##` summary above each into
+`PRELUDE_DOCS` — the table `help` and `explain` print from
+([[map/core/builtins|builtins]]), since only values and schemes survive the
+bake — and the consumer build scripts serialise the annotated
 IR — typechecked by the same `bake_prelude` path the runtime uses,
 [[map/core/typecheck|typecheck]] — as a `postcard` blob (the schema hazard
 documented in `core/src/lib.rs`). It

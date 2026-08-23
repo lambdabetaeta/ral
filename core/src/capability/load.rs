@@ -89,7 +89,7 @@ pub fn apply_session_profiles(
     let home = shell.mobile.context.home();
     let cwd = shell.cwd();
     let ctx = crate::path::sigil::FreezeCtx {
-        home: &home,
+        home: home.as_deref(),
         cwd: &cwd,
     };
     let mut composed = Capabilities::default();
@@ -122,7 +122,7 @@ mod tests {
 
     fn ctx() -> crate::path::sigil::FreezeCtx<'static> {
         crate::path::sigil::FreezeCtx {
-            home: "/h",
+            home: Some("/h"),
             cwd: std::path::Path::new("/"),
         }
     }

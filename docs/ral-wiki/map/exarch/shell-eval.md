@@ -226,11 +226,11 @@ boundary the events are buffered in the confined child and replayed through the
 parent's sink ([[map/core/capabilities|carried on the IPC response]]), so they
 are batched rather than live under the sandbox.
 
-`shell_eval/builtins.rs` registers exarch's resident host atoms — `view-text`, the
+`shell_eval/builtins.rs` registers exarch's resident host atoms — `view-text`/`view-hash`, the
 `grep-files` search, the hash-addressed `edit-hash`/`edit-replace`, whose
 file I/O happens in Rust, below the redirect frame
 ([[map/exarch/io-surface|io-surface]]) — and sources the small embedded
-`data/agent.ral` helper library (`view-text-around`, the tasks kit) into the
+`data/agent.ral` helper library (the `-around` readers, the tasks kit) into the
 shell at boot ([[map/exarch/builtins|builtins]]). The one `host_surface()`
 value declaring these sets rides core's `boot_shell` at construction and is
 also the builtin surface a wire engine child's `Frame::Attach` names, so a

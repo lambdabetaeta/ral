@@ -19,7 +19,7 @@
 use crate::path::basedir::{XdgKind, resolve_xdg};
 use crate::path::lex::fold_dots;
 use crate::path::resolved::NormalizedPrefix;
-use crate::path::tilde::{TildePath, expand_tilde_path};
+use crate::path::tilde::{TildePath, Unexpandable, expand_tilde_path};
 use crate::types::PolicyError;
 use std::path::{Path, PathBuf};
 
@@ -55,31 +55,50 @@ pub fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
 /// of expansion: no filesystem access, and `home` is both the tilde root and the
 /// fallback when an XDG env var is unset.
 ///
-/// Infallible, because [`Resolver::resolve`](super::Resolver::resolve) is: an
-/// empty `home` expands `~/x` to `/x`, and a `~user` this platform cannot
-/// resolve passes through literally.  Both fail closed — a prefix that matches
-/// nothing beats a fabricated path that might — but a caller wanting an unset
-/// `$HOME` to be a configuration error must use [`freeze_one`].
-pub fn expand_path_prefix(input: &str, home: &str) -> String {
+/// Infallible, because [`Resolver::resolve`](super::Resolver::resolve) is:
+/// whatever cannot be answered passes through literally — an unknown `home`
+/// leaves `~/x` as `~/x`, exactly as a `~user` this platform cannot resolve
+/// stays `~user`.  That fails closed, a prefix matching nothing beating a
+/// fabricated path that might; a caller wanting the same gap to be a
+/// configuration error uses [`freeze_one`].
+pub fn expand_path_prefix(input: &str, home: Option<&str>) -> String {
     if let Some((kind, sub)) = parse_xdg_token(input) {
-        let base = resolve_xdg(kind, home);
-        return match sub {
-            None => base.to_string_lossy().into_owned(),
-            Some(s) => base.join(s).to_string_lossy().into_owned(),
+        return match resolve_xdg(kind, home) {
+            None => input.to_string(),
+            Some(base) => match sub {
+                None => base.to_string_lossy().into_owned(),
+                Some(s) => base.join(s).to_string_lossy().into_owned(),
+            },
         };
     }
     if let Some(t) = TildePath::parse(input) {
         return expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), home)
-            .unwrap_or_else(|| input.to_string());
+            .unwrap_or_else(|_| input.to_string());
     }
     input.to_string()
 }
 
 /// The caller-supplied half of the freeze context; `xdg:` and `tempdir:` read
 /// the process environment, and `gitdir:` walks the filesystem from `cwd`.
+///
+/// `home` is `None` where nothing binds one, so a policy naming a
+/// home-relative sigil there is refused rather than resolved against a
+/// stand-in.  The `cwd` is not optional, unlike
+/// [`Resolver`](super::Resolver)'s otherwise identical pair: a grant is frozen
+/// once, so "here" must be settled now rather than re-asked per access.
 pub struct FreezeCtx<'a> {
-    pub home: &'a str,
+    pub home: Option<&'a str>,
     pub cwd: &'a Path,
+}
+
+impl FreezeCtx<'_> {
+    /// The home to freeze against, an empty one read as none.  The readers in
+    /// [`crate::path::tilde`] already filter that, but the field is public and
+    /// this is the door where a `Some("")` would root `~/x` at `/x` — a grant
+    /// nobody wrote.
+    fn home(&self) -> Option<&str> {
+        self.home.filter(|h| !h.is_empty())
+    }
 }
 
 /// [`freeze_one`] over a list, minting the grant's whole prefix set at once.
@@ -117,10 +136,9 @@ pub fn freeze_path_list(
 #[allow(clippy::disallowed_methods)]
 pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, PolicyError> {
     if looks_like_xdg(entry) {
-        require_home(ctx)?;
         let (kind, sub) =
             parse_xdg_token(entry).ok_or_else(|| PolicyError::new(unknown_xdg_message(entry)))?;
-        return resolve_xdg_safe(kind, sub, ctx.home);
+        return resolve_xdg_safe(kind, sub, ctx.home());
     }
     if let Some(sub) = parse_literal_sigil(entry, "cwd") {
         return Ok(join_sub(ctx.cwd.to_path_buf(), sub));
@@ -133,31 +151,33 @@ pub fn freeze_one(entry: &str, ctx: &FreezeCtx<'_>) -> Result<NormalizedPrefix, 
         return Ok(join_sub(base, sub));
     }
     if let Some(t) = TildePath::parse(entry) {
-        require_home(ctx)?;
-        let expanded = expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), ctx.home)
-            .ok_or_else(|| PolicyError::new(unresolvable_named_user_message(entry)))?;
+        let expanded = expand_tilde_path(t.user.as_deref(), t.suffix.as_deref(), ctx.home())
+            .map_err(|cause| PolicyError::new(unexpandable_tilde_message(entry, cause)))?;
         return Ok(NormalizedPrefix::freeze(Path::new(&expanded)));
     }
     Ok(NormalizedPrefix::freeze(Path::new(entry)))
 }
 
-fn unresolvable_named_user_message(entry: &str) -> String {
-    format!(
-        "'{entry}' names another user's home directory, which this platform \
-         cannot resolve (no getpwnam(3) equivalent) — replace it with an \
-         explicit absolute path, or use bare `~`/`~/...` for the current user."
-    )
+/// A tilde a policy cannot resolve, put in the policy author's terms: each
+/// cause takes a different way out.
+fn unexpandable_tilde_message(entry: &str, cause: Unexpandable) -> String {
+    match cause {
+        Unexpandable::HomeUnknown => home_unknown_message(),
+        Unexpandable::ForeignUser => format!(
+            "'{entry}' names another user's home directory, which this platform \
+             cannot resolve (no getpwnam(3) equivalent) — replace it with an \
+             explicit absolute path, or use bare `~`/`~/...` for the current user."
+        ),
+    }
 }
 
-fn require_home(ctx: &FreezeCtx<'_>) -> Result<(), PolicyError> {
-    if ctx.home.is_empty() {
-        return Err(PolicyError::new(
-            "HOME is unset, so `~/...` and `xdg:...` tokens in the policy \
-             can't be resolved.  Set HOME in the environment, or replace the \
-             sigil-bearing entries in the policy with explicit absolute paths.",
-        ));
-    }
-    Ok(())
+/// The one answer for a home-relative sigil where nothing binds `$HOME`: `~`
+/// and `xdg:` fail for the same reason and take the same two fixes.
+fn home_unknown_message() -> String {
+    "HOME is unset, so `~/...` and `xdg:...` tokens in the policy \
+     can't be resolved.  Set HOME in the environment, or replace the \
+     sigil-bearing entries in the policy with explicit absolute paths."
+        .to_string()
 }
 
 /// Match `name:`, `name:sub`, or `name:/sub`; leading slashes come off the
@@ -188,13 +208,20 @@ fn join_sub(base: PathBuf, sub: Option<&str>) -> NormalizedPrefix {
 /// `xdg:data` grant to `/etc`.  Both sides are folded before the comparison, so
 /// `xdg:config/../../etc` collapses to `/etc` and is caught at the door instead
 /// of stepping over the guard and collapsing only at match time.
+///
+/// That guard is stated in `home`'s terms, so an unknown home leaves an
+/// `xdg:` grant unanswerable — an absolute `$XDG_*_HOME` included, since there
+/// would then be nothing to contain it.
 #[allow(clippy::disallowed_methods)]
 fn resolve_xdg_safe(
     kind: XdgKind,
     sub: Option<&str>,
-    home: &str,
+    home: Option<&str>,
 ) -> Result<NormalizedPrefix, PolicyError> {
-    let resolved = join_sub(resolve_xdg(kind, home), sub);
+    let (Some(home), Some(base)) = (home, resolve_xdg(kind, home)) else {
+        return Err(PolicyError::new(home_unknown_message()));
+    };
+    let resolved = join_sub(base, sub);
     let folded_home = fold_dots(Path::new(home));
     if resolved.surface_path().starts_with(&folded_home) {
         return Ok(resolved);
@@ -312,7 +339,16 @@ mod tests {
     use super::*;
 
     fn ctx<'a>(home: &'a str, cwd: &'a Path) -> FreezeCtx<'a> {
-        FreezeCtx { home, cwd }
+        FreezeCtx {
+            home: Some(home),
+            cwd,
+        }
+    }
+
+    /// A context where nothing binds `$HOME` — the shape every home-relative
+    /// sigil must refuse.
+    fn homeless_ctx(cwd: &Path) -> FreezeCtx<'_> {
+        FreezeCtx { home: None, cwd }
     }
 
     fn frozen(paths: &[&str], ctx: &FreezeCtx<'_>) -> Result<Vec<String>, PolicyError> {
@@ -419,7 +455,23 @@ mod tests {
 
     #[test]
     fn tilde_expands_against_home() {
-        assert_eq!(expand_path_prefix("~/foo", "/h"), "/h/foo");
+        assert_eq!(expand_path_prefix("~/foo", Some("/h")), "/h/foo");
+    }
+
+    /// A home-relative sigil has no answer where nothing binds `$HOME`.  The
+    /// freeze refuses and says which env var is missing; the runtime twin
+    /// passes the entry through literally, a prefix matching nothing being the
+    /// fail-closed reading on that side.  Neither fabricates `/.gitconfig`.
+    #[test]
+    fn freeze_rejects_home_relative_sigils_without_home() {
+        for entry in ["~", "~/.gitconfig", "xdg:config/git"] {
+            let err = frozen(&[entry], &homeless_ctx(Path::new("/cwd")))
+                .unwrap_err()
+                .message;
+            assert!(err.contains("HOME is unset"), "{entry}: {err}");
+        }
+        assert_eq!(expand_path_prefix("~/.gitconfig", None), "~/.gitconfig");
+        assert_eq!(expand_path_prefix("xdg:config/git", None), "xdg:config/git");
     }
 
     /// No `getpwnam(3)` off Unix, and `expand_path_prefix` cannot fail, so the
@@ -427,7 +479,7 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn named_user_tilde_passes_through_unchanged_off_unix() {
-        assert_eq!(expand_path_prefix("~bob/foo", "/h"), "~bob/foo");
+        assert_eq!(expand_path_prefix("~bob/foo", Some("/h")), "~bob/foo");
     }
 
     /// `freeze_one` can fail, so the same entry is a load-time error rather
@@ -445,12 +497,12 @@ mod tests {
     fn unknown_xdg_token_passes_through_unchanged() {
         // Runtime is permissive — the load-time validator turns a typo into an
         // error; here it only must not be silently rewritten.
-        assert_eq!(expand_path_prefix("xdg:cofnig", "/h"), "xdg:cofnig");
+        assert_eq!(expand_path_prefix("xdg:cofnig", Some("/h")), "xdg:cofnig");
     }
 
     #[test]
     fn ordinary_path_passes_through_unchanged() {
-        assert_eq!(expand_path_prefix("/abs/path", "/h"), "/abs/path");
+        assert_eq!(expand_path_prefix("/abs/path", Some("/h")), "/abs/path");
     }
 
     // Unix-only: the join yields `\h\.cache\foo` on Windows, so the `/foo` tail
@@ -459,7 +511,7 @@ mod tests {
     #[test]
     fn xdg_subpath_is_appended() {
         // Only the tail is asserted: the base moves with `$XDG_CACHE_HOME`.
-        let out = expand_path_prefix("xdg:cache/foo", "/h");
+        let out = expand_path_prefix("xdg:cache/foo", Some("/h"));
         assert!(out.ends_with("/foo"), "got {out}");
     }
 

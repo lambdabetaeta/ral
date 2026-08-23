@@ -64,11 +64,11 @@
 # ral's own rc/plugin/state locations, other binaries).  Semantics code
 # threads the shell's overlay through `crate::path::home` /
 # `crate::path::user_name`; the host reading is `crate::host::home` /
-# `home_or_dot` / `user`, banned below so every host-level read is a
-# written decision with an `#[allow]` reason saying why the overlay must
-# not apply.  Calling `path::home(&EnvVars::new())` directly would dodge
-# the lint; that spelling is reserved for the three `host` accessors and
-# is enforced by review, like `PathBuf::from` above.
+# `user`, banned below so every host-level read is a written decision
+# with an `#[allow]` reason saying why the overlay must not apply.
+# Calling `path::home(&EnvVars::new())` directly would dodge the lint;
+# that spelling is reserved for the two `host` accessors and is enforced
+# by review, like `PathBuf::from` above.
 #
 # Child-wait discipline: `std::process::Child::wait` / `try_wait` call
 # the kernel without `WUNTRACED`, so a SIGSTOP'd child looks "still
@@ -116,7 +116,6 @@ disallowed-methods = [
     { path = "std::process::Child::try_wait", reason = "Use crate::process::ChildHandle::try_wait_handling_stop — Child::try_wait reports a stopped child as still running (no WUNTRACED), so cancel-aware polling spins forever." },
     { path = "std::env::var_os", reason = "An XDG basedir read goes through crate::path::basedir::resolve_xdg, which ignores relative overrides per the spec. Other path-valued env reads (terminal/sandbox/PATH probes, helper env snapshot, tests) #[allow] explicitly with a reason." },
     { path = "ral_core::host::home", reason = "Host-only $HOME read — a `within [env: …]` overlay does not apply. Inside language semantics, thread the shell's overlay through crate::path::home; genuine host-level reads (boot seeding, ral's own config/state locations, other binaries) #[allow] with a reason." },
-    { path = "ral_core::host::home_or_dot", reason = "Host-only $HOME read with a `.` fallback — same discipline as ral_core::host::home; #[allow] with a reason at every call site." },
     { path = "ral_core::host::user", reason = "Host-only $USER read — a `within [env: …]` overlay does not apply. Inside language semantics, thread the shell's overlay through crate::path::user_name; host-level reads #[allow] with a reason." },
     { path = "ignore::WalkBuilder::build", reason = "Directory walks go through exarch::shell_eval::builtins::cancellable, the single sanctioned build() site (it carries the one #[allow(clippy::disallowed_methods)]); each walk loop polls ral_core::process::check per raw entry so a long walk honours the tool-timeout / Esc cancel the bare ignore::Walk ignores." },
     { path = "std::fs::File::open", reason = "I/O goes through a known door (see surface-reads-writes-execs). A model read is a redirect door in runtime/command/redirect.rs that surfaces a read card; every other open is a reasoned-silent site that #[allow]s with a reason saying why it raises no card." },

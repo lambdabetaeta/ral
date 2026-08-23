@@ -8,6 +8,9 @@
 
 use std::process::Command;
 
+use crate::path;
+use crate::types::EnvVars;
+
 /// Grant a console child its console but withhold the window: synod is a
 /// windowless desktop binary (`windows_subsystem = "windows"`), and Windows
 /// answers a console child in such a parent by opening a real console that
@@ -95,7 +98,7 @@ pub fn now() -> Option<String> {
 pub use crate::path::process_cwd as cwd;
 
 /// `$HOME` (then `$USERPROFILE` on Windows) read from the host process env
-/// alone; empty when nothing is set.
+/// alone; `None` when nothing binds one.
 ///
 /// This is a host fact — where the tool itself is installed and who launched
 /// it — never language semantics: a `within [env: …]` overlay must not apply.
@@ -103,22 +106,19 @@ pub use crate::path::process_cwd as cwd;
 /// instead.  The clippy denylist bans this function so every call site is a
 /// written decision, carrying an `#[allow]` whose reason says why the read is
 /// host-level.
-pub fn home() -> String {
-    crate::path::home(&crate::types::EnvVars::new())
-}
-
-/// [`home`], falling back to `.`, so callers joining onto home never build a
-/// path off an empty base.  Same discipline as [`home`].
-pub fn home_or_dot() -> String {
-    let h = crate::path::home(&crate::types::EnvVars::new());
-    if h.is_empty() { ".".into() } else { h }
+///
+/// A host fact that is absent stays absent: no `.`, no `/`, no placeholder.
+/// Substituting one here would spend the caller's only chance to say something
+/// true — and every caller has a different true thing to say.
+pub fn home() -> Option<String> {
+    path::home(&EnvVars::new())
 }
 
 /// `$USER` (then `$USERNAME` on Windows) from the host process env alone.
 ///
-/// `"?"` when nothing is set, matching the prompt/audit placeholder.  Same
-/// discipline as [`home`] — overlay-holding code goes through
-/// [`crate::path::user_name`].
-pub fn user() -> String {
-    crate::path::user_name(&crate::types::EnvVars::new())
+/// `None` when nothing binds one.  Same discipline as [`home`] —
+/// overlay-holding code goes through [`crate::path::user_name`], and the
+/// prompt and audit trail each name their own placeholder.
+pub fn user() -> Option<String> {
+    path::user_name(&EnvVars::new())
 }

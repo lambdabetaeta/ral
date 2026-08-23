@@ -124,9 +124,29 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
     })
 }
 
-/// Literal replace of the unique occurrence of `from` in `s` with `to`; no regex,
-/// so braces, dollars, and backslashes are verbatim.  `pub` so exarch's
-/// `edit-replace` can share this match/error logic.
+/// Byte offsets of every occurrence of `from` in `input`, **overlaps included**.
+///
+/// `"aa"` occurs twice in `"aaa"`, so a needle that overlaps itself cannot pass
+/// for unique.  `pub` so exarch's `edit-replace` counts the way this does.
+pub fn occurrence_starts(input: &str, from: &str) -> Vec<usize> {
+    debug_assert!(!from.is_empty(), "an empty needle has no occurrence to name");
+    // Step by the first char, not one byte: an occurrence begins on a char
+    // boundary, so nothing between two overlapping hits is skipped.
+    let step = from.chars().next().map_or(1, char::len_utf8);
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while let Some(offset) = input[i..].find(from) {
+        let at = i + offset;
+        starts.push(at);
+        i = at + step;
+    }
+    starts
+}
+
+/// Literal replace of the unique occurrence of `from` in `s` with `to`.
+///
+/// No regex, so braces, dollars, and backslashes are verbatim.  Counts through
+/// [`occurrence_starts`], which exarch's `edit-replace` shares.
 ///
 /// # Errors
 /// If given fewer than three arguments, if `from` is empty, or if `from` does not
@@ -138,11 +158,10 @@ pub fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
     if from.is_empty() {
         return Err(sig("string-replace: 'from' must be non-empty"));
     }
-    let count = input.matches(&from).count();
-    match count {
+    match occurrence_starts(&input, &from).len() {
         0 => Err(sig(
-            "string-replace: 'from' not found in input — is the file already updated, \
-             or did the pattern get whitespace-mangled?",
+            "string-replace: 'from' not found in input — did the pattern get \
+             whitespace-mangled?",
         )),
         1 => Ok(Value::String(input.replacen(&from, &to, 1))),
         n => Err(sig(format!(

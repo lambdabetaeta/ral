@@ -393,7 +393,7 @@ pub(crate) fn run_shell(
 /// scarcity is context, which `max_bytes` already bounds in its own unit, so a
 /// second cap in a second unit buys only damage. And the damage is not cosmetic:
 /// a nested string here is usually a payload whose *text is its identity* — a
-/// `view-text` row's line, a `grep-files` hit — which `edit-hash` and
+/// `view-hash` row's line, a `grep-files` hit — which `edit-hash` and
 /// `edit-replace` both match verbatim, so a line rendered in part is a line that
 /// cannot be edited. Spending the byte budget instead costs whole rows, and each
 /// container says how many it dropped.
@@ -672,7 +672,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `view-text` returns one record per line: its number, its witness hash,
+    /// `view-hash` returns one record per line: its number, its witness hash,
     /// and its text.
     #[cfg(unix)]
     #[test]
@@ -682,16 +682,16 @@ mod tests {
         let r = run_once(
             &mut shell,
             &format!(
-                "let rows = view-text '{path_str}' 1 2; [line: $rows[0][line], hash: $rows[0][hash], text: $rows[0][text]]"
+                "let rows = view-hash '{path_str}' 1 2; [line: $rows[0][line], hash: $rows[0][hash], text: $rows[0][text]]"
             ),
         );
         assert_eq!(
             r.exit,
             0,
-            "view-text must run; stderr was: {}",
+            "view-hash must run; stderr was: {}",
             String::from_utf8_lossy(&r.stderr)
         );
-        let val = r.value.as_deref().expect("view-text must return value");
+        let val = r.value.as_deref().expect("view-hash must return value");
         assert!(
             val.contains("line: 1"),
             "line renders as a ral field: {val:?}"
@@ -711,6 +711,23 @@ mod tests {
             hash.starts_with('h') && hash[1..].bytes().all(|b| b.is_ascii_hexdigit()),
             "hash is `h` followed by six hex chars, got {hash:?}"
         );
+    }
+
+    /// The prompt's index lists the agent helpers and tells the model to
+    /// `explain` any name for its docs, so every helper must answer with one.
+    /// They are plain locals, and a local used to shadow the library table its
+    /// own doc lives in.
+    #[test]
+    fn explain_answers_every_agent_helper_with_its_doc() {
+        let mut shell = fresh_shell();
+        for (name, doc) in builtins::agent_library_docs() {
+            let run = run_once(&mut shell, &format!("explain {name}"));
+            let out = String::from_utf8_lossy(&run.stdout);
+            assert!(
+                out.contains(&doc),
+                "`explain {name}` must print its indexed doc, got:\n{out}"
+            );
+        }
     }
 
     /// The second call must see the first's binding: exarch's per-call
@@ -813,7 +830,7 @@ target
             &mut shell,
             &format!(
                 "let nlines = line-count '{repeated_str}'\n\
-                 let rows = view-text '{repeated_str}' 1 $[$nlines + 1]\n\
+                 let rows = view-hash '{repeated_str}' 1 $[$nlines + 1]\n\
                  edit-hash '{repeated_str}' [[hash: $rows[1][hash], line: 'FIRST']]"
             ),
         );
@@ -845,7 +862,7 @@ target
             &mut shell,
             &format!(
                 "let nlines = line-count '{run_str}'\n\
-                 let rows = view-text '{run_str}' 1 $[$nlines + 1]\n\
+                 let rows = view-hash '{run_str}' 1 $[$nlines + 1]\n\
                  edit-hash '{run_str}' [[hash: $rows[5][hash], line: 'Z']]"
             ),
         );
@@ -886,7 +903,7 @@ keep-bottom
             &mut shell,
             &format!(
                 "let nlines = line-count '{path_str}'\n\
-                 let rows = view-text '{path_str}' 1 $[$nlines + 1]\n\
+                 let rows = view-hash '{path_str}' 1 $[$nlines + 1]\n\
                  edit-hash '{path_str}' [[hash: $rows[1][hash], line: 'X'], [hash: 'hzzzzzz', line: 'Y']]"
             ),
         );
@@ -901,7 +918,7 @@ keep-bottom
             &mut shell,
             &format!(
                 "let nlines = line-count '{path_str}'\n\
-                 let rows = view-text '{path_str}' 1 $[$nlines + 1]\n\
+                 let rows = view-hash '{path_str}' 1 $[$nlines + 1]\n\
                  edit-hash '{path_str}' [[hash: $rows[1][hash], line: 'REPLACED'], [hash: $rows[2][hash], line: ''], [hash: $rows[3][hash], line: 'X\nY']]"
             ),
         );
@@ -937,7 +954,7 @@ keep-bottom
         let clash = run_once(
             &mut shell,
             &format!(
-                "let rows = view-text '{path}' 1 4\n\
+                "let rows = view-hash '{path}' 1 4\n\
                  edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[1][hash], line: 'SECOND']]"
             ),
         );
@@ -958,7 +975,7 @@ keep-bottom
         let ok = run_once(
             &mut shell,
             &format!(
-                "let rows = view-text '{path}' 1 4\n\
+                "let rows = view-hash '{path}' 1 4\n\
                  edit-hash '{path}' [[hash: $rows[1][hash], line: 'FIRST'], [hash: $rows[2][hash], line: 'SECOND']]"
             ),
         );
@@ -984,7 +1001,7 @@ keep-bottom
         let one = run_once(
             &mut shell,
             &format!(
-                "let rows = view-text '{path}' 1 4\n\
+                "let rows = view-hash '{path}' 1 4\n\
                  edit-hash '{path}' [[hash: $rows[0][hash], line: 'A']]"
             ),
         );
@@ -998,7 +1015,7 @@ keep-bottom
         let batch = run_once(
             &mut shell,
             &format!(
-                "let rows = view-text '{path}' 1 4\n\
+                "let rows = view-hash '{path}' 1 4\n\
                  edit-hash '{path}' [[hash: $rows[1][hash], line: 'B'], [hash: $rows[2][hash], line: 'C\\n']]"
             ),
         );
@@ -1090,21 +1107,21 @@ keep-bottom
                 &format!("{content}\n"),
             );
 
-            // Read the witness as the agent would: from `view-text`.
+            // Read the witness as the agent would: from `view-hash`.
             let vr = run_once(
                 &mut shell,
-                &format!("let rows = view-text '{path_str}' 1 2; $rows[0][hash]"),
+                &format!("let rows = view-hash '{path_str}' 1 2; $rows[0][hash]"),
             );
             assert_eq!(
                 vr.exit,
                 0,
-                "view-text must read the fixture; stderr was: {}",
+                "view-hash must read the fixture; stderr was: {}",
                 String::from_utf8_lossy(&vr.stderr)
             );
             let witness = vr
                 .value
                 .as_deref()
-                .expect("view-text must return a hash")
+                .expect("view-hash must return a hash")
                 .trim_matches('"')
                 .to_string();
 
@@ -1605,7 +1622,7 @@ keep-bottom
     /// The bulk-edit pipeline end to end, entirely in ral: `grep-files` finds
     /// every `[TODO]`, the hits fold per file, and each file's lines are
     /// rewritten in one atomic `edit-hash`.  The hashes come from a whole-file
-    /// `view-text`, so they match what `edit-hash` recomputes — no witness is
+    /// `view-hash`, so they match what `edit-hash` recomputes — no witness is
     /// ever read by eye.
     #[test]
     fn programmatic_todo_sweep_rewrites_every_match() {
@@ -1625,7 +1642,7 @@ let hits = grep-files #'\[TODO\]'#
 let files = nub !{{map {{ |h| $h[file] }} $hits}}
 each {{ |f|
     let lc = line-count $f
-    let rows = view-text $f 1 $[$lc + 1]
+    let rows = view-hash $f 1 $[$lc + 1]
     let mine = filter {{ |h| equal $h[file] $f }} $hits
     edit-hash $f !{{map {{ |h|
         [ hash: $rows[$[$h[line] - 1]][hash], line: !{{re-replace #'\[TODO\]'# '[DONE]' $h[text]}} ]
@@ -1656,9 +1673,9 @@ return !{{length $hits}}"
         );
     }
 
-    /// `edit-replace` (defined in `data/agent.ral`) collapses the
-    /// read/`string-replace`/write idiom into one call: a unique match rewrites
-    /// the file, and 0 or >1 matches error rather than guess.
+    /// `edit-replace` collapses the read/`string-replace`/write idiom into one
+    /// call: a unique match rewrites the file, and 0 or >1 matches error rather
+    /// than guess.
     #[test]
     fn edit_replace_replaces_unique_match_and_rejects_ambiguity() {
         let mut shell = fresh_shell();

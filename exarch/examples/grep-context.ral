@@ -10,7 +10,7 @@
 # to re-parse `file:line:text` back into pieces; here the pieces
 # never left.  `view-text-around PATH LINE PEEK` reads the file
 # centred on a given 1-based line — composing them is one loop, no
-# parsing — and tags each line with the witness `edit` checks.
+# parsing — and tags each line with its number.
 
 if !{is-empty $ARGS} {
     warn 'usage: grep-context.ral PATTERN [DIR]'

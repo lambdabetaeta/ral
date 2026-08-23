@@ -100,7 +100,7 @@ mod tests {
     use ral_core::path::sigil::FreezeCtx;
     // Gated with their only users below, so the Windows build stays warning-free.
     #[cfg(unix)]
-    use ral_core::path::sigil::expand_path_prefix;
+    use ral_core::path::sigil::freeze_one;
     #[cfg(unix)]
     use ral_core::types::ExecPolicy;
     use ral_core::types::{Capabilities, Shell};
@@ -120,14 +120,31 @@ mod tests {
         .unwrap_or_else(|e| panic!("base '{name}' failed to load: {e:?}"))
     }
 
+    /// Expect a grant through the door that authored it.  `expand_path_prefix`
+    /// is the runtime resolver's infallible twin and normalises differently,
+    /// so an equality against it agrees with a frozen grant only by
+    /// coincidence — and disagrees exactly where the freeze would have failed.
+    #[cfg(unix)]
+    fn frozen(entry: &str, ctx: &FreezeCtx<'_>) -> ral_core::path::NormalizedPrefix {
+        freeze_one(entry, ctx)
+            .unwrap_or_else(|e| panic!("'{entry}' should freeze: {}", e.message))
+    }
+
+    /// Every bake-in names `~`/`xdg:` paths, so a host with no `$HOME` cannot
+    /// load one at all — said here rather than by each test failing obscurely.
+    fn host_home() -> String {
+        ral_core::host::home()
+            .expect("these profiles name `~`/`xdg:` paths, so the test host needs $HOME")
+    }
+
     /// Every bake-in must load against the real `$HOME`, so a broken profile
     /// fails at `cargo test` rather than at a user's first invocation.
     #[cfg(unix)]
     #[test]
     fn bakeins_parse() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
         for (name, text) in [
@@ -150,9 +167,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn bakeins_parse_on_windows() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new(r"C:\work"),
         };
         for (name, text) in [
@@ -172,9 +189,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn minimal_drops_foreign_rooted_grants_on_windows() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new(r"C:\work"),
         };
         let caps = load("minimal", MINIMAL_RAL, &ctx);
@@ -201,7 +218,7 @@ mod tests {
     #[test]
     fn confined_is_offline_subpath_only_no_home_reads() {
         let ctx = FreezeCtx {
-            home: "/h",
+            home: Some("/h"),
             cwd: Path::new("/work/proj"),
         };
         let caps = load("confined", CONFINED_RAL, &ctx);
@@ -234,9 +251,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn read_only_does_not_write_cwd() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/work/proj"),
         };
         let caps = load("read-only", READ_ONLY_RAL, &ctx);
@@ -254,7 +271,7 @@ mod tests {
     #[test]
     fn dangerous_is_root() {
         let ctx = FreezeCtx {
-            home: "/h",
+            home: Some("/h"),
             cwd: Path::new("/"),
         };
         assert_eq!(
@@ -268,17 +285,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_carries_xdg_bin_subpath_in_exec() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
         let exec = caps.exec.as_ref().expect("reasonable should declare exec");
-        let xdg_bin = expand_path_prefix("xdg:bin", &home);
+        let xdg_bin = frozen("xdg:bin", &ctx);
         assert!(
-            exec.allow_dirs.iter().any(|p| p.as_str() == xdg_bin),
-            "reasonable should list the resolved xdg:bin ({xdg_bin}) in exec dirs"
+            exec.allow_dirs.iter().any(|p| p == &xdg_bin),
+            "reasonable should list the resolved xdg:bin ({}) in exec dirs",
+            xdg_bin.as_str()
         );
     }
 
@@ -287,9 +305,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn minimal_and_reasonable_carry_cwd_and_tempdir_sigils() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let cwd = Path::new("/work/proj");
-        let ctx = FreezeCtx { home: &home, cwd };
+        let ctx = FreezeCtx {
+            home: Some(&home),
+            cwd,
+        };
         // Freeze folds away the trailing separator macOS `$TMPDIR` carries, so
         // compare in the same normal form the frozen keys hold.
         let normal = |p: &str| ral_core::path::NormalizedPrefix::from_surface(p).into_string();
@@ -334,9 +355,9 @@ mod tests {
     #[test]
     fn freeze_admits_relative_exec_under_cwd_sigil() {
         let work = std::path::Path::new("/work/proj");
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: work,
         };
         let caps = load("minimal", MINIMAL_RAL, &ctx);
@@ -361,9 +382,9 @@ mod tests {
         if !ral_core::path::exists("/opt/homebrew") {
             return;
         }
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
@@ -394,9 +415,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_cargo_under_rustup_toolchain() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
@@ -412,9 +433,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_go_official_and_user_tools() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
@@ -435,9 +456,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_nvm_node() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
@@ -452,9 +473,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_admits_pyenv_python() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
         let caps = load("reasonable", REASONABLE_RAL, &ctx);
@@ -477,12 +498,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_and_read_only_admit_git() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
-        let gitconfig = expand_path_prefix("~/.gitconfig", &home);
+        let gitconfig = frozen("~/.gitconfig", &ctx);
         for (name, text) in [("reasonable", REASONABLE_RAL), ("read-only", READ_ONLY_RAL)] {
             let caps = load(name, text, &ctx);
             let exec = caps.exec.as_ref().expect("base declares exec");
@@ -494,7 +515,8 @@ mod tests {
             let fs = caps.fs.as_ref().expect("base declares fs");
             assert!(
                 fs.read_prefixes.iter().any(|p| p == &gitconfig),
-                "{name} should add resolved ~/.gitconfig ({gitconfig}) to read prefixes"
+                "{name} should add resolved ~/.gitconfig ({}) to read prefixes",
+                gitconfig.as_str()
             );
         }
     }
@@ -506,9 +528,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn minimal_admits_system_git_not_homebrew() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/work"),
         };
         let admits = |caps: ral_core::types::Capabilities, names: &[&str]| {
@@ -544,13 +566,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn git_extension_widens_into_git_capable_profile() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
-        let gitconfig = expand_path_prefix("~/.gitconfig", &home);
-        let xdg_config_git = expand_path_prefix("xdg:config/git", &home);
+        let gitconfig = frozen("~/.gitconfig", &ctx);
+        let xdg_config_git = frozen("xdg:config/git", &ctx);
 
         let widened_minimal =
             load("minimal", MINIMAL_RAL, &ctx).join(load("git-extension", GIT_EXTENSION_RAL, &ctx));
@@ -582,10 +604,11 @@ mod tests {
             .as_ref()
             .expect("extension should keep fs map");
         for denied in ["xdg:config/gh", "xdg:config/op", "xdg:config/gcloud"] {
-            let resolved = expand_path_prefix(denied, &home);
+            let resolved = frozen(denied, &ctx);
             assert!(
                 fs.deny_paths.iter().any(|p| p == &resolved),
-                "join with reasonable should preserve {denied} deny ({resolved})"
+                "join with reasonable should preserve {denied} deny ({})",
+                resolved.as_str()
             );
         }
     }
@@ -597,12 +620,12 @@ mod tests {
     /// platform's own branch and the assertion holds either way.
     #[test]
     fn every_exec_base_admits_live_system_tool_roots() {
-        let home = ral_core::host::home();
+        let home = host_home();
         // Absolute on every platform, unlike the `/work` literal the
         // `cfg(unix)`-gated tests use — Windows reads that as rootless.
         let cwd = std::env::temp_dir();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: &cwd,
         };
         let roots = ral_core::path::sigil::system_tool_roots();
@@ -649,10 +672,10 @@ mod tests {
     /// because it declares no exec map to restrict.
     #[test]
     fn every_grantable_base_settles_the_bundled_tools() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let cwd = std::env::temp_dir();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: &cwd,
         };
         for (name, text) in [
@@ -684,9 +707,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reasonable_drops_unix_only_bundled_tool_grants_off_unix() {
-        let home = ral_core::host::home();
+        let home = host_home();
         let ctx = FreezeCtx {
-            home: &home,
+            home: Some(&home),
             cwd: Path::new("/"),
         };
         let mut caps = load("reasonable", REASONABLE_RAL, &ctx);

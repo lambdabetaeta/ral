@@ -238,7 +238,7 @@ pub(super) fn unrecognized_command(trimmed: &str) -> Option<&str> {
     reason = "host-env: a path the operator types at the TUI means the operator's own `~`"
 )]
 pub(super) fn resolve_export_path(arg: &str, cwd: &str) -> PathBuf {
-    let expanded = expand_path_prefix(arg, &ral_core::host::home());
+    let expanded = expand_path_prefix(arg, ral_core::host::home().as_deref());
     ral_core::path::resolve_str(Some(cwd), &expanded)
 }
 

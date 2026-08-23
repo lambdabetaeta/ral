@@ -66,19 +66,9 @@ impl Shell {
         let old = self.cwd();
 
         let home = self.mobile.context.home();
-        let home = if home.is_empty() { ".".into() } else { home };
         let raw: String = if let Some(path) = TildePath::parse(target) {
-            expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), &home).ok_or_else(
-                || {
-                    Error::new(
-                        format!(
-                            "{target}: cannot resolve another user's home directory on \
-                             this platform (no getpwnam(3) equivalent)"
-                        ),
-                        1,
-                    )
-                },
-            )?
+            expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), home.as_deref())
+                .map_err(|cause| Error::new(format!("{target}: {}", cause.why()), 1))?
         } else {
             target.into()
         };

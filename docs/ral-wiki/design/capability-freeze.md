@@ -25,6 +25,14 @@ returning. In that pass it:
   `FreezeCtx { home, cwd }` (and `tempdir:` against the process temp dir);
 - **rejects** an `xdg:` value that escapes `home` — defence in depth against an
   attacker-set `XDG_*_HOME=/etc` silently widening a grant;
+- **rejects** a `~` or `xdg:` entry where nothing binds `$HOME`: no base to
+  resolve against, and the escape guard just above is itself stated in `home`'s
+  terms, so an absolute `$XDG_*_HOME` cannot stand in for one. Old rule, long
+  unreachable — boot seeding used to substitute `.` for an unset `HOME`, so the
+  guard saw a home that was merely wrong, and such a grant fell through to the
+  relative-entry rejection below carrying advice about the wrong problem
+  (`use cwd:~/.gitconfig`). The readers now answer `Option`, and the reason the
+  entry cannot be frozen is the reason the author is given;
 - **rejects** a `gitdir:` whose `.git` pointer file names a directory that does
   not name the working tree back;
 - **rejects** a non-sigil *relative* entry — it would otherwise anchor to the

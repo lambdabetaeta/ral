@@ -232,7 +232,7 @@ pub(crate) fn eval_grant(
     let home = shell.mobile.context.home();
     let cwd = shell.cwd();
     let ctx = crate::path::sigil::FreezeCtx {
-        home: &home,
+        home: home.as_deref(),
         cwd: &cwd,
     };
     let caps =

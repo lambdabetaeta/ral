@@ -32,7 +32,7 @@ Locate, drop, deduplicate, and sample in one turn:
     let files = fold { |acc h| if !{elem $h[file] $acc} { $acc } else { [...$acc, $h[file]] } } [] $live
     [total: !{length $hits}, live: !{length $live}, files: $files, sample: !{take 3 $live}]
 
-`grep-files` hit carries its file and line; a `view-text-around` over the hit shows the place with the witness `edit-hash` checks:
+`grep-files` hit carries its file and line; a `view-text-around` over the hit shows the place verbatim, which is what an edit must then match:
 
     let hits = grep-files #'fn parse_'#
     let few  = take 5 $hits

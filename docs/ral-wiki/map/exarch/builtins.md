@@ -20,7 +20,7 @@ symmetric window of neighbouring lines — at least ±`MIN_RADIUS` (5), grown un
 it names the line uniquely, falling back to the absolute index past
 `MAX_RADIUS` — with the target's offset and the radius folded in
 (`window_hashes`, an *adaptive-context* witness). The hashing is private Rust:
-the model never constructs a witness, only copies one from `view-text` into
+the model never constructs a witness, only copies one from `view-hash` into
 `edit-hash`, and both derive identical witnesses from identical content. The `h`
 prefix keeps the witness un-lexable as an integer, so a hash never elaborates to
 `Val::Int` and silently fails to compare against the recomputed `String`
@@ -39,11 +39,14 @@ through its `EngineInstaller` *boot recipe*
 The bulk-I/O atoms read in Rust, **below the redirect frame**, so each is one
 logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
 
-- `view-text <path> <start> <end>` → `[{line, hash, text}]`. The read primitive:
-  the half-open line range `[start, end)`, each row carrying its 1-based line
-  number, its witness, and its text. Reads the whole file (the witness depends
-  on file-wide uniqueness) and surfaces one `Observed::Read { path }`
-  observation.
+- `view-text <path> <start> <end>` → `[{line, text}]`. The read primitive: the
+  half-open line range `[start, end)`, each row carrying its 1-based line number
+  and its text, verbatim — which is what `edit-replace` matches on. Surfaces one
+  `Observed::Read { path }` observation.
+- `view-hash <path> <start> <end>` → `[{line, hash, text}]`. The same range with
+  each row's witness, the handle `edit-hash` checks. Reads *and hashes* the whole
+  file, since the witness depends on file-wide uniqueness; both readers share one
+  range door and differ only in the column.
 - `grep-files <pattern>` → `[{ file, line, text }]`. An ignore-aware Rust
   regex walk of the cwd (`search_tree`, binary detection quits at NUL, each file
   gated by `check_fs_read`, the walk polling the cancel check per entry via the
@@ -62,9 +65,14 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   of the original against the final text ([[map/exarch/cards|cards]]), and
   nothing at all if the two agree. A stderr note names the replaced lines and
   warns on suspicious `\n`-style escapes (the replacement text is verbatim).
-- `edit-replace <path> <from> <to>` → `Unit`. The string-replace sibling:
-  replace the one literal occurrence of `from`, erroring (file untouched) on
-  zero or several matches; same silent read, same atomic write, same diff card.
+- `edit-replace <path> <from> <to>` → `Unit`. The default taught edit: replace
+  the one literal occurrence of `from`, erroring (file untouched) on zero or
+  several matches; same silent read, same atomic write, same diff card. Counting
+  is overlap-aware (core's `occurrence_starts`), so a needle that overlaps itself
+  cannot pass for unique. It speaks its own diagnostics rather than relabelling
+  another builtin's: several matches name the lines, and a miss names the
+  mangling it can prove — a literal `\n`-style escape in `from`, or a line
+  matching apart from its indentation.
 - `explore-dir <n>` → `[String]`. List directory entries to depth `n`,
   ignore-aware, skipping the root and any denied path.
 - `skill-list` / `skill <name>` — Agent Skills with progressive disclosure: list
@@ -134,8 +142,8 @@ control is [[map/repl/jobs|repl/jobs]].
 
 Sourced into the shell at boot:
 
-- `view-text-around path line peek` — the one thin helper over the atoms:
-  `view-text` of the `2*peek + 1` lines centred on `line`, clamped at the top of
+- `view-text-around path line peek` / `view-hash-around path line peek` — the two
+  thin helpers over the atoms: the `2*peek + 1` lines centred on `line`, clamped at the top of
   the file.
 - `pin-set <key> <card>` / `pin-clear <key>` — the model-facing write pair,
   thin wrappers over `surface `` `pin ``/`` `unpin ``, completing the

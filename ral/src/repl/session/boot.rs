@@ -173,9 +173,17 @@ pub(super) fn setup_panic_hook() {
 /// Crash-log directory (`$XDG_STATE_HOME/ral`), resolved at hook-install
 /// time so an unset or changed `HOME` mid-session cannot redirect the
 /// crash log.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: the crash log belongs to the launching user, outside any shell overlay"
+)]
 fn crash_log_dir() -> std::path::PathBuf {
-    let home = crate::platform::home_dir();
-    ral_core::path::basedir::resolve_xdg(ral_core::path::basedir::XdgKind::State, &home).join("ral")
+    let home = ral_core::host::home();
+    // A crash report must land somewhere; with no home the temp dir is the
+    // honest last resort, where writing it under the cwd would not be.
+    ral_core::path::basedir::resolve_xdg(ral_core::path::basedir::XdgKind::State, home.as_deref())
+        .unwrap_or_else(std::env::temp_dir)
+        .join("ral")
 }
 
 /// Write the panic report both platform hooks share: `dir/crash-<unix-ts>.

@@ -4,11 +4,13 @@
 //! `path::sigil`, `cd`, command identity and REPL completion all resolve
 //! through [`expand_tilde_path`], so the rule is one-and-the-same.
 //!
-//! A *named* user has no answer off Unix (no `getpwnam(3)` analogue), so
-//! [`get_user_home`] returns `None` rather than fabricate `/home/<name>` and
-//! each caller picks its own honest fallback: the policy freeze, `cd` and
-//! interpolation error; command resolution falls back to the literal spelling;
-//! completion offers no candidates.  Bare `~`/`~/...` never come this way.
+//! Neither shape is always answerable, and both unanswerable cases are shaped
+//! alike: a *named* user has no answer off Unix (no `getpwnam(3)` analogue),
+//! and bare `~` has none where nothing binds `$HOME`.  So [`home`] and
+//! [`get_user_home`] return `Option`, [`expand_tilde_path`] fails with the
+//! [`Unexpandable`] cause, and each caller picks its own honest answer: the
+//! policy freeze, `cd` and interpolation error; command resolution falls back
+//! to the literal spelling; completion offers no candidates.
 //!
 //! Also the `$HOME`/`$USER` lookups, which pin the env var each one reads;
 //! `path.rs` re-exports them.
@@ -101,14 +103,48 @@ pub fn get_user_home(_username: &str) -> Option<String> {
     None
 }
 
-/// Expand a tilde shape against `home`, the current user's home; a named
-/// `user` routes through [`get_user_home`] instead, and so is `None` off Unix.
-pub fn expand_tilde_path(user: Option<&str>, suffix: Option<&str>, home: &str) -> Option<String> {
+/// Why a tilde has no expansion.  The two causes take different fixes, so the
+/// failure carries which one rather than leaving each caller to re-derive it
+/// from the arguments it passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unexpandable {
+    /// Nothing binds `$HOME`, so bare `~` names no directory.
+    HomeUnknown,
+    /// A `~user` this platform cannot look up.
+    ForeignUser,
+}
+
+impl Unexpandable {
+    /// The cause as a clause, the advice left to the caller — what to suggest
+    /// depends on whether a shell user typed the tilde or a policy declared it.
+    pub fn why(self) -> &'static str {
+        match self {
+            Self::HomeUnknown => "HOME is unset, so `~` names no directory",
+            Self::ForeignUser => {
+                "this platform cannot resolve another user's home directory \
+                 (no getpwnam(3) equivalent)"
+            }
+        }
+    }
+}
+
+/// Expand a tilde shape against `home`, the current user's home — `None` when
+/// nothing binds it; a named `user` routes through [`get_user_home`] instead,
+/// and so is unresolvable off Unix.
+///
+/// # Errors
+/// [`Unexpandable::HomeUnknown`] for a bare `~` with no `home`,
+/// [`Unexpandable::ForeignUser`] for a `~user` this platform cannot look up.
+pub fn expand_tilde_path(
+    user: Option<&str>,
+    suffix: Option<&str>,
+    home: Option<&str>,
+) -> Result<String, Unexpandable> {
     let base = match user {
-        None => home.to_string(),
-        Some(user) => get_user_home(user)?,
+        None => home.ok_or(Unexpandable::HomeUnknown)?.to_string(),
+        Some(user) => get_user_home(user).ok_or(Unexpandable::ForeignUser)?,
     };
-    Some(match suffix {
+    Ok(match suffix {
         None => base,
         Some(suffix) => format!("{base}{suffix}"),
     })
@@ -119,7 +155,7 @@ pub fn expand_tilde_path(user: Option<&str>, suffix: Option<&str>, home: &str) -
 ///
 /// The match is on component boundaries, so home `/home/al` leaves
 /// `/home/alex` alone where a `starts_with` on the raw string would clip it.
-pub fn abbreviate_home(path: &std::path::Path, home: &str) -> String {
+pub fn abbreviate_home(path: &std::path::Path, home: Option<&str>) -> String {
     abbreviate_home_for(&path.to_string_lossy(), home, cfg!(windows))
 }
 
@@ -137,19 +173,19 @@ pub fn abbreviate_home(path: &std::path::Path, home: &str) -> String {
     clippy::disallowed_methods,
     reason = "lexical Path::new for the component-boundary strip — no I/O behind it; this module is part of crate::path, where the path-construction rule lives"
 )]
-fn abbreviate_home_for(path: &str, home: &str, windows: bool) -> String {
-    let shown = if windows {
-        windows_strip_home(path, home)
-    } else {
-        match std::path::Path::new(path).strip_prefix(home) {
-            Ok(rest) if !home.is_empty() => {
+fn abbreviate_home_for(path: &str, home: Option<&str>, windows: bool) -> String {
+    let shown = match home {
+        None => path.to_string(),
+        Some(home) if windows => windows_strip_home(path, home),
+        Some(home) => match std::path::Path::new(path).strip_prefix(home) {
+            Ok(rest) => {
                 if rest.as_os_str().is_empty() {
                     return "~".to_string();
                 }
                 format!("~/{}", rest.display())
             }
-            _ => path.to_string(),
-        }
+            Err(_) => path.to_string(),
+        },
     };
     if windows {
         shown.replace('\\', "/")
@@ -170,7 +206,7 @@ fn abbreviate_home_for(path: &str, home: &str, windows: bool) -> String {
 /// the user's typed spelling survives — only the fold to `~`, never a fold to
 /// `home`'s case, happens here.
 fn windows_strip_home(path: &str, home: &str) -> String {
-    if home.is_empty() || !super::lex::starts_with_identity(path, home, true) {
+    if !super::lex::starts_with_identity(path, home, true) {
         return path.to_string();
     }
     let home_depth = super::lex::windows_identity_components(home).len();
@@ -197,21 +233,27 @@ fn windows_strip_home(path: &str, home: &str) -> String {
 // ── $HOME / $USER lookup ──────────────────────────────────────────────
 
 /// `$HOME`, then `$USERPROFILE` (Windows), each read from `env_overrides`
-/// before the host env; empty string when nothing is set.
-pub fn home(env_overrides: &crate::types::EnvVars) -> String {
-    env_overrides
-        .get_or_host("HOME")
-        .or_else(|| env_overrides.get_or_host("USERPROFILE"))
-        .unwrap_or_default()
+/// before the host env; `None` when nothing binds one.
+///
+/// An empty binding counts as none: `HOME=` names no directory, and admitting
+/// `Some("")` here is what once let `~/x` expand to `/x` — a syntactically
+/// ordinary path meaning something nobody asked for.  Every downstream `~`,
+/// `xdg:` and prompt fold therefore takes an `Option` and picks its own honest
+/// answer, exactly as [`get_user_home`]'s callers do.
+pub fn home(env_overrides: &crate::types::EnvVars) -> Option<String> {
+    bound(env_overrides, "HOME").or_else(|| bound(env_overrides, "USERPROFILE"))
 }
 
-/// `$USER`, then `$USERNAME` (Windows), overrides before the host env; `"?"`
-/// when nothing is set, matching the prompt/audit placeholder.
-pub fn user_name(env_overrides: &crate::types::EnvVars) -> String {
-    env_overrides
-        .get_or_host("USER")
-        .or_else(|| env_overrides.get_or_host("USERNAME"))
-        .unwrap_or_else(|| "?".into())
+/// `$USER`, then `$USERNAME` (Windows), overrides before the host env; `None`
+/// when nothing binds one.  Same discipline as [`home`] — the prompt and the
+/// audit trail each name their own placeholder.
+pub fn user_name(env_overrides: &crate::types::EnvVars) -> Option<String> {
+    bound(env_overrides, "USER").or_else(|| bound(env_overrides, "USERNAME"))
+}
+
+/// One env var, overrides before the host env, an empty value read as unset.
+fn bound(env_overrides: &crate::types::EnvVars, key: &str) -> Option<String> {
+    env_overrides.get_or_host(key).filter(|v| !v.is_empty())
 }
 
 #[cfg(test)]
@@ -220,15 +262,34 @@ mod tests {
 
     #[test]
     fn bare_tilde_expands_to_home_on_every_platform() {
-        assert_eq!(expand_tilde_path(None, None, "/h"), Some("/h".to_string()));
+        assert_eq!(expand_tilde_path(None, None, Some("/h")), Ok("/h".to_string()));
     }
 
     #[test]
     fn bare_tilde_with_suffix_expands_on_every_platform() {
         assert_eq!(
-            expand_tilde_path(None, Some("/sub"), "/h"),
-            Some("/h/sub".to_string())
+            expand_tilde_path(None, Some("/sub"), Some("/h")),
+            Ok("/h/sub".to_string())
         );
+    }
+
+    /// The two unanswerable shapes, kept apart: an unset `$HOME` and a
+    /// `~user` this platform cannot look up fail differently, so a caller can
+    /// say which happened instead of guessing from what it passed in.
+    #[test]
+    fn bare_tilde_without_home_is_unexpandable_not_rooted_at_slash() {
+        assert_eq!(
+            expand_tilde_path(None, Some("/.gitconfig"), None),
+            Err(Unexpandable::HomeUnknown)
+        );
+        assert_eq!(expand_tilde_path(None, None, None), Err(Unexpandable::HomeUnknown));
+    }
+
+    /// An unknown home folds nothing — the prompt shows the path whole rather
+    /// than an accidental `~`-relative reading of it.
+    #[test]
+    fn abbreviation_without_home_leaves_the_path_alone() {
+        assert_eq!(abbreviate_home_for("/a/b", None, false), "/a/b");
     }
 
     /// The username is chosen to be vanishingly unlikely to exist, so the test
@@ -249,8 +310,9 @@ mod tests {
     #[test]
     fn non_unix_named_user_is_unresolvable_not_fabricated() {
         assert_eq!(get_user_home("bob"), None);
-        assert_eq!(expand_tilde_path(Some("bob"), None, "/h"), None);
-        assert_eq!(expand_tilde_path(Some("bob"), Some("/sub"), "/h"), None);
+        let foreign = Err(Unexpandable::ForeignUser);
+        assert_eq!(expand_tilde_path(Some("bob"), None, Some("/h")), foreign);
+        assert_eq!(expand_tilde_path(Some("bob"), Some("/sub"), Some("/h")), foreign);
     }
 
     // No `cfg(windows)` on the fold tests below: `windows` is a parameter,
@@ -261,7 +323,7 @@ mod tests {
     #[test]
     fn abbreviation_renders_forward_slashes_on_windows() {
         assert_eq!(
-            abbreviate_home_for(r"/h/projects\ral", "/h", true),
+            abbreviate_home_for(r"/h/projects\ral", Some("/h"), true),
             "~/projects/ral"
         );
     }
@@ -269,7 +331,7 @@ mod tests {
     #[test]
     fn abbreviation_folds_separators_in_the_unabbreviated_fallback_on_windows() {
         assert_eq!(
-            abbreviate_home_for(r"D:\work\thing", r"C:\Users\al", true),
+            abbreviate_home_for(r"D:\work\thing", Some(r"C:\Users\al"), true),
             "D:/work/thing"
         );
     }
@@ -278,7 +340,7 @@ mod tests {
     /// leave it alone.
     #[test]
     fn abbreviation_keeps_backslash_bytes_off_windows() {
-        assert_eq!(abbreviate_home_for(r"/h/we\ird", "/h", false), r"~/we\ird");
+        assert_eq!(abbreviate_home_for(r"/h/we\ird", Some("/h"), false), r"~/we\ird");
     }
 
     #[test]
@@ -344,7 +406,7 @@ mod tests {
     #[test]
     fn abbreviation_is_case_insensitive_to_home_on_windows() {
         assert_eq!(
-            abbreviate_home_for("/h/users/MyProject", "/H/Users", true),
+            abbreviate_home_for("/h/users/MyProject", Some("/H/Users"), true),
             "~/MyProject"
         );
     }
@@ -355,7 +417,7 @@ mod tests {
     #[test]
     fn abbreviation_strips_verbatim_prefix_and_case_on_windows() {
         assert_eq!(
-            abbreviate_home_for(r"\\?\C:\Users\Al\Work", r"c:\users\al", true),
+            abbreviate_home_for(r"\\?\C:\Users\Al\Work", Some(r"c:\users\al"), true),
             "~/Work"
         );
     }
@@ -366,7 +428,7 @@ mod tests {
     #[test]
     fn abbreviation_off_windows_stays_case_sensitive() {
         assert_eq!(
-            abbreviate_home_for("/h/users/x", "/H/Users", false),
+            abbreviate_home_for("/h/users/x", Some("/H/Users"), false),
             "/h/users/x"
         );
     }

@@ -552,7 +552,7 @@ provider protocol. Both memory modes seed the launch prompt through the
 child's inbox, so the prompt enters through the same item path.
 
 Routing the fork through core matters because the builtin table is the easiest
-thing to drop. The exarch host builtins — `view-text`, `grep-files`,
+thing to drop. The exarch host builtins — `view-text`/`view-hash`, `grep-files`,
 `edit-hash`, `edit-replace`, `explore-dir`, `fff`, the skill loaders
 ([[map/exarch/builtins|builtins]]) — live in the agent's dispatch table,
 *outside* `Mobile`, and the `view-text-around` helper in `agent.ral` calls

@@ -25,16 +25,6 @@ pub(crate) fn probe_terminal(warn: bool) -> (InteractiveMode, TerminalState) {
     (mode, terminal)
 }
 
-/// Home directory, deferring the resolution rule to
-/// [`ral_core::host::home_or_dot`].
-#[allow(
-    clippy::disallowed_methods,
-    reason = "host-env: REPL front-end fact (completion, history location) for the launching user, outside any shell overlay"
-)]
-pub(crate) fn home_dir() -> String {
-    ral_core::host::home_or_dot()
-}
-
 static DEFAULT_EXIT_HINTS: &str = include_str!("../../data/exit-hints.txt");
 
 /// Load exit-code hints: user override in data dir, else the embedded default.

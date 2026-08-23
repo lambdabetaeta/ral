@@ -3,259 +3,240 @@
 //! its doc, its type, and where the shell would find it.
 
 use crate::ansi::{self, BOLD, CYAN, DIM, RESET};
+use crate::prelude_manifest::PRELUDE_DOCS;
 use crate::typecheck::{builtin_type_hint, fmt_scheme};
-use crate::types::{Shell, Value};
-use std::collections::HashMap;
+use crate::types::{Binding, Shell, Value};
 use std::fmt::Write;
-use std::sync::OnceLock;
 
-/// The baked prelude's `Bind` nodes carry the checker's harvested schemes,
-/// so the shell's own prelude scope is the whole registry.
-fn prelude_type_hint(name: &str, shell: &Shell) -> Option<String> {
-    let scheme = shell
-        .mobile
-        .scope
-        .get_prelude_binding(name)?
-        .scheme
-        .as_ref()?;
-    Some(fmt_scheme(scheme))
+/// A checked `let` installs its generalised scheme beside the value, so a
+/// definition's most general type reads straight off its binding — the baked
+/// prelude's `Bind` nodes carry theirs too.  `None` for a binding from an
+/// unchecked path, which has no scheme to show.
+fn scheme_of(binding: Option<&Binding>) -> Option<String> {
+    binding?.scheme.as_ref().map(fmt_scheme)
 }
 
-/// A checked top-level `let` installs its generalised scheme beside the
-/// value, so a user definition's most general type reads straight off the
-/// local binding.  `None` for a binding from an unchecked path.
-fn local_type_hint(name: &str, shell: &Shell) -> Option<String> {
-    let scheme = shell
-        .mobile
-        .scope
-        .get_local_binding(name)?
-        .scheme
-        .as_ref()?;
-    Some(fmt_scheme(scheme))
+fn prelude_doc(name: &str) -> Option<&'static str> {
+    PRELUDE_DOCS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|&(_, doc)| doc)
 }
 
-fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(String, String)> {
-    let mut v: Vec<(String, String)> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    v.sort_by(|a, b| a.0.cmp(&b.0));
-    v
+/// The documented prelude function names.  An embedding host folds these into
+/// its own command index beside [`Shell::builtin_names`].
+pub fn prelude_names() -> Vec<&'static str> {
+    PRELUDE_DOCS.iter().map(|&(name, _)| name).collect()
 }
 
-/// Empty until a host calls [`Shell::install_library_docs`].
-fn library_all_docs(shell: &Shell) -> Vec<(String, String)> {
-    sorted_pairs(&shell.session.library_docs)
+fn by_name<'a>(mut rows: Vec<(&'a str, &'a str)>) -> Vec<(&'a str, &'a str)> {
+    rows.sort_unstable_by_key(|&(name, _)| name);
+    rows
 }
 
-/// Scrape `## doc` / `let name` pairs from the prelude source — the same file
-/// the baked prelude comes from, read a second way, since only the values and
-/// schemes survive baking.  A summary is the first paragraph: doc lines join
-/// with spaces, a bare `##` closes it, anything else discards it.
-fn prelude_docs() -> &'static HashMap<String, String> {
-    static DOCS: OnceLock<HashMap<String, String>> = OnceLock::new();
-    DOCS.get_or_init(|| {
-        let mut map = HashMap::new();
-        let mut pending: Option<String> = None;
-        let mut closed = false;
-        for line in include_str!("../prelude.ral").lines() {
-            let trimmed = line.trim();
-            if trimmed == "##" {
-                if pending.is_some() {
-                    closed = true;
-                }
-            } else if let Some(doc) = trimmed.strip_prefix("## ") {
-                if !closed {
-                    match pending.as_mut() {
-                        Some(s) => {
-                            s.push(' ');
-                            s.push_str(doc);
-                        }
-                        None => pending = Some(doc.to_string()),
-                    }
-                }
-            } else if let Some(rest) = trimmed.strip_prefix("let ") {
-                if let Some(doc) = pending.take()
-                    && let Some(fn_name) = rest.split_whitespace().next()
-                {
-                    map.insert(fn_name.trim_end_matches('=').trim().to_string(), doc);
-                }
-                closed = false;
-            } else {
-                pending = None;
-                closed = false;
+/// Every documented registry, in `help`'s print order: the builtin manifest,
+/// the prelude, then whatever a host installed with
+/// [`Shell::install_library_docs`] — which is empty until one does.
+/// `explain`'s fallback search sweeps the same three.
+fn registries(shell: &Shell) -> [(&'static str, Vec<(&str, &str)>); 3] {
+    [
+        (
+            "Builtins",
+            by_name(
+                shell
+                    .builtin_names()
+                    .filter(|name| !name.starts_with('_'))
+                    .filter_map(|name| shell.lookup_builtin(name).map(|entry| (name, entry.doc)))
+                    .collect(),
+            ),
+        ),
+        // `build.rs` emits these name-sorted.
+        ("Prelude", PRELUDE_DOCS.to_vec()),
+        (
+            "Library",
+            by_name(
+                shell
+                    .session
+                    .library_docs
+                    .iter()
+                    .map(|(name, doc)| (name.as_str(), doc.as_str()))
+                    .collect(),
+            ),
+        ),
+    ]
+}
+
+/// The palette for one render, every field empty when color is off.
+#[derive(Clone, Copy)]
+struct Colors {
+    bold: &'static str,
+    cyan: &'static str,
+    dim: &'static str,
+    reset: &'static str,
+}
+
+impl Colors {
+    fn current() -> Self {
+        if ansi::use_ui_color() {
+            Self {
+                bold: BOLD,
+                cyan: CYAN,
+                dim: DIM,
+                reset: RESET,
+            }
+        } else {
+            Self {
+                bold: "",
+                cyan: "",
+                dim: "",
+                reset: "",
             }
         }
-        map
-    })
-}
-
-fn prelude_doc(name: &str) -> Option<String> {
-    prelude_docs().get(name).cloned()
-}
-
-/// The documented prelude function names, unsorted.  An embedding host folds
-/// these into its own command index beside [`Shell::builtin_names`].
-pub fn prelude_names() -> Vec<&'static str> {
-    prelude_docs().keys().map(String::as_str).collect()
-}
-
-fn prelude_all_docs() -> Vec<(String, String)> {
-    sorted_pairs(prelude_docs())
-}
-
-/// `(bold, cyan, dim, reset)`, all empty when color is off.
-fn ui_colors() -> (&'static str, &'static str, &'static str, &'static str) {
-    if ansi::use_ui_color() {
-        (BOLD, CYAN, DIM, RESET)
-    } else {
-        ("", "", "", "")
     }
 }
 
+/// One `explain` entry: the doc, the type, and the frame that would run.
 fn fmt_entry(
     name: &str,
     doc: Option<&str>,
-    type_hint: &str,
+    ty: Option<&str>,
     source: Option<&str>,
-    (cyan, dim, reset): (&str, &str, &str),
+    Colors {
+        cyan, dim, reset, ..
+    }: Colors,
 ) -> String {
-    let mut s = match doc {
+    let head = match doc {
         Some(doc) => format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n"),
         None => format!("  {cyan}{name}{reset}\n"),
     };
-    let _ = writeln!(s, "  {dim}{type_hint}{reset}");
-    if let Some(src) = source {
-        let _ = writeln!(s, "  {dim}{src}{reset}");
-    }
-    s.push('\n');
-    s
+    // Every manifest row has a type to print — a value row's polytype, a base
+    // frame's argv type — so an em dash means no registry had one.
+    let ty = format!("  {dim}{}{reset}\n", ty.unwrap_or("—"));
+    let source = source.map_or_else(String::new, |src| format!("  {dim}{src}{reset}\n"));
+    format!("{head}{ty}{source}\n")
 }
 
-fn fmt_line(name: &str, doc: &str, (cyan, dim, reset): (&str, &str, &str)) -> String {
+/// One row of the `help` index.
+fn fmt_line(
+    name: &str,
+    doc: &str,
+    Colors {
+        cyan, dim, reset, ..
+    }: Colors,
+) -> String {
     format!("  {cyan}{name}{reset} {dim}—{reset} {doc}\n")
 }
 
 pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
-    let (bold, cyan, dim, reset) = ui_colors();
-    let line_colors = (cyan, dim, reset);
+    let colors = Colors::current();
+    let Colors {
+        bold, dim, reset, ..
+    } = colors;
 
-    let out = {
-        let mut s = format!("{bold}Builtins:{reset}\n");
-        let mut builtin_names: Vec<&str> = shell
-            .builtin_names()
-            .filter(|n| !n.starts_with('_'))
-            .collect();
-        builtin_names.sort_unstable();
-        for name in builtin_names {
-            if let Some(entry) = shell.lookup_builtin(name) {
-                s.push_str(&fmt_line(name, entry.doc, line_colors));
-            }
-        }
-        let _ = writeln!(s, "{bold}Prelude:{reset}");
-        for (name, doc) in prelude_all_docs() {
-            s.push_str(&fmt_line(&name, &doc, line_colors));
-        }
-        let library = library_all_docs(shell);
-        if !library.is_empty() {
-            let _ = writeln!(s, "{bold}Library:{reset}");
-            for (name, doc) in library {
-                s.push_str(&fmt_line(&name, &doc, line_colors));
-            }
-        }
-        let _ = writeln!(s, "{dim}──{reset}");
-        let _ = writeln!(
-            s,
-            "{dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}"
-        );
-        s
-    };
+    let index = registries(shell)
+        .into_iter()
+        .filter(|(_, rows)| !rows.is_empty())
+        .fold(String::new(), |mut index, (heading, rows)| {
+            let _ = writeln!(index, "{bold}{heading}:{reset}");
+            index.extend(rows.iter().map(|&(name, doc)| fmt_line(name, doc, colors)));
+            index
+        });
+    let out = format!(
+        "{index}{dim}──{reset}\n\
+         {dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}\n"
+    );
+
     let _ = shell.write_stdout(out.as_bytes());
     shell.mobile.control.last_status = 0;
     Value::Unit
 }
 
 pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
-    let (_bold, cyan, dim, reset) = ui_colors();
-    let colors = (cyan, dim, reset);
-
-    if args.is_empty() {
-        let _ = shell.write_stdout(b"explain: expected a name, e.g. `explain map`\n");
-        shell.mobile.control.last_status = 0;
-        return Value::Unit;
-    }
-
-    let name = args[0].to_string();
-    let source = which_line(&name, shell);
-    // Every manifest row has a type to print — a value row's polytype, a base
-    // frame's argv type — so an em dash means the manifest has no such row.
-    let type_str = builtin_type_hint(&shell.session.builtins, &name).unwrap_or_else(|| "—".into());
-
-    // A local binding shadows every other resolution at runtime, so it
-    // answers first here too.
-    let out = if let Some(lt) = local_type_hint(&name, shell) {
-        fmt_entry(&name, None, &lt, source.as_deref(), colors)
-    } else if let Some(entry) = shell.lookup_builtin(&name) {
-        fmt_entry(&name, Some(entry.doc), &type_str, source.as_deref(), colors)
-    } else if let Some(doc) = prelude_doc(&name) {
-        let pt = prelude_type_hint(&name, shell).unwrap_or(type_str);
-        fmt_entry(&name, Some(&doc), &pt, source.as_deref(), colors)
-    } else if let Some(doc) = shell.session.library_docs.get(&name).cloned() {
-        fmt_entry(&name, Some(&doc), &type_str, source.as_deref(), colors)
-    } else if let Some(src) = source {
-        format!("explain: {src}\n")
-    } else {
-        let mut hits: Vec<(String, String)> = Vec::new();
-        for n in shell.builtin_names() {
-            if !n.starts_with('_')
-                && name_matches(&name, n)
-                && let Some(entry) = shell.lookup_builtin(n)
-            {
-                hits.push((n.to_string(), entry.doc.to_string()));
-            }
-        }
-        for (n, doc) in prelude_all_docs() {
-            if name_matches(&name, &n) {
-                hits.push((n, doc));
-            }
-        }
-        for (n, doc) in library_all_docs(shell) {
-            if name_matches(&name, &n) {
-                hits.push((n, doc));
-            }
-        }
-        if hits.is_empty() {
-            format!("explain: {name}: not found\n")
-        } else {
-            hits.sort_by(|a, b| a.0.cmp(&b.0));
-            hits.iter()
-                .map(|(n, doc)| fmt_line(n, doc, colors))
-                .collect()
-        }
+    let out = match args.first() {
+        Some(arg) => explanation(&arg.to_string(), shell, Colors::current()),
+        None => "explain: expected a name, e.g. `explain map`\n".to_string(),
     };
     let _ = shell.write_stdout(out.as_bytes());
     shell.mobile.control.last_status = 0;
     Value::Unit
 }
 
-/// The fallback search `explain` runs when a name resolves to nothing: a
-/// case-insensitive regex, degrading to substring for a pattern that will not
-/// compile.
-#[cfg(feature = "grep")]
-fn name_matches(pattern: &str, name: &str) -> bool {
-    match grep::regex::RegexMatcherBuilder::new()
-        .case_insensitive(true)
-        .build(pattern)
-    {
-        Ok(matcher) => {
-            use grep::matcher::Matcher;
-            matcher.is_match(name.as_bytes()).unwrap_or(false)
-        }
-        Err(_) => name.to_lowercase().contains(&pattern.to_lowercase()),
+/// The owning registry's doc and type over the frame that would run; failing
+/// that, the bare source line; failing that, a search of every documented name.
+fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
+    let source = which_line(name, shell);
+    match resolve(name, shell) {
+        Some((doc, ty)) => fmt_entry(
+            name,
+            doc.as_deref(),
+            ty.as_deref(),
+            source.as_deref(),
+            colors,
+        ),
+        None => source.map_or_else(
+            || search(name, shell, colors),
+            |src| format!("explain: {src}\n"),
+        ),
     }
 }
 
-/// Case-insensitive substring search; without `grep` there is no regex.
-#[cfg(not(feature = "grep"))]
-fn name_matches(pattern: &str, name: &str) -> bool {
-    name.to_lowercase().contains(&pattern.to_lowercase())
+/// The registry that owns `name`, in the order the runtime resolves it, each
+/// answering with a doc and a type.
+///
+/// A local answers first, since it shadows every other resolution at runtime —
+/// and its doc can only be the library table's: that is the one registry
+/// naming the locals a sourced library installs, so a local shadowing a
+/// prelude name has not inherited the prelude's doc.
+fn resolve(name: &str, shell: &Shell) -> Option<(Option<String>, Option<String>)> {
+    let scope = &shell.mobile.scope;
+    let manifest = builtin_type_hint(&shell.session.builtins, name);
+    let library_doc = || shell.session.library_docs.get(name).cloned();
+
+    scheme_of(scope.get_local_binding(name))
+        .map(|ty| (library_doc(), Some(ty)))
+        .or_else(|| {
+            shell
+                .lookup_builtin(name)
+                .map(|entry| (Some(entry.doc.to_owned()), manifest.clone()))
+        })
+        .or_else(|| {
+            prelude_doc(name).map(|doc| {
+                let ty = scheme_of(scope.get_prelude_binding(name)).or_else(|| manifest.clone());
+                (Some(doc.to_owned()), ty)
+            })
+        })
+        .or_else(|| library_doc().map(|doc| (Some(doc), manifest.clone())))
+}
+
+/// The fallback `explain` runs when no registry knows the name: every
+/// documented entry whose name matches, as `help`'s one-line rows.
+fn search(pattern: &str, shell: &Shell, colors: Colors) -> String {
+    let matches = matcher(pattern);
+    let hits: String = registries(shell)
+        .into_iter()
+        .flat_map(|(_, rows)| rows)
+        .filter(|&(name, _)| matches(name))
+        .map(|(name, doc)| fmt_line(name, doc, colors))
+        .collect();
+    if hits.is_empty() {
+        format!("explain: {pattern}: not found\n")
+    } else {
+        hits
+    }
+}
+
+/// A case-insensitive regex over the whole index — compiled once, not per
+/// name — degrading to a substring test for a pattern that will not compile.
+fn matcher(pattern: &str) -> impl Fn(&str) -> bool {
+    let regex = regex::RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
+        .ok();
+    let lowered = pattern.to_lowercase();
+    move |name| match &regex {
+        Some(regex) => regex.is_match(name),
+        None => name.to_lowercase().contains(&lowered),
+    }
 }
 
 /// Where the shell would find `name`.  Probes handlers before the manifest —
@@ -298,6 +279,8 @@ fn which_line(name: &str, shell: &Shell) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// `build.rs` scrapes these summaries out of `prelude.ral`; the two rules
+    /// worth pinning are how a wrapped doc joins and where one stops.
     #[test]
     fn multiline_doc_summary_joins_first_paragraph() {
         let lines_doc = prelude_doc("lines").expect("lines has a doc comment");

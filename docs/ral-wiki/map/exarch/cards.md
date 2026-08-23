@@ -199,7 +199,7 @@ composed, so a card is a report of a change and never a copy of the file — and
 the renderer stays dumb: L1 is the header alone, every rung above it draws
 what the mark holds. The read
 redirect and exec cards are likewise composed from core's I/O events. `agent.ral` now carries
-only the `view-text-around` reader, the tasks kit, and the goal pins
+only the `-around` readers, the tasks kit, and the goal pins
 ([[map/exarch/builtins|builtins]]).
 
 One ral constraint shapes the wire format: lists and records are statically

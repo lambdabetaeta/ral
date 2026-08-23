@@ -206,7 +206,7 @@ the rest are free.
 
 ## One surface per operation — bulk plumbing below the ral line
 
-The redirect frame cannot tell the model's `view-text 50 100 < foo.rs` from a
+The redirect frame cannot tell the model's `view-hash 50 100 < foo.rs` from a
 library helper's internal read — both install a read frame. The resolution is
 **not** a suppression flag but the invariant *if a ral redirect always means the
 model's I/O, library plumbing must not be a ral redirect*. So the bulk-I/O
@@ -214,7 +214,7 @@ helpers moved below the line into [[map/exarch/builtins|builtins]]
 (`shell_eval/builtins.rs`), where their reads happen in Rust and never reach the
 frame:
 
-- **`view-text`** reads the whole file in Rust (its adaptive-context witnesses
+- **`view-hash`** reads the whole file in Rust (its adaptive-context witnesses
   depend on file-wide uniqueness) and constructs its own single
   `Observed::Read { path }`, via core's public constructor rather than a
   hand-built map — one logical read, one surface, matching the shape the

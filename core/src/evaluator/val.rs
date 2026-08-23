@@ -4,7 +4,7 @@
 
 use crate::diagnostic;
 use crate::ir::{Comp, Val, ValListElem, ValMapEntry};
-use crate::path::tilde::expand_tilde_path;
+use crate::path::tilde::{Unexpandable, expand_tilde_path};
 use crate::types::{Error, List, Shell, Value};
 
 /// Renders one interpolation piece for `eval_interpolation` in `comp.rs`.
@@ -64,16 +64,19 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
         }
         Val::TildePath(path) => {
             let home = shell.mobile.context.home();
-            expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), &home)
+            expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), home.as_deref())
                 .map(Value::String)
-                .ok_or_else(|| {
+                .map_err(|cause| {
                     shell.err_hint(
-                        format!(
-                            "cannot resolve {}: no way to look up another user's home \
-                             directory on this platform",
-                            path.to_literal()
-                        ),
-                        "use bare ~ for the current user, or spell out an explicit path",
+                        format!("cannot resolve {}: {}", path.to_literal(), cause.why()),
+                        match cause {
+                            Unexpandable::HomeUnknown => {
+                                "set HOME, or spell out an explicit path"
+                            }
+                            Unexpandable::ForeignUser => {
+                                "use bare ~ for the current user, or spell out an explicit path"
+                            }
+                        },
                         1,
                     )
                 })

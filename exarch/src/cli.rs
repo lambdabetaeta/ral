@@ -96,10 +96,10 @@ pub struct Cli {
     #[arg(long = "vi")]
     pub vi: bool,
 
-    /// Which file-editing scheme the system prompt teaches: `hash` (the
-    /// default) the witnessed line-hash one, `replace` literal string
-    /// replacement.  Both stay registered, so the untaught one works if named.
-    #[arg(long = "edit", value_enum, default_value_t = EditScheme::Hash)]
+    /// Which file-editing scheme the system prompt teaches: `replace` (the
+    /// default) literal string replacement, `hash` the witnessed line-hash one.
+    /// Both stay registered, so the untaught one works if named.
+    #[arg(long = "edit", value_enum, default_value_t = EditScheme::Replace)]
     pub edit: EditScheme,
 
     /// Chat mode: no tools, no system prompt — a bare back-and-forth with the
@@ -115,10 +115,10 @@ pub struct Cli {
 /// editing builtins are registered regardless.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum EditScheme {
-    /// Witnessed line-hash editing: `view-text`/`view-text-around`/`edit-hash`.
-    Hash,
-    /// Literal string-replacement editing: `edit-replace`.
+    /// Literal string-replacement editing: `view-text`/`view-text-around`/`edit-replace`.
     Replace,
+    /// Witnessed line-hash editing: `view-hash`/`view-hash-around`/`edit-hash`.
+    Hash,
 }
 
 /// An out-of-band action that runs and exits instead of starting a session.

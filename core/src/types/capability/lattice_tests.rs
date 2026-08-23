@@ -1012,12 +1012,15 @@ fn decode_rejects_xdg_var_outside_home() {
     assert!(err.contains("HOME"), "should mention HOME: {err}");
 }
 
-/// An empty `home` is a configuration error, not a silent allow.
+/// No home is a configuration error, not a silent allow — whether it arrives
+/// as the absence the readers report or as the empty binding `HOME=` gives.
 #[test]
-fn decode_errors_when_home_is_empty() {
+fn decode_errors_when_there_is_no_home() {
     let v = map(vec![("fs", map(vec![("read", strs(&["~/x"]))]))]);
-    let err = break_msg(decode_capability_map(&v, "test", &test_ctx("")).unwrap_err());
-    assert!(err.contains("HOME"), "got {err}");
+    for ctx in [test_ctx(""), no_home_ctx()] {
+        let err = break_msg(decode_capability_map(&v, "test", &ctx).unwrap_err());
+        assert!(err.contains("HOME"), "got {err}");
+    }
 }
 
 /// A bare relative prefix survives freeze unchanged and would anchor to the
@@ -1127,7 +1130,14 @@ fn decode_accepts_bool_dimension_fields() {
 
 fn test_ctx(home: &str) -> crate::path::sigil::FreezeCtx<'_> {
     crate::path::sigil::FreezeCtx {
-        home,
+        home: Some(home),
+        cwd: crate::path::test_cwd(),
+    }
+}
+
+fn no_home_ctx() -> crate::path::sigil::FreezeCtx<'static> {
+    crate::path::sigil::FreezeCtx {
+        home: None,
         cwd: crate::path::test_cwd(),
     }
 }

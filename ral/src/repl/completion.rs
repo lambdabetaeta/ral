@@ -334,19 +334,21 @@ fn is_cmd_pos(before_token: &str) -> bool {
 /// names another user's home and this platform has no way to look one up
 /// (no `getpwnam(3)` equivalent) — either way the caller offers no
 /// candidates rather than completing against a fabricated path.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "host-env: completion completes for the launching user, outside any shell overlay"
+)]
 fn expand_tilde(dir: &str) -> Option<String> {
     let Some(parsed) = ral_core::path::tilde::TildePath::parse(dir) else {
         return Some(dir.to_string());
     };
-    let home = crate::platform::home_dir();
-    if home == "." {
-        return None;
-    }
+    let home = ral_core::host::home();
     ral_core::path::tilde::expand_tilde_path(
         parsed.user.as_deref(),
         parsed.suffix.as_deref(),
-        &home,
+        home.as_deref(),
     )
+    .ok()
 }
 
 /// A directory entry offered as a path candidate.  Carries `is_dir` so the
@@ -407,10 +409,9 @@ pub(super) fn complete_path(
     // `token_start`; quoting it would suppress tilde expansion, so names with
     // special chars are left bare on this path.
     if token == "~" {
-        let home = crate::platform::home_dir();
-        if home == "." {
+        let Some(home) = ral_core::host::home() else {
             return (token_start, vec![]);
-        }
+        };
         return (
             token_start,
             ranked_entries(Path::new(&home), "", "~/", false),
@@ -770,7 +771,7 @@ mod tests {
 
     #[test]
     fn complete_path_expands_home_tilde_prefix() {
-        if crate::platform::home_dir() == "." {
+        if ral_core::host::home().is_none() {
             return;
         }
         let (start, _) = complete_path("~/", 0, Path::new("/"));
@@ -779,7 +780,7 @@ mod tests {
 
     #[test]
     fn complete_path_supports_bare_tilde_token() {
-        if crate::platform::home_dir() == "." {
+        if ral_core::host::home().is_none() {
             return;
         }
         let (start, _) = complete_path("~", 3, Path::new("/"));

@@ -146,8 +146,8 @@ fn render(name: &CommandName, ctx: &Context) -> String {
         CommandName::Path(path) => path.clone(),
         CommandName::TildePath(path) => {
             let home = ctx.home();
-            expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), &home)
-                .unwrap_or_else(|| path.to_literal())
+            expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), home.as_deref())
+                .unwrap_or_else(|_| path.to_literal())
         }
     }
 }

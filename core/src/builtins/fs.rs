@@ -92,7 +92,8 @@ pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<V
 /// cwd-relative matches, a sigil-rooted or absolute one absolute matches.
 pub(super) fn builtin_glob(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let raw = arg0_str(args);
-    let expanded = crate::path::sigil::expand_path_prefix(&raw, &shell.mobile.context.home());
+    let home = shell.mobile.context.home();
+    let expanded = crate::path::sigil::expand_path_prefix(&raw, home.as_deref());
     let input_is_cwd_relative = !crate::path::is_absolute(&expanded);
     let pattern = checked_read_path(shell, &raw)?
         .as_path()

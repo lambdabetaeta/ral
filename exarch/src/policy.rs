@@ -50,7 +50,7 @@ pub fn for_invocation(
     let cwd_path = PathBuf::from(cwd);
     let home = host::home();
     let ctx = FreezeCtx {
-        home: &home,
+        home: home.as_deref(),
         cwd: &cwd_path,
     };
 
@@ -103,7 +103,7 @@ pub fn narrow(parent: &Capabilities, base_name: &str, cwd: &str) -> Result<Capab
     let cwd_path = PathBuf::from(cwd);
     let home = host::home();
     let ctx = FreezeCtx {
-        home: &home,
+        home: home.as_deref(),
         cwd: &cwd_path,
     };
     let base = resolve_base(base_name, &ctx)?;

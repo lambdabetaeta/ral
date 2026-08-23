@@ -159,7 +159,7 @@ impl Agent {
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
-            principal: ral_core::host::user(),
+            principal: ral_core::host::user().unwrap_or_default(),
             pins: Some(self.pins.clone()),
             wire_seat,
             hatchery: self.hatchery.clone(),

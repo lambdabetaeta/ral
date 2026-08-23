@@ -81,7 +81,7 @@ impl Shell {
         reason = "host-env: seeding the baseline $ENV at boot — the host process env is the source the overlay later shadows"
     )]
     pub fn seed_default_env_vars(&mut self) {
-        let home = crate::host::home_or_dot();
+        let home = crate::host::home();
         let user = crate::host::user();
         let path = std::env::var("PATH").unwrap_or_else(|_| {
             if cfg!(windows) {
@@ -98,7 +98,7 @@ impl Shell {
         });
         let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
         let lang = std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into());
-        let logname = std::env::var("LOGNAME").unwrap_or_else(|_| user.clone());
+        let logname = std::env::var("LOGNAME").ok().or_else(|| user.clone());
 
         // Only when unseeded: a front end whose working directory is not the
         // process cwd states it first through `Shell::seed_cwd`.
@@ -116,16 +116,21 @@ impl Shell {
         let mut install = |k: &str, v: String| {
             context.set_env_var_or_keep(k, v);
         };
+        // A host fact nothing binds stays unbound: seeding `HOME=.` once made
+        // every `~` in the session mean "here".  The four with a default of
+        // their own are `Some` by construction.
         for (k, v) in [
             ("HOME", home),
             ("USER", user),
-            ("PATH", path),
-            ("SHELL", shell_path),
-            ("TERM", term),
-            ("LANG", lang),
+            ("PATH", Some(path)),
+            ("SHELL", Some(shell_path)),
+            ("TERM", Some(term)),
+            ("LANG", Some(lang)),
             ("LOGNAME", logname),
         ] {
-            install(k, v);
+            if let Some(v) = v {
+                install(k, v);
+            }
         }
         for k in [
             "TMUX",

@@ -8,20 +8,25 @@ use std::path::{Path, PathBuf};
 
 use super::{ResolvedPath, SearchCwd, lex, sigil};
 
-/// The `HOME` and logical cwd one resolution runs against.
+/// The `HOME` and logical cwd one resolution runs against; `home` is `None`
+/// where nothing binds one, and a `~` then resolves to itself.
+///
+/// Field-for-field [`sigil::FreezeCtx`] bar the one that matters: a freeze
+/// resolves `cwd:` once and for good, so its cwd is total, where a runtime
+/// resolution may defer to the process cwd.
 pub struct Resolver<'a> {
-    pub home: String,
+    pub home: Option<String>,
     pub cwd: Option<&'a Path>,
 }
 
 impl Resolver<'_> {
     /// A resolver for callers with no shell — the `RAL_PATH` walker, the
     /// plugin loader, exarch's fff index — who already hold an absolute
-    /// candidate.  Safe only for those: the empty `home` expands `~/x` to
-    /// `/x`, and a `None` cwd sends `lex::resolve_path` to the process cwd.
+    /// candidate.  Safe only for those: with no `home`, `~/x` resolves to
+    /// itself, and a `None` cwd sends `lex::resolve_path` to the process cwd.
     pub fn shell_less() -> Self {
         Resolver {
-            home: String::new(),
+            home: None,
             cwd: None,
         }
     }
@@ -40,7 +45,7 @@ impl Resolver<'_> {
     /// Stages 1 and 2: expand `~`/`xdg:`, then anchor and fold against `cwd`.
     /// Pure — no filesystem access.
     pub fn resolve(&self, raw: &str) -> ResolvedPath {
-        let expanded = sigil::expand_path_prefix(raw, &self.home);
+        let expanded = sigil::expand_path_prefix(raw, self.home.as_deref());
         ResolvedPath::from_lexed(lex::resolve_path(self.cwd, &expanded))
     }
 
@@ -63,7 +68,7 @@ mod tests {
     #[test]
     fn resolve_expands_tilde_and_normalises() {
         let r = Resolver {
-            home: "/h".into(),
+            home: Some("/h".into()),
             cwd: None,
         };
         assert_eq!(
@@ -83,7 +88,7 @@ mod tests {
             Path::new("/work/proj")
         };
         let r = Resolver {
-            home: "/h".into(),
+            home: Some("/h".into()),
             cwd: Some(cwd),
         };
         assert_eq!(r.resolve("src/lib.rs").as_path(), cwd.join("src/lib.rs"));
@@ -94,7 +99,7 @@ mod tests {
     #[test]
     fn check_resolves_partial_paths_against_existing_ancestor() {
         let r = Resolver {
-            home: "/h".into(),
+            home: Some("/h".into()),
             cwd: None,
         };
         let suffix = format!("ral-resolver-probe-{}/leaf", std::process::id());
@@ -116,7 +121,7 @@ mod tests {
         let prev = std::env::var_os("XDG_DATA_HOME");
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
         let r = Resolver {
-            home: "/h".into(),
+            home: Some("/h".into()),
             cwd: None,
         };
         let out = r.check("xdg:data/agda");
@@ -134,7 +139,7 @@ mod tests {
     #[test]
     fn ordinary_absolute_path_is_a_fixed_point() {
         let r = Resolver {
-            home: "/h".into(),
+            home: Some("/h".into()),
             cwd: None,
         };
         assert_eq!(

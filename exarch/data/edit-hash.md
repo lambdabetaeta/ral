@@ -1,10 +1,10 @@
-`view-text PATH START END` shows the half-open line range `[START, END)`. The result is a list of `[line, hash, text]` records, where `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. Bind and collect in some record to read multiple locations at once:
+`view-hash PATH START END` shows the half-open line range `[START, END)`. The result is a list of `[line, hash, text]` records, where `<hash>` is a unique freshness witness for that line, which depends on neighbouring lines. Bind and collect in some record to read multiple locations at once:
 
-    let tui-start  = view-text #'src/tui.rs'# 100 150
-    let tui-end    = view-text #'src/tui.rs'# 300 350
+    let tui-start  = view-hash #'src/tui.rs'# 100 150
+    let tui-end    = view-hash #'src/tui.rs'# 300 350
     [ #'src/tui.rs-100-150'# : $tui-start, #'src/tui.rs-300-350'# : $tui-end ]
 
-`view-text-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, in the same records.
+`view-hash-around PATH LINE PEEK` shows the `2*PEEK + 1` lines centred on `LINE`, in the same records.
 
 `edit-hash PATH EDITS` applies a batch of `EDITS`, a list of records `[hash: HASH, line: NEWTEXT]`. Each edit replaces ONLY the line identified by `HASH` verbatim with `NEWTEXT`. It is atomic: every hash is resolved against lines before editing; and a batch either applies whole or fails whole. Use raw strings `#'…'#` for `NEWTEXT` without any escapes.
 
@@ -23,3 +23,5 @@ replacement must already have the exact indentation needed at the insertion poin
     edit-hash #'src/pointer.rs'# [ [hash : h3af4d, #''# ]   # you can edit multiple files in the same ral script
 
 Edits with newlines DO NOT replace the lines that follow; you MUST mention the hash of every line you wish to change.
+
+`view-text`/`view-text-around` show the same ranges without the witness column; read with `view-hash` when an `edit-hash` is to follow, since only it hands you the handle.

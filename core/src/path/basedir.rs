@@ -80,15 +80,22 @@ impl XdgKind {
 /// `home` is the caller's, never a process-level `$HOME` lookup, so a
 /// shell-scoped `HOME=` reaches here exactly as it reaches tilde expansion.
 /// The `XDG_*_HOME` vars themselves still come from the process environment.
+///
+/// `None` when nothing absolute resolves: no home to default under, and no
+/// absolute override to stand in for one.  An unknown home is thus not the
+/// same question as an absolute `$XDG_CONFIG_HOME` — that one is still
+/// answerable, and answered.
 #[allow(clippy::disallowed_methods)]
-pub fn resolve_xdg(kind: XdgKind, home: &str) -> PathBuf {
-    absolute_env_var(kind.env_var()).unwrap_or_else(|| {
+pub fn resolve_xdg(kind: XdgKind, home: Option<&str>) -> Option<PathBuf> {
+    absolute_env_var(kind.env_var()).or_else(|| {
         // `default_suffix()` is spelled with the spec's `/`, so join it
         // component-by-component rather than as one literal — otherwise the
         // result mixes native separators with a stray `/` on Windows.
-        kind.default_suffix()
-            .split('/')
-            .fold(Path::new(home).to_path_buf(), |acc, part| acc.join(part))
+        Some(
+            kind.default_suffix()
+                .split('/')
+                .fold(Path::new(home?).to_path_buf(), |acc, part| acc.join(part)),
+        )
     })
 }
 
@@ -110,8 +117,8 @@ mod tests {
     fn unset_var_falls_back_to_home_default() {
         with_var("XDG_STATE_HOME", None, || {
             assert_eq!(
-                resolve_xdg(XdgKind::State, "/h"),
-                PathBuf::from("/h/.local/state")
+                resolve_xdg(XdgKind::State, Some("/h")),
+                Some(PathBuf::from("/h/.local/state"))
             );
         });
     }
@@ -120,8 +127,8 @@ mod tests {
     fn absolute_var_overrides_home() {
         with_var("XDG_CACHE_HOME", Some("/var/cache/me"), || {
             assert_eq!(
-                resolve_xdg(XdgKind::Cache, "/h"),
-                PathBuf::from("/var/cache/me")
+                resolve_xdg(XdgKind::Cache, Some("/h")),
+                Some(PathBuf::from("/var/cache/me"))
             );
         });
     }
@@ -130,8 +137,24 @@ mod tests {
     fn relative_var_is_ignored_per_spec() {
         with_var("XDG_CONFIG_HOME", Some("relative/conf"), || {
             assert_eq!(
-                resolve_xdg(XdgKind::Config, "/h"),
-                PathBuf::from("/h/.config")
+                resolve_xdg(XdgKind::Config, Some("/h")),
+                Some(PathBuf::from("/h/.config"))
+            );
+        });
+    }
+
+    /// With no home the default has nothing to hang off, so the kind is
+    /// unresolved rather than rooted at `/` — but an absolute override still
+    /// answers, home or no home.
+    #[test]
+    fn unknown_home_resolves_only_through_an_absolute_override() {
+        with_var("XDG_DATA_HOME", None, || {
+            assert_eq!(resolve_xdg(XdgKind::Data, None), None);
+        });
+        with_var("XDG_DATA_HOME", Some("/srv/data"), || {
+            assert_eq!(
+                resolve_xdg(XdgKind::Data, None),
+                Some(PathBuf::from("/srv/data"))
             );
         });
     }

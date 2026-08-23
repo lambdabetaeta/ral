@@ -16,8 +16,7 @@ use super::basedir::{XdgKind, resolve_xdg};
     reason = "host-env: ral's own config/data live where the tool is installed — a script's env overlay must not relocate them"
 )]
 fn base(kind: XdgKind) -> Option<PathBuf> {
-    let path = resolve_xdg(kind, &host::home());
-    path.is_absolute().then_some(path)
+    resolve_xdg(kind, host::home().as_deref()).filter(|p| p.is_absolute())
 }
 
 /// The XDG config base joined with `subpath` (e.g. `"ral/rc"`).
@@ -37,6 +36,6 @@ pub fn xdg_data_subpath(subpath: &str) -> Option<PathBuf> {
     reason = "host-env: the dot-file convention names the launching user's real home — a script's env overlay must not relocate it"
 )]
 pub fn home_dot(dot_name: &str) -> Option<PathBuf> {
-    let p = PathBuf::from(host::home()).join(dot_name);
+    let p = PathBuf::from(host::home()?).join(dot_name);
     p.is_absolute().then_some(p)
 }
