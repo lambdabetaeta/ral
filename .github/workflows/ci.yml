@@ -22,27 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # bwrap needs a real user namespace to build its sandbox without being
-      # setuid-root, and a bare GitHub-hosted runner's unprivileged path there
-      # has proven unreliable: Ubuntu 24.04's AppArmor policy denied it
-      # outright ("setting up uid map: Permission denied") until granted —
-      # but granting it (two structurally opposite profiles, and disabling
-      # the restriction outright) left a separate, non-deterministic mount-
-      # layer fault standing: some hosts' bwrap-constructed `/dev` cannot be
-      # opened at all ("cannot open /dev/null: Permission denied"). That one
-      # AppArmor cannot fix — `bwrap_devnull_writable` in core/src/sandbox.rs
-      # probes for it and the affected tests skip, same as any other
-      # environment precondition this suite cannot assume.
-      #
-      # scripts/linux-box.Dockerfile + `just linux-ci` already solve the
-      # uid-map half for local dev by running privileged instead of fighting
-      # the unprivileged path — a `--privileged` container has real
-      # CAP_SYS_ADMIN and never needs AppArmor's grant at all. Do the same
-      # here: build the same image, run the same steps in it. `--init`
-      # matters independently of any of the above — without a real PID 1,
-      # a killed sandboxed subprocess tree's orphaned grandchildren are never
-      # reaped, which read as "the timeout didn't kill it" on tests that have
-      # nothing to do with bwrap.
+      # A bare runner's unprivileged bwrap path is unreliable (AppArmor
+      # userns denial, then a mount-layer /dev fault no policy fixes —
+      # bwrap_devnull_writable in core/src/sandbox.rs probes and skips it).
+      # scripts/linux-box.Dockerfile + `just linux-ci` already solve this for
+      # local dev by running privileged; do the same here. `--init` reaps
+      # orphaned grandchildren a killed sandboxed subprocess tree leaves
+      # behind — without it those reads as "the timeout didn't kill it".
       - name: Build the Linux sandbox image
         run: docker build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
 

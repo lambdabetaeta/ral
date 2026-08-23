@@ -168,21 +168,15 @@ pub fn apply_child_limits(child: &crate::process::ChildHandle) {
     windows::apply_job_limits(child);
 }
 
-/// Whether a `bwrap` envelope on this host can actually open a device node it
-/// binds in — proven false, non-deterministically, on some GitHub-hosted CI
-/// runners (`/bin/sh: cannot open /dev/null: Permission denied`) even with
-/// every AppArmor/userns knob tried, on hosts where `bwrap` itself launches
-/// fine. A mount-layer property of the host, not a policy this crate can ask
-/// for, so it is probed rather than inferred from `bwrap`'s mere presence.
+/// Whether `bwrap` on this host can open a device node it binds in.
 ///
-/// Test-only: the caller is one of the sandbox-dependent tests deciding
-/// whether to skip, per [`confinement_unavailable`]'s "nothing ran, and the
-/// sandbox is why" — never a real spawn path, which already fails closed on
-/// the same underlying error.
+/// False on some CI runners even when `bwrap` itself launches fine — a
+/// mount-layer host property, probed rather than assumed. Test-only:
+/// callers skip rather than assert on it.
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:bwrap-devnull-probe] A host capability probe for the test suite, never a spawn a grant or the model can observe."
+    reason = "[io-door:silent:bwrap-devnull-probe] host capability probe for tests, not a grant spawn"
 )]
 pub fn bwrap_devnull_writable() -> bool {
     use std::sync::OnceLock;
