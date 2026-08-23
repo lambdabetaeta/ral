@@ -3,10 +3,13 @@
 //! its doc, its type, and where the shell would find it.
 
 use crate::ansi::{self, BOLD, CYAN, DIM, RESET};
+use crate::ir::CommandName;
 use crate::prelude_manifest::PRELUDE_DOCS;
+use crate::runtime::command::CommandIdentity;
 use crate::typecheck::{builtin_type_hint, fmt_scheme};
-use crate::types::{Binding, Shell, Value};
-use std::fmt::Write;
+use crate::types::{Binding, HandlerLookup, Shell, Value};
+use std::fmt::{self, Write};
+use std::path::PathBuf;
 
 /// A checked `let` installs its generalised scheme beside the value, so a
 /// definition's most general type reads straight off its binding — the baked
@@ -95,12 +98,13 @@ impl Colors {
     }
 }
 
-/// One `explain` entry: the doc, the type, and the frame that would run.
+/// One `explain` entry: the doc, the type, then a dim line apiece for where
+/// the name lives and what that shadows.
 fn fmt_entry(
     name: &str,
     doc: Option<&str>,
     ty: Option<&str>,
-    source: Option<&str>,
+    tail: &[String],
     Colors {
         cyan, dim, reset, ..
     }: Colors,
@@ -112,8 +116,11 @@ fn fmt_entry(
     // Every manifest row has a type to print — a value row's polytype, a base
     // frame's argv type — so an em dash means no registry had one.
     let ty = format!("  {dim}{}{reset}\n", ty.unwrap_or("—"));
-    let source = source.map_or_else(String::new, |src| format!("  {dim}{src}{reset}\n"));
-    format!("{head}{ty}{source}\n")
+    let tail = tail.iter().fold(String::new(), |mut lines, line| {
+        let _ = writeln!(lines, "  {dim}{line}{reset}");
+        lines
+    });
+    format!("{head}{ty}{tail}\n")
 }
 
 /// One row of the `help` index.
@@ -161,51 +168,58 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
     Value::Unit
 }
 
-/// The owning registry's doc and type over the frame that would run; failing
-/// that, the bare source line; failing that, a search of every documented name.
+/// What documents `name` over the frame that would run.  A name nothing binds
+/// and no registry documents falls to a search of the whole index; everything
+/// else prints the one entry block, an em dash standing in for whichever of
+/// the doc and the type no registry holds.
 fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
-    let source = which_line(name, shell);
-    match resolve(name, shell) {
-        Some((doc, ty)) => fmt_entry(
-            name,
-            doc.as_deref(),
-            ty.as_deref(),
-            source.as_deref(),
-            colors,
-        ),
-        None => source.map_or_else(
-            || search(name, shell, colors),
-            |src| format!("explain: {src}\n"),
-        ),
+    let sites = locate_all(name, shell);
+    let (doc, ty) = documented(name, sites.first(), shell);
+    if sites.is_empty() && doc.is_none() && ty.is_none() {
+        return search(name, shell, colors);
     }
+    let mut tail: Vec<String> = sites
+        .first()
+        .map(|site| format!("{name}: {site}"))
+        .into_iter()
+        .collect();
+    if let [_, shadowed @ ..] = sites.as_slice()
+        && !shadowed.is_empty()
+    {
+        let names: Vec<String> = shadowed.iter().map(Where::to_string).collect();
+        tail.push(format!("shadows: {}", names.join(", ")));
+    }
+    fmt_entry(name, doc.as_deref(), ty.as_deref(), &tail, colors)
 }
 
-/// The registry that owns `name`, in the order the runtime resolves it, each
-/// answering with a doc and a type.
+/// The doc and type held by the registry that owns `name`.
 ///
-/// A local answers first, since it shadows every other resolution at runtime —
-/// and its doc can only be the library table's: that is the one registry
-/// naming the locals a sourced library installs, so a local shadowing a
-/// prelude name has not inherited the prelude's doc.
-fn resolve(name: &str, shell: &Shell) -> Option<(Option<String>, Option<String>)> {
+/// A local answers alone: it shadows every other resolution at runtime, so no
+/// registry below it may speak for it, and its doc can only be the library
+/// table's — that is the one registry naming the locals a sourced library
+/// installs.
+///
+/// Every other site sweeps the documented registries, since a frame stacked
+/// over a native — a handler, an alias — inherits the native's doc.
+fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String>, Option<String>) {
     let scope = &shell.mobile.scope;
-    let manifest = builtin_type_hint(&shell.session.builtins, name);
+    let manifest = || builtin_type_hint(&shell.session.builtins, name);
     let library_doc = || shell.session.library_docs.get(name).cloned();
 
-    scheme_of(scope.get_local_binding(name))
-        .map(|ty| (library_doc(), Some(ty)))
-        .or_else(|| {
-            shell
-                .lookup_builtin(name)
-                .map(|entry| (Some(entry.doc.to_owned()), manifest.clone()))
-        })
+    if matches!(site, Some(Where::Local)) {
+        return (library_doc(), scheme_of(scope.get_local_binding(name)));
+    }
+    shell
+        .lookup_builtin(name)
+        .map(|entry| (Some(entry.doc.to_owned()), manifest()))
         .or_else(|| {
             prelude_doc(name).map(|doc| {
-                let ty = scheme_of(scope.get_prelude_binding(name)).or_else(|| manifest.clone());
+                let ty = scheme_of(scope.get_prelude_binding(name)).or_else(manifest);
                 (Some(doc.to_owned()), ty)
             })
         })
-        .or_else(|| library_doc().map(|doc| (Some(doc), manifest.clone())))
+        .or_else(|| library_doc().map(|doc| (Some(doc), manifest())))
+        .unwrap_or_default()
 }
 
 /// The fallback `explain` runs when no registry knows the name: every
@@ -239,40 +253,93 @@ fn matcher(pattern: &str) -> impl Fn(&str) -> bool {
     }
 }
 
-/// Where the shell would find `name`.  Probes handlers before the manifest —
-/// the reverse of `command_call::resolve`'s env-first order — so a handler
-/// under a native's name reports as `handler` though only `^name` reaches it.
-fn which_line(name: &str, shell: &Shell) -> Option<String> {
-    if shell.mobile.scope.get_local(name).is_some() {
-        return Some(format!("{name}: local"));
+/// Which registry owns a name — the frame that would run, or the file
+/// dispatch would exec.  Both halves of `explain` read this one answer: the
+/// source line prints it, the doc ladder asks that registry for a doc.
+enum Where {
+    Local,
+    Prelude,
+    Alias,
+    Handler,
+    BaseFrame,
+    Builtin,
+    Path(PathBuf),
+    DeniedByGrant(PathBuf),
+}
+
+impl fmt::Display for Where {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => f.write_str("local"),
+            Self::Prelude => f.write_str("prelude"),
+            Self::Alias => f.write_str("alias"),
+            Self::Handler => f.write_str("handler"),
+            // A base frame reads as the builtin it is: that it answers through
+            // the stack rather than the manifest is what keeps it from
+            // reporting as a handler someone installed, and its own doc and
+            // argv type say the rest.  The reader needs no third word.
+            Self::BaseFrame | Self::Builtin => f.write_str("builtin"),
+            Self::Path(path) => write!(f, "{}", path.display()),
+            Self::DeniedByGrant(path) => write!(f, "denied by grant ({})", path.display()),
+        }
     }
-    if shell.mobile.scope.get_prelude(name).is_some() {
-        return Some(format!("{name}: prelude"));
+}
+
+/// Every registry holding `name`, in the order the runtime resolves it: the
+/// first is what runs, the rest are shadowed.  That tail is the whole answer
+/// `which` cannot give — a PATH binary this name will never reach.
+///
+/// Probes handlers before the manifest — the reverse of
+/// `command_call::resolve`'s env-first order — so a handler under a native's
+/// name reports as `handler` though only `^name` reaches it.
+fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
+    let scope = &shell.mobile.scope;
+    let mut sites = Vec::new();
+    if scope.get_local(name).is_some() {
+        sites.push(Where::Local);
     }
-    // An alias is a handler frame too, so it must be named before the
-    // handler arm swallows it.
-    if shell.has_alias(name) {
-        return Some(format!("{name}: alias"));
+    if scope.get_prelude(name).is_some() {
+        sites.push(Where::Prelude);
     }
-    if shell.lookup_handler(name).is_some() {
-        return Some(format!("{name}: handler"));
-    }
-    if shell.lookup_builtin(name).is_some() {
-        return Some(format!("{name}: builtin"));
-    }
-    let path = shell.locate_command(name)?;
-    let exec_name = if name.contains('/') {
-        crate::ir::CommandName::Path(name.into())
+    // An alias is a handler frame too, so it must be named before the stack
+    // answers generically; a base frame is one the stack carries below every
+    // run frame, which is what tells it from a handler stacked over it.
+    let stacked = if shell.has_alias(name) {
+        Some(Where::Alias)
     } else {
-        crate::ir::CommandName::Bare(name.into())
+        shell.lookup_handler(name).map(|found| match found {
+            HandlerLookup::Frame(..) => Where::Handler,
+            HandlerLookup::Base(..) => Where::BaseFrame,
+        })
     };
-    let id = crate::runtime::command::CommandIdentity::resolve(exec_name, &shell.mobile.context);
-    let admitted = crate::capability::admits_head(&shell.mobile.context, &id);
-    if admitted {
-        Some(format!("{name}: {}", path.to_string_lossy()))
-    } else {
-        Some(format!("{name}: denied by grant ({})", path.display()))
+    // A base frame is a manifest row seen through the stack, so naming it off
+    // the manifest as well would report one frame as two.
+    let seen_as_frame = matches!(stacked, Some(Where::BaseFrame));
+    sites.extend(stacked);
+    if !seen_as_frame && shell.lookup_builtin(name).is_some() {
+        sites.push(Where::Builtin);
     }
+    if let Some(path) = shell.locate_command(name) {
+        sites.push(if grant_admits(name, shell) {
+            Where::Path(path)
+        } else {
+            Where::DeniedByGrant(path)
+        });
+    }
+    sites
+}
+
+/// Whether a grant admits `name` as a command head — dispatch's own admission
+/// rule, read a second time here, so `explain` can say `denied by grant`
+/// rather than name a file the shell would refuse to exec.
+fn grant_admits(name: &str, shell: &Shell) -> bool {
+    let head = if name.contains('/') {
+        CommandName::Path(name.into())
+    } else {
+        CommandName::Bare(name.into())
+    };
+    let id = CommandIdentity::resolve(head, &shell.mobile.context);
+    crate::capability::admits_head(&shell.mobile.context, &id)
 }
 
 #[cfg(test)]

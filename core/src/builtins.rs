@@ -352,7 +352,7 @@ builtin_registry! {
         doc: "help  — print an overview of builtins, prelude, and library; see also `explain`.",
         call: |args, _mooring, shell| Ok(help::builtin_help(args, shell)), },
     Explain { names: ["explain"], ty: Sig(sig::EXPLAIN),
-        doc: "explain <name>  — print documentation for one name: doc, type signature, and source location.",
+        doc: "explain <name>  — print documentation for one name: doc, type signature, where the shell would find it, and what that shadows. Unlike `which`, which only searches PATH and so cannot see anything ral provides, this names the frame that would actually run.",
         call: |args, _mooring, shell| Ok(help::builtin_explain(args, shell)), },
     // The `_ed-*` family rides the REPL's boot surface instead; see
     // `ral::repl::plugin::ed_builtins::ED_BUILTINS`.

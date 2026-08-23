@@ -282,11 +282,13 @@ fn echos_frame_returns_at_the_brace() {
 
 /// A base frame keeps its manifest row, so the two verbs that read the manifest
 /// still answer for it: `explain` prints the row's doc and type, and reports the
-/// frame as what would run.
+/// frame as what would run — as the builtin it is, since answering through the
+/// stack is what distinguishes it from a handler someone installed, not
+/// something the reader has to be told.
 #[test]
 fn explain_still_reads_echos_manifest_row() {
     let out = printed("explain echo");
-    for fragment in ["write one line", "[String] → Command", "echo: handler"] {
+    for fragment in ["write one line", "[String] → Command", "echo: builtin"] {
         assert!(
             out.contains(fragment),
             "explain echo should mention {fragment:?}, got:\n{out}"

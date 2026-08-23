@@ -294,3 +294,9 @@ For dot files and gitignored files you must use `rg` bundled.
 ## Help
 
 When you are unsure of the signature of something you always call `explain <name>`.
+
+Do not reach for `which`. It is a PATH lookup, so it cannot see anything ral
+itself provides: it reports `/bin/echo` for `echo`, which never runs, and fails
+outright on `length` or any other builtin — a failure that stops the rest of
+the block. `explain <name>` names the frame that actually runs and, on its last
+line, whatever that shadows, the PATH binary included.

@@ -169,7 +169,13 @@ Bodies are grouped by concern, one submodule each:
 - `misc.rs` — including `surface`, which forwards a tagged variant to the host's
   [[map/core/shell-state|`SurfaceSink`]] and is the identity under a bare REPL;
 - `math.rs` — the Float rounding builtins (`round`, `floor`, `ceil`, `trunc`);
-- `help.rs` — `help` (arity-0 command index) and `explain <name>` lookup;
+- `help.rs` — `help` (arity-0 command index) and `explain <name>` lookup. One
+  `Where` answers both halves of an entry: the line naming the frame that would
+  run, and the doc ladder that asks *that* registry — a local owning its name
+  outright rather than inheriting the doc of what it shadows. `locate_all`
+  returns the whole resolution chain, so `explain` also names what a name
+  shadows, a PATH binary included, which is the question `which` answers
+  wrongly for every name ral provides;
 - `print.rs` — the value pretty-printer shared by the REPL and exarch's
   tool-result rendering (`PrintParams`; a rendering utility, not a registered
   builtin). One printer, one policy, per-reader numbers: truncation preserves

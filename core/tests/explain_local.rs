@@ -1,14 +1,12 @@
-//! `explain <name>` for a user-defined function surfaces the checker's
-//! generalised scheme straight off the local binding — the same scheme that
-//! seeds the next run's check — and reports where the name lives.  A local
-//! binding shadows every other resolution at runtime, so it answers first —
-//! and below it, `explain` names the frame that would actually run: alias
-//! before handler, handler before the builtin manifest.
+//! `explain <name>` resolves one name to what documents it, the type it
+//! carries, and where the shell would find it.  A local binding shadows every
+//! other resolution at runtime, so it owns the name outright; below it,
+//! `explain` names the frame that would actually run — alias before handler,
+//! handler before the builtin manifest.
 
 mod common;
 
 use ral_core::transport::{Program, Run};
-use ral_core::typecheck::fmt_scheme;
 use ral_core::types::{Capabilities, Settled, Shell, Value};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
 
@@ -56,27 +54,26 @@ fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
     run_capture(shell, src).0
 }
 
-/// The scheme `name` carries on the live scope.
-fn scheme_of(sh: &Shell, name: &str) -> Option<ral_core::typecheck::Scheme> {
+/// Whether `name` carries a checker-harvested scheme on the live scope.
+fn has_scheme(sh: &Shell, name: &str) -> bool {
     sh.binding_schemes()
         .into_iter()
-        .find(|(n, _)| n == name)
-        .and_then(|(_, scheme)| scheme)
+        .any(|(n, scheme)| n == name && scheme.is_some())
 }
 
-/// A checked top-level `let` function explains to its harvested most general
-/// type and a `local` source line.
+/// A checked top-level `let` explains to the scheme the checker harvested for
+/// it: the identity function's *most general* type, off the binding rather
+/// than the builtin manifest.
 #[test]
 fn explain_prints_local_bindings_generalised_scheme() {
     let mut sh = shell();
     run(&mut sh, "let idf = { |x| return $x }").unwrap();
-    let expected = fmt_scheme(&scheme_of(&sh, "idf").expect("a top-level let carries a scheme"));
 
     let (result, out) = run_capture(&mut sh, "explain idf");
     result.unwrap();
     assert!(
-        out.contains(&expected),
-        "explain must print the binding's scheme {expected:?}, got:\n{out}"
+        out.contains("∀α. α → Command α"),
+        "explain must print the harvested scheme, got:\n{out}"
     );
     assert!(
         out.contains("idf: local"),
@@ -84,41 +81,32 @@ fn explain_prints_local_bindings_generalised_scheme() {
     );
 }
 
-/// A local without a scheme — a pattern-bound name — keeps the plain
-/// source-line answer rather than inventing a type.
+/// A local owns the name it shadows even carrying no scheme — a pattern-bound
+/// name — so neither the shadowed doc nor the shadowed type may answer under
+/// it, which is what a registry sweep below the local would have them do.
 #[test]
-fn explain_scheme_less_local_falls_back_to_source_line() {
+fn explain_scheme_less_local_inherits_nothing_from_the_shadowed_entry() {
     let mut sh = shell();
-    run(&mut sh, "let [pa, pb] = [1, 2]").unwrap();
-    assert!(
-        scheme_of(&sh, "pa").is_none(),
-        "pattern binds carry no scheme"
-    );
-
-    let (result, out) = run_capture(&mut sh, "explain pa");
-    result.unwrap();
-    assert_eq!(
-        out, "explain: pa: local\n",
-        "a scheme-less local must fall back to the bare source line"
-    );
-}
-
-/// A local shadowing a prelude name wins the resolution: `explain` shows the
-/// local's scheme, not the shadowed prelude doc.
-#[test]
-fn explain_local_shadows_prelude_entry() {
-    let mut sh = shell();
-    run(&mut sh, "let lines = 3").unwrap();
+    run(&mut sh, "let [lines, rest] = [1, 2]").unwrap();
+    assert!(!has_scheme(&sh, "lines"), "pattern binds carry no scheme");
 
     let (result, out) = run_capture(&mut sh, "explain lines");
     result.unwrap();
     assert!(
         out.contains("lines: local"),
-        "the shadowing local must answer, got:\n{out}"
+        "the local must answer, got:\n{out}"
     );
     assert!(
         !out.contains("Split a string into lines"),
         "the shadowed prelude doc must not answer, got:\n{out}"
+    );
+    assert!(
+        !out.contains("→"),
+        "nor may the shadowed prelude's type, got:\n{out}"
+    );
+    assert!(
+        out.contains("shadows: prelude"),
+        "what the local shadows is still named, got:\n{out}"
     );
 }
 
@@ -131,7 +119,10 @@ fn explain_names_an_alias_before_the_handler_arm() {
 
     let (result, out) = run_capture(&mut sh, "explain greet");
     result.unwrap();
-    assert_eq!(out, "explain: greet: alias\n");
+    assert!(
+        out.contains("greet: alias") && !out.contains("greet: handler"),
+        "an alias must be named as one, got:\n{out}"
+    );
 }
 
 /// A handler stacked under a native's name is what runs, so `explain` reports
