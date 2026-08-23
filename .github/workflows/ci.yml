@@ -32,6 +32,17 @@ jobs:
       - name: Build the Linux sandbox image
         run: docker build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
 
+      # actions/checkout leaves /workspace owned by the runner's own uid, not
+      # the image's baked-in `dev` (1000). One root-owned mkdir+chown here,
+      # then every cargo step below runs as `dev` — a real passwd/HOME entry,
+      # unlike an arbitrary --user uid:gid (getpwuid-based code, e.g. `whoami`,
+      # fails with "no such id" for one; ral's own ~-expansion silently
+      # misresolves for the other).
+      - name: Own the target dir as the sandbox image's user
+        run: >
+          docker run --rm --user root -v "$PWD:/workspace" ral-linux-box
+          sh -c 'mkdir -p /workspace/.target-linux && chown -R dev:dev /workspace/.target-linux'
+
       # Enforces the fs/process I/O-door denylist (clippy.toml): every read,
       # write, spawn, and exec must go through a known door or carry an
       # #[allow(clippy::disallowed_methods, reason = "[io-door:…]")].  The
@@ -46,13 +57,13 @@ jobs:
       # for the same reason, so both Linux gates cover the same crates.
       - name: cargo clippy
         run: >
-          docker run --rm --privileged --init --user "$(id -u):$(id -g)" -e HOME=/home/dev -e RUSTFLAGS -v "$PWD:/workspace"
+          docker run --rm --privileged --init -e RUSTFLAGS -v "$PWD:/workspace"
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
           cargo clippy --workspace --exclude synod --all-targets
 
       - name: cargo build
         run: >
-          docker run --rm --privileged --init --user "$(id -u):$(id -g)" -e HOME=/home/dev -v "$PWD:/workspace"
+          docker run --rm --privileged --init -v "$PWD:/workspace"
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
           cargo build --workspace --exclude synod --all-targets
 
@@ -61,7 +72,7 @@ jobs:
       # alone does not reliably refresh that binary.
       - name: cargo test
         run: >
-          docker run --rm --privileged --init --user "$(id -u):$(id -g)" -e HOME=/home/dev -v "$PWD:/workspace"
+          docker run --rm --privileged --init -v "$PWD:/workspace"
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
           cargo test --workspace --exclude synod --features ral-core/test-util,exarch/test-util
 
@@ -83,7 +94,7 @@ jobs:
       - name: Syntax-check examples
         run: |
           for f in examples/*/*.ral; do
-            docker run --rm --privileged --init --user "$(id -u):$(id -g)" -e HOME=/home/dev -v "$PWD:/workspace" \
+            docker run --rm --privileged --init -v "$PWD:/workspace" \
               -v ral-linux-cargo:/home/dev/.cargo ral-linux-box \
               cargo run -p ral --quiet -- --check "$f"
           done
