@@ -36,7 +36,7 @@ check-windows $RUSTFLAGS='-D warnings' $CC_x86_64_pc_windows_msvc='cc-absent-use
 
 # Run the workspace test suite.
 test: build
-    cargo test --workspace {{gui}} --features ral-core/test-util
+    cargo test --workspace {{gui}} --features ral-core/test-util,exarch/test-util
 
 # Format every crate in place.
 fmt:

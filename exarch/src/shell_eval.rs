@@ -1448,6 +1448,14 @@ keep-bottom
     #[cfg(unix)]
     #[test]
     fn timeout_kills_sandboxed_subprocess_tree() {
+        #[cfg(all(target_os = "linux", feature = "test-util"))]
+        if !ral_core::sandbox::bwrap_devnull_writable() {
+            eprintln!(
+                "skip: this host's bwrap envelope cannot open /dev/null — a mount-layer \
+                 property some CI runners have, not a code defect"
+            );
+            return;
+        }
         let mut shell = fresh_shell();
         let cmd = "/bin/sh -c 'sleep 30 & echo $!; wait'";
         let t0 = std::time::Instant::now();

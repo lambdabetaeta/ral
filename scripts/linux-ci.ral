@@ -45,7 +45,7 @@ within [dir: $repo_root] {
     }
 
     step 'cargo test --workspace --exclude synod' {
-        podman run --rm --privileged -v "$repo_root:/workspace" -v ral-linux-cargo:/home/dev/.cargo -v ral-linux-target:/workspace/.target-linux ral-linux-box cargo test --workspace --exclude synod
+        podman run --rm --privileged --init -v "$repo_root:/workspace" -v ral-linux-cargo:/home/dev/.cargo -v ral-linux-target:/workspace/.target-linux ral-linux-box cargo test --workspace --exclude synod --features ral-core/test-util,exarch/test-util
     }
 }
 

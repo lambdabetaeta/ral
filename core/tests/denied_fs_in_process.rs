@@ -379,6 +379,14 @@ fn grant_fs_write_denies_helper_stage_redirect() {
 #[cfg(unix)]
 #[test]
 fn grant_fs_write_allows_helper_stage_redirect_inside_set() {
+    #[cfg(all(target_os = "linux", feature = "test-util"))]
+    if !ral_core::sandbox::bwrap_devnull_writable() {
+        eprintln!(
+            "skip: this host's bwrap envelope cannot open /dev/null — a mount-layer \
+             property some CI runners have, not a code defect"
+        );
+        return;
+    }
     let dir = scratch("helperok");
     let target = dir.join("kept.txt");
     let script = format!(

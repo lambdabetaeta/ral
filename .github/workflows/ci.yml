@@ -23,22 +23,26 @@ jobs:
       - uses: actions/checkout@v7
 
       # bwrap needs a real user namespace to build its sandbox without being
-      # setuid-root, and a bare GitHub-hosted runner's unprivileged path
-      # there has proven unreliable: Ubuntu 24.04's AppArmor policy denies
-      # it outright ("setting up uid map: Permission denied"), and even
-      # with that lifted, device access inside the sandbox itself broke
-      # non-deterministically run to run ("/bin/sh: cannot open /dev/null:
-      # Permission denied") on an otherwise-identical runner image — two
-      # structurally opposite AppArmor profiles produced the identical
-      # failure, and removing the restriction outright still reproduced it,
-      # which rules out the profile *and* that one restriction as the cause.
+      # setuid-root, and a bare GitHub-hosted runner's unprivileged path there
+      # has proven unreliable: Ubuntu 24.04's AppArmor policy denied it
+      # outright ("setting up uid map: Permission denied") until granted —
+      # but granting it (two structurally opposite profiles, and disabling
+      # the restriction outright) left a separate, non-deterministic mount-
+      # layer fault standing: some hosts' bwrap-constructed `/dev` cannot be
+      # opened at all ("cannot open /dev/null: Permission denied"). That one
+      # AppArmor cannot fix — `bwrap_devnull_writable` in core/src/sandbox.rs
+      # probes for it and the affected tests skip, same as any other
+      # environment precondition this suite cannot assume.
       #
-      # scripts/linux-box.Dockerfile + `just linux-ci` already solve this
-      # for local dev by running privileged instead of fighting the
-      # unprivileged path — a `--privileged` container has real
-      # CAP_SYS_ADMIN and disables the AppArmor/seccomp mediation this was
-      # colliding with. Do the same here rather than re-fight the bare
-      # runner: build the same image, run the same steps in it.
+      # scripts/linux-box.Dockerfile + `just linux-ci` already solve the
+      # uid-map half for local dev by running privileged instead of fighting
+      # the unprivileged path — a `--privileged` container has real
+      # CAP_SYS_ADMIN and never needs AppArmor's grant at all. Do the same
+      # here: build the same image, run the same steps in it. `--init`
+      # matters independently of any of the above — without a real PID 1,
+      # a killed sandboxed subprocess tree's orphaned grandchildren are never
+      # reaped, which read as "the timeout didn't kill it" on tests that have
+      # nothing to do with bwrap.
       - name: Build the Linux sandbox image
         run: docker build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
 
@@ -56,13 +60,13 @@ jobs:
       # for the same reason, so both Linux gates cover the same crates.
       - name: cargo clippy
         run: >
-          docker run --rm --privileged --user root -e RUSTFLAGS -v "$PWD:/workspace"
+          docker run --rm --privileged --init --user root -e RUSTFLAGS -v "$PWD:/workspace"
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
           cargo clippy --workspace --exclude synod --all-targets
 
       - name: cargo build
         run: >
-          docker run --rm --privileged --user root -v "$PWD:/workspace"
+          docker run --rm --privileged --init --user root -v "$PWD:/workspace"
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
           cargo build --workspace --exclude synod --all-targets
 
@@ -71,9 +75,9 @@ jobs:
       # alone does not reliably refresh that binary.
       - name: cargo test
         run: >
-          docker run --rm --privileged --user root -v "$PWD:/workspace"
+          docker run --rm --privileged --init --user root -v "$PWD:/workspace"
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
-          cargo test --workspace --exclude synod
+          cargo test --workspace --exclude synod --features ral-core/test-util,exarch/test-util
 
       - uses: astral-sh/setup-uv@v9.0.0
 
@@ -93,7 +97,7 @@ jobs:
       - name: Syntax-check examples
         run: |
           for f in examples/*/*.ral; do
-            docker run --rm --privileged --user root -v "$PWD:/workspace" \
+            docker run --rm --privileged --init --user root -v "$PWD:/workspace" \
               -v ral-linux-cargo:/home/dev/.cargo ral-linux-box \
               cargo run -p ral --quiet -- --check "$f"
           done
