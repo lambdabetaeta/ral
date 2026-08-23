@@ -46,13 +46,13 @@ jobs:
       # for the same reason, so both Linux gates cover the same crates.
       - name: cargo clippy
         run: >
-          docker run --rm --privileged --init --user root -e RUSTFLAGS -v "$PWD:/workspace"
+          docker run --rm --privileged --init --user "$(id -u):$(id -g)" -e RUSTFLAGS -v "$PWD:/workspace"
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
           cargo clippy --workspace --exclude synod --all-targets
 
       - name: cargo build
         run: >
-          docker run --rm --privileged --init --user root -v "$PWD:/workspace"
+          docker run --rm --privileged --init --user "$(id -u):$(id -g)" -v "$PWD:/workspace"
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
           cargo build --workspace --exclude synod --all-targets
 
@@ -61,7 +61,7 @@ jobs:
       # alone does not reliably refresh that binary.
       - name: cargo test
         run: >
-          docker run --rm --privileged --init --user root -v "$PWD:/workspace"
+          docker run --rm --privileged --init --user "$(id -u):$(id -g)" -v "$PWD:/workspace"
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
           cargo test --workspace --exclude synod --features ral-core/test-util,exarch/test-util
 
@@ -83,7 +83,7 @@ jobs:
       - name: Syntax-check examples
         run: |
           for f in examples/*/*.ral; do
-            docker run --rm --privileged --init --user root -v "$PWD:/workspace" \
+            docker run --rm --privileged --init --user "$(id -u):$(id -g)" -v "$PWD:/workspace" \
               -v ral-linux-cargo:/home/dev/.cargo ral-linux-box \
               cargo run -p ral --quiet -- --check "$f"
           done

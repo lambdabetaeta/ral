@@ -36,7 +36,7 @@ ARG UID=1000
 ARG GID=1000
 RUN groupadd --gid ${GID} ${USER} \
  && useradd  --uid ${UID} --gid ${GID} --create-home --shell /bin/bash ${USER} \
- && install -d -o ${USER} -g ${USER} /home/${USER}/.cargo /workspace
+ && install -d -m 0777 -o ${USER} -g ${USER} /home/${USER}/.cargo /workspace
 
 # Both paths are named volumes at run time (see scripts/linux-ci.ral), so
 # the registry and the Linux artefacts stay inside the podman VM instead of
