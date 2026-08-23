@@ -76,12 +76,19 @@ jobs:
           -v ral-linux-cargo:/home/dev/.cargo ral-linux-box
           cargo test --workspace --exclude synod --features ral-core/test-util,exarch/test-util
 
+      # tree-sitter CLI (prebuilt binary): render-site.py has no highlighting
+      # fallback, so this step is load-bearing, not optional. Mirrors
+      # pages.yml's install.
+      - name: Install tree-sitter CLI
+        run: |
+          curl -fsSL https://github.com/tree-sitter/tree-sitter/releases/download/v0.26.9/tree-sitter-linux-x64.gz \
+            | gunzip > /usr/local/bin/tree-sitter
+          chmod +x /usr/local/bin/tree-sitter
+
       - uses: astral-sh/setup-uv@v9.0.0
 
-      # Renders the whole site.  Without tree-sitter installed the examples
-      # page falls back to the regex highlighter, which keeps this check cheap
-      # on every PR while still catching a broken example, doc, or template.
-      # Runs on the bare runner: it needs uv/python, not the sandbox image.
+      # Renders the whole site.  Runs on the bare runner: it needs uv/python
+      # and the tree-sitter CLI above, not the sandbox image.
       - name: Render site
         run: uv run scripts/render-site.py
 
