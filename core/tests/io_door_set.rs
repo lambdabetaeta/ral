@@ -133,6 +133,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "core/src/runtime/pipeline/helper.rs",
         "io-door:silent:self-reexec-windows",
     ),
+    ("core/src/sandbox.rs", "io-door:silent:bwrap-devnull-probe"),
     ("core/src/sandbox.rs", "io-door:silent:self-reexec"),
     ("core/src/sandbox.rs", "io-door:surface:make-command"),
     ("core/src/sandbox/diag.rs", "io-door:silent:ps-sample"),
