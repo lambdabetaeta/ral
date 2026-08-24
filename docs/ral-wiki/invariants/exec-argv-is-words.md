@@ -14,7 +14,7 @@ oversight in either direction:
 - **At the boundary**, an argument is one word, and a list (several arguments), a
   map or record (fields), a block or lambda or native (a computation not yet
   run), a handle (still running), and bytes (a channel) are not words. `Unit` is
-  an empty word and a tagged value renders, so neither is refused.
+  the word `()` and a tagged value renders, so neither is refused.
 
 **One declaration, two readings.** `RefusedArg`
 (`core/src/types/exec_arg.rs`) names those shapes, with `of_value` for the

@@ -145,7 +145,7 @@ function. `lift_channels` keeps a `Fun` tail untouched, joins a `Return`
 tail's ends with the statements', and forces a still-unknown tail into stage
 shape only when some statement's end has *settled* `Bytes` — a demand needs a
 spec to live on — leaving it otherwise free to resolve `Fun` at its call site
-(`{ |f| return unit; !$f }` applied to a lambda). This is a state-inspection
+(`{ |f| return (); !$f }` applied to a lambda). This is a state-inspection
 beside `consumes_value_arg`, with the laxity that entails, stated: a
 statement whose byte demand settles only after the sequence closes does not
 reach a still-free tail, and an opaque statement (`force $t`) contributes

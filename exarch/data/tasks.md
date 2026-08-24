@@ -31,7 +31,7 @@ Definitions:
 
 Schema: [ id: Int, desc: String, status: `open | `doing | `blocked | `done, tags: [String], notes: String ]
 
-Anything bespoke — a field this kit does not surface, a one-off inspection — reads straight off the register: `pin-read "tasks"` answers the card itself, `unit` when the list is empty.
+Anything bespoke — a field this kit does not surface, a one-off inspection — reads straight off the register: `pin-read "tasks"` answers the card itself, `()` when the list is empty.
 
 ## Goal
 

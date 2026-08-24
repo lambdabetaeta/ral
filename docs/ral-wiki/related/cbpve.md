@@ -25,7 +25,7 @@ ral's `F[ρ] A`:
   write unboundedly to stdout. `ρ` says which product a value boundary reads,
   never what the computation may do ([[design/types|types]]).
 - **No `·`.** A sequence does not multiply its parts' annotations; it takes its
-  tail's, discarding every earlier one. `!{ echo a; return unit }` is
+  tail's, discarding every earlier one. `!{ echo a; return () }` is
   `F[Value] Unit` however loudly the head wrote.
 - **No `≤` in the paper's sense.** ral has one subsumption instance,
   `F[Value] Unit ⊑ F[Bytes] Unit`, and it fires only where a branch's arms must

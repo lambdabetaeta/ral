@@ -31,9 +31,9 @@ let jj = to-json [a: 42]
 let obj2 = !{echo $jj | from-json}
 assert_eq 'to-json bind captures its write' 42 $obj2[a]
 
-# to-bytes: a non-UTF-8 roundtrip must also stay in pipe form — binding the
-# write as a value would now strict-decode it as a String and fail.
-let raw = !{to-bytes [72, 105, 255] | from-bytes}
-assert_eq 'to-bytes non-utf8 roundtrip' 3 !{length $raw}
+# ints-to-bytes: a non-UTF-8 roundtrip must also stay in pipe form — binding
+# the write as a value would now strict-decode it as a String and fail.
+let raw = !{ints-to-bytes [72, 105, 255] | from-bytes}
+assert_eq 'ints-to-bytes non-utf8 roundtrip' 3 !{length $raw}
 
 echo 'capture semantics done'

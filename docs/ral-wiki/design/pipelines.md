@@ -23,8 +23,8 @@ unread. The symmetry is deliberate — a consumer need not read, a producer need
 not write, and an empty stream is still a byte stream:
 
 ```ral
-!{ return unit } | cat            # cat reads EOF
-!{ echo hi; return unit } | cat   # cat reads "hi"; the Unit goes nowhere
+!{ return () } | cat              # cat reads EOF
+!{ echo hi; return () } | cat     # cat reads "hi"; the Unit goes nowhere
 cat f | from-bytes | grep x       # the returned Bytes is discarded; grep reads EOF
 echo hi | !{ return 5 }           # the consumer ignores stdin; the pipeline returns 5
 yes | !{ return 5 }               # terminates: ral kills yes once !{ return 5 } is reaped

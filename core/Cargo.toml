@@ -60,6 +60,7 @@ ignore        = "0.4"
 tempfile      = "3.27"
 serde         = { workspace = true }
 serde_json    = { workspace = true }
+ryu           = "1"
 csv           = { workspace = true }
 postcard      = { version = "1", features = ["alloc"] }
 anstyle-query = "1"

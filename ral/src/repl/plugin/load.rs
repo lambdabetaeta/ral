@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn unary_lifecycle_handler_registers() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        let h = handler(&mut shell, "{ |_ev| return unit }");
+        let h = handler(&mut shell, "{ |_ev| return () }");
         register_plugin_hooks("p", &hooks_only(vec![("post-exec".into(), h)]), &mut shell)
             .expect("a unary lifecycle handler registers");
     }
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn two_parameter_lifecycle_handler_is_rejected() {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        let h = handler(&mut shell, "{ |_src _status| return unit }");
+        let h = handler(&mut shell, "{ |_src _status| return () }");
         let err =
             register_plugin_hooks("p", &hooks_only(vec![("post-exec".into(), h)]), &mut shell)
                 .expect_err("a two-parameter lifecycle handler must be rejected");

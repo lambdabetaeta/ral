@@ -118,7 +118,7 @@ let tasks-card = { |ts|
 ## elements would close its element type around whichever table ran first;
 ## the one `describe` case names every tag, keeping the list one type.
 let decode-tasks = { |v|
-  if !{equal $v unit} { [] }
+  if !{equal $v ()} { [] }
   else {
     try {
       case $v [
@@ -129,9 +129,9 @@ let decode-tasks = { |v|
             `fields:  { |[rows: rs]| [kind: "fields",  rows: $rs] },
           ] }
           let [d0, d1, d2] = map $describe $marks
-          if !{equal $d0[kind] "text"}    { unit } else { fail [status: 1, message: "not task-shaped"] }
-          if !{equal $d1[kind] "measure"} { unit } else { fail [status: 1, message: "not task-shaped"] }
-          if !{equal $d2[kind] "fields"}  { unit } else { fail [status: 1, message: "not task-shaped"] }
+          if !{equal $d0[kind] "text"}    { () } else { fail [status: 1, message: "not task-shaped"] }
+          if !{equal $d1[kind] "measure"} { () } else { fail [status: 1, message: "not task-shaped"] }
+          if !{equal $d2[kind] "fields"}  { () } else { fail [status: 1, message: "not task-shaped"] }
           map { |r|
             let [label: lbl, value: valv] = $r
             case $valv [

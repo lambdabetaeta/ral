@@ -254,7 +254,7 @@ queryable store.
 - **`pin-read <key>`** → `∀α. F α`. Enquiry over the caller's own pin
   register: the card pinned at `key`, canonically re-encoded
   ([[map/exarch/cards|cards]]) so a kit can destructure it whether or not the
-  bytes it wrote match what comes back; `unit` on a miss or an absent
+  bytes it wrote match what comes back; `()` on a miss or an absent
   register. Typed on the `from-json` precedent — trusted, not checked —
   because the register is schemaless by design
   ([[decisions/260803_register-is-read-write|register-is-read-write]]).

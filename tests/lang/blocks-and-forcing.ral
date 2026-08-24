@@ -5,8 +5,8 @@ let result = !{return 42}
 echo $result
 
 # Explicit unit return (no implicit value->command coercion)
-let result = !{return unit}
-echo !{equal $result unit}
+let result = !{return ()}
+echo !{equal $result ()}
 
 # Multi-statement force returns last explicit return
 let result = !{
@@ -22,6 +22,6 @@ echo $result
 
 # Block as argument to function (not forced)
 let run = { |_| echo 'deferred' }
-!{run unit}
+!{run ()}
 
 echo 'block tests done'

@@ -234,8 +234,12 @@ Three properties hold:
 - coherence follows from one subsumption instance and one coercion — the yield
   a pipeline carries is a choice of former, not a second coercion to reconcile.
 
-Inference is annotation-free; generalisation happens at the `Bind` boundary. Its
-soundness rests on two independent legs:
+Inference is annotation-free; generalisation happens at the `Bind` boundary. A
+leaf, meanwhile, commits before inference begins: a bare word's value type is
+fixed by the grammar that classifies it, never by the hole it lands in
+([[invariants/numerals-denote-numbers|numerals-denote-numbers]]), so no
+defaulting rule touches a value type. Soundness then rests on two independent
+legs:
 
 - **Recursion** is governed by the strongly-connected-component structure of
   binding groups: a non-recursive group generalises at its binding point, while a

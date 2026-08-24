@@ -14,7 +14,7 @@ use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
 use crate::types::{Env, Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint};
 use std::sync::Arc;
 
-use super::util::{arg0_str, as_byte_list, decode_utf8_strict};
+use super::util::{arg0_str, as_byte_list, as_bytes, decode_utf8_strict};
 
 fn read_stdin_bytes(name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
     use std::io::Read;
@@ -223,8 +223,13 @@ fn write_encoded(name: &str, bytes: &[u8], shell: &mut Shell) -> Settled<Value> 
 }
 
 pub(super) fn builtin_to_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let bs = as_byte_list(&args[0], "to-bytes")?;
-    write_encoded("to-bytes", &bs, shell)
+    let bs = as_bytes(&args[0], "to-bytes")?;
+    write_encoded("to-bytes", bs, shell)
+}
+
+pub(super) fn builtin_ints_to_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    let bs = as_byte_list(&args[0], "ints-to-bytes")?;
+    write_encoded("ints-to-bytes", &bs, shell)
 }
 
 pub(super) fn builtin_to_string(args: &[Value], shell: &mut Shell) -> Settled<Value> {
@@ -262,7 +267,8 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
 }
 
 /// Encode `v` as JSON, refusing whatever has no faithful JSON form rather
-/// than erasing it; Bytes become the integer array `to-bytes` accepts back.
+/// than erasing it; Bytes become the integer array `ints-to-bytes` accepts
+/// back.
 ///
 /// [`super::util::value_to_json_lossy_bytes`] is the total counterpart, where
 /// legibility outranks fidelity.

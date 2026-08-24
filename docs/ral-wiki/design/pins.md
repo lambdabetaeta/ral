@@ -89,7 +89,7 @@ already safe:
 ## Reading the register back
 
 `pin-read <key>` answers the card stored under `key`, **canonically
-re-encoded**, or `unit` on a miss; `pin-list` answers the occupied keys. The
+re-encoded**, or `()` on a miss; `pin-list` answers the occupied keys. The
 encoder (`encode_card`, [[map/exarch/cards|cards]]) is `value_to_card`'s
 inverse on the decoder's image, so what comes back is never the authored
 bytes — a bare-string span or a bare mark, sugar the decoder accepts, comes

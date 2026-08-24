@@ -34,8 +34,13 @@ Alternatives, and why they lose:
   But elaboration is syntax-directed and precedes typing: `elab_expr` calls
   `Val::from_word` with no expected type in scope. Achieving it needs bidirectional
   elaboration threading expected types to leaves, or a polymorphic literal with
-  defaulting rules — disproportionate to a witness format. Left as an open
-  language question, not taken here.
+  defaulting rules — disproportionate to a witness format. Not taken here, and
+  since **declined** for the language as a whole: a numeral denotes its number in
+  every position and a token meaning bytes is quoted, so nothing type-directed
+  decides a leaf
+  ([[decisions/260824_a-numeral-denotes-its-number|a-numeral-denotes-its-number]],
+  which also leaves qualified literals with evidence open). The `h` prefix is
+  therefore the permanent shape of a witness, not a way-station.
 - **Drop bare-word Int classification** (write `!{int 50}`). Relocates the
   coercion to every numeric builtin boundary as an implicit `String→Int`, and ral
   is a shell where bare integers are the common case. Strictly worse on the very

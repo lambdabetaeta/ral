@@ -475,7 +475,8 @@ impl Elaborator {
                 self.wrap_redirect(inner, redirect_vals)
             }
 
-            Ast::Return(None) => comp!(self, CompKind::Return(Val::Unit)),
+            // `return` with no value and `()` name the same value.
+            Ast::Unit | Ast::Return(None) => comp!(self, CompKind::Return(Val::Unit)),
 
             Ast::Return(Some(value)) => self.with_span(value.span, |this| {
                 comp!(this, CompKind::Return(this.to_val(&value.item, binds)))

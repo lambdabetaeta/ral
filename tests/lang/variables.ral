@@ -10,4 +10,4 @@ echo $greeting
 let y = 5
 let f = { |_| echo $y }
 let y = 10
-!{f unit}
+!{f ()}

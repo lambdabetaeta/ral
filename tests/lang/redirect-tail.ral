@@ -9,12 +9,12 @@ let assert_eq = { |name expected actual|
 
 let tmpdir = temp-dir
 let inner = { |_| echo inside }
-let outer = { |_| inner unit }
+let outer = { |_| inner () }
 
-# `outer unit` is the last statement of `run`, so it reaches the redirect in
+# `outer ()` is the last statement of `run`, so it reaches the redirect in
 # tail position: the frame must absorb the tail call while it is still open.
-let run = { |_| outer unit > "$tmpdir/out.txt" }
-run unit
+let run = { |_| outer () > "$tmpdir/out.txt" }
+run ()
 
 let got = !{from-string < "$tmpdir/out.txt"}
 assert_eq 'tail call writes inside the redirect frame' 'inside

@@ -133,6 +133,10 @@ Search and replacement are regex builtins (Rust regex syntax — #'a|b'#, DO NOT
 
 ## Numbers and booleans
 
+A bare word that looks like a number IS that number, in every position — argument, value, list element — and quoting is how you ask for the text instead. Each number has one printed spelling, so a non-canonical numeral comes back normalised: `echo 007` prints `7`, `echo 1.50` prints `1.5`, and a whole float keeps its point (`3.0`). Note that `3.10` is the number 3.1: version-like tokens MUST be quoted.
+
+    let ver = '3.10'                 # a version is text; bare, it would be 3.1
+
 Arithmetic and Boolean expressions must be in `$[…]` blocks: `$[$x == 0]`, `$[$a + $b]`, `$[$x > 0 && $x < 10]`, `$[not !{re-match #'x'# $s}]` are computed to values. Note that boolean negation is `not` (`!` forces). `$[…]` admits numbers and booleans only — string equality is the command `equal`, ordering `lt`/`gt`. Such blocks do not nest; one layer suffices.
 
 `if` takes a Boolean value and blocks:
@@ -175,7 +179,7 @@ A variant is a value tagged by a `` `tag ``, recording one of several outcomes a
       `file:   { |f| "$path: file, $f[bytes] bytes" }
     ]
 
-A nullary tag still binds a value (`unit`) — ignore it with `_`. An arm's body may be any expression, not only `{ |p| … }`: naming a function (`` `dir: $describe ``) applies it to the payload, and types and behaves exactly as `` `dir: { |d| $describe $d } `` does. 
+A nullary tag still binds a value (`()`) — ignore it with `_`. An arm's body may be any expression, not only `{ |p| … }`: naming a function (`` `dir: $describe ``) applies it to the payload, and types and behaves exactly as `` `dir: { |d| $describe $d } `` does. 
 
 `range 1 11` returns the list `[1, …, 10]` (`seq` is the external coreutil, and prints bytes).
 

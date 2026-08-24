@@ -10,7 +10,7 @@ pointed somewhere else; it is its own act, and `warn` is the name for it.**
 ## Decision
 
 - `warn : String → F[Value] Unit` writes the string and one newline to the
-  shell's stderr sink and returns `unit`. It is an ordinary table entry in
+  shell's stderr sink and returns `()`. It is an ordinary table entry in
   `builtin_registry!`, bodied in `core/src/builtins/misc.rs` beside `surface`,
   whose plain-text sibling it is.
 - The route is `Value`, not `Bytes`. A diagnostic does not join the byte

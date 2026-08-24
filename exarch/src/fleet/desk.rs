@@ -1218,7 +1218,7 @@ impl ExarchDesk {
     }
 
     /// `` `pin-read `` — the card stored under `key` on this agent's own
-    /// register, canonically re-encoded, or `` `unit `` on a miss or an absent
+    /// register, canonically re-encoded, or `()` on a miss or an absent
     /// mirror. Read-after-write within one run is sound because
     /// [`DeskBinding::enquire`] drains queued surface frames before handling.
     fn pin_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
@@ -2318,7 +2318,7 @@ mod tests {
     }
 
     /// A key never pinned, and a key unpinned after being pinned, both answer
-    /// `unit` — a miss and a clear are the same absence to `pin-read`.
+    /// `()` — a miss and a clear are the same absence to `pin-read`.
     #[test]
     fn pin_read_answers_unit_on_miss_and_after_unpin() {
         let mirror = fresh_mirror();

@@ -410,7 +410,7 @@ These words cannot be binding names or block parameters:
 ```text
 if  elsif  else  let  return  case
 within  grant  try  guard  audit
-true  false  unit
+true  false
 ```
 
 This restriction is contextual. For example, a quoted occurrence is always
@@ -460,12 +460,35 @@ run or inspect them.
 
 ### 4.1. Scalar literals
 
-The literals `unit`, `true`, and `false` produce `Unit` and `Bool` values.
-Decimal integer literals produce `Int` values. A floating-point literal must
-contain a decimal point. It may also contain an exponent.
+The literals `true` and `false` produce `Bool` values. `()` is the unit
+literal, producing the one `Unit` value. It is punctuation rather than a
+word, exactly like `[]` and `[:]`; the bare word `unit` is ordinary text. A
+word shaped like a numeral produces a number:
+
+```text
+numeral   ::= integer | float
+integer   ::= sign? digit+
+float     ::= sign? ( digit+ "." digit* | digit* "." digit+ ) exponent?
+exponent  ::= ("e" | "E") sign? digit+
+sign      ::= "+" | "-"
+digit     ::= "0" … "9"
+```
+
+An `integer` produces an `Int`, a `float` produces a `Float`. A float must carry
+a decimal point, and digits on one side of it are enough, so `.5` and `2.` are
+both floats. An exponent alone is not: `1e6` has no decimal point, so it is a
+word. There are no digit separators and no other base — `1_000` and `0x10` are
+words. Leading zeros and a leading `+` are allowed and carry no meaning.
+
+A numeral outside the range of its kind is a word instead. An `Int` must fit a
+signed 64-bit integer, so `9223372036854775808` is text. Every `Float` is
+finite, so a spelling that would overflow to infinity, such as `1.8e308`, is
+text too. The `float` conversion likewise rejects NaN and positive or negative
+infinity, and floating-point arithmetic fails if its result would be
+non-finite.
 
 ```ral
-return unit
+return ()
 return true
 return 42
 return -7
@@ -473,14 +496,46 @@ return 3.14
 return 1.0e6
 ```
 
-An unquoted word in value position is otherwise a `String`. Thus `return
-hello` returns the text `hello`, and `return 1e6` returns text because that
-spelling has no decimal point. A numeric spelling that is outside the range of
-its value kind is also an ordinary word.
+An unquoted word that is not a numeral is a `String`. Thus `return hello`
+returns the text `hello`.
 
-Every `Float` is finite. A float literal that would produce infinity is not a
-float literal. The `float` conversion rejects NaN and positive or negative
-infinity. Floating-point arithmetic fails if its result would be non-finite.
+#### Numerals denote numbers in every position
+
+This reading does not depend on where the word stands. A numeral is its number
+as a command argument, as a bound value, as a redirect target — everywhere a
+word may appear. `007` is the number 7 and `1.50` is the number 1.5, wherever
+they are written.
+
+Each number in turn has exactly one printed spelling: the shortest decimal that
+reads back as the same number. A `Float` keeps its decimal point, so `3.0`
+prints as `3.0` rather than `3`, and it takes exponent form where plain digits
+would run away, so the number ten to the three hundredth prints as `1.0e300`
+rather than as 301 characters. A
+canonical numeral therefore crosses the shell unchanged, and a non-canonical one
+is normalized on the way out:
+
+| Written | Printed |
+|---|---|
+| `007` | `7` |
+| `+5` | `5` |
+| `-0` | `0` |
+| `.5` | `0.5` |
+| `1.50` | `1.5` |
+| `3.0` | `3.0` |
+| `1.50e300` | `1.5e300` |
+
+Every printed number is itself a numeral of the grammar above, and reading it
+back gives the number it came from. Printing and reading therefore compose to
+the identity on numbers, and a printed float never degrades into text. The
+grammar is unchanged by this: `1e6` still has no decimal point and is still a
+word — it is the printer that never produces such a spelling.
+
+Quote a word to keep its bytes: `'007'` is three characters and `'1.50'` is
+four. Wherever ral renders a `String` back as source text — a completion, a
+quoted argument — it quotes a numeral-shaped one for the same reason. The edge
+worth knowing is a version-like token that is also a numeral: `3.10` is the
+number 3.1 and prints as `3.1`; write `'3.10'` when the digits name something
+rather than count it.
 
 ### 4.2. Strings
 
@@ -521,17 +576,19 @@ of it. The supported escapes are `\n`, `\r`, `\t`, `\\`, `\0`, `\e`, `\"`,
 Unicode scalar value written with one to six hexadecimal digits. An unknown
 or malformed escape is an error.
 
-Interpolation accepts `Unit`, `Bool`, `Int`, `Float`, and `String`. `Unit`
-becomes empty text. The other scalar values use their normal text form.
+Interpolation accepts `Unit`, `Bool`, `Int`, `Float`, and `String`, each in
+its normal text form; `()` interpolates as `()`.
 Interpolation rejects bytes, collections, variants, blocks, functions, and
 handles. Use an explicit conversion or select a field instead.
 
 ### 4.3. Bytes
 
 `Bytes` can contain any byte, including NUL and invalid UTF-8. There is no byte
-literal. Codecs and input operations create byte values. `to-bytes` also
-accepts a list of integers from 0 to 255. Section 7 defines byte pipes and the
-codecs that cross between bytes and values.
+literal. Codecs and input operations create byte values. `to-bytes` writes a
+`Bytes` value through unchanged; `ints-to-bytes` builds bytes from a list of
+integers from 0 through 255, which is how a program spells out bytes without a
+literal for them. Section 7 defines byte pipes and the codecs that cross
+between bytes and values.
 
 `length` counts bytes. Equality compares bytes exactly.
 
@@ -655,15 +712,16 @@ keeps the full 64-bit integer precision. String ordering is lexicographic.
 ral has a text conversion for command output and a value renderer for
 interactive hosts. They serve different purposes.
 
-Text conversion writes strings without quotes, writes `Unit` as empty text,
-and writes scalar values in their usual form. It shows lists, records, maps,
+Text conversion writes strings without quotes and every other scalar value in
+its usual form — `()` for the unit value. It shows lists, records, maps,
 and variants with brackets and tags. It shows bytes as lossy UTF-8, and a
-callable or a handle in an abbreviated form such as `<|x| block>`. It is total:
+function, a block, or a handle in an abbreviated form such as `<|x| block>`.
+It is total:
 every value has a text conversion. This form is readable but is not always
 valid ral source and is not a serialization format.
 
 The interactive value renderer quotes strings with a safe hash fence, writes
-`unit` for `Unit`, and lays out collections to fit the available width. Maps
+`()` for `Unit`, and lays out collections to fit the available width. Maps
 display in sorted key order. A host may shorten deeply nested collections or a
 long string stored directly under a map key. It must mark any omitted content.
 Lists and top-level strings are not shortened by the standard `ral` renderer.
@@ -815,7 +873,7 @@ echo $outside                 # outer
 echo $local                   # error: no such binding
 ```
 
-An empty block returns `unit`. A non-empty block returns the result of its
+An empty block returns `()`. A non-empty block returns the result of its
 last statement. Earlier statement results are discarded.
 
 ### 5.4. Functions
@@ -878,7 +936,7 @@ directory change.
 ### 5.5. `return`
 
 `return value` produces `value` as the successful result of the current
-statement. `return` with no value produces `unit`. It accepts at most one
+statement. `return` with no value produces `()`. It accepts at most one
 value.
 
 Despite its name, `return` is not an early-exit statement. It does not skip
@@ -924,7 +982,7 @@ A simple named block binding can refer to itself.
 
 ```ral
 let countdown = { |n|
-  if $[$n == 0] { return unit }
+  if $[$n == 0] { return () }
   else { countdown $[$n - 1] }
 }
 ```
@@ -1016,7 +1074,7 @@ A path head does not consult bindings, handlers, bundled commands, or `PATH`.
 ral expands `~` when it resolves the command. A relative path uses ral's current
 logical directory.
 
-An explicit value head stays in the value world. If it is not callable, ral
+An explicit value head stays in the value world. If ral cannot apply it, ral
 reports an error. It does not reinterpret the value as a command name.
 
 A bare `$f` with no arguments is only a value:
@@ -1044,9 +1102,9 @@ control forms. A caret form such as `^try` uses caret lookup instead.
 ral resolves an ordinary bare head in this order. The first match wins.
 
 1. **A value binding.** ral searches the current lexical scopes, session
-   bindings, and prelude. Builtins are callable values in this namespace. A
-   matching value must be callable. Otherwise, lookup fails without falling
-   through.
+   bindings, and prelude. Builtins live here as values. A matching value must
+   be one ral can apply — a function, a block, or a builtin. Otherwise, lookup
+   fails without falling through.
 2. **A named user handler.** This includes persistent handlers installed by
    `alias` and scoped handlers installed by `within [handlers: …]`. The
    innermost handler for the name wins.
@@ -1063,8 +1121,8 @@ ral resolves an ordinary bare head in this order. The first match wins.
 Prelude functions behave like user functions: use their bare name as a head,
 and `$name` when passing one as a value.
 
-Builtins are callable values: each takes the arguments its entry declares, and
-supports partial application and higher-order use. A base handler is not a
+Builtins are functions held as values: each takes the arguments its entry
+declares, and supports partial application and higher-order use. A base handler is not a
 value. It is reached in command position only, so `$echo` is an error.
 
 A named handler may share a name with a binding or builtin. The ordinary bare
@@ -1136,10 +1194,9 @@ let add-two = add 2
 let five = add-two 3
 ```
 
-Too few arguments return a partially applied callable. The exact number runs
-the body. If arguments remain after the call returns, ral tries to apply them
-to the returned value. It reports an arity error when that value is not
-callable.
+Too few arguments return a partial application. The exact number runs the body.
+If arguments remain after the call returns, ral tries to apply them to the
+returned value. It reports an arity error when that value cannot be applied.
 
 ral checks known arity and argument-type errors before execution. An
 application's arity is always known, so the arguments written at a call site are
@@ -1202,8 +1259,8 @@ they construct and destructure a list, and neither forms an argument list.
 
 Operating-system arguments must become text, and there the conversion is partial
 rather than total. ral formats strings, integers, floats, Booleans, `Unit`, and
-tagged values. `Unit` becomes an empty argument. ral rejects bytes, lists, maps,
-records, blocks, functions, native callables, and handles. Spread a list, and
+tagged values. `Unit` becomes the argument `()`. ral rejects bytes, lists, maps,
+records, blocks, functions, builtins, and handles. Spread a list, and
 send bytes through a byte pipe or decode them first.
 
 ral reports that rejection before execution when the argument's type states the
@@ -1415,7 +1472,8 @@ An encoder takes its value as an ordinary argument and writes bytes:
 
 | Encoder | Accepted value | Output |
 |---|---|---|
-| `to-bytes` | `Bytes` or a list of integers from 0 through 255 | The represented bytes. |
+| `to-bytes` | `Bytes` | Those bytes, unchanged. |
+| `ints-to-bytes` | a list of integers from 0 through 255 | The bytes they number. |
 | `to-string` | any value | Its ral textual form. |
 | `to-line` | any value | Its textual form followed by a newline. |
 | `to-lines` | a list of values | Textual forms separated by newlines, with no final newline. |
@@ -1495,7 +1553,7 @@ Windows has no POSIX foreground-terminal handoff. Pipeline members share the con
 ## 8. Control flow and failure
 
 ral separates successful values from failure. A computation may successfully
-return any value, including `false`, `unit`, an empty collection, or an empty
+return any value, including `false`, `()`, an empty collection, or an empty
 string. Failure is a separate control outcome carrying a nonzero status and a
 message. This distinction is fundamental: `if` examines a `Bool`, while `?`
 and `try` examine whether a computation succeeded.
@@ -1516,11 +1574,11 @@ publish $result
 
 Execution stops at the first failure. If every computation succeeds, the
 sequence returns the value of its final computation; an empty sequence returns
-`unit`. Bytes written by earlier computations remain observable even when a
+`()`. Bytes written by earlier computations remain observable even when a
 later computation fails or when the sequence is evaluated under capture.
 
 `return value` is the primitive successful computation. With no value,
-`return` returns `unit`:
+`return` returns `()`:
 
 ```ral
 return 42
@@ -1550,7 +1608,7 @@ into the surrounding scope.
 With `else`, all bodies must agree on one payload: either every body returns a
 value of one type, or every body's payload is its standard output, which an
 empty or silent body joins. Without `else`, the conditional is for effects: its
-result is always `unit`, whether the body runs or not.
+result is always `()`, whether the body runs or not.
 
 `false` chooses another branch; it does not cause `?` to continue and does not
 invoke a `try` handler.
@@ -1569,7 +1627,7 @@ let result = case $reply [
 
 The scrutinee must be a variant. `case` runs the arm whose tag matches it,
 binding the variant's payload to that arm's pattern; a nullary variant binds
-`unit`. The arm has a fresh lexical scope for that binding, but it is a branch
+`()`. The arm has a fresh lexical scope for that binding, but it is a branch
 and not a function applied to the payload: it runs in the surrounding shell
 context, so the arm's own changes — the recorded status among them — remain in
 place after the `case`, as an `if` body's do.
@@ -1582,7 +1640,7 @@ runs exactly what `` `ok: { |p| $handle $p } `` runs.
 Arm result types must be compatible, exactly as for `if` branches and `?`
 alternatives: either every arm returns a value of one type, or every arm's
 payload is captured from standard output, with an arm that ends silently at
-`unit` admitted beside the byte-routed ones.
+`()` admitted beside the byte-routed ones.
 
 Because the alternatives are syntax, exhaustiveness is decided statically and
 always. The typechecker closes the scrutinee's variant row to exactly the arms'
@@ -1605,7 +1663,7 @@ failure continues with the next alternative. If every alternative fails, the
 chain propagates the final failure. Alternatives must have a compatible result
 type, and each runs in a fresh lexical scope. Compatibility uses the joined
 output behavior of the whole chain: when the chain's selected arm writes bytes,
-a raw `unit` result is observed as the captured `String` at a binding boundary.
+a raw `()` result is observed as the captured `String` at a binding boundary.
 
 Control escapes are not alternatives. In particular, `exit`, a stopped job,
 and internal tail-call control pass through a fallback chain rather than
@@ -1864,7 +1922,7 @@ A named handler reinterprets one command name:
 within [handlers: [
     git: { |args|
         echo "git called with: $args"
-        return unit
+        return ()
     },
 ]] {
     git status
@@ -3335,7 +3393,8 @@ to-json $record > data.json
 ```
 
 The core environment provides `from-bytes`, `from-string`, `from-line`,
-`from-lines`, `from-json`, and `from-csv`, with corresponding `to-` encoders.
+`from-lines`, `from-json`, and `from-csv`, with corresponding `to-` encoders,
+and `ints-to-bytes` beside them for bytes given as numbers.
 Codecs do not silently reinterpret arbitrary values or output. Their exact
 UTF-8, newline, JSON, CSV, and capture rules are specified with pipelines and
 input/output.
@@ -4028,7 +4087,7 @@ head          ::= "^" bare-name | atom
 argument      ::= atom | "..." atom
 
 atom          ::= primary index*
-primary       ::= word-value | block | collection
+primary       ::= word-value | block | collection | unit-literal
 word-value    ::= lexical-word
                 | quoted-string
                 | interpolated-string
@@ -4053,6 +4112,8 @@ map           ::= "[:]"
                 | "[" map-entry ("," map-entry)* ","? "]"
 map-entry     ::= map-key ":" atom | "..." atom
 map-key       ::= identifier | quoted-string | variable | tag-key
+
+unit-literal  ::= "(" ")"
 
 pattern       ::= "_" | identifier | list-pattern | map-pattern
 list-pattern  ::= "[" pattern-list? "]"
@@ -4085,6 +4146,10 @@ A `case`'s arm list resembles a tag-keyed map literal but is a production of
 its own, and no expression may stand in its place: a spread among the arms and
 a repeated tag are both rejected, and the list may not be empty. This is what
 makes the set of alternatives a fact the parser establishes (§8.3).
+
+Which lexical words are literals rather than names is the numeral grammar of
+§4.1, and the expression grammar inside `$[...]` reads numbers by that same
+rule.
 
 A plain identifier in head position enters ordinary name dispatch. A slash or
 tilde path is a direct path head. `^name` requests external-name lookup. Other
@@ -4443,7 +4508,7 @@ join[(μ1,A1), (μ2,A2)] = (μ,A)
 
 `join` is the arm join of §17.4. Additional `elsif` arms fold by the same
 rule. A conditional without `else` is elaborated so that the selected body is
-sequenced with `return unit`: both arms are then `F[value] Unit`, the whole
+sequenced with `return ()`: both arms are then `F[value] Unit`, the whole
 form is `F[value] Unit`, and whatever the body writes flows on to the ambient
 stream instead of becoming a payload. An explicit empty `else {}` is a
 different program — it is `F[value] Unit` beside whatever the other arm is, so
@@ -4568,7 +4633,7 @@ The central rules are:
 Sequences evaluate left to right, stop on the first error or escape, and
 return the final value. `if` evaluates its Boolean condition and only the
 selected branch, in a fresh lexical scope. `case` evaluates the scrutinee,
-selects the arm carrying its tag, binds the payload — `unit` for a nullary tag
+selects the arm carrying its tag, binds the payload — `()` for a nullary tag
 — to that arm's pattern in a fresh lexical scope, and runs that arm's body
 there. The body is a branch and not an applied function: it runs in the
 `case`'s own tail position and in the ambient shell context, so a tail call in

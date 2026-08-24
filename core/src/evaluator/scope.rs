@@ -120,7 +120,7 @@ impl WithinScope {
                             let sv = match ev {
                                 Value::String(s) => s,
                                 Value::Int(n) => n.to_string(),
-                                Value::Float(n) => n.to_string(),
+                                Value::Float(n) => crate::types::fmt_float(n),
                                 Value::Bool(b) => b.to_string(),
                                 other => {
                                     return Err(sig(format!(
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn try_closes_the_trail_it_opened() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        match run_source(&mut shell, r#"try { sh -c "exit 1" } { |_e| return unit }"#) {
+        match run_source(&mut shell, r#"try { sh -c "exit 1" } { |_e| return () }"#) {
             RunReport::Ran { .. } => {}
             RunReport::Static { .. } => panic!("well-formed source must run"),
         }
@@ -410,7 +410,7 @@ mod tests {
     fn a_panicking_try_body_still_closes_the_trail() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
-        match run_source(&mut shell, "try { core-panic-now } { |_e| return unit }") {
+        match run_source(&mut shell, "try { core-panic-now } { |_e| return () }") {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } => panic!("a panicking body must report Static"),
         }
@@ -430,7 +430,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let tree = match run_source(
             &mut shell,
-            "audit { echo one; try { echo two } { |_e| return unit }; echo three }",
+            "audit { echo one; try { echo two } { |_e| return () }; echo three }",
         ) {
             RunReport::Ran { ending, .. } => ending.into_result().expect("audit body must succeed"),
             RunReport::Static { .. } => panic!("well-formed source must run"),

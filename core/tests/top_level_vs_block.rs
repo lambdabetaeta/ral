@@ -219,7 +219,7 @@ fn recovered_try_clears_the_status_register() {
     );
     assert_ne!(shell.last_status(), 0, "the baseline failure must set `$?`");
 
-    let recovered = format!("try {{ {failing} }} {{ |_e| return unit }}");
+    let recovered = format!("try {{ {failing} }} {{ |_e| return () }}");
     assert_eq!(
         status(&mut shell, &recovered),
         0,
@@ -663,9 +663,9 @@ fn sandbox_parity_top_level_cd() {
 #[test]
 fn lambda_enters_with_fresh_status() {
     let mut shell = fresh_shell();
-    top_level(&mut shell, "let f = { |_| return unit }").expect("define f");
+    top_level(&mut shell, "let f = { |_| return () }").expect("define f");
     shell.set_last_status(7);
-    top_level(&mut shell, "f unit").expect("call f");
+    top_level(&mut shell, "f ()").expect("call f");
     assert_eq!(
         shell.last_status(),
         0,
@@ -681,7 +681,7 @@ fn lambda_enters_with_fresh_status() {
 fn forced_block_keeps_caller_status_when_body_sets_none() {
     let mut shell = fresh_shell();
     shell.set_last_status(7);
-    top_level(&mut shell, "!{ return unit }").expect("forced block");
+    top_level(&mut shell, "!{ return () }").expect("forced block");
     assert_eq!(
         shell.last_status(),
         7,
@@ -697,7 +697,7 @@ fn lambda_folds_back_body_status() {
     let mut shell = fresh_shell();
     top_level(&mut shell, "let gg = { |_| return $[1 == 2] }").expect("define gg");
     shell.set_last_status(5);
-    top_level(&mut shell, "gg unit").expect("call gg");
+    top_level(&mut shell, "gg ()").expect("call gg");
     assert_eq!(
         shell.last_status(),
         1,
@@ -732,7 +732,7 @@ fn lambda_cd_persists() {
     let before = shell.cwd();
     top_level(
         &mut shell,
-        &format!("let h = {{ |_| cd '{tmp_disp}'; return unit }}\nh unit"),
+        &format!("let h = {{ |_| cd '{tmp_disp}'; return () }}\nh ()"),
     )
     .expect("lambda body cd");
     let after = shell.cwd();
@@ -770,7 +770,7 @@ fn forced_block_discards_cd() {
 fn function_body_records_into_enclosing_audit() {
     let mut shell = fresh_shell();
     top_level(&mut shell, "let emit = { |_| echo audited-from-fn }").expect("define emit");
-    let tree = top_level(&mut shell, "audit { emit unit }").expect("audit body");
+    let tree = top_level(&mut shell, "audit { emit () }").expect("audit body");
     let children = match &tree {
         Value::Map(m) => match m.get("children") {
             Some(Value::List(ch)) => ch.iter().cloned().collect::<Vec<_>>(),

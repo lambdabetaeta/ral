@@ -182,7 +182,7 @@ Blocks may take space-separated parameters:
 Commas do not separate parameters:
 
     { |left right| $[$left + $right] }   # two parameters
-    { |left, right| unit }               # parse error
+    { |left, right| () }                 # parse error
 
 A block returns its last command's result. `return` leaves early:
 
@@ -331,7 +331,7 @@ A variant says that a value is one of several alternatives:
 
 The arms are written out at the `case` itself, one per tag, which is what lets
 the type checker prove they cover every alternative the value can be. A tag
-without a payload binds `unit`; `_` ignores it. An arm may also name what to
+without a payload binds `()`; `_` ignores it. An arm may also name what to
 run — `` `missing: $explain `` runs `$explain` on the payload — but the list of
 arms is always there to read.
 
@@ -368,7 +368,10 @@ Codecs cross between bytes and values:
 | `from-bytes` | a `Bytes` value |
 
 The encoders are `to-line`, `to-string`, `to-lines`, `to-json`, `to-csv`, and
-`to-bytes`.
+`to-bytes` — each takes one value and writes its encoded bytes. `to-bytes` is
+`from-bytes`'s inverse and takes a `Bytes` value; ral has no byte literal, so
+`ints-to-bytes` writes bytes given as numbers, and
+`ints-to-bytes [104, 105] | from-bytes` is how a `Bytes` value is minted.
 
 Decode while bytes are flowing, and let the decoder be the last stage. Its
 returned value is the pipeline's, and `let` binds it:

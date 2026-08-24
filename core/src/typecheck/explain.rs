@@ -553,8 +553,8 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                   payload route; match the existing head's route or add a codec"
                 .to_string(),
         }),
+        Reason::BuiltinTypedArg => byte_writer_hint(kind),
         Reason::AliasParam
-        | Reason::BuiltinTypedArg
         | Reason::ReturnShape
         | Reason::TryHandler
         | Reason::ScopeBody
@@ -570,4 +570,20 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         | Reason::CaptureOperand
         | Reason::DecodeOperand => None,
     }
+}
+
+/// A list where `Bytes` was wanted, or the reverse.  Every byte-channel writer
+/// takes one argument type, so the hint must hold for each of them; which side
+/// is `expected` is an accident of the call site, hence both orders.
+fn byte_writer_hint(kind: &TypeErrorKind) -> Option<String> {
+    let TypeErrorKind::TyMismatch { expected, actual } = kind else {
+        return None;
+    };
+    let list_for_bytes = |a: &Ty, b: &Ty| matches!(a, Ty::List(_)) && matches!(b, Ty::Bytes);
+    (list_for_bytes(expected, actual) || list_for_bytes(actual, expected)).then(|| {
+        "a Bytes value and a list are different things: `from-bytes` yields Bytes \
+         and `to-bytes` writes it back; a list of numbers is written by \
+         `ints-to-bytes`, a list of lines by `to-lines`"
+            .to_string()
+    })
 }

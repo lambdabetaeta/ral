@@ -108,7 +108,7 @@ fn literal_bool() {
 
 #[test]
 fn literal_unit() {
-    ok("return unit");
+    ok("return ()");
 }
 
 // ─── Arithmetic ───────────────────────────────────────────────────────────────
@@ -251,7 +251,7 @@ fn map_multiple_spreads_no_crash() {
 
 #[test]
 fn pattern_wildcard() {
-    ok("let _ = 1; return unit");
+    ok("let _ = 1; return ()");
 }
 
 #[test]
@@ -274,24 +274,24 @@ fn pattern_map_destructure() {
 #[test]
 fn let_generalize_polymorphic_identity() {
     // `id` should be polymorphic in its input/output type — usable at two different types.
-    ok("let id = { |x| return $x }; let _ = !{id 1}; let _ = !{id hello}; return unit");
+    ok("let id = { |x| return $x }; let _ = !{id 1}; let _ = !{id hello}; return ()");
 }
 
 #[test]
 fn let_generalize_list_id() {
-    ok("let id = { |x| return $x }; let _ = !{id [1, 2]}; let _ = !{id [a, b]}; return unit");
+    ok("let id = { |x| return $x }; let _ = !{id [1, 2]}; let _ = !{id [a, b]}; return ()");
 }
 
 #[test]
 fn let_generalize_through_list_pattern() {
     ok("let [f, g] = [{ |x| return $x }, { |y| return $y }]; \
-        let _ = !{f 1}; let _ = !{f hello}; let _ = !{g 2}; return unit");
+        let _ = !{f 1}; let _ = !{f hello}; let _ = !{g 2}; return ()");
 }
 
 #[test]
 fn let_generalize_through_map_pattern() {
     ok("let [id: f] = [id: { |x| return $x }]; \
-        let _ = !{f 1}; let _ = !{f hello}; return unit");
+        let _ = !{f 1}; let _ = !{f hello}; return ()");
 }
 
 #[test]
@@ -344,12 +344,12 @@ fn lambda_applied() {
 
 #[test]
 fn record_field_access() {
-    ok("let r = [a: 1, b: 2]; let _ = $r[a]; return unit");
+    ok("let r = [a: 1, b: 2]; let _ = $r[a]; return ()");
 }
 
 #[test]
 fn nested_record_access() {
-    ok("let r = [x: [y: 42]]; let _ = $r[x][y]; return unit");
+    ok("let r = [x: [y: 42]]; let _ = $r[x][y]; return ()");
 }
 
 // ─── Recursive bindings are monomorphic ───────────────────────────────────────
@@ -358,7 +358,7 @@ fn nested_record_access() {
 fn recursive_binding_no_error() {
     // A recursive function must type-check without generalising inside the rec group.
     ok(
-        "let go = { |n| if $[$n == 0] { return unit } else { let _ = !{go $[$n - 1]}; return unit } }; return unit",
+        "let go = { |n| if $[$n == 0] { return () } else { let _ = !{go $[$n - 1]}; return () } }; return ()",
     );
 }
 
@@ -367,7 +367,7 @@ fn recursive_binding_no_error() {
 #[test]
 fn coercion_record_map_no_error() {
     // Record ↔ Map: pass a record literal to `keys` (expects [Str:Value]).
-    ok("let r = [a: 1, b: 2]; let _ = !{keys $r}; return unit");
+    ok("let r = [a: 1, b: 2]; let _ = !{keys $r}; return ()");
 }
 
 // ─── Builtins ─────────────────────────────────────────────────────────────────
@@ -421,7 +421,7 @@ fn builtin_try_err_field_types() {
 
 #[test]
 fn guard_passes_its_bodys_byte_route_through() {
-    ok("guard { echo hi } { return unit } | from-string");
+    ok("guard { echo hi } { return () } | from-string");
 }
 
 #[test]
@@ -430,7 +430,7 @@ fn guard_cleanup_bytes_are_ambient_not_a_payload() {
     // stream is the pipe.  Neither the guard's payload route nor its
     // cleanup's decides whether the edge to `cat` is allowed: it is
     // positional, and no route takes part in it.
-    ok("guard { return unit } { echo hi } | cat");
+    ok("guard { return () } { echo hi } | cat");
 }
 
 #[test]
@@ -438,8 +438,8 @@ fn guard_input_joins_bytes_dominant_when_either_always_arm_reads() {
     // Both arms always run, so input joins bytes-dominant rather than
     // alternating: an upstream byte producer satisfies the guard even
     // though only one of the two arms actually reads it.
-    ok("echo hi | guard { from-string } { return unit }");
-    ok("echo hi | guard { return unit } { from-string }");
+    ok("echo hi | guard { from-string } { return () }");
+    ok("echo hi | guard { return () } { from-string }");
 }
 
 #[test]
@@ -469,7 +469,7 @@ fn audit_record_value_field_is_body_raw_value_not_invented() {
 /// stdout; they are simply not what `v` binds.
 #[test]
 fn pipeline_ending_in_audit_binds_the_audit_record() {
-    let comp = annotated("let v = echo a | audit { cat }; return unit");
+    let comp = annotated("let v = echo a | audit { cat }; return ()");
     let mut bound = None;
     common::walk_comp(&comp, &mut |c| {
         if let CompKind::Bind {
@@ -639,7 +639,7 @@ fn pipeline_var_tail_stays_shape_forcing_not_pinned() {
 
 #[test]
 fn block_stage_reading_bytes_before_its_last_statement_is_byte_input() {
-    ok("echo foo | within [env: [X: 'y']] { from-lines; return unit }");
+    ok("echo foo | within [env: [X: 'y']] { from-lines; return () }");
 }
 
 /// A block *literal* in stage position is an ordinary value: the stage
@@ -853,14 +853,14 @@ fn case_arm_naming_a_non_function_is_faulted_as_an_arm() {
     // The arm runs what it names on the payload, so a value there is the
     // same error as a value in head position — but the user wrote an arm,
     // and the guidance has to be about arms.
-    let errs = raw_errors("case `a unit [`a: 7]");
+    let errs = raw_errors("case `a () [`a: 7]");
     assert!(
         has_hint(&errs, "write the arm out"),
         "expected the arm-vocabulary hint, got: {errs:?}"
     );
     // A non-function head *inside* an arm the user wrote out is an ordinary
     // command-head fault: the arm's body is where it belongs.
-    let errs = raw_errors("let n = 7\ncase `a unit [`a: { |_| $n x }]");
+    let errs = raw_errors("let n = 7\ncase `a () [`a: { |_| $n x }]");
     assert!(
         has_hint(&errs, "a command head must be"),
         "expected the command-head hint, got: {errs:?}"
@@ -872,14 +872,14 @@ fn case_arm_hint_survives_a_handler_that_hoists() {
     // A handler atom with an effect of its own is bound *ahead* of the
     // dispatch, so the arm's application sits under a `Bind` chain rather than
     // at the arm's root.  The arm still owns the head, and still says so.
-    let errs = raw_errors(r#"case `a unit [`a: "v$[1 + 1]"]"#);
+    let errs = raw_errors(r#"case `a () [`a: "v$[1 + 1]"]"#);
     assert!(
         has_hint(&errs, "write the arm out"),
         "expected the arm-vocabulary hint, got: {errs:?}"
     );
     // And the arm's voice stops at a value: the block interpolated into that
     // handler is code of its own, so its bad head is diagnosed as any other.
-    let errs = raw_errors("let n = 7\ncase `a unit [`a: \"v!{$n x}\"]");
+    let errs = raw_errors("let n = 7\ncase `a () [`a: \"v!{$n x}\"]");
     assert!(
         has_hint(&errs, "a command head must be") && has_hint(&errs, "write the arm out"),
         "expected both hints, each in its own voice, got: {errs:?}"
@@ -915,7 +915,7 @@ fn self_recursive_function() {
     // a thunk of a computation variable; the body's recursive call unifies that
     // with `Fun(Int, CompVar)`, producing a cyclic comp type which the unifier
     // accepts equi-recursively.
-    ok("let f = { |n| if $[$n == 0] { return 0 } else { return !{f $[$n - 1]} } }\nreturn unit");
+    ok("let f = { |n| if $[$n == 0] { return 0 } else { return !{f $[$n - 1]} } }\nreturn ()");
 }
 
 #[test]
@@ -923,7 +923,7 @@ fn recursive_stream_consumer() {
     // Pattern lifted from the streaming plan: a consumer that cases on a
     // forced thunk and recurses through the `more arm's payload.
     ok(
-        "let drain = { |s| case !$s [`more: { |p| !{drain $p[tail]} }, `done: { |_| return unit }] }\nreturn unit",
+        "let drain = { |s| case !$s [`more: { |p| !{drain $p[tail]} }, `done: { |_| return () }] }\nreturn ()",
     );
 }
 
@@ -933,7 +933,7 @@ fn recursive_stream_producer_typechecks() {
     // comp types let the cycle CompVar ⟶ Fun(Int, F (Variant {`more:
     // {head: Int, tail: Thunk(CompVar)} | `done | row})) close in the
     // union-find without tripping an occurs check.
-    ok("let nats = { |n| stream-cons $n { !{nats $[$n + 1]} } }\nreturn unit");
+    ok("let nats = { |n| stream-cons $n { !{nats $[$n + 1]} } }\nreturn ()");
 }
 
 #[test]
@@ -959,10 +959,10 @@ fn recursive_sibling_arm_outputs_stay_independent_under_the_join() {
     // or `f`'s later `echo` grounds `g`'s output `Bytes` and `g`'s pure body
     // fails its own group unification.
     ok(
-        "let h = { |v| case $v [ `go: { |_| !{f 0} }, `alt: { |_| !{g 0} }, `stop: { |_| return unit } ] }\n\
-        let f = { |n| return $h; echo x; return unit }\n\
-        let g = { |n| return $h; return unit }\n\
-        return unit",
+        "let h = { |v| case $v [ `go: { |_| !{f 0} }, `alt: { |_| !{g 0} }, `stop: { |_| return () } ] }\n\
+        let f = { |n| return $h; echo x; return () }\n\
+        let g = { |n| return $h; return () }\n\
+        return ()",
     );
 }
 
@@ -1152,12 +1152,12 @@ fn within_handler_for_echo_preserving_its_byte_mode_ok() {
 #[test]
 fn an_open_route_pinned_to_a_byte_head_must_return_unit() {
     has_error(
-        "alias echo { |args| fold-lines { |a l| fail [status: 5] } 0 }\nreturn unit",
+        "alias echo { |args| fold-lines { |a l| fail [status: 5] } 0 }\nreturn ()",
         "couldn't match",
     );
     // The diagnostic must name what the author did, not merely the clash.
     let errs =
-        raw_errors("alias echo { |args| fold-lines { |a l| fail [status: 5] } 0 }\nreturn unit");
+        raw_errors("alias echo { |args| fold-lines { |a l| fail [status: 5] } 0 }\nreturn ()");
     assert!(
         errs.iter().any(|e| e
             .hint()
@@ -1165,7 +1165,7 @@ fn an_open_route_pinned_to_a_byte_head_must_return_unit() {
         "expected the WF-2 hint naming both sides, got: {errs:?}"
     );
     // The same arm returning `Unit` is consistent, and stays accepted.
-    ok("alias echo { |args| fold-lines { |a l| fail [status: 5] } unit }\nreturn unit");
+    ok("alias echo { |args| fold-lines { |a l| fail [status: 5] } () }\nreturn ()");
 }
 
 /// A byte-output forwarding alias defines the unknown head as byte-output and
@@ -1179,7 +1179,7 @@ fn alias_byte_output_forwarder_typechecks() {
 /// definition typechecks on its own.
 #[test]
 fn alias_value_output_body_typechecks() {
-    ok("alias foo { |args| return 3 }\nreturn unit");
+    ok("alias foo { |args| return 3 }\nreturn ()");
 }
 
 #[test]
@@ -1201,7 +1201,7 @@ fn alias_over_route_preserving_alias_typechecks() {
 /// catch-all arm is not rejected.
 #[test]
 fn catch_all_handler_arm_is_not_route_pinned() {
-    ok(r"within [handler: { |n a| return 'x' }] { return unit }");
+    ok(r"within [handler: { |n a| return 'x' }] { return () }");
 }
 
 #[test]
@@ -1366,7 +1366,7 @@ fn alias_inside_conditional_does_not_leak() {
     // The alias is inside the `then` branch — not at the enclosing Seq level.
     // The subsequent `greet` should NOT see the binding.  Compilation must
     // not panic; the type of `greet` is left free (external dispatch).
-    ok("if true { alias greet { |args| return \"hi\" } } else { return unit }; greet");
+    ok("if true { alias greet { |args| return \"hi\" } } else { return () }; greet");
 }
 
 /// Multi-statement Seq: bindings from an alias are visible to all subsequent
@@ -1378,7 +1378,7 @@ fn alias_binding_visible_to_all_subsequent_statements() {
     ok(r#"alias greet { |args| echo hi; return "hi" }; let r = !{greet}; greet"#);
     // Verify `r` really has String type by checking arithmetic on it errors.
     has_error(
-        r#"let _ = !{ alias greet { |args| echo hi; return "hi" }; let r = !{greet}; return $[$r + 0] }; return unit"#,
+        r#"let _ = !{ alias greet { |args| echo hi; return "hi" }; let r = !{greet}; return $[$r + 0] }; return ()"#,
         "couldn't match",
     );
 }
@@ -1448,8 +1448,8 @@ fn fail_demands_an_error_record() {
 /// field is left alone: both spellings run, and picking one would be a guess.
 #[test]
 fn fail_message_must_be_text() {
-    ok("let m = !{to-bytes [104, 105]}; fail [status: 1, message: $m]");
-    ok("let f = { |m| fail [status: 1, message: $m] }; return unit");
+    ok("let m = !{ints-to-bytes [104, 105]}; fail [status: 1, message: $m]");
+    ok("let f = { |m| fail [status: 1, message: $m] }; return ()");
 
     has_error("fail [status: 1, message: 42]", "must be a String or Bytes");
     has_error(
@@ -1557,7 +1557,7 @@ fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
     // kernel node for the exact bytes, wrapped in a `Decode` node for the
     // text; a value-routed one (`return 42`) is left alone.  This is the whole
     // observable content of the route at a value boundary.
-    let comp = annotated(r"let x = echo hi; let y = return 42; return unit");
+    let comp = annotated(r"let x = echo hi; let y = return 42; return ()");
     let mut binds = Vec::new();
     common::walk_comp(&comp, &mut |c| {
         if let CompKind::Bind {
@@ -1609,7 +1609,7 @@ fn bind_x_is_captured(src: &str) -> bool {
 fn if_byte_branches_join_to_byte_output() {
     // Both arms emit bytes, so the conditional's output channel is `Bytes`.
     assert!(bind_x_is_captured(
-        "let x = if true { echo a } else { echo b }; return unit"
+        "let x = if true { echo a } else { echo b }; return ()"
     ));
 }
 
@@ -1617,7 +1617,7 @@ fn if_byte_branches_join_to_byte_output() {
 fn if_value_branches_join_to_value_output() {
     // Both arms are pure values, so the conditional carries no byte output.
     assert!(!bind_x_is_captured(
-        "let x = if true { return 1 } else { return 2 }; return unit"
+        "let x = if true { return 1 } else { return 2 }; return ()"
     ));
 }
 
@@ -1639,7 +1639,7 @@ fn an_arms_writes_do_not_make_its_returned_value_a_payload() {
 fn a_bind_rhs_writes_reach_the_stages_sink() {
     // The RHS's bytes escape the bind and reach the stage's visible stream,
     // which inside a pipeline is the pipe.  The returned value is discarded.
-    ok("!{ let x = !{ echo hi; return 5 }; return unit } | cat");
+    ok("!{ let x = !{ echo hi; return 5 }; return () } | cat");
 }
 
 #[test]
@@ -1653,7 +1653,7 @@ fn a_captured_bind_rhs_keeps_its_bytes_out_of_the_pipe() {
 #[test]
 fn chain_byte_arms_join_to_byte_output() {
     // Both arms emit bytes, so the chain's output channel is `Bytes`.
-    assert!(bind_x_is_captured("let x = echo a ? echo b; return unit"));
+    assert!(bind_x_is_captured("let x = echo a ? echo b; return ()"));
 }
 
 #[test]
@@ -1703,9 +1703,9 @@ fn a_case_arm_is_coerced_by_its_route_not_its_spelling() {
     assert_eq!(
         case_arms_captured(
             "let h = { |p| echo b }\n\
-             let v = `some unit\n\
+             let v = `some ()\n\
              let x = case $v [`some: $h, `none: { |p| echo z }]\n\
-             return unit"
+             return ()"
         ),
         vec![("some".to_string(), true), ("none".to_string(), true)]
     );
@@ -1714,9 +1714,9 @@ fn a_case_arm_is_coerced_by_its_route_not_its_spelling() {
     assert_eq!(
         case_arms_captured(
             "let h = { |p| echo b }\n\
-             let v = `some unit\n\
+             let v = `some ()\n\
              let x = case $v [`some: { |p| $h $p }, `none: { |p| echo z }]\n\
-             return unit"
+             return ()"
         ),
         vec![("some".to_string(), true), ("none".to_string(), true)]
     );
@@ -1730,7 +1730,7 @@ fn a_discarded_cases_arms_stay_uncaptured() {
     assert_eq!(
         case_arms_captured(
             "let h = { |p| echo b }\n\
-             let v = `some unit\n\
+             let v = `some ()\n\
              case $v [`some: $h, `none: { |p| echo z }]"
         ),
         vec![("some".to_string(), false), ("none".to_string(), false)]
@@ -1742,7 +1742,7 @@ fn seq_tail_still_unknown_may_become_a_function() {
     // The tail gives the sequence its value and may be a function: with
     // every statement silent, `!$f` must stay free to resolve `Fun` at the
     // call site rather than be forced into stage shape at visit time.
-    ok("let apply = { |f| return unit; !$f }; apply { |x| return $x }");
+    ok("let apply = { |f| return (); !$f }; apply { |x| return $x }");
 }
 
 #[test]
@@ -1805,10 +1805,10 @@ fn sibling_arms_grounding_apart_report_under_the_joins_own_reason() {
     // `CaseArms` — not a mismatch surfacing at whichever group unification
     // next touches a variable the join had eagerly equated.
     let errs = raw_errors(
-        "let h = { |v| case $v [ `a: { |_| return unit }, `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }\n\
+        "let h = { |v| case $v [ `a: { |_| return () }, `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }\n\
          let f = { |n| return $h; echo done }\n\
          let g = { |n| return $h; return 5 }\n\
-         return unit",
+         return ()",
     );
     assert!(
         errs.iter().any(|e| {
@@ -1827,10 +1827,10 @@ fn inner_bind_does_not_collapse_the_enclosing_groups_join() {
     // and report there — the same conduit mismatch under `CaseArms` as the
     // unhoisted program, not a shape clash at the group unification.
     let errs = raw_errors(
-        "let h = { |v| case $v [ `a: { |_| return unit }, `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }\n\
+        "let h = { |v| case $v [ `a: { |_| return () }, `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }\n\
          let f = { |n| return $h; echo done }\n\
          let g = { |n| return $h; return $[$n + 1] }\n\
-         return unit",
+         return ()",
     );
     assert!(
         errs.iter().any(|e| {
@@ -1850,8 +1850,8 @@ fn inner_bind_does_not_foreclose_a_siblings_subsumption() {
     ok(
         "let h = { |v| case $v [ `b: { |_| !{f 0} }, `c: { |_| !{g 0} } ] }\n\
          let f = { |n| return $h; echo done }\n\
-         let g = { |n| return $h; let w = $[$n + 1]; return unit }\n\
-         return unit",
+         let g = { |n| return $h; let w = $[$n + 1]; return () }\n\
+         return ()",
     );
 }
 
@@ -1865,7 +1865,7 @@ fn late_byte_arm_beside_value_payload_arm_is_a_conduit_mismatch_under_try_arms()
     let errs = raw_errors(
         "let h = { |v| try { !{f $v} } { |_| return 5 } }\n\
          let f = { |n| return $h; echo x }\n\
-         return unit",
+         return ()",
     );
     assert!(
         errs.iter().any(|e| {
@@ -1897,9 +1897,9 @@ fn chain_return_string_then_return_int_is_static_mismatch() {
 #[test]
 fn try_relaxation_echo_body_unit_handler_accepted() {
     // Previously rejected (observed String vs raw Unit): the body's `echo`
-    // and the handler's `return unit` now observe under their joined Bytes
+    // and the handler's `return ()` now observe under their joined Bytes
     // output, both landing on String.
-    ok("try { echo x } { |_| return unit }");
+    ok("try { echo x } { |_| return () }");
 }
 
 #[test]
@@ -1908,10 +1908,10 @@ fn byte_side_subsumption_does_not_depend_on_statement_order() {
     // an equation the byte side imposes, not one it asks after.  `$x`'s type
     // is still open when the byte join is reached in the first spelling and
     // already `Unit` in the second, and the two must agree.
-    ok("let f = { |x| if true { return unit } else { return $x }\n\
+    ok("let f = { |x| if true { return () } else { return $x }\n\
                      if true { echo hi } else { return $x } }");
     ok("let f = { |x| if true { echo hi } else { return $x }\n\
-                     if true { return unit } else { return $x } }");
+                     if true { return () } else { return $x } }");
 }
 
 #[test]
@@ -1924,7 +1924,7 @@ fn an_equation_added_elsewhere_does_not_make_a_program_typecheck() {
                        if true { echo hi } else { !$t }\n\
                        return $x }");
     ok(
-        "let f = { |t x| let u = if true { return $x } else { return unit }\n\
+        "let f = { |t x| let u = if true { return $x } else { return () }\n\
                        if true { !$t } else { return $x }\n\
                        let z = 1\n\
                        if true { echo hi } else { !$t }\n\
@@ -1940,7 +1940,7 @@ fn an_arms_unsolved_value_type_is_not_evidence_for_the_value_side() {
     // value side here would foreclose the byte side on no evidence.  `g`
     // stays route-polymorphic instead, and both uses type.
     ok("let g = { |t x| if true { !$t } else { return $x } }\n\
-        g { echo hi } unit\n\
+        g { echo hi } ()\n\
         g { return 3 } 4");
 }
 
@@ -1962,7 +1962,7 @@ fn nested_binds_carry_no_scheme_while_spine_does() {
     // The spine `let g` carries a scheme; a `let inner` under the lambda
     // body evaluates in a block scope and never installs, so it stays
     // `scheme: None`.
-    let comp = annotated(r"let g = { |x| let inner = return $x; return $inner }; return unit");
+    let comp = annotated(r"let g = { |x| let inner = return $x; return $inner }; return ()");
     let mut spine_named = None;
     let mut nested_named = None;
     common::walk_comp(&comp, &mut |c| {
@@ -2033,6 +2033,7 @@ fn decoder_is_a_first_class_nullary_native() {
 fn encoder_without_its_value_is_an_arity_error() {
     for name in [
         "to-bytes",
+        "ints-to-bytes",
         "to-string",
         "to-line",
         "to-lines",
@@ -2063,12 +2064,44 @@ fn an_encoder_stage_takes_its_value_not_the_upstream_one() {
 /// Written out, each encoder takes the value its registry doc promises.
 #[test]
 fn saturated_encoders_typecheck() {
-    ok("echo !{to-bytes [104, 105]}");
+    ok("echo !{ints-to-bytes [104, 105]}");
+    ok("let b = !{echo hi | from-bytes}; echo !{to-bytes $b}");
     ok("echo !{to-string 'hi'}");
     ok("echo !{to-line 1}");
     ok("echo !{to-lines ['a', 'b']}");
     ok("echo !{to-json [a: 1]}");
     ok("echo !{to-csv [[a: 1]]}");
+}
+
+/// Two writers put bytes on the channel, and each names one argument.
+/// `to-bytes` is `from-bytes`'s inverse and takes the `Bytes` it returns;
+/// `ints-to-bytes` takes the numbers ral has no literal for.  Neither reads
+/// the other's argument, and neither reads text.
+#[test]
+fn the_two_byte_writers_take_their_own_argument() {
+    has_error("to-bytes hello", "couldn't match");
+    has_error("to-bytes [104, 105]", "couldn't match");
+    has_error("ints-to-bytes 'hi'", "couldn't match");
+    has_error("ints-to-bytes ['x']", "couldn't match");
+    has_error(
+        "let b = !{echo hi | from-bytes}; ints-to-bytes $b",
+        "couldn't match",
+    );
+
+    // Numbers handed to `to-bytes` are the one slip worth naming a rewrite for.
+    let errs = raw_errors("to-bytes [104, 105]");
+    assert!(
+        has_hint(&errs, "ints-to-bytes"),
+        "the hint should name the other writer, got: {errs:?}"
+    );
+
+    // The same mismatch at `to-lines` is not a `to-bytes` slip; the hint must
+    // still fit.
+    let errs = raw_errors("let b = !{echo hi | from-bytes}; to-lines $b");
+    assert!(
+        has_hint(&errs, "to-lines"),
+        "the hint should name the writer that was called, got: {errs:?}"
+    );
 }
 
 // ─── A spread is the notation of an argv ─────────────────────────────────────

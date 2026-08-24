@@ -62,10 +62,15 @@ behind. Bind the decoder's result and apply the next function to it instead —
 `let document = cat data.json | from-json` followed by `length $document`.
 
 An encoder takes one value and writes its encoded form to stdout.
-`to-bytes`, `to-string`, `to-lines` (which joins a list with newlines),
+`to-bytes` (a `Bytes` value, passed through unchanged), `ints-to-bytes` (a list
+of `Int`, each 0 through 255 — ral has no byte literal, so this is how bytes are
+written by number), `to-string`, `to-lines` (which joins a list with newlines),
 `to-json`, `to-csv`, and `to-line` (the line writer that `echo` uses) all
 return `Unit`; the written bytes are the payload (`write_encoded` in
-`core/src/builtins/codecs.rs`). In a pipeline, the write feeds the wire:
+`core/src/builtins/codecs.rs`). Each encoder names one operand type, so
+`to-bytes 3` and `to-bytes hello` are ordinary unification failures rather than
+a union the checker has to resolve; the operand-prefixed name is what
+distinguishes the second writer, as in `bytes-to-string`. In a pipeline, the write feeds the wire:
 `to-json $x | cmd` gives `cmd` the encoded bytes. At a bind, the
 [[design/types|capture]] coercion applies: `let e = to-json $x` binds the
 encoded text as a `String`.

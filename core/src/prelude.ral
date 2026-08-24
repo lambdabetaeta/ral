@@ -212,7 +212,7 @@ let is-done = { |h|
 
 ## Run body; suppress failure and return unit.  For fire-and-forget commands
 ## where the outcome is irrelevant.
-let attempt = { |body| try { !$body; return unit } { |_| return unit } }
+let attempt = { |body| try { !$body; return () } { |_| return () } }
 
 ## Run body; return true on POSIX exit 0, false on any error or non-zero status.
 let succeeds = { |body| try { !$body; return true } { |_| return false } }
@@ -414,7 +414,7 @@ let stream-fold = { |f z s|
 let stream-each = { |f s|
     case $s [
         `more: { |p| $f $p[head]; stream-each $f !$p[tail] },
-        `done: { |_| return unit }
+        `done: { |_| return () }
     ]
 }
 
@@ -470,15 +470,15 @@ let to-jsonl = { |items| each { |x| to-json $x; echo "" } $items }
 # riding the payload cannot feed a downstream stage.
 ## Map a function over stdin lines, echoing results.
 let map-lines = { |f|
-    fold-lines { |_ line| echo !{$f $line} } unit
+    fold-lines { |_ line| echo !{$f $line} } ()
 }
 ## Filter stdin lines by a predicate.
 let filter-lines = { |pred|
-    fold-lines { |_ line| if !{$pred $line} { echo $line } else {} } unit
+    fold-lines { |_ line| if !{$pred $line} { echo $line } else {} } ()
 }
 ## Apply a function to each stdin line.
 let each-line = { |f|
-    fold-lines { |_ line| !{$f $line}; return unit } unit
+    fold-lines { |_ line| !{$f $line}; return () } ()
 }
 
 # ANSI styling — every constant is the empty string when colour is not

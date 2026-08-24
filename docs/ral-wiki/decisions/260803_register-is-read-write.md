@@ -94,7 +94,7 @@ of that wire sit four model-facing commands:
 - `pin-set <key> <card>` — overwrite the slot; a ral wrapper over
   `surface `` `pin ``.
 - `pin-clear <key>` — empty the slot; a ral wrapper over `surface `` `unpin ``.
-- `pin-read <key>` — the stored card, canonically encoded, or `unit`.
+- `pin-read <key>` — the stored card, canonically encoded, or `()`.
 - `pin-list` — the occupied keys.
 
 Only the read pair are Rust builtins; the writes are prelude wrappers, since
@@ -110,7 +110,7 @@ because a pin appends nothing and a clear removes no element.
 ### 2. `pin-read` returns the canonical card
 
 `pin-read` is an enquiry, answered from the agent's own mirror: the stored
-card re-encoded as a ral value, or `unit` when the slot is empty. Because the
+card re-encoded as a ral value, or `()` when the slot is empty. Because the
 mirror holds the *decoded* `Card`, the read returns the canonical form, not
 the authored bytes: sugar the decoder lifts (a bare string span, a bare mark)
 comes back as its record form, and an unknown mark comes back as the plain
@@ -265,7 +265,7 @@ Doc strings (model-facing; per the standing rule they describe data and
 placement, never rendering, and cross-reference nothing):
 
 > `pin-read <key>  — the card currently pinned under KEY on your register,
-> as a `` `card `` value you can destructure, or unit if the slot is empty.
+> as a `` `card `` value you can destructure, or () if the slot is empty.
 > Reads your own register only. Answered only on the run that calls it:
 > inside spawn { … } this errors.`
 
@@ -277,7 +277,7 @@ Tests: the scripted-provider round-trip pattern
 (`reply_full_stack_round_trip…`, `harness.rs:1075`) — a script that
 `pin-set`s, `pin-read`s in the same run, and replies with the readback;
 assert the parent receives the canonical card. A second script reads an
-absent key and replies `unit`.
+absent key and replies `()`.
 
 ### D. The kit: tasks and goals as preludes
 
@@ -320,7 +320,7 @@ label standing in for a title on one of them (amended, 2026-08-06).
 **The serialization pair and the write point:**
 
 - `tasks-card ts` — the list to the card above.
-- `decode-tasks v` — `unit` → `[]`; a card of the exact shape above → the
+- `decode-tasks v` — `()` → `[]`; a card of the exact shape above → the
   task records; anything else →
   `fail "tasks: the card under the 'tasks' pin is not task-shaped — …"`,
   spelling out the expected three marks and the row form.
@@ -330,7 +330,7 @@ label standing in for a title on one of them (amended, 2026-08-06).
   work, no pin, and the nudge goes quiet on its own. The cost is accepted
   deliberately and documented in the kit: transition-ing the last open task
   to `` `done `` discards the records — a reopen afterwards finds an empty
-  register and starts a fresh list (`decode-tasks` of `unit` is `[]`).
+  register and starts a fresh list (`decode-tasks` of `()` is `[]`).
 
 **Mutators**, all reading the register, none taking a list:
 `add-task <desc>`, `remove-task <id>`, `transition <id> <status>`,
@@ -382,7 +382,7 @@ Beyond the per-stage tests above:
 - **Protection**: a model `pin-set "services" …` is refused (existing
   guard), and `pin-read "services"` still answers.
 - **All-done clears**: `transition` the last open task to `` `done `` —
-  `pin-read "tasks"` answers `unit`, and a subsequent `add-task` starts a
+  `pin-read "tasks"` answers `()`, and a subsequent `add-task` starts a
   fresh list at id 1.
 - **Schema collision**: `pin-set "tasks"` a plain text card, then
   `add-task` — the didactic `fail` fires, naming the expected shape.

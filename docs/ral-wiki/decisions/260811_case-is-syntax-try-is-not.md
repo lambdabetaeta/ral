@@ -30,7 +30,7 @@ The witness typechecked:
 
 ```ral
 let t = [ `some: { |p| echo b }, `none: { |p| echo z } ]
-let q = case `some unit $t          # printed b to the terminal; q was EMPTY
+let q = case `some () $t            # printed b to the terminal; q was EMPTY
 ```
 
 The payload escaped to the terminal and the capture returned nothing. The same

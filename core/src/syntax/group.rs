@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn self_recursive_lambda_is_a_singleton_letrec() {
         assert_eq!(
-            groups_of("let f = { |x| f $x }\nreturn unit"),
+            groups_of("let f = { |x| f $x }\nreturn ()"),
             vec!["rec [f]", "stmt"]
         );
     }
@@ -356,14 +356,14 @@ mod tests {
     #[test]
     fn mutually_recursive_lambdas_share_one_letrec() {
         assert_eq!(
-            groups_of("let f = { |x| g $x }\nlet g = { |y| f $y }\nreturn unit"),
+            groups_of("let f = { |x| g $x }\nlet g = { |y| f $y }\nreturn ()"),
             vec!["rec [f, g]", "stmt"]
         );
     }
 
     #[test]
     fn acyclic_forward_reference_splits_into_singles_in_dependency_order() {
-        let groups = groups_of("let g = { f }\nlet f = { |x| f $x }\nreturn unit");
+        let groups = groups_of("let g = { f }\nlet f = { |x| f $x }\nreturn ()");
         assert_eq!(groups, vec!["rec [f]", "let g", "stmt"]);
     }
 
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn shadowed_definitions_stay_separate() {
         let groups =
-            groups_of("let f = { return 1 }\nlet f = { return 2 }\nlet g = { f }\nreturn unit");
+            groups_of("let f = { return 1 }\nlet f = { return 2 }\nlet g = { f }\nreturn ()");
         assert_eq!(groups, vec!["let f", "let f", "let g", "stmt"]);
     }
 

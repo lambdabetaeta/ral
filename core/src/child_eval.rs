@@ -609,7 +609,7 @@ mod tests {
         let wire = WireMobile::from_runtime(&mobile, &mut ctx).expect("to wire");
         let request = ChildEvalRequest {
             scope_table: ctx.finish().expect("finish"),
-            body: compile_one("return unit"),
+            body: compile_one("return ()"),
             mobile: wire,
             captured: None,
             audit_policy: None,

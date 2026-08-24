@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5afa1c81
-generated_at_date: 2026-08-12
+generated_at_commit: bf7610ab
+generated_at_date: 2026-08-24
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -67,9 +67,10 @@ Bodies are grouped by concern, one submodule each:
   rendered through the total `to-string` — `Value`'s `Display`, mapped over the
   argv — single-space intercalation, a newline to the byte channel.
   `write_encoded` (`codecs.rs`) writes its bytes to stdout and returns
-  `Value::Unit`, so `to-csv`, `to-bytes`, `to-string`, `to-lines`, and
-  `to-json` are writers: each types `A → F[Bytes] Unit`, and its
-  encoded bytes are its sole payload;
+  `Value::Unit`, so `to-csv`, `to-bytes`, `ints-to-bytes`, `to-string`,
+  `to-lines`, and `to-json` are writers: each types `A → F[Bytes] Unit` at its
+  own operand type, and its encoded bytes are its sole payload. `to-bytes` takes
+  `Bytes` and `ints-to-bytes` takes `[Int]` — two names, no union in the table;
 - `shell.rs` — `cd`, `alias` / `unalias`;
 - `concurrency.rs` — `spawn` / `watch` / `service` / `detach` and the handle
   verbs

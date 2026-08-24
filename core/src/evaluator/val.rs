@@ -10,8 +10,9 @@ use crate::types::{Error, List, Shell, Value};
 /// Renders one interpolation piece for `eval_interpolation` in `comp.rs`.
 pub(crate) fn interpolate_piece(v: &Value, shell: &Shell) -> Result<String, Error> {
     match v {
-        Value::Unit => Ok(String::new()),
-        Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => Ok(v.to_string()),
+        Value::Unit | Value::String(_) | Value::Int(_) | Value::Float(_) | Value::Bool(_) => {
+            Ok(v.to_string())
+        }
         Value::Bytes(_) => Err(shell.err_hint(
             "cannot interpolate Bytes in string",
             "render with str (lossy UTF-8), or decode with from-string",

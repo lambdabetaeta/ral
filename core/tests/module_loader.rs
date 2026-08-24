@@ -94,10 +94,10 @@ fn answer_of(m: &Value) -> i64 {
 fn use_self_reference_is_a_cycle() {
     let path = write_module(
         "ral_use_cycle.ral",
-        "let _ = use \"PLACEHOLDER\"\nreturn unit\n",
+        "let _ = use \"PLACEHOLDER\"\nreturn ()\n",
     );
     let p = path.to_string_lossy().into_owned();
-    std::fs::write(&path, format!("let _ = use '{p}'\nreturn unit\n")).unwrap();
+    std::fs::write(&path, format!("let _ = use '{p}'\nreturn ()\n")).unwrap();
 
     let mut shell = fresh_shell();
     let err = top_level(&mut shell, &format!("use '{p}'")).unwrap_err();
@@ -117,7 +117,7 @@ fn use_self_reference_is_a_cycle() {
 /// the same guard in `evaluate_source`.
 #[test]
 fn source_self_reference_is_a_cycle() {
-    let path = write_module("ral_source_cycle.ral", "return unit\n");
+    let path = write_module("ral_source_cycle.ral", "return ()\n");
     let p = path.to_string_lossy().into_owned();
     std::fs::write(&path, format!("source '{p}'\n")).unwrap();
 

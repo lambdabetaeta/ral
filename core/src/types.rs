@@ -19,7 +19,7 @@ pub use capability::{
 mod value;
 #[cfg(test)]
 pub(crate) use value::deep_block_chain;
-pub use value::{Value, fmt_lambda, fmt_native};
+pub use value::{Value, fmt_float, fmt_lambda, fmt_native};
 
 // What the exec boundary refuses, declared once for the two sides that read it:
 // the checker before the spawn, `runtime::command::vet` at it.

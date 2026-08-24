@@ -280,7 +280,7 @@ fn alias_visible_to_next_run() {
 #[test]
 fn value_output_alias_piped_into_decoder_is_accepted() {
     let sh = shell();
-    let errs = check_errors(&sh, "alias three { |args| return 3 }\nreturn unit");
+    let errs = check_errors(&sh, "alias three { |args| return 3 }\nreturn ()");
     assert!(
         errs.is_empty(),
         "expected no error defining a value-output alias, got: {:?}",
@@ -339,7 +339,7 @@ fn session_scheme_instantiates_at_two_types() {
     );
     for (src, why) in [
         (
-            "let nn = !{idf 1}\nlet ss = !{idf hello}\nreturn unit",
+            "let nn = !{idf 1}\nlet ss = !{idf hello}\nreturn ()",
             "two instantiations in one run must not clash",
         ),
         (

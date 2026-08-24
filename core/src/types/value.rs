@@ -232,10 +232,10 @@ impl PartialEq for Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unit => write!(f, ""),
+            Self::Unit => write!(f, "()"),
             Self::Bool(b) => write!(f, "{b}"),
             Self::Int(n) => write!(f, "{n}"),
-            Self::Float(n) => write!(f, "{n}"),
+            Self::Float(n) => f.write_str(&fmt_float(*n)),
             Self::String(s) => write!(f, "{s}"),
             Self::Bytes(b) => write!(f, "{}", String::from_utf8_lossy(b)),
             Self::List(items) => {
@@ -302,6 +302,21 @@ fn fmt_param(p: &crate::ir::IrPattern) -> String {
                 .collect();
             format!("[{}]", parts.join(" "))
         }
+    }
+}
+
+/// The one printed spelling of a `Float`.
+///
+/// ryu's shortest round trip, with the point restored to a bare exponent
+/// mantissa (`1e300` → `1.0e300`) so the printer's image stays inside the
+/// numeral grammar.  A `Float` is finite by construction; ryu's `NaN`/`inf`
+/// are the honest last resort.
+pub fn fmt_float(n: f64) -> String {
+    let mut buf = ryu::Buffer::new();
+    let s = buf.format(n);
+    match s.split_once('e') {
+        Some((mantissa, exp)) if !mantissa.contains('.') => format!("{mantissa}.0e{exp}"),
+        _ => s.to_owned(),
     }
 }
 

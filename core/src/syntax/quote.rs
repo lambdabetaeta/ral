@@ -9,10 +9,10 @@
 
 use std::borrow::Cow;
 
-use crate::syntax::ast::Word;
+use crate::syntax::ast::{Word, WordLiteral};
 use crate::syntax::lexer::{Token, lex};
 
-/// True when `s` lexes as one bare word whose value is exactly `s`.
+/// True when `s` lexes as one bare word *and* reads back as the string `s`.
 ///
 /// Bareness is positional — `#` opens a comment only at token start, `:`
 /// splits only before whitespace or `]` — so it is settled by lexing
@@ -20,8 +20,12 @@ use crate::syntax::lexer::{Token, lex};
 /// which would call `#foo`, `...` and `foo:` bare.  `,` is the case
 /// lexing cannot settle: it stays inside a word at top level and
 /// punctuates inside `[…]`, so it always forces quoting.
+///
+/// The dual of [`WordLiteral::classify`]: a numeral-shaped string re-reads as
+/// its number, so it may go bare only where classification declines it.  The
+/// grammar is consulted in this direction alone, never the printer from it.
 pub fn is_bare_word(s: &str) -> bool {
-    if s.is_empty() || s.contains(',') {
+    if s.is_empty() || s.contains(',') || WordLiteral::classify(s).is_some() {
         return false;
     }
     let Ok(tokens) = lex(s) else {
@@ -129,6 +133,62 @@ mod tests {
         }
     }
 
+    // ── the dual of the numeral grammar ──────────────────────────────
+
+    /// A word the numeral grammar claims denotes its number in every
+    /// position, so a *string* of those bytes can never go bare: emitted
+    /// bare, `007` would read back as 7 and `3.10` as 3.1.
+    #[test]
+    fn bare_word_rejects_what_the_numeral_grammar_claims() {
+        for s in [
+            "5", "007", "+5", "-0", ".5", "2.", "1.50", "3.10", "1.0e300",
+        ] {
+            assert!(
+                !is_bare_word(s),
+                "{s:?} re-reads as a number, so it must be quoted"
+            );
+        }
+    }
+
+    /// The remaining word literals are the same case.
+    #[test]
+    fn bare_word_rejects_the_other_word_literals() {
+        for s in ["true", "false"] {
+            assert!(
+                !is_bare_word(s),
+                "{s:?} re-reads as a literal, so it must be quoted"
+            );
+        }
+    }
+
+    /// `unit` is not one of them any more: `()` is the unit literal, so these
+    /// bytes are text like any other word's.
+    #[test]
+    fn bare_word_keeps_unit() {
+        assert!(is_bare_word("unit"));
+    }
+
+    /// And no further: the rule quotes numerals, not everything holding a
+    /// digit or a dot.  What the grammar declines is still text, and stays
+    /// bare.
+    #[test]
+    fn bare_word_keeps_what_the_numeral_grammar_declines() {
+        for s in [
+            "1e6",
+            "1_000",
+            "0x10",
+            "v1.50",
+            "3.10.1",
+            "007a",
+            "9223372036854775808",
+        ] {
+            assert!(
+                is_bare_word(s),
+                "{s:?} is not a numeral and should stay bare"
+            );
+        }
+    }
+
     // ── quote_word ───────────────────────────────────────────────────
 
     #[test]
@@ -220,9 +280,46 @@ mod tests {
             ":",       // a bare Colon
             "?x",      // `?` is its own token
             "&x",      // `&` is its own token
+            // Numeral- and literal-shaped: lexing alone would leave these
+            // bare, and they would come back as values rather than text.
+            "007",
+            "3.10",
+            "1.0e300",
+            "-0",
+            ".5",
+            "true",
         ] {
             let src = quote_word(input);
             lex_round_trip(&src, input);
+        }
+    }
+
+    /// The round trip the emission exists for, read at the grammar rather
+    /// than the lexer: whatever `quote_word` leaves bare must be a word the
+    /// numeral grammar declines, or the emitted source would name a value
+    /// instead of this text.
+    #[test]
+    fn a_bare_emission_is_never_a_literal() {
+        for input in [
+            "hello",
+            "hello.txt",
+            "007",
+            "3.10",
+            "1.0e300",
+            "-0",
+            "1e6",
+            "0x10",
+            "true",
+            "unit",
+            "v1.50",
+            "9223372036854775808",
+        ] {
+            if quote_word(input) == input {
+                assert!(
+                    WordLiteral::classify(input).is_none(),
+                    "{input:?} was emitted bare but reads back as a literal"
+                );
+            }
         }
     }
 

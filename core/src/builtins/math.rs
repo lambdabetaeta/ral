@@ -3,7 +3,7 @@
 //! All four take a Float only, since an integer is already rounded.  `round`
 //! stays in Float even at zero places: `round 3.7 0` is `4.0`.
 
-use crate::types::{Settled, Value, sig, sig_hint};
+use crate::types::{Settled, Value, fmt_float, sig, sig_hint};
 
 use super::util::f64_to_i64;
 
@@ -15,7 +15,10 @@ const MAX_PLACES: i64 = 308;
 fn finite_float(name: &str, val: &Value) -> Settled<f64> {
     match val {
         Value::Float(f) if f.is_finite() => Ok(*f),
-        Value::Float(f) => Err(sig(format!("{name}: {f} is not a finite number"))),
+        Value::Float(f) => Err(sig(format!(
+            "{name}: {} is not a finite number",
+            fmt_float(*f)
+        ))),
         other => Err(sig_hint(
             format!("{name}: expected Float, got {}", other.type_name()),
             "e.g. round 3.7 0",
@@ -55,7 +58,8 @@ pub(super) fn builtin_round(args: &[Value]) -> Settled<Value> {
         Ok(Value::Float(r))
     } else {
         Err(sig(format!(
-            "round: rounding {x} to {places} places is not representable as a Float"
+            "round: rounding {} to {places} places is not representable as a Float",
+            fmt_float(x)
         )))
     }
 }

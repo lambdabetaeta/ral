@@ -48,9 +48,9 @@ assert_eq 'read-lines wrapper explicit' 2 !{length $rl}
 let round2 = to-json [x: 1] | from-json
 assert_eq 'to-json piped roundtrip' 1 $round2[x]
 
-# bytes codec roundtrip — to-bytes piped to from-bytes gives Value::Bytes
+# bytes codec roundtrip — ints-to-bytes piped to from-bytes gives Value::Bytes
 let bs = [72, 105]
-let b2 = to-bytes $bs | from-bytes
+let b2 = ints-to-bytes $bs | from-bytes
 assert_eq 'bytes codec length' 2 !{length $b2}
 let b2_txt = !{to-bytes $b2 | from-string}
 assert_eq 'bytes codec string' 'Hi' $b2_txt

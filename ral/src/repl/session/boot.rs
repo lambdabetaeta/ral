@@ -256,7 +256,7 @@ pub(super) fn setup_terminal(shell: &mut Shell) {
 /// the frontend settings the rc resolved (the defaults when no rc ran).
 ///
 /// Login profiles: `/etc/ral/profile`, then `~/.ral_profile` — scripts
-/// sourced for their effects, contracted to return `unit`.
+/// sourced for their effects, contracted to return `()`.
 /// RC: `$XDG_CONFIG_HOME/ral/rc` or `~/.ralrc` (created from a default
 /// skeleton if neither exists) — a configuration expression, contracted
 /// to return the map that [`apply_rc_config`] applies.
@@ -345,10 +345,10 @@ pub(super) fn create_frontend(
 //
 // Two kinds of startup file, each with exactly one contract on its return
 // value: a login profile is a script sourced for its effects and must
-// return `unit`; the rc file is a configuration expression and must
+// return `()`; the rc file is a configuration expression and must
 // return a map.  Both share [`evaluate_startup_file`].
 
-/// Source a login profile.  Anything other than `unit` — a configuration
+/// Source a login profile.  Anything other than `()` — a configuration
 /// map included — is rejected: silently discarding a returned map would
 /// let a misplaced `[theme: …]` in `~/.ral_profile` do nothing without a
 /// word, and configuration belongs in the rc file.  A profile only ever
@@ -363,7 +363,7 @@ fn source_profile_inner(path: &str, shell: &mut Shell) -> Result<(), String> {
     match evaluate_startup_file(path, shell)? {
         None | Some(Value::Unit) => Ok(()),
         Some(v) => Err(format!(
-            "{path}: profile must return unit; got {} — configuration belongs in the rc file",
+            "{path}: profile must return (); got {} — configuration belongs in the rc file",
             v.type_name()
         )),
     }
@@ -527,10 +527,10 @@ mod tests {
         )
     }
 
-    /// A side-effect-only profile returning `unit` sources cleanly.
+    /// A side-effect-only profile returning `()` sources cleanly.
     #[test]
     fn profile_returning_unit_sources_cleanly() {
-        let (_dir, path) = startup_file("return unit\n");
+        let (_dir, path) = startup_file("return ()\n");
         assert_eq!(source_profile_inner(&path, &mut booted_shell()), Ok(()));
     }
 
@@ -540,18 +540,18 @@ mod tests {
     fn profile_returning_map_is_rejected() {
         let (_dir, path) = startup_file("return [edit_mode: 'vi']\n");
         let err = source_profile_inner(&path, &mut booted_shell()).unwrap_err();
-        assert!(err.contains("profile must return unit; got Map"), "{err}");
+        assert!(err.contains("profile must return (); got Map"), "{err}");
         assert!(
             err.contains("configuration belongs in the rc file"),
             "{err}"
         );
     }
 
-    /// An rc file returning `unit` is rejected — the error names the rc
+    /// An rc file returning `()` is rejected — the error names the rc
     /// contract.
     #[test]
     fn rc_returning_unit_is_rejected() {
-        let (_dir, path) = startup_file("return unit\n");
+        let (_dir, path) = startup_file("return ()\n");
         let err = rc_config(&path, &mut booted_shell()).unwrap_err();
         assert!(err.contains("rc file must return a map; got Unit"), "{err}");
     }

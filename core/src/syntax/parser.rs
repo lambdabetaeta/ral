@@ -933,8 +933,23 @@ impl Parser {
         self.nested(|p| match p.peek() {
             Token::LBrace => p.parse_block(),
             Token::LBracket => p.parse_collection(),
+            Token::LParen => p.parse_unit(),
             _ => p.parse_word(),
         })
+    }
+
+    /// `unit-literal = '(' ')'` — the whole of what `(` opens out here.  Parenthesised
+    /// sub-expressions live in the arithmetic grammar of `$[…]` and nowhere else.
+    fn parse_unit(&mut self) -> Result<Ast, ParseError> {
+        self.expect(&Token::LParen)?;
+        if self.peek() == &Token::RParen {
+            self.advance();
+            return Ok(Ast::Unit);
+        }
+        Err(self.error(
+            "`(` opens the unit literal `()` and nothing else here — for arithmetic \
+             write `$[…]`, and to run a command inline write `!{…}`",
+        ))
     }
 
     /// `atom = primary ('[' word ']')*`
@@ -1619,7 +1634,7 @@ fn parse_force_body(tokens: Vec<(Token, Span)>) -> Result<Vec<Stmt>, ParseError>
 /// value literal.  A `^name` head never reaches a pattern, so `^try` still
 /// resolves through PATH.
 fn is_reserved(s: &str) -> bool {
-    crate::syntax::is_keyword(s) || matches!(s, "true" | "false" | "unit")
+    crate::syntax::is_keyword(s) || matches!(s, "true" | "false")
 }
 
 /// A map-literal key before its entry is built: a static label or a `$name`
@@ -2034,6 +2049,19 @@ mod tests {
         assert!(
             err.message.contains("comparison operator"),
             "expected a comparison-operator error, got: {}",
+            err.message
+        );
+    }
+
+    /// `(` opens the unit literal and nothing else, so a reader reaching for
+    /// grouping must be sent to the form that has it rather than told a token
+    /// was unexpected.
+    #[test]
+    fn a_lone_paren_names_the_unit_literal_and_the_expression_form() {
+        let err = parse("echo (1)").unwrap_err();
+        assert!(
+            err.message.contains("`()`") && err.message.contains("$[…]"),
+            "expected the unit literal and `$[…]` both named, got: {}",
             err.message
         );
     }
@@ -3267,8 +3295,7 @@ mod tests {
     #[test]
     fn parse_try_body_then_lambda() {
         // The shape the prelude writes: a bound body, a lambda handler.
-        let (op, redirects) =
-            unwrap_single_scope(parse("try $body { |err| return unit }").unwrap());
+        let (op, redirects) = unwrap_single_scope(parse("try $body { |err| return () }").unwrap());
         assert!(redirects.is_empty());
         match op {
             ScopeAst::Try { body, handler } => {

@@ -64,7 +64,7 @@ fn scenarios() -> Vec<Scenario> {
         ),
         s("let x = 3.14\nlet y = 1\nreturn $[$x + $y]", "float+int"),
         s("let a = 1\nlet b = true\nreturn $[$a + $b]", "int+bool"),
-        s("let a = unit\nreturn $[$a + 1]", "unit+int"),
+        s("let a = ()\nreturn $[$a + 1]", "unit+int"),
         s("if 1 { return 1 } else { return 2 }", "non-bool-cond"),
         s("if hello { return 1 } else { return 2 }", "string-cond"),
         s("if [a: 1] { return 1 } else { return 2 }", "record-cond"),
@@ -167,12 +167,9 @@ fn scenarios() -> Vec<Scenario> {
             "let r = [`a: 1, `b: hello]\nreturn $r[`a]",
             "tag-keyed-bad-mix",
         ),
+        s("return [1, hello, true, (), [a: 1]]", "all-mismatched-list"),
         s(
-            "return [1, hello, true, unit, [a: 1]]",
-            "all-mismatched-list",
-        ),
-        s(
-            "return [1, [a: 1], hello, true, [b: 2], unit, [1, 2]]",
+            "return [1, [a: 1], hello, true, [b: 2], (), [1, 2]]",
             "wide-mismatch",
         ),
         // ─── Pipeline shape: a stage must be ready to run ────────────────

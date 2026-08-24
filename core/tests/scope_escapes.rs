@@ -78,7 +78,7 @@ fn statically_rejected(source: &str) -> bool {
 
 // ── (1) `try` must not swallow `exit` ────────────────────────────────────
 
-/// Regression for: `try { exit 7 } { |_| return unit }` used to exit 0
+/// Regression for: `try { exit 7 } { |_| return () }` used to exit 0
 /// because `classify` (then in `core/src/builtins/control.rs`, now in
 /// `core/src/evaluator/scope.rs`) mapped
 /// `Err(Break::Escape(Escape::Exit(_)))` to `Outcome { ok: true, value: Unit }`,
@@ -91,7 +91,7 @@ fn statically_rejected(source: &str) -> bool {
 #[test]
 fn try_does_not_swallow_exit() {
     let mut shell = fresh_shell();
-    let result = top_level(&mut shell, "try { exit 7 } { |_e| return unit }");
+    let result = top_level(&mut shell, "try { exit 7 } { |_e| return () }");
     match result {
         Err(Break::Escape(Escape::Exit(7))) => {}
         Err(Break::Escape(Escape::Exit(other))) => panic!(
@@ -229,10 +229,7 @@ fn audit_recording_survives_consecutive_audit_blocks() {
     // Pre-fix this set the dispatcher flag.  We discard the returned
     // tree — the bug it leaves behind is observable in the *next*
     // block.
-    let _ = top_level(
-        &mut shell,
-        "audit { guard { return unit } { return unit } }",
-    );
+    let _ = top_level(&mut shell, "audit { guard { return () } { return () } }");
     // Second audit block: the first dispatched command inside the
     // body would be eaten by the stale flag.
     let tree = match top_level(&mut shell, "audit { echo hi }") {

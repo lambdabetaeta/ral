@@ -16,7 +16,7 @@ let other = if false { echo one } else { echo two }
 assert_eq 'if else-arm' two $other
 
 # An empty arm is subsumed into the byte side and contributes the empty
-# String — not `unit`, which would make the comparison below ill-typed.
+# String — not `()`, which would make the comparison below ill-typed.
 let empty_arm = if false { echo one } else {}
 assert_eq 'empty arm' '' $empty_arm
 
@@ -28,13 +28,13 @@ assert_eq 'chain arm' fallback $chained
 let guarded = guard { echo body } { echo cleanup }
 assert_eq 'guard body' body $guarded
 
-let recovered = try { ^false } { |_| return unit }
+let recovered = try { ^false } { |_| return () }
 assert_eq 'try handler' '' $recovered
 
 # The body arm is a variable, not a literal block, so it is eta-expanded
 # before the capture is placed.
 let arm = { echo indirect }
-let indirect = try $arm { |_| return unit }
+let indirect = try $arm { |_| return () }
 assert_eq 'eta-expanded arm' indirect $indirect
 
 echo 'join capture done'

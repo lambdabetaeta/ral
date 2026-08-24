@@ -157,7 +157,7 @@ the templates hold and a scheme does not:
 | **T0050** arity | a scheme gives arity by curry depth, but under-application would become legal for a builtin as it is for a lambda — bare `explain` would stop being an error |
 | **T0054** | `DecoderTakesNoArgument`, the `from-*` diagnostic |
 | **T0055** | `check_error_message`, reachable only through `ArgTemplate::ErrorRecord` |
-| `OneOf` precision | `to-bytes 3` and `to-bytes [1.5]` would become statically legal |
+| `OneOf` precision — **paid 2026-08-24** | `to-bytes 3` and `to-bytes [1.5]` would become statically legal |
 | per-argument spans | `unify_arg_template` underlines the offending argument; a scheme mismatch underlines the call |
 
 The templates are cruft, and their shape says so: `BlockOrLambda` (`alias`),
@@ -165,6 +165,22 @@ The templates are cruft, and their shape says so: `BlockOrLambda` (`alias`),
 each. Read it as such — and then take it as the templates' own plan, with that
 price list as its agenda. Five diagnostics are not to be smuggled out under a
 refactor.
+
+> **Amended 2026-08-24.** One row of that price list is paid, and it was paid by
+> naming rather than by weakening. `to-bytes` narrows to `Bytes → F[Bytes] Unit`
+> and the list-of-`Int` convenience becomes its own builtin, `ints-to-bytes :
+> [Int] → F[Bytes] Unit`, on the operand-prefix precedent of `bytes-to-string`.
+> Both rejections the row priced — `to-bytes 3`, `to-bytes [1.5]` — survive as
+> ordinary unification failures, so `ArgTemplate::OneOf` is deleted with no user
+> and no diagnostic smuggled out. `ArgTemplate::Any` goes in the same stroke, its
+> slots respelled `ArgTemplate::Ty(TyTemplate::Any)`; the **T0050** row is
+> *honoured, not paid* — those builtins keep their `Sig` arity diagnostics.
+>
+> What the row was really pricing is the reason it had to go. `OneOf`'s
+> resolution branched on the current substitution, imposing `Bytes` on a
+> still-open variable and so reading the store's progress as a verdict — the one
+> move the solver forbids itself ([[internals/type-inference|type-inference]]).
+> No rule in the builtin tables tests an equation it should impose any more.
 
 ## The prize is reachable, and taken next door
 

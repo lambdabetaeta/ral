@@ -1014,7 +1014,7 @@ mod tests {
     /// `try` classifies a cancellation like any recoverable error, so a handler
     /// that settles cleanly resets `last_status` to 0 — the run boundary must
     /// re-poll the monotone scope before the status is read, or a final
-    /// `try { … } { |_| return unit }` suppresses the interrupt entirely.
+    /// `try { … } { |_| return () }` suppresses the interrupt entirely.
     #[test]
     fn a_try_handler_cannot_settle_a_cancelled_run() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
@@ -1029,7 +1029,7 @@ mod tests {
         shell.face_signals();
         match shell.run(RunRequest {
             lifecycle: Box::new(CancelInPreExec),
-            ..capture_req("try { let x = unit\nreturn $x } { |_| return unit }")
+            ..capture_req("try { let x = ()\nreturn $x } { |_| return () }")
         }) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(

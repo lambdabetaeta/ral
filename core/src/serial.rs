@@ -370,7 +370,7 @@ impl<X> FOValue<X> {
     #[must_use]
     pub fn shape(&self) -> String {
         match self {
-            Self::Unit => "unit".to_string(),
+            Self::Unit => "()".to_string(),
             Self::Bool { .. } => "a Bool".to_string(),
             Self::Int { .. } => "an Int".to_string(),
             Self::Float { .. } => "a Float".to_string(),

@@ -1621,7 +1621,7 @@ keep-bottom
         let mut shell = fresh_shell();
         let r = run_once(
             &mut shell,
-            "return [stderr: !{to-bytes [107, 105, 108, 108, 101, 100, 255] | from-bytes}]",
+            "return [stderr: !{ints-to-bytes [107, 105, 108, 108, 101, 100, 255] | from-bytes}]",
         );
         assert_eq!(
             r.exit,

@@ -61,7 +61,8 @@ impl Ast {
     ) {
         match self {
             Self::Variable(n) => note_free(n, candidates, scopes, out),
-            Self::Literal(_)
+            Self::Unit
+            | Self::Literal(_)
             | Self::Word(Word::Plain(_) | Word::Slash(_) | Word::Tilde(_))
             | Self::Return(None) => {}
             Self::Lambda { param, body } => {

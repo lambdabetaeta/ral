@@ -26,10 +26,12 @@ use crate::types::BuiltinTable;
 /// a list of slots to diagnose one by one.
 #[derive(Clone, Copy)]
 pub enum BuiltinTypeRule {
-    /// Standard polytype, written by hand where the templates cannot say it.
+    /// Standard polytype: a curried value, which a call may leave
+    /// under-applied for the residual arrow to carry.
     Scheme(fn(&mut Unifier) -> Scheme),
-    /// Per-argument templates: one type vocabulary the checker can diagnose
-    /// argument by argument, at the arity the template list declares.
+    /// The same polytype as const data, the verb's name and count included, so
+    /// a short call in command position is *this* verb's arity error rather
+    /// than an anonymous mismatch further down.
     Sig(BuiltinSig),
 }
 
@@ -78,9 +80,7 @@ pub struct BuiltinSig {
 #[derive(Clone, Copy)]
 pub enum ArgTemplate {
     Ty(TyTemplate),
-    Any,
     BlockOrLambda,
-    OneOf(&'static [Self]),
     /// An error record: `status` and an open tail, the shape `try` hands its
     /// handler.  Not a record former — one named type, whose optional
     /// `message` no row can spell.  See [`error_record_arg`].
@@ -210,22 +210,21 @@ macro_rules! curry {
     ($p:expr, $($rest:expr),+ => $ret:expr) => { fun($p, curry!($($rest),+ => $ret)) };
 }
 
-/// Template signatures for builtins the scheme vocabulary cannot diagnose
-/// argument by argument.
+/// Template signatures: a builtin's typing as const data.
+///
+/// Name and arity travel with the type, so a short call in command position
+/// is that verb's own arity error — `cd` expected 1 argument — and not a
+/// mismatch reported anonymously downstream.
 pub mod sig {
     use super::{
         ArgTemplate, BuiltinDiagnostic, BuiltinSig, CompTemplate, GroundRoute, TyTemplate,
     };
 
-    const ANY: ArgTemplate = ArgTemplate::Any;
+    const ANY: ArgTemplate = ArgTemplate::Ty(TyTemplate::Any);
     const STR: ArgTemplate = ArgTemplate::Ty(TyTemplate::String);
     const INT: ArgTemplate = ArgTemplate::Ty(TyTemplate::Int);
     const FLOAT: ArgTemplate = ArgTemplate::Ty(TyTemplate::Float);
     const BLOCK: ArgTemplate = ArgTemplate::BlockOrLambda;
-    const BYTES_OR_INT_LIST: &[ArgTemplate] = &[
-        ArgTemplate::Ty(TyTemplate::Bytes),
-        ArgTemplate::Ty(TyTemplate::ListInt),
-    ];
 
     const TWO_INTS: &[ArgTemplate] = &[INT, INT];
     const ONE_ANY: &[ArgTemplate] = &[ANY];
@@ -234,7 +233,8 @@ pub mod sig {
     const ONE_INT: &[ArgTemplate] = &[INT];
     const ONE_FLOAT: &[ArgTemplate] = &[FLOAT];
     const FLOAT_INT: &[ArgTemplate] = &[FLOAT, INT];
-    const TO_BYTES_ARGS: &[ArgTemplate] = &[ArgTemplate::OneOf(BYTES_OR_INT_LIST)];
+    const ONE_BYTES: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::Bytes)];
+    const ONE_INT_LIST: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::ListInt)];
     const TO_LINES_ARGS: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::ListAny)];
     const NO_ARGS: &[ArgTemplate] = &[];
     const ALIAS_ARGS: &[ArgTemplate] = &[STR, BLOCK];
@@ -287,7 +287,13 @@ pub mod sig {
     pub const FROM_JSON: BuiltinSig = decoder(ret(TyTemplate::Any));
     pub const FROM_LINES: BuiltinSig = decoder(CompTemplate::LinesStep);
 
-    pub const TO_BYTES: BuiltinSig = command(TO_BYTES_ARGS, ret_bytes());
+    /// `to-bytes`: [`FROM_BYTES`]'s inverse, and nothing wider — the bytes go
+    /// back out the way they came in.
+    pub const TO_BYTES: BuiltinSig = command(ONE_BYTES, ret_bytes());
+
+    /// `ints-to-bytes`: ral has no byte literal, so a list of `Int` is how
+    /// bytes are written by number.  No decoder reads them back as a list.
+    pub const INTS_TO_BYTES: BuiltinSig = command(ONE_INT_LIST, ret_bytes());
 
     pub const TO_ANY_BYTES: BuiltinSig = command(ONE_ANY, ret_bytes());
 
@@ -899,9 +905,7 @@ pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
 }
 
 /// Derive a `Sig`-ruled builtin's value scheme: the argument templates become
-/// the curry spine, the result template the comp.  `OneOf` derives
-/// conservatively to a fresh variable: command position keeps the precise
-/// diagnostic, and the body still refuses at runtime.
+/// the curry spine, the result template the comp.
 ///
 /// The built `Ty` goes through [`generalize`] against an empty [`TyEnv`]
 /// rather than a hand-rolled quantifier list: `generalize` already snapshots
@@ -935,12 +939,10 @@ pub fn sig_comp_ty(sig: &BuiltinSig, u: &mut Unifier) -> CompTy {
     CompTy::Return(route, Box::new(value))
 }
 
-/// An argument template's type in a derived value scheme; `OneOf` joins
-/// `Any` in deriving to a fresh variable.
+/// An argument template's type in a derived value scheme.
 fn arg_template_ty(template: ArgTemplate, u: &mut Unifier) -> Ty {
     match template {
         ArgTemplate::Ty(t) => ty_of_template(t, u),
-        ArgTemplate::Any | ArgTemplate::OneOf(_) => u.fresh_ty(),
         ArgTemplate::BlockOrLambda => Ty::Thunk(Box::new(u.fresh_comp_ty())),
         ArgTemplate::ErrorRecord => error_record_arg(u),
     }
@@ -1041,7 +1043,6 @@ impl Inferencer<'_> {
 
     fn unify_arg_template(&mut self, actual: &Ty, template: ArgTemplate) {
         match template {
-            ArgTemplate::Any => {}
             ArgTemplate::Ty(ty) => {
                 let expected = self.ty_from_template(ty);
                 self.ctx
@@ -1052,41 +1053,6 @@ impl Inferencer<'_> {
                 let expected = Ty::Thunk(Box::new(result));
                 self.ctx
                     .unify_ty(actual, &expected, Reason::BuiltinBlockArg);
-            }
-            ArgTemplate::OneOf(options) => {
-                let resolved = self.ctx.unifier.apply_ty(actual);
-                match resolved {
-                    Ty::Bytes
-                        if options
-                            .iter()
-                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) => {}
-                    Ty::List(_)
-                        if options
-                            .iter()
-                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::ListInt))) =>
-                    {
-                        self.ctx.unify_ty(
-                            actual,
-                            &Ty::List(Box::new(Ty::Int)),
-                            Reason::BuiltinTypedArg,
-                        );
-                    }
-                    Ty::Var(_)
-                        if options
-                            .iter()
-                            .any(|o| matches!(o, ArgTemplate::Ty(TyTemplate::Bytes))) =>
-                    {
-                        self.ctx
-                            .unify_ty(actual, &Ty::Bytes, Reason::BuiltinTypedArg);
-                    }
-                    _ => {
-                        if let Some(ArgTemplate::Ty(ty)) = options.first() {
-                            let expected = self.ty_from_template(*ty);
-                            self.ctx
-                                .unify_ty(actual, &expected, Reason::BuiltinTypedArg);
-                        }
-                    }
-                }
             }
             ArgTemplate::ErrorRecord => {
                 let expected = error_record_arg(&mut self.ctx.unifier);

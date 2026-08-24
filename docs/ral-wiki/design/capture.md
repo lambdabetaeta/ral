@@ -32,7 +32,7 @@ reach the terminal. Inside a [[design/pipelines|pipeline]] "visible" is
 stage-relative — a non-final stage's own stdout *is* the wire, and a stage runs
 in a fresh child shell with no enclosing capture at all, so a flush there
 bottoms out at the wire rather than escaping the pipeline. `!{ echo a; return
-unit } | cat` therefore writes `a` into `cat` by exactly this clause, with no
+() } | cat` therefore writes `a` into `cat` by exactly this clause, with no
 pipeline rule involved.
 
 This is the load-bearing clause, and the one an implementation can get subtly

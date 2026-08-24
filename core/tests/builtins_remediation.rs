@@ -354,31 +354,25 @@ fn lines_keeps_interior_blank() {
 //
 // The deleted `__decode-captured` builtin indexed `args[0]` and a spread call
 // reached it with an empty argv, panicking past a catchable error. Its
-// sibling encoders (`to-json`, `to-csv`, `to-bytes`, `to-string`, `to-line`,
-// `to-lines`) share that same `&args[0]` shape, and each takes its one
+// sibling encoders (`to-json`, `to-csv`, `to-bytes`, `ints-to-bytes`,
+// `to-string`, `to-line`, `to-lines`) share that `&args[0]` shape, and each takes its one
 // argument by application: it has no argv, so `...` has nothing to spread
 // into and the checker refuses the call outright. These tests pin that the
 // shape is unreachable, at the door rather than in the body.
 
 #[test]
 fn a_spread_never_reaches_to_json() {
-    expect_type_code(
-        "let nothing = []\nto-json ...$nothing\nreturn unit",
-        "T0056",
-    );
+    expect_type_code("let nothing = []\nto-json ...$nothing\nreturn ()", "T0056");
 }
 
 #[test]
 fn a_spread_never_reaches_to_csv() {
-    expect_type_code("let nothing = []\nto-csv ...$nothing\nreturn unit", "T0056");
+    expect_type_code("let nothing = []\nto-csv ...$nothing\nreturn ()", "T0056");
 }
 
 #[test]
 fn a_spread_never_reaches_to_bytes() {
-    expect_type_code(
-        "let nothing = []\nto-bytes ...$nothing\nreturn unit",
-        "T0056",
-    );
+    expect_type_code("let nothing = []\nto-bytes ...$nothing\nreturn ()", "T0056");
 }
 
 // ── an encoder omitting its value is refused before it runs ───────────────
@@ -386,13 +380,14 @@ fn a_spread_never_reaches_to_bytes() {
 // `!{to-json}` captures a byte-routed operand, whose value is `Unit` by typing
 // (WF-2) — something `eval_capture` asserts rather than checks. An encoder
 // without its argument is a partial `Native`, so the arity gate is what keeps
-// the assert honest: the run door refuses each of the six before evaluation,
+// the assert honest: the run door refuses each of the seven before evaluation,
 // and only saturated calls ever reach the capture.
 
 #[test]
 fn captured_encoders_without_a_value_are_rejected() {
     for name in [
         "to-bytes",
+        "ints-to-bytes",
         "to-string",
         "to-line",
         "to-lines",

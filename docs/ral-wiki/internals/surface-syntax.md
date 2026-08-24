@@ -20,6 +20,13 @@ a name character, so `"$os-$arch"` splits into two derefs around a literal `-`;
 arithmetic sublanguage `$[…]` is pre-scanned by a dedicated `scan_expr_block` so
 its Pratt parser downstream sees exactly those tokens.
 
+**A word's *literal* shape is lexical too.** `WordLiteral::classify` (`ast.rs`)
+reads a bare word and nothing else — no expected type, no scope, no head — so a
+numeral denotes its number wherever it stands and a token meaning bytes is
+quoted ([[invariants/numerals-denote-numbers|numerals-denote-numbers]]). Both the
+parser (skipping the `Call` wrapper for a value head) and elaboration (through
+`Val::from_word`) read that one answer.
+
 **Parsing is recursive descent with a Pratt core for expressions.**
 `parse(source)` returns `Vec<Stmt>` or a `ParseError`. Statement and pipeline
 productions descend recursively (`parse_stmt`, `parse_pipeline`, `parse_primary`)

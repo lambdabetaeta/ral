@@ -16,8 +16,8 @@ let base = 'outer'
 !{{ |_|
     let x = 'inner'
     echo $x
-    return unit
-} unit}
+    return ()
+} ()}
 echo $base
 
 # Shadowing in for does not leak

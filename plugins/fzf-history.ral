@@ -52,7 +52,7 @@ return { |options|
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
         }
-        return unit
+        return ()
     }
 
     return [

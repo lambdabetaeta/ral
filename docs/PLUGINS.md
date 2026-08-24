@@ -447,7 +447,7 @@ return { |options|
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
         }
-        return unit
+        return ()
     }
 
     return [
@@ -508,7 +508,7 @@ return { |options|
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
         }
-        return unit
+        return ()
     }
 
     return [
@@ -572,7 +572,7 @@ return { |options|
         } elsif $[$r[status] != 0 && $r[status] != 1 && $r[status] != 130] {
             fail [status: $r[status], message: "fzf: $r[output]"]
         }
-        return unit
+        return ()
     }
 
     return [
@@ -629,8 +629,8 @@ return { |options|
         let word = $cw[word]
         let wn = length $word
         let tn = length $trigger
-        if $[$wn < $tn] { return unit }
-        if $[$tn > 0 && not !{equal !{slice $word $[$wn - $tn] $tn} $trigger}] { return unit }
+        if $[$wn < $tn] { return () }
+        if $[$tn > 0 && not !{equal !{slice $word $[$wn - $tn] $tn} $trigger}] { return () }
         let prefix = slice $word 0 $[$wn - $tn]
         let lbuf = slice $text 0 $cw[off]
         let seg = last !{re-split '[|;&\n]' $lbuf}
@@ -651,7 +651,7 @@ return { |options|
         } else {
             _path-complete $prefix $lbuf 'path'
         }
-        return unit
+        return ()
     }
 
     return [
@@ -672,7 +672,7 @@ or `ps` output to plain `fzf`), and the host-list readers
 ```
 let _handler = { |ev|
     let new = $ev[line]
-    _if !{is-empty $new} { _ed-highlight []; return unit } {}
+    _if !{is-empty $new} { _ed-highlight []; return () } {}
     let toks  = split '[ \t]+' $new
     let head  = $toks[0]
     let style = try { which $head; return 'command' } { |_| return 'error' }

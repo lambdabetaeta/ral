@@ -1,7 +1,7 @@
 # Test: set operations (maps as sets with Unit values)
 
-let left = [alice: unit, bob: unit, carol: unit]
-let right = [bob: unit, dave: unit, eve: unit]
+let left = [alice: (), bob: (), carol: ()]
+let right = [bob: (), dave: (), eve: ()]
 
 # has — membership
 echo !{has $left alice}

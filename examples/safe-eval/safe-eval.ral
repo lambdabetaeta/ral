@@ -13,14 +13,14 @@ let try-op = { |label body|
 
 echo 'outside the grant block:'
 try-op 'write inside  /tmp'      { to-string 'ok' > "$sandbox/scratch" }
-try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return unit }
+try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return () }
 
 echo ''
 echo 'inside grant [exec: [:], fs: [read+write only the sandbox]]:'
 grant [exec: [:], fs: [read: [$sandbox], write: [$sandbox]]] {
     try-op 'write inside  sandbox'   { to-string 'ok' > "$sandbox/inside"  }
     try-op 'write outside sandbox'   { to-string 'no' > "/tmp/escape"      }
-    try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return unit }
+    try-op 'read  /etc/hosts'        { let _ = !{from-string < /etc/hosts} ; return () }
     try-op 'exec  curl'              { curl http://example.com 2> /dev/null }
 }
 

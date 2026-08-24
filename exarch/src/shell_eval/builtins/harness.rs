@@ -1011,7 +1011,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 9] = [
     BuiltinEntry::new(
         Cow::Borrowed("pin-read"),
         BuiltinTypeRule::Scheme(scheme_pin_read),
-        "pin-read <key>  — the card currently pinned under KEY on your register, as a `card value you can destructure, or unit if the slot is empty. Reads your own register only. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "pin-read <key>  — the card currently pinned under KEY on your register, as a `card value you can destructure, or () if the slot is empty. Reads your own register only. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_pin_read),
     ),
     BuiltinEntry::new(

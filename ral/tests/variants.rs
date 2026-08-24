@@ -103,7 +103,7 @@ fn case_arm_naming_a_handler_is_captured_like_an_inline_one() {
     let named = common::run(
         "case_named_arm",
         "let h = { |p| echo b }\n\
-         let xv = case `some unit [`some: $h, `none: { |p| echo z }]\n\
+         let xv = case `some () [`some: $h, `none: { |p| echo z }]\n\
          echo \"got [$xv]\"\n",
     );
     assert_eq!(named.status, 0, "stderr: {}", named.stderr);
@@ -112,7 +112,7 @@ fn case_arm_naming_a_handler_is_captured_like_an_inline_one() {
     let inline = common::run(
         "case_inline_arm",
         "let h = { |p| echo b }\n\
-         let xv = case `some unit [`some: { |p| $h $p }, `none: { |p| echo z }]\n\
+         let xv = case `some () [`some: { |p| $h $p }, `none: { |p| echo z }]\n\
          echo \"got [$xv]\"\n",
     );
     assert_eq!(inline.status, 0, "stderr: {}", inline.stderr);
@@ -131,7 +131,7 @@ fn case_arm_leaves_its_status_as_the_cases_own() {
     let out = common::run(
         "case_arm_leaves_status",
         "true\n\
-         case `go unit [`go: { |_| false }]\n",
+         case `go () [`go: { |_| false }]\n",
     );
     assert_eq!(out.status, 1, "stderr: {}", out.stderr);
 }

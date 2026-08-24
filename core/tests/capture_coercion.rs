@@ -96,7 +96,7 @@ fn an_alias_cannot_stand_in_for_the_coercion() {
     let mut shell = fresh_shell();
     ok(
         &mut shell,
-        "alias __decode-captured { |_| return 42 }\nreturn unit",
+        "alias __decode-captured { |_| return 42 }\nreturn ()",
     );
     assert_eq!(
         ok(&mut shell, "__decode-captured anything"),
@@ -116,7 +116,7 @@ fn an_alias_cannot_blank_a_captured_binding() {
     let mut shell = fresh_shell();
     ok(
         &mut shell,
-        "alias __decode-captured { |_| return \"\" }\nreturn unit",
+        "alias __decode-captured { |_| return \"\" }\nreturn ()",
     );
     assert_eq!(
         ok(&mut shell, "let greeting = echo hello\nreturn $greeting"),
@@ -153,7 +153,7 @@ fn a_handler_frame_cannot_stand_in_for_the_coercion() {
 #[test]
 fn a_binding_named_like_the_old_synthesized_binder_survives() {
     let mut shell = fresh_shell();
-    ok(&mut shell, "let __captured = 7\nreturn unit");
+    ok(&mut shell, "let __captured = 7\nreturn ()");
     assert_eq!(
         ok(&mut shell, "let captured = echo hi\nreturn $__captured"),
         Value::Int(7)
@@ -169,7 +169,7 @@ fn a_binding_named_like_the_old_synthesized_binder_survives() {
 #[test]
 fn the_coercion_leaves_no_binding_in_scope() {
     let mut shell = fresh_shell();
-    ok(&mut shell, "let captured = echo hi\nreturn unit");
+    ok(&mut shell, "let captured = echo hi\nreturn ()");
     let leaked = run(&mut shell, "return $__captured");
     assert!(
         leaked.is_err(),

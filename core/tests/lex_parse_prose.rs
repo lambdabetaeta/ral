@@ -230,7 +230,6 @@ fn random_token_soup_never_panics_and_messages_are_friendly() {
         "case",
         "true",
         "false",
-        "unit",
         "try",
         "guard",
         "within",
@@ -265,6 +264,7 @@ fn random_token_soup_never_panics_and_messages_are_friendly() {
         "]",
         "(",
         ")",
+        "()",
         // Pipeline and chain.
         "|",
         "?",
@@ -457,8 +457,8 @@ fn nested_stream_error_spans_point_into_the_outer_source() {
 #[test]
 fn spread_in_control_op_operand_is_a_parse_error_not_a_panic() {
     let cases = &[
-        ("try_first", "let x = [1, 2]\ntry ...$x { |e| return unit }"),
-        ("try_second", "try { return unit } ...$h"),
+        ("try_first", "let x = [1, 2]\ntry ...$x { |e| return () }"),
+        ("try_second", "try { return () } ...$h"),
         ("guard_first", "guard ...$b { echo done }"),
         ("audit_only", "audit ...$b"),
     ];
@@ -575,7 +575,7 @@ const REACHABLE: &[Reachable] = &[
     // surviving into the elaborator (which has no lowering for it).
     r(
         "parse_control_op_spread",
-        "try ...$x { |e| return unit }",
+        "try ...$x { |e| return () }",
         "spread",
     ),
     // Unterminated top-level `{` / `[`: the lexer tracks the open

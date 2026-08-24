@@ -8,7 +8,7 @@
 let [root] = $ARGS
 
 let scan = { |dir|
-    let listing = try { return `ok !{list-dir $dir} } { |_| return `denied unit }
+    let listing = try { return `ok !{list-dir $dir} } { |_| return `denied () }
     case $listing [
         `denied: { |_| return [verdict: `unknown, rows: [[path: $dir, verdict: `unknown]]] },
         `ok: { |items|

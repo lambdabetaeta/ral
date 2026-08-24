@@ -8,7 +8,7 @@
 if !{is-empty $ARGS} {
     fail [status: 2, message: 'usage: http-status URL...']
 } else {
-    return unit
+    return ()
 }
 
 let probe = { |u|
@@ -28,6 +28,6 @@ let classes = group-by { |r|
 for !{keys $classes} { |c| echo "$c: $[!{length $classes[$c]}]" }
 
 let dead = filter { |r| equal $r[code] '000' } $results
-if !{is-empty $dead} { return unit } else {
+if !{is-empty $dead} { return () } else {
     fail [status: 1, message: "unreachable: $[!{intercalate ', ' !{map { |r| return $r[url] } $dead}}]"]
 }

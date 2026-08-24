@@ -2295,13 +2295,13 @@ fn spawn_passes_closure_that_spawns() {
 
 #[test]
 fn unit_literal() {
-    assert_eq!(must_succeed("return unit"), Value::Unit);
+    assert_eq!(must_succeed("return ()"), Value::Unit);
 }
 
 #[test]
 fn unit_in_map() {
     assert_eq!(
-        must_succeed("let m = [done: unit]\nreturn $m[done]"),
+        must_succeed("let m = [done: ()]\nreturn $m[done]"),
         Value::Unit
     );
 }
@@ -2407,10 +2407,10 @@ fn interpolation_coerces_int() {
 }
 
 #[test]
-fn interpolation_coerces_unit_to_empty() {
+fn interpolation_renders_unit_as_its_literal() {
     assert_eq!(
-        must_succeed("let uu = unit\nreturn \"val: $uu end\""),
-        Value::String("val:  end".into())
+        must_succeed("let uu = ()\nreturn \"val: $uu end\""),
+        Value::String("val: () end".into())
     );
 }
 
@@ -2500,7 +2500,7 @@ fn hoist_left_to_right_observable_via_filesystem() {
     let path = format!("/tmp/ral_hoist_test_{}.txt", std::process::id());
     let _ = std::fs::remove_file(&path);
     let script = format!(
-        "let f = {{ |a b c| return unit }}\n\
+        "let f = {{ |a b c| return () }}\n\
          !{{f !{{/bin/sh -c 'echo A >> {path}'}} !{{/bin/sh -c 'echo B >> {path}'}} !{{/bin/sh -c 'echo C >> {path}'}}}}"
     );
     must_succeed(&script);
@@ -2767,7 +2767,7 @@ fn helper_stage_cd_does_not_flow_back_to_parent() {
     assert_eq!(
         must_succeed(
             "let before = !{pwd}\n\
-             let wander = { from-line; cd /tmp; return unit }\n\
+             let wander = { from-line; cd /tmp; return () }\n\
              !{echo x | !$wander}\n\
              let after = !{pwd}\n\
              return !{equal $before $after}"

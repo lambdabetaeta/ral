@@ -76,6 +76,9 @@ pub enum Ast {
         param: Spanned<Param>,
         body: Vec<Stmt>,
     },
+    /// `()` — punctuation that denotes the unit value, like `[]` and `[:]`,
+    /// and so not a word.
+    Unit,
     /// `[a, b, c]`
     List(Vec<ListElem>),
     /// `[key: val, key: val]`
@@ -476,12 +479,13 @@ impl ScopeAst {
 /// command name?", read by the parser to skip the [`Ast::Call`] wrapper and
 /// by elaboration through [`crate::ir::Val::from_word`].
 ///
-/// A float wants an embedded `.`, so `1e5`, which merely happens to
-/// f64-parse, stays a string.
+/// Purely lexical: the numeral grammar decides, never a round trip through
+/// printing.  A float wants a `.`, so `1e5`, which merely happens to f64-parse,
+/// stays a string; `007` and `1.50` are numerals all the same, and normalise
+/// to `7` and `1.5` wherever they are printed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WordLiteral {
     Bool(bool),
-    Unit,
     Int(i64),
     Float(f64),
 }
@@ -491,7 +495,6 @@ impl WordLiteral {
         match s {
             "true" => Some(Self::Bool(true)),
             "false" => Some(Self::Bool(false)),
-            "unit" => Some(Self::Unit),
             _ => {
                 if let Ok(i) = s.parse::<i64>() {
                     Some(Self::Int(i))

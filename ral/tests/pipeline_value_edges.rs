@@ -50,12 +50,12 @@ fn read_json_from_non_utf8_pipeline_fails() {
 }
 
 #[test]
-fn to_bytes_roundtrips_through_from_bytes() {
-    // to-bytes writes bytes to the channel (not a list of ints); from-bytes
-    // decodes them back to Value::Bytes.
+fn ints_to_bytes_roundtrips_through_from_bytes() {
+    // Both writers put bytes on the channel — `ints-to-bytes` from numbers,
+    // `to-bytes` from a Bytes value — and from-bytes decodes them back.
     // Verify the roundtrip via length and string decoding (pure ASCII input).
     let o = run_pipe(
-        "let bs = !{to-bytes [65, 66, 67] | from-bytes}\necho !{length $bs}\nlet txt = !{to-bytes $bs | from-string}\necho $txt",
+        "let bs = !{ints-to-bytes [65, 66, 67] | from-bytes}\necho !{length $bs}\nlet txt = !{to-bytes $bs | from-string}\necho $txt",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     let lines: Vec<&str> = o.stdout.lines().collect();
@@ -63,26 +63,48 @@ fn to_bytes_roundtrips_through_from_bytes() {
 }
 
 #[test]
-fn to_bytes_rejects_out_of_range_values() {
-    let o = run_pipe("!{to-bytes [256]}");
+fn ints_to_bytes_rejects_out_of_range_values() {
+    let o = run_pipe("!{ints-to-bytes [256]}");
     assert_ne!(o.status, 0);
     assert!(
-        o.stderr.contains("to-bytes: byte at index 0 out of range"),
+        o.stderr
+            .contains("ints-to-bytes: byte at index 0 out of range"),
         "stderr: {}",
         o.stderr
     );
 }
 
 #[test]
-fn to_bytes_rejects_non_int_values() {
+fn ints_to_bytes_rejects_non_int_values() {
     // The list element type is checked before the codec runs, so this is a
     // static failure rather than the builtin's runtime index diagnostic.
-    let o = run_pipe("!{to-bytes ['x']}");
+    let o = run_pipe("!{ints-to-bytes ['x']}");
     assert_ne!(o.status, 0);
     assert!(
         o.stderr
             .contains("couldn't match type String with type Integer"),
         "stderr: {}",
+        o.stderr
+    );
+}
+
+/// The two writers keep their own argument: neither stands in for the other,
+/// and both refusals are static.
+#[test]
+fn each_byte_writer_refuses_the_others_argument() {
+    let o = run_pipe("!{to-bytes [65, 66]}");
+    assert_ne!(o.status, 0);
+    assert!(
+        o.stderr.contains("couldn't match"),
+        "a list is not a Bytes value: {}",
+        o.stderr
+    );
+
+    let o = run_pipe("let bs = !{ints-to-bytes [65] | from-bytes}\nints-to-bytes $bs");
+    assert_ne!(o.status, 0);
+    assert!(
+        o.stderr.contains("couldn't match"),
+        "a Bytes value is not a list of Ints: {}",
         o.stderr
     );
 }
@@ -228,7 +250,7 @@ fn an_interior_decoders_returned_bytes_never_reach_the_next_stage() {
 /// A producer need not write; an empty stream is still a byte stream.
 #[test]
 fn a_silent_producer_gives_its_consumer_eof() {
-    let o = run_pipe("!{ return unit } | cat");
+    let o = run_pipe("!{ return () } | cat");
     assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
     assert!(
         o.stdout.is_empty(),
@@ -242,7 +264,7 @@ fn a_silent_producer_gives_its_consumer_eof() {
 /// the stage's own value is `unit`.
 #[test]
 fn a_discarded_statements_bytes_reach_the_pipe() {
-    let o = run_pipe("!{ echo x; return unit } | cat");
+    let o = run_pipe("!{ echo x; return () } | cat");
     assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
     assert_eq!(
         o.stdout, "x\n",
@@ -263,7 +285,7 @@ fn a_consumer_that_ignores_its_stdin_still_returns_its_value() {
 /// EOF rather than `A`.  There is no implicit value pipe.
 #[test]
 fn a_returned_bytes_value_is_not_written_to_the_next_stage() {
-    let o = run_pipe("to-bytes [65] | from-bytes | cat");
+    let o = run_pipe("ints-to-bytes [65] | from-bytes | cat");
     assert_eq!(o.status, 0, "expected acceptance: {}", o.stderr);
     assert!(
         o.stdout.is_empty(),
@@ -506,10 +528,10 @@ fn to_json_pipes_to_from_json() {
 }
 
 #[test]
-fn to_bytes_non_utf8_survives_the_pipe() {
+fn ints_to_bytes_non_utf8_survives_the_pipe() {
     // Binding a non-UTF-8 write at a value boundary now strict-decodes it as
     // a String and fails; the pipe form still carries the raw bytes through.
-    let o = run_pipe("let bb = !{to-bytes [255, 0, 254] | from-bytes}\necho !{length $bb}");
+    let o = run_pipe("let bb = !{ints-to-bytes [255, 0, 254] | from-bytes}\necho !{length $bb}");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "3");
 }
@@ -741,7 +763,7 @@ fn outer_stdin_redirect_feeds_ral_helper_pipeline_first_stage() {
 
 #[test]
 fn guard_body_bytes_flow_into_downstream_stage() {
-    let o = run_pipe("let s = !{ guard { echo hi } { return unit } | from-string }\necho $s");
+    let o = run_pipe("let s = !{ guard { echo hi } { return () } | from-string }\necho $s");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "hi");
 }
@@ -772,7 +794,7 @@ fn pipeline_ending_in_audit_binds_the_audit_record() {
 fn guard_bound_value_is_the_bytes_body_observed_as_a_string() {
     // `guard` keeps `try`'s observed-value convention: binding a guard whose
     // body emits bytes captures the decoded String, not the cleanup's value.
-    let o = run_pipe("let gval = guard { echo hi } { return unit }\necho $gval");
+    let o = run_pipe("let gval = guard { echo hi } { return () }\necho $gval");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "hi");
 }
@@ -820,14 +842,14 @@ fn if_echo_arm_with_empty_else_binds_empty_string_when_else_taken() {
 
 #[test]
 fn try_relaxed_echo_body_binds_the_line_when_body_succeeds() {
-    let o = run_pipe("let v = try { echo hi } { |_| return unit }\necho $v");
+    let o = run_pipe("let v = try { echo hi } { |_| return () }\necho $v");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "hi");
 }
 
 #[test]
-fn try_relaxed_echo_body_binds_empty_string_when_handler_taken() {
-    let o = run_pipe("let v = try { fail [status: 7] } { |_| return unit }\necho \"[$v]\"");
+fn try_relaxed_echo_body_binds_the_handlers_unit_when_handler_taken() {
+    let o = run_pipe("let v = try { fail [status: 7] } { |_| return () }\necho \"[$v]\"");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "[]");
+    assert_eq!(o.stdout.trim(), "[()]");
 }

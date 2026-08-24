@@ -84,7 +84,6 @@ impl Val {
         use crate::syntax::ast::WordLiteral;
         match WordLiteral::classify(s) {
             Some(WordLiteral::Bool(b)) => Self::Bool(b),
-            Some(WordLiteral::Unit) => Self::Unit,
             Some(WordLiteral::Int(n)) => Self::Int(n),
             Some(WordLiteral::Float(f)) => Self::Float(f),
             None => Self::String(s.to_string()),
@@ -616,7 +615,7 @@ mod tests {
         assert_eq!(Val::from_word("0"), Val::Int(0));
         assert_eq!(Val::from_word("2.5"), Val::Float(2.5));
         assert_eq!(Val::from_word("true"), Val::Bool(true));
-        assert_eq!(Val::from_word("unit"), Val::Unit);
+        assert_eq!(Val::from_word("unit"), Val::String("unit".into()));
         assert_eq!(Val::from_word("hello"), Val::String("hello".into()));
     }
 

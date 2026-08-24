@@ -22,7 +22,7 @@ let decode = { |s|
         if !{re-match '^%' $tok} {
             if !{re-match '^(?:%[0-9A-Fa-f]{2})+$' $tok} {
                 let ns = map $byte !{re-find-matches '[0-9A-Fa-f]{2}' $tok}
-                to-bytes $ns | from-string
+                ints-to-bytes $ns | from-string
             } else { fail [status: 2, message: "malformed percent-escape in '$s'"] }
         } else { return $tok }
     }

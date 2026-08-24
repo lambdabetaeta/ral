@@ -1,6 +1,8 @@
 //! Shared builtin argument, IO, and conversion helpers.
 
-use crate::types::{Break, Env, Error, HandleInner, Settled, Shell, Value, sig, sig_hint};
+use crate::types::{
+    Break, Env, Error, HandleInner, Settled, Shell, Value, fmt_float, sig, sig_hint,
+};
 use std::sync::Arc;
 
 /// `i64::MAX` is not itself an `f64` — it rounds up to exactly this, so the
@@ -16,7 +18,10 @@ pub(crate) fn f64_to_i64(name: &str, f: f64) -> Settled<i64> {
         )]
         Ok(f as i64)
     } else {
-        Err(sig(format!("{name}: {f} is outside the integer range")))
+        Err(sig(format!(
+            "{name}: {} is outside the integer range",
+            fmt_float(f)
+        )))
     }
 }
 
@@ -65,10 +70,19 @@ pub(crate) fn decode_utf8_strict(bytes: Vec<u8>, context: &str, hint: &str) -> S
     String::from_utf8(bytes).map_err(|e| sig_hint(format!("{context}: {e}"), hint))
 }
 
-pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
-    if let Value::Bytes(b) = val {
-        return Ok(b.clone());
+pub(crate) fn as_bytes<'v>(val: &'v Value, ctx: &str) -> Settled<&'v [u8]> {
+    match val {
+        Value::Bytes(b) => Ok(b),
+        other => Err(sig_hint(
+            format!("{ctx}: expected Bytes, got {}", other.type_name()),
+            "a list of numbers is `ints-to-bytes`; a Bytes value comes from `from-bytes`",
+        )),
     }
+}
+
+/// Bytes written by number, one `Int` per byte — [`as_bytes`] is the other
+/// spelling, for a `Bytes` value already in hand.
+pub(crate) fn as_byte_list(val: &Value, ctx: &str) -> Settled<Vec<u8>> {
     let items = crate::types::as_list(val, ctx)?;
     let mut out = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
