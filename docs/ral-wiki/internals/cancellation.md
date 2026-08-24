@@ -241,7 +241,7 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   and a genuine exchange boundary `Token::reset`s the flag, so a prior
   exchange's Esc never bleeds into the next.
 - **The registry cascade is two-layer.** `AgentRegistry::cancel` (behind
-  `agent-cancel`, the per-agent idle lease, and the
+  `` agents `cancel ``, the per-agent idle lease, and the
   `/clear`/`reply` reaps) cancels each descendant's `Token` *and* its own
   session's `DurableRoot` (`Shell::cancel_handle`, held per registry entry). The
   token stops the attend loop between steps; the root cancel unwinds a `ral` eval

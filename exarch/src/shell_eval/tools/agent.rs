@@ -104,11 +104,12 @@ pub(crate) fn spawn_async(
     // from it, so a later `/model` on either never disturbs the other.
     let child_provider = child.provider_handle();
     // A returning sub-agent holds `reply`; a conversing branch does not.  This
-    // one fact gates the lease, the tab kind, and the settle epilogue.
+    // one fact gates the lease, the parent edge, and the settle epilogue.
     let delivers = child.returns();
+    let spawner = delivers.then_some(parent);
     let generation = match registry.register(Registration {
         id: agent_id,
-        parent: Some(parent),
+        parent: spawner,
         lease: delivers.then_some(AGENT_LEASE_IDLE), // an hour of silence must not reap a conversation
         name: name.clone(),
         log_dir: log_dir.clone(),
@@ -143,7 +144,6 @@ pub(crate) fn spawn_async(
     };
     let started = Instant::now();
     let born_name = name.clone();
-    let born_parent = parent;
     let worker_name = name.clone();
     // The only downward edge into the child is this one write.
     if let Some(p) = &prompt {
@@ -168,8 +168,7 @@ pub(crate) fn spawn_async(
             recorder.transient(Transient::Born {
                 log_dir: log_dir.clone(),
                 name: born_name,
-                parent: born_parent,
-                branch: !delivers,
+                parent: spawner,
             });
             let (outcome, payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 child.attend(&mut crate::agent::NoControl, &child_emit)
@@ -184,7 +183,8 @@ pub(crate) fn spawn_async(
             });
             child.recorder().transient(Transient::Died);
             // A branch pushes nothing and leaves its entry to outlive this
-            // worker, for `/clear` or `/close` to drop.
+            // worker; holding no parent edge, only `/close` on its own tab
+            // ever drops it.
             if delivers {
                 // The parent reads this as prose in its own context, so the
                 // faithful payload is rendered to text at this edge.

@@ -262,7 +262,9 @@ impl Agent {
             name: name.to_string(),
             log_dir: self.log.lock().dir().to_path_buf(),
             cancel: self.cancel.clone(),
-            reach: self.seat.eval_reach(),
+            // This seat is rebuilt in place under this standing entry, so a
+            // root captured now would go stale — see `interrupt_only`.
+            reach: self.seat.eval_reach().interrupt_only(),
             mailbox: self.inbox.mailbox(),
             provider: self.provider.clone(),
         });

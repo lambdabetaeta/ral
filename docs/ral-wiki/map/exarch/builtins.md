@@ -202,45 +202,55 @@ queryable store.
   digest but cannot cross the live exchange; folding is curation, not a promise
   of compression, so the byte delta may be negative.
 
-- **`agent [prompt: …, name: …, type: …, grant: …, search: …]`** →
-  `F [name: Str, log-dir: Str]`. The one spawn verb, taking a single closed
-  **record** argument. Launch-only and always asynchronous: the receipt is
-  the answer, the reply comes later through the inbox. `name` is the child's
-  identity — the tab-bar contract (`valid_name`), and unique among live
-  agents or the call is refused; `type` is `` `amnemon `` (blank context) or
-  `` `mnemon `` (imports the parent's model-visible context before the fresh
-  final prompt); `grant` is one of the five spawnable [[map/exarch/policy|base]]
-  names (`confined`, `read-only`, `edit-only`, `reasonable`, `dangerous`);
-  `search` is a `Bool` admitting the provider's own hosted web search,
-  clamped at the desk to at most the caller's own bit, which the trunk takes
-  from the IT network policy's `search` verdict
-  ([[map/exarch/agent|agent]]). Fuel bounds delegation
-  depth, not fan-out — refused only once the caller's own `fuel` reaches
-  zero.
-- **`agents`** → `F [[name: Str, elapsed-s: Int, log-dir: Str]]`.
-  Silent; a recovery poll over live descendants.
-- **`message <name> <text>`** → `F Unit`. Descendant-only, resolved by name
-  and enforced at the desk; a pure confirmation, so success is the return and
-  failure raises.
-- **`agent-cancel <name>`** → `F <cancelled | no-such-agent>`.
-  Descendant-only, resolved by name and enforced at the desk; the answer
-  distinguishes a real cancellation from a name that reached no live agent, so
-  a scope violation is the only case left to raise.
-- **`schedule <spec>`** → `F [label: Str, next-s: Int]`, taking a single
-  closed **record** argument (`[trigger: …, label: …, prompt: …]`) rather
-  than three positional arguments — a record literal infers an exact row, so
-  a missing or surplus field is a static error naming it, which also
-  sidesteps ral's grammar footgun where a nullary tag would otherwise absorb
-  the following positional atom. `trigger` is `` `cron '<expr>' `` or
-  `` `after '<dur>' ``; `label` is a required `Str`. The label is the
-  schedule's identity — unique among live schedules, and always named by the
-  caller — and the receipt's `next-s` reads back the seconds to first fire.
-  Gated on the `--allow-schedule` grant, refused with a didactic text
+- **`agents <tag>`** →
+  `F [[name: Str, elapsed-s: Int, log-dir: Str]]`. One verb for the fleet, over
+  an **open** row of four tags — `` `list ``, `` `start ``, `` `message ``,
+  `` `cancel `` — each taking one argument, and every one of them answering
+  with the roster *afterwards* rather than a receipt of its own. The outer row
+  is open so an unknown tag reaches a door that enumerates the four; each known
+  tag's payload keeps its exact type, so the closed record inside `` `start ``
+  still makes a missing or misspelled field a static error naming it, while the
+  `type`/`grant` rows *inside* that record stay open for the same reason one
+  level down.
+  `` `start [prompt: …, name: …, type: …, grant: …, search: …] `` is the one
+  spawn: launch-only and always asynchronous, the reply arriving later through
+  the inbox, and the child's row in the answer carrying the `name` and
+  `log-dir` the old receipt did. `name` is the child's identity — the tab-bar
+  contract (`valid_name`), unique among live agents or the call is refused;
+  `type` is `` `amnemon `` (blank context) or `` `mnemon `` (imports the
+  parent's model-visible context before the fresh final prompt); `grant` is one
+  of the five spawnable [[map/exarch/policy|base]] names (`confined`,
+  `read-only`, `edit-only`, `reasonable`, `dangerous`); `search` is a `Bool`
+  admitting the provider's own hosted web search, clamped at the desk to at
+  most the caller's own bit, which the trunk takes from the IT network policy's
+  `search` verdict ([[map/exarch/agent|agent]]). Fuel bounds delegation depth,
+  not fan-out — refused only once the caller's own `fuel` reaches zero.
+  `` `message [to: …, text: …] `` and `` `cancel <name> `` are descendant-only,
+  resolved by name and enforced at the desk; a scope violation raises. Where a
+  removed schedule is simply gone from its answer, a cancelled agent is not:
+  `AgentRegistry::cancel` only sets the cooperative token, so **a successful
+  cancel answers with a roster that still lists the target** — a request, not a
+  transaction, and the one place the rule needs a sentence of its own.
+- **`schedules <tag>`** → `F [[label: Str, trigger: Str, next-s: Int,
+  fires: Int]]`. The same shape over `` `list ``, `` `add ``, `` `remove ``.
+  `` `add [trigger: …, label: …, prompt: …] `` takes a closed record — a record
+  literal infers an exact row, so a missing or surplus field is a static error
+  naming it, which also sidesteps ral's grammar footgun where a nullary tag
+  would otherwise absorb the following positional atom; `trigger` is
+  `` `cron '<expr>' `` or `` `after '<dur>' `` over an open row, `label` a
+  required `Str` and the schedule's identity. The receipt's `next-s` is not
+  lost but recomputed: the new schedule's row in the answer carries it, which
+  is still how a mis-meant cron is caught at arm time. `` `remove <label> ``
+  really does answer by absence, since `ScheduleRegistry::unschedule` removes
+  the entry under the lock — the half of the rule the fleet cannot honour.
+  `next-s` saturates to `i64::MAX` for a cron with no next occurrence. Every
+  tag is gated on the `--allow-schedule` grant, refused with a didactic text
   otherwise.
-- **`schedules`** → `F [[label: Str, trigger: Str, next-s: Int,
-  fires: Int]]`. Silent; `next-s` saturates to `i64::MAX` for a cron with no
-  next occurrence.
-- **`unschedule <label>`** → `F <removed | no-such-label>`.
+
+  Both verbs issue their transition and then the list, so a raise does not
+  imply nothing happened — the act may have landed and the re-read failed.
+  The audit is unchanged: `agent-list` and `schedule-list` commit no `DeskAct`,
+  so each transition is still one act.
 - **`pin-read <key>`** → `∀α. F α`. Enquiry over the caller's own pin
   register: the card pinned at `key`, canonically re-encoded
   ([[map/exarch/cards|cards]]) so a kit can destructure it whether or not the

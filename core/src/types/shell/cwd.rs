@@ -67,8 +67,12 @@ impl Shell {
 
         let home = self.mobile.context.home();
         let raw: String = if let Some(path) = TildePath::parse(target) {
-            expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), home.as_deref())
-                .map_err(|cause| Error::new(format!("{target}: {}", cause.why()), 1))?
+            expand_tilde_path(
+                path.user.as_deref(),
+                path.suffix.as_deref(),
+                home.as_deref(),
+            )
+            .map_err(|cause| Error::new(format!("{target}: {}", cause.why()), 1))?
         } else {
             target.into()
         };

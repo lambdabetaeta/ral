@@ -189,6 +189,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         matrix_bar(
             &rows,
             app.tabs.names(),
+            app.tabs.parents(),
             focused,
             app.tabs.root(),
             app.tabs.dying_map(),

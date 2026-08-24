@@ -3,7 +3,7 @@
 **exarch is a small LLM coding agent that embeds [[map/core|ral-core]] behind a
 deliberately thin architecture.** A model is given one `ral` tool, and every
 tool call is evaluated as a ral top-level run against a persistent in-process
-`Shell`. The `agent` and `fff` surface is provided by ral builtins inside that
+`Shell`. The `agents` and `fff` surface is provided by ral builtins inside that
 call, not by additional provider tools. The agent loop is just provider
 round-trips, repeated until the model emits no tool call
 ([[map/exarch/agent|agent]]):

@@ -108,6 +108,12 @@ impl Colors {
     }
 }
 
+/// The lead paragraph of a doc: everything before the first blank line, as
+/// `build.rs` already scrapes the prelude's.
+fn lead_paragraph(doc: &str) -> &str {
+    doc.split_once("\n\n").map_or(doc, |(head, _)| head)
+}
+
 /// One `explain` entry: the doc, the type, then a dim line apiece for where
 /// the name lives and what that shadows.
 fn fmt_entry(
@@ -120,7 +126,11 @@ fn fmt_entry(
     }: Colors,
 ) -> String {
     let head = match doc {
-        Some(doc) => format!("  {cyan}{name}{reset}{dim}:{reset} {doc}\n"),
+        // Continuation lines must land inside the two-space block, not the margin.
+        Some(doc) => format!(
+            "  {cyan}{name}{reset}{dim}:{reset} {}\n",
+            doc.replace('\n', "\n  ")
+        ),
         None => format!("  {cyan}{name}{reset}\n"),
     };
     // Every manifest row has a type to print — a value row's polytype, a base
@@ -141,7 +151,10 @@ fn fmt_line(
         cyan, dim, reset, ..
     }: Colors,
 ) -> String {
-    format!("  {cyan}{name}{reset} {dim}—{reset} {doc}\n")
+    format!(
+        "  {cyan}{name}{reset} {dim}—{reset} {}\n",
+        lead_paragraph(doc)
+    )
 }
 
 pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
@@ -420,6 +433,36 @@ mod tests {
         assert!(
             explain_out.contains("frob the widget"),
             "explain must resolve the installed library doc, got:\n{explain_out}"
+        );
+    }
+
+    /// The index prints a doc's lead paragraph; `explain` prints the whole thing.
+    #[test]
+    fn index_shows_summary_explain_shows_full_doc() {
+        let mut shell = Shell::default();
+        shell.install_library_docs(vec![(
+            "frob".to_string(),
+            "frob the widget.\n\nHandle with care: it is load-bearing.".to_string(),
+        )]);
+
+        let (sink, buf) = crate::io::new_buffer();
+        shell.set_stdout(sink);
+        builtin_help(&[], &mut shell);
+        let help_out =
+            String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
+        assert!(
+            help_out.contains("frob the widget.") && !help_out.contains("load-bearing"),
+            "help's index row must carry only the lead paragraph, got:\n{help_out}"
+        );
+
+        let (sink, buf) = crate::io::new_buffer();
+        shell.set_stdout(sink);
+        builtin_explain(&[Value::String("frob".into())], &mut shell);
+        let explain_out =
+            String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
+        assert!(
+            explain_out.contains("frob the widget.") && explain_out.contains("load-bearing"),
+            "explain must print the doc in full, got:\n{explain_out}"
         );
     }
 }

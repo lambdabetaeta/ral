@@ -1,7 +1,7 @@
 ---
 generated_at_commit: cbeb5457
 generated_at_date: 2026-08-17
-covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agent.md, exarch/data/agent-spawn.md, exarch/data/ral.md, exarch/data/script-style.md]
+covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
 # Map: exarch
@@ -170,8 +170,7 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   *placeholder* here: the real per-agent list — filtered to the harness verbs
   that agent holds — is resolved by `BuiltinIndex::apply` once the agent's
   own grants — `returns`, `allow_schedule`, `spawns` (`fuel > 0`) — are in reach,
-  without a live `Shell`; zero-fuel agents omit `agent`, `agents`, `message`, and
-  `agent-cancel` together.
+  without a live `Shell`; zero-fuel agents omit `agents` alone.
 - **`Tasks`** (`data/tasks.md`) is the task-management kit API.
 - **`Script style`** (`data/script-style.md`) is the reuse guide: one program, not
   a nervous probe — define then query, parameterised blocks, records for knobs,
@@ -193,8 +192,8 @@ agent, so a root, identity fork, and wire child each receive their own surface.
   the five Bertin marks and role set
   ([[decisions/260619_surface-carries-documents|surface-carries-documents]],
   → [[map/exarch/cards|cards]]). Per-agent resolution then appends
-  **`Spawning agents`** (`data/agent-spawn.md`) iff `fuel > 0`, followed by
-  **`Agent`** (`data/agent.md`) iff `returns`; returning interactive children
+  **`Agents`** (`data/agents.md`) iff `fuel > 0`, followed by
+  **`Reply`** (`data/reply.md`) iff `returns`; returning interactive children
   therefore keep both obligations. A headless root is returning too, so with
   the normal positive spawn fuel it gets both late sections; only a zero-fuel
   returning agent gets `Agent` alone.
@@ -215,10 +214,10 @@ the per-agent index and optional sections still resolve from the stored base.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
 - [[map/exarch/tools|tools]] — `ral` is the one tool; `tools.rs` is a thin
-  seam over it, with no registry. Every other harness verb — the `agent`
-  spawn (one record-spec verb, `` `amnemon ``/`` `mnemon `` by field,
-  fuel-gated), `reply`, the schedule family — is a builtin reached through
-  it, answered by the desk. The sub-agent model is [[design/agents|agents]].
+  seam over it, with no registry. Every other harness verb — the
+  `` agents `start `` spawn (one record-spec tag, `` `amnemon ``/`` `mnemon ``
+  by field, fuel-gated), `reply`, the schedule family — is a builtin reached
+  through it, answered by the desk. The sub-agent model is [[design/agents|agents]].
 - [[map/exarch/builtins|builtins]] — the resident host atoms and the harness
   verbs: the hash-addressed edit primitives, the spawn/schedule/reply
   family, and the `agent.ral` helpers ([[design/hash-addressed-editing|why]]).
@@ -245,18 +244,18 @@ the frame is installed by the host. Profiles ship as `.exarch.ral` files in
 
 ## Scheduled wakeups
 
-With `--allow-schedule`, the agent may schedule its own wakeups (`schedule`,
-`schedules`, `unschedule`) — a cron expression or a one-shot `after <dur>`. A
-wakeup schedules the *agent*, not a worker: at its time a synthetic user item is
-posted to the agent's own inbox and delivered at the exchange boundary, re-engaging
-the loop with no human present. It is off by default — waking yourself
+With `--allow-schedule`, the agent may schedule its own wakeups (`schedules`)
+— a cron expression or a one-shot `after <dur>`. A wakeup schedules the
+*agent*, not a worker: at its time a synthetic user item is posted to the
+agent's own inbox and delivered at the exchange boundary, re-engaging the
+loop with no human present. It is off by default — waking yourself
 indefinitely is real authority. The inbox/reaper mechanics live on the
 [[map/exarch/frontend|frontend]] and [[map/exarch/agent|agent]] pages; see
 [[decisions/260617_scheduled-wakeups|scheduled-wakeups]].
 
 ## Where to look
 
-- `exarch/data/{system.md, ral.md, edit-hash.md, edit-replace.md, tasks.md, script-style.md, grant-legend.md, surface.md, agent.md, agent-spawn.md, agent.ral}` —
+- `exarch/data/{system.md, ral.md, edit-hash.md, edit-replace.md, tasks.md, script-style.md, grant-legend.md, surface.md, agents.md, reply.md, agent.ral}` —
   the persona rules, ral reference, editing schemes, task kit, reusable-script
   guide, grant legend, surfacing guidance, returning-agent and spawn contracts,
   and the embedded agent helper library.

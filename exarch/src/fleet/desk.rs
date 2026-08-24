@@ -563,11 +563,11 @@ impl ExarchDesk {
         // siblings are free and only a deep enough chain bottoms out.
         if s.fuel == 0 {
             return Err(Error::new(
-                "agent-start refused: no spawn fuel remains at this depth, so agent cannot \
+                "agent-start refused: no spawn fuel remains at this depth, so you cannot \
                  delegate any further here. Fuel bounds how deep a chain of spawns may \
                  recurse, never how many children you may start at any one depth — starting \
-                 several agents here costs nothing extra. agent-cancel on any node stops its \
-                 whole live subtree regardless of depth.",
+                 several agents here costs nothing extra. `agents `cancel` on any node stops \
+                 its whole live subtree regardless of depth.",
                 1,
             ));
         }
@@ -986,7 +986,7 @@ impl ExarchDesk {
             Err(NotADescendant(_)) => (
                 "refused: not a descendant".to_string(),
                 format!(
-                    "agent '{name}' is not an agent you started; agent-cancel may only reach a descendant of yours"
+                    "agent '{name}' is not an agent you started; `agents `cancel` may only reach a descendant of yours"
                 ),
                 Err(()),
             ),
@@ -1032,7 +1032,7 @@ impl ExarchDesk {
             Some(Err(MessageError::NotADescendant(_))) => (
                 "refused: not a descendant".to_string(),
                 format!(
-                    "agent '{name}' is not an agent you started; message may only reach a descendant of yours"
+                    "agent '{name}' is not an agent you started; `agents `message` may only reach a descendant of yours"
                 ),
                 false,
             ),
@@ -3128,7 +3128,7 @@ mod tests {
             .expect_err("a message to a sibling must be refused");
         assert_eq!(
             err.message,
-            "agent 'sibling' is not an agent you started; message may only reach a descendant of yours"
+            "agent 'sibling' is not an agent you started; `agents `message` may only reach a descendant of yours"
         );
 
         assert!(
@@ -3160,7 +3160,7 @@ mod tests {
             .expect_err("cancelling an ancestor must be refused");
         assert_eq!(
             cancel_err.message,
-            "agent 'parent' is not an agent you started; agent-cancel may only reach a descendant of yours"
+            "agent 'parent' is not an agent you started; `agents `cancel` may only reach a descendant of yours"
         );
 
         assert!(
@@ -3179,7 +3179,7 @@ mod tests {
     }
 
     /// `desk_binding_drains_pending_surfaces_before_handling`'s law again, but
-    /// through a real `agent` spawn rather than a stub class.
+    /// through a real spawn rather than a stub class.
     #[test]
     fn surface_then_spawn_observes_the_surface_first() {
         let mut session = crate::agent::Agent::for_test("system").unwrap();
@@ -3187,7 +3187,7 @@ mod tests {
         let emit = Emitter::new(tx, session.id);
         let _ = session.run_shell(
             "call-1".to_string(),
-            r#"surface `unpin [key: "test-marker"]; agent [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true]"#,
+            r#"surface `unpin [key: "test-marker"]; agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true]"#,
             5,
             &emit,
         );

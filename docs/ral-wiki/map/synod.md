@@ -588,7 +588,7 @@ exarch's cross-by-copy position.
   `Hatchery` trait synod implements above.
 - [[design/agents|agents]] — the one-snapshot law: an identity fork and a
   wire hatch's `EngineSeed` scrub the same handle-carrying bindings, so
-  `agent` means one thing regardless of seat.
+  `` agents `start `` means one thing regardless of seat.
 - [[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]
   — why synod's after-checkpoint waits for the whole fleet, not just the
   trunk.

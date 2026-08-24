@@ -262,7 +262,10 @@ mod tests {
 
     #[test]
     fn bare_tilde_expands_to_home_on_every_platform() {
-        assert_eq!(expand_tilde_path(None, None, Some("/h")), Ok("/h".to_string()));
+        assert_eq!(
+            expand_tilde_path(None, None, Some("/h")),
+            Ok("/h".to_string())
+        );
     }
 
     #[test]
@@ -282,7 +285,10 @@ mod tests {
             expand_tilde_path(None, Some("/.gitconfig"), None),
             Err(Unexpandable::HomeUnknown)
         );
-        assert_eq!(expand_tilde_path(None, None, None), Err(Unexpandable::HomeUnknown));
+        assert_eq!(
+            expand_tilde_path(None, None, None),
+            Err(Unexpandable::HomeUnknown)
+        );
     }
 
     /// An unknown home folds nothing — the prompt shows the path whole rather
@@ -312,7 +318,10 @@ mod tests {
         assert_eq!(get_user_home("bob"), None);
         let foreign = Err(Unexpandable::ForeignUser);
         assert_eq!(expand_tilde_path(Some("bob"), None, Some("/h")), foreign);
-        assert_eq!(expand_tilde_path(Some("bob"), Some("/sub"), Some("/h")), foreign);
+        assert_eq!(
+            expand_tilde_path(Some("bob"), Some("/sub"), Some("/h")),
+            foreign
+        );
     }
 
     // No `cfg(windows)` on the fold tests below: `windows` is a parameter,
@@ -340,7 +349,10 @@ mod tests {
     /// leave it alone.
     #[test]
     fn abbreviation_keeps_backslash_bytes_off_windows() {
-        assert_eq!(abbreviate_home_for(r"/h/we\ird", Some("/h"), false), r"~/we\ird");
+        assert_eq!(
+            abbreviate_home_for(r"/h/we\ird", Some("/h"), false),
+            r"~/we\ird"
+        );
     }
 
     #[test]

@@ -386,8 +386,9 @@ pub enum Transient {
     Born {
         log_dir: PathBuf,
         name: String,
-        parent: AgentId,
-        branch: bool,
+        /// `None` for a `/branch` child: it roots its own tab tree, and that
+        /// is what `/close` reads to know what it may kill.
+        parent: Option<AgentId>,
     },
     Died,
     /// The durable copy already rides [`Protocol::AssistantMessage`].

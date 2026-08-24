@@ -320,15 +320,13 @@ impl App {
                 log_dir,
                 name,
                 parent,
-                branch,
             } => {
                 #[allow(
                     clippy::cast_possible_truncation,
                     reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
                 )]
                 let agent_slot = AgentSlot((self.tabs.len() % AGENT_HUES.len()) as u8);
-                self.tabs
-                    .born(id, &log_dir, name, parent, branch, agent_slot);
+                self.tabs.born(id, &log_dir, name, parent, agent_slot);
             }
             // Root never enters the linger window; it outlives the session.
             Transient::Died => self.tabs.died(id),
@@ -731,8 +729,7 @@ mod tests {
             Transient::Born {
                 log_dir: std::env::temp_dir(),
                 name: "helper".into(),
-                parent: 1,
-                branch: false,
+                parent: Some(1),
             },
             &rx,
         );

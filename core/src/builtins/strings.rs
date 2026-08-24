@@ -129,7 +129,10 @@ pub(super) fn builtin_replace(args: &[Value]) -> Settled<Value> {
 /// `"aa"` occurs twice in `"aaa"`, so a needle that overlaps itself cannot pass
 /// for unique.  `pub` so exarch's `edit-replace` counts the way this does.
 pub fn occurrence_starts(input: &str, from: &str) -> Vec<usize> {
-    debug_assert!(!from.is_empty(), "an empty needle has no occurrence to name");
+    debug_assert!(
+        !from.is_empty(),
+        "an empty needle has no occurrence to name"
+    );
     // Step by the first char, not one byte: an occurrence begins on a char
     // boundary, so nothing between two overlapping hits is skipped.
     let step = from.chars().next().map_or(1, char::len_utf8);

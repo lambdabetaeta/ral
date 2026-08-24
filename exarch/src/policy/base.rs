@@ -126,8 +126,7 @@ mod tests {
     /// coincidence — and disagrees exactly where the freeze would have failed.
     #[cfg(unix)]
     fn frozen(entry: &str, ctx: &FreezeCtx<'_>) -> ral_core::path::NormalizedPrefix {
-        freeze_one(entry, ctx)
-            .unwrap_or_else(|e| panic!("'{entry}' should freeze: {}", e.message))
+        freeze_one(entry, ctx).unwrap_or_else(|e| panic!("'{entry}' should freeze: {}", e.message))
     }
 
     /// Every bake-in names `~`/`xdg:` paths, so a host with no `$HOME` cannot

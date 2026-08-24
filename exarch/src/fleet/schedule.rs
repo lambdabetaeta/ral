@@ -401,7 +401,7 @@ impl ScheduleRegistry {
         let mut g = self.lock();
         if g.entries.values().any(|e| e.label == label) {
             return Err(format!(
-                "label '{label}' is already borne by a live schedule — pick another, or unschedule it first"
+                "label '{label}' is already borne by a live schedule — pick another, or `schedules `remove` it first"
             ));
         }
         let id = g.next_id;

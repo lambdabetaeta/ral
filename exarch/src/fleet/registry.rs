@@ -97,19 +97,19 @@ impl EvalReach {
     }
 
     /// Weaken a reach so its terminate side can no longer poison a session:
-    /// the trunk's entry must never carry a `DurableRoot`, for two reasons.
-    /// [`terminate_entry`] fires on every entry a cascade visits, the trunk's
-    /// included, and a trunk root would turn that into a permanent kill of the
-    /// whole session rather than a subtree reap.  And the trunk is the one
-    /// seat `/clear` rebuilds in place, minting a fresh root while the entry
-    /// stands, so a root captured at registration would go stale — the
+    /// a seat rebuilt in place under a standing entry — the trunk's — must
+    /// never carry a `DurableRoot`, for two reasons.  [`terminate_entry`]
+    /// fires on every entry a cascade visits, such a seat's included, and its
+    /// root would turn that into a permanent kill of the whole session rather
+    /// than a subtree reap.  And the rebuild mints a fresh root while the
+    /// entry stands, so a root captured at registration would go stale — the
     /// interrupt target is host-owned precisely so it survives that rebuild,
     /// and a root has no such target.
     ///
     /// A wire reach passes through: its only primitive is `Control::Cancel`
     /// against the in-flight dispatch, which is not permanent, so it carries
     /// nothing to weaken.
-    fn interrupt_only(self) -> Self {
+    pub(crate) fn interrupt_only(self) -> Self {
         match self {
             Self::Identity {
                 interrupt_target, ..
@@ -144,7 +144,8 @@ pub struct AgentInfo {
 /// Threaded once at birth into [`AgentRegistry::register`].
 pub struct Registration {
     pub id: AgentId,
-    /// `None` for the trunk.
+    /// `None` for a root: the trunk, or a conversing `/branch` child that
+    /// owes no reply and is nobody's to manage.
     pub parent: Option<AgentId>,
     /// The idle lease to arm over this agent's subtree, or `None` for none.
     /// Duration-typed rather than a bare flag so a test can arm a millisecond
@@ -153,9 +154,10 @@ pub struct Registration {
     pub name: String,
     pub log_dir: PathBuf,
     pub cancel: Token,
-    /// The seat's own reach into this agent's running eval.  The caller
-    /// states it plainly for every entry; [`AgentRegistry::register`] weakens
-    /// a parentless one to interrupt-only.
+    /// The seat's own reach into this agent's running eval, stated plainly:
+    /// `register` stores exactly what it is given.  A seat rebuilt in place
+    /// under a standing entry — the trunk — must state it already weakened;
+    /// see [`EvalReach::interrupt_only`].
     pub(crate) reach: EvalReach,
     pub mailbox: Mailbox,
     pub provider: ProviderHandle,
@@ -185,7 +187,8 @@ impl Inner {
 }
 
 struct Entry {
-    /// `None` for the trunk — the edge that makes this map a tree.
+    /// `None` for a root — the trunk, or a conversing branch — the edge that
+    /// makes this map a forest.
     parent: Option<AgentId>,
     /// How many times *this* session has rebuilt its context
     /// ([`AgentRegistry::clear_subtree`]).  Work bound for this session is
@@ -279,11 +282,6 @@ impl AgentRegistry {
     /// it must be reaped), a branch does not (a conversation must not lose an
     /// exchange at the hour mark).
     ///
-    /// A parentless registration — the trunk, the one entry rebuilt in place
-    /// rather than reaped — has its reach weakened to
-    /// [`EvalReach::interrupt_only`] here, at the one door every entry passes,
-    /// so no caller can seat a terminate-capable root on it.
-    ///
     /// # Errors
     /// [`RegisterError::SessionDead`] when `parent` is not, at this instant, a
     /// live and un-terminated entry — a spawn racing a cancel on its own
@@ -330,10 +328,6 @@ impl AgentRegistry {
             drop(g);
             return Err(RegisterError::NameTaken(name));
         }
-        let reach = match parent {
-            Some(_) => reach,
-            None => reach.interrupt_only(),
-        };
         // `Agent::register_self` re-registers in place under the same id, so
         // the count of this session's own clears must survive the overwrite.
         let generation = g.generation(id);
@@ -979,9 +973,9 @@ mod tests {
 
     /// The other reason the trunk's entry must never carry a `DurableRoot`: a
     /// `cancel`/`agent-cancel`-class terminate landing on it must not poison
-    /// the session.  The registration below states a full reach, root and
-    /// all, and `register` itself weakens it — the door, not the caller, is
-    /// what keeps a terminate off the root.
+    /// the session.  The trunk's registration states its reach pre-weakened
+    /// (`register_self_named` does the same), so a terminate never reaches
+    /// the root that registration captured.
     #[test]
     fn a_registry_terminate_on_the_trunk_leaves_its_session_root_uncancelled() {
         let reg = AgentRegistry::new();
@@ -997,7 +991,8 @@ mod tests {
             reach: EvalReach::Identity {
                 eval_root: Some(root.clone()),
                 interrupt_target: InterruptTarget::default(),
-            },
+            }
+            .interrupt_only(),
             mailbox: mb(),
             provider: provider(),
         });
@@ -1011,8 +1006,8 @@ mod tests {
         assert_eq!(
             root.as_scope().cause(),
             None,
-            "register weakened the parentless reach at the door, so terminate never reaches \
-             the root — the session survives a cancel aimed at the trunk"
+            "the trunk's registration states its reach pre-weakened, so terminate never \
+             reaches the root — the session survives a cancel aimed at the trunk"
         );
     }
 
@@ -1483,6 +1478,27 @@ mod tests {
             reg.cancel_scoped(0, 999),
             Ok(false),
             "an unknown id is reported, not an error"
+        );
+    }
+
+    /// A `/branch` child registers with no parent edge (see `spawn_async`'s
+    /// `delivers.then_some(parent)`), so it roots its own tree rather than
+    /// joining the spawner's: the fleet the model manages never lists it, and
+    /// the model's own cancel verb cannot reach it through the spawner.
+    #[test]
+    fn a_parentless_branch_is_outside_its_spawners_fleet() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        entry(&reg, 1, None); // a /branch child of 0, registered parentless
+
+        assert!(
+            reg.list(0).is_empty(),
+            "the trunk's listing omits a branch that shares its registry but no edge"
+        );
+        assert_eq!(
+            reg.cancel_scoped(0, 1),
+            Err(NotADescendant(1)),
+            "cancel_scoped refuses a target the caller never spawned"
         );
     }
 

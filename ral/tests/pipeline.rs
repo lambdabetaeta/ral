@@ -552,8 +552,8 @@ fn producer_side_effect_after_reader_exit_is_truncated() {
     let _ = std::fs::remove_file(&path);
 
     let script = format!("sh -c 'echo a; sleep 0.3; : > {path_str}; exit 4' | head -1");
-    let o = run_with_timeout(&[], &script, Duration::from_secs(5))
-        .expect("truncation pipeline hung");
+    let o =
+        run_with_timeout(&[], &script, Duration::from_secs(5)).expect("truncation pipeline hung");
     let marker_exists = path.exists();
     let _ = std::fs::remove_file(&path);
 

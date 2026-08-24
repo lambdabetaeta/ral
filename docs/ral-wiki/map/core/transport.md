@@ -116,7 +116,7 @@ parent's whole lexical scope: `Shell::fork_into_nursery` scrubs every
 handle-carrying binding before parking the fork (`Value::Handle` has no wire
 form, `serial.rs`'s `value_carries_handle`), so an in-process identity fork
 and a wire hatch's `EngineSeed` snapshot the same serialisable fragment and
-`agent` means one thing regardless of seat
+`` agents `start `` means one thing regardless of seat
 ([[design/agents|agents]]'s one-snapshot law).
 
 ## Framing codec — `core/src/subprocess_codec.rs`

@@ -51,7 +51,7 @@ is what `guest-net::Config::egress` takes: the policy and ledger a synod
 session's guest network is gated by are the fleet's own, not a second
 copy ([[design/egress|egress]], [[map/synod|synod]]). Host-mode exarch, which
 has no guest to police, still keeps `Egress` for one thing: the `search` bit
-that clamps the harness `agent [... search: …]` field
+that clamps the harness `` agents `start [... search: …] `` field
 ([[map/exarch/builtins|builtins]]).
 
 An `interactive` node
@@ -63,7 +63,7 @@ never an `is_root` branch:
 ```
   returns(a)    // fixed at construction: fork true, branch false, trunk ¬interactive
   conversing(a) =  a.interactive ∧ ¬returns(a)
-  park_mode(a)  =  Quiesce        if conversing(a) ∧ ¬registry.is_live(a)   // /clear or /close reaped it
+  park_mode(a)  =  Quiesce        if conversing(a) ∧ ¬registry.is_live(a)   // /close reaped it
                    Held           if conversing(a)                          // immune to cancellation
                    Engaged        if a.parent ∧ returns(a) ∧ registry.engaged(a)  // parks, but a terminate cause still ends it
                    HeldByChildren if a has live descendants
@@ -244,7 +244,7 @@ The other four (`AgentResult`, `AgentMessage`, `Command`, `Surface`) are
 quota-checked against `INBOX_SOURCE_CAP` (64) and the shared
 `INBOX_TOTAL_CAP` (256) and *rejected*, never dropped, once full — every
 producer surfaces the rejection to its own caller: `AgentRegistry::message`
-returns `MessageError::RecipientInboxFull` (the `message` builtin reports it),
+returns `MessageError::RecipientInboxFull` (`` agents `message `` reports it),
 a rejected slash command reports through the UI's error line, and a
 rejected `spawn` completion or surfaced batch — which has no synchronous
 caller left to return to — records straight through the record seam as a
@@ -308,20 +308,20 @@ disagree about what is shared.
   is a delivered human message (`AgentRegistry::steer`); nothing else does —
   not the TUI's `TAB` cursor, a plain, presentation-only `AgentId` local to
   the frontend (`tui::tabs::Tabs::focus`) that neither the registry nor
-  `park_mode` ever reads, not the model-facing `message` builtin, not a
+  `park_mode` ever reads, not the model-facing `` agents `message `` tag, not a
   `/resources` probe. A returning agent's `reply` cancels its proper
   descendants and ends it even mid-conversation, regardless of which tab the
   human's cursor sits on.
 
 ## Cancellation cascades the subtree, across both layers
 
-The single cascade serves the deliberate teardowns — `agent-cancel`, a
+The single cascade serves the deliberate teardowns — `` agents `cancel ``, a
 returning agent's `reply`, and the `/clear` / `/close` subtree reaps.
 `AgentRegistry` lives in `fleet/registry.rs`; an entry's `name` is its
 identity — unique among live entries, enforced at `register`
-(`RegisterError::NameTaken`; the trunk holds `TRUNK_NAME`) and the handle the
-`message`/`agent-cancel` verbs resolve descendants by. Each entry carries a
-`parent` link, so the registry is the
+(`RegisterError::NameTaken`; the trunk holds `TRUNK_NAME`) and the handle
+`` agents `message ``/`` agents `cancel `` resolve descendants by. Each entry
+carries a `parent` link, so the registry is the
 spawn *tree*: `AgentRegistry::cancel(id)` walks descendants and cancels the whole
 subtree, `cancel_descendants(root)` abandons a returning agent's children without
 touching any generation, and `clear_subtree(root)` reaps a subtree and bumps
@@ -484,9 +484,8 @@ There is no flow-back: the child's `cd`, env, and new bindings die with it. An
 agent with fuel left may spawn, and each fork hands the child one less unit of
 `fuel` than the parent holds (`SPAWN_FUEL = 3` at the trunk; the parent's own
 fuel is never debited, so fuel bounds depth, not fan-out). At `fuel == 0` the
-prompt drops the spawn family — `agent`, `agents`, `message`, and
-`agent-cancel` — and the desk refuses `agent-start` with the exhaustion text;
-the desk remains the runtime wall
+prompt drops the spawn family — `agents` — and the desk refuses `agent-start`
+with the exhaustion text; the desk remains the runtime wall
 ([[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]]) — so a delegation
 chain bottoms out by refusal a fixed number of generations down. The fork
 mirrors on the bus as `Transient::Born` / `Transient::Died` regardless of
@@ -496,14 +495,14 @@ remaining fuel.
 `true`; `branch` is `fork_with(self.caps, returns: false)` plus
 `inherit_context`, minting a *conversing* peer tab with the parent's verbatim
 authority ([[decisions/260705_branch-minimal|branch-minimal]]). A builtin
-spawn takes the decomposed path instead: the `agent` verb's body forks the
+spawn takes the decomposed path instead: the `` `start `` tag's body forks the
 session into the run's nursery (`Shell::fork_into_nursery`), and the desk's
 `agent-start` arm adopts it and calls `Agent::assemble` at one less unit of
 fuel ([[map/exarch/builtins|builtins]]).
 
 Prompt resolution is shared across the root, identity-fork, and wire-child
 paths. Each keeps the unresolved base and applies its own `returns`,
-`allow_schedule`, and child-fuel bits; the resolver appends `Spawning agents`
+`allow_schedule`, and child-fuel bits; the resolver appends `Agents`
 iff fuel remains and `Agent` iff the child returns. The child's log bookend
 records that fully resolved prompt length, including the filtered index and
 late sections, so a child never inherits an already-appended `Agent` section.

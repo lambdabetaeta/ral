@@ -97,20 +97,16 @@ pub(crate) struct Grants {
 type Section = Option<(&'static str, &'static str)>;
 fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 3] {
     [
-        (
-            g.allow_schedule,
-            &["schedule", "schedules", "unschedule"],
-            None,
-        ),
+        (g.allow_schedule, &["schedules"], None),
         (
             g.spawns,
-            &["agent", "agents", "message", "agent-cancel"],
-            Some(("Spawning agents", include_str!("../data/agent-spawn.md"))),
+            &["agents"],
+            Some(("Agents", include_str!("../data/agents.md"))),
         ),
         (
             g.returns,
             &["reply"],
-            Some(("Agent", include_str!("../data/agent.md"))),
+            Some(("Reply", include_str!("../data/reply.md"))),
         ),
     ]
 }
@@ -437,9 +433,7 @@ mod tests {
         });
         let n = names(&index);
         assert!(n.contains("reply"));
-        assert!(n.contains("schedule"));
         assert!(n.contains("schedules"));
-        assert!(n.contains("unschedule"));
     }
 
     /// Non-returning: the interactive trunk and every `/branch` child.
@@ -456,7 +450,7 @@ mod tests {
             "must not advertise a verb the desk always refuses"
         );
         assert!(
-            n.contains("schedule"),
+            n.contains("schedules"),
             "a granted agent still holds the schedule family"
         );
     }
@@ -469,9 +463,7 @@ mod tests {
             spawns: true,
         });
         let n = names(&index);
-        assert!(!n.contains("schedule"));
         assert!(!n.contains("schedules"));
-        assert!(!n.contains("unschedule"));
         assert!(n.contains("reply"), "a returning agent still holds `reply`");
     }
 
@@ -483,10 +475,7 @@ mod tests {
             spawns: false,
         });
         let n = names(&index);
-        assert!(!n.contains("agent"));
         assert!(!n.contains("agents"));
-        assert!(!n.contains("message"));
-        assert!(!n.contains("agent-cancel"));
     }
 
     #[test]

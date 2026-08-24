@@ -37,8 +37,9 @@ not decide who returns.
   instead of returning. Its `reply` call is refused at the desk, and the verb is
   dropped from its builtin index, both keyed on the same bit. The interactive
   trunk is one such agent — parent-less, its writer ever-present — but not the
-  *only* one: a **branch** is interactive, `reply`-withheld, and *parented*
-  ([[decisions/260705_branch-minimal|branch-minimal]]). "Parent-less trunk" and
+  *only* one: a **branch** is interactive, `reply`-withheld, and — like the
+  trunk — parent-less, a root of its own tree rather than a descendant
+  ([[decisions/260705_branch-minimal|branch-minimal]]). "Parent-less" and
   "converses" are not the same set, which is exactly why the property is a bit
   fixed at construction rather than a predicate on position.
 
@@ -59,7 +60,7 @@ same construction facts that govern the desk govern what the model is taught:
 - **`interactive` gates `Surfacing`.** Human-facing guidance remains in the
   shared base, so a returning interactive child can receive both it and
   `# Agent`.
-- **`fuel > 0` gates `# Spawning agents`.** A leaf receives neither spawn
+- **`fuel > 0` gates `# Agents`.** A leaf receives neither spawn
   guidance nor the spawn family in its builtin index.
 - **The builtin index has three bits** — `returns`, `allow_schedule`, and
   `spawns` (`fuel > 0`) — cached once from the booted shell. The unresolved base
@@ -70,8 +71,8 @@ same construction facts that govern the desk govern what the model is taught:
 
 Spawning is **available to every agent with fuel left**, so the spawn tree is
 not capped at one level. The effective `spawns` bit is `fuel > 0`; when it is
-false, the prompt index omits `agent`, `agents`, `message`, and `agent-cancel`
-as a dead family, while the desk remains the runtime authority. Depth-N works
+false, the prompt index omits `agents` as a dead family, while the desk remains
+the runtime authority. Depth-N works
 structurally — a child registers in the fleet's registry and `fork` snapshots
 the parent's shell by value at any depth — but each `fork` hands the child one
 less unit of `fuel` than the parent holds (the parent's own `fuel` is untouched,
@@ -83,7 +84,7 @@ depth-1 cap of [[decisions/260617_async-agent-tool|async-agent-tool]];
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]], bounding the depth
 that decision left open).
 
-The `agent` spawn verb is **launch-only and always asynchronous**
+The `` agents `start `` tag is **launch-only and always asynchronous**
 ([[decisions/260617_async-agent-tool|async-agent-tool]]). Its argument is a
 single closed record `[prompt: …, name: …, type: …, grant: …]` — a record
 literal, so a missing or misspelled field is a *static* error naming it, while
@@ -105,11 +106,12 @@ One call:
   [[design/pipelines|byte-pipeline stage]]'s subshell — see
   [[#Wire-seat children: the same snapshot, a different wire|below]] for why
   "serialisable fragment" is the exact promise rather than "whole scope";
-- **runs it on a detached thread** through the same `attend` loop, returning a
-  receipt `[name: Str, log-dir: Str]` at once — a ral record the
-  script can bind and fan out over. The child runs off the
-  parent's critical path — the one shape in-exchange concurrency cannot
-  express, the parent exchange ending before the child does;
+- **runs it on a detached thread** through the same `attend` loop, answering
+  at once with the roster afterwards — the child's row carrying `name: Str`
+  and `log-dir: Str` — a ral record the script can bind and fan out over. The
+  child runs off the parent's critical path — the one shape in-exchange
+  concurrency cannot express, the parent exchange ending before the child
+  does;
 - **delivers the child's single reply later** as a marked `Item` through the
   parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names —
   rendered to prose at the consuming edge.
@@ -136,7 +138,7 @@ binding to an `` `amnemon `` child:
 let ctx = context-read [4, 7]
 let handoff = slice ctx 0 12000
 context-drop [4, 7]
-agent [
+agents `start [
   prompt: "read `handoff` for the material to work from; report your findings",
   name: 'researcher',
   type: `amnemon,
@@ -197,8 +199,9 @@ exactly as the in-process lattice does.
 **The one snapshot law.** A wire seed cannot carry a `Value::Handle` binding —
 a handle is live authority over a parent-side resource, with no wire form —
 while an in-process fork, left alone, would carry one unfiltered. Rather than
-let `agent` mean two different things depending on which seat answered it,
-`fork_into_nursery` — the one place both an identity fork and a wire hatch
+let `` agents `start `` mean two different things depending on which seat
+answered it, `fork_into_nursery` — the one place both an identity fork and a
+wire hatch
 pass through — scrubs every handle-carrying binding before parking the fork,
 so an identity fork and a wire seed's `EngineSeed` snapshot the same
 **serialisable fragment** of the parent's scope, never the unfiltered whole.
@@ -212,11 +215,11 @@ pins the law: fork a scope in memory, seed the same scope through
 the same absence.
 
 The hatchery is where the seat asymmetry ends and the fleet's uniformity
-resumes: `message`, `agent-cancel`, and the idle-lease reaper all address a
-descendant by name through the registry, whatever seat it sits on, and
-a wire helper's `message` crosses as an enquiry on its own connection exactly
-as an identity peer's does — sender and recipient never learn each other's
-transport.
+resumes: `` agents `message ``, `` agents `cancel ``, and the idle-lease
+reaper all address a descendant by name through the registry, whatever seat
+it sits on, and a wire helper's `message` crosses as an enquiry on its own
+connection exactly as an identity peer's does — sender and recipient never
+learn each other's transport.
 
 ## Returning: the deliberate `reply`
 
@@ -252,9 +255,9 @@ that renews it is a delivered human message (`AgentRegistry::steer`), so a
 child a human is actually steering parks `Engaged` and keeps its lease fresh,
 while a lease that is never renewed fires at exactly its birth-seeded hour. A
 `/branch` child and the trunk carry no lease at all and so never idle-reap.
-Neither `TAB`, nor the model-facing `message` builtin, nor a `/resources`
-probe renews anything — enumeration and attention alone can never immortalise
-a child.
+Neither `TAB`, nor the model-facing `` agents `message `` tag, nor a
+`/resources` probe renews anything — enumeration and attention alone can
+never immortalise a child.
 
 A leased child that is parked waiting for input and has sat idle for five
 minutes demotes out of the `TAB` cycle and the tab bar into a compact matrix
@@ -269,20 +272,20 @@ there is no `TAB`-driven reap to begin with.
 ## Descendant messages: marked notes, not shared memory
 
 An agent may send a **marked message** by **name** to a proper descendant
-through the `message` builtin. The registry resolves the name to the
+through `` agents `message ``. The registry resolves the name to the
 recipient's inbox and posts an `AgentMessage`; the recipient sees it at the
 next tool boundary as a marked note naming the sender, not as human input. This is
 coordination, not a return edge: it does not share shell state, does not grant
 authority, and does not wait for an answer. The durable result path remains
-`reply`; the durable cancellation path remains `agent-cancel`, addressed by name
-the same way.
+`reply`; the durable cancellation path remains `` agents `cancel ``, addressed
+by name the same way.
 
 ## Cancellation: a key interrupts one exchange; a terminator cascades the subtree
 
 `Esc` and `Ctrl-C` are a **per-tab exchange interrupt** — they unwind only the focused
 tab's current exchange, never a subtree and never an agent
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
-but only behind the **lifecycle terminators**: the `agent-cancel` builtin, the
+but only behind the **lifecycle terminators**: the `` agents `cancel `` tag, the
 per-agent idle-lease reaper, and `/clear`. They share one registry cascade — the
 registry is the spawn *tree* (`AgentRegistry::Entry` carries the `parent` link), so
 terminating a mid-tree agent reaps everything below it; `/clear` additionally bumps
@@ -354,8 +357,8 @@ child's `Capabilities` as an argument rather than cloning the parent's.
 [[design/exarch-architecture|exarch-architecture]] (the agent as a provider loop
 over one `ral` tool),
 [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
-(the one record-spec `agent` verb, names as fleet-unique identity, schedule
-labels, commitments retired),
+(the record-spec `` agents `start `` tag, names as fleet-unique identity,
+schedule labels, commitments retired),
 [[design/grant|grant]] (the capability lattice the meet runs in),
 [[map/exarch/tools|tools]], [[map/exarch/agent|agent]],
 [[map/exarch/policy|policy]],
@@ -365,8 +368,8 @@ labels, commitments retired),
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]],
 [[decisions/260705_cancel-per-tab|cancel-per-tab]] (Esc/Ctrl-C are a per-tab exchange
 interrupt, not a subtree cascade),
-[[decisions/260705_branch-minimal|branch-minimal]] (the conversing parented child
-whose `returns` bit is fixed false at construction),
+[[decisions/260705_branch-minimal|branch-minimal]] (the conversing child whose
+`returns` bit is fixed false at construction),
 [[map/synod|synod]] (the hatchery's landed home, and the helper surface built
 over wire-seat children),
 [[decisions/260806_exchange-ends-at-fleet-quiescence|synod's exchange ends at

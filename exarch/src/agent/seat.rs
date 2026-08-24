@@ -433,7 +433,7 @@ mod tests {
 
         let report = ral_core::transport::dispatch_to_report(
             seat.transport(),
-            source_run("agents"),
+            source_run("agents `list"),
             |_| {},
             |req| {
                 desk.handle(req).map_err(|e| EnquiryError {
@@ -449,7 +449,7 @@ mod tests {
                 ending: ral_core::transport::Ending::Settled { .. },
                 ..
             } => {}
-            other => panic!("`agents` must settle through the installed desk, got {other:?}"),
+            other => panic!("`agents `list` must settle through the installed desk, got {other:?}"),
         }
 
         let _ = child.kill();

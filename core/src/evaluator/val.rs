@@ -64,22 +64,24 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
         }
         Val::TildePath(path) => {
             let home = shell.mobile.context.home();
-            expand_tilde_path(path.user.as_deref(), path.suffix.as_deref(), home.as_deref())
-                .map(Value::String)
-                .map_err(|cause| {
-                    shell.err_hint(
-                        format!("cannot resolve {}: {}", path.to_literal(), cause.why()),
-                        match cause {
-                            Unexpandable::HomeUnknown => {
-                                "set HOME, or spell out an explicit path"
-                            }
-                            Unexpandable::ForeignUser => {
-                                "use bare ~ for the current user, or spell out an explicit path"
-                            }
-                        },
-                        1,
-                    )
-                })
+            expand_tilde_path(
+                path.user.as_deref(),
+                path.suffix.as_deref(),
+                home.as_deref(),
+            )
+            .map(Value::String)
+            .map_err(|cause| {
+                shell.err_hint(
+                    format!("cannot resolve {}: {}", path.to_literal(), cause.why()),
+                    match cause {
+                        Unexpandable::HomeUnknown => "set HOME, or spell out an explicit path",
+                        Unexpandable::ForeignUser => {
+                            "use bare ~ for the current user, or spell out an explicit path"
+                        }
+                    },
+                    1,
+                )
+            })
         }
     }
 }

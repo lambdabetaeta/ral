@@ -448,8 +448,7 @@ mod tests {
             Transient::Born {
                 log_dir: std::path::PathBuf::new(),
                 name: "a".into(),
-                parent: 0,
-                branch: false,
+                parent: Some(0),
             },
         ))
         .unwrap();

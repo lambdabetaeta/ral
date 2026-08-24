@@ -52,8 +52,8 @@ child's reach but never escalate it past the parent's: naming a base looser than
 the parent changes nothing (a network-off parent stays offline even under
 `minimal`, since `false ⊓ true = false`), and `dangerous` — the lattice top —
 leaves the parent's authority verbatim. The desk behind the
-[[map/exarch/builtins|`agent` verb]] (`fleet/desk.rs`) calls it at the spawn
-site with the spawn record's mandatory `grant` base.
+[[map/exarch/builtins|`` agents `start `` tag]] (`fleet/desk.rs`) calls it at
+the spawn site with the spawn record's mandatory `grant` base.
 
 `deny_paths` makes a restrict file's own bytes structurally unreachable: a
 restrict file shapes the agent's authority, so the agent must not be able to edit
@@ -92,7 +92,7 @@ and it fails, naming the tool.
 The consequence for spawning: a base whose `exec` is prefixes alone is
 unusable as a child's `grant`, since the child cannot widen its own ceiling to
 recover `ls`. `minimal` is such a base, and is offered by `--base` only —
-`harness.rs::PERMISSION_LABELS` withholds it from `agent`
+`harness.rs::PERMISSION_LABELS` withholds it from `` agents `start ``
 ([[design/agents|agents]]).
 
 Each is a ral script whose terminal expression is a map shaped like the argument

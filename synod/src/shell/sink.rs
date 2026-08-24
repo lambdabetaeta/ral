@@ -742,8 +742,7 @@ mod tests {
         let born = |id: AgentId| Transient::Born {
             log_dir: PathBuf::new(),
             name: format!("helper-{id}"),
-            parent: 0,
-            branch: false,
+            parent: Some(0),
         };
         let Some(SynodEvent::Helpers { live }) = router.route_transient(1, &born(1)) else {
             panic!("a Born must announce the live count");

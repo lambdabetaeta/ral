@@ -1,7 +1,7 @@
 //! Session/view lifecycle — viewports, tab order and names, the parent chain
 //! focus falls back along, and the linger clock.  [`super::App`]'s `tabs` field.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -35,11 +35,8 @@ pub(super) struct Tabs {
     root: AgentId,
     focus: AgentId,
     /// Each tab's spawning agent, so focus can climb toward the trunk when the
-    /// focused agent ends.
+    /// focused agent ends.  A `/branch` has no entry: it roots its own tree.
     parents: HashMap<AgentId, AgentId>,
-    /// Tabs born as a `/branch` — a conversing fork `/close` may kill, unlike a
-    /// returning sub-agent's tab.
-    branches: HashSet<AgentId>,
     /// The rung thinking traces read at across every view — `/thinking`'s
     /// datum, kept here because it outlives any one viewport: a tab born after
     /// the command was typed inherits it.
@@ -71,7 +68,6 @@ impl Tabs {
             root: root_id,
             focus: root_id,
             parents: HashMap::new(),
-            branches: HashSet::new(),
             traces,
             title_frame: 0,
         }
@@ -121,7 +117,6 @@ impl Tabs {
                 self.focus = self.parent_focus(id);
             }
             self.parents.remove(&id);
-            self.branches.remove(&id);
             if let Some(vp) = self.viewports.get_mut(&id) {
                 vp.evict_to_tombstone(id);
             }
@@ -135,8 +130,7 @@ impl Tabs {
         id: AgentId,
         log_dir: &Path,
         name: String,
-        parent: AgentId,
-        branch: bool,
+        parent: Option<AgentId>,
         agent_slot: AgentSlot,
     ) {
         if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
@@ -149,9 +143,8 @@ impl Tabs {
             self.dispatch_order.push(id);
         }
         self.names.insert(id, name);
-        self.parents.insert(id, parent);
-        if branch {
-            self.branches.insert(id);
+        if let Some(parent) = parent {
+            self.parents.insert(id, parent);
         }
         if !self.tabs.contains(&id) {
             self.tabs.push(id);
@@ -172,9 +165,10 @@ impl Tabs {
         self.traces
     }
 
-    /// Whether `id` is a `/branch` tab — the only kind `/close` may kill.
+    /// Whether `id` is a `/branch` tab — the only kind `/close` may kill.  A
+    /// branch is exactly a spawned tab that roots its own tree.
     pub(super) fn is_branch(&self, id: AgentId) -> bool {
-        self.branches.contains(&id)
+        id != self.root && !self.parents.contains_key(&id)
     }
 
     pub(super) fn died(&mut self, id: AgentId) {
@@ -269,6 +263,10 @@ impl Tabs {
         &self.dying
     }
 
+    pub(super) fn parents(&self) -> &HashMap<AgentId, AgentId> {
+        &self.parents
+    }
+
     pub(super) fn viewports(&self) -> &HashMap<AgentId, Viewport> {
         &self.viewports
     }
@@ -332,8 +330,7 @@ mod tests {
             child,
             std::path::Path::new("/tmp/test-child"),
             "child".into(),
-            root,
-            false,
+            Some(root),
             AgentSlot(1),
         );
         if let Some(vp) = tabs.viewport_mut(child) {
