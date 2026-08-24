@@ -744,7 +744,25 @@ impl Unifier {
             (Ty::Map(elem), Ty::Record(row)) | (Ty::Record(row), Ty::Map(elem)) => {
                 self.unify_map_record(&elem, &row, pairs, depth)
             }
-            (a, b) => Err(TypeErrorKind::TyMismatch {
+            // Enumerated, not `_`, here and in the two matches below: a new
+            // constructor then fails the build until it is routed above,
+            // instead of being reported as a mismatch with itself.
+            (
+                a @ (Ty::Unit
+                | Ty::Bytes
+                | Ty::Bool
+                | Ty::Int
+                | Ty::Float
+                | Ty::String
+                | Ty::List(_)
+                | Ty::Map(_)
+                | Ty::Record(_)
+                | Ty::Variant(_)
+                | Ty::Thunk(_)
+                | Ty::Handle(_)
+                | Ty::Var(_)),
+                b,
+            ) => Err(TypeErrorKind::TyMismatch {
                 expected: a,
                 actual: b,
             }),
@@ -887,7 +905,9 @@ impl Unifier {
                     self.unify_row_inner(&r1, &new_r1, pairs, depth)?;
                     return self.unify_row_inner(&r2, &new_r2, pairs, depth);
                 }
-                _ => unreachable!("Row::Var pairs are handled by the early-return blocks above"),
+                (Row::Var(_), _) | (_, Row::Var(_)) => {
+                    unreachable!("Row::Var pairs are handled by the early-return blocks above")
+                }
             }
         }
     }
@@ -979,11 +999,13 @@ impl Unifier {
                 self.unify_ty_inner(&a1, &a2, pairs, depth)?;
                 self.unify_comp_ty_inner(&b1, &b2, pairs, depth)
             }
-            (a, b) => Err(TypeErrorKind::CompTyMismatch {
-                expected: a,
-                actual: b,
-                diffs: Vec::new(),
-            }),
+            (a @ (CompTy::Return(..) | CompTy::Fun(..) | CompTy::Var(_)), b) => {
+                Err(TypeErrorKind::CompTyMismatch {
+                    expected: a,
+                    actual: b,
+                    diffs: Vec::new(),
+                })
+            }
         }
     }
 
