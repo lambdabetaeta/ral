@@ -30,7 +30,11 @@ through is which half of the manifest holds it
   [[invariants/fixed-arity|fixed-arity]]). What makes a capability one of these,
   and the shape of the set, is [[design/builtins|builtins]].
 - **Underscore primitives** — `_ansi-ok` and the host `_ed-*` / `_plugin`:
-  internals the prelude wraps, never called directly by user scripts.
+  internals the prelude wraps, never called directly by user scripts. The
+  prefix is the convention, not the layer: a prelude `_` binding is internal
+  the same way, and every index that lists names — `help`, completion,
+  exarch's command list — hides them, though `explain` still answers for one
+  named exactly.
 - **Prelude functions** — ordinary ral bindings in scope before user code,
   wrapping the layers below for convenience (`for` calls `each`, `lines` splits on
   `\n`). They curry and shadow like any binding (`docs/SPEC.md` §14).

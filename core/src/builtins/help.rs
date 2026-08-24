@@ -41,6 +41,9 @@ fn by_name<'a>(mut rows: Vec<(&'a str, &'a str)>) -> Vec<(&'a str, &'a str)> {
 /// the prelude, then whatever a host installed with
 /// [`Shell::install_library_docs`] — which is empty until one does.
 /// `explain`'s fallback search sweeps the same three.
+///
+/// A leading `_` marks a name internal: it is kept out of the index and out
+/// of the search, though `explain` named it exactly still answers.
 fn registries(shell: &Shell) -> [(&'static str, Vec<(&str, &str)>); 3] {
     [
         (
@@ -54,7 +57,14 @@ fn registries(shell: &Shell) -> [(&'static str, Vec<(&str, &str)>); 3] {
             ),
         ),
         // `build.rs` emits these name-sorted.
-        ("Prelude", PRELUDE_DOCS.to_vec()),
+        (
+            "Prelude",
+            PRELUDE_DOCS
+                .iter()
+                .copied()
+                .filter(|(name, _)| !name.starts_with('_'))
+                .collect(),
+        ),
         (
             "Library",
             by_name(
