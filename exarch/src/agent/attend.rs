@@ -298,21 +298,21 @@ impl Agent {
     /// so a parked parent never sees "no live child" without the result
     /// already queued), and a deferred `spawn`'s surface batch composes and
     /// pushes in two steps a `/clear` can fall between: neither can judge its
-    /// own staleness, so both stamp a birth generation for this consuming edge
-    /// to check.  A `ScheduledWakeup` is settled earlier, at the inbox's own
+    /// own staleness, so both stamp this consuming session's generation to
+    /// check against.  A `ScheduledWakeup` is settled earlier, at the inbox's own
     /// pop boundary against that inbox's clear-epoch; every other source is
     /// generation-free.  The `Surface` id is a debug assertion, not an
     /// admission rule — the deferred sink stamps and posts to the very session
     /// that drains it, so a mismatch could only be a routing bug.
     pub(super) fn admits(&self, item: &Item) -> bool {
         match item {
-            Item::Agent(r) => r.generation == self.agents.generation(),
+            Item::Agent(r) => r.generation == self.agents.generation(self.id),
             Item::Surface { id, generation, .. } => {
                 debug_assert_eq!(
                     *id, self.id,
                     "a spawn's surface batch always drains in the session it was stamped with"
                 );
-                *generation == self.agents.generation()
+                *generation == self.agents.generation(self.id)
             }
             _ => true,
         }

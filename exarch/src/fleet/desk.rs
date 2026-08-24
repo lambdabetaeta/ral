@@ -214,7 +214,8 @@ pub(crate) struct HostServices {
     /// The adoption end of the body's own [`ral_core::Shell::fork_into_nursery`];
     /// `agent-start` redeems a [`NurseryId`] here.
     pub nursery: Nursery,
-    /// Read at install, so a desk older than a `/clear` refuses to spawn.
+    /// The calling agent's own generation, read at install, so a desk older
+    /// than *its* `/clear` refuses to spawn.
     pub generation: u64,
     pub disk_warn_bytes: Option<u64>,
     /// A spawn shares its parent's egress policy, never a fresh one.
@@ -547,8 +548,9 @@ impl ExarchDesk {
         let s = &self.services;
 
         // The captured fuel, caps, and grant are only as fresh as the
-        // generation they were snapshotted under.
-        if s.generation != s.registry.generation() {
+        // generation they were snapshotted under — this caller's own, so a
+        // `/clear` in another tab does not refuse a spawn here.
+        if s.generation != s.registry.generation(s.parent) {
             return Err(Error::new(
                 "agent-start refused: the agent tree was cleared while this call was still in \
                  flight, so the fuel and permissions snapshot it captured are now stale — \
@@ -1852,7 +1854,7 @@ mod tests {
                 parent: parent_id,
                 mailbox: parent_inbox.mailbox(),
                 fuel,
-                generation: registry.generation(),
+                generation: registry.generation(parent_id),
                 ..base_services()
             },
         };
@@ -2989,12 +2991,12 @@ mod tests {
         }
     }
 
-    /// The capture went stale the instant the registry's shared generation moved
-    /// past what was snapshotted at install.
+    /// The capture went stale the instant the *calling* session's generation
+    /// moved past what was snapshotted at install.
     #[test]
     fn agent_start_refuses_after_clear() {
         let (desk, registry, _parent_inbox) = spawnable_desk(3);
-        registry.clear_subtree(desk.services.parent); // the /clear gesture: bumps the shared generation
+        registry.clear_subtree(desk.services.parent); // the /clear gesture, on this caller
         let root = root_shell();
         let shell = forkable_child_shell(&root);
         let session = desk.services.nursery.park(shell);
@@ -4149,7 +4151,7 @@ mod wire_tests {
                 )),
                 interactive: false,
                 nursery: Nursery::default(),
-                generation: registry.generation(),
+                generation: registry.generation(parent_id),
                 disk_warn_bytes: None,
                 egress: Egress::for_test(),
                 acts: ActFragment::default(),
@@ -4457,7 +4459,7 @@ mod wire_tests {
                 )),
                 interactive: false,
                 nursery: Nursery::default(),
-                generation: registry.generation(),
+                generation: registry.generation(parent_id),
                 disk_warn_bytes: None,
                 egress: Egress::for_test(),
                 acts: ActFragment::default(),

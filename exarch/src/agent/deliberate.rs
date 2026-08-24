@@ -918,7 +918,7 @@ mod tests {
     #[test]
     fn stale_agent_result_is_dropped_by_generation_admission() {
         let mut session = Agent::for_test("system").unwrap();
-        let stale = session.agents.generation();
+        let stale = session.agents.generation(session.id);
         session.agents.clear_subtree(session.id);
         session
             .inbox
@@ -954,7 +954,7 @@ mod tests {
                 outcome: AgentOutcome::Complete,
                 text: "found it".into(),
                 elapsed: std::time::Duration::ZERO,
-                generation: session.agents.generation(),
+                generation: session.agents.generation(session.id),
             }))
             .unwrap();
         // A headless root's first `reply` is turned back for self-verification.
@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn stale_surface_batch_is_dropped_by_generation_admission() {
         let mut session = Agent::for_test("system").unwrap();
-        let stale = session.agents.generation();
+        let stale = session.agents.generation(session.id);
         session.agents.clear_subtree(session.id);
         session
             .inbox
@@ -1016,7 +1016,7 @@ mod tests {
             .push(Post::Surface {
                 id: session.id,
                 values: Vec::new(),
-                generation: session.agents.generation(),
+                generation: session.agents.generation(session.id),
             })
             .unwrap();
         // Same self-verification turn-back as the agent-result twin above.

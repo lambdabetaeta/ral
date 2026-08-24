@@ -324,9 +324,11 @@ identity — unique among live entries, enforced at `register`
 `parent` link, so the registry is the
 spawn *tree*: `AgentRegistry::cancel(id)` walks descendants and cancels the whole
 subtree, `cancel_descendants(root)` abandons a returning agent's children without
-advancing the global generation, and `clear_subtree(root)` reaps a subtree and
-bumps the generation, so a late result or deferred surface batch from a cleared
-generation is still dropped. Each cancelled node is stopped **across both
+touching any generation, and `clear_subtree(root)` reaps a subtree and bumps
+`root`'s *own* generation, so a late result or deferred surface batch addressed
+to that root is still dropped. The counter is per entry, not per fleet, and the
+number a worker carries is its *reader's* — a `/clear` in one tab must not throw
+away work another tab is still waiting on. Each cancelled node is stopped **across both
 layers**: its cooperative `Token` (read by `deliberate` between steps and
 raced by the provider's mid-stream cancel) *and* the eval layer through the
 entry's `reach: EvalReach` (`fleet/registry.rs`, minted from the

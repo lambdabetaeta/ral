@@ -124,8 +124,9 @@ pub struct Agent {
     /// The **fleet's** registry, one map cloned to every node: each agent
     /// registers itself and its children, so this is the spawn tree at any
     /// depth.  [`clear_subtree`](crate::fleet::registry::AgentRegistry::clear_subtree)
-    /// bumps its generation, so a worker settling after a `/clear` drops its
-    /// result.
+    /// bumps the cleared session's own generation, so a worker settling after
+    /// *that* session's `/clear` drops its result — and one settling after
+    /// some other tab's does not.
     pub(crate) agents: AgentRegistry,
     /// Live wakeups (cron / after), posted into this agent's own inbox; the
     /// builtins that arm them gate on `allow_schedule`.

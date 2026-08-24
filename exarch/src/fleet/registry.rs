@@ -14,9 +14,12 @@
 //! of its own.  *Interrupt* cancels only the scope of the dispatch in flight,
 //! so the next one, minted fresh from the untouched root, is clean.
 //!
-//! The generation counter, bumped by `/clear`, is the fleet's one late-settle
-//! fence: an async agent's result (`Agent::admits`) and a detached worker's
-//! deferred batch (`InboxDeferred`) both admit against it.
+//! Each entry carries a generation counter, bumped by its own `/clear`, and
+//! that is the fleet's late-settle fence: an async agent's result
+//! (`Agent::admits`) and a detached worker's deferred batch (`InboxDeferred`)
+//! both admit against the generation of the session that will *consume* them.
+//! Per session, not per fleet — a `/clear` in one tab must not drop work
+//! another tab is still waiting on.
 
 use crate::agent::ProviderHandle;
 use crate::agent::cancel::Token;
@@ -169,15 +172,26 @@ pub struct AgentRegistry {
 }
 
 struct Inner {
-    /// Bumped by [`AgentRegistry::clear_subtree`]; a worker that settles under
-    /// an older generation is rejected.
-    generation: u64,
     entries: HashMap<AgentId, Entry>,
+}
+
+impl Inner {
+    /// `id`'s clear count.  An id that has left the map reads 0 — nothing
+    /// drains a departed session's inbox, so the value only has to be total,
+    /// not meaningful.
+    fn generation(&self, id: AgentId) -> u64 {
+        self.entries.get(&id).map_or(0, |e| e.generation)
+    }
 }
 
 struct Entry {
     /// `None` for the trunk — the edge that makes this map a tree.
     parent: Option<AgentId>,
+    /// How many times *this* session has rebuilt its context
+    /// ([`AgentRegistry::clear_subtree`]).  Work bound for this session is
+    /// stamped with the value current at its birth, so a `/clear` here
+    /// invalidates it — and a `/clear` anywhere else leaves it alone.
+    generation: u64,
     name: String,
     log_dir: PathBuf,
     started: Instant,
@@ -216,16 +230,15 @@ impl AgentRegistry {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                generation: 0,
                 entries: HashMap::new(),
             })),
         }
     }
 
-    /// Captured by a worker at birth, so a result arriving after a `/clear` can
-    /// be rejected.
-    pub fn generation(&self) -> u64 {
-        self.lock().generation
+    /// `id`'s generation: captured by a worker at birth so a result arriving
+    /// after `id`'s own `/clear` can be rejected.
+    pub fn generation(&self, id: AgentId) -> u64 {
+        self.lock().generation(id)
     }
 
     /// The fleet's liveness: no entries, no fleet.
@@ -259,11 +272,12 @@ impl AgentRegistry {
         cancel_and_remove(&mut g, root, false);
     }
 
-    /// Register an agent, returning the birth generation it carries into its
-    /// result.  A lease is the caller's choice, not a consequence of being
-    /// parented: a detached worker gets one (abandoned, it must be reaped), a
-    /// branch does not (a conversation must not lose an exchange at the hour
-    /// mark).
+    /// Register an agent, returning the generation it carries into its result:
+    /// its *parent's*, read at this birth, since the parent is who must still
+    /// be listening when the result lands.  A lease is the caller's choice, not
+    /// a consequence of being parented: a detached worker gets one (abandoned,
+    /// it must be reaped), a branch does not (a conversation must not lose an
+    /// exchange at the hour mark).
     ///
     /// A parentless registration — the trunk, the one entry rebuilt in place
     /// rather than reaped — has its reach weakened to
@@ -293,12 +307,19 @@ impl AgentRegistry {
             provider,
         } = reg;
         let mut g = self.lock();
-        if let Some(p) = parent
-            && g.entries.get(&p).is_none_or(|e| e.cancel.terminated())
-        {
-            drop(g);
-            return Err(RegisterError::SessionDead);
-        }
+        // One lookup, two answers: the parent must be live, and its generation
+        // is the one the result must survive — the parent is who will read it.
+        // A parentless entry reports to nobody, so nothing awaits it: 0.
+        let consumer = match parent {
+            None => 0,
+            Some(p) => match g.entries.get(&p) {
+                Some(e) if !e.cancel.terminated() => e.generation,
+                _ => {
+                    drop(g);
+                    return Err(RegisterError::SessionDead);
+                }
+            },
+        };
         // Excludes `id`'s own current entry: `Agent::register_self` re-registers
         // under the same id and must overwrite in place, not be refused for
         // colliding with the very entry it is about to replace.
@@ -313,10 +334,14 @@ impl AgentRegistry {
             Some(_) => reach,
             None => reach.interrupt_only(),
         };
+        // `Agent::register_self` re-registers in place under the same id, so
+        // the count of this session's own clears must survive the overwrite.
+        let generation = g.generation(id);
         g.entries.insert(
             id,
             Entry {
                 parent,
+                generation,
                 name,
                 log_dir,
                 started: Instant::now(),
@@ -331,11 +356,12 @@ impl AgentRegistry {
         // Armed only after the entry exists: `lease_fire` re-reads the entry by
         // id, so arming earlier would let the first fire find nothing and end
         // the chain before it started.
+        drop(g);
         if let Some(ttl) = lease {
             let reg = self.clone();
             process::arm_callback(ttl, move || lease_fire(&reg, id)).keep();
         }
-        Ok(g.generation)
+        Ok(consumer)
     }
 
     /// The cheap half of the spawn-uniqueness rule [`Self::register`] enforces
@@ -476,13 +502,15 @@ impl AgentRegistry {
     /// Settle a worker born under `generation`.  The entry is reaped either way
     /// — a worker is authoritative over its *own* lifetime, so a stale one can
     /// never leave a zombie behind — while the return admits the result only
-    /// when `generation` is still current.
+    /// when `generation` still matches the parent this worker reports to.
     pub fn settle(&self, id: AgentId, generation: u64) -> bool {
         let mut g = self.lock();
-        let current = g.generation;
-        let existed = g.entries.remove(&id).is_some();
+        let Some(entry) = g.entries.remove(&id) else {
+            return false;
+        };
+        let current = entry.parent.map_or(0, |p| g.generation(p));
         drop(g);
-        existed && current == generation
+        current == generation
     }
 
     /// The trunk's self-removal at the end of its attend; a child leaves
@@ -573,12 +601,25 @@ impl AgentRegistry {
     }
 
     /// `/clear` on `root`: reap the subtree the rebuilt context no longer owns,
-    /// and bump the generation so any late result from the old one is rejected.
-    /// `root` is being rebuilt, not torn down, so it stays registered.
+    /// and bump *`root`'s own* generation so any late result addressed to it is
+    /// rejected.  `root` is being rebuilt, not torn down, so it stays
+    /// registered.  Bumping only this entry is what keeps one tab's `/clear`
+    /// from dropping work another tab is still waiting on.
+    ///
+    /// # Panics
+    /// In debug, if `root` holds no entry: the counter lives on the entry now,
+    /// so a clear on an unregistered session would fence nothing at all, and
+    /// would do it silently.
     pub fn clear_subtree(&self, root: AgentId) {
         let mut g = self.lock();
         cancel_and_remove(&mut g, root, false);
-        g.generation += 1;
+        debug_assert!(
+            g.entries.contains_key(&root),
+            "/clear on an unregistered session cannot bump the generation it needs to fence"
+        );
+        if let Some(e) = g.entries.get_mut(&root) {
+            e.generation += 1;
+        }
     }
 
     /// `/close`: the inclusive twin of the `/clear` reap, taking `root` itself
@@ -823,7 +864,23 @@ mod tests {
         );
         assert!(reg.mailbox(1).is_none(), "the cleared child is reaped");
         assert!(reg.mailbox(0).is_some(), "the cleared agent itself stays");
-        assert_ne!(g, reg.generation(), "the generation advanced on clear");
+        assert_ne!(g, reg.generation(0), "the generation advanced on clear");
+    }
+
+    /// The fence is per session, so a `/clear` on one root must leave another
+    /// root's in-flight result alone.  `/clear` in a `/branch` tab reaches this
+    /// through `Agent::admits`, which reads the *consuming* session's counter.
+    #[test]
+    fn a_clear_on_one_root_does_not_reject_another_roots_late_result() {
+        let reg = AgentRegistry::new();
+        entry(&reg, 0, None); // the trunk
+        entry(&reg, 1, None); // a branch, rooted beside it
+        let g = entry(&reg, 2, Some(0)); // the trunk's child, still working
+        reg.clear_subtree(1);
+        assert!(
+            reg.settle(2, g),
+            "the branch's /clear must not poison the trunk's outstanding result"
+        );
     }
 
     /// Both layers, so an in-flight eval unwinds instead of grinding on as an
@@ -1593,8 +1650,13 @@ mod tests {
     #[test]
     fn settle_always_reaps_its_entry_even_across_a_bare_generation_bump() {
         let reg = AgentRegistry::new();
-        let g = entry(&reg, 1, None);
-        reg.lock().generation += 1;
+        entry(&reg, 0, None); // the parent that would read the result
+        let g = entry(&reg, 1, Some(0));
+        reg.lock()
+            .entries
+            .get_mut(&0)
+            .expect("the parent is registered")
+            .generation += 1;
         assert!(
             !reg.settle(1, g),
             "a stale-generation result is not delivered"

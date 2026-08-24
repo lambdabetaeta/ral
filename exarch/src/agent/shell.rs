@@ -153,7 +153,7 @@ impl Agent {
             index: self.index.clone(),
             interactive: self.interactive,
             nursery,
-            generation: self.agents.generation(),
+            generation: self.agents.generation(self.id),
             disk_warn_bytes: self.disk_warn_bytes,
             egress: self.egress.clone(),
             // Minted here, once per `ral` call: this is the one place a call's

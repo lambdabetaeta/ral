@@ -112,11 +112,14 @@ written against it:
   worker's cancel scope is a child of that root, so cancelling it walks the
   ancestor chain with no extra edge), and reaches its schedules and
   children through the registry.
-- **generation** — `/clear` bumps one generation every chapter observes,
-  so anything settling across a clear is rejected, uniformly — whether by
-  checking the generation directly (an async agent's result, a worker's
-  deferred surface batch) or by the stronger route of unconditional removal
-  (a schedule, disarmed and dropped rather than tagged).
+- **generation** — every session counts its own clears, and `/clear` bumps
+  only that session's count. Anything settling across it is rejected —
+  whether by checking the generation directly (an async agent's result, a
+  worker's deferred surface batch) or by the stronger route of unconditional
+  removal (a schedule, disarmed and dropped rather than tagged). What a
+  worker carries is the count of the session that will *read* it, so the
+  rejection is addressed, not global: one tab's `/clear` leaves another
+  tab's outstanding work alone.
 - **probe** — the `/resources` projection, over residents and accumulators
   alike.
 

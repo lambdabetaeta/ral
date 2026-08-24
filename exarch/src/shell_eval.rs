@@ -208,9 +208,9 @@ fn reject_protected_pin(surface: &Surface, recorder: &crate::record::Emitter) ->
 ///
 /// A worker settling mid-`/clear` cannot decide its own staleness, since
 /// composing the batch and pushing it are two steps a `/clear` can fall
-/// between; so the sink stamps every batch with the [`AgentRegistry`]
-/// generation it captured at construction and always pushes, leaving
-/// `Agent::admits` to reject a stale one at the consuming edge.
+/// between; so the sink stamps every batch with the root session's
+/// [`AgentRegistry`] generation as captured at construction and always pushes,
+/// leaving `Agent::admits` to reject a stale one at the consuming edge.
 struct InboxDeferred {
     mailbox: Mailbox,
     /// The **root** session's id: a spawn worker registers no tab of its own,
@@ -255,7 +255,7 @@ pub fn deferred_sink(
     Arc::new(InboxDeferred {
         mailbox: emit.mailbox(),
         root,
-        generation: registry.generation(),
+        generation: registry.generation(root),
         recorder,
     })
 }
@@ -1299,8 +1299,29 @@ keep-bottom
         let inbox = Inbox::new();
         let (tx, _rx) = channel();
         let emit = Emitter::with_mailbox(tx, 7, inbox.mailbox());
+        // Registered, so the `/clear` below has an entry whose generation to
+        // bump: the counter lives on the session, not on the fleet.
+        let _ = registry.register(crate::fleet::registry::Registration {
+            id: 7,
+            parent: None,
+            lease: None,
+            name: "root".into(),
+            log_dir: std::path::PathBuf::from("/tmp"),
+            cancel: crate::agent::cancel::Token::new(),
+            reach: crate::fleet::registry::EvalReach::Identity {
+                eval_root: None,
+                interrupt_target: crate::fleet::registry::InterruptTarget::default(),
+            },
+            mailbox: inbox.mailbox(),
+            provider: crate::agent::ProviderHandle::new(std::sync::Arc::new(
+                crate::provider::Provider::scripted(
+                    "test",
+                    crate::provider::scripted::Script::new(),
+                ),
+            )),
+        });
         let deferred = deferred_sink(&emit, 7, &registry, crate::record::Emitter::none());
-        let born = registry.generation();
+        let born = registry.generation(7);
 
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {
@@ -1311,7 +1332,7 @@ keep-bottom
             other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),
         }
 
-        // A `/clear` bumps the registry past the sink's captured generation.
+        // A `/clear` bumps this root past the sink's captured generation.
         registry.clear_subtree(7);
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {

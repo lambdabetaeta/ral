@@ -70,9 +70,8 @@ pub(crate) struct AgentResult {
     pub outcome: AgentOutcome,
     pub text: String,
     pub elapsed: Duration,
-    /// The session generation that owned the worker.  One older than the live
-    /// session — a worker that settled after a `/clear` — is refused by
-    /// `Agent::admits` rather than delivered into a rebuilt context.
+    /// The parent's, read at the worker's birth; `admits` refuses a result
+    /// that arrives into a context rebuilt by a `/clear` since.
     pub generation: u64,
 }
 
@@ -151,10 +150,8 @@ pub(crate) enum Post {
     Surface {
         id: AgentId,
         values: Vec<Value>,
-        /// The birth generation the deferred sink (`InboxDeferred`,
-        /// `shell_eval.rs`) captured at construction.  A worker settling
-        /// mid-`/clear` cannot judge its own staleness, so it always posts and
-        /// `Agent::admits` drops a stale batch at the consuming edge.
+        /// The root session's, captured at the sink's construction; `admits`
+        /// drops the batch if that root has cleared since.
         generation: u64,
     },
 }
