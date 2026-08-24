@@ -19,7 +19,10 @@ different quantities:
   on every descent into a strictly deeper subterm. This is the one traversal
   whose depth is not bounded by the source: a substitution composes types the
   program never wrote beside one another, so unification can descend far past
-  anything the parser saw.
+  anything the parser saw. The row occurs check is on this side of the line
+  however much it reads like a structural walk: `row_occurs` is called from
+  inside `unify_row_inner` and spends the caller's remaining budget, so it
+  cannot share a traversal with the walks below.
 - *The structural walks* are linear in a type the program built one constructor
   per statement. Their depth is the source file's own length. A budget there
   would re-guard a quantity the source already bounds, at the cost of turning
