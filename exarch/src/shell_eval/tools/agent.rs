@@ -66,7 +66,6 @@ pub(crate) struct AsyncSpawn {
 pub(crate) struct SpawnedChild {
     pub id: crate::bus::AgentId,
     pub name: String,
-    pub log_dir: String,
 }
 
 /// Hand an already-forked, already-capped `child` to a worker thread that
@@ -95,7 +94,6 @@ pub(crate) fn spawn_async(
     // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.id;
     let log_dir = child.log_dir();
-    let log_dir_str = log_dir.display().to_string();
     let cancel = child.cancel_token().clone();
     // Registered so a terminate-class cancel can unwind a `ral` eval already in
     // flight, and a per-tab interrupt can unwind just the in-flight exchange
@@ -226,7 +224,6 @@ pub(crate) fn spawn_async(
         Ok(_) => Ok(SpawnedChild {
             id: agent_id,
             name,
-            log_dir: log_dir_str,
         }),
         Err(e) => {
             // Registration must precede the thread: registering after it would

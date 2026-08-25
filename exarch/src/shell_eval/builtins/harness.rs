@@ -7,7 +7,11 @@
 //! the run's nursery ([`ral_core::Shell::fork_into_nursery`]) and enquires
 //! with the parked fork's id: the reentrancy law bars a desk handler from
 //! holding `&mut Shell` to fork one itself. [`crate::fleet::desk::ExarchDesk`]
-//! answers every class on the other side.
+//! answers every enquiry on the other side.
+//!
+//! A registry is one enquiry class, named as the model names it: `agents` and
+//! `schedules` each carry the model's tag as a nested variant and its record
+//! verbatim, and each answers the registry's own state.
 
 use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::serial::FOValue;
@@ -42,43 +46,44 @@ pub(crate) fn valid_name(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Decode a spawn's `type` into its bare tag. [`scheme_agents`] leaves that
-/// row open, so the enumeration is closed here, where the error can name
-/// both memory modes.
-fn agent_type_label(v: &Value) -> Settled<String> {
-    if let Value::Variant {
-        label,
-        payload: None,
-    } = v
-        && (label == "amnemon" || label == "mnemon")
-    {
-        return Ok(label.clone());
+/// The label of a nullary tag — the shape both `type` and `grant` must have.
+fn bare_tag(v: &Value) -> Option<&str> {
+    match v {
+        Value::Variant {
+            label,
+            payload: None,
+        } => Some(label),
+        _ => None,
+    }
+}
+
+/// Check a spawn's `type`. [`scheme_agents`] leaves that row open, so the
+/// enumeration is closed here, where the error can name both memory modes.
+fn agent_type_label(v: &Value) -> Settled<()> {
+    if matches!(bare_tag(v), Some("amnemon" | "mnemon")) {
+        return Ok(());
     }
     Err(sig(format!(
         "agents: `type` must be `amnemon (blank context) or `mnemon (inherits your conversation) — got {v}"
     )))
 }
 
-/// Decode a `grant` into its bare tag, closing the row [`scheme_agents`]
-/// leaves open so the error can enumerate every legal label.
-fn permission_label(v: &Value) -> Settled<String> {
-    if let Value::Variant {
-        label,
-        payload: None,
-    } = v
-        && PERMISSION_LABELS.contains(&label.as_str())
-    {
-        return Ok(label.clone());
+/// Check a `grant`, closing the row [`scheme_agents`] leaves open so the
+/// error can enumerate every legal label.
+fn permission_label(v: &Value) -> Settled<()> {
+    if bare_tag(v).is_some_and(|label| PERMISSION_LABELS.contains(&label)) {
+        return Ok(());
     }
     Err(sig(format!(
         "grant must be one of `confined, `read-only, `edit-only, `reasonable, `dangerous — got {v}"
     )))
 }
 
-/// Decode a `schedule` spec's `trigger`, re-running the real parsers
+/// Check a `schedule` spec's `trigger`, re-running the real parsers
 /// ([`CronSchedule::parse`]/[`parse_duration`]) engine-side so a malformed
 /// expression carries their own message home before any enquiry crosses.
-fn schedule_trigger(v: &Value) -> Settled<FOValue> {
+/// The desk parses again on arrival: a guest may send whatever it likes.
+fn schedule_trigger(v: &Value) -> Settled<()> {
     let Value::Variant {
         label,
         payload: Some(payload),
@@ -95,59 +100,79 @@ fn schedule_trigger(v: &Value) -> Settled<FOValue> {
         )));
     };
     match label.as_str() {
-        "cron" => {
-            CronSchedule::parse(expr).map_err(|e| sig(format!("schedules: {e}")))?;
-            Ok(FOValue::Variant {
-                label: "cron".to_string(),
-                payload: Some(Box::new(FOValue::String {
-                    value: expr.clone(),
-                })),
-            })
-        }
-        "after" => {
-            parse_duration(expr).map_err(|e| sig(format!("schedules: {e}")))?;
-            Ok(FOValue::Variant {
-                label: "after".to_string(),
-                payload: Some(Box::new(FOValue::String {
-                    value: expr.clone(),
-                })),
-            })
-        }
+        "cron" => CronSchedule::parse(expr)
+            .map(|_| ())
+            .map_err(|e| sig(format!("schedules: {e}"))),
+        "after" => parse_duration(expr)
+            .map(|_| ())
+            .map_err(|e| sig(format!("schedules: {e}"))),
         other => Err(sig(format!(
             "schedules: trigger must be `cron '<5-field-cron-expr>'` or `after '<n><unit>'`, got `{other}`"
         ))),
     }
 }
 
-/// Decode a `schedule` spec's `label`: the wakeup's name, required — every
+/// Check a `schedule` spec's `label`: the wakeup's name, required — every
 /// schedule now names itself, so there is no default to fall back to.
-fn schedule_label(v: &Value) -> Settled<FOValue> {
-    let Value::String(name) = v else {
-        return Err(sig(format!(
-            "schedules: `label` must be a Str naming the wakeup, got {}",
-            v.type_name()
-        )));
-    };
-    Ok(FOValue::String {
-        value: name.clone(),
+fn schedule_label(v: &Value) -> Settled<()> {
+    if matches!(v, Value::String(_)) {
+        return Ok(());
+    }
+    Err(sig(format!(
+        "schedules: `label` must be a Str naming the wakeup, got {}",
+        v.type_name()
+    )))
+}
+
+/// A request in the nested form the desk matches: the registry's family, then
+/// the tag the model typed, then that tag's own payload.
+fn request(family: &str, tag: &str, payload: Option<FOValue>) -> FOValue {
+    FOValue::Variant {
+        label: family.to_string(),
+        payload: Some(Box::new(FOValue::Variant {
+            label: tag.to_string(),
+            payload: payload.map(Box::new),
+        })),
+    }
+}
+
+/// The model's own record, sent verbatim. Its recursion is the seam's
+/// first-orderness check, so the door need not re-encode field by field.
+fn verbatim(spec: &Value, verb: &str) -> Settled<FOValue> {
+    FOValue::try_from(spec).map_err(|_| {
+        sig(format!(
+            "{verb}: the spec must be first-order data — no closures, handles, or environments — \
+             since it crosses to the host as plain data"
+        ))
     })
 }
 
-/// Check the `` `started `` tag `agent-start`/`agent-hatched` answer with.
-/// The payload is dropped: the roster carries the child's row.
-fn spawn_receipt(answer: FOValue) -> Settled<()> {
-    let FOValue::Variant { label, .. } = answer else {
+/// The `agents` family's answer: `` `roster [rows] ``, whichever tag was sent.
+fn roster(answer: FOValue) -> Settled<Value> {
+    let FOValue::Variant {
+        label,
+        payload: Some(payload),
+    } = answer
+    else {
         return Err(sig(
-            "agents: host answered an unexpected shape for its receipt",
+            "agents: host answered an unexpected shape for the roster",
         ));
     };
-    if label != "started" {
-        return Err(sig(format!("agents: host refused: {label}")));
+    if label != "roster" {
+        return Err(sig(format!(
+            "agents: host answered `{label} where `roster was expected — every tag in this family \
+             answers the roster"
+        )));
     }
-    Ok(())
+    let FOValue::List { items } = *payload else {
+        return Err(sig(
+            "agents: host's `roster answer must carry a list of agent rows",
+        ));
+    };
+    Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// Decode `agent-start`'s wire arm's `` `hatch [token, port] `` payload.
+/// Decode the wire seat's `` `hatch [token, port] `` payload.
 fn decode_hatch_answer(payload: FOValue) -> Settled<(u64, u32)> {
     let FOValue::Map { entries } = payload else {
         return Err(sig(
@@ -209,14 +234,13 @@ fn run_hatch(
 fn enquire_hatched(mooring: &Mooring, shell: &Shell, token: u64) -> Settled<FOValue> {
     Ok(shell.enquire(
         mooring,
-        FOValue::Variant {
-            label: "agent-hatched".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: vec![FOValue::Int {
-                    value: token.cast_signed(),
-                }],
-            })),
-        },
+        request(
+            "agents",
+            "hatched",
+            Some(FOValue::Int {
+                value: token.cast_signed(),
+            }),
+        ),
     )?)
 }
 
@@ -235,52 +259,51 @@ fn kill_hatched(_pid: u32) {
 fn enquire_abort(mooring: &Mooring, shell: &Shell, token: u64) {
     let _ = shell.enquire(
         mooring,
-        FOValue::Variant {
-            label: "agent-abort".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: vec![FOValue::Int {
-                    value: token.cast_signed(),
-                }],
-            })),
-        },
+        request(
+            "agents",
+            "abort",
+            Some(FOValue::Int {
+                value: token.cast_signed(),
+            }),
+        ),
     );
 }
 
 /// `` `start ``'s payload: validate, fork this shell into the run's nursery,
-/// enquire `` `agent-start `` with the parked fork's id; the desk's `launch`
-/// is the other half.
+/// enquire `` agents `start `` with the model's record and the parked fork;
+/// the desk's `launch` is the other half.
 ///
 /// [`scheme_agents`]'s closed record row inside `` `start `` already
 /// guarantees the five fields, so the `else` arms below are unreachable
 /// through the type checker; they stay didactic rather than trust it alone.
-fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<()> {
-    let Value::Map(spec) = spec else {
+fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
+    let Value::Map(fields) = spec else {
         return Err(sig(format!(
             "agents: `start`'s payload must be a [prompt: …, name: …, type: …, grant: …, search: …] record, got {}",
             spec.type_name()
         )));
     };
-    let Some(prompt) = spec.get("prompt") else {
+    if fields.get("prompt").is_none() {
         return Err(sig(
             "agents: the spec record needs a `prompt` field — the instruction the child starts with",
         ));
-    };
-    let Some(name) = spec.get("name") else {
+    }
+    let Some(name) = fields.get("name") else {
         return Err(sig(
             "agents: the spec record needs a `name` field — the child's identity",
         ));
     };
-    let Some(kind) = spec.get("type") else {
+    let Some(kind) = fields.get("type") else {
         return Err(sig(
             "agents: the spec record needs a `type` field — `amnemon or `mnemon",
         ));
     };
-    let Some(grant) = spec.get("grant") else {
+    let Some(grant) = fields.get("grant") else {
         return Err(sig(
             "agents: the spec record needs a `grant` field — one of the five permission bases",
         ));
     };
-    let Some(search) = spec.get("search") else {
+    let Some(search) = fields.get("search") else {
         return Err(sig(
             "agents: the spec record needs a `search` field — whether the child may use the \
              provider's built-in web search",
@@ -294,15 +317,18 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<()> {
              digits, `-`, or `_` (the tab-bar contract) — got {name:?}"
         )));
     }
-    let kind = agent_type_label(kind)?;
-    let grant = permission_label(grant)?;
-    let Value::Bool(search) = search else {
+    agent_type_label(kind)?;
+    permission_label(grant)?;
+    // The door admitted it, so the grant is a bare tag; the hatch needs its
+    // label to narrow the child guest-side.
+    let grant = bare_tag(grant).unwrap_or_default().to_string();
+    if !matches!(search, Value::Bool(_)) {
         return Err(sig(format!(
             "agents: `search` must be a Bool — got {}",
             search.type_name()
         )));
-    };
-    let prompt = prompt.to_string();
+    }
+    let spec = verbatim(spec, "agents")?;
 
     let session = shell.fork_into_nursery(mooring)?;
     // `Nursery::park` mints ids from a monotonic per-run counter, so this
@@ -311,52 +337,44 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<()> {
     let session_id = i64::try_from(session.0).unwrap_or(i64::MAX);
     let answer = shell.enquire(
         mooring,
-        FOValue::Variant {
-            label: "agent-start".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: vec![
-                    FOValue::Int { value: session_id },
-                    FOValue::Variant {
-                        label: kind,
-                        payload: None,
-                    },
-                    FOValue::String { value: prompt },
-                    FOValue::String { value: name },
-                    FOValue::Variant {
-                        label: grant.clone(),
-                        payload: None,
-                    },
-                    FOValue::Bool { value: *search },
+        request(
+            "agents",
+            "start",
+            Some(FOValue::Map {
+                entries: vec![
+                    ("spec".to_string(), spec),
+                    (
+                        "fork".to_string(),
+                        FOValue::Variant {
+                            label: "parked".to_string(),
+                            payload: Some(Box::new(FOValue::Int { value: session_id })),
+                        },
+                    ),
                 ],
-            })),
-        },
+            }),
+        ),
     )?;
 
-    let FOValue::Variant { label, payload } = answer else {
-        return Err(sig(
-            "agents: host answered an unexpected shape for its receipt",
-        ));
-    };
-    if label != "hatch" {
-        return spawn_receipt(FOValue::Variant { label, payload });
+    if !matches!(&answer, FOValue::Variant { label, .. } if label == "hatch") {
+        return Ok(answer);
     }
-    // The wire arm: the trunk's own engine hatches the child itself, then
-    // enquires `agent-hatched` to hand the desk its dial to await.
-    let Some(payload) = payload else {
+    // The wire seat: the trunk's own engine hatches the child itself, then
+    // enquires `` `hatched ``, whose answer is the roster.
+    let FOValue::Variant {
+        payload: Some(payload),
+        ..
+    } = answer
+    else {
         return Err(sig("agents: host's `hatch answer carries no payload"));
     };
     let (token, port) = decode_hatch_answer(*payload)?;
     match run_hatch(port, token, mooring, session, grant) {
-        Ok(pid) => match enquire_hatched(mooring, shell, token) {
-            Ok(answer) => spawn_receipt(answer),
-            Err(e) => {
-                // The dial never landed in time, or landed and was refused:
-                // either way the desk has given up, so this engine must not
-                // leave the hatched child dialling into silence.
-                kill_hatched(pid);
-                Err(e)
-            }
-        },
+        Ok(pid) => enquire_hatched(mooring, shell, token).inspect_err(|_| {
+            // The dial never landed in time, or landed and was refused:
+            // either way the desk has given up, so this engine must not
+            // leave the hatched child dialling into silence.
+            kill_hatched(pid);
+        }),
         Err(reason) => {
             enquire_abort(mooring, shell, token);
             Err(sig(format!("agents: {reason}")))
@@ -364,57 +382,46 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<()> {
     }
 }
 
-/// `` `message ``'s payload: enquires `` `message ``; name resolution,
-/// descendant-scoping, and delivery errors all belong to the desk.
-fn message_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<()> {
-    let Value::Map(spec) = spec else {
+/// `` `message ``'s payload: enquires `` agents `message `` with the model's
+/// record; name resolution, descendant-scoping, and delivery errors all
+/// belong to the desk.
+fn message_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
+    let Value::Map(fields) = spec else {
         return Err(sig(format!(
             "agents: `message`'s payload must be a [to: …, text: …] record, got {}",
             spec.type_name()
         )));
     };
-    let Some(to) = spec.get("to") else {
+    let Some(to) = fields.get("to") else {
         return Err(sig(
             "agents: the `message` spec needs a `to` field — the descendant's name",
         ));
     };
-    let Some(text) = spec.get("text") else {
+    let Some(text) = fields.get("text") else {
         return Err(sig(
             "agents: the `message` spec needs a `text` field — what to send",
         ));
     };
-    let Value::String(to) = to else {
+    if !matches!(to, Value::String(_)) {
         return Err(sig(format!(
             "agents: `to` must be a Str naming the descendant, got {}",
             to.type_name()
         )));
-    };
-    let Value::String(text) = text else {
+    }
+    if !matches!(text, Value::String(_)) {
         return Err(sig(format!(
             "agents: `text` must be a Str, got {}",
             text.type_name()
         )));
-    };
-    shell.enquire(
+    }
+    Ok(shell.enquire(
         mooring,
-        FOValue::Variant {
-            label: "message".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: vec![
-                    FOValue::String { value: to.clone() },
-                    FOValue::String {
-                        value: text.clone(),
-                    },
-                ],
-            })),
-        },
-    )?;
-    Ok(())
+        request("agents", "message", Some(verbatim(spec, "agents")?)),
+    )?)
 }
 
-/// `agents <tag>` — issue the tag's transition, then re-read
-/// `` `agent-list ``: every tag answers with the roster afterwards, never a
-/// receipt of its own.
+/// `agents <tag>` — one enquiry, whose answer is the registry itself: every
+/// tag answers with the roster, never a receipt of its own.
 fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Variant { label, payload } = &args[0] else {
         return Err(sig(format!(
@@ -422,8 +429,8 @@ fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settl
             args[0].type_name()
         )));
     };
-    match (label.as_str(), payload) {
-        ("list", None) => {}
+    let answer = match (label.as_str(), payload) {
+        ("list", None) => shell.enquire(mooring, request("agents", "list", None))?,
         ("start", Some(spec)) => start_agent(spec, mooring, shell)?,
         ("message", Some(spec)) => message_agent(spec, mooring, shell)?,
         ("cancel", Some(target)) => {
@@ -435,82 +442,62 @@ fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settl
             };
             shell.enquire(
                 mooring,
-                FOValue::Variant {
-                    label: "agent-cancel".to_string(),
-                    payload: Some(Box::new(FOValue::List {
-                        items: vec![FOValue::String {
-                            value: name.clone(),
-                        }],
-                    })),
-                },
-            )?;
+                request(
+                    "agents",
+                    "cancel",
+                    Some(FOValue::String {
+                        value: name.clone(),
+                    }),
+                ),
+            )?
         }
         _ => {
             return Err(sig(format!(
                 "agents: tag must be one of `list, `start, `message, `cancel — got {label}"
             )));
         }
-    }
-    let answer = shell.enquire(
-        mooring,
-        FOValue::Variant {
-            label: "agent-list".to_string(),
-            payload: None,
-        },
-    )?;
-    let FOValue::List { items } = answer else {
-        return Err(sig(
-            "agents: host answered an unexpected shape for the listing",
-        ));
     };
-    Ok(Value::list(items.into_iter().map(Value::from).collect()))
+    roster(answer)
 }
 
-/// `` `add ``'s payload: decodes through
-/// [`schedule_trigger`]/[`schedule_label`], then enquires `` `schedule ``.
-/// The self-wakeup grant and label uniqueness are refusals the desk and the
-/// schedule registry own.
-fn add_schedule(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<()> {
-    let Value::Map(spec) = spec else {
+/// `` `add ``'s payload: checked through
+/// [`schedule_trigger`]/[`schedule_label`], then enquired verbatim as
+/// `` schedules `add ``. The self-wakeup grant and label uniqueness are
+/// refusals the desk and the schedule registry own.
+fn add_schedule(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
+    let Value::Map(fields) = spec else {
         return Err(sig(format!(
             "schedules: `add`'s payload must be a [trigger: …, label: …, prompt: …] record, got {}",
             spec.type_name()
         )));
     };
-    let Some(trigger) = spec.get("trigger") else {
+    let Some(trigger) = fields.get("trigger") else {
         return Err(sig(
             "schedules: the `add` spec needs a `trigger` field — `cron '<expr>' or `after '<dur>'",
         ));
     };
-    let Some(label) = spec.get("label") else {
+    let Some(label) = fields.get("label") else {
         return Err(sig(
             "schedules: the `add` spec needs a `label` field — a Str naming the wakeup",
         ));
     };
-    let Some(prompt) = spec.get("prompt") else {
+    if fields.get("prompt").is_none() {
         return Err(sig(
             "schedules: the `add` spec needs a `prompt` field — the instruction delivered when the wakeup fires",
         ));
-    };
-    let trigger = schedule_trigger(trigger)?;
-    let label = schedule_label(label)?;
-    let prompt = prompt.to_string();
+    }
+    schedule_trigger(trigger)?;
+    schedule_label(label)?;
 
-    shell.enquire(
+    Ok(shell.enquire(
         mooring,
-        FOValue::Variant {
-            label: "schedule".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: vec![trigger, label, FOValue::String { value: prompt }],
-            })),
-        },
-    )?;
-    Ok(())
+        request("schedules", "add", Some(verbatim(spec, "schedules")?)),
+    )?)
 }
 
-/// `schedules <tag>` — issue the tag's transition, then re-read
-/// `` `schedule-list ``: every tag answers with the table afterwards, never a
-/// receipt of its own. The self-wakeup grant refusal is the desk's.
+/// `schedules <tag>` — one enquiry, whose answer is the registry itself:
+/// every tag answers with the table, never a receipt of its own. The
+/// self-wakeup grant refusal is the desk's.
 fn builtin_schedules(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Variant { label, payload } = &args[0] else {
         return Err(sig(format!(
@@ -518,8 +505,8 @@ fn builtin_schedules(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             args[0].type_name()
         )));
     };
-    match (label.as_str(), payload) {
-        ("list", None) => {}
+    let answer = match (label.as_str(), payload) {
+        ("list", None) => shell.enquire(mooring, request("schedules", "list", None))?,
         ("add", Some(spec)) => add_schedule(spec, mooring, shell)?,
         ("remove", Some(target)) => {
             let Value::String(target_label) = target.as_ref() else {
@@ -530,29 +517,21 @@ fn builtin_schedules(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
             };
             shell.enquire(
                 mooring,
-                FOValue::Variant {
-                    label: "unschedule".to_string(),
-                    payload: Some(Box::new(FOValue::List {
-                        items: vec![FOValue::String {
-                            value: target_label.clone(),
-                        }],
-                    })),
-                },
-            )?;
+                request(
+                    "schedules",
+                    "remove",
+                    Some(FOValue::String {
+                        value: target_label.clone(),
+                    }),
+                ),
+            )?
         }
         _ => {
             return Err(sig(format!(
                 "schedules: tag must be one of `list, `add, `remove — got {label}"
             )));
         }
-    }
-    let answer = shell.enquire(
-        mooring,
-        FOValue::Variant {
-            label: "schedule-list".to_string(),
-            payload: None,
-        },
-    )?;
+    };
     let FOValue::List { items } = answer else {
         return Err(sig(
             "schedules: host answered an unexpected shape for the listing",
@@ -991,13 +970,13 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 9] = [
     BuiltinEntry::new(
         Cow::Borrowed("agents"),
         scheme_agents,
-        "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one. Every tag answers with the roster afterwards, [[name: Str, elapsed-s: Int, log-dir: Str]], so what you read back is always what is live now rather than a receipt for what you just did.\n\nagents `list  — your live descendants at any depth, oldest first. Settled agents are not listed: their replies arrive on their own, as marked items in your inbox. This is how you recover names after a context compaction.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation and reuses your provider selection for cache locality. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live descendant named `to`; it lands at that child's next exchange boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. A cancel is a request, not a transaction: the child is still running when this answers, so its row is still in the roster you get back. A name you still see listed is NOT a failed cancel — do not fire it again; read `list later and find it gone.\n\nEach tag issues its transition and then re-reads the registry, so a raise does not prove nothing happened: the transition may have landed and the re-read failed. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one. Every tag answers with the roster afterwards, [[name: Str, elapsed-s: Int, log-dir: Str]], so what you read back is always what is live now rather than a receipt for what you just did.\n\nagents `list  — your live descendants at any depth, oldest first. Settled agents are not listed: their replies arrive on their own, as marked items in your inbox. This is how you recover names after a context compaction.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation and reuses your provider selection for cache locality. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live descendant named `to`; it lands at that child's next exchange boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. A cancel is a request, not a transaction: the child is still running when this answers, so its row is still in the roster you get back. A name you still see listed is NOT a failed cancel — do not fire it again; read `list later and find it gone.\n\nEach tag is one exchange with the host, and the roster it answers is the registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agents),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("schedules"),
         scheme_schedules,
-        "schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nschedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after a context compaction.\n\nschedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nschedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag issues its transition and then re-reads the table, so a raise does not prove nothing happened: the transition may have landed and the re-read failed. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nschedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after a context compaction.\n\nschedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nschedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag is one exchange with the host, and the table it answers is the schedule registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_schedules),
     ),
     BuiltinEntry::new(
@@ -1073,7 +1052,7 @@ mod tests {
                 label: label.to_string(),
                 payload: None,
             };
-            assert_eq!(permission_label(&v).unwrap(), label);
+            permission_label(&v).unwrap_or_else(|e| panic!("the door must admit `{label}: {e:?}"));
         }
     }
 
@@ -1674,7 +1653,7 @@ mod tests {
     /// The record must reach the parent's inbox structured, not flattened
     /// to a string. The child's script does the replying, for the
     /// undriven-parent reason
-    /// `agent_full_stack_round_trip_delivers_receipt_and_settles_into_inbox`
+    /// `agent_full_stack_round_trip_answers_the_roster_and_settles_into_inbox`
     /// gives.
     #[test]
     fn reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox() {
@@ -1700,7 +1679,7 @@ mod tests {
         );
         assert!(
             result.content.contains("finder"),
-            "the receipt record must be the run's value, got: {}",
+            "the roster must be the run's value and must name the child, got: {}",
             result.content
         );
 
@@ -1820,7 +1799,7 @@ mod tests {
         );
         assert!(
             result.content.contains("pinner"),
-            "the receipt record must be the run's value, got: {}",
+            "the roster must be the run's value and must name the child, got: {}",
             result.content
         );
 
@@ -1878,7 +1857,7 @@ mod tests {
         );
         assert!(
             result.content.contains("reader"),
-            "the receipt record must be the run's value, got: {}",
+            "the roster must be the run's value and must name the child, got: {}",
             result.content
         );
 
@@ -2049,7 +2028,7 @@ mod tests {
         );
         assert!(
             result.content.contains("tasker"),
-            "the receipt record must be the run's value, got: {}",
+            "the roster must be the run's value and must name the child, got: {}",
             result.content
         );
 
