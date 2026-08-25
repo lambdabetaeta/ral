@@ -1,6 +1,6 @@
 # justfile — a registry of dev commands for ral, not a place for logic:
-# every recipe delegates to `cargo` or to a `.ral` script under scripts/.
-# Run `just` with no arguments to list recipes.
+# every recipe delegates to `cargo`, to scripts/ci.sh, or to a `.ral` script
+# under scripts/.  Run `just` with no arguments to list recipes.
 
 # Windows has no `sh`; PowerShell is the shell it always has.
 set windows-shell := ['powershell.exe', '-NoLogo', '-NoProfile', '-Command']
@@ -55,17 +55,23 @@ lint $RUSTFLAGS='-D warnings':
 # Lint and test the workspace: the gate before every commit.
 gate: lint test
 
-# Replay CI on this host: the gate plus the build, the Windows cross-check, the site, and the examples.
-ci:
-    cargo run -p ral --quiet -- scripts/ci-local.ral
+# Both run scripts/ci.sh — the same step list GitHub Actions runs, differing
+# only in where cargo runs.  POSIX sh, so `just ci` still works when ral does
+# not build; that is the point of it not being a `.ral` script.
 
-# Replay the Linux half of CI in a container.
+# Run CI on this host's toolchain: lint, build, test, the Windows cross-check, the site, the examples.
+[unix]
+ci:
+    scripts/ci.sh native
+
+# Run that same CI inside the Linux container — the only place a macOS host compiles the bwrap sandbox.
+[unix]
 linux-ci:
-    cargo run -p ral --quiet -- scripts/linux-ci.ral
+    scripts/ci.sh linux-box
 
 # Build the container `linux-ci` runs in.
 linux-box:
-    podman build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
+    docker build -t ral-linux-box -f scripts/linux-box.Dockerfile scripts
 
 # Render the static site into site/.
 site:

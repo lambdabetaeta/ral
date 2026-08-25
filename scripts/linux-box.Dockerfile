@@ -2,9 +2,9 @@
 # compile or run `#[cfg(target_os = "linux")]` code at all, since
 # core/src/sandbox.rs gates `mod linux` out of a native build.
 #
-# Deliberately lean: this replays the `check` job in
-# .github/workflows/ci.yml, not the dev container in the private dev/
-# checkout, which carries the site toolchain too.
+# Deliberately lean: the cargo toolchain and bubblewrap, nothing else.  The
+# site toolchain stays on the host — which is why scripts/ci.sh runs
+# render-site.py natively in both of its modes.
 #
 # Unpinned base on purpose.  rust-toolchain.toml tracks `stable` and CI
 # installs `stable`, so a pin here would be the one place claiming a
@@ -38,9 +38,9 @@ RUN groupadd --gid ${GID} ${USER} \
  && useradd  --uid ${UID} --gid ${GID} --create-home --shell /bin/bash ${USER} \
  && install -d -o ${USER} -g ${USER} /home/${USER}/.cargo /workspace
 
-# Both paths are named volumes at run time (see scripts/linux-ci.ral), so
-# the registry and the Linux artefacts stay inside the podman VM instead of
-# crossing the bind mount into the host's own target/.
+# Both paths are named volumes at run time (see scripts/ci.sh), so
+# the registry and the Linux artefacts stay inside docker's own storage instead
+# of crossing the bind mount into the host's target/.
 ENV CARGO_HOME=/home/${USER}/.cargo
 ENV CARGO_TARGET_DIR=/workspace/.target-linux
 
