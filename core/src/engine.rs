@@ -36,6 +36,11 @@ pub struct EngineInstaller {
     /// Prelude, host surface, libraries, env seeding, ledger arming — at
     /// Attach, once.
     pub boot: fn() -> Shell,
+    /// How a wire-seeded child's grant becomes a ceiling. A field and not a
+    /// registered hook: core has no base-tag lexicon to resolve a grant
+    /// against, and a host that boots an engine has to state the policy its
+    /// seeded children are held to rather than be trusted to install one.
+    pub narrow: crate::hatch::GrantNarrower,
 }
 
 /// The engine's one write door: locks `writer`, writes `frame`, and on error
@@ -393,7 +398,7 @@ fn engine_session(
             // before Attach becomes this shell's scope and ceiling before
             // anything else runs.
             if let Some(seed) = seed
-                && let Err(msg) = crate::hatch::apply_seed(seed, &mut shell)
+                && let Err(msg) = crate::hatch::apply_seed(seed, &mut shell, target.narrow)
             {
                 eprintln!("engine: {msg}");
                 return 1;
@@ -807,10 +812,21 @@ mod tests {
         Shell::new(crate::io::TerminalState::default())
     }
 
+    /// These tests never hatch, so the honest policy is the one a host with no
+    /// grant lexicon states: no seeded child is admitted.
+    fn no_seeded_children(
+        _own: &crate::types::Capabilities,
+        _grant: &str,
+        _cwd: &str,
+    ) -> Result<crate::types::Capabilities, String> {
+        Err("this engine hatches no children".to_string())
+    }
+
     fn stub_installers() -> Vec<EngineInstaller> {
         vec![EngineInstaller {
             tag: "exarch-agent",
             boot: stub_boot,
+            narrow: no_seeded_children,
         }]
     }
 
@@ -869,7 +885,21 @@ mod engine_session_tests {
         )
     }
 
-    static INSTALLERS: &[EngineInstaller] = &[EngineInstaller { tag: "test", boot }];
+    /// This engine is attached to in-process and never hatches, so it states
+    /// the only policy a host without a grant lexicon can: no seeded child.
+    fn no_seeded_children(
+        _own: &crate::types::Capabilities,
+        _grant: &str,
+        _cwd: &str,
+    ) -> Result<crate::types::Capabilities, String> {
+        Err("this engine hatches no children".to_string())
+    }
+
+    static INSTALLERS: &[EngineInstaller] = &[EngineInstaller {
+        tag: "test",
+        boot,
+        narrow: no_seeded_children,
+    }];
 
     /// One capturing run under the ⊤ capability ceiling.
     fn run(src: &str) -> Run {

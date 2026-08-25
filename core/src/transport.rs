@@ -73,7 +73,7 @@ pub enum Frame {
         /// `"repl"`, `"exarch-agent"`. Each front-end binary re-execs *itself*
         /// with `--engine` and resolves the tag against its own compiled-in
         /// `EngineInstaller` table, so only the tag crosses, never the
-        /// function.
+        /// functions it names.
         installer: String,
     },
     /// Front-end drops: cancel in-flight dispatch, reap foreground

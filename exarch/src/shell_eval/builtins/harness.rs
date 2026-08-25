@@ -239,7 +239,8 @@ fn hatch_over_the_wire(
     shell: &Shell,
 ) -> Settled<FOValue> {
     let token = mint_token();
-    let (port, listener) = ral_core::hatch::listen_for_hatch(token, &shell.fork_scrubbed(), grant)
+    let (socket, port) = super::guest_port::bind().map_err(|why| sig(format!("agents: {why}")))?;
+    let listener = ral_core::hatch::listen_for_hatch(socket, token, &shell.fork_scrubbed(), grant)
         .map_err(|reason| sig(format!("agents: {reason}")))?;
     let answer = shell.enquire(mooring, start_request(spec, listening(port, token)));
     // A host that refused never dialled, so the thread is still in its poll:

@@ -21,6 +21,8 @@ use std::fs;
 use std::io::Write;
 
 mod fff_index;
+#[cfg(target_os = "linux")]
+mod guest_port;
 pub(crate) mod harness;
 
 const AGENT_SOURCE: &str = include_str!("../../data/agent.ral");

@@ -1,23 +1,23 @@
-//! The guest hatch: a parent engine spawning a child engine onto a vsock
-//! connection the host dials in on, and that child hydrating the seed it was
-//! spawned with.
+//! The hatch: a parent engine spawning a child engine onto a connection it
+//! was handed, and that child hydrating the seed it was spawned with.
 //!
-//! The parent binds a port for one spawn ([`listen_for_hatch`]) and names it.
-//! The listener thread checks the host's eight token bytes and hands the
-//! connection to [`hatch_over`], which re-execs this binary with the dial on fd
-//! 3 and a seed socketpair named by `RAL_ENGINE_SEED_FD`, writes the one framed
-//! [`EngineSeed`] while the child drains it, and answers
-//! [`crate::transport::HATCH_ACK`]: a host that hears the ack has a live child
-//! holding its whole seed. [`seed_from_env`] and [`apply_seed`] are the other
-//! end, narrowing the child through whichever host installed
-//! [`set_grant_narrower`] — core has no grant vocabulary of its own.
+//! The caller binds a socket for one spawn and passes it to
+//! [`listen_for_hatch`]. The listener thread checks the dialler's eight token
+//! bytes and hands the connection to [`hatch_over`], which re-execs this
+//! binary with the dial on fd 3 and a seed socketpair named by
+//! `RAL_ENGINE_SEED_FD`, writes the one framed [`EngineSeed`] while the child
+//! drains it, and answers [`crate::transport::HATCH_ACK`]: a peer that hears
+//! the ack has a live child holding its whole seed. [`seed_from_env`] and
+//! [`apply_seed`] are the other end, narrowing the child through the
+//! [`GrantNarrower`] its [`crate::engine::EngineInstaller`] carries — core has
+//! no grant vocabulary of its own.
 //!
-//! Only the sockets ([`crate::vsock`]) are Linux-only; the tests stand a
-//! `UnixListener` and `UnixStream` pairs in for them. So much of this file is
-//! unreachable in a plain non-Linux build — a fact about this milestone's
-//! shape, stated once by the blanket allow rather than on every item it
-//! covers.
-#![cfg_attr(not(any(target_os = "linux", test)), allow(dead_code, unused_imports))]
+//! Nothing here names a transport: the listening socket is the caller's, and
+//! the tests stand a `UnixListener` and `UnixStream` pairs in for it. Only a
+//! Linux guest reaches this at all, so a plain non-Linux build sees the whole
+//! chain as unreachable — a fact stated once by the blanket allow rather than
+//! on every item it covers.
+#![cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -50,22 +50,15 @@ type Recipe = &'static [&'static str];
 #[cfg(target_os = "linux")]
 const ENGINE: Recipe = &["--engine"];
 
-/// `own`, the grant tag, the cwd — in, a narrowed [`Capabilities`] or a
-/// refusal out. What `set_grant_narrower` registers.
-type GrantNarrower = fn(&Capabilities, &str, &str) -> Result<Capabilities, String>;
-
-/// Host-supplied grant-narrowing hook: `own ⊓ resolve_base(grant, cwd)`,
-/// evaluated where the installer's own capability vocabulary lives — core
-/// carries no base-tag lexicon of its own. Registered once, the same
-/// `OnceLock` shape as [`crate::sandbox::set_child_shell_extension`].
-static GRANT_NARROWER: OnceLock<GrantNarrower> = OnceLock::new();
-
-/// Register the host's grant-narrowing policy — `exarch::policy::narrow` for
-/// exarch's own installer. Must be called before a hatched seed can ever be
-/// applied; subsequent calls are silently ignored.
-pub fn set_grant_narrower(narrow: GrantNarrower) {
-    let _ = GRANT_NARROWER.set(narrow);
-}
+/// `own`, the grant tag, the cwd — in, a narrowed [`Capabilities`] out.
+///
+/// The narrowing is `own ⊓ resolve_base(grant, cwd)`, evaluated where the
+/// host's own capability vocabulary lives, since core carries no base-tag
+/// lexicon. A field of [`crate::engine::EngineInstaller`] rather than a registered
+/// hook: an installer is chosen at `Attach`, before [`apply_seed`] runs, so
+/// the policy can be demanded of every host that dresses an engine instead of
+/// left in a slot one of them might forget to fill.
+pub type GrantNarrower = fn(&Capabilities, &str, &str) -> Result<Capabilities, String>;
 
 /// The process-global hatch table. No thread, no signal handler: a hatch
 /// sweeps it on entry, and `teardown` sweeps it once more as the engine
@@ -107,7 +100,7 @@ pub enum Unhatched {
 /// One spawn's listener: the thread that owns it, and the pipe that wakes it.
 pub struct HatchListener {
     wake: io::PipeWriter,
-    thread: JoinHandle<Result<u32, Unhatched>>,
+    thread: JoinHandle<Result<(), Unhatched>>,
 }
 
 impl HatchListener {
@@ -117,12 +110,13 @@ impl HatchListener {
         let _ = (&self.wake).write(&[0]);
     }
 
-    /// Wait for the thread, and answer the hatched child's pid.
+    /// Wait for the thread. A hatched child is the table's to reap, so there
+    /// is nothing to answer with.
     ///
     /// # Errors
     /// [`Unhatched::Failed`] if the thread got as far as a reason of its own;
     /// [`Unhatched::Cancelled`] if [`Self::cancel`] reached it first.
-    pub fn join(self) -> Result<u32, Unhatched> {
+    pub fn join(self) -> Result<(), Unhatched> {
         self.thread.join().unwrap_or_else(|_| {
             Err(Unhatched::Failed(
                 "hatch: the thread listening for the host's dial panicked".to_string(),
@@ -131,35 +125,29 @@ impl HatchListener {
     }
 }
 
-/// Listen on an ephemeral guest port for the host to dial, and answer with
-/// that port and the thread now waiting on it.
+/// Wait on `listener` — a socket the caller has already bound and listened on
+/// — for the one dial that hatches a child, and answer with the thread now
+/// waiting.
 ///
-/// `token` is the eight bytes the host must write first. `shell` is packed
+/// `token` is the eight bytes the dialler must write first. `shell` is packed
 /// here, on the caller's own thread: the seed is all the listener thread ever
 /// holds of the parent's session, and a `Shell` never leaves this one.
 ///
 /// # Errors
-/// Returns a sentence if the shell will not pack, no port could be bound, the
-/// wake pipe could not be opened, or the listener thread could not be started.
+/// Returns a sentence if the shell will not pack, the wake pipe could not be
+/// opened, or the listener thread could not be started.
 #[cfg(target_os = "linux")]
 pub fn listen_for_hatch(
+    listener: OwnedFd,
     token: u64,
     shell: &Shell,
     grant: String,
-) -> Result<(u32, HatchListener), String> {
-    let seed = packed_seed(shell, grant)?;
-    let (listener, port) = crate::vsock::listen_any().map_err(|e| {
-        format!(
-            "hatch: could not bind a guest port for the host to dial: {e} — is this engine running \
-             inside a VM with a vsock device?"
-        )
-    })?;
-    Ok((port, hatch_listener(listener, token, seed, ENGINE)?))
+) -> Result<HatchListener, String> {
+    hatch_listener(listener, token, packed_seed(shell, grant)?, ENGINE)
 }
 
-/// The portable core of [`listen_for_hatch`]: `listener` is a bound,
-/// listening socket — the guest's `AF_VSOCK` one, or a `UnixListener`'s in
-/// tests.
+/// [`listen_for_hatch`] with the recipe and the packed seed exposed, so the
+/// tests can hatch a child of their own naming.
 fn hatch_listener(
     listener: OwnedFd,
     token: u64,
@@ -177,8 +165,8 @@ fn hatch_listener(
     Ok(HatchListener { wake, thread })
 }
 
-/// The listener thread's whole life: accept until the connection the host
-/// dialled arrives, hatch onto it, and answer the child's pid.
+/// The listener thread's whole life: accept until the dial bearing the token
+/// arrives, then hatch onto it.
 ///
 /// Two kinds of poll site and no clock: the listener, then every partial read
 /// of a token. Neither blocks without the wake end in its set, which is what
@@ -191,7 +179,7 @@ fn await_dial(
     token: u64,
     seed: &EngineSeed,
     recipe: Recipe,
-) -> Result<u32, Unhatched> {
+) -> Result<(), Unhatched> {
     loop {
         wait_readable(listener, woken)?;
         let connection = accept(listener)
@@ -201,11 +189,13 @@ fn await_dial(
             continue;
         };
         if u64::from_le_bytes(claim) != token {
-            // Whoever this was did not know the token, so it is not the host.
-            // Losing the race costs it nothing but this connection.
+            // Whoever this was did not know the token, so it is not the peer
+            // we were told to expect. Losing costs it only this connection.
             continue;
         }
-        return hatch_over(stream.into(), seed, recipe).map_err(Unhatched::Failed);
+        return hatch_over(stream.into(), seed, recipe)
+            .map(|_pid| ())
+            .map_err(Unhatched::Failed);
     }
 }
 
@@ -271,9 +261,9 @@ fn wait_readable(fd: &impl AsFd, woken: &io::PipeReader) -> Result<(), Unhatched
     }
 }
 
-/// `accept(2)` with the peer's address discarded: a vsock peer is a CID this
-/// guest has no use for, and std's `UnixListener` would refuse to read one as
-/// a path.
+/// `accept(2)` with the peer's address discarded — nothing here has any use
+/// for it, and std's `UnixListener` would refuse to read an `AF_VSOCK` peer as
+/// a path, which is the whole reason this is hand-rolled.
 fn accept(listener: &OwnedFd) -> io::Result<OwnedFd> {
     loop {
         // SAFETY: a plain `accept(2)`; a null address pair asks for no peer
@@ -323,12 +313,12 @@ fn packed_seed(shell: &Shell, grant: String) -> Result<EngineSeed, String> {
 fn hatch_over(connection: OwnedFd, seed: &EngineSeed, recipe: Recipe) -> Result<u32, String> {
     sweep_hatched();
 
-    let mut vsock = UnixStream::from(connection);
+    let mut dial = UnixStream::from(connection);
     let (mut parent_seed, child_seed) =
         UnixStream::pair().map_err(|e| format!("hatch: failed to open the seed channel: {e}"))?;
     // The child is draining before the first byte goes out, so a seed larger
     // than the socketpair's buffer crosses instead of wedging both sides.
-    let mut child = ChildHandle::from_std(spawn_engine(recipe, &vsock, child_seed)?);
+    let mut child = ChildHandle::from_std(spawn_engine(recipe, &dial, child_seed)?);
     let pid = child.id();
     if let Err(e) = send_seed(&mut parent_seed, seed) {
         // Half a frame leaves the child blocked in its own read, and a child
@@ -338,16 +328,16 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed, recipe: Recipe) -> Result<
         let _ = child.reap();
         return Err(e);
     }
-    // The child exists and holds its seed, so the host may now be told: the
-    // ack is the byte before the first protocol frame, and it is all the host
+    // The child exists and holds its seed, so the peer may now be told: the
+    // ack is the byte before the first protocol frame, and it is all the peer
     // has to go on before it names this child on its roster.
-    let ack = vsock.write_all(&[crate::transport::HATCH_ACK]).map_err(|e| {
+    let ack = dial.write_all(&[crate::transport::HATCH_ACK]).map_err(|e| {
         format!("hatch: the child engine started, but the host could not be told so: {e}")
     });
-    // The host's end must read the child's death as EOF, so this process keeps
-    // no copy of the dial — `vsock` drops here as `WireTransport::new`'s own
+    // The peer's end must read the child's death as EOF, so this process keeps
+    // no copy of the dial — it drops here as `WireTransport::new`'s own
     // `engine` end does.
-    drop(vsock);
+    drop(dial);
 
     // Recorded before the ack is reported on, so a child that started is
     // reaped even when the host never heard of it.
@@ -368,11 +358,11 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed, recipe: Recipe) -> Result<
 /// of failing it.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:hatch-spawn] re-execs the current engine binary as a hatched child over a fresh vsock connection — infrastructure handoff exactly like WireTransport::new's engine-spawn door, not model turn-time I/O"
+    reason = "[io-door:silent:hatch-spawn] re-execs the current engine binary as a hatched child over the connection a peer just dialled — infrastructure handoff exactly like WireTransport::new's engine-spawn door, not model turn-time I/O"
 )]
 fn spawn_engine(
     recipe: Recipe,
-    vsock: &UnixStream,
+    dial: &UnixStream,
     child_seed: UnixStream,
 ) -> Result<Child, String> {
     let current_exe = std::env::current_exe()
@@ -384,7 +374,7 @@ fn spawn_engine(
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
 
-    let vsock_fd = vsock.as_raw_fd();
+    let dial_fd = dial.as_raw_fd();
     let seed_fd = child_seed.as_raw_fd();
     // SAFETY: the closure runs between `fork` and `exec` and calls only
     // async-signal-safe syscalls — `dup2`, `close`, `fcntl` — with no
@@ -392,11 +382,11 @@ fn spawn_engine(
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
-            if vsock_fd != PROTOCOL_FD {
-                if libc::dup2(vsock_fd, PROTOCOL_FD) < 0 {
+            if dial_fd != PROTOCOL_FD {
+                if libc::dup2(dial_fd, PROTOCOL_FD) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                libc::close(vsock_fd);
+                libc::close(dial_fd);
             }
             // `dup2` clears `CLOEXEC` only when it actually copies; when the
             // dial already sits on fd 3 the flag set at `socket(2)` survives
@@ -480,17 +470,20 @@ fn read_seed(mut channel: UnixStream) -> Result<EngineSeed, String> {
         .ok_or_else(|| "hatch: the seed channel closed before a seed arrived".to_string())
 }
 
-/// Guest-side application of a seed already taken: called from
-/// `engine_session` once the installer has booted `shell`. Hydrates scope and
-/// context exactly as `child_eval::eval_request` does, then narrows `shell`'s
-/// capabilities to `own ⊓ resolve_base(grant, cwd)` through whichever policy
-/// [`set_grant_narrower`] registered.
+/// Application of a seed already taken: called from `engine_session` once the
+/// installer has booted `shell`. Hydrates scope and context exactly as
+/// `child_eval::eval_request` does, then narrows `shell`'s capabilities
+/// through `narrow`, the [`GrantNarrower`] that installer carries.
 ///
 /// # Errors
-/// Returns a sentence naming a decode failure or an unregistered grant policy
-/// — a wire-seeded child is refused rather than admitted with no way to enforce
-/// its ceiling.
-pub(crate) fn apply_seed(seed: EngineSeed, shell: &mut Shell) -> Result<(), String> {
+/// Returns a sentence naming a decode failure, or whatever `narrow` refuses
+/// with — a wire-seeded child is refused rather than admitted above its
+/// ceiling.
+pub(crate) fn apply_seed(
+    seed: EngineSeed,
+    shell: &mut Shell,
+    narrow: GrantNarrower,
+) -> Result<(), String> {
     let dec = WireDecoder::for_shell(shell, &seed.scope_table)
         .map_err(|e| format!("hatch: the seed's scope failed to decode: {}", e.message))?;
     install_shell_mobile(seed.mobile, shell, &dec)
@@ -500,11 +493,6 @@ pub(crate) fn apply_seed(seed: EngineSeed, shell: &mut Shell) -> Result<(), Stri
         .into_runtime(&dec)
         .map_err(|e| format!("hatch: the seed's scope failed to decode: {}", e.message))?;
 
-    let narrow = GRANT_NARROWER.get().ok_or_else(|| {
-        "hatch: this engine has no grant-narrowing policy installed; a wire-seeded child cannot \
-         be admitted"
-            .to_string()
-    })?;
     let own = shell.mobile().context.grants.effective();
     let cwd = shell.cwd();
     let narrowed = narrow(&own, &seed.grant, &cwd.to_string_lossy())?;
@@ -640,7 +628,7 @@ mod tests {
         packed_seed(&shell, "read-only".to_string()).expect("pack a seed")
     }
 
-    /// A `UnixListener` stands in for the guest's bound vsock port.
+    /// A `UnixListener` stands in for the socket the caller binds.
     fn listening(dir: &tempfile::TempDir) -> (std::path::PathBuf, HatchListener) {
         let path = dir.path().join("spawn");
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind a listener");
@@ -703,8 +691,6 @@ mod tests {
 
     #[test]
     fn apply_seed_hydrates_scope_and_narrows_capabilities() {
-        GRANT_NARROWER.get_or_init(|| deny_net);
-
         let mut parent = Shell::new(crate::io::TerminalState::default());
         parent.mobile.scope.set("kept".to_string(), Value::Int(7));
         let seed = pack_seed(&parent, "confined".to_string()).expect("pack seed");
@@ -713,13 +699,14 @@ mod tests {
         std::thread::spawn(move || send_seed(&mut writer, &seed).expect("send the seed"));
 
         let mut shell = bare_child_shell();
-        apply_seed(read_seed(reader).expect("read seed"), &mut shell).expect("apply seed");
+        apply_seed(read_seed(reader).expect("read seed"), &mut shell, deny_net)
+            .expect("apply seed");
 
         assert_eq!(shell.mobile.scope.get("kept"), Some(&Value::Int(7)));
         assert_eq!(
             shell.mobile().context.grants.effective().net,
             Some(false),
-            "the registered narrower's floor must land on the hydrated shell"
+            "the installer's narrower must land its floor on the hydrated shell"
         );
     }
 }

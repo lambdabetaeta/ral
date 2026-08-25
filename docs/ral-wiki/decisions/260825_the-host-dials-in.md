@@ -212,6 +212,20 @@ have refused every wire-seeded child at boot with *"this engine has no
 grant-narrowing policy installed"*. The wire hatch had never run end to end. Fixed
 here.
 
+**The hook itself was then deleted.** A `OnceLock` a second crate must remember
+to fill is a defect of shape, not of that commit: nothing makes the obligation
+visible, so nothing catches it going unmet. `GrantNarrower` is now a third field
+of `EngineInstaller`, chosen at `Attach` and therefore already in scope where
+`apply_seed` runs — every host that boots an engine states the policy its seeded
+children are held to, and the REPL, which hatches nothing, states a refusal in
+one function. The same pass took `AF_VSOCK` out of core: `listen_for_hatch` is
+handed a listening descriptor, exarch's `guest_port` binds it, and `ral-daemon`
+carries its own `socket`/`connect` — which drops that init's dependency on the
+whole language crate, the rule its own `reap.rs` already argues for. The sibling
+hook, `sandbox::set_child_shell_extension`, is deliberately left: it runs in a
+re-exec'd helper where no installer has been chosen, and an unfilled slot there
+means *core builtins only*, a coherent shell rather than a refusal.
+
 ## Deliberately not done
 
 `Seat` → `Helm` was requested during review and **dropped**. The argument stands

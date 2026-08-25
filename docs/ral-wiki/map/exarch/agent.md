@@ -527,12 +527,14 @@ bars a desk handler from holding the `&mut Shell` a fork needs:
   `` `parked <id> ``. The desk's arm adopts by id, in the same process.
 - **Wire.** A guest engine's runs carry `Fork::Listen` (`core/src/engine.rs`),
   so the builtin body mints a `u64` token from OS randomness and calls
-  `ral_core::hatch::listen_for_hatch` (`core/src/hatch.rs`; only the socket
-  calls are Linux-only, since `AF_VSOCK` means nothing outside a guest, and
-  the rest is plain Unix plumbing tested over `UnixListener` pairs): the
-  scrubbed fork is packed into an `EngineSeed` on the caller's own thread — a
-  `Shell` never leaves it — an ephemeral guest vsock port is bound, and a
-  thread is left on it. The enquiry names `` `listening [port, token] ``.
+  `ral_core::hatch::listen_for_hatch` (`core/src/hatch.rs`) with a listening
+  descriptor `shell_eval/builtins/guest_port.rs` has already bound — the one
+  `AF_VSOCK` endpoint exarch opens itself, and Linux-only because a guest port
+  means nothing outside a VM, while core's half is plain Unix plumbing tested
+  over `UnixListener` pairs on the production path. The scrubbed fork is
+  packed into an `EngineSeed` on the caller's own thread — a `Shell` never
+  leaves it — and a thread is left on the socket. The enquiry names
+  `` `listening [port, token] ``.
 
 The desk's wire arm dials that port through its **`Dial`** capability
 (`exarch/src/agent/dial.rs` — `vm_manager`-free by construction, a capability

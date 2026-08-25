@@ -1,7 +1,7 @@
 ---
 generated_at_commit: fb52275a
 generated_at_date: 2026-08-25
-covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs, core/src/vsock.rs]
+covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs]
 ---
 
 # Map: core / transport
@@ -22,9 +22,14 @@ A wire-seat child's hatch (`core/src/hatch.rs`,
 [[map/exarch/agent|exarch / agent]]) sits below both seams and reuses this
 one's machinery rather than the host seam's. The connection is opened from the
 *host's* side: the parent binds an ephemeral guest port for one spawn's
-duration (`listen_any`, `core/src/vsock.rs`) and names it in its enquiry, the
-host dials it and writes eight little-endian token bytes, and the listener
-thread checks them before handing the connection to `hatch_over`. Every partial
+duration and names it in its enquiry, the host dials it and writes eight
+little-endian token bytes, and the listener thread checks them before handing
+the connection to `hatch_over`. Core opens no socket for this — `AF_VSOCK` is a
+VM concept below the language, so the bind lives in exarch
+(`shell_eval/builtins/guest_port.rs`, the one endpoint exarch opens itself) and
+`listen_for_hatch` is handed a listening descriptor. Nothing under
+`core/src/hatch.rs` names a transport, which is also why the tests substitute a
+`UnixListener` on the production path rather than beside it. Every partial
 token read polls beside the wake pipe, so a peer that sends a prefix and stalls
 cannot pin cancellation — though it does hold the accept loop, and so denies that
 one spawn. `hatch_over` re-execs `current_exe` on the recipe the hatch carries —
@@ -49,8 +54,12 @@ frame. Neither the token nor the ack is a
 `Frame`, so a hatch never touches `PROTOCOL_VERSION` at all — no new frame, no
 version bump. `HATCH_ACK` sits in the platform-neutral
 `core/src/transport.rs` because the two ends need not share an operating
-system, while spawning and seed hydration are Unix guest machinery. The seed a
-hatch carries is this page's `EngineSeed`, below.)
+system, while spawning and seed hydration are Unix guest machinery. A seeded
+child's ceiling is narrowed by the `GrantNarrower` its `EngineInstaller`
+carries: core has no base-tag lexicon of its own, and a field rather than a
+registered hook means an engine whose seeded children have no policy is
+unrepresentable rather than merely unlikely. The seed a hatch carries is this
+page's `EngineSeed`, below.)
 
 **Every wire↔runtime hop is an exhaustive, field-complete map: no hop may pass
 through a constructor that defaults a field the wire carries, and no kind may

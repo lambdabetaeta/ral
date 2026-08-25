@@ -40,15 +40,12 @@ use tui::SessionInfo;
 /// and rejects it.
 pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     ral_core::sandbox::set_child_shell_extension(shell_eval::builtins::host_surface);
-    // Before `run_engine`, since a wire-seeded child narrows itself while
-    // booting: core carries no base-tag lexicon to resolve a grant against.
-    #[cfg(unix)]
-    ral_core::hatch::set_grant_narrower(policy::narrow);
     #[cfg(unix)]
     if std::env::args().any(|a| a == "--engine") {
         ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
             tag: shell_eval::builtins::INSTALLER_TAG,
             boot: bootstrap::engine_boot_shell,
+            narrow: policy::narrow,
         }]);
     }
     if let Some(code) = ral_core::try_run_pipeline_stage_helper() {
