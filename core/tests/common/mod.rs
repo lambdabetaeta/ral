@@ -65,10 +65,17 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             sub(else_);
         }
         CompKind::Case { arms, .. } => arms.iter().for_each(|arm| sub(arm.body.comp())),
+        CompKind::Rec { group, .. } => group.iter().for_each(|(_, m)| sub(m)),
+        CompKind::Source { path, rest } => {
+            sub(path);
+            sub(rest);
+        }
         CompKind::Force(Val::Thunk(c))
         | CompKind::Return(Val::Thunk(c))
         | CompKind::Capture(c)
-        | CompKind::Decode(c) => walk_comp(c, visit),
+        | CompKind::Decode(c)
+        | CompKind::Redirect { body: c, .. }
+        | CompKind::Hoisted { body: c } => walk_comp(c, visit),
         _ => {}
     }
 }
