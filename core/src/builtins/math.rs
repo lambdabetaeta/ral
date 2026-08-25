@@ -11,7 +11,8 @@ use super::util::f64_to_i64;
 const MAX_PLACES: i64 = 308;
 
 /// Both arms are defensive: a Float is finite by construction, and
-/// `sig::ROUND` and `sig::FLOAT_TO_INT` in the typechecker admit a Float only.
+/// `round`'s and `float_to_int`'s schemes in the typechecker admit a Float
+/// only.
 fn finite_float(name: &str, val: &Value) -> Settled<f64> {
     match val {
         Value::Float(f) if f.is_finite() => Ok(*f),

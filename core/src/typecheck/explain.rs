@@ -401,9 +401,6 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                     .to_string(),
             )
         }),
-        Reason::BuiltinBlockArg | Reason::ErrorRecordArg | Reason::BuiltinTypedArg => {
-            argument_shape_hint(kind)
-        }
         Reason::NotOperand => Some(
             "`not` flips a Bool — its operand has to be a Bool (`true` / `false` or a comparison)"
                 .to_string(),

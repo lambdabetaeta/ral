@@ -1,7 +1,9 @@
 //! Type synthesis for the CBPV pair: `infer_val` yields a `Ty`, `infer_comp` a
 //! `CompTy`, mutually recursive through thunks.
 
-use super::builtins::{BuiltinDiagnostic, FieldSchema, fail_status_is_zero_literal, plugin_entry_field_ty, rule_scheme};
+use super::builtins::{
+    BuiltinDiagnostic, FieldSchema, fail_status_is_zero_literal, plugin_entry_field_ty,
+};
 use super::env::{InferCtx, TyEnv};
 use super::error::{CompDiff, PinFailure, Reason, StdinFeed, TypeErrorKind};
 use super::generalize::{generalize, instantiate};
@@ -283,8 +285,11 @@ impl Inferencer<'_> {
         let tail = Self::discard_tail(comp);
         self.with_span(tail.span, |this| match this.discarded_builtin_arity(tail) {
             Some((name, expected, got)) => {
-                this.ctx
-                    .diagnose(TypeErrorKind::BuiltinArity { name, expected, got });
+                this.ctx.diagnose(TypeErrorKind::BuiltinArity {
+                    name,
+                    expected,
+                    got,
+                });
                 (this.ctx.unifier.fresh_ty(), this.ctx.unifier.fresh_route())
             }
             None => this.force_return_shape(cty, why),
@@ -546,7 +551,7 @@ impl Inferencer<'_> {
             self.ctx.diagnose(TypeErrorKind::FailStatusZero);
         }
 
-        let scheme = rule_scheme(&entry.type_rule, &mut self.ctx.unifier);
+        let scheme = (entry.type_rule)(&mut self.ctx.unifier);
         let head_cty = self.instantiate_comp(&scheme);
         let (result, applied) = self.apply_args_capped(head_cty, args, fixed_arity);
 
@@ -579,7 +584,7 @@ impl Inferencer<'_> {
     /// of it is (hypothetically) applied — what a refused spread into a
     /// builtin's type is.
     fn saturated_result(&mut self, entry: &BuiltinEntry) -> CompTy {
-        let scheme = rule_scheme(&entry.type_rule, &mut self.ctx.unifier);
+        let scheme = (entry.type_rule)(&mut self.ctx.unifier);
         let cty = self.instantiate_comp(&scheme);
         self.peel_curry_spine(cty)
     }

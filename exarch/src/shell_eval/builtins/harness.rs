@@ -11,9 +11,7 @@
 
 use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::serial::FOValue;
-use ral_core::typecheck::builtins::{
-    BuiltinTypeRule, closed_record, fun, mk_scheme as scheme, pure, thunk,
-};
+use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
 use ral_core::typecheck::{Row, RowVar, Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
@@ -912,7 +910,7 @@ fn scheme_reply(u: &mut Unifier) -> Scheme {
 }
 
 /// `pin-read :: ∀α. String → F α` — the `from-json` precedent
-/// (`TyTemplate::Any`, `core/src/typecheck/builtins.rs:391`): trusted, not
+/// ([`ral_core::typecheck::builtins::scheme::from_json`]): trusted, not
 /// checked, since only the kit's own decoder can judge whether the card
 /// read back matches the shape it expects.
 fn scheme_pin_read(u: &mut Unifier) -> Scheme {
@@ -992,55 +990,55 @@ fn scheme_context_fold(_u: &mut Unifier) -> Scheme {
 static HARNESS_BUILTINS_ARR: [BuiltinEntry; 9] = [
     BuiltinEntry::new(
         Cow::Borrowed("agents"),
-        BuiltinTypeRule::Scheme(scheme_agents),
+        scheme_agents,
         "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one. Every tag answers with the roster afterwards, [[name: Str, elapsed-s: Int, log-dir: Str]], so what you read back is always what is live now rather than a receipt for what you just did.\n\nagents `list  — your live descendants at any depth, oldest first. Settled agents are not listed: their replies arrive on their own, as marked items in your inbox. This is how you recover names after a context compaction.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation and reuses your provider selection for cache locality. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live descendant named `to`; it lands at that child's next exchange boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. A cancel is a request, not a transaction: the child is still running when this answers, so its row is still in the roster you get back. A name you still see listed is NOT a failed cancel — do not fire it again; read `list later and find it gone.\n\nEach tag issues its transition and then re-reads the registry, so a raise does not prove nothing happened: the transition may have landed and the re-read failed. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agents),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("schedules"),
-        BuiltinTypeRule::Scheme(scheme_schedules),
+        scheme_schedules,
         "schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nschedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after a context compaction.\n\nschedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nschedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag issues its transition and then re-reads the table, so a raise does not prove nothing happened: the transition may have landed and the re-read failed. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_schedules),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("reply"),
-        BuiltinTypeRule::Scheme(scheme_reply),
+        scheme_reply,
         "reply <value>  — hand `value` back to whoever spawned you: the sole return path for a returning agent. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. The run does not end at this call: it ends once the enclosing ral call's whole batch of statements finishes draining, so write reply last and let earlier statements in the same script run to completion first. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_reply),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("pin-read"),
-        BuiltinTypeRule::Scheme(scheme_pin_read),
+        scheme_pin_read,
         "pin-read <key>  — the card currently pinned under KEY on your register, as a `card value you can destructure, or () if the slot is empty. Reads your own register only. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_pin_read),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("pin-list"),
-        BuiltinTypeRule::Scheme(scheme_pin_list),
+        scheme_pin_list,
         "pin-list  — the keys currently occupied on your pin register, as [String]. Read one back with pin-read. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_pin_list),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("context"),
-        BuiltinTypeRule::Scheme(scheme_context),
+        scheme_context,
         "context  — survey the finite, addressable model context. Returns [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int, cache: Str]. Each span is an exchange or import, and a digest is represented by its reach in `exchange`; `prompt` is its opening line, `bytes` its serialized weight, `steps` its provider-step count, and `live` marks the exchange currently in progress. The cache sentence explains that editing before the cache watermark re-reads the prefix on the next request. This is a survey: it does not edit context.",
         BuiltinBody::Static(builtin_context),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("context-read"),
-        BuiltinTypeRule::Scheme(scheme_context_read),
+        scheme_context_read,
         "context-read <exchanges>  — read named closed exchanges as one transcript Str, with roles marked and steps delimited. The list must be non-empty; name a digest by its reach, and do not name an exchange folded strictly inside that digest. Only stdout echoes into a turn's tool result; a `let`-bound value prints nothing. Binding is silent, but both stdout and a tool call's final VALUE enter model context; read large bindings in slices — never bare-print a whole binding merely to inspect it, because the transcript is material, not a survey.",
         BuiltinBody::Static(builtin_context_read),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("context-drop"),
-        BuiltinTypeRule::Scheme(scheme_context_drop),
+        scheme_context_drop,
         "context-drop <exchanges>  — shed whole closed exchanges from the model context, where <exchanges> is a list of non-negative exchange numbers from `context`. The live exchange cannot be named, unknown or already-folded exchanges are refused with an explanation, and an empty list is not an edit. The model is always mid-exchange when it speaks, so a rewind-shaped request for a suffix of closed exchanges is this verb with a range; there is no context-rewind. Returns [bytes-delta: Int], the serialized model-view bytes before minus after (a negative value is honest when a digest is larger than what it replaces). Applied immediately at the desk; the edit is recorded as a model context event.",
         BuiltinBody::Static(builtin_context_drop),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("context-fold"),
-        BuiltinTypeRule::Scheme(scheme_context_fold),
+        scheme_context_fold,
         "context-fold [through: <Int>, digest: <Str>]  — replace the visible prefix through a closed exchange with the digest text you supply. `through` may extend the current digest by its reach, but cannot cross the live exchange; name the digest reach itself to fold further. Returns [bytes-delta: Int], the serialized model-view bytes before minus after, and records one model context event immediately. A digest is curation, not a promise of compression, so a negative delta is possible and meaningful.",
         BuiltinBody::Static(builtin_context_fold),
     ),

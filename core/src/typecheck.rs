@@ -88,12 +88,7 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
     let frames: Vec<(String, Scheme)> = env
         .builtins
         .base_frames()
-        .map(|entry| {
-            (
-                entry.name.as_ref().to_string(),
-                builtins::rule_scheme(&entry.type_rule, u),
-            )
-        })
+        .map(|entry| (entry.name.as_ref().to_string(), (entry.type_rule)(u)))
         .collect();
     for (name, scheme) in frames {
         env.bind_handler(name, scheme, false);

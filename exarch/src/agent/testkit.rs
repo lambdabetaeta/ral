@@ -17,7 +17,7 @@ use crate::provider::{Provider, ToolCall};
 use ral_core::Shell;
 use ral_core::Value;
 use ral_core::serial::FOValue;
-use ral_core::typecheck::builtins::{BuiltinTypeRule, mk_scheme, pure, thunk};
+use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
 use ral_core::typecheck::{Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
@@ -182,13 +182,13 @@ pub(crate) fn builtin_test_clear_block_until_released(
 static WORKER_REGISTRY_TEST_BUILTINS_ARR: [BuiltinEntry; 2] = [
     BuiltinEntry::new(
         Cow::Borrowed("test-clear-block-forever"),
-        BuiltinTypeRule::Scheme(scheme_test_clear_block_forever),
+        scheme_test_clear_block_forever,
         "test-only: block until cancelled.",
         BuiltinBody::Static(builtin_test_clear_block_forever),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("test-clear-block-until-released"),
-        BuiltinTypeRule::Scheme(scheme_test_clear_block_forever),
+        scheme_test_clear_block_forever,
         "test-only: ignore cancellation until released, then settle on it.",
         BuiltinBody::Static(builtin_test_clear_block_until_released),
     ),

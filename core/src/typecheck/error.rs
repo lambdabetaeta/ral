@@ -46,10 +46,6 @@ pub enum Reason {
     Argument,
     /// An arm's declared parameter against the argv a call site hands it.
     AliasParam,
-    BuiltinBlockArg,
-    BuiltinTypedArg,
-    /// A raising form's argument against the error-record shape it demands.
-    ErrorRecordArg,
     /// A pipeline stage forced to `Return` shape: a stage still waiting for an
     /// argument is not a computation that can run.
     PipelineStageShape,

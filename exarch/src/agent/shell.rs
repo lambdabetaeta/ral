@@ -291,7 +291,7 @@ mod tests {
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Shell;
     use ral_core::Value;
-    use ral_core::typecheck::builtins::{BuiltinTypeRule, mk_scheme, pure, thunk};
+    use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
     use ral_core::typecheck::{Scheme, Ty, Unifier};
     use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
     use std::borrow::Cow;
@@ -311,7 +311,7 @@ mod tests {
 
     static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
         Cow::Borrowed("a4-panic-now"),
-        BuiltinTypeRule::Scheme(scheme_panic_now),
+        scheme_panic_now,
         "test-only: panic the evaluator mid-eval.",
         BuiltinBody::Static(builtin_panic_now),
     )];

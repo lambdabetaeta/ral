@@ -25,7 +25,6 @@
 mod common;
 
 use ral_core::builtins::CORE_BUILTINS;
-use ral_core::typecheck::builtins::rule_scheme;
 use ral_core::typecheck::{CompTy, Ty, Unifier};
 use ral_core::types::{Map, Mooring, Shell, Value};
 use ral_core::{Break, builtins};
@@ -149,7 +148,7 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         // unified, so a quantified `Ty::Var` stays unbound and is treated as
         // a polymorphic (any-value) position.
         let mut u = Unifier::new();
-        let scheme = rule_scheme(&entry.type_rule, &mut u);
+        let scheme = (entry.type_rule)(&mut u);
         let Some((arg_tys, ret_ty)) = arg_and_return_types(&mut u, &scheme.ty) else {
             continue;
         };

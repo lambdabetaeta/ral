@@ -397,7 +397,7 @@ mod tests {
 
     static PANIC_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
         std::borrow::Cow::Borrowed("core-panic-now"),
-        crate::typecheck::builtins::BuiltinTypeRule::Scheme(panic_now_scheme),
+        panic_now_scheme,
         "test-only: panic the evaluator mid-run.",
         BuiltinBody::Static(panic_now),
     )];

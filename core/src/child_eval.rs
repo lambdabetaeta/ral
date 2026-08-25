@@ -835,7 +835,7 @@ mod tests {
         let captured: Arc<[crate::types::BuiltinEntry]> =
             Arc::from(vec![crate::types::BuiltinEntry::new(
                 std::borrow::Cow::Borrowed("test-captured-native"),
-                crate::typecheck::builtins::BuiltinTypeRule::Scheme(scheme_stub),
+                scheme_stub,
                 "test-only captured native.",
                 crate::types::BuiltinBody::Static(body_stub),
             )]);

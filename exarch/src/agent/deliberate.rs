@@ -532,7 +532,7 @@ mod tests {
     use genai::chat::ChatRole;
     use ral_core::Shell;
     use ral_core::Value;
-    use ral_core::typecheck::builtins::{BuiltinTypeRule, mk_scheme, pure, thunk};
+    use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
     use ral_core::typecheck::{Scheme, Ty, Unifier};
     use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
     use std::borrow::Cow;
@@ -860,7 +860,7 @@ mod tests {
 
     static T2_CANCEL_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
         Cow::Borrowed("t2-cancel-now"),
-        BuiltinTypeRule::Scheme(scheme_t2_cancel_now),
+        scheme_t2_cancel_now,
         "test-only: cancel the token staged in T2_CANCEL_TOKEN.",
         BuiltinBody::Static(builtin_t2_cancel_now),
     )];

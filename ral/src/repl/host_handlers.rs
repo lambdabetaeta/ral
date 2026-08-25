@@ -5,7 +5,7 @@
 //! with no handler argv packing.
 
 use ral_core::diagnostic;
-use ral_core::typecheck::builtins::{BuiltinTypeRule, scheme};
+use ral_core::typecheck::builtins::scheme;
 use ral_core::types::{
     Break, BuiltinBody, BuiltinEntry, HandleState, Mooring, Resident, WorkerEntry,
 };
@@ -122,7 +122,7 @@ pub(crate) fn teardown_notice(workers: &[WorkerEntry]) -> Option<String> {
 fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
         Cow::Borrowed("jobs"),
-        BuiltinTypeRule::Scheme(scheme::terminal_control),
+        scheme::terminal_control,
         "jobs  — list active background and stopped jobs: pgid groups, and this shell's \
               detached worker handles (spawn/watch/&) marked [wN], done once settled until \
               observed.",
@@ -142,7 +142,7 @@ fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
 fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
         Cow::Borrowed("fg"),
-        BuiltinTypeRule::Scheme(scheme::int_to_unit),
+        scheme::int_to_unit,
         "fg <id>  — bring pgid job <id> to the foreground. \
               pgid-only: a worker handle has no foreground — `await` is its fg.",
         BuiltinBody::Captured(Arc::new(move |args, mooring, shell| {
@@ -174,7 +174,7 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
 fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
         Cow::Borrowed("bg"),
-        BuiltinTypeRule::Scheme(scheme::int_to_unit),
+        scheme::int_to_unit,
         "bg <id>  — resume pgid job <id> in the background. \
               pgid-only: a worker handle already runs detached — see `jobs`.",
         BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
@@ -195,7 +195,7 @@ fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
 fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
     BuiltinEntry::new(
         Cow::Borrowed("disown"),
-        BuiltinTypeRule::Scheme(scheme::int_to_unit),
+        scheme::int_to_unit,
         "disown <id>  — detach pgid job <id> from the shell. \
               pgid-only: a worker handle has no disown — `cancel` is its kill.",
         BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
@@ -223,7 +223,7 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
 fn build_load_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
     BuiltinEntry::new(
         Cow::Borrowed("load-plugin"),
-        BuiltinTypeRule::Scheme(scheme::string_to_unit),
+        scheme::string_to_unit,
         "load-plugin <name>  — load a REPL plugin by name or path.",
         BuiltinBody::Captured(Arc::new(
             move |args, mooring: &Mooring, shell: &mut Shell| {
@@ -247,7 +247,7 @@ fn build_load_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
 fn build_unload_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
     BuiltinEntry::new(
         Cow::Borrowed("unload-plugin"),
-        BuiltinTypeRule::Scheme(scheme::string_to_unit),
+        scheme::string_to_unit,
         "unload-plugin <name>  — unload a previously loaded REPL plugin.",
         BuiltinBody::Captured(Arc::new(
             move |args, _mooring: &Mooring, shell: &mut Shell| {

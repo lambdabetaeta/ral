@@ -14,7 +14,7 @@
 
 use super::flow::Settled;
 use super::value::Value;
-use crate::typecheck::builtins::{BuiltinDiagnostic, BuiltinTypeRule};
+use crate::typecheck::builtins::{BuiltinDiagnostic, BuiltinTypeRule, scheme_curry_depth};
 use crate::typecheck::{Scheme, Unifier};
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -112,7 +112,7 @@ impl BuiltinEntry {
         Self {
             name,
             convention: Convention::Argv,
-            type_rule: BuiltinTypeRule::Scheme(argv),
+            type_rule: argv,
             doc,
             diagnostic: BuiltinDiagnostic::None,
             body,
@@ -131,13 +131,13 @@ impl BuiltinEntry {
     /// The curry depth of this row's type — for a value row, the argument
     /// count a `$name` reference saturates at, and the checker's own arity
     /// diagnostics for a call at command position, not only the evaluator's
-    /// arity gate.  Structural, read off the type rule
-    /// ([`BuiltinTypeRule::fixed_arity`]) once and cached: application calls
-    /// this every apply step, and a `Scheme` rule's derivation is not free.
+    /// arity gate.  Structural, read off the type rule's curry spine
+    /// ([`scheme_curry_depth`]) once and cached: application calls this every
+    /// apply step, and instantiating a scheme fresh is not free.
     pub fn fixed_arity(&self) -> usize {
         *self
             .arity_cache
-            .get_or_init(|| self.type_rule.fixed_arity())
+            .get_or_init(|| scheme_curry_depth(self.type_rule))
     }
 
     /// Invoke the body — reachable only with a proof that a

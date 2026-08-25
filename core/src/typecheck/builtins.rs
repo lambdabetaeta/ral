@@ -6,49 +6,30 @@
 //! and the record shapes the record-valued builtins share.
 //!
 //! A scheme factory allocates its unifier vars fresh, so the scheme it returns
-//! needs no renaming pass; a [`BuiltinSig`] is inert data, interpreted by the
-//! `Inferencer` impl at the bottom of this file.
+//! needs no renaming pass.
 
 use super::env::TyEnv;
-use super::error::{Reason, TypeErrorKind};
+use super::error::TypeErrorKind;
 use super::fmt::fmt_scheme;
 use super::generalize::generalize;
 use super::infer::Inferencer;
 use super::scheme::{CachedFreeVars, Scheme};
-use super::ty::{CompTy, GroundRoute, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
+use super::ty::{CompTy, PayloadRoute, PayloadVar, Row, RowVar, Ty, TyVar};
 use super::unify::Unifier;
 use crate::types::BuiltinTable;
 
-/// How the type checker types a registered builtin: an ordinary polytype, or a
-/// signature of argument templates.
+/// How the type checker types a registered builtin: a scheme factory, run
+/// fresh against a live [`Unifier`].
 ///
-/// A base frame is always the former — an argv is one argument of one type, not
-/// a list of slots to diagnose one by one.
-#[derive(Clone, Copy)]
-pub enum BuiltinTypeRule {
-    /// Standard polytype: a curried value, which a call may leave
-    /// under-applied for the residual arrow to carry.
-    Scheme(fn(&mut Unifier) -> Scheme),
-    /// The same polytype as const data, the verb's name and count included, so
-    /// a short call in command position is *this* verb's arity error rather
-    /// than an anonymous mismatch further down.
-    Sig(BuiltinSig),
-}
-
-impl BuiltinTypeRule {
-    /// The number of arguments the rule declares: a `Scheme` rule's
-    /// curry-spine depth, a `Sig` rule's template count.
-    pub fn fixed_arity(&self) -> usize {
-        match self {
-            Self::Scheme(factory) => scheme_curry_depth(*factory),
-            Self::Sig(sig) => sig.args.len(),
-        }
-    }
-}
+/// A base frame names one directly, the same as any value builtin — an argv
+/// is one argument of one type, not a list of slots to diagnose one by one.
+pub type BuiltinTypeRule = fn(&mut Unifier) -> Scheme;
 
 /// The `Fun`-nesting depth of a scheme factory's curried body — instantiated
-/// fresh, since a factory needs a live [`Unifier`] to run.
-fn scheme_curry_depth(factory: fn(&mut Unifier) -> Scheme) -> usize {
+/// fresh, since a factory needs a live [`Unifier`] to run.  A builtin's
+/// arity: the checker's own arity diagnostics at command position read this,
+/// not only the evaluator's arity gate.
+pub(crate) fn scheme_curry_depth(factory: BuiltinTypeRule) -> usize {
     let mut u = Unifier::new();
     let scheme = factory(&mut u);
     fn count(ct: &CompTy) -> usize {
@@ -63,56 +44,6 @@ fn scheme_curry_depth(factory: fn(&mut Unifier) -> Scheme) -> usize {
     }
 }
 
-/// Data signature for a builtin typed by templates, one slot per argument.
-///
-/// So `args.len()` is the arity and nothing else declares it.  Every argument
-/// is taken by application — a value's arity is the depth of its curry spine,
-/// so there is no arrow a caller may decline to supply, and no argv for it to
-/// open.
-#[derive(Clone, Copy)]
-pub struct BuiltinSig {
-    pub args: &'static [ArgTemplate],
-    pub(in crate::typecheck) result: CompTemplate,
-    pub diagnostic: BuiltinDiagnostic,
-}
-
-/// One argument slot in a command signature.
-#[derive(Clone, Copy)]
-pub enum ArgTemplate {
-    Ty(TyTemplate),
-    BlockOrLambda,
-    /// An error record: `status` and an open tail, the shape `try` hands its
-    /// handler.  Not a record former — one named type, whose optional
-    /// `message` no row can spell.  See [`error_record_arg`].
-    ErrorRecord,
-}
-
-/// The whole type vocabulary a command signature may name.
-#[derive(Clone, Copy)]
-pub enum TyTemplate {
-    String,
-    Int,
-    Float,
-    Bool,
-    Bytes,
-    Unit,
-    Any,
-    ListAny,
-    ListInt,
-}
-
-/// Computation template returned by a command signature.
-#[derive(Clone, Copy)]
-pub(in crate::typecheck) enum CompTemplate {
-    Pure(TyTemplate),
-    Return {
-        value: TyTemplate,
-        route: GroundRoute,
-    },
-    Never,
-    LinesStep,
-}
-
 /// Extra non-typing behaviour a builtin's [`crate::types::BuiltinEntry`]
 /// carries: which diagnostic an over-application or a literal misuse earns.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,19 +53,6 @@ pub enum BuiltinDiagnostic {
     /// A `from-*` decoder: an argument is not an arity slip but a misreading
     /// of where the bytes come from.
     Decoder,
-}
-
-/// The [`PayloadRoute`] of a command signature — the sole source of a `Sig`
-/// builtin's route.
-pub(in crate::typecheck) fn sig_route(result: CompTemplate, u: &mut Unifier) -> PayloadRoute {
-    match result {
-        CompTemplate::Pure(_) | CompTemplate::LinesStep => PayloadRoute::Value,
-        CompTemplate::Return { route, .. } => route.into(),
-        // A divergent computation (`fail`) joins either side of a byte/value
-        // split, so its route is a fresh variable, not a ground `Value` —
-        // see `join_arm_results`.
-        CompTemplate::Never => u.fresh_route(),
-    }
 }
 
 /// Build a [`Scheme`] from its quantified vars and body.  Public so host crates
@@ -245,138 +163,6 @@ macro_rules! curry_bytes {
     ($p:expr, $($rest:expr),+) => { fun($p, curry_bytes!($($rest),+)) };
 }
 
-/// Template signatures: a builtin's typing as const data.
-///
-/// Name and arity travel with the type, so a short call in command position
-/// is that verb's own arity error — `cd` expected 1 argument — and not a
-/// mismatch reported anonymously downstream.
-pub mod sig {
-    use super::{
-        ArgTemplate, BuiltinDiagnostic, BuiltinSig, CompTemplate, GroundRoute, TyTemplate,
-    };
-
-    const ANY: ArgTemplate = ArgTemplate::Ty(TyTemplate::Any);
-    const STR: ArgTemplate = ArgTemplate::Ty(TyTemplate::String);
-    const INT: ArgTemplate = ArgTemplate::Ty(TyTemplate::Int);
-    const FLOAT: ArgTemplate = ArgTemplate::Ty(TyTemplate::Float);
-    const BLOCK: ArgTemplate = ArgTemplate::BlockOrLambda;
-
-    const TWO_INTS: &[ArgTemplate] = &[INT, INT];
-    const ONE_ANY: &[ArgTemplate] = &[ANY];
-    const ONE_ERROR_RECORD: &[ArgTemplate] = &[ArgTemplate::ErrorRecord];
-    const ONE_STR: &[ArgTemplate] = &[STR];
-    const ONE_INT: &[ArgTemplate] = &[INT];
-    const ONE_FLOAT: &[ArgTemplate] = &[FLOAT];
-    const FLOAT_INT: &[ArgTemplate] = &[FLOAT, INT];
-    const ONE_BYTES: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::Bytes)];
-    const ONE_INT_LIST: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::ListInt)];
-    const TO_LINES_ARGS: &[ArgTemplate] = &[ArgTemplate::Ty(TyTemplate::ListAny)];
-    const NO_ARGS: &[ArgTemplate] = &[];
-    const ALIAS_ARGS: &[ArgTemplate] = &[STR, BLOCK];
-
-    const fn pure(value: TyTemplate) -> CompTemplate {
-        CompTemplate::Pure(value)
-    }
-
-    const fn ret(value: TyTemplate) -> CompTemplate {
-        CompTemplate::Return {
-            value,
-            route: GroundRoute::Value,
-        }
-    }
-
-    /// Like [`ret`], but the byte channel *is* the payload: `route: Bytes`,
-    /// so `value` must be `Unit` (WF-2) — those bytes belong to whoever
-    /// consumes this command as a value.
-    const fn ret_bytes() -> CompTemplate {
-        CompTemplate::Return {
-            value: TyTemplate::Unit,
-            route: GroundRoute::Bytes,
-        }
-    }
-
-    const fn command(args: &'static [ArgTemplate], result: CompTemplate) -> BuiltinSig {
-        BuiltinSig {
-            args,
-            result,
-            diagnostic: BuiltinDiagnostic::None,
-        }
-    }
-
-    /// A `from-*` decoder: nullary, because the bytes come from the channel.
-    /// Its value form is a thunk whose forcing reads that channel.
-    const fn decoder(result: CompTemplate) -> BuiltinSig {
-        BuiltinSig {
-            args: NO_ARGS,
-            result,
-            diagnostic: BuiltinDiagnostic::Decoder,
-        }
-    }
-
-    pub const TERMINAL_CONTROL: BuiltinSig = command(NO_ARGS, ret_bytes());
-
-    pub const RANGE: BuiltinSig = command(TWO_INTS, pure(TyTemplate::ListInt));
-
-    pub const FROM_BYTES: BuiltinSig = decoder(ret(TyTemplate::Bytes));
-    pub const FROM_STRING: BuiltinSig = decoder(ret(TyTemplate::String));
-    pub const FROM_JSON: BuiltinSig = decoder(ret(TyTemplate::Any));
-    pub const FROM_LINES: BuiltinSig = decoder(CompTemplate::LinesStep);
-
-    /// `to-bytes`: [`FROM_BYTES`]'s inverse, and nothing wider — the bytes go
-    /// back out the way they came in.
-    pub const TO_BYTES: BuiltinSig = command(ONE_BYTES, ret_bytes());
-
-    /// `ints-to-bytes`: ral has no byte literal, so a list of `Int` is how
-    /// bytes are written by number.  No decoder reads them back as a list.
-    pub const INTS_TO_BYTES: BuiltinSig = command(ONE_INT_LIST, ret_bytes());
-
-    pub const TO_ANY_BYTES: BuiltinSig = command(ONE_ANY, ret_bytes());
-
-    pub const TO_LINE: BuiltinSig = command(ONE_ANY, ret_bytes());
-
-    pub const TO_LINES: BuiltinSig = command(TO_LINES_ARGS, ret_bytes());
-
-    pub const CHDIR: BuiltinSig = command(ONE_STR, pure(TyTemplate::Unit));
-    pub const PATH_BOOL: BuiltinSig = command(ONE_STR, pure(TyTemplate::Bool));
-
-    pub const INT_PARSE: BuiltinSig = command(ONE_ANY, pure(TyTemplate::Int));
-    pub const FLOAT_PARSE: BuiltinSig = command(ONE_ANY, pure(TyTemplate::Float));
-    pub const STR_PARSE: BuiltinSig = command(ONE_ANY, pure(TyTemplate::String));
-    pub const ROUND: BuiltinSig = command(FLOAT_INT, pure(TyTemplate::Float));
-    /// Shared by `floor`, `ceil`, and `trunc`.
-    pub const FLOAT_TO_INT: BuiltinSig = command(ONE_FLOAT, pure(TyTemplate::Int));
-
-    pub const ALIAS: BuiltinSig = command(ALIAS_ARGS, pure(TyTemplate::Unit));
-    pub const UNALIAS: BuiltinSig = command(ONE_STR, pure(TyTemplate::Unit));
-
-    pub const HELP: BuiltinSig = command(NO_ARGS, ret_bytes());
-
-    pub const EXPLAIN: BuiltinSig = command(ONE_STR, ret_bytes());
-
-    /// `fg`/`bg`/`disown`, registered by the REPL host in
-    /// `ral/src/repl/host_handlers.rs`: the job to act on, named.
-    pub const INT_TO_UNIT: BuiltinSig = command(ONE_INT, pure(TyTemplate::Unit));
-
-    pub const STRING_TO_UNIT: BuiltinSig = command(ONE_STR, pure(TyTemplate::Unit));
-
-    /// `fail`: an error record, open at the tail so a caught error re-raises
-    /// with the fields `try` gave it.  The nonzero-status rule is a literal
-    /// check the shape cannot state, hence the diagnostic.
-    pub const FAIL: BuiltinSig = BuiltinSig {
-        args: ONE_ERROR_RECORD,
-        result: CompTemplate::Never,
-        diagnostic: BuiltinDiagnostic::FailStatusNonzero,
-    };
-
-    /// `exit`/`quit`: a status, and no return.
-    ///
-    /// Divergent like [`FAIL`] — the escape it raises unwinds past every
-    /// binding — so it joins whatever its context needs rather than forcing
-    /// `Unit` on the other arm of an `if`.  The status is fixed-1: the
-    /// elaborator sugars bare `exit` into `exit 0`.
-    pub const EXIT: BuiltinSig = command(ONE_INT, CompTemplate::Never);
-}
-
 /// A record type over a closed row: the tail is `Empty`, so no extension.
 pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
     let mut row = Row::Empty;
@@ -393,13 +179,9 @@ pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
 ///
 /// `message` is absent by design: it is optional, and its type is `String` or
 /// `Bytes` — a union no row can spell.  [`Inferencer::check_error_message`]
-/// judges it once the row has been unified.
-pub(super) fn error_record_arg(u: &mut Unifier) -> Ty {
-    error_record_shape(u.fresh_row_var())
-}
-
-/// The shape [`error_record_arg`] builds, its open tail taken directly so a
-/// caller that must quantify that row itself — [`scheme::fail`] — can.
+/// judges it once the row has been unified.  The caller quantifies the row
+/// itself — [`scheme::fail`] — so this takes it directly rather than minting
+/// one.
 pub(in crate::typecheck) fn error_record_shape(row: RowVar) -> Ty {
     Ty::Record(Row::Extend(
         "status".into(),
@@ -1020,16 +802,6 @@ pub mod scheme {
     }
 }
 
-/// The polytype a type rule names, whichever half of the manifest it came
-/// from.  A `Sig` rule's is derived from its own templates by
-/// [`derive_sig_scheme`], the only source there is.
-pub fn rule_scheme(rule: &BuiltinTypeRule, u: &mut Unifier) -> Scheme {
-    match rule {
-        BuiltinTypeRule::Scheme(factory) => factory(u),
-        BuiltinTypeRule::Sig(sig) => derive_sig_scheme(sig, u),
-    }
-}
-
 /// A value builtin's first-class polytype: the type a `$name` reference holds.
 ///
 /// `None` when `table` has no value row under `name`.  A base frame is absent
@@ -1039,7 +811,7 @@ pub fn rule_scheme(rule: &BuiltinTypeRule, u: &mut Unifier) -> Scheme {
 /// Resolution runs against `table`, the checked session's own surface, so a
 /// name means what that session evaluates.
 pub fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
-    Some(rule_scheme(&table.value(name)?.type_rule, u))
+    Some((table.value(name)?.type_rule)(u))
 }
 
 /// The formatted type of any manifest row, either half.
@@ -1049,71 +821,7 @@ pub fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Opti
 /// does not carry.
 pub fn builtin_type_hint(table: &BuiltinTable, name: &str) -> Option<String> {
     let mut u = Unifier::new();
-    Some(fmt_scheme(&rule_scheme(
-        &table.get(name)?.type_rule,
-        &mut u,
-    )))
-}
-
-/// Derive a `Sig`-ruled builtin's value scheme: the argument templates become
-/// the curry spine, the result template the comp.
-///
-/// The built `Ty` goes through [`generalize`] against an empty [`TyEnv`]
-/// rather than a hand-rolled quantifier list: `generalize` already snapshots
-/// [`CompTemplate::LinesStep`]'s cyclic comp-var root into the scheme's
-/// `comp_ty_bindings`.
-fn derive_sig_scheme(sig: &BuiltinSig, u: &mut Unifier) -> Scheme {
-    let params: Vec<Ty> = sig.args.iter().map(|t| arg_template_ty(*t, u)).collect();
-    let body = params
-        .into_iter()
-        .rev()
-        .fold(sig_comp_ty(sig, u), |acc, p| fun(p, acc));
-    generalize(u, &TyEnv::new(), &thunk(body))
-}
-
-/// The [`CompTy`] a command signature's result describes.
-///
-/// That is the route it names over the value it returns.  Both readings of a
-/// [`BuiltinSig`]'s result go through here: inference, and the derived value
-/// scheme.
-pub fn sig_comp_ty(sig: &BuiltinSig, u: &mut Unifier) -> CompTy {
-    let route = sig_route(sig.result, u);
-    let value = match sig.result {
-        CompTemplate::Pure(t) | CompTemplate::Return { value: t, .. } => ty_of_template(t, u),
-        CompTemplate::Never => u.fresh_ty(),
-        CompTemplate::LinesStep => lines_step_ty(u),
-    };
-    debug_assert!(
-        route != PayloadRoute::Bytes || matches!(value, Ty::Unit),
-        "WF-2: a Bytes-route sig's value template must be Unit"
-    );
-    CompTy::Return(route, Box::new(value))
-}
-
-/// An argument template's type in a derived value scheme.
-fn arg_template_ty(template: ArgTemplate, u: &mut Unifier) -> Ty {
-    match template {
-        ArgTemplate::Ty(t) => ty_of_template(t, u),
-        ArgTemplate::BlockOrLambda => Ty::Thunk(Box::new(u.fresh_comp_ty())),
-        ArgTemplate::ErrorRecord => error_record_arg(u),
-    }
-}
-
-/// A [`TyTemplate`]'s type, standalone from an [`Inferencer`] context.
-///
-/// [`Inferencer::ty_from_template`] delegates here.
-pub(in crate::typecheck) fn ty_of_template(template: TyTemplate, u: &mut Unifier) -> Ty {
-    match template {
-        TyTemplate::String => Ty::String,
-        TyTemplate::Int => Ty::Int,
-        TyTemplate::Float => Ty::Float,
-        TyTemplate::Bool => Ty::Bool,
-        TyTemplate::Bytes => Ty::Bytes,
-        TyTemplate::Unit => Ty::Unit,
-        TyTemplate::Any => u.fresh_ty(),
-        TyTemplate::ListAny => Ty::List(Box::new(u.fresh_ty())),
-        TyTemplate::ListInt => Ty::List(Box::new(Ty::Int)),
-    }
+    Some(fmt_scheme(&(table.get(name)?.type_rule)(&mut u)))
 }
 
 /// The value `from-lines` returns, standalone from an [`Inferencer`] context:
@@ -1185,35 +893,7 @@ pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
     )
 }
 
-/// The signature interpreter: a data-only [`BuiltinSig`] becomes an inferred
-/// [`CompTy`].  It lives here, beside the templates it reads.
 impl Inferencer<'_> {
-    fn ty_from_template(&mut self, template: TyTemplate) -> Ty {
-        ty_of_template(template, &mut self.ctx.unifier)
-    }
-
-    #[allow(dead_code)]
-    fn unify_arg_template(&mut self, actual: &Ty, template: ArgTemplate) {
-        match template {
-            ArgTemplate::Ty(ty) => {
-                let expected = self.ty_from_template(ty);
-                self.ctx
-                    .unify_ty(actual, &expected, Reason::BuiltinTypedArg);
-            }
-            ArgTemplate::BlockOrLambda => {
-                let result = self.ctx.unifier.fresh_comp_ty();
-                let expected = Ty::Thunk(Box::new(result));
-                self.ctx
-                    .unify_ty(actual, &expected, Reason::BuiltinBlockArg);
-            }
-            ArgTemplate::ErrorRecord => {
-                let expected = error_record_arg(&mut self.ctx.unifier);
-                self.ctx.unify_ty(actual, &expected, Reason::ErrorRecordArg);
-                self.check_error_message(actual);
-            }
-        }
-    }
-
     /// The half of the error-record shape the row cannot carry: a `message`,
     /// if the record has one, is `String` or `Bytes`.  Read after unification,
     /// so a field arriving through the open tail is judged too.  A field still
@@ -1240,83 +920,10 @@ impl Inferencer<'_> {
                 .diagnose(TypeErrorKind::ErrorRecordMessage { actual: message });
         }
     }
-
-    #[allow(dead_code)]
-    pub(super) fn apply_builtin_sig(
-        &mut self,
-        sig: BuiltinSig,
-        name: &str,
-        args: &crate::ir::Args,
-    ) -> CompTy {
-        if sig.diagnostic == BuiltinDiagnostic::FailStatusNonzero
-            && fail_status_is_zero_literal(args)
-        {
-            self.ctx.diagnose(TypeErrorKind::FailStatusZero);
-        }
-
-        let expected = sig.args;
-
-        // There is no positional reading exactly when the call writes a `...`,
-        // and a builtin takes its arguments by application, which has no argv to
-        // spread into.  Unconditional: every signature declares an arity, the
-        // argv half of the manifest being base frames, which are typed as
-        // handlers and never arrive here.
-        let Some(positional) = crate::ir::args::positional(args) else {
-            self.infer_refused_args(args);
-            self.refuse_spread(
-                args,
-                crate::typecheck::error::SpreadHead::Builtin {
-                    name: name.into(),
-                    arity: expected.len(),
-                },
-            );
-            // Nothing was applied and nothing is residual: the refusal is the
-            // whole story of this call, so its type is the saturated result.
-            return sig_comp_ty(&sig, &mut self.ctx.unifier);
-        };
-
-        if positional.len() != expected.len() {
-            // A decoder's `expected` is empty, so arriving here means an
-            // argument was written.
-            self.ctx.diagnose(match sig.diagnostic {
-                BuiltinDiagnostic::Decoder => {
-                    TypeErrorKind::DecoderTakesNoArgument { name: name.into() }
-                }
-                _ => TypeErrorKind::BuiltinArity {
-                    name: name.into(),
-                    expected: expected.len(),
-                    got: positional.len(),
-                },
-            });
-        }
-        for (arg, template) in positional.iter().zip(expected.iter()) {
-            let actual = self.infer_val(arg);
-            self.unify_arg_template(&actual, *template);
-        }
-        for arg in positional.iter().skip(expected.len()) {
-            let _ = self.infer_val(arg);
-        }
-
-        // The templates the call left unwritten — a residue only a short call
-        // has, since a long one is diagnosed and consumes everything written.
-        let residual = &expected[positional.len().min(expected.len())..];
-
-        // An under-applied builtin is a value awaiting the rest, so its type is
-        // the residual spine — the same shape `apply_args` yields for an
-        // under-applied lambda.  Granting the saturated result here would make
-        // the recorded type an accomplice of the arity slip, and a computation
-        // boundary downstream would believe it.
-        let saturated = sig_comp_ty(&sig, &mut self.ctx.unifier);
-        residual.iter().rev().fold(saturated, |acc, template| {
-            fun(arg_template_ty(*template, &mut self.ctx.unifier), acc)
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// A `[arg]` in a doc synopsis (before the em dash) reads as optional, and
     /// no argument is: every template is one the caller must write.  A bracket
     /// spelling a record type — `[status: Int, ...]`, one required argument —
@@ -1331,9 +938,6 @@ mod tests {
                 continue;
             }
             let entry = table.get(name).unwrap();
-            let BuiltinTypeRule::Sig(_) = entry.type_rule else {
-                continue;
-            };
             let synopsis = entry.doc.split('—').next().unwrap_or(entry.doc);
             let optional_looking = synopsis.split('[').skip(1).any(|rest| {
                 let bracketed = rest.split(']').next().unwrap_or(rest);
