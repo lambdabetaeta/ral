@@ -10,10 +10,11 @@ use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
 use super::ty::{CompTy, GroundRoute, PayloadRoute, Row, Ty};
 use crate::ir::{
-    ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, IrPattern, Register, Val,
-    ValListElem, ValMapEntry,
+    ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, IrPattern, Phrase, Register,
+    Toplevel, Val, ValListElem, ValMapEntry,
 };
 use crate::source::Span;
+use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{BinaryOp, BinaryOpKind, RedirectMode};
 use crate::syntax::tag::tag_row_label;
@@ -149,6 +150,46 @@ pub fn infer_comp(ctx: &mut InferCtx, env: &mut TyEnv, comp: &Comp) -> CompTy {
     cty
 }
 
+/// Type-check a whole [`Toplevel`]: infer each phrase in order, extending
+/// `TyEnv` at each `Define` — a `Source` binds nothing statically — and
+/// binding/unbinding an `alias`/`unalias` `Run` phrase's handler scheme for
+/// the phrases after it, as [`Inferencer::infer_seq_with_alias_bindings`]
+/// does for `Seq` parts today (§3.5).  Returns each `Define` phrase's
+/// generalised per-name schemes, parallel to `top.phrases` and empty for
+/// every other phrase — `annotate::annotate_toplevel` writes it straight
+/// onto the rebuilt `Phrase::Define`.
+pub fn infer_toplevel(
+    ctx: &mut InferCtx,
+    env: &mut TyEnv,
+    top: &Toplevel,
+) -> Vec<Vec<(String, Scheme)>> {
+    let mut inferencer = Inferencer { ctx, env };
+    inferencer.infer_phrases(&top.phrases)
+}
+
+/// Every `Name` an `IrPattern` binds, in pattern order — the phrase-level
+/// analogue of [`Inferencer::bind_pattern`]'s own walk, kept separate since
+/// this one only collects, never binds.
+fn collect_pattern_names<'a>(pat: &'a IrPattern, out: &mut Vec<&'a str>) {
+    match pat {
+        IrPattern::Wildcard => {}
+        IrPattern::Name(name) => out.push(name),
+        IrPattern::List { elems, rest } => {
+            for elem in elems {
+                collect_pattern_names(elem, out);
+            }
+            if let Some(rest_name) = rest {
+                out.push(rest_name);
+            }
+        }
+        IrPattern::Map(entries) => {
+            for entry in entries {
+                collect_pattern_names(&entry.pattern, out);
+            }
+        }
+    }
+}
+
 /// Inference state, built directly by the entry points in `typecheck.rs`.
 pub(super) struct Inferencer<'a> {
     pub(super) ctx: &'a mut InferCtx,
@@ -248,6 +289,51 @@ impl Inferencer<'_> {
                     self.bind_pattern(&entry.pattern, field_ty, mode);
                 }
             }
+        }
+    }
+
+    /// What a binder's pattern reaches from its RHS's inferred type: a `Fun`
+    /// RHS is a lambda — evaluating it builds a closure, nothing to capture —
+    /// so the whole arrow is thunked; otherwise the binder consumes the
+    /// RHS's *payload*, a byte payload through the `Capture` coercion as the
+    /// bound `String`, a value payload directly.  An open route defaults to
+    /// `Value`: nothing pinned it to `Bytes`, so there is nothing here to
+    /// capture.  Shared by `Bind` and `Phrase::Define` (§3.5).
+    fn rhs_bound_ty(&mut self, inner_ty: CompTy) -> Ty {
+        if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty) {
+            Ty::Thunk(Box::new(inner_ty))
+        } else {
+            let (ty, route) = self.extract_return(&inner_ty);
+            if matches!(self.ctx.unifier.resolve_route(&route), PayloadRoute::Var(_)) {
+                self.ctx
+                    .unify_route(&route, &PayloadRoute::Value, Reason::RoutePin);
+            }
+            if self.ctx.ground(route) == GroundRoute::Bytes {
+                Ty::String
+            } else {
+                ty
+            }
+        }
+    }
+
+    /// `cty`'s curried arity: `0` for anything not a `Fun`.
+    fn fun_arity(&mut self, cty: &CompTy) -> usize {
+        match self.ctx.unifier.resolve_comp_ty(cty) {
+            CompTy::Fun(_, body) => 1 + self.fun_arity(&body),
+            _ => 0,
+        }
+    }
+
+    /// Record `rhs`'s curried arity for `annotate`'s η-expansion (S3), keyed
+    /// by `rhs`'s own address — absent means "not `Fun`-shaped".  A pure
+    /// side table: harmless where nothing reads it, which is every call site
+    /// on the old, un-phrased path.
+    fn record_arrow_arity(&mut self, rhs: &Arc<Comp>, cty: &CompTy) {
+        let arity = self.fun_arity(cty);
+        if arity > 0 {
+            self.ctx
+                .rhs_arrow_arity
+                .insert(std::ptr::from_ref::<Comp>(rhs.as_ref()) as usize, arity);
         }
     }
 
@@ -1000,6 +1086,96 @@ impl Inferencer<'_> {
         last
     }
 
+    /// [`infer_toplevel`]'s walk: one phrase at a time, each under its own
+    /// span, threading the extended `TyEnv` from one phrase to the next.
+    fn infer_phrases(&mut self, phrases: &[Spanned<Phrase>]) -> Vec<Vec<(String, Scheme)>> {
+        let tail_index = phrases.len().saturating_sub(1);
+        phrases
+            .iter()
+            .enumerate()
+            .map(|(index, phrase)| {
+                self.with_span(phrase.span, |this| {
+                    this.infer_phrase(&phrase.item, index == tail_index)
+                })
+            })
+            .collect()
+    }
+
+    /// One phrase of §3.5.  `is_tail` marks the toplevel's own last phrase:
+    /// a non-tail `Run`'s value is discarded, exactly as a `Seq` part's is
+    /// ([`Self::infer_seq_with_alias_bindings`]); the tail `Run`'s is the
+    /// run's own value, reported rather than forced — S3's η-expansion may
+    /// still rebuild it if it resolved to `Fun`.
+    fn infer_phrase(&mut self, phrase: &Phrase, is_tail: bool) -> Vec<(String, Scheme)> {
+        match phrase {
+            Phrase::Define { pattern, comp, .. } => {
+                let inner_ty = self.infer_comp(comp);
+                self.record_arrow_arity(comp, &inner_ty);
+                let bound_ty = self.rhs_bound_ty(inner_ty);
+                self.ctx.solve_at_boundary(self.env);
+                let concrete = self.ctx.unifier.apply_ty(&bound_ty);
+                self.bind_pattern(pattern, &concrete, BindMode::Let);
+
+                let mut names = Vec::new();
+                collect_pattern_names(pattern, &mut names);
+                names
+                    .into_iter()
+                    .map(|name| {
+                        let scheme = self
+                            .env
+                            .lookup_binding(name)
+                            .cloned()
+                            .expect("bind_pattern just bound every collected name");
+                        (name.to_string(), scheme)
+                    })
+                    .collect()
+            }
+            // The path is a computation, inferred for the errors inside it;
+            // its own names arrive at run time, so the phrase binds nothing
+            // statically here (§3.5).
+            Phrase::Source { path } => {
+                let _ = self.infer_comp(path);
+                Vec::new()
+            }
+            Phrase::Run(comp) => {
+                let mut alias_already_typed = false;
+                match alias_statement_shape(comp) {
+                    Ok(Some((name, thunk))) => {
+                        let scheme = self.handler_comp_scheme(name, thunk);
+                        self.env.bind_handler(name.to_string(), scheme, true);
+                        alias_already_typed = true;
+                    }
+                    Err(msg) => {
+                        self.ctx
+                            .diagnose(TypeErrorKind::MalformedAlias { detail: msg });
+                    }
+                    Ok(None) => {}
+                }
+                match unalias_statement_shape(comp) {
+                    Ok(Some(name)) => {
+                        self.env.unbind_removable_handler(name);
+                    }
+                    Err(msg) => {
+                        self.ctx
+                            .diagnose(TypeErrorKind::MalformedUnalias { detail: msg });
+                    }
+                    Ok(None) => {}
+                }
+                let cty = if alias_already_typed {
+                    super::builtins::pure(Ty::Unit)
+                } else {
+                    self.infer_comp(comp)
+                };
+                if is_tail {
+                    self.record_arrow_arity(comp, &cty);
+                } else {
+                    self.force_discarded_shape(comp, &cty);
+                }
+                Vec::new()
+            }
+        }
+    }
+
     /// `a ? b ? c` yields whichever arm succeeds, so every arm must agree on
     /// one payload route and value — exactly the discipline
     /// [`Self::merge_branches`] already applies to `if`'s two arms, here
@@ -1452,13 +1628,18 @@ impl Inferencer<'_> {
         self.merge_branches(arm_ctys, &Reason::CaseArms)
     }
 
-    /// The `Rec` rule of §3.5, without the memo `rec_groups` adds: bind each
-    /// name to a self-referential mono computation type, infer every member
-    /// in that recursive environment, unify each against its own type, unbind
-    /// the self-bindings, and answer the `index`-th member's type. Re-infers
-    /// the whole group at every projection — correct, `O(n²)` in the group
-    /// size — because nothing here remembers having done this already.
+    /// The `Rec` rule of §3.5: bind each name to a self-referential mono
+    /// computation type, infer every member in that recursive environment,
+    /// unify each against its own type, unbind the self-bindings, and answer
+    /// the `index`-th member's type — memoized in `ctx.rec_groups` per
+    /// `Arc` identity, so a group is inferred once within a run however many
+    /// of its members are projected.
     fn infer_rec(&mut self, group: &Arc<[(String, Arc<Comp>)]>, index: usize) -> CompTy {
+        let key = Arc::as_ptr(group).cast::<()>();
+        if let Some(betas) = self.ctx.rec_groups.get(&key) {
+            return betas[index].clone();
+        }
+
         let betas: Vec<CompTy> = group
             .iter()
             .map(|_| self.ctx.unifier.fresh_comp_ty())
@@ -1477,6 +1658,7 @@ impl Inferencer<'_> {
         for (name, _) in group.iter() {
             self.env.unbind(name);
         }
+        self.ctx.rec_groups.insert(key, betas.clone());
         betas[index].clone()
     }
 
@@ -1505,27 +1687,8 @@ impl Inferencer<'_> {
                 ..
             } => {
                 let inner_ty = self.infer_comp(inner);
-                // A `Fun` RHS is a lambda: evaluating it builds a closure,
-                // nothing to capture.  Otherwise the binder consumes the
-                // RHS's *payload* — a byte payload through the `Capture`
-                // coercion, as the bound `String`; a value payload directly.
-                // An open route defaults to `Value`: nothing pinned it to
-                // `Bytes`, so there is nothing here to capture.
-                let bound_ty = if let CompTy::Fun(..) = self.ctx.unifier.resolve_comp_ty(&inner_ty)
-                {
-                    Ty::Thunk(Box::new(inner_ty))
-                } else {
-                    let (ty, route) = self.extract_return(&inner_ty);
-                    if matches!(self.ctx.unifier.resolve_route(&route), PayloadRoute::Var(_)) {
-                        self.ctx
-                            .unify_route(&route, &PayloadRoute::Value, Reason::RoutePin);
-                    }
-                    if self.ctx.ground(route) == GroundRoute::Bytes {
-                        Ty::String
-                    } else {
-                        ty
-                    }
-                };
+                self.record_arrow_arity(inner, &inner_ty);
+                let bound_ty = self.rhs_bound_ty(inner_ty);
 
                 if let IrPattern::Name(_) = pattern.as_ref() {
                     self.ctx

@@ -11,10 +11,11 @@
 
 use super::env::{InferCtx, TyEnv};
 use super::generalize::generalize;
+use super::scheme::Scheme;
 use super::ty::GroundRoute;
 use crate::ir::{
-    CaseArm, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV, Val, ValListElem, ValMapEntry,
-    ValRedirectTarget,
+    Args, CaseArm, Comp, CompKind, Exec, IrPattern, Phrase, PipeYield, RedirectV, Toplevel, Val,
+    ValListElem, ValMapEntry, ValRedirectTarget,
 };
 use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
@@ -109,7 +110,8 @@ fn annotate_bind(
     rhs: &Arc<Comp>,
     ctx: &mut InferCtx,
     spine: bool,
-) -> (Arc<Comp>, Option<Box<crate::typecheck::Scheme>>) {
+    eta: bool,
+) -> (Arc<Comp>, Option<Box<Scheme>>) {
     let scheme = spine
         .then(|| ctx.bind_tys.get(&comp_key(comp)).cloned())
         .flatten()
@@ -122,18 +124,65 @@ fn annotate_bind(
             );
             Box::new(scheme)
         });
-    let rhs = Arc::new(annotate_demand(rhs, ctx, false, Demand::Value));
-    (rhs, scheme)
+    (annotate_value_rhs(rhs, ctx, eta), scheme)
 }
 
 /// Rebuild `comp` under `demand`; `spine` marks the `Bind`s that install into
 /// the persistent session scope, so only those carry a generalised scheme
 /// (closed against an empty environment, since the unifier dies with the run).
 pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
-    annotate_demand(comp, ctx, spine, Demand::Discard)
+    annotate_demand(comp, ctx, spine, false, Demand::Discard)
 }
 
-fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand) -> Comp {
+/// `annotate_demand`, but for a position that reads its child's *value* —
+/// a `Bind`/`Define` RHS, or the toplevel's own tail `Run` — so that S3's
+/// η-expansion (`eta_expand_arrow`) can apply after the ordinary rebuild,
+/// keyed by the *original* `rhs`'s address in `ctx.rhs_arrow_arity`.
+fn annotate_value_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool) -> Arc<Comp> {
+    let annotated = annotate_demand(rhs, ctx, false, eta, Demand::Value);
+    let arity = if eta {
+        ctx.rhs_arrow_arity.get(&comp_key(rhs)).copied()
+    } else {
+        None
+    };
+    match arity {
+        Some(arity) => Arc::new(eta_expand_arrow(annotated, ctx, arity)),
+        None => Arc::new(annotated),
+    }
+}
+
+/// S3: rebuild an arrow-typed RHS of curried arity `arity` as
+/// `Return(Thunk(λx₁. … λxₙ. App { head, args }))`, flattening `rhs` into
+/// the `App`'s own head when it is itself an `App` — so every
+/// function-typed thunk's body is a syntactic `Lam` ([`Comp::arrow`]).
+fn eta_expand_arrow(rhs: Comp, ctx: &mut InferCtx, arity: usize) -> Comp {
+    let span = rhs.span;
+    let (head, mut args): (Arc<Comp>, Args) = match rhs.item {
+        CompKind::App { head, args } => (head, args),
+        other => (Arc::new(Spanned::with_span(span, other)), Vec::new()),
+    };
+    let params: Vec<String> = (0..arity).map(|_| ctx.fresh_eta_name()).collect();
+    for param in &params {
+        args.push(Spanned::synthetic(ValListElem::Single(Val::Variable(
+            param.clone(),
+        ))));
+    }
+    let body = params.into_iter().rev().fold(
+        Spanned::with_span(span, CompKind::App { head, args }),
+        |body, param| {
+            Spanned::with_span(
+                span,
+                CompKind::Lam {
+                    param: IrPattern::Name(param),
+                    body: Arc::new(body),
+                },
+            )
+        },
+    );
+    Spanned::with_span(span, CompKind::Return(Val::Thunk(Arc::new(body))))
+}
+
+fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, eta: bool, demand: Demand) -> Comp {
     match &comp.item {
         CompKind::Seq(parts) => {
             let item = match parts.split_last() {
@@ -141,9 +190,9 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
                 Some((last, init)) => {
                     let mut rebuilt: Vec<Arc<Comp>> = init
                         .iter()
-                        .map(|p| Arc::new(annotate_demand(p, ctx, spine, Demand::Discard)))
+                        .map(|p| Arc::new(annotate_demand(p, ctx, spine, eta, Demand::Discard)))
                         .collect();
-                    rebuilt.push(Arc::new(annotate_demand(last, ctx, spine, demand)));
+                    rebuilt.push(Arc::new(annotate_demand(last, ctx, spine, eta, demand)));
                     CompKind::Seq(rebuilt)
                 }
             };
@@ -155,33 +204,33 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
             rest,
             ..
         } => {
-            let (rhs, scheme) = annotate_bind(comp, rhs, ctx, spine);
+            let (rhs, scheme) = annotate_bind(comp, rhs, ctx, spine, eta);
             let item = CompKind::Bind {
                 comp: rhs,
                 pattern: Arc::new(annotate_pattern(pattern, ctx)),
-                rest: Arc::new(annotate_demand(rest, ctx, spine, demand)),
+                rest: Arc::new(annotate_demand(rest, ctx, spine, eta, demand)),
                 scheme,
             };
             return Spanned::with_span(comp.span, item);
         }
         CompKind::Source { path, rest } => {
             let item = CompKind::Source {
-                path: Arc::new(annotate_demand(path, ctx, false, Demand::Value)),
-                rest: Arc::new(annotate_demand(rest, ctx, spine, demand)),
+                path: Arc::new(annotate_demand(path, ctx, false, eta, Demand::Value)),
+                rest: Arc::new(annotate_demand(rest, ctx, spine, eta, demand)),
             };
             return Spanned::with_span(comp.span, item);
         }
         CompKind::Force(Val::Thunk(inner)) => {
             let item = CompKind::Force(Val::Thunk(Arc::new(annotate_demand(
-                inner, ctx, false, demand,
+                inner, ctx, false, eta, demand,
             ))));
             return Spanned::with_span(comp.span, item);
         }
         CompKind::If { cond, then, else_ } => {
             let item = CompKind::If {
                 cond: annotate_spanned_val(cond, ctx),
-                then: Arc::new(annotate_join_arm(comp, then, ctx, demand)),
-                else_: Arc::new(annotate_join_arm(comp, else_, ctx, demand)),
+                then: Arc::new(annotate_join_arm(comp, then, ctx, eta, demand)),
+                else_: Arc::new(annotate_join_arm(comp, else_, ctx, eta, demand)),
             };
             return Spanned::with_span(comp.span, item);
         }
@@ -189,7 +238,7 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
             let item = CompKind::Chain(
                 parts
                     .iter()
-                    .map(|p| Arc::new(annotate_join_arm(comp, p, ctx, demand)))
+                    .map(|p| Arc::new(annotate_join_arm(comp, p, ctx, eta, demand)))
                     .collect(),
             );
             return Spanned::with_span(comp.span, item);
@@ -206,6 +255,7 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
                             comp,
                             arm.body.comp(),
                             ctx,
+                            eta,
                             demand,
                         ))),
                     })
@@ -219,11 +269,11 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
         | CompKind::Grant { .. }
         | CompKind::Audit { .. }
         | CompKind::Redirect { .. }
-        | CompKind::Hoisted { .. } => return annotate_scope(comp, ctx, demand),
+        | CompKind::Hoisted { .. } => return annotate_scope(comp, ctx, eta, demand),
         _ => {}
     }
 
-    let item = annotate_plain(comp, ctx);
+    let item = annotate_plain(comp, ctx, eta);
     let wrapped = if demand == Demand::Value && bytes_result(ctx, comp_key(comp)) {
         captured_string(Spanned::with_span(comp.span, item))
     } else {
@@ -234,7 +284,7 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
 
 /// The structural rebuild shared by every node `annotate_demand` doesn't walk
 /// specially: every child is `Discard`.
-fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
+fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
     match &comp.item {
         CompKind::Pipeline {
             stages,
@@ -266,7 +316,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
             CompKind::Pipeline {
                 stages: stages
                     .iter()
-                    .map(|stage| Arc::new(annotate(stage, ctx, false)))
+                    .map(|stage| Arc::new(annotate_demand(stage, ctx, false, eta, Demand::Discard)))
                     .collect(),
                 stage_types,
                 yields,
@@ -274,10 +324,10 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
         }
         CompKind::Lam { param, body } => CompKind::Lam {
             param: annotate_pattern(param, ctx),
-            body: Arc::new(annotate(body, ctx, false)),
+            body: Arc::new(annotate_demand(body, ctx, false, eta, Demand::Discard)),
         },
         CompKind::App { head, args } => CompKind::App {
-            head: Arc::new(annotate(head, ctx, false)),
+            head: Arc::new(annotate_demand(head, ctx, false, eta, Demand::Discard)),
             args: annotate_args(args, ctx),
         },
         CompKind::Force(value) => CompKind::Force(annotate_val(value, ctx)),
@@ -307,7 +357,12 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
             group: Arc::from(
                 group
                     .iter()
-                    .map(|(name, m)| (name.clone(), Arc::new(annotate(m, ctx, false))))
+                    .map(|(name, m)| {
+                        (
+                            name.clone(),
+                            Arc::new(annotate_demand(m, ctx, false, eta, Demand::Discard)),
+                        )
+                    })
                     .collect::<Vec<_>>(),
             ),
             index: *index,
@@ -337,17 +392,17 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
 /// One arm of an `If`/`Case`/`Chain` join under `demand`: a byte-side join
 /// walks a byte-payload arm at `Value` and wraps a subsumed (`∅`-`Unit`) arm
 /// whole; otherwise `demand` simply inherits into the arm.
-fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, demand: Demand) -> Comp {
+fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {
     if byte_side_join(join, ctx, demand) {
         if bytes_result(ctx, comp_key(arm)) {
-            return annotate_demand(arm, ctx, false, Demand::Value);
+            return annotate_demand(arm, ctx, false, eta, Demand::Value);
         }
         return Spanned::with_span(
             arm.span,
-            captured_string(annotate_demand(arm, ctx, false, Demand::Discard)),
+            captured_string(annotate_demand(arm, ctx, false, eta, Demand::Discard)),
         );
     }
-    annotate_demand(arm, ctx, false, demand)
+    annotate_demand(arm, ctx, false, eta, demand)
 }
 
 /// A scope arm/body `Val`, dispatched the way [`annotate_join_arm`]
@@ -390,10 +445,10 @@ fn annotate_scope_val(
 /// or [`ArmWalk::Wrap`] (wrap the whole body at `Discard`).
 fn arm_body(body: &Arc<Comp>, ctx: &mut InferCtx, walk: ArmWalk) -> Arc<Comp> {
     match walk {
-        ArmWalk::Descend => Arc::new(annotate_demand(body, ctx, false, Demand::Value)),
+        ArmWalk::Descend => Arc::new(annotate_demand(body, ctx, false, false, Demand::Value)),
         ArmWalk::Wrap => Arc::new(Spanned::with_span(
             body.span,
-            captured_string(annotate_demand(body, ctx, false, Demand::Discard)),
+            captured_string(annotate_demand(body, ctx, false, false, Demand::Discard)),
         )),
         ArmWalk::Plain => unreachable!("arm_body is only called under Descend/Wrap"),
     }
@@ -478,7 +533,7 @@ fn annotate_redirect(redirect: &RedirectV, ctx: &mut InferCtx) -> RedirectV {
     }
 }
 
-fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, demand: Demand) -> Comp {
+fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {
     let item = match &comp.item {
         CompKind::Try { body, handler } => CompKind::Try {
             body: annotate_scope_val(comp, body, ctx, false, demand),
@@ -500,10 +555,10 @@ fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, demand: Demand) -> Comp {
             body: annotate_val(body, ctx),
         },
         CompKind::Hoisted { body } => CompKind::Hoisted {
-            body: Arc::new(annotate_demand(body, ctx, false, demand)),
+            body: Arc::new(annotate_demand(body, ctx, false, eta, demand)),
         },
         CompKind::Redirect { body, redirects } => CompKind::Redirect {
-            body: Arc::new(annotate_demand(body, ctx, false, demand)),
+            body: Arc::new(annotate_demand(body, ctx, false, eta, demand)),
             redirects: redirects
                 .iter()
                 .map(|r| annotate_redirect(r, ctx))
@@ -536,4 +591,49 @@ fn annotate_pattern(pattern: &IrPattern, ctx: &mut InferCtx) -> IrPattern {
                 .collect(),
         ),
     }
+}
+
+/// Rebuild a checked [`Toplevel`]: every phrase's RHS is walked at `eta =
+/// true`, so S3's η-expansion applies throughout — a `Define`'s RHS, a
+/// `Source`'s path, and the toplevel's own tail `Run` are read at `Value`
+/// demand, every other `Run` discarded.  `schemes`, parallel to
+/// `top.phrases`, is [`infer::infer_toplevel`](super::infer::infer_toplevel)'s
+/// per-`Define` harvest, written straight onto the rebuilt `Phrase::Define` —
+/// `Bind` never carries one on this path, `spine` staying `false` throughout.
+pub(super) fn annotate_toplevel(
+    top: &Toplevel,
+    ctx: &mut InferCtx,
+    schemes: Vec<Vec<(String, Scheme)>>,
+) -> Toplevel {
+    let tail_index = top.phrases.len().saturating_sub(1);
+    let phrases = top
+        .phrases
+        .iter()
+        .zip(schemes)
+        .enumerate()
+        .map(|(index, (phrase, names))| {
+            let item = match &phrase.item {
+                Phrase::Define { pattern, comp, .. } => Phrase::Define {
+                    pattern: Arc::new(annotate_pattern(pattern, ctx)),
+                    comp: annotate_value_rhs(comp, ctx, true),
+                    schemes: names,
+                },
+                Phrase::Source { path } => Phrase::Source {
+                    path: annotate_value_rhs(path, ctx, true),
+                },
+                Phrase::Run(comp) if index == tail_index => {
+                    Phrase::Run(annotate_value_rhs(comp, ctx, true))
+                }
+                Phrase::Run(comp) => Phrase::Run(Arc::new(annotate_demand(
+                    comp,
+                    ctx,
+                    false,
+                    true,
+                    Demand::Discard,
+                ))),
+            };
+            Spanned::with_span(phrase.span, item)
+        })
+        .collect();
+    Toplevel { phrases }
 }

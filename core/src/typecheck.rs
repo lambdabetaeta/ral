@@ -30,7 +30,7 @@ pub use self::ty::{CompTy, CompTyVar, Row, RowVar, Ty, TyVar};
 pub use self::unify::Unifier;
 
 use self::generalize::generalize;
-use crate::ir::{Comp, CompKind, IrPattern};
+use crate::ir::{Comp, CompKind, IrPattern, Phrase, Toplevel};
 
 /// The seed of a run's check, read off the live session by
 /// `Shell::session_schemes`.
@@ -129,6 +129,30 @@ pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeE
     Ok(annotate::annotate(comp, &mut ctx, true))
 }
 
+/// [`typecheck`], for a [`Toplevel`] (§3.5): infer each phrase in order,
+/// extending `TyEnv` at each `Define`, then write back the same verdict —
+/// each `Define`'s generalised per-name schemes land on its own
+/// `Phrase::Define`, not on a shared spine.
+///
+/// # Errors
+/// Every diagnostic inference collected, whenever that list is non-empty.
+pub fn typecheck_toplevel(
+    top: &Toplevel,
+    schemes: SessionSchemes,
+) -> Result<Toplevel, Vec<TypeError>> {
+    let mut ctx = InferCtx::new();
+    let mut env = TyEnv::new();
+    seed_env(&mut env, schemes, &mut ctx.unifier);
+
+    let phrase_schemes = infer::infer_toplevel(&mut ctx, &mut env, top);
+    ctx.solve_and_finalize();
+    if !ctx.errors.is_empty() {
+        return Err(ctx.errors);
+    }
+
+    Ok(annotate::annotate_toplevel(top, &mut ctx, phrase_schemes))
+}
+
 /// The (name, scheme) pairs on an *annotated* comp's top-level `Bind` nodes.
 fn harvest_schemes(comp: &Comp) -> Vec<(String, Scheme)> {
     let mut out = Vec::new();
@@ -180,6 +204,37 @@ pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
         }
     };
     let schemes = harvest_schemes(&annotated);
+    (annotated, schemes)
+}
+
+/// The (name, scheme) pairs on an *annotated* [`Toplevel`]'s `Phrase::Define`s,
+/// in phrase order — `Define.schemes` needs no tree walk, unlike
+/// [`harvest_schemes`]'s spine search, since every phrase already carries
+/// its own.
+fn harvest_schemes_toplevel(top: &Toplevel) -> Vec<(String, Scheme)> {
+    top.phrases
+        .iter()
+        .flat_map(|phrase| match &phrase.item {
+            Phrase::Define { schemes, .. } => schemes.clone(),
+            Phrase::Source { .. } | Phrase::Run(_) => Vec::new(),
+        })
+        .collect()
+}
+
+/// [`bake_prelude`], for a [`Toplevel`] prelude.
+///
+/// # Panics
+/// If the prelude fails to type-check, reporting the errors.
+pub fn bake_prelude_toplevel(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>) {
+    let seed = SessionSchemes::default();
+    let annotated = match typecheck_toplevel(top, seed) {
+        Ok(a) => a,
+        Err(errs) => {
+            let msgs: Vec<String> = errs.iter().map(ToString::to_string).collect();
+            panic!("prelude type errors:\n{}", msgs.join("\n"));
+        }
+    };
+    let schemes = harvest_schemes_toplevel(&annotated);
     (annotated, schemes)
 }
 

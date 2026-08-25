@@ -213,6 +213,20 @@ fn walk_phrase<'a>(phrase: &'a Phrase, out: &mut Vec<&'a str>) {
 /// evaluator interprets.
 pub type Comp = Spanned<CompKind>;
 
+impl Comp {
+    /// `Some` for a `Lam`, and for a `Rec` projection whose member is a
+    /// `Lam` (§1.1 of the CEK plan): the checker's η-expansion (S3)
+    /// guarantees the body of every function-typed thunk *is* a `Lam`, so
+    /// reading the shape here is reading the type.
+    pub fn arrow(&self) -> Option<(&IrPattern, &Arc<Comp>)> {
+        match &self.item {
+            CompKind::Lam { param, body } => Some((param, body)),
+            CompKind::Rec { group, index } => group[*index].1.arrow(),
+            _ => None,
+        }
+    }
+}
+
 /// True if this computation is a single external/builtin command call —
 /// a fact about the input's shape, which hosts read to tailor what they say
 /// about a failure.

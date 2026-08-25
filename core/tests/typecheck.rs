@@ -2537,3 +2537,252 @@ fn duplicate_case_arm_is_refused() {
     );
 }
 
+// ─── Toplevel phrase typechecking (W1c) ───────────────────────────────────────
+//
+// `typecheck_toplevel` infers a `Toplevel`'s phrases in order (§3.5).  W1b's
+// `elaborate_toplevel` lands concurrently with this parcel, so these tests
+// build a `Toplevel` by hand from `elaborate`d source: elaborating a group of
+// statements together — so a mutually-recursive `let` sees its siblings —
+// yields a bare top-level `Bind` (one statement) or a `Seq` of them
+// (several); splitting that shallow, already-flat structure into phrases is
+// exactly the depth-0 half of what `elaborate_toplevel` will do.
+
+use ral_core::ir::{Phrase, Toplevel, Val};
+use ral_core::source::Spanned;
+use ral_core::typecheck::typecheck_toplevel;
+use std::sync::Arc;
+
+fn one_phrase(comp: &Arc<ral_core::ir::Comp>) -> Spanned<Phrase> {
+    let item = match &comp.item {
+        CompKind::Bind {
+            comp: rhs, pattern, ..
+        } => Phrase::Define {
+            pattern: pattern.clone(),
+            comp: rhs.clone(),
+            schemes: Vec::new(),
+        },
+        _ => Phrase::Run(comp.clone()),
+    };
+    Spanned::with_span(comp.span, item)
+}
+
+fn toplevel(src: &str) -> Toplevel {
+    let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
+    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
+        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+    let span = comp.span;
+    let phrases = match comp.item {
+        CompKind::Seq(parts) => parts.iter().map(one_phrase).collect(),
+        other => vec![one_phrase(&Arc::new(Spanned::with_span(span, other)))],
+    };
+    Toplevel { phrases }
+}
+
+fn toplevel_errors(src: &str) -> Vec<TypeError> {
+    typecheck_toplevel(
+        &toplevel(src),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::HostSurface::default().builtin_table(),
+        ),
+    )
+    .err()
+    .unwrap_or_default()
+}
+
+fn toplevel_ok(src: &str) -> Toplevel {
+    typecheck_toplevel(
+        &toplevel(src),
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::HostSurface::default().builtin_table(),
+        ),
+    )
+    .unwrap_or_else(|errs| {
+        let msgs: Vec<String> = errs.iter().map(|e| e.kind.render_message()).collect();
+        panic!("expected no errors in {src:?}, got: {msgs:?}")
+    })
+}
+
+/// A top-level `Define`'s scheme is generalised: an identity function's
+/// parameter type is free at the top level, so its scheme is quantified.
+#[test]
+fn toplevel_define_generalises_scheme() {
+    let top = toplevel_ok("let id = { |x| return $x }");
+    let Phrase::Define { schemes, .. } = &top.phrases[0].item else {
+        panic!("expected a Define phrase, got {:?}", top.phrases[0].item);
+    };
+    assert_eq!(schemes.len(), 1);
+    assert_eq!(schemes[0].0, "id");
+    let rendered = fmt_scheme(&schemes[0].1);
+    assert!(
+        rendered.starts_with('∀'),
+        "expected id's scheme to be generalised, got: {rendered}"
+    );
+}
+
+/// A destructuring top-level `let` carries one generalised scheme per name
+/// the pattern binds — the field type each map-pattern entry reaches, not
+/// one scheme for the whole pattern.
+#[test]
+fn toplevel_define_destructuring_generalises_each_name() {
+    let top = toplevel_ok(
+        "let [a: fa, b: fb] = [a: { |x| return $x }, b: { |y| return $y }]",
+    );
+    let Phrase::Define { schemes, .. } = &top.phrases[0].item else {
+        panic!("expected a Define phrase, got {:?}", top.phrases[0].item);
+    };
+    assert_eq!(schemes.len(), 2);
+    assert_eq!(schemes[0].0, "fa");
+    assert_eq!(schemes[1].0, "fb");
+    for (name, scheme) in schemes {
+        let rendered = fmt_scheme(scheme);
+        assert!(
+            rendered.starts_with('∀'),
+            "expected {name}'s scheme to be generalised, got: {rendered}"
+        );
+    }
+}
+
+/// A nested `let` (a `Bind` inside a `!{ … }` block on a `Define`'s
+/// RHS) never carries a written-back scheme, unlike the `Define` around it —
+/// `annotate_toplevel` walks with `spine` always `false`.
+#[test]
+fn toplevel_nested_bind_never_generalises() {
+    let top = toplevel_ok("let result = !{ let y = 1; return $y }");
+    let Phrase::Define { comp, .. } = &top.phrases[0].item else {
+        panic!("expected a Define phrase, got {:?}", top.phrases[0].item);
+    };
+    let CompKind::Force(Val::Thunk(inner)) = &comp.item else {
+        panic!("expected a forced thunk, got {:?}", comp.item);
+    };
+    let CompKind::Seq(parts) = &inner.item else {
+        panic!("expected a Seq body, got {:?}", inner.item);
+    };
+    let CompKind::Bind { scheme, .. } = &parts[0].item else {
+        panic!("expected the nested `let` as a Bind, got {:?}", parts[0].item);
+    };
+    assert!(
+        scheme.is_none(),
+        "a nested Bind must never carry a written-back scheme"
+    );
+}
+
+/// A self-recursive `let` types the group of one polymorphically at the top
+/// level — its parameter is never forced to a ground type — and
+/// monomorphically within its own body: using the recursive name at two
+/// different argument types in sibling statements is a type error.
+#[test]
+fn toplevel_self_recursive_rec_polymorphic_at_top() {
+    let top = toplevel_ok(
+        "let f = { |x| if true { return $x } else { !{f $x} } }\n\
+         return ()",
+    );
+    let Phrase::Define { schemes, .. } = &top.phrases[0].item else {
+        panic!("expected a Define phrase, got {:?}", top.phrases[0].item);
+    };
+    let rendered = fmt_scheme(&schemes[0].1);
+    assert!(
+        rendered.starts_with('∀'),
+        "expected f's scheme to be generalised, got: {rendered}"
+    );
+}
+
+#[test]
+fn toplevel_self_recursive_rec_monomorphic_within_body() {
+    let errs = toplevel_errors(
+        "let f = { |x| let _ = !{f 1}; let _ = !{f \"s\"}; return $x }\n\
+         return ()",
+    );
+    assert!(
+        !errs.is_empty(),
+        "expected using f at two argument types within its own body to fail"
+    );
+}
+
+/// A two-member recursive group generalises each member on its own type —
+/// the n-ary `Rec` no longer forces every member through one shared `Map`
+/// shape (revision-2 fix, §0.3 item 1).
+#[test]
+fn toplevel_rec_group_members_generalise_independently() {
+    let top = toplevel_ok(
+        "let f = { |x| let _ = $[$x + 1]; let _ = !{g \"s\"}; return true }\n\
+         let g = { |y| let _ = !{upper $y}; let _ = !{f 1}; return 1 }\n\
+         return ()",
+    );
+    let (Phrase::Define { schemes: f_schemes, .. }, Phrase::Define { schemes: g_schemes, .. }) =
+        (&top.phrases[0].item, &top.phrases[1].item)
+    else {
+        panic!("expected two Define phrases");
+    };
+    let f_rendered = fmt_scheme(&f_schemes[0].1);
+    let g_rendered = fmt_scheme(&g_schemes[0].1);
+    assert!(
+        f_rendered.contains("Integer") && f_rendered.contains("Bool"),
+        "expected f : Integer → F Bool, got: {f_rendered}"
+    );
+    assert!(
+        g_rendered.contains("String") && g_rendered.contains("Integer"),
+        "expected g : String → F Integer, got: {g_rendered}"
+    );
+}
+
+/// An `alias` statement's handler scheme is visible to the phrases after it
+/// and gone after the matching `unalias` — `$foo` used as a value while
+/// `foo` is a live handler is a static error, and using it again after
+/// `unalias` is not.
+#[test]
+fn toplevel_alias_scheme_visible_until_unalias() {
+    let errs = toplevel_errors(
+        "alias foo { |args| return 3 }\n\
+         let f = $foo\n\
+         unalias foo\n\
+         let g = $foo\n\
+         return ()",
+    );
+    let handler_errors = errs
+        .iter()
+        .filter(|e| e.kind.render_message().contains("is a handler entry"))
+        .count();
+    assert_eq!(
+        handler_errors, 1,
+        "expected exactly one handler-not-first-class error, before the unalias: {errs:?}"
+    );
+}
+
+/// A partial application's RHS resolves to `Fun`, so `annotate` η-expands it
+/// (S3): `let g = f 1` becomes `Return(Thunk(Lam x. App { f, [1, x] }))`,
+/// whose body `Comp::arrow` reads as a `Lam`, and `g`'s scheme is
+/// generalised over the still-free second parameter.
+#[test]
+fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
+    let top = toplevel_ok(
+        "let f = { |a b| return $a }\n\
+         let g = f 1\n\
+         return ()",
+    );
+    let Phrase::Define { comp, schemes, .. } = &top.phrases[1].item else {
+        panic!("expected g's Define phrase, got {:?}", top.phrases[1].item);
+    };
+    let CompKind::Return(Val::Thunk(body)) = &comp.item else {
+        panic!("expected Return(Thunk(..)), got {:?}", comp.item);
+    };
+    let (param, lam_body) = body.arrow().expect("g's thunk body must be a syntactic Lam");
+    assert!(matches!(param, IrPattern::Name(_)));
+    let CompKind::App { args, .. } = &lam_body.item else {
+        panic!("expected an App body, got {:?}", lam_body.item);
+    };
+    assert_eq!(
+        args.len(),
+        2,
+        "expected the original argument plus the eta parameter"
+    );
+
+    assert_eq!(schemes.len(), 1);
+    let rendered = fmt_scheme(&schemes[0].1);
+    assert!(
+        rendered.starts_with('∀') && rendered.contains('→'),
+        "expected g : U (B → C), got: {rendered}"
+    );
+}
+
