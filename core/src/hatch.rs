@@ -1,39 +1,22 @@
 //! The guest hatch: a parent engine spawning a child engine onto a vsock
-//! connection to the host, and that child engine hydrating the seed it was
+//! connection the host dials in on, and that child hydrating the seed it was
 //! spawned with.
 //!
-//! The connection is opened from the host's side. The parent binds a port for
-//! the duration of one spawn ([`listen_for_hatch`]) and tells the host where;
-//! the thread over that listener accepts, checks the eight token bytes the
-//! host writes, and hands the connection to [`hatch_over`], which mirrors
-//! [`crate::transport::WireTransport::new`]'s re-exec shape with
-//! `ral-daemon`'s own fd discipline: open a fresh socketpair for the seed,
-//! re-exec `current_exe` on the recipe it was given, with the connection on
-//! fd 3 and the seed's fd named by `RAL_ENGINE_SEED_FD`, write the one framed
-//! [`EngineSeed`] while that child drains it, and write
-//! [`crate::transport::HATCH_ACK`] back — so a host that hears the ack has a
-//! live child that holds its whole seed.
+//! The parent binds a port for one spawn ([`listen_for_hatch`]) and names it.
+//! The listener thread checks the host's eight token bytes and hands the
+//! connection to [`hatch_over`], which re-execs this binary with the dial on fd
+//! 3 and a seed socketpair named by `RAL_ENGINE_SEED_FD`, writes the one framed
+//! [`EngineSeed`] while the child drains it, and answers
+//! [`crate::transport::HATCH_ACK`]: a host that hears the ack has a live child
+//! holding its whole seed. [`seed_from_env`] and [`apply_seed`] are the other
+//! end, narrowing the child through whichever host installed
+//! [`set_grant_narrower`] — core has no grant vocabulary of its own.
 //!
-//! [`seed_from_env`] and [`apply_seed`] are the other end: `engine_session`
-//! takes the seed before it waits for `Attach`, then, once a freshly booted
-//! shell exists, hydrates its scope and context and narrows its capabilities
-//! to the seed's validated grant through whichever host installed
-//! [`set_grant_narrower`] — core itself carries no capability vocabulary of
-//! its own to resolve a grant tag against.
-//!
-//! The sockets alone — [`crate::vsock`] — are Linux-only, since `AF_VSOCK`
-//! only means something inside a real guest. Everything else here is plain
-//! Unix process/socket plumbing, exercised in tests over a `UnixListener` and
-//! `UnixStream` pairs standing in for the guest's port and the host's dial,
-//! with a re-exec of the test binary onto one fixture playing the child engine
-//! — a stand-in that drained no seed and never spoke on fd 3 would attest to
-//! nothing.
-//!
-//! Everything that exists only to serve the Linux-only calls or this file's
-//! own tests is therefore unreachable in a plain non-Linux, non-test build —
-//! an accurate fact about this milestone's shape, not a bug, so it is stated
-//! once here rather than peppering every such item with its own
-//! `#[allow(dead_code)]`.
+//! Only the sockets ([`crate::vsock`]) are Linux-only; the tests stand a
+//! `UnixListener` and `UnixStream` pairs in for them. So much of this file is
+//! unreachable in a plain non-Linux build — a fact about this milestone's
+//! shape, stated once by the blanket allow rather than on every item it
+//! covers.
 #![cfg_attr(not(any(target_os = "linux", test)), allow(dead_code, unused_imports))]
 
 use std::io::{self, Read, Write};
@@ -60,12 +43,10 @@ const PROTOCOL_FD: RawFd = 3;
 /// the name as it takes the fd.
 const RAL_ENGINE_SEED_FD_ENV: &str = "RAL_ENGINE_SEED_FD";
 
-/// What this binary is re-exec'd as to become a hatched child: the argument
-/// list, travelling with the hatch rather than chosen inside it, so the tests
-/// name their own child without production code branching on `cfg(test)`.
+/// A hatched child's argv, carried by the hatch so the tests can name their
+/// own child without a `cfg(test)` in the spawn.
 type Recipe = &'static [&'static str];
 
-/// The one production recipe: a hatched child is this engine again.
 #[cfg(target_os = "linux")]
 const ENGINE: Recipe = &["--engine"];
 
@@ -95,10 +76,9 @@ fn table() -> &'static Mutex<Vec<ChildHandle>> {
     HATCHED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Reap every hatched child that has exited; leave the rest running. The wait
-/// is the non-blocking one, and nothing else may stand in for it: a child
-/// closes its seed channel the moment it has hydrated, so that channel says
-/// when a child *started*, never when it stopped.
+/// Reap every hatched child that has exited; leave the rest running. Only
+/// `waitpid` can tell them apart: a child closes its seed channel when it
+/// hydrates, not when it dies.
 fn sweep_hatched() {
     let mut table = table()
         .lock()
@@ -551,10 +531,8 @@ mod tests {
         }))
     }
 
-    /// The libtest binary has no `--engine` entrypoint, so a hatched child is
-    /// one exact test performing the child's half of the fd agreement —
-    /// a stand-in that drained no seed and never spoke on fd 3 would attest to
-    /// nothing.
+    /// The libtest binary has no `--engine`, so a hatched child is one exact
+    /// test performing the child's half of the fd agreement.
     const FIXTURE: Recipe = &[
         "--exact",
         "hatch::tests::hatched_child_fixture",
@@ -564,16 +542,12 @@ mod tests {
     /// The byte the host asks fd 3 with, and the child answers.
     const PROBE: u8 = b'?';
 
-    /// Production hands [`hatch_over`] a connection it has just accepted,
-    /// while fd 3 is spoken for by something else entirely — the parent
-    /// engine's own wire — so it is `dup2` that puts the dial where the child
-    /// looks. A test socketpair left wherever it landed could hold fd 3 with a
-    /// copy of the very socket under test, which the child would inherit
-    /// whether or not `dup2` ran: it would attest nothing. Hence the move up,
-    /// and hence the original closing here rather than at the end of the test.
+    /// Production accepts its dial onto a high fd while fd 3 holds the parent
+    /// engine's own wire, so only `dup2` puts the dial where the child looks.
+    /// A pair left on fd 3 would be inherited either way, and attest nothing.
     fn well_clear_of_fd_3(dial: UnixStream) -> UnixStream {
-        // SAFETY: `F_DUPFD` on a descriptor the caller owns; it answers the
-        // lowest free fd at or above 100, adopted immediately below.
+        // SAFETY: `F_DUPFD` on a descriptor this call owns; the lowest free fd
+        // at or above 100, adopted below.
         let raw = unsafe { libc::fcntl(dial.as_raw_fd(), libc::F_DUPFD, 100) };
         assert!(raw >= 100, "the dial must be moved clear of fd 3");
         drop(dial);
@@ -581,10 +555,9 @@ mod tests {
         unsafe { UnixStream::from_raw_fd(raw) }
     }
 
-    /// The child half of `hatch_over`'s fd agreement. A normal test-suite run
-    /// has no seed fd and returns; a re-exec reads the entire seed, answers
-    /// the host's probe on fd 3, and lives until the host hangs up, as a real
-    /// child engine does.
+    /// The child half of `hatch_over`'s fd agreement: an ordinary run has no
+    /// seed fd and returns, a re-exec drains the whole seed, answers the probe
+    /// on fd 3, and lives until the host hangs up.
     #[test]
     fn hatched_child_fixture() {
         let _seed = match seed_from_env() {
@@ -606,9 +579,8 @@ mod tests {
     /// The whole hatch through a real re-exec of this binary, with a seed
     /// larger than the socketpair can hold: it crosses only because the child
     /// is draining while the parent writes, which is the one claim here that
-    /// no reading of the code can settle. The probe settles the other: fd 3
-    /// in that child is the connection the host dialled, and only the child
-    /// can answer on it.
+    /// no reading of the code can settle. The probe settles a second: fd 3 in
+    /// that child is the dial, and only that child can answer on it.
     #[test]
     fn a_seed_outgrowing_the_channel_crosses_to_a_real_child() {
         let mut parent = Shell::new(crate::io::TerminalState::default());
@@ -622,8 +594,7 @@ mod tests {
         let dial = well_clear_of_fd_3(dial);
         let dialled = std::thread::spawn(move || {
             let mut host = host;
-            // Bounded, so a child that never reaches fd 3 fails this test
-            // instead of hanging it.
+            // Bounded, so a silent child fails this test rather than hanging it.
             host.set_read_timeout(Some(crate::engine::HOST_SILENCE_DEADLINE))
                 .expect("bound the host's own wait");
             let mut ack = [0u8; 1];
@@ -635,8 +606,7 @@ mod tests {
         });
 
         let pid = hatch_over(dial.into(), &seed, FIXTURE).expect("hatch over a socketpair");
-        // Held to the end of this test: the child lives exactly as long as
-        // this end of the dial does.
+        // Held: the child lives as long as this end of the dial.
         let (_host, ack, answer) = dialled.join().expect("the host's thread");
         assert_eq!(
             (ack, answer),
@@ -648,8 +618,8 @@ mod tests {
         sweep_hatched();
         assert!(
             recorded(pid),
-            "this child has hydrated and closed its seed channel, but it is running: only its \
-             exit may retire it from the table"
+            "this child has hydrated, so its seed channel is closed — but it runs, and only its \
+             exit may retire it"
         );
     }
 
@@ -713,11 +683,9 @@ mod tests {
         }
     }
 
-    /// Straight at [`read_claim`], because through the listener thread there
-    /// is no moment a test can name: the byte and the cancel both arrive
-    /// before the call, so this settles which one the poll consults first
-    /// rather than racing the accept for it. A peer that stops mid-token
-    /// keeps its connection open here, exactly as the pinning one would.
+    /// Straight at [`read_claim`]: through the listener thread there is no
+    /// moment a test can name, so byte and cancel are both in place before the
+    /// call and the poll's own order is what answers.
     #[test]
     fn a_partial_token_cannot_pin_cancellation() {
         let (mut rogue, mut dialled) = UnixStream::pair().expect("a socketpair for the dial");
