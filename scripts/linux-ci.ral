@@ -14,6 +14,10 @@
 # /dev, which an unprivileged container refuses, and every sandbox test
 # would then skip instead of confining anything.
 #
+# All three steps carry the same `RUSTFLAGS`.  A step that differs re-fingerprints
+# every unit in the graph, third-party crates included: measured 2026-08-25, the
+# test step alone rebuilt 408 crates that clippy and build had just cached.
+#
 # synod is excluded: its tauri dependency links the GTK/WebKit stack, whose
 # dev packages this image does not carry, and synod ships on macOS and
 # Windows only.  ci.yml excludes it on the same grounds.  The site render
@@ -45,7 +49,7 @@ within [dir: $repo_root] {
     }
 
     step 'cargo test --workspace --exclude synod' {
-        podman run --rm --privileged --init -v "$repo_root:/workspace" -v ral-linux-cargo:/home/dev/.cargo -v ral-linux-target:/workspace/.target-linux ral-linux-box cargo test --workspace --exclude synod --features ral-core/test-util,exarch/test-util
+        podman run --rm --privileged --init --env 'RUSTFLAGS=-D warnings' -v "$repo_root:/workspace" -v ral-linux-cargo:/home/dev/.cargo -v ral-linux-target:/workspace/.target-linux ral-linux-box cargo test --workspace --exclude synod --features ral-core/test-util,exarch/test-util
     }
 }
 
