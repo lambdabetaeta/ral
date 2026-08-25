@@ -16,7 +16,7 @@
 
 use crate::ir::{
     Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield,
-    RedirectV, Register, Val, ValListElem, ValMapEntry, ValRedirectTarget,
+    Phrase, RedirectV, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRedirectTarget,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
@@ -130,7 +130,20 @@ impl Elaborator {
     fn elab_pattern(&mut self, pat: &Pattern) -> IrPattern {
         match pat {
             Pattern::Wildcard => IrPattern::Wildcard,
-            Pattern::Name(n) => IrPattern::Name(n.clone()),
+            Pattern::Name(n) => {
+                if let Some((_, reading)) = reserved_register(n) {
+                    self.error.get_or_insert_with(|| ParseError {
+                        message: format!(
+                            "${n} is a reading of {reading}, not a name you can bind; \
+                             choose another name"
+                        ),
+                        span: self.current_span,
+                        lex_kind: None,
+                        incompleteness: None,
+                    });
+                }
+                IrPattern::Name(n.clone())
+            }
             Pattern::List { elems, rest } => IrPattern::List {
                 elems: elems.iter().map(|e| self.elab_pattern(e)).collect(),
                 rest: rest.clone(),
@@ -258,35 +271,7 @@ impl Elaborator {
                 comp
             })],
             StmtGroup::LetRec(bindings) => {
-                // Forward-declare the group's own names before any RHS, so a
-                // sibling reference resolves to a variable.  Confining that to
-                // the group, rather than scanning ahead over earlier
-                // statements, keeps a preceding command use of the same name
-                // lowering to `Exec` instead of a dangling `Force(Variable)`.
-                let scope = self.current_scope_mut();
-                for (name, _, _) in &bindings {
-                    scope.insert(name.clone());
-                }
-                let group: Arc<[(String, Arc<Comp>)]> = bindings
-                    .iter()
-                    .map(|(name, value, span)| {
-                        let mut empty = Vec::new();
-                        let CompKind::Return(Val::Thunk(arc)) = self
-                            .with_span(*span, |this| this.elab_expr(value, &mut empty))
-                            .item
-                        else {
-                            unreachable!(
-                                "group.rs only emits lambda/block LetRec RHS, \
-                                 which elaborate to Return(Thunk(_))"
-                            )
-                        };
-                        debug_assert!(
-                            empty.is_empty(),
-                            "lambda/block elaboration must not hoist into outer binds"
-                        );
-                        (name.clone(), arc)
-                    })
-                    .collect();
+                let group = self.build_rec_group(&bindings);
                 bindings
                     .iter()
                     .enumerate()
@@ -321,18 +306,7 @@ impl Elaborator {
     fn stmt(&mut self, ast: &Ast) -> Comp {
         match ast {
             Ast::Let { pattern, value } => {
-                // Value and pattern each elaborate under their own span, so a
-                // bind failure in `let [a, b] = 42` underlines `42` and a
-                // pattern-shape one underlines the pattern, not the statement.
-                let mut binds = Vec::new();
-                let comp =
-                    self.with_span(value.span, |this| this.elab_expr(&value.item, &mut binds));
-                let pattern_ir =
-                    self.with_span(pattern.span, |this| this.elab_pattern(&pattern.item));
-                // The temporaries wrap the right-hand side, not the `Bind`:
-                // only the RHS reads them, and a frame around the `Bind` would
-                // take the user's own binding down with them.
-                let rhs = wrap_binds(self.current_span, binds, comp);
+                let (rhs, pattern_ir) = self.elab_let_parts(pattern, value);
                 comp!(
                     self,
                     CompKind::Bind {
@@ -352,6 +326,253 @@ impl Elaborator {
         }
     }
 
+    /// A `let pattern = value`'s two halves, each under its own span so a
+    /// bind failure in `let [a, b] = 42` underlines `42` and a pattern-shape
+    /// one underlines the pattern, not the statement.  The pattern's names
+    /// are not yet in scope: the caller binds them once it decides where
+    /// `let x = x` should read the outer `x` from.
+    fn elab_let_parts(
+        &mut self,
+        pattern: &Spanned<Pattern>,
+        value: &Spanned<Box<Ast>>,
+    ) -> (Comp, IrPattern) {
+        let mut binds = Vec::new();
+        let comp = self.with_span(value.span, |this| this.elab_expr(&value.item, &mut binds));
+        let pattern_ir = self.with_span(pattern.span, |this| this.elab_pattern(&pattern.item));
+        // The temporaries wrap the right-hand side, not the `Bind`: only the
+        // RHS reads them, and a frame around the `Bind` would take the
+        // user's own binding down with them.
+        let rhs = wrap_binds(self.current_span, binds, comp);
+        (rhs, pattern_ir)
+    }
+
+    /// Forward-declares a recursive knot's own names, then elaborates each
+    /// member's RHS to its thunk body, sharing one `group` `Arc` — Levy's
+    /// `rec x⃗. M⃗`.  Confining the forward declaration to the group, rather
+    /// than scanning ahead over earlier statements, keeps a preceding
+    /// command use of the same name lowering to `Exec` instead of a
+    /// dangling `Force(Variable)`.
+    fn build_rec_group(
+        &mut self,
+        bindings: &[(String, Box<Ast>, Option<Span>)],
+    ) -> Arc<[(String, Arc<Comp>)]> {
+        let scope = self.current_scope_mut();
+        for (name, _, _) in bindings {
+            scope.insert(name.clone());
+        }
+        bindings
+            .iter()
+            .map(|(name, value, span)| {
+                let mut empty = Vec::new();
+                let CompKind::Return(Val::Thunk(arc)) = self
+                    .with_span(*span, |this| this.elab_expr(value, &mut empty))
+                    .item
+                else {
+                    unreachable!(
+                        "group.rs only emits lambda/block LetRec RHS, \
+                         which elaborate to Return(Thunk(_))"
+                    )
+                };
+                debug_assert!(
+                    empty.is_empty(),
+                    "lambda/block elaboration must not hoist into outer binds"
+                );
+                (name.clone(), arc)
+            })
+            .collect()
+    }
+
+    /// `ast` is a bare, unbound `source path` — one argument, no redirects —
+    /// the only call shape [`Phrase::Source`]/[`CompKind::Source`] lower
+    /// from (S2).  A bound `source`, or any other shape, reaches the
+    /// builtin table entry instead, so this returns the sole argument only
+    /// when the form is that one shape.
+    fn as_source_arg<'a>(&self, ast: &'a Ast) -> Option<&'a Spanned<Ast>> {
+        let Ast::Call {
+            head: Head::Bare(name),
+            args,
+            redirects,
+        } = ast
+        else {
+            return None;
+        };
+        if name != "source" || args.len() != 1 || !redirects.is_empty() || self.is_bound("source")
+        {
+            return None;
+        }
+        args.first()
+    }
+
+    /// A `source` form's path argument as an `F String` computation: hoists
+    /// of its own (a `~`-path, an interpolation, `$[…]`) wrap the returned
+    /// value exactly as any statement's do.
+    fn elab_source_path(&mut self, arg: &Spanned<Ast>) -> Comp {
+        let mut binds = Vec::new();
+        let v = self.with_span(arg.span, |this| this.to_val(&arg.item, &mut binds));
+        let ret = comp!(self, CompKind::Return(v));
+        wrap_binds(self.current_span, binds, ret)
+    }
+
+    /// One top-level phrase (§3.4, depth 0): a `let` becomes a `Define`, an
+    /// unbound bare `source path` becomes a `Source`, anything else a `Run`.
+    /// The `Define` pattern's names enter scope only after the RHS is
+    /// elaborated, as `emit_group`'s `Single` arm does.
+    fn toplevel_phrase(&mut self, stmt: Stmt) -> Spanned<Phrase> {
+        let Spanned { item: kind, span } = stmt;
+        self.with_span(span, |this| {
+            if let Ast::Let { pattern, value } = &kind {
+                let (rhs, pattern_ir) = this.elab_let_parts(pattern, value);
+                this.bind_pattern(&pattern.item);
+                return Spanned::with_span(
+                    span,
+                    Phrase::Define {
+                        pattern: Arc::new(pattern_ir),
+                        comp: Arc::new(rhs),
+                        schemes: vec![],
+                    },
+                );
+            }
+            if let Some(arg) = this.as_source_arg(&kind) {
+                let path = this.elab_source_path(arg);
+                return Spanned::with_span(
+                    span,
+                    Phrase::Source {
+                        path: Arc::new(path),
+                    },
+                );
+            }
+            let mut binds = Vec::new();
+            let comp = this.elab_expr(&kind, &mut binds);
+            let comp = wrap_binds(this.current_span, binds, comp);
+            Spanned::with_span(span, Phrase::Run(Arc::new(comp)))
+        })
+    }
+
+    /// A recursive knot at depth 0: *n* `Define`s, `xᵢ = Return(Thunk(Rec{group,
+    /// i}))`, sharing one `group` `Arc`.
+    fn toplevel_rec_group(
+        &mut self,
+        bindings: Vec<(String, Box<Ast>, Option<Span>)>,
+    ) -> Vec<Spanned<Phrase>> {
+        let group = self.build_rec_group(&bindings);
+        bindings
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _, span))| {
+                let rec = Spanned::with_span(
+                    *span,
+                    CompKind::Rec {
+                        group: group.clone(),
+                        index,
+                    },
+                );
+                let comp = Arc::new(Spanned::with_span(
+                    *span,
+                    CompKind::Return(Val::Thunk(Arc::new(rec))),
+                ));
+                Spanned::with_span(
+                    *span,
+                    Phrase::Define {
+                        pattern: Arc::new(IrPattern::Name(name.clone())),
+                        comp,
+                        schemes: vec![],
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Elaborate `stmts` at depth > 0 — every block or lambda body — right-
+    /// nesting each statement into a `Bind`/`Source` chain over what follows
+    /// it, so `{ a; b }` is `a to _. b` (S11).  The tail of the block is its
+    /// last statement's own comp, not a `Bind` on it; a block ending in a
+    /// `let`/`source` has tail `Return(Unit)`.  Not yet wired into
+    /// `elab_expr`'s `Block`/`Lambda` arms — W1e's cutover does that; until
+    /// then it is exercised by this module's tests alone.
+    #[allow(dead_code, reason = "wired in at W1e's cutover")]
+    fn stmts_nested(&mut self, stmts: &[Stmt]) -> Comp {
+        let mut units: Vec<(Option<Span>, NestedUnit)> = Vec::new();
+        for group in group_stmts(stmts) {
+            match group {
+                StmtGroup::Single(stmt) => units.push(self.nested_single(stmt)),
+                StmtGroup::LetRec(bindings) => units.extend(self.nested_rec_group(bindings)),
+            }
+        }
+        let mut rev = units.into_iter().rev();
+        let Some((span, last)) = rev.next() else {
+            return comp!(self, CompKind::Return(Val::Unit));
+        };
+        let mut rest = nested_tail(span, last);
+        for (span, unit) in rev {
+            rest = nested_wrap(span, unit, rest);
+        }
+        rest
+    }
+
+    /// One statement at depth > 0: a `let` binds a fresh `Name` (never
+    /// `Wildcard` — a surface `_` gets the hygienic gensym `$[…]` temporaries
+    /// already use), a bare unbound `source path` is a `Source`, and
+    /// anything else is a discard, marked `Wildcard`, which no surface
+    /// pattern ever produces.
+    #[allow(dead_code, reason = "wired in at W1e's cutover")]
+    fn nested_single(&mut self, stmt: Stmt) -> (Option<Span>, NestedUnit) {
+        let Spanned { item: kind, span } = stmt;
+        self.with_span(span, |this| {
+            if let Ast::Let { pattern, value } = &kind {
+                let (rhs, pattern_ir) = this.elab_let_parts(pattern, value);
+                let pattern_ir = match pattern_ir {
+                    IrPattern::Wildcard => IrPattern::Name(this.gensym()),
+                    named => named,
+                };
+                this.bind_pattern(&pattern.item);
+                return (
+                    span,
+                    NestedUnit::Bind {
+                        rhs,
+                        pattern: pattern_ir,
+                    },
+                );
+            }
+            if let Some(arg) = this.as_source_arg(&kind) {
+                let path = this.elab_source_path(arg);
+                return (span, NestedUnit::Source { path });
+            }
+            let comp = this.stmt(&kind);
+            (span, NestedUnit::Other { comp })
+        })
+    }
+
+    /// A recursive knot at depth > 0: *n* nested `Bind`s over `Return(Thunk(
+    /// Rec{group, i}))`, sharing one `group` `Arc`, in source order.
+    #[allow(dead_code, reason = "wired in at W1e's cutover")]
+    fn nested_rec_group(
+        &mut self,
+        bindings: Vec<(String, Box<Ast>, Option<Span>)>,
+    ) -> Vec<(Option<Span>, NestedUnit)> {
+        let group = self.build_rec_group(&bindings);
+        bindings
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _, span))| {
+                let rec = Spanned::with_span(
+                    *span,
+                    CompKind::Rec {
+                        group: group.clone(),
+                        index,
+                    },
+                );
+                let rhs = Spanned::with_span(*span, CompKind::Return(Val::Thunk(Arc::new(rec))));
+                (
+                    *span,
+                    NestedUnit::Bind {
+                        rhs,
+                        pattern: IrPattern::Name(name.clone()),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Elaborate `ast` as a computation, pushing every sub-expression that must
     /// run before its parent into `binds` for the caller to `wrap_binds`.
     fn elab_expr(&mut self, ast: &Ast, binds: &mut Vec<(IrPattern, Comp)>) -> Comp {
@@ -361,7 +582,12 @@ impl Elaborator {
             }
             Ast::Literal(s) => comp!(self, CompKind::Return(Val::String(s.clone()))),
             Ast::Variable(s) => {
-                let v = self.variable_val(s);
+                let v = if let Some((register, _)) = reserved_register(s) {
+                    let observed = comp!(self, CompKind::Observe(register));
+                    self.hoist(observed, binds)
+                } else {
+                    self.variable_val(s)
+                };
                 comp!(self, CompKind::Return(v))
             }
             Ast::Word(Word::Tilde(path)) => {
@@ -999,6 +1225,74 @@ fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) ->
     )
 }
 
+/// One statement of a block, elaborated but not yet nested over what
+/// follows it — [`Elaborator::stmts_nested`]'s intermediate form.
+#[allow(dead_code, reason = "wired in at W1e's cutover")]
+enum NestedUnit {
+    /// A `let` or a recursive group's member: `rest` is the elaboration of
+    /// what follows.
+    Bind { rhs: Comp, pattern: IrPattern },
+    /// A bare `source path`: `rest` is what follows.
+    Source { path: Comp },
+    /// Any other statement, discarded on a `Wildcard` bind.
+    Other { comp: Comp },
+}
+
+/// The last unit of a block: a `let`/`source` still needs a `rest` — the
+/// block's own value, `Unit` — but a plain statement's comp *is* the tail.
+#[allow(dead_code, reason = "wired in at W1e's cutover")]
+fn nested_tail(span: Option<Span>, unit: NestedUnit) -> Comp {
+    match unit {
+        NestedUnit::Other { comp } => comp,
+        other => nested_wrap(span, other, Spanned::with_span(span, CompKind::Return(Val::Unit))),
+    }
+}
+
+/// Nest one [`NestedUnit`] over `rest`.
+#[allow(dead_code, reason = "wired in at W1e's cutover")]
+fn nested_wrap(span: Option<Span>, unit: NestedUnit, rest: Comp) -> Comp {
+    match unit {
+        NestedUnit::Bind { rhs, pattern } => Spanned::with_span(
+            span,
+            CompKind::Bind {
+                comp: Arc::new(rhs),
+                pattern: Arc::new(pattern),
+                rest: Arc::new(rest),
+                scheme: None,
+            },
+        ),
+        NestedUnit::Source { path } => Spanned::with_span(
+            span,
+            CompKind::Source {
+                path: Arc::new(path),
+                rest: Arc::new(rest),
+            },
+        ),
+        NestedUnit::Other { comp } => Spanned::with_span(
+            span,
+            CompKind::Bind {
+                comp: Arc::new(comp),
+                pattern: Arc::new(IrPattern::Wildcard),
+                rest: Arc::new(rest),
+                scheme: None,
+            },
+        ),
+    }
+}
+
+/// The five reserved pseudo-variables (S8): a store read, and the English
+/// name of what it reads, for the "not a name you can bind" diagnostic.
+fn reserved_register(name: &str) -> Option<(Register, &'static str)> {
+    Some(match name {
+        "ENV" => (Register::Env, "the shell's environment"),
+        "ARGS" => (Register::Args, "the shell's arguments"),
+        "NPROC" => (Register::Nproc, "the machine's processor count"),
+        "CWD" => (Register::Cwd, "the shell's working directory"),
+        "USER" => (Register::User, "the current user"),
+        _ => return None,
+    })
+}
+
 /// Sugar bare `exit` / `quit` into `exit 0` / `quit 0`.  The builtin tolerates
 /// zero args, but ral's fixed-arity rule gives it one `Int` slot; supplying the
 /// status here spares the typechecker a zero-arg special case.
@@ -1048,6 +1342,40 @@ pub fn elaborate(ast: &[Stmt], bindings: HashSet<String>, name: &str) -> Result<
         eprintln!("{comp:#?}");
     }
     Ok(comp)
+}
+
+/// Elaborate a top-level statement sequence into a [`Toplevel`] (§3.4):
+/// each `let` becomes a `Define`, a `let`-knot becomes one `Define` per
+/// member sharing a `Rec` group, an unbound bare `source path` becomes a
+/// `Source`, and everything else a `Run`.  Same inputs as [`elaborate`].
+///
+/// # Errors
+/// `$SCRIPT` referenced where `name` carries no script identity; a pattern
+/// binding one of the five reserved pseudo-variable names.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "elaboration entry point; every caller passes a default HashSet of REPL/prelude bindings, so generalizing over the hasher would be signature ceremony with no call site to exercise it."
+)]
+pub fn elaborate_toplevel(
+    ast: &[Stmt],
+    bindings: HashSet<String>,
+    name: &str,
+) -> Result<Toplevel, ParseError> {
+    let mut elaborator = Elaborator::new_with_bindings(bindings, name);
+    let mut phrases = Vec::new();
+    for group in group_stmts(ast) {
+        match group {
+            StmtGroup::Single(stmt) => phrases.push(elaborator.toplevel_phrase(stmt)),
+            StmtGroup::LetRec(rec) => phrases.extend(elaborator.toplevel_rec_group(rec)),
+        }
+    }
+    if let Some(e) = elaborator.error {
+        return Err(e);
+    }
+    if std::env::var("RAL_DUMP_IR").is_ok() {
+        eprintln!("{phrases:#?}");
+    }
+    Ok(Toplevel { phrases })
 }
 
 #[cfg(test)]
@@ -1267,5 +1595,201 @@ mod tests {
         assert!(elaborate(&ast, HashSet::new(), "").is_err());
         assert!(elaborate(&ast, HashSet::new(), "-c").is_err());
         assert!(elaborate(&ast, HashSet::new(), "<stdin>").is_err());
+    }
+
+    // ── W1b: phrases and right-nested binders ────────────────────────────
+
+    #[test]
+    fn nested_sequence_is_wildcard_bind() {
+        let stmts = parse("date\necho hi").expect("parse");
+        let mut elaborator = Elaborator::new_with_bindings(HashSet::new(), "");
+        let seq = elaborator.stmts_nested(&stmts);
+        let CompKind::Bind {
+            pattern,
+            comp,
+            rest,
+            ..
+        } = &seq.item
+        else {
+            panic!("expected a Bind, got {:?}", seq.item);
+        };
+        assert!(matches!(pattern.as_ref(), IrPattern::Wildcard));
+        let (name, _, _) = expect_exec_name(comp);
+        assert_eq!(name, &CommandName::Bare("date".into()));
+        let (name, _, _) = expect_exec_name(rest);
+        assert_eq!(name, &CommandName::Bare("echo".into()));
+    }
+
+    #[test]
+    fn nested_let_wildcard_binds_a_fresh_name() {
+        let stmts = parse("let _ = date\necho hi").expect("parse");
+        let mut elaborator = Elaborator::new_with_bindings(HashSet::new(), "");
+        let seq = elaborator.stmts_nested(&stmts);
+        let CompKind::Bind { pattern, .. } = &seq.item else {
+            panic!("expected a Bind, got {:?}", seq.item);
+        };
+        match pattern.as_ref() {
+            IrPattern::Name(n) => assert!(n.starts_with("_var"), "not a gensym: {n}"),
+            other => panic!("expected a fresh Name, never Wildcard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_let_right_nests_over_following_statements() {
+        let stmts = parse("let x = 1\necho hi\necho bye").expect("parse");
+        let mut elaborator = Elaborator::new_with_bindings(HashSet::new(), "");
+        let seq = elaborator.stmts_nested(&stmts);
+        let CompKind::Bind { pattern, rest, .. } = &seq.item else {
+            panic!("expected a Bind, got {:?}", seq.item);
+        };
+        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n == "x"));
+        let CompKind::Bind {
+            pattern: inner_pattern,
+            rest: inner_rest,
+            ..
+        } = &rest.item
+        else {
+            panic!("expected the let to right-nest over echo hi, got {:?}", rest.item);
+        };
+        assert!(matches!(inner_pattern.as_ref(), IrPattern::Wildcard));
+        let (name, _, _) = expect_exec_name(inner_rest);
+        assert_eq!(name, &CommandName::Bare("echo".into()));
+    }
+
+    #[test]
+    fn nested_block_ending_in_let_has_unit_tail() {
+        let stmts = parse("let x = 1").expect("parse");
+        let mut elaborator = Elaborator::new_with_bindings(HashSet::new(), "");
+        let seq = elaborator.stmts_nested(&stmts);
+        let CompKind::Bind { rest, .. } = &seq.item else {
+            panic!("expected a Bind, got {:?}", seq.item);
+        };
+        assert_eq!(rest.item, CompKind::Return(Val::Unit));
+    }
+
+    #[test]
+    fn source_tilde_path_hoists_observe_tilde() {
+        let ast = parse("source ~/x.ral").expect("parse");
+        let top = elaborate_toplevel(&ast, HashSet::new(), "").expect("elaborate");
+        assert_eq!(top.phrases.len(), 1);
+        let Phrase::Source { path } = &top.phrases[0].item else {
+            panic!("expected a Source phrase, got {:?}", top.phrases[0].item);
+        };
+        let CompKind::Hoisted { body } = &path.item else {
+            panic!("expected the path's tilde hoist wrapped in Hoisted, got {:?}", path.item);
+        };
+        let CompKind::Bind { comp, .. } = &body.item else {
+            panic!("expected a Bind over the hoisted temporary, got {:?}", body.item);
+        };
+        assert!(matches!(comp.item, CompKind::Observe(Register::Tilde(_))));
+    }
+
+    #[test]
+    fn chained_source_is_not_a_source_phrase() {
+        let ast = parse("source f ? fallback").expect("parse");
+        let top = elaborate_toplevel(&ast, HashSet::new(), "").expect("elaborate");
+        assert_eq!(top.phrases.len(), 1);
+        assert!(matches!(top.phrases[0].item, Phrase::Run(_)));
+    }
+
+    #[test]
+    fn unbound_source_is_a_source_phrase() {
+        let ast = parse("source x").expect("parse");
+        let top = elaborate_toplevel(&ast, HashSet::new(), "").expect("elaborate");
+        assert_eq!(top.phrases.len(), 1);
+        assert!(matches!(top.phrases[0].item, Phrase::Source { .. }));
+    }
+
+    #[test]
+    fn bound_source_is_an_app_not_a_source_phrase() {
+        let ast = parse("let source = { |x| return $x }\nsource x").expect("parse");
+        let top = elaborate_toplevel(&ast, HashSet::new(), "").expect("elaborate");
+        assert_eq!(top.phrases.len(), 2);
+        assert!(matches!(top.phrases[0].item, Phrase::Define { .. }));
+        let Phrase::Run(comp) = &top.phrases[1].item else {
+            panic!("expected a Run phrase, got {:?}", top.phrases[1].item);
+        };
+        assert!(matches!(comp.item, CompKind::App { .. }));
+    }
+
+    #[test]
+    fn toplevel_phrases_classify_define_source_run() {
+        let ast = parse("let x = 1\nsource cfg\necho hi").expect("parse");
+        let top = elaborate_toplevel(&ast, HashSet::new(), "").expect("elaborate");
+        assert_eq!(top.phrases.len(), 3);
+        assert!(matches!(top.phrases[0].item, Phrase::Define { .. }));
+        assert!(matches!(top.phrases[1].item, Phrase::Source { .. }));
+        assert!(matches!(top.phrases[2].item, Phrase::Run(_)));
+    }
+
+    #[test]
+    fn toplevel_self_recursive_let_is_a_rec_define() {
+        let ast = parse("let f = { |n| f $n }").expect("parse");
+        let top = elaborate_toplevel(&ast, HashSet::new(), "").expect("elaborate");
+        assert_eq!(top.phrases.len(), 1);
+        let Phrase::Define { pattern, comp, .. } = &top.phrases[0].item else {
+            panic!("expected a Define, got {:?}", top.phrases[0].item);
+        };
+        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n == "f"));
+        let CompKind::Return(Val::Thunk(rec)) = &comp.item else {
+            panic!("expected Return(Thunk(Rec)), got {:?}", comp.item);
+        };
+        let CompKind::Rec { group, index } = &rec.item else {
+            panic!("expected a Rec node, got {:?}", rec.item);
+        };
+        assert_eq!(*index, 0);
+        assert_eq!(group.len(), 1, "a self-recursive let is a group of one");
+    }
+
+    #[test]
+    fn toplevel_mutual_recursion_shares_one_group_arc() {
+        let ast = parse("let f = { |x| g $x }\nlet g = { |y| f $y }").expect("parse");
+        let top = elaborate_toplevel(&ast, HashSet::new(), "").expect("elaborate");
+        assert_eq!(top.phrases.len(), 2);
+        fn group_arc(phrase: &Phrase) -> Arc<[(String, Arc<Comp>)]> {
+            let Phrase::Define { comp, .. } = phrase else {
+                panic!("expected a Define, got {phrase:?}");
+            };
+            let CompKind::Return(Val::Thunk(rec)) = &comp.item else {
+                panic!("expected Return(Thunk(Rec)), got {:?}", comp.item);
+            };
+            let CompKind::Rec { group, .. } = &rec.item else {
+                panic!("expected a Rec node, got {:?}", rec.item);
+            };
+            group.clone()
+        }
+        let g1 = group_arc(&top.phrases[0].item);
+        let g2 = group_arc(&top.phrases[1].item);
+        assert!(Arc::ptr_eq(&g1, &g2), "both binders must share one group Arc");
+        assert_eq!(g1[0].0, "f");
+        assert_eq!(g1[1].0, "g");
+    }
+
+    #[test]
+    fn cwd_reference_hoists_one_observe_cwd() {
+        let ast = parse("echo $CWD").expect("parse");
+        let top = elaborate_toplevel(&ast, HashSet::new(), "").expect("elaborate");
+        let Phrase::Run(comp) = &top.phrases[0].item else {
+            panic!("expected a Run phrase, got {:?}", top.phrases[0].item);
+        };
+        let CompKind::Hoisted { body } = &comp.item else {
+            panic!("expected the $CWD hoist wrapped in Hoisted, got {:?}", comp.item);
+        };
+        let CompKind::Bind { comp: rhs, rest, .. } = &body.item else {
+            panic!("expected a Bind over the hoisted temporary, got {:?}", body.item);
+        };
+        assert!(matches!(rhs.item, CompKind::Observe(Register::Cwd)));
+        assert!(matches!(rest.item, CompKind::Exec(_)));
+    }
+
+    #[test]
+    fn let_cwd_is_a_parse_error_naming_the_reading() {
+        let ast = parse("let CWD = 1").expect("parse");
+        let err = elaborate_toplevel(&ast, HashSet::new(), "").expect_err("expected a ParseError");
+        assert!(
+            err.message.contains("working directory"),
+            "message did not name the reading: {}",
+            err.message
+        );
     }
 }
