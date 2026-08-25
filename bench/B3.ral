@@ -1,0 +1,5 @@
+# B3 — `map { |x| $[$x * 2] } $xs` over 10^5 elements: the nested-machine boundary.
+
+let xs = range 1 100001
+
+map { |x| $[$x * 2] } $xs

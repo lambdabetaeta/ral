@@ -1,0 +1,11 @@
+# B2 — tail loop to 2*10^5 (`loop $[$i+1]` in tail position): the tail-call property.
+#
+# The plan's §6.3 spec is 10^6; scaled to 2*10^5 (5x) so `just bench`'s
+# 18 hyperfine runs finish in seconds, not tens of seconds — the per-step
+# cost this benchmark measures is unaffected by count.
+
+let loop = { |i|
+    if $[$i >= 200000] { return $i } else { loop $[$i + 1] }
+}
+
+loop 0

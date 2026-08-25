@@ -1,0 +1,36 @@
+#!/usr/bin/env ral
+
+# bench.ral — build a release `ral` and time the CEK-machine benchmarks
+# (dev/docs/plans/260825_cek_machine.md §6.3) with hyperfine, printing a
+# median-ms ± stdev-ms table. Run via `just bench`.
+
+let here      = dirname $SCRIPT
+let repo_root = resolve-path "$here/.."
+let bin       = "$repo_root/target/release/ral"
+
+cargo build --release -p ral
+
+let benches = [
+    [id: #'B1'#, file: "$repo_root/bench/B1.ral"],
+    [id: #'B2'#, file: "$repo_root/bench/B2.ral"],
+    [id: #'B3'#, file: "$repo_root/bench/B3.ral"],
+    [id: #'B4'#, file: "$repo_root/bench/B4.ral"],
+    [id: #'B5'#, file: "$repo_root/bench/B5.ral"],
+    [id: #'B6'#, file: "$repo_root/bench/B6.ral"],
+    [id: #'B7'#, file: "$repo_root/bench/B7.ral"],
+]
+
+let run_one = { |b|
+    let out = temp-file
+    hyperfine --warmup 3 --runs 15 --export-json $out "$bin $b[file]" > /dev/null
+    let report  = from-json < $out
+    let result  = $report[results][0]
+    let median  = round $[$result[median] * 1000.0] 2
+    let stddev  = round $[$result[stddev] * 1000.0] 2
+    return [id: $b[id], median: $median, stddev: $stddev]
+}
+
+let rows = map $run_one $benches
+
+echo #'bench   median ms   stdev ms'#
+for $rows { |r| echo "$r[id]      $r[median]   ± $r[stddev]" }

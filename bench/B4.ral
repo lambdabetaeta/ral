@@ -1,0 +1,8 @@
+# B4 — 10 x `echo a | cat`: pipeline launch, the prelude leaving the wire.
+#
+# The plan's §6.3 spec is 2000; each pipeline launch measures ~167ms in
+# release (32x bash), so 2000 x hyperfine's 18 runs would run ~100 minutes.
+# Scaled to 10 (200x) so `just bench`'s whole suite finishes in well under
+# 120s; the per-launch cost this benchmark measures is unaffected by count.
+
+for !{range 1 11} { |_| echo a | cat > /dev/null }

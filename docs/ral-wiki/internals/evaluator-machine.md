@@ -4,17 +4,33 @@ verified_at_date: 2026-07-28
 anchors: [eval_top_level, evaluate, with_thunk_body, Settled, trampoline, Mobile, Mooring, IoLoan, SessionState]
 ---
 
-# The evaluator as a trampolined CBPV machine
+# The evaluator today: a trampolined tree-walker over call-by-push-value IR
 
-The evaluator runs the typed [[internals/compilation-ladder|IR]] as a
-call-by-push-value abstract machine that threads two things: the run's
-immutable `&Mooring` and one mutable `Shell`. Every verb takes them in that
-order, the mooring immediately before the shell. *The
-machine is `core/src/evaluator/` alone* — `comp`, `expr`, `val`, `call`,
-`case`, `pattern`, `scope`, `trampoline`, `capture`, redirect frames, `audit`;
-the command / pipeline / transport plumbing it delegates to lives in
-`core/src/runtime/` and re-enters the machine only through three verbs
+The evaluator runs the typed [[internals/compilation-ladder|IR]] by recursive
+descent, not as an explicit-state machine: `eval_comp`
+(`core/src/evaluator/comp.rs`) walks a `Comp` and recurses into its
+sub-`Comp`s on the Rust call stack, threading two things through every call —
+the run's immutable `&Mooring` and one mutable `Shell`. There is one ambient
+lexical environment, not per-closure environments passed as data: bindings
+live in `shell.mobile.scope` (`Env`), and entering a scope
+(`with_scope`, `comp.rs`) pushes a frame there and pops it on the way out
+rather than building a new environment value. The one place this *is* an
+explicit machine is tail position: `apply` (`core/src/evaluator/trampoline.rs`)
+loops on an escaping `TailCall` instead of letting a tail call recurse, which
+is what keeps a tail loop in O(1) host frames. Every other reduction —
+non-tail calls, `if`/`case` arms, bind continuations — is host recursion, so
+depth is capped by `recursion_limit` (default 1024 frames) to fail cleanly
+before the Rust stack would overflow. *The evaluator is `core/src/evaluator/`
+alone* — `comp`, `expr`, `val`, `call`, `case`, `pattern`, `scope`,
+`trampoline`, `capture`, redirect frames, `audit`; the command / pipeline /
+transport plumbing it delegates to lives in `core/src/runtime/` and re-enters
+the evaluator only through three verbs
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
+
+**Planned:** a CEK-style machine — explicit closures, frames, and one `step`
+— replacing this tree-walker and its ambient scope is designed in
+`dev/docs/plans/260825_cek_machine.md`; nothing below this line describes
+that machine as built.
 
 **Evaluation is entered only through the framed run door; the machine's own
 verbs are crate-private.** Two verbs reach outside the module:

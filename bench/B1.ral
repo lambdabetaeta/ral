@@ -1,0 +1,11 @@
+# B1 — non-tail fib 22: closure call, `To` frames, `bind`.
+
+let fib = { |n|
+    if $[$n < 2] { return $n } else {
+        let a = fib $[$n - 1]
+        let b = fib $[$n - 2]
+        return $[$a + $b]
+    }
+}
+
+fib 22

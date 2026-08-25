@@ -85,6 +85,10 @@ install:
 release *args:
     cargo run -p ral --quiet -- scripts/build-release.ral {{args}}
 
+# Build release and time the bench/*.ral benchmarks with hyperfine (dev/docs/plans/260825_cek_machine.md §6.3).
+bench:
+    cargo run -p ral --quiet -- scripts/bench.ral
+
 # Run the current source as `ral`, forwarding arguments, e.g. `just run examples/hello.ral`.
 run *args:
     cargo run -p ral --quiet -- {{args}}
