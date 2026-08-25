@@ -182,6 +182,35 @@ refactor.
 > move the solver forbids itself ([[internals/type-inference|type-inference]]).
 > No rule in the builtin tables tests an equation it should impose any more.
 
+> **Closed out 2026-08-24.** The rest of the price list is paid, and the thesis
+> taken to its end: every value builtin is a `Scheme`, `BuiltinTypeRule` is no
+> longer an enum, and `BuiltinSig`, `ArgTemplate`, `TyTemplate`,
+> `CompTemplate`, `sig_route`, `sig_comp_ty`, `unify_arg_template` and
+> `apply_builtin_sig` are gone. Row by row:
+>
+> - **T0050** — honoured and extended, but re-founded. Under-application *did*
+>   become legal, as the row foresaw; what the row was protecting did not
+>   depend on it. Bare `explain` is still an error, because a discarded value
+>   that is still waiting for an argument is one — a readiness rule, not an
+>   arity rule, and one that now reaches all 83 builtins and every user lambda
+>   besides ([[invariants/fixed-arity|fixed-arity]]).
+> - **T0054** — rehomed to the entry's diagnostic facet, where a fact about a
+>   verb rather than about a type belongs
+>   ([[internals/builtins-registry|builtins-registry]]).
+> - **T0055** — rehomed as `fail`'s post-check, run over the argument's
+>   inferred type once the row has been unified. It is the one thing here HM
+>   genuinely cannot say, and now the only thing that claims to be.
+> - **per-argument spans** — *this row was inverted.* `apply_builtin_sig` never
+>   wrapped an argument in a span and underlined the whole call;
+>   `apply_args` wraps each one. Unifying the paths therefore **gained** the
+>   per-argument span for the 37 builtins that lacked it, and cost nothing.
+>
+> Nothing was smuggled out. The row that reads as a loss above — T0050 — was
+> written when the only way to retire the templates was to move the builtins
+> across the rule table unchanged. Keying the diagnostic on the entry at the
+> point of application, and readiness on what the context does with the value,
+> is the way that was not seen then.
+
 ## The prize is reachable, and taken next door
 
 With renderability a static predicate, R0001 *could* become a compile-time

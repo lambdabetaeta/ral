@@ -16,15 +16,24 @@ each builtin as one row, collapsed into the `CORE_BUILTINS` static
 
 - names;
 - doc line;
-- [[internals/type-inference|type rule]] — a command `Sig` or a `Scheme`;
+- [[internals/type-inference|type rule]] — a scheme factory, and nothing else;
+- an optional diagnostic facet — what a misuse this verb has a name for earns:
+  a decoder's argument, `fail`'s literal zero status;
 - runtime body.
 
 Because the facets are one entry, they cannot drift apart. Arity is not among
-them: `BuiltinEntry::fixed_arity` *derives* it from the type rule — a
-signature's slot count, a scheme's curry-spine depth — and answers a `usize` for
-every entry in the table, so the arity the checker enforces is the arity the
-body assumes with nothing to keep in agreement
-([[invariants/fixed-arity|fixed-arity]]). Bodies are grouped by concern
+them: `BuiltinEntry::fixed_arity` *derives* it from the type rule — the curry
+depth of the scheme — and answers a `usize` for every entry in the table, so
+the arity the checker enforces is the arity the body assumes with nothing to
+keep in agreement ([[invariants/fixed-arity|fixed-arity]]). The derivation runs
+a throwaway unifier, so it is cached; it feeds the checker's diagnostics as
+well as the evaluator's application gate.
+
+The diagnostic facet is deliberately not a typing rule. It says what a wrong
+call *means* for this verb, which no polytype can state — that an argument
+written to a decoder is a misreading of where the bytes come from, or that
+`fail [status: 0]` wants `return`. Everything a type can state is in the
+scheme. Bodies are grouped by concern
 (`strings.rs`, `collections.rs`, `predicates.rs`, `fs.rs`, `codecs.rs`,
 `concurrency.rs` for `spawn` / `watch`, `modules.rs` for `use`, `misc.rs` for
 the ones with no cluster — `fail`, `exit`, `surface`, `warn`, `ask` — …).

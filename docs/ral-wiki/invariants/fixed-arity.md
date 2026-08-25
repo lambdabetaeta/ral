@@ -18,8 +18,8 @@ over a list of strings, typed `List String -> Return(Bytes, Unit)` and
 ([[decisions/260725_survives-exit-is-its-own-verb|survives-exit-is-its-own-verb]]).
 
 **The manifest is authored as two, and arity is the consequence.** A native
-table entry declares its arguments, so it has an arity — read off its type rule,
-a signature's slot count or a scheme's curry-spine depth
+table entry declares its arguments, so it has an arity — the curry-spine depth
+of its scheme, which is the one place any arity is read from
 (`BuiltinEntry::fixed_arity`, a `usize` for every entry there) — and it is a
 first-class *native* value. A base-frame manifest row takes an argv instead, so
 the argv half has no arity at all: the row is a *base frame* on the handler
@@ -28,6 +28,33 @@ stack, whose arguments arrive as an argv like any command's
 [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]). So
 `$name` exists exactly where an arity does, by construction rather than by
 agreement between a declaration and a check.
+
+**Arity binds application; it does not bind writing a name.** A builtin is a
+function and functions curry, so supplying fewer arguments than the arity is
+not an error — it is the residual function, and `let f = length`,
+`let f = to-json` and `let f = range 1` all bind one. A bare name and `$name`
+agree about this; they differ only in that the first is a command and the
+second a value.
+
+**What is refused is a *discarded* value that is still waiting for an
+argument.** A computation whose value is thrown away must be ready to run, not
+a function: nothing will ever supply the rest of it, so it cannot have run, and
+the statement did nothing. A value is discarded in exactly two places — a
+non-tail part of a sequence, and the program itself, whose only surviving trace
+is its status. A sequence's *tail* is not discarded: it is the block's value,
+and `{ |x| $x }` is a block whose value is a function.
+
+That is not a rule about builtins, and not a new one. It is the demand a
+[[design/pipelines|pipeline]] stage already met — a stage must be a computation
+ready to run, not an arrow still waiting — generalised from a stage to any
+discarded value. Both readings name the verb when they can: bare `cd` is
+`cd` expected 1 argument, got 0, rather than an anonymous shape mismatch.
+
+So the two rules are about different things, which is why they do not conflict:
+arity binds application, and readiness binds discarding. Over-application is
+the arity rule's business (`upper "a" "b"` is one **T0050**, the surplus
+inferred but unified against nothing, so a single slip earns a single
+diagnostic); under-application is nobody's until the value is dropped.
 
 **That split is the interception rule too.** A table entry is a native seeded
 into the base env scope, which resolution reaches before the handler stack, so

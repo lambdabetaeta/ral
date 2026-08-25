@@ -72,8 +72,8 @@ The checker reads the keys (`infer_map_val`, `core/src/typecheck/infer.rs`):
 This is why your two everyday cases land where they do. `audit { … }` returns a
 record — its labels (`kind`, `status`, `stdout`, `value`, …) are fixed in the
 builtin's scheme (`core/src/typecheck/builtins.rs`). `from-json` returns an
-*unconstrained* result (`TyTemplate::Any`, a fresh type variable —
-`core/src/typecheck/infer.rs`), and a JSON object decodes to the `Map` carrier
+*unconstrained* result — a quantified type variable in its scheme — and a JSON
+object decodes to the `Map` carrier
 at run time (`json_to_value`, `core/src/builtins/util.rs`). The decoded value's
 *type* is then fixed by how you use it: index it with a computed key and it
 pins to `Map<α>`; read a literal field off it and it pins toward `Record`.

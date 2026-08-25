@@ -96,11 +96,10 @@ Internals:
 - `generalize.rs`;
 - `env.rs` — `TyEnv`, `InferCtx`;
 - `fmt.rs` — type display;
-- `builtins.rs` — per-builtin type rules (`fixed_arity`, `builtin_type_hint`),
-  whose arity rules enforce [[invariants/fixed-arity|fixed-arity]], and
-  `derive_sig_scheme`, the total deriver of a `Sig`'s first-class form — every
-  entry in the table declares its arguments, so it has an arity and a value
-  form;
+- `builtins.rs` — the scheme factory each entry names, and the readings taken
+  off it (`fixed_arity`, `builtin_type_hint`), which is where
+  [[invariants/fixed-arity|fixed-arity]] is enforced: every entry in the table
+  declares its arguments, so it has an arity and a value form;
 - `scope.rs` — the five structural scope nodes.
 
 `infer.rs`'s `infer_case` is left whole by decision
@@ -135,13 +134,12 @@ obligations differing only in route stay distinct
 `Unifier::fresh_route` mints an open one; `InferCtx::ground` defaults a residual
 to `Value` at annotation time, the only defaulting site.
 
-A builtin's route is the projection of its declared signature, read once:
-`typecheck::builtins::sig_route` maps a `CompTemplate` onto a `PayloadRoute` —
-`Pure` and `LinesStep` to `Value`, `Return { route, .. }` to its declared ground
-route, and `Never` (`fail`, `exit`/`quit`) to a fresh variable, since a divergent
-computation joins either side of a byte/value split. `ret_bytes()` builds the
-byte shape and pairs it with `TyTemplate::Unit` at construction, so WF-2 holds
-structurally for every encoder, `help`, `explain`, and the terminal controls.
+A builtin's route is written into its scheme, and there is nowhere else to read
+it from. Most name `Value`; the divergent pair (`fail`, `exit`/`quit`) quantify
+a fresh route variable, since a divergent computation joins either side of a
+byte/value split. `ret_bytes()` builds the byte shape paired with `Ty::Unit`, so
+WF-2 holds structurally for every encoder, `help`, `explain`, and the terminal
+controls.
 `external_exec_comp_ty` (`infer.rs`) gives every external command
 `Return(Bytes, Unit)` for the same reason, and `echo`'s base-frame row states it
 in its own type, `List String -> Return(Bytes, Unit)`

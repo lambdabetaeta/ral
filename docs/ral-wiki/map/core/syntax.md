@@ -45,7 +45,7 @@ governs both stages.
   map patterns recurse back through it per element).
 
 A command's [[design/types|payload route]] is the projection of its declared
-type, read once: a builtin's is `sig_route` in
+type, read once: a builtin's is written into its scheme in
 [[map/core/typecheck|typecheck::builtins]], and the static checker walks a
 prelude function's body for its own. With the runtime engine retired
 ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]), there is

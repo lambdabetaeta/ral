@@ -78,32 +78,38 @@ fallback chains is [[design/failure|failure]].
 
 ## How a builtin is typed
 
-The manifest is authored as two, and typing follows the split. A native table
-entry's [[internals/builtins-registry|six-facet entry]] carries a typing rule
-whose shape follows from whether its surface is a curried function:
-
-- **`Scheme`** — an ordinary first-class polytype, allocated fresh per call. The
-  default: a curried function usable in command position *and* reifiable as a
-  value (`$map`). A builtin is a `Scheme` whenever its surface is an ordinary
-  curried function. `fold-lines` is a `Scheme` like any other; the route it
-  forwards from its callback is invisible to a structural projection of a
-  command signature, so its scheme constructor writes it in directly
-  ([[design/codecs|codecs]]).
-- **`Sig`** — a *command signature*: the arguments declared as templates and the
-  result computation read directly, without falling through to command-name
-  classification. This is for builtins whose surface is not a curried function —
-  *nullary* (`clear`, `reset`, `help`, and the `from-X` codecs, which read
-  stdin) or *divergent* (result `Never`: `fail`, which also carries the
-  nonzero-status diagnostic — [[design/failure|failure]] — and `exit`/`quit`,
-  whose escape unwinds past every binding).  A divergent result is a fresh
-  variable in both route and value, so `if $c { exit 1 } else { return "x" }`
-  takes its type from the arm that returns.
-
-A `Sig`'s first-class form is *derived* from it, and derivation is its only
-source — the argument templates become the curry spine and the result template
-the computation. The deriver is total, because every entry in the table declares
-its arguments: a table entry has an arity and a value form, both by construction
+**A builtin is a function, and its type rule is a scheme.** There is one rule,
+`fn(&mut Unifier) -> Scheme`: an ordinary first-class polytype, allocated fresh
+per call, usable in command position *and* reifiable as a value (`$map`). A
+table entry has an arity and a value form, both by construction
 ([[invariants/fixed-arity|fixed-arity]]).
+
+Nullary and divergent are shapes a scheme writes, not a second rule:
+
+- **Nullary** — `clear`, `reset`, `help`, and the `from-X` codecs, which read
+  the byte channel — is a body with no arrow over it.
+- **Divergent** — `fail` and `exit` / `quit`, whose escape unwinds past every
+  binding — quantifies a fresh value *and* route directly, so
+  `if $c { exit 1 } else { return "x" }` takes its type from the arm that
+  returns. `fail` also carries the nonzero-status diagnostic
+  ([[design/failure|failure]]), which is a facet of its registry row rather
+  than of its type.
+- **Byte-routed** — every encoder returns `Return(Bytes, Unit)`: those bytes
+  belong to whoever consumes the command as a value.
+
+Two schemes close a computation variable, which a written quantifier list
+cannot bind, so they generalise against the empty environment instead:
+`from-lines`, whose stream type recurses through its own tail, and `alias`,
+whose block argument is a thunk over an unconstrained computation
+([[invariants/schemes-leave-closed|schemes-leave-closed]]).
+
+**A builtin's argument diagnostics need no vocabulary of their own.** What a
+mismatched argument earns follows from the type that was expected, not from a
+tag naming who expected it: a `Ty::Thunk` parameter *is* the block case, a row
+carrying `status: Int` *is* the error-record case, and a list meeting `Bytes`
+earns the codec hint wherever it happens. So the help reaches a user lambda's
+argument as readily as a builtin's, and one application path serves both
+([[internals/type-inference|type-inference]]).
 
 `echo` and `detach` are not table entries. They are the two rows of the
 *base-frame manifest*, typed `List String -> Return(Bytes, Unit)` and
@@ -112,10 +118,10 @@ share, `List String` inside and bytes at the OS call — and their schemes are
 seeded into the checker's env at boot, so a base frame is looked up as a handler
 is ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 
-Each codec being its own `Sig` rather than one polymorphic `decode` / `encode` is
-what lets `from-json < file` dispatch straight through the command arm with the
-*concrete* return type in view, and a misspelled codec fail at command lookup
-rather than as a runtime "unknown codec" string.
+Each codec being its own entry rather than one polymorphic `decode` / `encode`
+is what lets `from-json < file` dispatch straight through the command arm with
+the *concrete* return type in view, and a misspelled codec fail at command
+lookup rather than as a runtime "unknown codec" string.
 
 ## A name is a value or it is handled
 

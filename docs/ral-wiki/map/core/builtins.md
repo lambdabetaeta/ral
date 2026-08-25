@@ -23,14 +23,16 @@ Settled<Value>`, or a `Captured` closure of the same shape for a host frontend
 with state to carry — so the run's mooring arrives beside the shell
 ([[map/core/shell-state|shell-state]]): it is how a body surfaces an event,
 enquires, or starts a nested run parented under the run that called it. The
-type-rule facet is a `BuiltinTypeRule` of two arms: `Sig` (a command signature)
-or `Scheme` (a first-class polytype). The streaming reducer `fold-lines`
-registers as an ordinary `Scheme` whose factory writes its forwarded
+type-rule facet is a `BuiltinTypeRule`, which is a scheme factory —
+`fn(&mut Unifier) -> Scheme` — and nothing else. The streaming reducer
+`fold-lines` is an ordinary one whose factory writes its forwarded
 [[design/types|payload route]] directly ([[map/core/typecheck|typecheck]]);
-there is no separate reducer arm. A `Sig`-ruled entry's first-class form is
-derived from the signature by `derive_sig_scheme` and nowhere else, and the
-derivation is total, every entry in the table having declared its arguments
-([[invariants/fixed-arity|fixed-arity]]).
+there is no separate reducer arm. Beside it sits an optional diagnostic facet,
+which is not a typing rule: it carries what a misuse this verb has a name for
+earns — a decoder handed an argument, `fail` handed a literal zero status
+([[internals/builtins-registry|builtins-registry]]). An entry's first-class
+form is its scheme, so it has one by construction, every entry in the table
+having declared its arguments ([[invariants/fixed-arity|fixed-arity]]).
 Builtins are *shell-scoped*: each shell's session carries a `BuiltinTable`
 ([[map/core/shell-state|shell-state]]) seeded from `CORE_BUILTINS`
 (`core_builtin_table`), and a host's extra sets ride a `HostSurface` into
