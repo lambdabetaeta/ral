@@ -530,6 +530,13 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              `from-line` if it should consume the stream instead"
                 .to_string(),
         ),
+        Reason::DiscardedValueShape => Some(
+            "a discarded statement's value is thrown away, so it must be \
+             ready to run, not still waiting for an argument — apply it to \
+             what's left, or write `$name` if you meant to keep the function \
+             itself"
+                .to_string(),
+        ),
         Reason::OptionField { form, key } => Some(format!("{form} {key}: wrong value type")),
         // The same pin fails two different ways.  A route clash is about
         // *where* the payload lives; a WF-2 failure is about the arm having a

@@ -78,11 +78,15 @@ fn ints_to_bytes_rejects_out_of_range_values() {
 fn ints_to_bytes_rejects_non_int_values() {
     // The list element type is checked before the codec runs, so this is a
     // static failure rather than the builtin's runtime index diagnostic.
+    // Which side of the mismatch lands as "expected" is an accident of the
+    // call site (`explain.rs`'s own doc says so), so this checks both types
+    // are named rather than their order.
     let o = run_pipe("!{ints-to-bytes ['x']}");
     assert_ne!(o.status, 0);
     assert!(
-        o.stderr
-            .contains("couldn't match type String with type Integer"),
+        o.stderr.contains("couldn't match type")
+            && o.stderr.contains("String")
+            && o.stderr.contains("Integer"),
         "stderr: {}",
         o.stderr
     );
@@ -343,20 +347,22 @@ fn a_final_stage_waiting_for_an_argument_is_rejected() {
 
 #[test]
 fn an_interior_stage_waiting_for_an_argument_is_rejected() {
-    // `fold-lines $step` is one argument short of a computation.
+    // `fold-lines $step` is one argument short of a computation, and a bare
+    // builtin head names itself rather than reporting an anonymous shape
+    // mismatch — the same rule a discarded statement follows.
     let o = run_pipe(
         "let step = { |acc _| return $acc }\n\
          echo hi | fold-lines $step | cat",
     );
     assert_ne!(o.status, 0, "expected a stage-shape error: {}", o.stdout);
     assert!(
-        o.stderr.contains("T0011"),
-        "expected the shape error code; stderr: {}",
+        o.stderr.contains("T0050"),
+        "expected the named arity error; stderr: {}",
         o.stderr
     );
     assert!(
-        o.stderr.contains("apply it to its argument"),
-        "the hint must reach stderr in interior position too; stderr: {}",
+        o.stderr.contains("fold-lines"),
+        "the diagnostic must name the verb in interior position too; stderr: {}",
         o.stderr
     );
 }

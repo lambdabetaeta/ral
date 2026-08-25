@@ -1,7 +1,7 @@
 //! Type synthesis for the CBPV pair: `infer_val` yields a `Ty`, `infer_comp` a
 //! `CompTy`, mutually recursive through thunks.
 
-use super::builtins::{FieldSchema, plugin_entry_field_ty};
+use super::builtins::{BuiltinDiagnostic, FieldSchema, fail_status_is_zero_literal, plugin_entry_field_ty, rule_scheme};
 use super::env::{InferCtx, TyEnv};
 use super::error::{CompDiff, PinFailure, Reason, StdinFeed, TypeErrorKind};
 use super::generalize::{generalize, instantiate};
@@ -15,7 +15,7 @@ use crate::source::Span;
 use crate::source::WithSpan;
 use crate::syntax::ast::{BinaryOp, BinaryOpKind, RedirectMode};
 use crate::syntax::tag::tag_row_label;
-use crate::types::RefusedArg;
+use crate::types::{BuiltinEntry, RefusedArg};
 use std::sync::Arc;
 
 /// Which argv boundary `argv_ty` is walking, and so what crosses it.
@@ -136,8 +136,14 @@ fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
     Ok(Some(name.as_str()))
 }
 
+/// Type-check a whole program.  Its value is discarded — a program's only
+/// surviving trace is its status — so it is held to the same shape a
+/// pipeline stage is: [`Inferencer::force_discarded_shape`].
 pub fn infer_comp(ctx: &mut InferCtx, env: &mut TyEnv, comp: &Comp) -> CompTy {
-    Inferencer { ctx, env }.infer_comp(comp)
+    let mut inferencer = Inferencer { ctx, env };
+    let cty = inferencer.infer_comp(comp);
+    inferencer.force_discarded_shape(comp, &cty);
+    cty
 }
 
 /// Inference state, built directly by the entry points in `typecheck.rs`.
@@ -264,6 +270,68 @@ impl Inferencer<'_> {
         }
     }
 
+    /// A computation demanded ready to run — not a `Fun` still waiting for an
+    /// argument — names the verb when it fails as a bare under-applied
+    /// builtin, rather than reporting through the unifier as an anonymous
+    /// mismatch.  Shared by a discarded value (extended to a non-tail `Seq`
+    /// part and the program's own value) and a pipeline stage; `why` is the
+    /// fallback [`Reason`] each wants for the ordinary shape mismatch.
+    fn force_ready_shape(&mut self, comp: &Comp, cty: &CompTy, why: Reason) -> (Ty, PayloadRoute) {
+        if !matches!(self.ctx.unifier.resolve_comp_ty(cty), CompTy::Fun(..)) {
+            return self.force_return_shape(cty, why);
+        }
+        let tail = Self::discard_tail(comp);
+        self.with_span(tail.span, |this| match this.discarded_builtin_arity(tail) {
+            Some((name, expected, got)) => {
+                this.ctx
+                    .diagnose(TypeErrorKind::BuiltinArity { name, expected, got });
+                (this.ctx.unifier.fresh_ty(), this.ctx.unifier.fresh_route())
+            }
+            None => this.force_return_shape(cty, why),
+        })
+    }
+
+    /// [`Self::force_ready_shape`] for a discarded value, whose result no one
+    /// reads.
+    pub(super) fn force_discarded_shape(&mut self, comp: &Comp, cty: &CompTy) {
+        let _ = self.force_ready_shape(comp, cty, Reason::DiscardedValueShape);
+    }
+
+    /// The statement whose type `comp`'s own type actually is: a `Bind`'s
+    /// type is its `rest`'s and a `Seq`'s is its last part's, all the way
+    /// down, so `let a = 1; let b = 2; cd`'s discarded value is `cd`'s, not
+    /// the outermost node's.
+    fn discard_tail(comp: &Comp) -> &Comp {
+        match &comp.item {
+            CompKind::Bind { rest, .. } => Self::discard_tail(rest),
+            CompKind::Seq(parts) => match parts.last() {
+                Some(last) => Self::discard_tail(last),
+                None => comp,
+            },
+            _ => comp,
+        }
+    }
+
+    /// `comp`'s own name and written argument count, when it is an `Exec`
+    /// head resolving — by `exec_comp_ty`'s own lookup order — to a value
+    /// builtin rather than a user binding.  The one case a discarded `Fun`
+    /// should name as that verb's own arity error rather than an anonymous
+    /// shape mismatch.
+    fn discarded_builtin_arity(&self, comp: &Comp) -> Option<(String, usize, usize)> {
+        let CompKind::Exec(exec) = &comp.item else {
+            return None;
+        };
+        let CommandWord::Name(CommandName::Bare(name)) = &exec.head else {
+            return None;
+        };
+        if self.env.lookup_binding(name).is_some() {
+            return None;
+        }
+        let entry: BuiltinEntry = self.env.builtins.value(name)?;
+        let got = crate::ir::args::positional(&exec.args).map_or(0, |p| p.len());
+        Some((name.clone(), entry.fixed_arity(), got))
+    }
+
     /// A computation's own payload route, peering past `Fun` arrows; an
     /// unresolved comp var yields a fresh route.  Unlike [`Self::extract_return`],
     /// this never forces or reports — it reads whatever shape is already
@@ -369,7 +437,23 @@ impl Inferencer<'_> {
         });
     }
 
-    pub(super) fn apply_args(&mut self, mut cty: CompTy, args: &crate::ir::Args) -> CompTy {
+    pub(super) fn apply_args(&mut self, cty: CompTy, args: &crate::ir::Args) -> CompTy {
+        self.apply_args_capped(cty, args, usize::MAX).0
+    }
+
+    /// [`Self::apply_args`], applying no more than `cap` positionals: the
+    /// surplus is still inferred, for the errors inside it, but unified
+    /// against nothing — the same zip an over-applied builtin needs so its
+    /// one arity diagnostic is not followed by an anonymous mismatch on the
+    /// surplus.  Returns the residual type and each *applied* argument's own
+    /// inferred type, the latter for a post-check that must see what was
+    /// actually passed (`fail`'s error-record `message` field).
+    fn apply_args_capped(
+        &mut self,
+        mut cty: CompTy,
+        args: &crate::ir::Args,
+        cap: usize,
+    ) -> (CompTy, Vec<Ty>) {
         // A value takes its arguments by application, at an arity its own type
         // declares, so it has no argv and `...` has nothing to spread into.
         // Both callers are value-side, so the refusal needs no test on the head:
@@ -380,21 +464,124 @@ impl Inferencer<'_> {
                 let _ = self.infer_val(sub);
             }
             self.refuse_spread(args, super::error::SpreadHead::Applied);
-            return cty;
+            return (self.peel_curry_spine(cty), Vec::new());
         };
+        let mut applied = Vec::with_capacity(positional.len().min(cap));
         for (i, arg) in positional.into_iter().enumerate() {
+            if i >= cap {
+                let _ = self.infer_val(arg);
+                continue;
+            }
             cty = self.autoderef_thunk_return(cty);
             // Underline the offending argument, not the whole call.  A
             // synthetic entry carries no span, and `with_span` leaves pos alone.
-            cty = self.with_span(args[i].span, |this| {
+            let (result, arg_ty) = self.with_span(args[i].span, |this| {
                 let arg_ty = this.infer_val(arg);
                 let result = this.ctx.unifier.fresh_comp_ty();
-                let expected = CompTy::Fun(Box::new(arg_ty), Box::new(result.clone()));
+                let expected = CompTy::Fun(Box::new(arg_ty.clone()), Box::new(result.clone()));
                 this.ctx.unify_comp_ty(&cty, &expected, Reason::Argument);
-                result
+                (result, arg_ty)
+            });
+            cty = result;
+            applied.push(arg_ty);
+        }
+        (cty, applied)
+    }
+
+    /// One application path for every registered builtin, `Scheme` and `Sig`
+    /// rules alike: refuse a spread, catch over-application, catch a literal
+    /// zero-status `fail`, apply at most `entry.fixed_arity()` arguments, then
+    /// run the entry's post-check.  Under-application raises nothing here —
+    /// the residual arrow is the type, exactly as an under-applied lambda's
+    /// is; a *discarded* one is caught downstream, by
+    /// [`Self::force_discarded_shape`].
+    ///
+    /// The manifest's argv half never reaches here: `exec_comp_ty` looks
+    /// `entry` up through [`super::env::TyEnv`]'s value half alone, a base
+    /// frame being typed as a handler and reached through
+    /// [`Self::apply_alias_arm`] instead — which matters, because a base
+    /// frame's argv scheme has curry depth 1 while an argv has no arity at
+    /// all ([[invariants/fixed-arity]]).
+    pub(super) fn apply_builtin(
+        &mut self,
+        entry: &BuiltinEntry,
+        name: &str,
+        args: &crate::ir::Args,
+    ) -> CompTy {
+        let fixed_arity = entry.fixed_arity();
+
+        // There is no positional reading exactly when the call writes a
+        // `...`, and a builtin takes its arguments by application, which has
+        // no argv to spread into.
+        let Some(positional) = crate::ir::args::positional(args) else {
+            self.infer_refused_args(args);
+            self.refuse_spread(
+                args,
+                super::error::SpreadHead::Builtin {
+                    name: name.into(),
+                    arity: fixed_arity,
+                },
+            );
+            // Nothing was applied and nothing is residual: the refusal is the
+            // whole story of this call, so its type is the saturated result.
+            return self.saturated_result(entry);
+        };
+
+        if positional.len() > fixed_arity {
+            self.ctx.diagnose(match entry.diagnostic {
+                BuiltinDiagnostic::Decoder => {
+                    TypeErrorKind::DecoderTakesNoArgument { name: name.into() }
+                }
+                _ => TypeErrorKind::BuiltinArity {
+                    name: name.into(),
+                    expected: fixed_arity,
+                    got: positional.len(),
+                },
             });
         }
-        cty
+
+        if entry.diagnostic == BuiltinDiagnostic::FailStatusNonzero
+            && fail_status_is_zero_literal(args)
+        {
+            self.ctx.diagnose(TypeErrorKind::FailStatusZero);
+        }
+
+        let scheme = rule_scheme(&entry.type_rule, &mut self.ctx.unifier);
+        let head_cty = self.instantiate_comp(&scheme);
+        let (result, applied) = self.apply_args_capped(head_cty, args, fixed_arity);
+
+        // `fail`'s error-record shape is unified above like any argument; its
+        // `message` field's type is the one part of the shape a row cannot
+        // state, so it needs its own pass over what was actually passed.
+        if entry.diagnostic == BuiltinDiagnostic::FailStatusNonzero
+            && let Some(arg_ty) = applied.first()
+        {
+            self.check_error_message(arg_ty);
+        }
+
+        result
+    }
+
+    /// Peel `cty`'s whole curry spine, stopping at the first non-`Fun`: what a
+    /// head's type becomes when nothing was applied and nothing is residual —
+    /// a refused spread is the whole story of the call, so its type is the
+    /// saturated result rather than the still-waiting arrow.
+    fn peel_curry_spine(&mut self, mut cty: CompTy) -> CompTy {
+        loop {
+            let CompTy::Fun(_, body) = self.ctx.unifier.resolve_comp_ty(&cty) else {
+                return cty;
+            };
+            cty = *body;
+        }
+    }
+
+    /// The `CompTy` a fresh instantiation of `entry`'s scheme names once all
+    /// of it is (hypothetically) applied — what a refused spread into a
+    /// builtin's type is.
+    fn saturated_result(&mut self, entry: &BuiltinEntry) -> CompTy {
+        let scheme = rule_scheme(&entry.type_rule, &mut self.ctx.unifier);
+        let cty = self.instantiate_comp(&scheme);
+        self.peel_curry_spine(cty)
     }
 
     /// The head's value type when it is concretely not a function — neither a
@@ -656,14 +843,7 @@ impl Inferencer<'_> {
         }
 
         if !external_only && let Some(entry) = self.env.builtins.value(name) {
-            use super::builtins::BuiltinTypeRule;
-            match entry.type_rule {
-                BuiltinTypeRule::Scheme(factory) => {
-                    let scheme = factory(&mut self.ctx.unifier);
-                    return self.apply_scheme(&scheme, args);
-                }
-                BuiltinTypeRule::Sig(sig) => return self.apply_builtin_sig(sig, name, args),
-            }
+            return self.apply_builtin(&entry, name, args);
         }
 
         if let Some(handler) = self.env.lookup_handler(name).cloned() {
@@ -766,7 +946,8 @@ impl Inferencer<'_> {
         empty: Ty,
     ) -> CompTy {
         let mut last = CompTy::pure(empty);
-        for part in parts {
+        let tail_index = parts.len().saturating_sub(1);
+        for (index, part) in parts.iter().enumerate() {
             let mut alias_already_typed = false;
             match alias_statement_shape(part) {
                 Ok(Some((name, thunk))) => {
@@ -800,11 +981,15 @@ impl Inferencer<'_> {
             } else {
                 self.infer_comp(part)
             };
+            // A sequence *is* its tail: a discarded statement ran for its
+            // effect and left nothing behind for a later boundary to
+            // observe.  Forcing the tail to `Return` here would pin a
+            // still-unknown tail out of ever becoming a function — every
+            // other part, though, is discarded and must already be one.
+            if index != tail_index {
+                self.force_discarded_shape(part, &last);
+            }
         }
-        // A sequence *is* its tail: a discarded statement ran for its effect
-        // and left nothing behind for a later boundary to observe.  Forcing
-        // the tail to `Return` here would pin a still-unknown tail out of
-        // ever becoming a function.
         last
     }
 
@@ -1021,7 +1206,7 @@ impl Inferencer<'_> {
             }
             let cty = self.infer_comp(stage);
             let (value, route) = self.with_span(stage.span, |this| {
-                this.force_return_shape(&cty, Reason::PipelineStageShape)
+                this.force_ready_shape(stage, &cty, Reason::PipelineStageShape)
             });
             let key = std::ptr::from_ref::<Comp>(stage.as_ref()) as usize;
             self.ctx.stage_types.insert(key, value.clone());

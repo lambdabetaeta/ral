@@ -375,16 +375,17 @@ fn a_spread_never_reaches_to_bytes() {
     expect_type_code("let nothing = []\nto-bytes ...$nothing\nreturn ()", "T0056");
 }
 
-// ── an encoder omitting its value is refused before it runs ───────────────
+// ── an encoder omitting its value is the encoder itself ────────────────────
 //
-// `!{to-json}` captures a byte-routed operand, whose value is `Unit` by typing
-// (WF-2) — something `eval_capture` asserts rather than checks. An encoder
-// without its argument is a partial `Native`, so the arity gate is what keeps
-// the assert honest: the run door refuses each of the seven before evaluation,
-// and only saturated calls ever reach the capture.
+// Reversed by `260824_sig_is_not_a_typing_discipline.md` §2.2 ⚠: pure FP
+// rules — currying, so under-application is never an arity error.  An
+// encoder without its argument is a partial `Native`; its value is not
+// discarded here (it is `echo`'s argument), so no rule forces it to run —
+// `echo` renders it like any other native, `<native to-json>` and so on,
+// exactly as `echo !{length}` already does.
 
 #[test]
-fn captured_encoders_without_a_value_are_rejected() {
+fn captured_encoders_without_a_value_are_the_function_itself() {
     for name in [
         "to-bytes",
         "ints-to-bytes",
@@ -394,7 +395,9 @@ fn captured_encoders_without_a_value_are_rejected() {
         "to-json",
         "to-csv",
     ] {
-        expect_static(&format!("echo !{{{name}}}"));
+        let mut shell = fresh_shell();
+        let source = format!("echo !{{{name}}}");
+        eval(&mut shell, &source).unwrap_or_else(|e| panic!("{source:?}: {e:?}"));
     }
 }
 

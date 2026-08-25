@@ -113,7 +113,8 @@ pub(in crate::typecheck) enum CompTemplate {
     LinesStep,
 }
 
-/// Extra non-typing behaviour attached to a builtin signature.
+/// Extra non-typing behaviour a builtin's [`crate::types::BuiltinEntry`]
+/// carries: which diagnostic an over-application or a literal misuse earns.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinDiagnostic {
     None,
@@ -1041,6 +1042,7 @@ impl Inferencer<'_> {
         ty_of_template(template, &mut self.ctx.unifier)
     }
 
+    #[allow(dead_code)]
     fn unify_arg_template(&mut self, actual: &Ty, template: ArgTemplate) {
         match template {
             ArgTemplate::Ty(ty) => {
@@ -1067,7 +1069,7 @@ impl Inferencer<'_> {
     /// so a field arriving through the open tail is judged too.  A field still
     /// a variable stays free — the runtime takes either spelling, so pinning
     /// one here would be a guess.
-    fn check_error_message(&mut self, actual: &Ty) {
+    pub(super) fn check_error_message(&mut self, actual: &Ty) {
         let Ty::Record(row) = self.ctx.unifier.apply_ty(actual) else {
             return;
         };
@@ -1089,6 +1091,7 @@ impl Inferencer<'_> {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn apply_builtin_sig(
         &mut self,
         sig: BuiltinSig,

@@ -575,15 +575,13 @@ fn a_value_returning_producer_is_an_ordinary_stage() {
 #[test]
 fn a_stage_still_wanting_an_argument_is_rejected() {
     // `length` is `String -> …`, a function, not a computation that can run.
-    // The rejection is on its *shape*, so the useful thing to say is to apply
-    // it — the one static rule about a stage that survives.
-    let errs = raw_errors("echo foo | length");
-    assert!(
-        errs.iter().any(|e| e
-            .hint()
-            .is_some_and(|h| h.contains("apply it to its argument"))),
-        "expected the stage-shape hint, got: {errs:?}"
-    );
+    // As a bare builtin it names itself, the same rule a discarded statement
+    // follows, rather than reporting an anonymous shape mismatch.
+    let codes: Vec<_> = raw_errors("echo foo | length")
+        .iter()
+        .map(|e| e.kind.code())
+        .collect();
+    assert_eq!(codes, ["T0050"]);
 }
 
 /// A stage-root `< f` or `<< w` answers every read the stage makes, for the
@@ -1741,16 +1739,20 @@ fn a_discarded_cases_arms_stay_uncaptured() {
 fn seq_tail_still_unknown_may_become_a_function() {
     // The tail gives the sequence its value and may be a function: with
     // every statement silent, `!$f` must stay free to resolve `Fun` at the
-    // call site rather than be forced into stage shape at visit time.
-    ok("let apply = { |f| return (); !$f }; apply { |x| return $x }");
+    // call site rather than be forced into stage shape at visit time.  The
+    // call's own result is bound (`let r = …`) rather than left bare, since a
+    // program's own discarded value is now held to the same shape a pipeline
+    // stage is — a distinct rule from the one this test pins.
+    ok("let apply = { |f| return (); !$f }; let r = apply { |x| return $x }");
 }
 
 #[test]
 fn a_preceding_statements_bytes_do_not_constrain_the_tail() {
     // The dual: a statement that reads bytes is still just a discarded
     // statement.  It leaves nothing behind for the tail to carry, so the
-    // tail stays free to resolve `Fun` at the call site.
-    ok("let apply = { |f| let x = from-string; !$f }; apply { |x| return $x }");
+    // tail stays free to resolve `Fun` at the call site.  Bound for the same
+    // reason as above.
+    ok("let apply = { |f| let x = from-string; !$f }; let r = apply { |x| return $x }");
 }
 
 // ─── Observed-value arm join (if / `?` / try) ─────────────────────────────────
@@ -2027,8 +2029,11 @@ fn decoder_is_a_first_class_nullary_native() {
 // its one argument.  Omitting it is an arity error (T0050); nothing supplies the
 // argument from the channel or from an upstream stage.
 
-/// One T0050 per encoder, and only one: the missing argument is the whole
-/// story in the bare form and under a capture alike.
+/// One T0050 per encoder in the bare form: the missing argument is the whole
+/// story, a program whose value is a discarded function.  `echo !{name}`,
+/// once tested here too, no longer is one: under currying, `!{to-json}` is
+/// the function itself, handed to `echo`, which renders it like any other
+/// native (`echo !{length}` always has).
 #[test]
 fn encoder_without_its_value_is_an_arity_error() {
     for name in [
@@ -2040,24 +2045,23 @@ fn encoder_without_its_value_is_an_arity_error() {
         "to-json",
         "to-csv",
     ] {
-        for src in [name.to_string(), format!("echo !{{{name}}}")] {
-            let codes: Vec<_> = raw_errors(&src).iter().map(|e| e.kind.code()).collect();
-            assert_eq!(codes, ["T0050"], "expected one T0050 for {src:?}");
-        }
+        let codes: Vec<_> = raw_errors(name).iter().map(|e| e.kind.code()).collect();
+        assert_eq!(codes, ["T0050"], "expected one T0050 for {name:?}");
     }
 }
 
 /// A pipe carries bytes, so an upstream stage is no argument either: the
-/// encoder feeding an external consumer names its own value.  An unsaturated
-/// stage is typed as the function it is, which the stage shape rejects in turn,
-/// so the arity slip is both the first diagnostic and the cause of the second.
+/// encoder feeding an external consumer names its own value.  Under-application
+/// is silent now (pure FP rules — currying), but a stage must still be ready
+/// to run, and a stage that is a bare short builtin names itself — one named
+/// diagnostic, better than either an unrelated one or none at all.
 #[test]
 fn an_encoder_stage_takes_its_value_not_the_upstream_one() {
     let codes: Vec<_> = raw_errors("[1, 2] | to-lines | grep .")
         .iter()
         .map(|e| e.kind.code())
         .collect();
-    assert_eq!(codes, ["T0050", "T0011"]);
+    assert_eq!(codes, ["T0050"]);
     ok("to-lines [1, 2] | grep .");
 }
 

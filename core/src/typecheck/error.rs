@@ -53,6 +53,11 @@ pub enum Reason {
     /// A pipeline stage forced to `Return` shape: a stage still waiting for an
     /// argument is not a computation that can run.
     PipelineStageShape,
+    /// A discarded statement forced to `Return` shape: its value is thrown
+    /// away, so it must be ready to run, not a `Fun` still waiting for an
+    /// argument — [`PipelineStageShape`](Self::PipelineStageShape)'s sibling
+    /// for a non-tail `Seq` part and the program's own value.
+    DiscardedValueShape,
     /// An unresolved computation forced to `Return` shape to read its value and route.
     ReturnShape,
     /// An arm's payload route against that of the head it reinterprets.

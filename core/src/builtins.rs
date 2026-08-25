@@ -18,7 +18,7 @@ use crate::types::{
 // Variants unprefixed, so an entry reads `ty: Sig(sig::RANGE)`.
 use crate::typecheck::builtins::BuiltinTypeRule;
 use crate::typecheck::builtins::BuiltinTypeRule::{Scheme, Sig};
-use crate::typecheck::builtins::{scheme, sig};
+use crate::typecheck::builtins::{BuiltinDiagnostic, scheme, sig};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -46,18 +46,35 @@ macro_rules! count_builtins {
     };
 }
 
+/// `entry.with_diagnostic(diag)` when a `diag` is given, `entry` unchanged
+/// otherwise — the registry macro's optional `diagnostic:` field.
+macro_rules! with_diagnostic_if_any {
+    ($entry:expr) => {
+        $entry
+    };
+    ($entry:expr, $diag:expr) => {
+        $entry.with_diagnostic($diag)
+    };
+}
+
 /// One entry per builtin, expanded into [`CORE_BUILTINS`].  Arity is never
 /// declared — [`BuiltinEntry::fixed_arity`] reads it off the type rule.
 ///
 /// `call` must be a non-capturing closure — it is coerced to a fn pointer.
+/// `names` splits its first literal out from the rest so an optional
+/// `diagnostic:` — one row's own diagnostic never varies with how many names
+/// alias it — can sit beside it without zipping against a repetition of
+/// mismatched length; a diagnosed row is always written with one name, which
+/// is every row this macro carries one for today.
 macro_rules! builtin_registry {
     (
         $(
             $(#[$meta:meta])*
             $variant:ident {
-                names: [$($name:literal),+ $(,)?],
+                names: [$name0:literal $(, $namerest:literal)* $(,)?],
                 ty: $ty:expr,
                 doc: $doc:literal,
+                $(diagnostic: $diag:expr,)?
                 call: $call:expr,
             }
         ),+ $(,)?
@@ -82,17 +99,26 @@ macro_rules! builtin_registry {
 
         // A named array, not a promoted temporary: rustc refuses promotion
         // once an element carries `arity_cache`'s interior mutability.
-        static CORE_BUILTINS_ARR: [BuiltinEntry; count_builtins!($($($name),+),+)] = [
+        static CORE_BUILTINS_ARR: [BuiltinEntry; count_builtins!($($name0 $(, $namerest)*),+)] = [
             $(
                 $(#[$meta])*
+                with_diagnostic_if_any!(
+                    BuiltinEntry::new(
+                        Cow::Borrowed($name0),
+                        $ty,
+                        $doc,
+                        BuiltinBody::Static(__core_thunks::$variant),
+                    )
+                    $(, $diag)?
+                ),
                 $(
                     BuiltinEntry::new(
-                        Cow::Borrowed($name),
+                        Cow::Borrowed($namerest),
                         $ty,
                         $doc,
                         BuiltinBody::Static(__core_thunks::$variant),
                     ),
-                )+
+                )*
             )+
         ];
 
@@ -135,6 +161,7 @@ builtin_registry! {
         call: |args, mooring, _| collections::builtin_range(args, mooring), },
     Fail { names: ["fail"], ty: Sig(sig::FAIL),
         doc: "fail [status: Int, message?: String|Bytes]  — raise an error. status must be nonzero; message defaults to \"explicit failure\". `fail $err` on a caught error re-raises it.",
+        diagnostic: BuiltinDiagnostic::FailStatusNonzero,
         call: |args, _mooring, _shell| Err(misc::builtin_fail(args)), },
     Len { names: ["length"], ty: Scheme(scheme::length),
         doc: "length <val>  — number of elements in a string, bytes, list, or map.",
@@ -210,21 +237,27 @@ builtin_registry! {
         call: |args, mooring, shell| collections::builtin_fold_lines(args, mooring, shell), },
     FromBytes { names: ["from-bytes"], ty: Sig(sig::FROM_BYTES),
         doc: "from-bytes  — read raw bytes from the channel (stdin / `< file` / pipe) as Bytes.",
+        diagnostic: BuiltinDiagnostic::Decoder,
         call: |args, _mooring, shell| codecs::builtin_from_bytes(args, shell), },
     FromString { names: ["from-string"], ty: Sig(sig::FROM_STRING),
         doc: "from-string  — decode UTF-8 bytes from the channel to a String.",
+        diagnostic: BuiltinDiagnostic::Decoder,
         call: |args, _mooring, shell| codecs::builtin_from_string(args, shell), },
     FromLine { names: ["from-line"], ty: Sig(sig::FROM_STRING),
         doc: "from-line  — decode UTF-8 bytes from the channel, stripping one trailing newline.",
+        diagnostic: BuiltinDiagnostic::Decoder,
         call: |args, _mooring, shell| codecs::builtin_from_line(args, shell), },
     FromLines { names: ["from-lines"], ty: Sig(sig::FROM_LINES),
         doc: "from-lines  — decode channel bytes to a Step stream of lines (lossy on invalid UTF-8).",
+        diagnostic: BuiltinDiagnostic::Decoder,
         call: |args, _mooring, shell| codecs::builtin_from_lines(args, shell), },
     FromJson { names: ["from-json"], ty: Sig(sig::FROM_JSON),
         doc: "from-json  — decode JSON bytes from the channel to a value.",
+        diagnostic: BuiltinDiagnostic::Decoder,
         call: |args, _mooring, shell| codecs::builtin_from_json(args, shell), },
     FromCsv { names: ["from-csv"], ty: Sig(sig::FROM_JSON),
         doc: "from-csv  — decode CSV bytes from the channel to a list of records keyed by the header row (every field a String).",
+        diagnostic: BuiltinDiagnostic::Decoder,
         call: |args, _mooring, shell| codecs::builtin_from_csv(args, shell), },
     ToBytes { names: ["to-bytes"], ty: Sig(sig::TO_BYTES),
         doc: "to-bytes <bytes>  — pass a Bytes value through to the byte channel; the inverse of from-bytes.",

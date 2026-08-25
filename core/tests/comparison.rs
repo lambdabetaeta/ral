@@ -186,11 +186,13 @@ fn sort_list_by_uses_key_ordering() {
 
 #[test]
 fn arity_one_string_builtins_curry_to_a_partial_native() {
-    // A bare head with no argument under-applies, yielding the partial
-    // `Native` back — application is the one arity gate.
+    // A bare name in command position is a discarded function — a static
+    // arity error, not a value.  Taking the value itself with `$name`
+    // under-applies, yielding the partial `Native` back — application, not
+    // command position, is the one arity gate.
     for name in ["upper", "lower", "dedent", "shell-quote", "shell-split"] {
         let mut shell = fresh_shell();
-        match eval(&mut shell, name) {
+        match eval(&mut shell, &format!("${name}")) {
             Ok(Value::Native { entry, applied }) => {
                 assert_eq!(entry.name, name);
                 assert!(applied.is_empty(), "{name:?}: expected no collected args");

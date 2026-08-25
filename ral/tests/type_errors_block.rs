@@ -53,14 +53,15 @@ fn value_type_error_blocks() {
 }
 
 /// A stage still waiting for an argument (`length` is `String -> …`) is not a
-/// computation that can run, so the pipeline is fatal at check time.
+/// computation that can run, so the pipeline is fatal at check time; as a bare
+/// builtin, `length` names itself rather than reporting an anonymous mismatch.
 #[test]
 fn stage_shape_error_blocks() {
     let r = run_c("echo foo | length");
     assert_ne!(r.status, 0, "a stage-shape error must block");
     assert!(
-        r.stderr.contains("T0011") && r.stderr.contains("apply it to its argument"),
-        "the stage-shape error must render with its teaching hint; stderr was:\n{}",
+        r.stderr.contains("T0050") && r.stderr.contains("length"),
+        "the stage-shape error must name the verb; stderr was:\n{}",
         r.stderr
     );
 }
@@ -227,7 +228,7 @@ fn rc_stage_shape_error_skips_file_but_boots() {
     let rc = "let marker = 'applied'\necho foo | length\n";
     let r = boot_with_rc(rc, "return booted\n");
     assert!(
-        r.stderr.contains("T0011") && r.stderr.contains("skipped due to type errors"),
+        r.stderr.contains("T0050") && r.stderr.contains("skipped due to type errors"),
         "an rc stage-shape error must skip the file; stderr was:\n{}",
         r.stderr
     );

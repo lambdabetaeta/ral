@@ -14,7 +14,7 @@
 
 use super::flow::Settled;
 use super::value::Value;
-use crate::typecheck::builtins::BuiltinTypeRule;
+use crate::typecheck::builtins::{BuiltinDiagnostic, BuiltinTypeRule};
 use crate::typecheck::{Scheme, Unifier};
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -70,6 +70,10 @@ pub struct BuiltinEntry {
     pub convention: Convention,
     pub type_rule: BuiltinTypeRule,
     pub doc: &'static str,
+    /// Extra non-typing behaviour the checker's application path reads: which
+    /// diagnostic an over-application or a literal misuse earns.  `None` for
+    /// the overwhelming majority of rows.
+    pub diagnostic: BuiltinDiagnostic,
     body: BuiltinBody,
     /// [`Self::fixed_arity`]'s cache: a `Scheme` rule needs a fresh
     /// [`Unifier`] to derive its curry depth, so this spares every
@@ -90,6 +94,7 @@ impl BuiltinEntry {
             convention: Convention::Value,
             type_rule,
             doc,
+            diagnostic: BuiltinDiagnostic::None,
             body,
             arity_cache: OnceLock::new(),
         }
@@ -109,16 +114,26 @@ impl BuiltinEntry {
             convention: Convention::Argv,
             type_rule: BuiltinTypeRule::Scheme(argv),
             doc,
+            diagnostic: BuiltinDiagnostic::None,
             body,
             arity_cache: OnceLock::new(),
         }
     }
 
+    /// Attach a diagnostic facet to an otherwise-built entry — a builder
+    /// rather than a `new`/`base_frame` parameter, so the common case names
+    /// none.
+    pub const fn with_diagnostic(mut self, diagnostic: BuiltinDiagnostic) -> Self {
+        self.diagnostic = diagnostic;
+        self
+    }
+
     /// The curry depth of this row's type — for a value row, the argument
-    /// count a `$name` reference saturates at.  Structural, read off the type
-    /// rule ([`BuiltinTypeRule::fixed_arity`]) once and cached: application
-    /// calls this every apply step, and a `Scheme` rule's derivation is not
-    /// free.
+    /// count a `$name` reference saturates at, and the checker's own arity
+    /// diagnostics for a call at command position, not only the evaluator's
+    /// arity gate.  Structural, read off the type rule
+    /// ([`BuiltinTypeRule::fixed_arity`]) once and cached: application calls
+    /// this every apply step, and a `Scheme` rule's derivation is not free.
     pub fn fixed_arity(&self) -> usize {
         *self
             .arity_cache
@@ -156,6 +171,7 @@ impl Clone for BuiltinEntry {
             convention: self.convention,
             type_rule: self.type_rule,
             doc: self.doc,
+            diagnostic: self.diagnostic,
             body: self.body.clone(),
             arity_cache,
         }
