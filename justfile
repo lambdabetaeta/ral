@@ -1,18 +1,11 @@
-# justfile — a registry of the common dev commands for ral.
-#
-# This is an entry point, not a place for logic: every recipe is a
-# single delegation to a `cargo` invocation or to one of the `.ral`
-# scripts under scripts/, where the real orchestration lives.
-#
+# justfile — a registry of dev commands for ral, not a place for logic:
+# every recipe delegates to `cargo` or to a `.ral` script under scripts/.
 # Run `just` with no arguments to list recipes.
 
 # Windows has no `sh`; PowerShell is the shell it always has.
 set windows-shell := ['powershell.exe', '-NoLogo', '-NoProfile', '-Command']
 
-# synod ships on macOS and Windows only, and its tauri dependency links GTK,
-# which a Linux host is not expected to carry.  CI's Linux job excludes it for
-# exactly this reason; this is the same exclusion, written once so that no
-# recipe below hand-rolls it and no Linux developer has to.
+# synod's tauri dependency links GTK, absent on Linux; excluded there, once.
 gui := if os() == "linux" { "--exclude synod" } else { "" }
 
 # Show the recipe list.
@@ -31,8 +24,17 @@ check:
 check-windows $RUSTFLAGS='-D warnings' $CC_x86_64_pc_windows_msvc='cc-absent-use-blake3-pure-fallback':
     cargo check --workspace --exclude exarch --exclude synod --exclude guest-net --all-targets --target x86_64-pc-windows-msvc
 
-# Builds first because the integration tests in ral/tests/ invoke the `ral`
-# binary as a subprocess, and `cargo test` alone does not reliably refresh it.
+# `linux-ci` covers this ground properly, in a container; this is seconds
+# because `check` never links. `ral`/`ral-ripgrep-core` are excluded on top of
+# the Windows twin's three: musl gives ripgrep a jemalloc allocator with no
+# pure-Rust fallback, so the absent-CC trick that spares blake3 can't spare it.
+
+# Cross-check the guest's musl target — the only cheap check of the `cfg(target_os = "linux")` code (vsock, hatch, spawn jail) a macOS host gates out entirely.
+check-linux $RUSTFLAGS='-D warnings' $CC_x86_64_unknown_linux_musl='cc-absent-use-blake3-pure-fallback':
+    cargo check --workspace --exclude exarch --exclude synod --exclude guest-net --exclude ral --exclude ral-ripgrep-core --all-targets --target x86_64-unknown-linux-musl
+
+# Builds first: `cargo test` alone won't reliably refresh the `ral` binary
+# that ral/tests/ shells out to.
 
 # Run the workspace test suite.
 test: build
@@ -42,10 +44,9 @@ test: build
 fmt:
     cargo fmt
 
-# No `-- -D warnings`: that would override the vendored ral-ripgrep-core's
-# `all = "allow"` opt-out.  The pedantry comes from RUSTFLAGS plus the
-# `[workspace.lints.clippy]` table (pedantic + nursery, deny on the I/O-door
-# denylist), which is where a lint decision belongs.
+# No `-- -D warnings`: it'd override vendored ral-ripgrep-core's `all = "allow"`
+# opt-out. Pedantry (pedantic + nursery, I/O-door denylist) lives in RUSTFLAGS
+# and `[workspace.lints.clippy]` instead.
 
 # Clippy across the workspace, warnings as errors — exactly what CI lints with.
 lint $RUSTFLAGS='-D warnings':
