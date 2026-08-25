@@ -24,12 +24,23 @@ one's machinery rather than the host seam's. The connection is opened from the
 *host's* side: the parent binds an ephemeral guest port for one spawn's
 duration (`listen_any`, `core/src/vsock.rs`) and names it in its enquiry, the
 host dials it and writes eight little-endian token bytes, and the listener
-thread checks them before handing the connection to `hatch_over` — which
-spawns `current_exe --engine` with it on fd 3 and the framed `EngineSeed` on
-the fd named by `RAL_ENGINE_SEED_FD`, then writes one `HATCH_ACK` byte back.
-That byte goes out *after* `spawn` returns, so a host that hears it has a live
-child; the frame algebra offers no substitute, since the host speaks first and
-`Attach` is its only legal opening frame. Neither the token nor the ack is a
+thread checks them before handing the connection to `hatch_over`. Every partial
+token read polls beside the wake pipe, so a peer that sends a prefix and stalls
+cannot pin cancellation — though it does hold the accept loop, and so denies that
+one spawn. `hatch_over` spawns `current_exe --engine` with the dial on fd 3 and a
+seed channel named by `RAL_ENGINE_SEED_FD`; the child drains the framed
+`EngineSeed` before waiting for `Attach`, the parent writes it after `spawn`, and
+only then sends one `HATCH_ACK` byte back. That ordering is what lets a seed
+outgrow the socketpair's bounded buffer without deadlocking creation, and
+`spawn_engine` takes the child's end of that pair *by value*, so no write can
+precede the drop that turns a dead child into `EPIPE` rather than a blocked
+writer. The write is bounded by the same stall the engine allows its own protocol
+writes, and a seed that only partly crosses kills its child instead of recording
+it: half a frame would leave it blocked in a read no sweep could notice. The ack
+goes out only once `spawn` has returned and the seed has crossed, so a host that
+hears it has a live child holding its whole seed; the frame algebra offers no
+substitute, since the host speaks first and `Attach` is its only legal opening
+frame. Neither the token nor the ack is a
 `Frame`, so a hatch never touches `PROTOCOL_VERSION` at all — no new frame, no
 version bump. `HATCH_ACK` sits in the platform-neutral
 `core/src/transport.rs` because the two ends need not share an operating
@@ -116,9 +127,13 @@ conversions share the `InternCtx` from `serial.rs`.
 for a wire-seat hatch, `ChildEvalRequest`'s shape minus a body
 (`scope_table`, `mobile: WireMobile`, `captured: SerialEnvSnapshot`, the
 spawn's validated `grant` tag). `pack_seed` builds one from a `Shell`, and
-`apply_seed` hydrates it into a freshly booted engine through the same
-`WireDecoder::for_shell` `eval_request` already uses, before narrowing the
-shell's capabilities to the seed's grant. The scope it carries is never the
+`seed_from_env` takes it before the engine waits for `Attach` — striking the env
+var as it takes the fd, so no descendant inherits a number that has stopped being
+one — and after `Attach` selects an installer and boots the shell, `apply_seed`
+hydrates it through the same `WireDecoder::for_shell` `eval_request` already uses,
+before narrowing the shell's capabilities to the seed's grant. Taking and applying
+are split for one reason each: the take must not wait on the host, and the
+application needs the booted installer's shell. The scope it carries is never the
 parent's whole lexical scope: `Shell::fork_scrubbed` strips every
 handle-carrying binding (`Value::Handle` has no wire form, `serial.rs`'s
 `value_carries_handle`), and it is the one door both seats pass through, so an

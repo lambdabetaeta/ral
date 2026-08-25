@@ -113,7 +113,7 @@ const TICK: Duration = Duration::from_secs(1);
 
 /// The armed silence the engine reads as the front-end's death — six times the
 /// host's default 5s ping interval, so no scheduling jitter can fake one.
-const HOST_SILENCE_DEADLINE: Duration = Duration::from_secs(30);
+pub(crate) const HOST_SILENCE_DEADLINE: Duration = Duration::from_secs(30);
 
 /// How long the engine tolerates a silent front-end and a stalled write before
 /// declaring it dead. The two deadlines are conceptually distinct — one
@@ -307,6 +307,18 @@ fn engine_session(
     installers: &[EngineInstaller],
     patience: Patience,
 ) -> i32 {
+    // A hatched parent starts writing only once this process exists, so the
+    // seed is taken before the wait for Attach: a seed larger than the
+    // socketpair's buffer would otherwise wedge parent and child. It is applied
+    // later, once Attach has selected and booted an installer.
+    let seed = match crate::hatch::seed_from_env() {
+        Ok(seed) => seed,
+        Err(msg) => {
+            eprintln!("engine: {msg}");
+            return 1;
+        }
+    };
+
     let writer_ch = reader_ch.try_clone().expect("try_clone engine channel");
     writer_ch
         .set_write_deadline(patience.write_stall)
@@ -377,11 +389,11 @@ fn engine_session(
                     ),
                 ));
             }
-            // A wire-hatched child's whole reason for existing: the parent's
-            // `hatch` named this fd, so a seed is waiting to become this
-            // shell's scope and ceiling before anything else runs.
-            if let Ok(fd) = std::env::var(crate::hatch::RAL_ENGINE_SEED_FD_ENV)
-                && let Err(msg) = crate::hatch::apply_seed(&fd, &mut shell)
+            // A wire-hatched child's whole reason for existing: the seed read
+            // before Attach becomes this shell's scope and ceiling before
+            // anything else runs.
+            if let Some(seed) = seed
+                && let Err(msg) = crate::hatch::apply_seed(seed, &mut shell)
             {
                 eprintln!("engine: {msg}");
                 return 1;

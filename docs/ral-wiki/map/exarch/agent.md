@@ -535,12 +535,18 @@ The desk's wire arm dials that port through its **`Dial`** capability
 object `RootConfig` carries, `None` on every identity trunk), writes the eight
 token bytes little-endian, and blocks on **one acknowledgement byte**
 (`ral_core::transport::HATCH_ACK`) under the transport's own deadline. The
-listener thread accepts, compares the eight bytes — a dial that does not know
-them is dropped and the accept loop resumes, so losing the race costs the
-stranger nothing but its connection — and `hatch_over` spawns
-`current_exe --engine` with the connection on fd 3 and the seed's fd named by
-`RAL_ENGINE_SEED_FD`, writing the ack **only after `spawn()` has returned**.
-An ack therefore means the child already exists. The desk then adopts the
+listener thread accepts and compares the eight bytes, polling the wake pipe
+before every partial read — a dial that does not know them is dropped and the
+accept loop resumes, while one that sends only a prefix cannot pin shutdown.
+Losing the token race costs a stranger nothing but its connection; stalling
+mid-token costs the winner its spawn, which the decision records rather than
+defends against. `hatch_over` spawns `current_exe --engine` with the connection
+on fd 3 and the seed's fd named by `RAL_ENGINE_SEED_FD`; the child reads the
+framed seed before waiting for `Attach`, and the parent writes it after
+`spawn()`, so even a seed larger than the channel buffer makes progress. It
+writes the ack **only once `spawn()` has returned and the seed has crossed**. An
+ack therefore means the child already exists and holds its seed. The desk then
+adopts the
 stream as `Seat::Wire` and hands the child to the same `spawn_async` an
 identity fork reaches, at `fuel = parent - 1`.
 

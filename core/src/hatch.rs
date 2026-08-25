@@ -7,24 +7,25 @@
 //! the thread over that listener accepts, checks the eight token bytes the
 //! host writes, and hands the connection to [`hatch_over`], which mirrors
 //! [`crate::transport::WireTransport::new`]'s re-exec shape with
-//! `ral-daemon`'s own fd discipline: seed a fresh socketpair with one framed
-//! [`EngineSeed`], spawn `current_exe --engine` with the connection on fd 3
-//! and the seed's fd named by `RAL_ENGINE_SEED_FD`, and write
-//! [`crate::transport::HATCH_ACK`] back — after the spawn, so a host that
-//! hears the ack has a live child on the other end.
+//! `ral-daemon`'s own fd discipline: open a fresh socketpair for the seed,
+//! spawn `current_exe --engine` with the connection on fd 3 and the seed's fd
+//! named by `RAL_ENGINE_SEED_FD`, write the one framed [`EngineSeed`] while
+//! that child drains it, and write [`crate::transport::HATCH_ACK`] back — so a
+//! host that hears the ack has a live child that holds its whole seed.
 //!
-//! [`apply_seed`] is the other end: called from `engine_session` once a
-//! freshly booted shell exists, it hydrates the seed's scope and context,
-//! then narrows the shell's capabilities to the seed's validated grant
-//! through whichever host installed [`set_grant_narrower`] — core itself
-//! carries no capability vocabulary of its own to resolve a grant tag
-//! against.
+//! [`seed_from_env`] and [`apply_seed`] are the other end: `engine_session`
+//! takes the seed before it waits for `Attach`, then, once a freshly booted
+//! shell exists, hydrates its scope and context and narrows its capabilities
+//! to the seed's validated grant through whichever host installed
+//! [`set_grant_narrower`] — core itself carries no capability vocabulary of
+//! its own to resolve a grant tag against.
 //!
 //! The sockets alone — [`crate::vsock`] — are Linux-only, since `AF_VSOCK`
 //! only means something inside a real guest. Everything else here is plain
 //! Unix process/socket plumbing, exercised in tests over a `UnixListener` and
-//! `UnixStream` pairs standing in for the guest's port, the same vehicle the
-//! wire seat's own tests already re-exec `--engine` over.
+//! `UnixStream` pairs standing in for the guest's port and the host's dial,
+//! with a re-exec of the test binary onto one fixture playing the child engine
+//! — a stand-in that never drained its seed would attest to nothing.
 //!
 //! Everything that exists only to serve the Linux-only calls or this file's
 //! own tests is therefore unreachable in a plain non-Linux, non-test build —
@@ -36,7 +37,7 @@
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -55,8 +56,9 @@ const PROTOCOL_FD: RawFd = 3;
 
 /// The env var carrying the seed socketpair's fd number — the pipeline
 /// helpers' env-named-fd pattern (`runtime/pipeline/helper.rs`), not a second
-/// magic number.
-pub(crate) const RAL_ENGINE_SEED_FD_ENV: &str = "RAL_ENGINE_SEED_FD";
+/// magic number. Private: [`seed_from_env`] is the only reader, and it strikes
+/// the name as it takes the fd.
+const RAL_ENGINE_SEED_FD_ENV: &str = "RAL_ENGINE_SEED_FD";
 
 /// `own`, the grant tag, the cwd — in, a narrowed [`Capabilities`] or a
 /// refusal out. What `set_grant_narrower` registers.
@@ -161,7 +163,8 @@ impl HatchListener {
 /// holds of the parent's session, and a `Shell` never leaves this one.
 ///
 /// # Errors
-/// Returns a sentence if the shell will not pack, or no port could be bound.
+/// Returns a sentence if the shell will not pack, no port could be bound, the
+/// wake pipe could not be opened, or the listener thread could not be started.
 #[cfg(target_os = "linux")]
 pub fn listen_for_hatch(
     token: u64,
@@ -188,17 +191,23 @@ fn hatch_listener(
 ) -> Result<HatchListener, String> {
     let (woken, wake) = io::pipe()
         .map_err(|e| format!("hatch: could not open the pipe that wakes the listener: {e}"))?;
-    let thread = std::thread::spawn(move || await_dial(&listener, &woken, token, &seed));
+    let thread = std::thread::Builder::new()
+        .name("ral-hatch-listener".to_string())
+        .spawn(move || await_dial(&listener, &woken, token, &seed))
+        .map_err(|e| {
+            format!("hatch: could not start the thread that waits for the host's dial: {e}")
+        })?;
     Ok(HatchListener { wake, thread })
 }
 
 /// The listener thread's whole life: accept until the connection the host
 /// dialled arrives, hatch onto it, and answer the child's pid.
 ///
-/// Two poll sites and no clock. Neither blocks without the wake end in its
-/// set, which is what makes the caller's join safe: the only party that can
-/// leave this thread waiting is the host, whose own wait on the ack carries
-/// the transport's deadline.
+/// Two kinds of poll site and no clock: the listener, then every partial read
+/// of a token. Neither blocks without the wake end in its set, which is what
+/// makes the caller's join safe. The one wait past them is [`send_seed`]'s,
+/// bounded rather than woken — by then a child exists — and the host's own wait
+/// on the ack carries the transport's deadline over all of it.
 fn await_dial(
     listener: &OwnedFd,
     woken: &io::PipeReader,
@@ -209,17 +218,40 @@ fn await_dial(
         wait_readable(listener, woken)?;
         let connection = accept(listener)
             .map_err(|e| Unhatched::Failed(format!("hatch: could not accept a dial: {e}")))?;
-        wait_readable(&connection, woken)?;
-
-        let mut claim = [0u8; 8];
         let mut stream = UnixStream::from(connection);
-        if stream.read_exact(&mut claim).is_err() || u64::from_le_bytes(claim) != token {
+        let Some(claim) = read_claim(&mut stream, woken)? else {
+            continue;
+        };
+        if u64::from_le_bytes(claim) != token {
             // Whoever this was did not know the token, so it is not the host.
             // Losing the race costs it nothing but this connection.
             continue;
         }
         return hatch_over(stream.into(), seed).map_err(Unhatched::Failed);
     }
+}
+
+/// Read exactly one token without ever waiting on the dial alone. A peer may
+/// send any proper prefix and then stop; cancellation must still recover the
+/// listener thread. Such a peer does hold the accept loop meanwhile, so it can
+/// deny this one spawn — accepted, since the host's own deadline ends it and
+/// the next enquiry binds a fresh port.
+fn read_claim(
+    stream: &mut UnixStream,
+    woken: &io::PipeReader,
+) -> Result<Option<[u8; 8]>, Unhatched> {
+    let mut claim = [0u8; 8];
+    let mut filled = 0;
+    while filled < claim.len() {
+        wait_readable(stream, woken)?;
+        match stream.read(&mut claim[filled..]) {
+            Ok(0) => return Ok(None),
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Ok(None),
+        }
+    }
+    Ok(Some(claim))
 }
 
 /// Block until `fd` is readable, or the caller writes the wake pipe.
@@ -310,23 +342,74 @@ fn packed_seed(shell: &Shell, grant: String) -> Result<EngineSeed, String> {
 
 /// The portable core of a hatch: everything past the connection itself,
 /// which a `UnixStream` pair stands in for in tests.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:hatch-spawn] re-execs the current engine binary as a hatched child over a fresh vsock connection — infrastructure handoff exactly like WireTransport::new's engine-spawn door, not model turn-time I/O"
-)]
 fn hatch_over(connection: OwnedFd, seed: &EngineSeed) -> Result<u32, String> {
     sweep_hatched();
 
     let mut vsock = UnixStream::from(connection);
     let (mut parent_seed, child_seed) =
         UnixStream::pair().map_err(|e| format!("hatch: failed to open the seed channel: {e}"))?;
-    crate::subprocess_codec::write_frame(&mut parent_seed, seed)
-        .map_err(|e| format!("hatch: failed to write the engine seed: {e}"))?;
+    // The child is draining before the first byte goes out, so a seed larger
+    // than the socketpair's buffer crosses instead of wedging both sides.
+    let mut child = ChildHandle::from_std(spawn_engine(&vsock, child_seed)?);
+    let pid = child.id();
+    if let Err(e) = send_seed(&mut parent_seed, seed) {
+        // Half a frame leaves the child blocked in its own read, and a child
+        // with no seed can never attach: it is killed here rather than
+        // recorded for a sweep that would wait forever to notice it.
+        let _ = child.kill();
+        let _ = child.reap();
+        return Err(e);
+    }
+    // The child exists and holds its seed, so the host may now be told: the
+    // ack is the byte before the first protocol frame, and it is all the host
+    // has to go on before it names this child on its roster.
+    let ack = vsock.write_all(&[crate::transport::HATCH_ACK]).map_err(|e| {
+        format!("hatch: the child engine started, but the host could not be told so: {e}")
+    });
+    // The host's end must read the child's death as EOF, so this process keeps
+    // no copy of the dial — `vsock` drops here as `WireTransport::new`'s own
+    // `engine` end does.
+    drop(vsock);
 
+    // Recorded before the ack is reported on, so a child that started is
+    // reaped even when the host never heard of it.
+    table()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(Hatched {
+            child,
+            seed: WireChannel::from_stream(parent_seed),
+        });
+    ack?;
+    Ok(pid)
+}
+
+/// Start the child engine: the dial on [`PROTOCOL_FD`], the seed channel on an
+/// fd named to it by env var.
+///
+/// Taking `child_seed` by value is the whole discipline: it is closed as this
+/// returns, so no caller can write the seed while a reading end still lives in
+/// this process — which would leave that write blocked on a dead child instead
+/// of failing it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:hatch-spawn] re-execs the current engine binary as a hatched child over a fresh vsock connection — infrastructure handoff exactly like WireTransport::new's engine-spawn door, not model turn-time I/O"
+)]
+fn spawn_engine(vsock: &UnixStream, child_seed: UnixStream) -> Result<Child, String> {
     let current_exe = std::env::current_exe()
         .map_err(|e| format!("hatch: could not resolve this engine's own executable path: {e}"))?;
     let mut cmd = Command::new(current_exe);
+    #[cfg(not(test))]
     cmd.arg("--engine");
+    // The libtest binary has no `--engine` entrypoint. Re-exec one exact
+    // fixture that performs the child's half of the fd agreement instead of
+    // mistaking a quickly exiting test harness for an engine.
+    #[cfg(test)]
+    cmd.args([
+        "--exact",
+        "hatch::tests::hatched_child_fixture",
+        "--nocapture",
+    ]);
     cmd.env(RAL_ENGINE_SEED_FD_ENV, child_seed.as_raw_fd().to_string());
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
@@ -367,55 +450,78 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed) -> Result<u32, String> {
 
     let child = cmd
         .spawn()
-        .map_err(|e| format!("hatch: could not start the child engine: {e}"))?;
-    let pid = child.id();
-    // The child exists, so the host may now be told: the ack is written after
-    // the spawn and before the first frame, and it is all the host has to go
-    // on before it names this child on its roster.
-    let ack = vsock.write_all(&[crate::transport::HATCH_ACK]);
-    // The parent must not hold either the dial or the child's seed end open,
-    // or the child's death would never read as EOF on the ends this process
-    // keeps — `vsock` drops here as `WireTransport::new`'s own `engine` end
-    // does, and `child_seed` beside it.
-    drop(vsock);
+        .map_err(|e| format!("hatch: could not start the child engine: {e}"));
+    // Closed here and nowhere else. The child holds its own copy across the
+    // exec, and one kept in this process would leave the seed write blocked on
+    // a dead child instead of failing it — which is why this end is taken by
+    // value rather than borrowed.
     drop(child_seed);
-
-    // Recorded before the ack is reported on, so a child that started is
-    // reaped even when the host never heard of it.
-    table()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(Hatched {
-            child: ChildHandle::from_std(child),
-            seed: WireChannel::from_stream(parent_seed),
-        });
-    ack.map_err(|e| {
-        format!("hatch: the child engine started, but the host could not be told so: {e}")
-    })?;
-    Ok(pid)
+    child
 }
 
-/// Guest-side application of a wire seed: called from `engine_session` once
-/// the installer has booted `shell`, if [`RAL_ENGINE_SEED_FD_ENV`] names an
-/// fd. Hydrates scope and context exactly as `child_eval::eval_request`
-/// does, then narrows `shell`'s capabilities to `own ⊓ resolve_base(grant,
-/// cwd)` through whichever policy [`set_grant_narrower`] registered.
+/// Hand the child its one frame, bounded by the same stall the engine allows
+/// its own protocol writes ([`crate::engine::HOST_SILENCE_DEADLINE`]) — no new
+/// number, and none of the listener thread's poll sites: by the time a seed is
+/// crossing, the child exists, so what this wait needs is a bound and not the
+/// wake pipe's cancel.
+fn send_seed(parent_seed: &mut UnixStream, seed: &EngineSeed) -> Result<(), String> {
+    parent_seed
+        .set_write_timeout(Some(crate::engine::HOST_SILENCE_DEADLINE))
+        .map_err(|e| format!("hatch: could not bound the wait for the child's seed: {e}"))?;
+    let sent = crate::subprocess_codec::write_frame(parent_seed, seed);
+    // The bound belonged to that one write; the end this process keeps outlives
+    // it, and is only ever polled for the child's death.
+    let _ = parent_seed.set_write_timeout(None);
+    sent.map_err(|e| format!("hatch: the child engine started, but its seed could not be sent: {e}"))
+}
+
+/// The wire seed this engine was hatched with, if it was hatched at all.
+///
+/// `engine_session` calls this before it waits for `Attach`: the parent writes
+/// the frame only once this process exists, so a child that waited on the host
+/// first would wedge both sides on any seed larger than the socket's buffer.
+/// The fd's name is struck from the environment as the fd is taken, so no
+/// descendant inherits a number that has stopped being one.
 ///
 /// # Errors
-/// Returns a sentence naming whichever step failed: the fd, the read, the
-/// decode, or an unregistered grant policy — a wire-seeded child is refused
-/// rather than admitted with no way to enforce its ceiling.
-pub(crate) fn apply_seed(fd: &str, shell: &mut Shell) -> Result<(), String> {
-    let fd: RawFd = fd
-        .parse()
-        .map_err(|_| format!("{RAL_ENGINE_SEED_FD_ENV} is not an fd: {fd:?}"))?;
+/// Returns a sentence naming an unreadable name, an invalid fd, a failed read,
+/// or an early EOF.
+pub(crate) fn seed_from_env() -> Result<Option<EngineSeed>, String> {
+    let named = std::env::var(RAL_ENGINE_SEED_FD_ENV);
+    // SAFETY: engine startup, before this process has a second thread.
+    unsafe { std::env::remove_var(RAL_ENGINE_SEED_FD_ENV) };
+    let fd: RawFd = match &named {
+        Ok(fd) => fd
+            .parse()
+            .map_err(|_| format!("{RAL_ENGINE_SEED_FD_ENV} is not an fd: {fd:?}"))?,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!("{RAL_ENGINE_SEED_FD_ENV} is not a valid fd number"));
+        }
+    };
     // SAFETY: the parent placed exactly one open fd here, named by this env
     // var and touched by nothing else in this process.
-    let mut stream = unsafe { UnixStream::from_raw_fd(fd) };
-    let seed: EngineSeed = crate::subprocess_codec::read_frame(&mut stream)
-        .map_err(|e| format!("hatch: failed to read the engine seed: {e}"))?
-        .ok_or_else(|| "hatch: the seed channel closed before a seed arrived".to_string())?;
+    read_seed(unsafe { UnixStream::from_raw_fd(fd) }).map(Some)
+}
 
+/// The one framed seed on `channel`, which is closed as this returns.
+fn read_seed(mut channel: UnixStream) -> Result<EngineSeed, String> {
+    crate::subprocess_codec::read_frame(&mut channel)
+        .map_err(|e| format!("hatch: failed to read the engine seed: {e}"))?
+        .ok_or_else(|| "hatch: the seed channel closed before a seed arrived".to_string())
+}
+
+/// Guest-side application of a seed already taken: called from
+/// `engine_session` once the installer has booted `shell`. Hydrates scope and
+/// context exactly as `child_eval::eval_request` does, then narrows `shell`'s
+/// capabilities to `own ⊓ resolve_base(grant, cwd)` through whichever policy
+/// [`set_grant_narrower`] registered.
+///
+/// # Errors
+/// Returns a sentence naming a decode failure or an unregistered grant policy
+/// — a wire-seeded child is refused rather than admitted with no way to enforce
+/// its ceiling.
+pub(crate) fn apply_seed(seed: EngineSeed, shell: &mut Shell) -> Result<(), String> {
     let dec = WireDecoder::for_shell(shell, &seed.scope_table)
         .map_err(|e| format!("hatch: the seed's scope failed to decode: {}", e.message))?;
     install_shell_mobile(seed.mobile, shell, &dec)
@@ -441,7 +547,7 @@ pub(crate) fn apply_seed(fd: &str, shell: &mut Shell) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::subprocess::bare_child_shell;
-    use crate::types::{Fork, Mooring, Nursery, Value};
+    use crate::types::Value;
 
     /// A grant narrower that just meets `own` against a fixed floor, so
     /// tests need no exarch-shaped base vocabulary.
@@ -456,49 +562,52 @@ mod tests {
         }))
     }
 
+    /// The child half of `hatch_over`'s fd agreement. A normal test-suite run
+    /// has no seed fd and returns; a re-exec reads the entire seed, then keeps
+    /// fd 3 alive until the host-side fixture has received the ack.
     #[test]
-    fn hatch_over_a_socketpair_seeds_a_fresh_engine_process() {
-        let mut parent = Shell::new(crate::io::TerminalState::default());
-        parent
-            .mobile
-            .scope
-            .set("greeting".to_string(), Value::String("hi".to_string()));
-
-        let nursery = Nursery::default();
-        let mooring = Mooring {
-            fork: Some(Fork::Park(nursery.clone())),
-            ..Mooring::adrift()
+    fn hatched_child_fixture() {
+        let _seed = match seed_from_env() {
+            Ok(None) => return,
+            Ok(Some(seed)) => seed,
+            Err(msg) => panic!("the re-exec child must read its seed: {msg}"),
         };
-        let id = parent
-            .fork_into_nursery(&mooring)
-            .expect("a nursery is installed");
-        let nursery_shell = nursery.adopt(id).expect("adopt the parked fork");
+        // SAFETY: `hatch_over` placed the one protocol connection on fd 3 for
+        // this process, exactly as `run_engine` expects.
+        let mut protocol = unsafe { UnixStream::from_raw_fd(PROTOCOL_FD) };
+        let mut end = [0u8; 1];
+        let _ = protocol.read(&mut end);
+    }
 
-        let (a, b) = UnixStream::pair().expect("socketpair standing in for the host's connection");
-        let a: OwnedFd = a.into();
-        let peer_thread = std::thread::spawn(move || {
-            let mut b = b;
+    /// The whole hatch through a real re-exec of this binary, with a seed
+    /// larger than the socketpair can hold: it crosses only because the child
+    /// is draining while the parent writes, which is the one claim here that
+    /// no reading of the code can settle.
+    #[test]
+    fn a_seed_outgrowing_the_channel_crosses_to_a_real_child() {
+        let mut parent = Shell::new(crate::io::TerminalState::default());
+        parent.mobile.scope.set(
+            "larger-than-a-socket-buffer".to_string(),
+            Value::String("x".repeat(2 * 1024 * 1024)),
+        );
+        let seed = packed_seed(&parent, "read-only".to_string()).expect("pack a seed");
+
+        let (dial, host) = UnixStream::pair().expect("a socketpair for the host's dial");
+        let dialled = std::thread::spawn(move || {
+            let mut host = host;
             let mut ack = [0u8; 1];
-            b.read_exact(&mut ack).expect("read the ack");
+            host.read_exact(&mut ack).expect("the ack");
             ack[0]
         });
 
-        let pid = hatch_over(a, &pack_seed(&nursery_shell, "read-only".into()).unwrap())
-            .expect("hatch over a socketpair");
-
+        let pid = hatch_over(dial.into(), &seed).expect("hatch over a socketpair");
         assert_eq!(
-            peer_thread.join().expect("peer thread"),
+            dialled.join().expect("the host's thread"),
             crate::transport::HATCH_ACK,
             "the host learns of the child only by its ack"
         );
-
-        assert!(
-            recorded(pid),
-            "hatch_over must record the child before returning"
-        );
+        assert!(recorded(pid), "a started child must be recorded for reaping");
     }
-
-    const TOKEN: u64 = 0xdead_beef_1234_5678;
 
     /// The table is process-global and these tests run beside each other, so
     /// each looks for its own child rather than counting.
@@ -509,6 +618,8 @@ mod tests {
             .iter()
             .any(|hatched| hatched.child.id() == pid)
     }
+
+    const TOKEN: u64 = 0xdead_beef_1234_5678;
 
     fn a_seed() -> EngineSeed {
         let shell = Shell::new(crate::io::TerminalState::default());
@@ -525,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn the_host_dials_in_and_only_the_token_hatches_a_child() {
+    fn a_wrong_token_costs_only_its_own_connection() {
         let dir = tempfile::tempdir().expect("a directory for the listening socket");
         let (path, hatching) = listening(&dir);
 
@@ -537,17 +648,14 @@ mod tests {
         assert_eq!(
             rogue.read(&mut end).ok(),
             Some(0),
-            "a wrong token costs the dialler its connection, and nothing else"
+            "a wrong token costs the dialler its connection"
         );
 
-        let mut host = UnixStream::connect(&path).expect("the host's dial");
-        host.write_all(&TOKEN.to_le_bytes()).expect("the token");
-        let mut ack = [0u8; 1];
-        host.read_exact(&mut ack).expect("the ack");
-        assert_eq!(ack[0], crate::transport::HATCH_ACK);
-
-        let pid = hatching.join().expect("a child hatched");
-        assert!(recorded(pid), "the thread hatched before it acked");
+        hatching.cancel();
+        match hatching.join() {
+            Err(Unhatched::Cancelled) => {}
+            other => panic!("the listener must still be waiting, but got {other:?}"),
+        }
     }
 
     #[test]
@@ -562,6 +670,22 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_token_cannot_pin_listener_cancellation() {
+        let dir = tempfile::tempdir().expect("a directory for the listening socket");
+        let (path, hatching) = listening(&dir);
+        let mut rogue = UnixStream::connect(path).expect("a rogue dial");
+        rogue
+            .write_all(&TOKEN.to_le_bytes()[..1])
+            .expect("a proper token prefix");
+
+        hatching.cancel();
+        match hatching.join() {
+            Err(Unhatched::Cancelled) => {}
+            other => panic!("a partial token must not pin cancellation, but got {other:?}"),
+        }
+    }
+
+    #[test]
     fn apply_seed_hydrates_scope_and_narrows_capabilities() {
         GRANT_NARROWER.get_or_init(|| deny_net);
 
@@ -570,16 +694,10 @@ mod tests {
         let seed = pack_seed(&parent, "confined".to_string()).expect("pack seed");
 
         let (mut writer, reader) = UnixStream::pair().expect("socketpair");
-        std::thread::spawn(move || {
-            crate::subprocess_codec::write_frame(&mut writer, &seed).expect("write seed");
-        });
+        std::thread::spawn(move || send_seed(&mut writer, &seed).expect("send the seed"));
 
         let mut shell = bare_child_shell();
-        let reader_fd = {
-            use std::os::fd::IntoRawFd;
-            reader.into_raw_fd()
-        };
-        apply_seed(&reader_fd.to_string(), &mut shell).expect("apply seed");
+        apply_seed(read_seed(reader).expect("read seed"), &mut shell).expect("apply seed");
 
         assert_eq!(shell.mobile.scope.get("kept"), Some(&Value::Int(7)));
         assert_eq!(

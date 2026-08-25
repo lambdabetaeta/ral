@@ -54,11 +54,14 @@ one token, one thread, no table.
   written after `spawn()` succeeds. So the roster is honest with no state column,
   and there is no window in which a registered agent has no transport. Whether the
   child *boots* is liveness's job, exactly as it is for the trunk.
-- **The listener thread has two poll sites and no clock.** It never blocks without
-  a wake pipe in its poll set, which is what makes the builtin's join safe: the
-  builtin can always get its thread back, and the only party that can leave it
-  waiting is the host — whose own wait on the ack already carries the transport's
-  liveness deadline, so no new number enters the design.
+- **The listener thread waits for a peer only with the wake pipe beside it.** Two
+  kinds of poll site and no clock: the listener, then the accepted dial before
+  every partial token read. So a peer may send one byte and stop without pinning
+  shutdown, and the builtin can always get its thread back. The one wait that is
+  *not* a poll site is the seed write, and it is bounded instead — see below. No
+  new number enters the design either way: the host's own wait on the ack already
+  carries the transport's liveness deadline, and the seed write is given that same
+  stall.
 - **`Mooring.nursery` becomes `Mooring.fork`**, a sum of `Park(Nursery)` and
   `Listen`. The nursery was always the **identity** arm's door: the reentrancy law
   bars an in-process handler from holding `&mut Shell`, so the builtin parks a fork
@@ -70,12 +73,38 @@ one token, one thread, no table.
 ## The ack byte is not ceremony
 
 The wire protocol offers no substitute: the host speaks first, and the only legal
-first frame is `Attach`. So one byte, written between `spawn()` succeeding and the
-parent dropping its end, is the **whole** of the guest's readiness signal. Without
-it the roster answers for a child that may not exist, and "the child exists before
-the host answers" degrades from a fact to a race. It lives beside the frame algebra
-— the ack is the byte before the first frame — not in a module of its own; a module
+first frame is `Attach`. So one byte, written once `spawn()` has succeeded and the
+seed has crossed, is the **whole** of the guest's readiness signal. Without it the
+roster answers for a child that may not exist, and "the child exists before the
+host answers" degrades from a fact to a race. It lives beside the frame algebra —
+the ack is the byte before the first frame — not in a module of its own; a module
 for sixteen bytes is what died here.
+
+## The seed channel is bounded, so the order is a law
+
+The socketpair holds a couple of hundred kilobytes; a seed is as large as the
+parent's scope. So the parent writes the framed `EngineSeed` only *after* spawning
+and the child reads it *before* waiting for `Attach`, applying it once `Attach` has
+selected and booted the installer. Neither side is ever waiting on protocol startup
+while the other waits on the buffer, and no seed is too large to cross.
+
+Three consequences, each load-bearing:
+
+- **The child's end is taken by value.** `spawn_engine` consumes it and closes it
+  as it returns, so no code can write the seed while a reading duplicate still
+  lives in the parent — that duplicate would leave the write blocked on a dead
+  child instead of failing it with `EPIPE`. The ordering is not a comment; it is
+  the signature.
+- **The write is bounded, not cancellable.** By the time a seed is crossing, the
+  child exists and is the parent's to reap, so what this wait needs is a bound
+  rather than the wake pipe's cancel: it is given the same stall the engine allows
+  its own protocol writes. A child that will not drain is a failed hatch, and the
+  listener thread comes back either way.
+- **A partly-sent seed kills its child.** Half a frame leaves the child blocked in
+  its own read forever, and a child with no seed can never attach; it is killed and
+  reaped on the spot rather than recorded for a sweep that waits on a death that
+  will not come. That is the one hatch failure whose child is *not* left for the
+  sweep, and the reason is exactly that the sweep could not notice it.
 
 ## The threat model, stated correctly
 
@@ -99,6 +128,15 @@ it. It holds *less* than the engine, not more; the old claim that it "already ho
 the VM's authority" was wrong about who it was. What it would gain by racing the
 host to the port is a child engine seeded with the parent's scope — the parent's
 bindings made readable to a process that should not read them.
+
+A weaker thing is reachable without the token at all: a dial that connects and then
+sends nothing keeps the listener in that one partial token read, so the host's own
+dial is never accepted and the spawn fails on the host's deadline. Losing the token
+race costs a stranger only its connection, but *stalling* costs the winner its
+hatch. That is denial of one spawn and no more — no adoption, no scope read, and the
+next enquiry binds a fresh port — so it is recorded here rather than defended
+against; the defence would be a second poll set for pending dials, bought for a
+threat the kernel's refusal already keeps off this image.
 
 Measurement narrowed this further. The guest kernel **refuses**
 `VMADDR_CID_LOCAL`, and a jailed command cannot read `/dev/vsock` to learn its own
