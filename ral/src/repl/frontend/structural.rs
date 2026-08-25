@@ -22,7 +22,7 @@
 //! runtime state and never mutates it.
 
 use ral_core::Shell;
-use ral_core::ir::{Comp, CompKind};
+use ral_core::ir::{Comp, CompKind, ScopeOp};
 use ral_core::typecheck::{Scheme, fmt_scheme, fmt_ty};
 use ral_core::types::HandleState;
 use ral_core::{CompileOutcome, Value};
@@ -664,7 +664,8 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
 }
 
 /// The first top-level pipeline in `comp`, if any — the line being composed
-/// elaborates to a bare `Pipeline`, or one under a `let` bind or a sequence.
+/// elaborates to a bare `Pipeline`, or one under a `let` bind, a sequence, or
+/// the frame holding whatever the line hoisted.
 fn find_pipeline(comp: &Comp) -> Option<&Comp> {
     match &comp.item {
         CompKind::Pipeline { .. } => Some(comp),
@@ -672,6 +673,7 @@ fn find_pipeline(comp: &Comp) -> Option<&Comp> {
         CompKind::Bind {
             comp: bound, rest, ..
         } => find_pipeline(bound).or_else(|| find_pipeline(rest)),
+        CompKind::Scope(ScopeOp::Hoisted { body }) => find_pipeline(body),
         _ => None,
     }
 }

@@ -101,6 +101,12 @@ pub(crate) fn eval_comp(
             ScopeOp::Try { body, handler } => scope::eval_try(body, handler, mooring, shell),
             ScopeOp::Guard { body, cleanup } => scope::eval_guard(body, cleanup, mooring, shell),
             ScopeOp::Audit { body } => scope::eval_audit(body, mooring, shell),
+            // A temporary is dead once `body` is, so the frame pops here.
+            // Tail position passes through: a tail callee carries its own
+            // captured environment and never reads these slots.
+            ScopeOp::Hoisted { body } => {
+                with_scope(shell, |shell| eval_comp(body, mooring, shell, tail))
+            }
         },
 
         CompKind::Seq(comps) => eval_seq(comps, tail, mooring, shell),

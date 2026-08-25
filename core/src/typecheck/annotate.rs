@@ -479,6 +479,9 @@ fn annotate_scope(comp: &Comp, op: &ScopeOp, ctx: &mut InferCtx, demand: Demand)
         ScopeOp::Audit { body } => CompKind::Scope(ScopeOp::Audit {
             body: annotate_val(body, ctx),
         }),
+        ScopeOp::Hoisted { body } => CompKind::Scope(ScopeOp::Hoisted {
+            body: Arc::new(annotate_demand(body, ctx, false, demand)),
+        }),
         ScopeOp::Redirect { body, redirects } => CompKind::Scope(ScopeOp::Redirect {
             body: Arc::new(annotate_demand(body, ctx, false, demand)),
             redirects: redirects

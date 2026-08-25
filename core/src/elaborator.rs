@@ -101,9 +101,17 @@ impl Elaborator {
         Val::Unit
     }
 
+    /// A name for a hoisted temporary.  Skips anything already bound: `_` is
+    /// ral's internal namespace, not an unwritable one, so a user's own `_var2`
+    /// must not be capturable by a temporary that happens to land on it.
     fn gensym(&mut self) -> String {
-        self.counter += 1;
-        format!("_g{}", self.counter)
+        loop {
+            self.counter += 1;
+            let name = format!("_var{}", self.counter);
+            if !self.is_bound(&name) {
+                return name;
+            }
+        }
     }
 
     fn current_scope_mut(&mut self) -> &mut HashSet<String> {
@@ -302,16 +310,19 @@ impl Elaborator {
                     self.with_span(value.span, |this| this.elab_expr(&value.item, &mut binds));
                 let pattern_ir =
                     self.with_span(pattern.span, |this| this.elab_pattern(&pattern.item));
-                let inner = comp!(
+                // The temporaries wrap the right-hand side, not the `Bind`:
+                // only the RHS reads them, and a frame around the `Bind` would
+                // take the user's own binding down with them.
+                let rhs = wrap_binds(self.current_span, binds, comp);
+                comp!(
                     self,
                     CompKind::Bind {
-                        comp: Arc::new(comp),
+                        comp: Arc::new(rhs),
                         pattern: pattern_ir,
                         rest: Arc::new(comp!(self, CompKind::Return(Val::Unit))),
                         scheme: None,
                     }
-                );
-                wrap_binds(self.current_span, binds, inner)
+                )
             }
 
             other => {
@@ -928,7 +939,10 @@ impl Elaborator {
 /// Fold `binds` into a chain of `Comp::Bind` nodes around `inner`, the first
 /// binding outermost so the chain runs in the order the hoists were pushed.
 fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) -> Comp {
-    binds
+    if binds.is_empty() {
+        return inner;
+    }
+    let chain = binds
         .into_iter()
         .rev()
         .fold(inner, |rest, (pattern, comp)| {
@@ -941,7 +955,13 @@ fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) ->
                     scheme: None,
                 },
             )
-        })
+        });
+    Spanned::with_span(
+        span,
+        CompKind::Scope(ScopeOp::Hoisted {
+            body: Arc::new(chain),
+        }),
+    )
 }
 
 /// Sugar bare `exit` / `quit` into `exit 0` / `quit 0`.  The builtin tolerates

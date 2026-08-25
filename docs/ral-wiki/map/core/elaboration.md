@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 95449d4
-generated_at_date: 2026-08-10
+generated_at_commit: 7a4bf71e
+generated_at_date: 2026-08-25
 covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 ---
 
@@ -16,6 +16,18 @@ value/computation split by binding effectful sub-expressions to fresh temporarie
 statement boundaries via `wrap_binds`). No parser syntax survives — the IR the
 elaborator hands on carries no surface conveniences
 ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
+
+A temporary's extent is bounded by two mechanisms, and both are load-bearing.
+`wrap_binds` wraps the chain in a `ScopeOp::Hoisted` frame, so the temporaries
+die with the computation that reads them; nothing else pops them, and a
+top-level `Bind` installs into the session scope, so without the frame a
+temporary stayed readable as `$_var1`, was PATH-shadow-checked on the way in,
+and was harvested by the binding-lease ledger. A `let`'s temporaries wrap its
+right-hand side rather than its `Bind`, since only the right-hand side reads
+them and a frame around the `Bind` would take the user's own binding down with
+it. `Elaborator::gensym` then skips any name already bound: `_` is ral's
+internal namespace — `use` hides it, the `_ed-*` builtins live in it — not an
+unwritable one, so a temporary must never capture a user's own `_var2`.
 
 It also resolves command heads against lexical scope
 (`Elaborator::lexical_scopes`), realising the data-vs-authority split of

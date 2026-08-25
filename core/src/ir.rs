@@ -368,6 +368,7 @@ fn walk_scope_op<'a>(op: &'a ScopeOp, out: &mut Vec<&'a str>) {
             walk_val(body, out);
         }
         ScopeOp::Audit { body } => walk_val(body, out),
+        ScopeOp::Hoisted { body } => walk_comp(body, out),
         ScopeOp::Redirect { body, redirects } => {
             walk_comp(body, out);
             walk_redirects(redirects, out);
@@ -599,6 +600,11 @@ pub enum ScopeOp {
         body: Arc<Comp>,
         redirects: Vec<RedirectV>,
     },
+    /// The frame holding the temporaries elaboration hoists out of a
+    /// statement.  Their extent is `body` and nothing wider, so the frame is
+    /// what keeps a temporary out of the session scope, off the PATH-shadow
+    /// check, and off the binding-lease ledger.
+    Hoisted { body: Arc<Comp> },
 }
 
 #[cfg(test)]
