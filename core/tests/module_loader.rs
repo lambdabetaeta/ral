@@ -346,3 +346,80 @@ fn sourced_module_runtime_error_points_into_module() {
 
     std::fs::remove_file(&path).ok();
 }
+
+// ── W1d: `Phrase::Source`/`Ran` semantics ────────────────────────────────
+//
+// `run_phrases`, `Ran`, and `Mode` (`evaluator.rs`) are additive this
+// parcel — the run door above still resolves `source`/`use` through
+// `evaluate_source`, the single-`Comp` path the rest of this file pins.
+// These two need `Phrase::Source`/`Phrase::Define` actually reaching the
+// door, which is W1e's cutover (the elaborator's `elaborate_toplevel` is
+// real already, but `compile`/`compile_and_typecheck` do not call it yet).
+
+/// A `source`d file that fails partway keeps the `Define`s it made before
+/// the failure — `Ran::env` threads them even though `Ran::outcome` is the
+/// file's own error (S12: `source` is not transactional) — and that halt
+/// halts the run that sourced it, with the same status.
+#[test]
+#[ignore = "W1e wires elaborate_toplevel"]
+fn a_sourced_failure_keeps_the_defines_before_it() {
+    let path = write_module(
+        "ral_source_partial_defines.ral",
+        "let before_fail = 1\nfail [status: 3, message: 'boom']\nlet after_fail = 2\n",
+    );
+    let p = path.to_string_lossy().into_owned();
+    let mut shell = fresh_shell();
+
+    let e = match top_level(&mut shell, &format!("source '{p}'")) {
+        Err(Break::Error(e)) => e,
+        other => panic!("expected the module's failure, got {other:?}"),
+    };
+    assert_eq!(e.status, Status::Code(3));
+    assert_eq!(
+        shell.scope_lookup("before_fail"),
+        Some(&Value::Int(1)),
+        "a `Define` before the file's halt must still be threaded into the caller"
+    );
+    assert!(
+        shell.scope_lookup("after_fail").is_none(),
+        "a `Define` after the file's halt never ran"
+    );
+
+    std::fs::remove_file(&path).ok();
+}
+
+/// `use` runs the module under the session as extended by this run's
+/// earlier `Define`s — not under the caller's block-local `let`s — and
+/// returns exactly the names the module's own `Define`s bound, minus the
+/// `_`-prefixed ones (S7).
+#[test]
+#[ignore = "W1e wires elaborate_toplevel"]
+fn use_sees_earlier_session_defines_and_returns_only_defined_names() {
+    let path = write_module(
+        "ral_use_defines.ral",
+        "let visible = 1\nlet _private = 2\nlet reads_earlier = $[$outer_define + 1]\n",
+    );
+    let p = path.to_string_lossy().into_owned();
+    let mut shell = fresh_shell();
+
+    let m = top_level(&mut shell, &format!("let outer_define = 41\nuse '{p}'"))
+        .expect("use must see the session extended by this run's earlier Define");
+    match m {
+        Value::Map(rec) => {
+            assert_eq!(rec.get("visible"), Some(&Value::Int(1)));
+            assert_eq!(rec.get("reads_earlier"), Some(&Value::Int(42)));
+            assert!(
+                rec.get("_private").is_none(),
+                "a `_`-prefixed name must not appear in the returned map"
+            );
+            assert_eq!(
+                rec.len(),
+                2,
+                "exactly the module's own Defines, minus `_private`"
+            );
+        }
+        other => panic!("expected Map, got {other:?}"),
+    }
+
+    std::fs::remove_file(&path).ok();
+}

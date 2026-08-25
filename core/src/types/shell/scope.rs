@@ -180,35 +180,42 @@ impl Shell {
         self.mobile.scope.set(name, value);
     }
 
-    /// The evaluator's single install point for a scope entry, so writing a
-    /// name and stamping the binding-lease ledger can never be pulled apart
-    /// at a call site: `assign_pattern` and `eval_letrec` both route here.  A
-    /// session-scope write starts a fresh non-baseline name's lease and
-    /// renews an existing one — writing a name is itself interest in it.
-    /// Deeper frames (block, lambda, letrec, a `use` body) are recorded
-    /// nowhere, since `Env::at_session_scope` classifies rather than any
-    /// caller.  The host verbs [`Self::bind_value`] and [`Self::set_var`]
-    /// stay on the raw `Env` primitive: every host call to them precedes
-    /// arming, so the boot baseline already covers them.
+    /// The evaluator's single install point for a scope entry.
     ///
-    /// An armed session-scope write whose [`Value::shallow_size`] meets the
-    /// lease's `large_binding_bytes` also queues a residency notice —
-    /// orthogonal to the idle lease and to baseline status, and requeued by
-    /// each rebind still over the threshold.
+    /// Still runs [`Self::note_define`] itself, gated on
+    /// [`Env::at_session_scope`] — the run door does not build `Phrase`s yet
+    /// (W1e), so a top-level `let` reaches this through `eval_bind`, not
+    /// `run_phrases`, and this depth-based gate is today's only way to know
+    /// it is a session write.  `run_phrases`'s `Define` arm calls
+    /// `note_define` itself too, by `Mode` rather than depth (§1.3's actual
+    /// design — depth cannot tell a `use` body cloning the session scope for
+    /// isolation from a real session write, which is exactly why `Mode`
+    /// exists); until W1e retires this gate, a `Phrase::Define` note_defines
+    /// twice, which only `run_phrases`'s own inert tests can observe today.
     pub(crate) fn install_scope_binding(&mut self, name: String, binding: Binding) {
-        let session = self.mobile.scope.at_session_scope();
-        if session {
-            self.local.bindings.note_install(&name);
-            if let Some(lease) = self.local.bindings.lease() {
-                let bytes = binding.value.shallow_size() as u64;
-                if bytes >= lease.large_binding_bytes {
-                    self.local
-                        .bindings
-                        .queue_large_binding_notice(name.clone(), bytes);
-                }
-            }
+        if self.mobile.scope.at_session_scope() {
+            self.note_define(&name, &binding);
         }
         self.mobile.scope.set_binding(name, binding);
+    }
+
+    /// Record a `Phrase::Define`'s binding on the lease ledger: starts a
+    /// fresh non-baseline name's lease and renews an existing one — writing
+    /// a name is itself interest in it — and, when the lease is armed and
+    /// [`Value::shallow_size`] meets `large_binding_bytes`, queues a
+    /// residency notice.  Called from [`Self::install_scope_binding`]'s own
+    /// depth gate today, and from `run_phrases`'s `Define` arm under
+    /// `Mode::Session`  — see that method's doc for why both exist for now.
+    pub(crate) fn note_define(&mut self, name: &str, binding: &Binding) {
+        self.local.bindings.note_install(name);
+        if let Some(lease) = self.local.bindings.lease() {
+            let bytes = binding.value.shallow_size() as u64;
+            if bytes >= lease.large_binding_bytes {
+                self.local
+                    .bindings
+                    .queue_large_binding_notice(name.to_string(), bytes);
+            }
+        }
     }
 
     /// Look `name` up in the lexical scope chain, natives included — *not*

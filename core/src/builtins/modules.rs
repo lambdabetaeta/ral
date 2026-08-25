@@ -13,8 +13,10 @@
 
 use std::path::Path;
 
-use crate::ir::Comp;
-use crate::types::{Break, Mooring, Settled, Shell, Value, sig};
+use crate::evaluator::{Mode, Ran};
+use crate::ir::{Comp, Toplevel};
+use crate::source::Span;
+use crate::types::{Break, CommandOrigin, Control, Env, Mooring, Settled, Shell, Value, sig};
 
 use super::util::arg0_str;
 
@@ -80,6 +82,156 @@ pub fn evaluate_source(
 ) -> Settled<Value> {
     let comp = check_source(source, virtual_path, shell)?;
     evaluate_checked(mooring, shell, &comp, source, virtual_path)
+}
+
+// ── Phrases (§3.3) ──────────────────────────────────────────────────────
+//
+// The `Toplevel`-based door `Phrase::Source`/`CompKind::Source` and (once
+// W1e's cutover flips them) `source`/`use` call through. Additive for now:
+// `builtin_source`/`builtin_use` stay on [`evaluate_source`] — the run door
+// still resolves a program through `elaborate`/`typecheck`, not
+// `elaborate_toplevel`/`typecheck_toplevel` (`lib.rs`'s `compile`/
+// `compile_and_typecheck`, W1e's to cut over) — and `CompKind::Source`'s
+// caller in `evaluator/comp.rs` is itself unreachable until W1e wires
+// `stmts_nested` into `elab_expr`.  [`source`] and [`source_phrases`] are
+// otherwise complete: `compile_toplevel` below calls the real
+// `elaborate_toplevel`/`typecheck_toplevel`.
+
+/// Load `path`'s text, compile it to a [`Toplevel`], and run its phrases
+/// under `mode` — the `source` half of §3.3, mirroring [`evaluate_source`]'s
+/// resolution but over phrases rather than one `Comp`.
+///
+/// # Errors
+/// A load refusal — cycle, depth limit, read failure, compile failure —
+/// stops before any phrase runs; see [`source_phrases`].
+pub(crate) fn source(
+    path: &str,
+    env: Env,
+    mode: Mode,
+    span: Option<Span>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Ran> {
+    let resolved = resolve_relative_to_current_script(path, shell);
+    let abs_path = shell
+        .resolve(&resolved.to_string_lossy())
+        .canonicalise_strict()
+        .map_or_else(
+            |_| resolved.to_string_lossy().into_owned(),
+            |p| p.to_string_lossy().into_owned(),
+        );
+    let text = read_and_normalize(&resolved, &abs_path, "source", shell)?;
+    let top = compile_toplevel(&text, &abs_path, shell).map_err(|e| tag_loader_error("source", e))?;
+    source_phrases(&top, env, mode, &abs_path, &text, span, mooring, shell)
+}
+
+/// Elaborate and typecheck `source_text` into a [`Toplevel`], seeded from
+/// the live session's schemes exactly as [`check_source`] seeds the
+/// single-`Comp` path.  The `FileId` is peeked, not minted, on the same
+/// promise `check_source` relies on: [`source_phrases`]'s
+/// `install_script_context` call, a moment later, is the one registration
+/// in between.
+fn compile_toplevel(source_text: &str, virtual_path: &str, shell: &Shell) -> Settled<Toplevel> {
+    let file = shell.session.sources.next_id();
+    let ast = crate::syntax::parser::parse_with(source_text, file).map_err(|e| sig(e.to_string()))?;
+    let bindings = shell
+        .session_schemes()
+        .bindings
+        .iter()
+        .map(|(n, _)| n.clone())
+        .collect();
+    let top = crate::elaborator::elaborate_toplevel(&ast, bindings, virtual_path)
+        .map_err(|e| sig(e.to_string()))?;
+    crate::typecheck::typecheck_toplevel(&top, shell.session_schemes()).map_err(|errs| {
+        sig(errs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"))
+    })
+}
+
+/// Run `top`'s phrases under `mode`, guarded by the same cycle/depth checks
+/// and module-stack bookkeeping [`evaluate_checked`] applies to a bare
+/// `Comp`; the call is recorded in the audit trail as a native's is
+/// ([`crate::evaluator::audit::frame_call`]), `span` standing in for the
+/// call site a form has no argument list to carry.
+///
+/// # Errors
+/// A circular dependency or a depth-limit refusal — before any phrase runs.
+/// A phrase that halts is `Ran::outcome`, not this `Err`: `source` is not
+/// transactional (S12), so every caller threads `Ran::env` before it
+/// propagates `Ran::outcome`.
+pub(crate) fn source_phrases(
+    top: &Toplevel,
+    env: Env,
+    mode: Mode,
+    virtual_path: &str,
+    source_text: &str,
+    span: Option<Span>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Ran> {
+    let key = virtual_path.to_string();
+    if shell.mobile.context.modules.stack.contains(&key) {
+        let cycle: Vec<&str> = shell
+            .mobile
+            .context
+            .modules
+            .stack
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
+        return Err(sig(format!(
+            "circular dependency: {} -> {key}",
+            cycle.join(" -> ")
+        )));
+    }
+    if shell.mobile.context.modules.stack.len() >= MAX_SOURCE_DEPTH {
+        return Err(sig(format!(
+            "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
+        )));
+    }
+    shell.install_script_context(&key, source_text);
+    shell.local.audit.call_site = span;
+    let frame = ModuleStackFrame::enter(shell, key);
+    let mut ran_slot = None;
+    let _ = crate::evaluator::audit::frame_call(
+        "source",
+        &[Value::String(virtual_path.to_string())],
+        CommandOrigin::Builtin,
+        mooring,
+        frame.shell,
+        |shell, _frame| {
+            let ran = crate::evaluator::run_phrases(&top.phrases, env, mode, mooring, shell);
+            let outcome = match &ran.outcome {
+                Ok(_) => Ok(Value::Unit),
+                Err(e) => Err(Control::Break(e.clone())),
+            };
+            ran_slot = Some(ran);
+            outcome
+        },
+    );
+    drop(frame);
+    Ok(ran_slot.expect("frame_call always invokes its body exactly once"))
+}
+
+/// Pops the module stack on `Drop`, panic included — the guard [`source_phrases`] promised.
+struct ModuleStackFrame<'a> {
+    shell: &'a mut Shell,
+}
+
+impl<'a> ModuleStackFrame<'a> {
+    fn enter(shell: &'a mut Shell, key: String) -> Self {
+        shell.mobile.context.modules.stack.push(key);
+        Self { shell }
+    }
+}
+
+impl Drop for ModuleStackFrame<'_> {
+    fn drop(&mut self) {
+        self.shell.mobile.context.modules.stack.pop();
+    }
 }
 
 /// Compile `source` seeded from the live session's schemes, so a loaded
@@ -216,4 +368,59 @@ fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::P
         String::as_str,
     );
     crate::path::resolve_relative_to_script(path, script)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write `contents` to a fresh temp `.ral` file and return its path —
+    /// the caller removes it; mirrors `core/tests/module_loader.rs`'s
+    /// `write_module` for these crate-internal, direct-API tests.
+    fn write_temp(name: &str, contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, contents).expect("write temp module");
+        path
+    }
+
+    /// [`source`] end to end: `compile_toplevel` through the real
+    /// `elaborate_toplevel`/`typecheck_toplevel`, `run_phrases` over the
+    /// result.  Not reachable through the run door yet (W1e), but every
+    /// piece it calls is real.
+    #[test]
+    fn source_runs_a_files_defines_and_reports_unit() {
+        let path = write_temp("ral_w1d_source_ok.ral", "let sourced_ok = 5");
+        let p = path.to_string_lossy().into_owned();
+        let mut shell = Shell::default();
+        let env = shell.mobile.scope.clone();
+        let ran = source(&p, env, Mode::Local, None, &Mooring::adrift(), &mut shell)
+            .expect("a well-formed file must load");
+        assert!(
+            matches!(ran.outcome, Ok(Value::Unit)),
+            "`source`'s own value is Unit (S12)"
+        );
+        assert_eq!(ran.defined, vec!["sourced_ok".to_string()]);
+        assert_eq!(ran.env.get("sourced_ok"), Some(&Value::Int(5)));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A file that halts midway is `Ran::outcome`, not the door's `Err`
+    /// (S12): the `Define`s before the halt are still in `Ran::env`.
+    #[test]
+    fn source_halting_midway_keeps_the_defines_before_the_halt() {
+        let path = write_temp(
+            "ral_w1d_source_halt.ral",
+            "let sourced_before = 1\nexit 9\nlet sourced_after = 2",
+        );
+        let p = path.to_string_lossy().into_owned();
+        let mut shell = Shell::default();
+        let env = shell.mobile.scope.clone();
+        let ran = source(&p, env, Mode::Local, None, &Mooring::adrift(), &mut shell)
+            .expect("a load refusal is a different Err; the file itself loaded fine");
+        assert!(ran.outcome.is_err(), "the file's own halt is Ran::outcome");
+        assert_eq!(ran.defined, vec!["sourced_before".to_string()]);
+        assert_eq!(ran.env.get("sourced_before"), Some(&Value::Int(1)));
+        assert!(ran.env.get("sourced_after").is_none());
+        std::fs::remove_file(&path).ok();
+    }
 }

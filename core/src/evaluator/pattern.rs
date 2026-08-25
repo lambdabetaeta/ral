@@ -5,11 +5,12 @@
 use super::comp::eval_comp;
 use crate::ir::IrPattern;
 use crate::typecheck::Scheme;
-use crate::types::{Binding, Mooring, Raw, Shell, Tail, Value};
+use crate::types::{Binding, Control, Mooring, Raw, Settled, Shell, Tail, Value};
 
 /// Refuse every name a `let` pattern binds that would shadow a PATH command.
-/// `eval_bind` alone calls this: a lambda parameter is a local lexical name,
-/// not a command name, so the trampoline binds one unchecked.
+/// `run_phrases`'s `Define` arm alone calls this, under `Mode::Session`: a
+/// nested `Bind`'s pattern is a local lexical name, not a command name, so
+/// the trampoline binds one unchecked.
 pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Raw<()> {
     match pattern {
         IrPattern::Wildcard => Ok(()),
@@ -32,13 +33,14 @@ pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Raw<()
     }
 }
 
-/// Refuse a session-scope binding that shadows a command on `PATH`: ral keeps
-/// the value and command namespaces disjoint.  Block, lambda and prelude
-/// bindings never enter the command namespace, so they go unchecked.
+/// Refuse a binding that shadows a command on `PATH`: ral keeps the value
+/// and command namespaces disjoint.  The caller — `run_phrases`'s `Define`
+/// arm, under `Mode::Session` alone — is the only one that ever reaches
+/// this, so every call here is already at session scope; block, lambda and
+/// prelude bindings never enter the command namespace, so they go unchecked
+/// by never calling in.
 pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Raw<()> {
-    if shell.mobile.scope.at_session_scope()
-        && let Some(path) = shell.locate_command(name)
-    {
+    if let Some(path) = shell.locate_command(name) {
         return Err(shell
             .err_hint(
                 format!(
@@ -71,6 +73,146 @@ pub(crate) fn assign_pattern(
         shell.install_scope_binding(name, binding);
     }
     Ok(())
+}
+
+/// Stage `pattern`'s bindings against `value`, attaching to each bound name
+/// the scheme `schemes` lists for it — a destructuring `Phrase::Define`
+/// carries one scheme per component, unlike [`assign_pattern`]'s single
+/// scheme shared by a whole-value `Name` pattern alone.  All-or-nothing, as
+/// [`assign_pattern`] is: nothing is installed here, so `run_phrases` can
+/// still discard the lot on a later failure.  Returns the staged bindings in
+/// pattern order — `run_phrases` installs each one itself, so it can run
+/// `Shell::note_define` beside the install rather than after it.
+///
+/// # Errors
+/// The same shape mismatches [`assign_pattern`] reports; never a `Tail`, so
+/// the caller need not thread [`Raw`] any further than here.
+pub(crate) fn bind_pattern(
+    pattern: &IrPattern,
+    value: &Value,
+    schemes: &[(String, Scheme)],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Vec<(String, Binding)>> {
+    let mut staged = Vec::new();
+    stage_pattern_named(pattern, value, schemes, mooring, shell, &mut staged).map_err(
+        |control| match control {
+            Control::Break(b) => b,
+            Control::Tail(_) => unreachable!("pattern staging never applies a tail call"),
+        },
+    )?;
+    Ok(staged)
+}
+
+fn scheme_for<'a>(schemes: &'a [(String, Scheme)], name: &str) -> Option<&'a Scheme> {
+    schemes.iter().find(|(n, _)| n == name).map(|(_, s)| s)
+}
+
+/// [`stage_pattern`]'s sibling for [`bind_pattern`]: the same shape walk,
+/// looking up every leaf's scheme by name instead of broadcasting one scheme
+/// from the pattern's root.
+fn stage_pattern_named(
+    pattern: &IrPattern,
+    value: &Value,
+    schemes: &[(String, Scheme)],
+    mooring: &Mooring,
+    shell: &mut Shell,
+    staged: &mut Vec<(String, Binding)>,
+) -> Raw<()> {
+    match pattern {
+        IrPattern::Wildcard => Ok(()),
+        IrPattern::Name(name) => {
+            staged.push((
+                name.clone(),
+                Binding {
+                    value: value.clone(),
+                    scheme: scheme_for(schemes, name).cloned(),
+                },
+            ));
+            Ok(())
+        }
+        IrPattern::List { elems, rest } => {
+            let Value::List(items) = value else {
+                return Err(shell
+                    .err_hint(
+                        format!("expected List, got {}", value.type_name()),
+                        "right-hand side must be a list",
+                        1,
+                    )
+                    .into());
+            };
+            if elems.len() > items.len() {
+                let hint = if rest.is_none() {
+                    "use [..., ...rest] to capture remaining elements"
+                } else {
+                    "the list has too few elements for the named bindings"
+                };
+                return Err(shell
+                    .err_hint(
+                        format!("need {} values, got {}", elems.len(), items.len()),
+                        hint,
+                        1,
+                    )
+                    .into());
+            }
+            if rest.is_none() && items.len() > elems.len() {
+                return Err(shell
+                    .err_hint(
+                        format!("need {} values, got {}", elems.len(), items.len()),
+                        "there are more elements; use [..., ...rest] to capture them",
+                        1,
+                    )
+                    .into());
+            }
+            for (i, pat) in elems.iter().enumerate() {
+                stage_pattern_named(pat, &items[i], schemes, mooring, shell, staged)?;
+            }
+            if let Some(name) = rest {
+                let mut whole = items.clone();
+                let tail = whole.split_off(elems.len());
+                staged.push((
+                    name.clone(),
+                    Binding {
+                        value: Value::List(tail),
+                        scheme: scheme_for(schemes, name).cloned(),
+                    },
+                ));
+            }
+            Ok(())
+        }
+        IrPattern::Map(entries) => {
+            let Value::Map(m) = value else {
+                return Err(shell
+                    .err_hint(
+                        format!("expected Map, got {}", value.type_name()),
+                        "right-hand side must be a map",
+                        1,
+                    )
+                    .into());
+            };
+            for entry in entries {
+                let key_label = entry.key.row_label();
+                let val = match (m.get(&key_label), &entry.default) {
+                    (Some(v), _) => v.clone(),
+                    (None, Some(default_comp)) => {
+                        eval_comp(default_comp, mooring, shell, Tail::No)?
+                    }
+                    (None, None) => {
+                        let ks: Vec<&str> = m.keys().map(std::string::String::as_str).collect();
+                        return Err(shell
+                            .err_hint(
+                                format!("key '{key_label}' not found"),
+                                format!("available: {}", ks.join(", ")),
+                                1,
+                            )
+                            .into());
+                    }
+                };
+                stage_pattern_named(&entry.pattern, &val, schemes, mooring, shell, staged)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Recursive worker for [`assign_pattern`]: pushes each binding onto `staged`

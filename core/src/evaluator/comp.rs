@@ -6,8 +6,7 @@
 //! `TailCall` escapes through [`Raw`], and an absorption point above
 //! ([`super::absorb_tail`]) must land it before a settled caller sees it.
 
-use crate::ir::{Comp, CompKind, IrPattern, PipeYield, Register, Val};
-use crate::path::tilde::{Unexpandable, expand_tilde_path};
+use crate::ir::{Comp, CompKind, IrPattern, PipeYield, Val};
 use crate::source::Spanned;
 use crate::typecheck::Scheme;
 use crate::types::{Binding, Break, Control, Error, Mooring, Raw, Shell, Tail, Value};
@@ -50,7 +49,7 @@ pub(crate) fn eval_comp(
 
         CompKind::Rec { group, index } => eval_rec(group, *index, tail, mooring, shell),
 
-        CompKind::Observe(reg) => eval_observe(reg, shell).map_err(Into::into),
+        CompKind::Observe(reg) => super::observe::observe(reg, shell).map_err(Into::into),
 
         CompKind::Force(val) => step_force(val, mooring, shell),
 
@@ -110,11 +109,10 @@ pub(crate) fn eval_comp(
             with_scope(shell, |shell| eval_comp(body, mooring, shell, tail))
         }
 
-        // W1b's elaborator is the first thing to lower a `source` statement
-        // to this node; nothing constructs it yet.
-        CompKind::Source { .. } => unreachable!(
-            "CompKind::Source is not emitted before W1b's elaborator lowers `source`"
-        ),
+        // `stmts_nested`'s `Source` lowering (S2) is not wired into
+        // `elab_expr`'s `Block`/`Lambda` arms until W1e's cutover, so this
+        // node is unreachable from any live compile path today.
+        CompKind::Source { path, rest } => eval_source(path, rest, comp.span, tail, mooring, shell),
 
         CompKind::Seq(comps) => eval_seq(comps, tail, mooring, shell),
     };
@@ -137,7 +135,9 @@ fn eval_return(val: &Val, shell: &mut Shell) -> Raw<Value> {
 
 /// A Bool result becomes `last_status` (true → 0), mirroring POSIX
 /// predicates like `test`; any other value leaves the status untouched.
-fn set_status_from_value(v: &Value, shell: &mut Shell) {
+/// `pub(crate)` so `run_phrases` (`evaluator.rs`) can apply the same rule to
+/// a `Define`'s RHS.
+pub(crate) fn set_status_from_value(v: &Value, shell: &mut Shell) {
     if let Value::Bool(b) = v {
         shell.set_status_from_bool(*b);
     }
@@ -184,45 +184,6 @@ fn eval_rec(
             None => eval_comp(member, mooring, shell, tail),
         }
     })
-}
-
-/// A read of the store: the five pseudo-variables, total by
-/// [`Shell::pseudo_var`], and a `~`-path awaiting `HOME`.
-fn eval_observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
-    match reg {
-        Register::Env => Ok(shell.pseudo_var("ENV").expect("ENV is a total pseudo-var")),
-        Register::Args => Ok(shell
-            .pseudo_var("ARGS")
-            .expect("ARGS is a total pseudo-var")),
-        Register::Nproc => Ok(shell
-            .pseudo_var("NPROC")
-            .expect("NPROC is a total pseudo-var")),
-        Register::Cwd => Ok(shell.pseudo_var("CWD").expect("CWD is a total pseudo-var")),
-        Register::User => Ok(shell
-            .pseudo_var("USER")
-            .expect("USER is a total pseudo-var")),
-        Register::Tilde(path) => {
-            let home = shell.mobile.context.home();
-            expand_tilde_path(
-                path.user.as_deref(),
-                path.suffix.as_deref(),
-                home.as_deref(),
-            )
-            .map(Value::String)
-            .map_err(|cause| {
-                shell.err_hint(
-                    format!("cannot resolve {}: {}", path.to_literal(), cause.why()),
-                    match cause {
-                        Unexpandable::HomeUnknown => "set HOME, or spell out an explicit path",
-                        Unexpandable::ForeignUser => {
-                            "use bare ~ for the current user, or spell out an explicit path"
-                        }
-                    },
-                    1,
-                )
-            })
-        }
-    }
 }
 
 /// `force V` — a [`Value::Block`] runs through the evaluator; a
@@ -369,6 +330,17 @@ fn eval_decode(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<Va
 /// `M to x. N` — run `M`, destructure its result against `pattern`, then
 /// continue with `rest`, which inherits the bind's own tail position.
 ///
+/// `M` runs under the ambient sink (S11): its own bytes are effect, not the
+/// bound value, exactly as a discarded statement's are — `a; b` is `a to _.
+/// b`, so this is sequencing's one routing rule.
+///
+/// The PATH-shadow check belongs to `run_phrases`'s `Define` arm now, under
+/// `Mode::Session` alone (a nested `Bind`'s pattern is never a command
+/// name) — but the run door does not build `Phrase`s yet (W1e), so a
+/// top-level `let` still reaches this node, and this still guards it at
+/// session scope; the W1e cutover that retires the guard here is the same
+/// one that gives `run_phrases`'s copy a caller.
+///
 /// The checker's `scheme` for the node installs together with the value, so
 /// the next run's check is seeded from the live binding.
 fn eval_bind(
@@ -381,11 +353,51 @@ fn eval_bind(
     shell: &mut Shell,
 ) -> Raw<Value> {
     crate::process::check(mooring)?;
-    super::pattern::check_pattern_shadow(pattern, shell)?;
-    let val = eval_comp(m, mooring, shell, Tail::No)?;
+    if shell.mobile.scope.at_session_scope() {
+        super::pattern::check_pattern_shadow(pattern, shell)?;
+    }
+    let step = super::capture::with_ambient_stdout(shell, |shell| {
+        eval_comp(m, mooring, shell, Tail::No)
+    })
+    .map_err(|e| shell.err(format!("statement sink: {e}"), 1))?;
+    let val = step?;
     set_status_from_value(&val, shell);
     assign_pattern(pattern, &val, scheme, mooring, shell)?;
     eval_comp(rest, mooring, shell, tail)
+}
+
+/// `source path` in a block: run the file's phrases in [`super::Mode::Local`]
+/// — a block-local `source` leases nothing (§3.2) — then continue with
+/// `rest` under the file's `Define`s, already installed into
+/// `shell.mobile.scope`: today's install-into-ambient-scope made this
+/// structural.  The file's own halt halts the block, after its `Define`s
+/// before the halt are threaded (S12).
+fn eval_source(
+    path: &Arc<Comp>,
+    rest: &Arc<Comp>,
+    span: Option<crate::source::Span>,
+    tail: Tail,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Raw<Value> {
+    let path_val = eval_comp(path, mooring, shell, Tail::No)?;
+    let Value::String(p) = path_val else {
+        return Err(shell
+            .err_hint(
+                format!("source: expected String, got {}", path_val.type_name()),
+                "the path to `source` must be a computation of type F String",
+                1,
+            )
+            .into());
+    };
+    let env = shell.mobile.scope.clone();
+    let ran = crate::builtins::modules::source(&p, env, super::Mode::Local, span, mooring, shell)
+        .map_err(Control::Break)?;
+    shell.mobile.scope = ran.env;
+    match ran.outcome {
+        Ok(_) => eval_comp(rest, mooring, shell, tail),
+        Err(e) => Err(Control::Break(e)),
+    }
 }
 
 /// A single-stage pipeline is just its inner computation, and inherits the
@@ -474,7 +486,7 @@ fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shel
                 eval_comp(c, mooring, shell, Tail::No)
             })
             .map_err(|e| shell.err(format!("statement sink: {e}"), 1))?;
-            step.map_err(|control| note_abandoned_steps(control, len - i - 1))?
+            step.map_err(note_abandoned_steps)?
         };
     }
     Ok(result)
@@ -483,15 +495,16 @@ fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shel
 /// A failing part abandons the parts after it, and nothing downstream can tell
 /// that from a sequence that simply had fewer parts: `audit`'s `children` just
 /// stops short. Name the abandonment on the error, on the innermost sequence
-/// that suffered it — an outer one leaves the inner hint standing.
-fn note_abandoned_steps(control: Control, abandoned: usize) -> Control {
+/// that suffered it — an outer one leaves the inner hint standing. No count
+/// (S11): once a hoisted temporary is a step of the chain too, the count
+/// would name binds rather than statements.
+pub(crate) fn note_abandoned_steps(control: Control) -> Control {
     match control {
         Control::Break(Break::Error(e)) if e.hint.is_none() => {
-            let steps = if abandoned == 1 { "step" } else { "steps" };
-            Control::Break(Break::Error(e.with_hint(format!(
-                "{abandoned} later {steps} in this block did not run; wrap a step in \
-                 `attempt` if its failure should not stop the rest"
-            ))))
+            Control::Break(Break::Error(e.with_hint(
+                "later steps in this block did not run; wrap a step in `attempt` if its \
+                 failure should not stop the rest",
+            )))
         }
         other => other,
     }

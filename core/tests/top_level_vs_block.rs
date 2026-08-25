@@ -429,6 +429,162 @@ fn block_grant_does_not_leak_cd() {
     );
 }
 
+// ── (6b) W1d: run phrases, ambient routing, block-local `source` ────────
+//
+// The Toplevel/Phrase/`Mode` machinery `run_phrases` (`evaluator.rs`) adds
+// this parcel is not yet wired into the run door above — that is W1e's
+// cutover, once the elaborator's `stmts_nested`/`elaborate_toplevel` land
+// in `compile`/`compile_and_typecheck`.  Tests below that need the new
+// `Source` shapes are `#[ignore]`d until then; the two that pin
+// already-true invariants (S11's ambient-routing rule, and revision 3's
+// kept `let _` rule) run today, unaffected by which elaborator produced
+// the IR.
+
+/// Like [`top_level`], but with stdout captured instead of inherited, so a
+/// test can tell what a run *printed* apart from what it *bound*.
+fn top_level_capturing(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<u8>) {
+    match shell.run(RunRequest {
+        run: Run {
+            program: Program::Source(source.into()),
+            script_name: "<test>".into(),
+            caps: Capabilities::root(),
+            wall: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: RunIo::Capture,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: RunStdin::Inherit,
+            trail: None,
+        },
+        surface: None,
+        deferred: None,
+        desk: None,
+        fork: None,
+        lifecycle: Box::new(()),
+    }) {
+        RunReport::Ran {
+            ending, captured, ..
+        } => (
+            ending.into_result(),
+            captured.map(|c| c.stdout).unwrap_or_default(),
+        ),
+        RunReport::Static { .. } => panic!("well-formed source must run: {source:?}"),
+    }
+}
+
+/// A bare forced block (`!{ ... }`, no `grant`/`within`/`try`/`guard`) is
+/// still a block boundary: its `let` does not persist.  Sibling of the
+/// `block_*_does_not_leak_let_binding` tests above, without a handler
+/// bracket in the way.
+#[test]
+fn bare_forced_block_does_not_leak_let_binding() {
+    let mut shell = fresh_shell();
+    let _ = top_level(&mut shell, "let outer_val = !{ let leak_bare = 1 }")
+        .expect("forced block should succeed");
+    assert!(
+        shell.scope_lookup("leak_bare").is_none(),
+        "`let` inside a bare forced block must not leak into the parent env"
+    );
+}
+
+/// `a; b`'s one routing rule (S11): a non-final step's bytes are effect and
+/// go to the visible stream, while the block's own value comes from its
+/// tail alone.  `!{ echo one; echo two }`'s value is the tail's decoded
+/// text ("two"); `echo one`'s bytes print regardless.
+#[test]
+fn sequence_inside_a_forced_block_prints_the_non_final_step_and_binds_the_tail() {
+    let mut shell = fresh_shell();
+    let (result, stdout) =
+        top_level_capturing(&mut shell, "let seq_out = !{ echo one; echo two }\nreturn $seq_out");
+    assert_eq!(
+        result.expect("sequence inside a forced block must succeed"),
+        Value::String("two".into()),
+        "the block's value is its tail's decoded text"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "one\n",
+        "the non-final step's bytes must reach the visible stream"
+    );
+}
+
+/// A top-level `let _ = M` still captures and drops `M`'s tail bytes — the
+/// one rule every `let` has (revision 3, §0.4 item 1) — so only the
+/// statement after it is seen.
+#[test]
+fn let_wildcard_discards_the_rhs_and_prints_only_what_follows() {
+    let mut shell = fresh_shell();
+    let (result, stdout) = top_level_capturing(&mut shell, "let _ = echo secret\necho done");
+    result.expect("discard-let followed by echo must succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "done\n",
+        "`let _ = echo secret` must not print `secret`"
+    );
+}
+
+/// `source` inside a block scopes its `Define`s over the rest of the
+/// block — today's install-into-ambient-scope made structural, kept by
+/// `CompKind::Source`'s frame (§3.3).  Needs `stmts_nested` wired into
+/// `elab_expr`, which is W1e's cutover.
+#[test]
+#[ignore = "W1e wires elaborate_toplevel"]
+fn source_in_a_block_scopes_over_the_rest_of_the_block() {
+    let mut shell = fresh_shell();
+    let path = module_loader_fixture(
+        "top_level_vs_block_source_scope.ral",
+        "let scoped_from_file = 99",
+    );
+    let result = top_level(
+        &mut shell,
+        &format!("!{{ source '{}'; return $scoped_from_file }}", path.display()),
+    );
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(result.expect("sourced name must be visible to the rest of the block"), Value::Int(99));
+}
+
+/// A block-local `source` leases nothing (Mode::Local): the run's own
+/// `Define`s are session leases, a nested `source`'s are not.  Needs
+/// `Phrase::Source`/`CompKind::Source` wired into the run door.
+#[test]
+#[ignore = "W1e wires elaborate_toplevel"]
+fn block_local_source_leases_nothing() {
+    let mut shell = fresh_shell();
+    let before = shell.leased_binding_count();
+    let path = module_loader_fixture(
+        "top_level_vs_block_source_no_lease.ral",
+        "let leased_from_file = 1",
+    );
+    let _ = top_level(&mut shell, &format!("!{{ source '{}' }}", path.display()));
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        shell.leased_binding_count(),
+        before,
+        "a block-local `source` must not add to the binding-lease ledger"
+    );
+}
+
+/// `source` is a definition form: its own value is `()`, like a block
+/// ending in `let` (S12).
+#[test]
+#[ignore = "W1e wires elaborate_toplevel"]
+fn source_is_unit() {
+    let mut shell = fresh_shell();
+    let path = module_loader_fixture("top_level_vs_block_source_unit.ral", "let x = 1");
+    let result = top_level(&mut shell, &format!("source '{}'", path.display()));
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(result.expect("source must succeed"), Value::Unit);
+}
+
+/// Write `contents` to a fresh temp `.ral` file under `name` and return its
+/// path — the `#[ignore]`d `source`-form tests' fixture, mirroring
+/// `module_loader.rs`'s `write_module`.
+fn module_loader_fixture(name: &str, contents: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(name);
+    std::fs::write(&path, contents).expect("write temp module");
+    path
+}
+
 // ── (7) Sandbox parity ──────────────────────────────────────────────────
 
 /// Persistence, partial effects, and cwd must look the same whether or

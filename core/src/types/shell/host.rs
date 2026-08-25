@@ -339,6 +339,11 @@ impl Shell {
     /// name cannot come back through a panic rollback either, since
     /// [`Shell::run`] checkpoints at run entry, after any earlier prune.
     ///
+    /// Depth-gated rather than `Mode`-gated (contrast `install_scope_binding`
+    /// and `note_define`, `types/shell/scope.rs`) because `run_phrases` does
+    /// not call this: it is the ready boundary's own door, reached only
+    /// between runs, and `Mode` is a property of a run in progress.
+    ///
     /// One pass in sorted order: a name absent from scope had its install
     /// rolled back, so the orphan drops silently; a value that structurally
     /// reaches a running handle is pinned and re-examined next boundary; the
