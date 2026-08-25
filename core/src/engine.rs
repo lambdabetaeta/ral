@@ -20,7 +20,7 @@ use crate::transport::{
     Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
     answer_probe,
 };
-use crate::types::{DeferredSink, EnquiryDesk, Error, Nursery, Shell, SurfaceSink};
+use crate::types::{DeferredSink, EnquiryDesk, Error, Fork, Shell, SurfaceSink};
 use crate::wire::WireChannel;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -463,13 +463,7 @@ fn engine_session(
                         surface: Some(surface.clone() as SurfaceSink),
                         deferred: Some(deferred.clone() as Arc<dyn DeferredSink>),
                         desk: Some(worker_desk.clone() as crate::types::Desk),
-                        // Fresh per dispatch, exactly as the host's own
-                        // `Agent::run_shell` mints one per call: a wire
-                        // trunk's `agent` builtin forks into it and, on the
-                        // hatch arm, adopts straight back out of it within
-                        // this same dispatch — the desk across the wire
-                        // never needs to reach it.
-                        nursery: Some(Nursery::default()),
+                        fork: Some(Fork::Listen),
                         lifecycle: Box::new(()),
                     };
                     let run_report = shell.run_under(&scope, req);

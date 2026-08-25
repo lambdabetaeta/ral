@@ -3,14 +3,13 @@
 //! and its [`Build`] bundle. `clear` rebuilds a node's context in place
 //! rather than ending it; `Drop` is the one exit every life takes.
 
+use crate::agent::dial::Dial;
 use crate::agent::event::{AgentLog, ContextOp, EditAuthority};
-use crate::agent::hatchery::Hatchery;
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
 use crate::agent::{Agent, ProviderHandle, SPAWN_FUEL, cancel, nudge};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Emitter, Inbox};
-use crate::fleet::hatch::PendingHatches;
 use crate::fleet::registry::{AgentRegistry, Registration};
 use crate::prompt::Grants;
 use crate::provider::Provider;
@@ -94,9 +93,7 @@ pub(crate) struct Build {
     pub(crate) egress: crate::egress::Egress,
     /// Shared verbatim by every fork — `agent-start`'s wire arm reads it off
     /// its own agent, never off a fresh construction.
-    pub(crate) hatchery: Option<Arc<dyn Hatchery>>,
-    /// Fleet-shared, like `agents`.
-    pub(crate) pending_hatches: PendingHatches,
+    pub(crate) dial: Option<Arc<dyn Dial>>,
 }
 
 /// A session's provider identity, snapshotted for the record.
@@ -151,11 +148,11 @@ pub struct RootConfig {
     /// IT's network policy, audit ledger, and rate budget, opened once at
     /// launch and threaded into every fork verbatim.
     pub egress: crate::egress::Egress,
-    /// The dial-side capability a wire trunk's helpers hatch through;
+    /// The dial-side capability a wire trunk reaches its helpers through;
     /// `None` for every identity trunk. A wire trunk built with `fuel > 0`
-    /// and no hatchery is refused here — never a runtime surprise reached
+    /// and no dialler is refused here — never a runtime surprise reached
     /// only once a model calls `agent`.
-    pub hatchery: Option<Arc<dyn Hatchery>>,
+    pub dial: Option<Arc<dyn Dial>>,
 }
 
 /// Where the trunk's engine lives — [`Agent::root`]'s one construction-time
@@ -203,8 +200,7 @@ impl Agent {
             resume_summary,
             disk_warn_bytes,
             egress,
-            hatchery,
-            pending_hatches,
+            dial,
         } = b;
         Self {
             id: log.id(),
@@ -238,8 +234,7 @@ impl Agent {
             disk_warn_latched: false,
             context_warn_latched: false,
             egress,
-            hatchery,
-            pending_hatches,
+            dial,
         }
     }
 
@@ -298,7 +293,7 @@ impl Agent {
             disk_warn_bytes,
             fuel,
             egress,
-            hatchery,
+            dial,
         } = cfg;
         if resume.is_some() && no_logs {
             return Err(io::Error::other(
@@ -316,12 +311,12 @@ impl Agent {
             ));
         }
         // Stated, not discovered by a model calling `agent`: a fuelled wire
-        // trunk with no hatchery to dial helpers through cannot ever answer
+        // trunk with no dialler to reach helpers through cannot ever answer
         // `agent-start`'s wire arm, so refuse the construction itself.
-        if matches!(&root_seat, RootSeat::Wire { .. }) && fuel > 0 && hatchery.is_none() {
+        if matches!(&root_seat, RootSeat::Wire { .. }) && fuel > 0 && dial.is_none() {
             return Err(io::Error::other(
-                "a wire trunk with spawn fuel needs a hatchery to dial helper engines through — \
-                 pass one via RootConfig::hatchery, or build this trunk with fuel: 0",
+                "a wire trunk with spawn fuel needs a dialler to reach helper engines through — \
+                 pass one via RootConfig::dial, or build this trunk with fuel: 0",
             ));
         }
         // Read before `egress` moves into `Build` below.
@@ -432,8 +427,7 @@ impl Agent {
             resume_summary,
             disk_warn_bytes,
             egress,
-            hatchery,
-            pending_hatches: PendingHatches::new(),
+            dial,
         });
         if resume.is_some() {
             agent
@@ -559,8 +553,7 @@ impl Agent {
             resume_summary: None,
             disk_warn_bytes: self.disk_warn_bytes,
             egress: self.egress.clone(),
-            hatchery: self.hatchery.clone(),
-            pending_hatches: self.pending_hatches.clone(),
+            dial: self.dial.clone(),
         }))
     }
 
@@ -660,8 +653,7 @@ impl Agent {
             // A test exercising the disk-warn check sets this directly.
             disk_warn_bytes: None,
             egress: crate::egress::Egress::for_test(),
-            hatchery: None,
-            pending_hatches: PendingHatches::new(),
+            dial: None,
         });
         agent.register_self();
         Ok(agent)
@@ -876,7 +868,7 @@ mod tests {
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
                 egress: crate::egress::Egress::for_test(),
-                hatchery: None,
+                dial: None,
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -1233,7 +1225,7 @@ mod tests {
                 disk_warn_bytes: None,
                 fuel: 0,
                 egress: crate::egress::Egress::for_test(),
-                hatchery: None,
+                dial: None,
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -1359,7 +1351,7 @@ mod tests {
                 disk_warn_bytes: None,
                 fuel: 1,
                 egress: crate::egress::Egress::for_test(),
-                hatchery: None,
+                dial: None,
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -1416,7 +1408,7 @@ mod tests {
                 disk_warn_bytes: None,
                 fuel: 1,
                 egress: crate::egress::Egress::for_test(),
-                hatchery: None,
+                dial: None,
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),

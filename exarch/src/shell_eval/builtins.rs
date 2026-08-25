@@ -1271,7 +1271,7 @@ mod tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         };
         match shell.run(req) {
@@ -1671,7 +1671,7 @@ mod tests {
                 surface: None,
                 deferred: None,
                 desk: None,
-                nursery: None,
+                fork: None,
                 lifecycle: Box::new(()),
             };
             match shell.run(req) {

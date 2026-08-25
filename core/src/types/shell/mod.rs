@@ -43,7 +43,7 @@ use super::env::Env;
 use super::env::EnvVars;
 use super::error::Error;
 use super::handler::HandlerStack;
-use super::mooring::{Mooring, NurseryId, SurfaceSink, TerminalAccess};
+use super::mooring::{Fork, Mooring, NurseryId, SurfaceSink, TerminalAccess};
 use super::value::Value;
 use crate::diagnostic::CallSite;
 use crate::io::Io;
@@ -283,25 +283,32 @@ impl Shell {
         }
     }
 
-    /// Fork this shell ([`Self::fork_session`]) and park the fork in
-    /// `mooring`'s nursery, returning the [`NurseryId`] a desk handler — barred
+    /// Fork this shell ([`Self::fork_session`]) for a child engine to inherit.
+    ///
+    /// The one snapshot law lands here: the fork's scope is scrubbed of
+    /// `Value::Handle` bindings, so an identity-adopted child and a
+    /// wire-hatched one — both forked here — resolve every name to the same
+    /// value or the same absence.
+    pub fn fork_scrubbed(&self) -> Self {
+        let mut fork = self.fork_session();
+        fork.mobile.scope = fork.mobile.scope.scrub_handles();
+        fork
+    }
+
+    /// [`Self::fork_scrubbed`] plus the in-process hand-off: park the fork in
+    /// `mooring`'s nursery and return the [`NurseryId`] a desk handler — barred
     /// by the reentrancy law from holding `&mut Shell` itself — later redeems
     /// with `Nursery::adopt`.
     ///
-    /// The one snapshot law lands here: the fork's scope is scrubbed of
-    /// `Value::Handle` bindings before parking, so an identity-adopted child
-    /// and a wire-hatched one — both read out of the same nursery slot —
-    /// resolve every name to the same value or the same absence.
-    ///
     /// # Errors
-    /// Returns `Err` if no nursery is installed on this run.
+    /// Returns `Err` unless this run's [`Fork`] door is [`Fork::Park`].
     pub fn fork_into_nursery(&self, mooring: &Mooring) -> crate::types::Settled<NurseryId> {
-        match mooring.nursery.as_ref() {
-            Some(nursery) => {
-                let mut fork = self.fork_session();
-                fork.mobile.scope = fork.mobile.scope.scrub_handles();
-                Ok(nursery.park(fork))
-            }
+        match mooring.fork.as_ref() {
+            Some(Fork::Park(nursery)) => Ok(nursery.park(self.fork_scrubbed())),
+            Some(Fork::Listen) => Err(crate::types::Break::Error(self.err(
+                "this host's forked sessions leave over a wire, so there is no pen to park one in",
+                1,
+            ))),
             None => Err(crate::types::Break::Error(
                 self.err("this host adopts no forked sessions", 1),
             )),
@@ -521,6 +528,31 @@ mod tests {
         assert!(shell.lookup_value_name("USER").is_some());
     }
 
+    /// A `Fork::Listen` run has no pen, and says so rather than reusing the
+    /// absent-host sentence: the two are different situations.
+    #[test]
+    fn fork_into_nursery_refuses_a_listening_run_with_its_own_sentence() {
+        let shell = Shell::new(crate::io::TerminalState::default());
+        let mooring = Mooring {
+            fork: Some(Fork::Listen),
+            ..Mooring::adrift()
+        };
+        match shell
+            .fork_into_nursery(&mooring)
+            .expect_err("a listening run parks nothing")
+        {
+            crate::types::Break::Error(e) => {
+                assert_eq!(
+                    e.message,
+                    "this host's forked sessions leave over a wire, so there is no pen to park one in"
+                );
+            }
+            other @ crate::types::Break::Escape(_) => {
+                panic!("expected Break::Error, got {other:?}")
+            }
+        }
+    }
+
     /// The nursery twin of `enquire`'s absent-desk contract, error text and all.
     #[test]
     fn fork_into_nursery_errors_honestly_without_a_nursery() {
@@ -549,7 +581,7 @@ mod tests {
             .set("parent_binding".to_string(), Value::Int(42));
         let nursery = Nursery::default();
         let mooring = Mooring {
-            nursery: Some(nursery.clone()),
+            fork: Some(Fork::Park(nursery.clone())),
             ..Mooring::adrift()
         };
 
@@ -604,7 +636,7 @@ mod tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: Some(nursery.clone()),
+            fork: Some(Fork::Park(nursery.clone())),
             lifecycle: Box::new(ParkThenPanic(parked_id.clone())),
         });
 

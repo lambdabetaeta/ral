@@ -52,7 +52,7 @@ fn root_config(run_dir: &Path, resume: bool) -> RootConfig {
         disk_warn_bytes: None,
         fuel: 0,
         egress: exarch::egress::Egress::for_test(),
-        hatchery: None,
+        dial: None,
     }
 }
 

@@ -47,7 +47,7 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
@@ -99,7 +99,7 @@ fn expect_static(source: &str) -> StaticDiagnostics {
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }) {
         RunReport::Static { diagnostics } => diagnostics,

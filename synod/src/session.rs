@@ -420,11 +420,11 @@ type NetWire = std::net::TcpStream;
 /// first message to the last.
 pub struct Conversation {
     grant: Grant,
-    /// The machine, held in trust by the accept pump: [`Conversation::end`]
-    /// recovers it via [`crate::hatchery::MachineHatchery::join`], the only
-    /// other owner being the [`Agent`] this conversation also holds, which
-    /// drops first.
-    hatchery: Arc<crate::hatchery::MachineHatchery>,
+    /// The machine, held in trust by the dialler: [`Conversation::end`]
+    /// recovers it via [`crate::machine_dial::MachineDial::into_machine`],
+    /// the only other owner being the [`Agent`] this conversation also
+    /// holds, which drops first.
+    dial: Arc<crate::machine_dial::MachineDial>,
     agent: Agent,
     engine: Arc<Engine>,
     baseline: Baseline,
@@ -569,7 +569,7 @@ fn as_gb(bytes: u64) -> String {
 /// closure) and the capture's `handle` (untouched by it) stay with the
 /// caller.
 struct Booted {
-    hatchery: Arc<crate::hatchery::MachineHatchery>,
+    dial: Arc<crate::machine_dial::MachineDial>,
     agent: Agent,
     engine: Arc<Engine>,
     net: guest_net::Session<NetWire>,
@@ -698,10 +698,10 @@ impl Conversation {
             let root_seat = control_seat(wires.control, workspace)?;
             let net = net_seat(wires.net, egress.clone())?;
 
-            // The machine itself goes to the accept pump now: nothing else
-            // in this function touches it, and `MachineHatchery` is what
-            // `end` asks for it back once the agent it feeds is gone.
-            let hatchery = Arc::new(crate::hatchery::MachineHatchery::start(machine));
+            // The machine itself goes to the dialler now: nothing else in
+            // this function touches it, and `MachineDial` is what `end`
+            // asks for it back once the agent it dials for is gone.
+            let dial = Arc::new(crate::machine_dial::MachineDial::new(machine));
 
             let engine = Engine::new();
             let provider = Arc::new(Provider::build(
@@ -744,7 +744,7 @@ impl Conversation {
                     // (`converse_settled`'s Law B), not merely the trunk.
                     fuel: exarch::agent::SPAWN_FUEL,
                     egress,
-                    hatchery: Some(hatchery.clone()),
+                    dial: Some(dial.clone()),
                 },
                 root_seat,
                 Arc::clone(&provider),
@@ -752,7 +752,7 @@ impl Conversation {
             .map_err(|e| format!("could not start the assistant: {e}"))?;
 
             Ok(Booted {
-                hatchery,
+                dial,
                 agent,
                 engine,
                 net,
@@ -761,14 +761,14 @@ impl Conversation {
 
         match booted {
             Ok(Booted {
-                hatchery,
+                dial,
                 agent,
                 engine,
                 net,
             }) => Ok((
                 Self {
                     grant,
-                    hatchery,
+                    dial,
                     agent,
                     engine,
                     baseline: Baseline::Pending(handle),
@@ -830,10 +830,10 @@ impl Conversation {
     /// the machine off from the inside — the same inside-out shutdown
     /// `boot-run`'s own drop-then-stop performs, so the grace window
     /// `machine.shutdown` waits on below normally observes a stop already
-    /// under way rather than forcing one. The accept pump is joined next,
-    /// recovering the machine it held since `begin` — its only other owner
+    /// under way rather than forcing one. The machine comes back from the
+    /// dialler next, which has held it since `begin` — its only other owner
     /// was the agent just dropped, whose own helpers (if any) are gone too
-    /// by the time an exchange has settled, so this is always the pump's
+    /// by the time an exchange has settled, so this is always the dialler's
     /// last reference. The net wire follows, never before the control wire
     /// — a session with its control plane gone but its network still live
     /// has nothing left to police what that network is used for. The wipe
@@ -853,25 +853,25 @@ impl Conversation {
     /// everything above it has succeeded.
     ///
     /// # Panics
-    /// Panics if the accept pump's `Arc` has another owner left once the
-    /// agent is gone — a construction bug, since nothing else in this
-    /// crate clones it — or if the pump thread itself panicked.
+    /// Panics if the dialler's `Arc` has another owner left once the agent
+    /// is gone — a construction bug, since nothing else in this crate
+    /// clones it.
     pub fn end(self) -> Result<(), String> {
         let Self {
-            hatchery,
+            dial,
             agent,
             net,
             mut baseline,
             ..
         } = self;
         drop(agent);
-        let hatchery = Arc::try_unwrap(hatchery).unwrap_or_else(|_| {
+        let dial = Arc::try_unwrap(dial).unwrap_or_else(|_| {
             panic!(
-                "the agent-port pump outlived the agent that was its only other owner — a \
-                 helper must have leaked past the exchange that was supposed to settle it"
+                "the guest dialler outlived the agent that was its only other owner — a helper \
+                 must have leaked past the exchange that was supposed to settle it"
             )
         });
-        let machine = hatchery.join();
+        let machine = dial.into_machine();
         // Joined, not merely stopped: ending a conversation must leave no
         // guest-net thread behind, and `join` is what reports a worker panic.
         net.stop();

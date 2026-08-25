@@ -69,12 +69,12 @@ pub(crate) struct ChildEvalRequest {
     pub script: Option<WireScriptContext>,
 }
 
-/// A nursery-parked shell's scope, wire-ready for `hatch` — the
+/// A forked shell's scope, wire-ready for `hatch` — the
 /// [`ChildEvalRequest`] shape minus a body, since there is no stage to run:
 /// the child engine that hydrates this one *becomes* the shell it seeds.
 ///
 /// What it deliberately does not carry — `Value::Handle` bindings (scrubbed
-/// upstream, at `Shell::fork_into_nursery`, the one place both an identity
+/// upstream, at `Shell::fork_scrubbed`, the one place both an identity
 /// fork and a wire seed pass through), terminal authority, the parent's
 /// inbox or cancel token, its provider handle — is the parity argument for
 /// shipping a seed at all: a fork and a seed must mean the same thing.
@@ -88,10 +88,9 @@ pub(crate) struct EngineSeed {
     pub grant: String,
 }
 
-/// Reify a nursery-parked shell into a wire-ready [`EngineSeed`] — `hatch`'s
-/// only producer. `shell` is expected already scrubbed by
-/// `Shell::fork_into_nursery`; this function trusts that law rather than
-/// re-checking it.
+/// Reify a forked shell into a wire-ready [`EngineSeed`] — `hatch`'s only
+/// producer. `shell` is expected already scrubbed by `Shell::fork_scrubbed`;
+/// this function trusts that law rather than re-checking it.
 ///
 /// `hatch` is Linux-only, and `crate::hatch`'s own tests are its only other
 /// caller, so a plain non-Linux, non-test build sees this as unreachable —
@@ -870,7 +869,7 @@ mod tests {
     /// `Value::Handle` bindings before either arm ever sees the scope.
     #[test]
     fn identity_fork_and_wire_seed_agree_on_the_scrubbed_scope() {
-        use crate::types::{Mooring, Nursery};
+        use crate::types::{Fork, Mooring, Nursery};
         use std::sync::Mutex;
 
         let mut parent = Shell::default();
@@ -893,7 +892,7 @@ mod tests {
 
         let nursery = Nursery::default();
         let mooring = Mooring {
-            nursery: Some(nursery.clone()),
+            fork: Some(Fork::Park(nursery.clone())),
             ..Mooring::adrift()
         };
 

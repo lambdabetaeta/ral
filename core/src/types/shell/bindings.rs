@@ -372,7 +372,7 @@ mod chokepoint_tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         }) {
             RunReport::Ran { ending, .. } => ending.into_result(),
@@ -399,7 +399,7 @@ mod chokepoint_tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         }) {
             RunReport::Ran { captured, .. } => {
@@ -588,7 +588,7 @@ mod chokepoint_tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         }) {
             RunReport::Static { .. } => {}
@@ -655,7 +655,7 @@ mod chokepoint_tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         });
         match report {
@@ -830,7 +830,7 @@ mod chokepoint_tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         }) {
             RunReport::Ran { ending, .. } => {

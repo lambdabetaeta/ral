@@ -49,7 +49,7 @@ fn run_seen(shell: &mut Shell, source: &str) -> (Result<Value, String>, Vec<u8>)
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }) {
         RunReport::Ran {

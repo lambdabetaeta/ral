@@ -72,7 +72,7 @@ pub(crate) fn apply_session_capabilities(
     paths: &[std::path::PathBuf],
 ) -> Result<(), ExitCode> {
     // Session bring-up: no run is in hand yet, so the profiles evaluate
-    // moored adrift — no surface, no desk, no nursery.
+    // moored adrift — no surface, no desk, no fork door.
     match ral_core::capability::apply_session_profiles(&Mooring::adrift(), shell, paths) {
         Ok(()) => Ok(()),
         Err(Break::Error(e)) => {

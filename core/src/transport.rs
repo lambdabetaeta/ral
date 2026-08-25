@@ -1095,9 +1095,9 @@ pub struct EngineInner {
     /// `None` until a host calls `set_desk`, in which case `enquire` answers
     /// its honest absence error.
     desk: Option<crate::types::Desk>,
-    /// `None` until a host calls `set_nursery`, in which case
+    /// `None` until a host calls `set_fork`, in which case
     /// `fork_into_nursery` answers its honest absence error.
-    nursery: Option<crate::types::Nursery>,
+    fork: Option<crate::types::Fork>,
     /// Set by Attach.
     terminal_lease: Option<crate::process::TerminalLease>,
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
@@ -1135,7 +1135,7 @@ impl IdentityTransport {
             surface_sink: sink,
             deferred_sink: None,
             desk: None,
-            nursery: None,
+            fork: None,
             terminal_lease: None,
             current_dispatch,
         };
@@ -1180,18 +1180,17 @@ impl IdentityTransport {
         self.engine.lock().desk = Some(desk);
     }
 
-    /// Install the session's nursery for engine-side session forks. Called per
-    /// run, so a stale fork from an earlier generation is never adoptable.
-    pub fn set_nursery(&self, nursery: crate::types::Nursery) {
-        self.engine.lock().nursery = Some(nursery);
+    /// Install the session's [`Fork`](crate::types::Fork) door. Called per run,
+    /// so a stale fork from an earlier generation is never adoptable.
+    pub fn set_fork(&self, fork: crate::types::Fork) {
+        self.engine.lock().fork = Some(fork);
     }
 
-    /// Uninstall the session's nursery. `set_desk` needs no counterpart — a
-    /// desk retires by installing one that answers nothing — but an empty
-    /// `Nursery` would still accept a park, so `None` is the only honest
-    /// absence here.
-    pub fn clear_nursery(&self) {
-        self.engine.lock().nursery = None;
+    /// Uninstall it. `set_desk` needs no counterpart — a desk retires by
+    /// installing one that answers nothing — but an empty `Nursery` would still
+    /// accept a park, so `None` is the only honest absence here.
+    pub fn clear_fork(&self) {
+        self.engine.lock().fork = None;
     }
 
     /// The inverse of [`IdentityTransport::new`], for a caller that lent a
@@ -1263,7 +1262,7 @@ impl Transport for IdentityTransport {
             surface: Some(engine.surface_sink.clone() as SurfaceSink),
             deferred: engine.deferred_sink.clone(),
             desk: engine.desk.clone(),
-            nursery: engine.nursery.clone(),
+            fork: engine.fork.clone(),
             lifecycle: Box::new(()),
         };
         let run_report = engine.shell.run_under(&scope, req);
@@ -1964,7 +1963,7 @@ mod enquiry_tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         }
     }
@@ -2123,23 +2122,23 @@ mod enquiry_tests {
         );
     }
 
-    /// Reverting `engine.nursery` to `None` is what makes a later dispatch's
+    /// Reverting `engine.fork` to `None` is what makes a later dispatch's
     /// `fork_into_nursery` answer absence rather than find a stale nursery.
     #[test]
-    fn clear_nursery_uninstalls_from_engine_inner() {
-        use crate::types::Nursery;
+    fn clear_fork_uninstalls_from_engine_inner() {
+        use crate::types::{Fork, Nursery};
 
         let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        transport.set_nursery(Nursery::default());
+        transport.set_fork(Fork::Park(Nursery::default()));
         assert!(
-            transport.shell_mut().nursery.is_some(),
-            "set_nursery must install onto engine.nursery"
+            transport.shell_mut().fork.is_some(),
+            "set_fork must install onto engine.fork"
         );
 
-        transport.clear_nursery();
+        transport.clear_fork();
         assert!(
-            transport.shell_mut().nursery.is_none(),
-            "clear_nursery must uninstall it, mirroring set_desk's retirement"
+            transport.shell_mut().fork.is_none(),
+            "clear_fork must uninstall it, mirroring set_desk's retirement"
         );
     }
 }

@@ -79,7 +79,7 @@ pub use crate::diagnostic::CallSite;
 
 mod mooring;
 pub use mooring::{
-    DeferredSink, Desk, EnquiryDesk, EventSink, Mooring, NO_DESK, NO_DESK_STATUS, Nursery,
+    DeferredSink, Desk, EnquiryDesk, EventSink, Fork, Mooring, NO_DESK, NO_DESK_STATUS, Nursery,
     NurseryId, SurfaceSink,
 };
 pub(crate) use mooring::{NurseryGuard, TerminalAccess};

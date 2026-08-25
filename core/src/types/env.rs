@@ -150,7 +150,7 @@ impl Env {
     /// seed must resolve every name to the same value or the same absence,
     /// and a handle has no wire form, so both arms scrub it the same way —
     /// this one, called from the one place both pass through,
-    /// `Shell::fork_into_nursery`.
+    /// `Shell::fork_scrubbed`.
     pub(crate) fn scrub_handles(&self) -> Self {
         let scopes = self
             .scopes

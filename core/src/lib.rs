@@ -29,7 +29,6 @@ pub(crate) mod prelude_manifest {
 pub mod engine;
 #[cfg(unix)]
 pub mod hatch;
-pub mod hatch_preamble;
 pub mod process;
 pub mod run;
 pub(crate) mod runtime;

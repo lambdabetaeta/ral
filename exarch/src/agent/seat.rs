@@ -26,7 +26,7 @@ pub(crate) enum Seat {
     /// Out-of-process, one engine per session, holding nothing per call: a
     /// wire run's desk and applier ride `Agent::run_shell`'s arguments into
     /// the drain loop's enquiry arm, the real scratch lives in the guest,
-    /// and forks are refused at the desk for fuel 0, so no nursery either.
+    /// and forks are refused at the desk for fuel 0, so no fork door either.
     Wire {
         transport: Box<ral_core::transport::WireTransport>,
     },
@@ -37,7 +37,7 @@ pub(crate) enum Seat {
 pub(crate) struct RunInstall {
     pub(crate) seam: Arc<HostSeam>,
     pub(crate) deferred: Arc<dyn ral_core::types::DeferredSink>,
-    pub(crate) nursery: ral_core::types::Nursery,
+    pub(crate) fork: ral_core::types::Fork,
 }
 
 /// Retires the install on *every* exit, including a panic `Agent::attend`
@@ -50,7 +50,7 @@ impl Drop for RunGuard<'_> {
         match self.0 {
             Seat::Identity { transport, .. } => {
                 transport.set_desk(Arc::new(AbsentDesk));
-                transport.clear_nursery();
+                transport.clear_fork();
             }
             Seat::Wire { .. } => {}
         }
@@ -129,7 +129,7 @@ impl Seat {
         match self {
             Self::Identity { transport, .. } => {
                 transport.set_deferred_sink(install.deferred);
-                transport.set_nursery(install.nursery);
+                transport.set_fork(install.fork);
                 // Drain-then-handle: a handler's chrome must never jump
                 // ahead of surface output still queued on the channel.
                 transport.set_desk(Arc::new(DeskBinding {
@@ -378,8 +378,7 @@ mod tests {
             principal: ral_core::host::user(),
             pins: None,
             wire_seat: true,
-            hatchery: None,
-            pending_hatches: crate::fleet::hatch::PendingHatches::new(),
+            dial: None,
         }
     }
 
@@ -488,7 +487,7 @@ mod tests {
                 &registry,
                 crate::record::Emitter::none(),
             ),
-            nursery: Nursery::default(),
+            fork: ral_core::types::Fork::Park(Nursery::default()),
         };
         let _guard = seat.install_run(install);
 

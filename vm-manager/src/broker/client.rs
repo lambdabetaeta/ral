@@ -144,15 +144,6 @@ impl Machine for BrokeredGuest {
             .expect("a machine's two wires are taken at most once")
     }
 
-    /// Not yet: the broker's agent-wire path arrives alongside HCS's own,
-    /// once a Windows guest completes a boot at all.
-    ///
-    /// # Errors
-    /// Always returns [`std::io::ErrorKind::Unsupported`].
-    fn accept_agent(&mut self, _patience: std::time::Duration) -> io::Result<crate::AgentDial> {
-        Err(crate::agent_not_supported_yet())
-    }
-
     /// Ask the service to stop the machine, and wait for its answer.
     ///
     /// Both wires are closed first, for the same reason the direct backend

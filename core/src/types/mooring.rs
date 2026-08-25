@@ -1,5 +1,5 @@
 //! [`Mooring`]: the frame a run fixes once and never changes — its
-//! structured-event sink, its enquiry desk, its session-fork [`Nursery`], and
+//! structured-event sink, its enquiry desk, its session-[`Fork`] door, and
 //! its terminal-foreground authority.
 
 use super::shell::Shell;
@@ -78,10 +78,12 @@ struct NurseryState {
     parked: HashMap<u64, Shell>,
 }
 
-/// Run-local holding pen for engine-side session forks.
+/// Run-local holding pen for engine-side session forks, reached only through
+/// [`Fork::Park`] — an in-process desk and nothing else.
 ///
-/// The reentrancy law bars a desk handler from holding `&mut Shell`, so it
-/// cannot fork a session itself: the builtin body forks through
+/// That arm exists for one reason: the reentrancy law bars a same-process desk
+/// handler from holding `&mut Shell`, so it cannot fork a session itself. The
+/// builtin body forks through
 /// [`Shell::fork_into_nursery`](crate::types::Shell::fork_into_nursery) and the
 /// fork reaches the handler as a [`NurseryId`] to [`adopt`](Self::adopt).
 /// [`NurseryGuard`] empties it, so an unadopted fork dies with its run.
@@ -119,6 +121,15 @@ impl Nursery {
     pub fn clear(&self) {
         self.0.lock().unwrap().parked.clear();
     }
+}
+
+/// How a forked session reaches the desk that will adopt it.
+#[derive(Clone)]
+pub enum Fork {
+    /// In-process: the builtin parks the fork, the handler adopts it by id.
+    Park(Nursery),
+    /// Across a wire: the builtin listens, the desk dials it back.
+    Listen,
 }
 
 /// Host-installed destination for a deferred worker's surface batch, delivered
@@ -172,7 +183,8 @@ pub struct Mooring {
     /// Never given to a deferred worker: a worker outlives its run's Report, so
     /// one that could enquire would break the ordering law.
     pub(crate) desk: Option<Desk>,
-    pub(crate) nursery: Option<Nursery>,
+    /// `None`: this host adopts no forked sessions.
+    pub(crate) fork: Option<Fork>,
     /// The run's foreground work scope, consulted between effectful steps by
     /// [`signal::check`](crate::process::signal::check) and always a descendant
     /// of [`SessionState`](crate::types::SessionState)'s durable root.  The one
@@ -190,7 +202,7 @@ impl Mooring {
     /// The mooring a detached worker runs under: a rebuild, not a share.
     ///
     /// `parent`'s cancel scope would let a foreground cancel reach a worker
-    /// that must outlive the run, and desk and nursery are barred to one; rail,
+    /// that must outlive the run, and desk and fork are barred to one; rail,
     /// lease, and cap carry over, so a nested `spawn` is governed alike.  Its
     /// scope is a [`worker`](DurableRoot::worker) of the session root: a
     /// SIGTERM reaches it, a Ctrl-C does not.
@@ -199,7 +211,7 @@ impl Mooring {
             surface: Some(surface),
             deferred: parent.deferred.clone(),
             desk: None,
-            nursery: None,
+            fork: None,
             cancel: root.worker(),
             deferred_lease: parent.deferred_lease,
             worker_cap: parent.worker_cap,
@@ -217,7 +229,7 @@ impl Mooring {
             surface: Some(surface),
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             cancel: root.worker(),
             deferred_lease: None,
             worker_cap: None,
@@ -234,12 +246,17 @@ impl Mooring {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             cancel: DurableRoot::default().worker(),
             deferred_lease: None,
             worker_cap: None,
             terminal_access: TerminalAccess::Denied,
         }
+    }
+
+    /// How a forked session reaches this run's desk, if it has one.
+    pub fn fork(&self) -> Option<&Fork> {
+        self.fork.as_ref()
     }
 
     /// Whether anything is on the other end — what lets a door skip building
@@ -282,7 +299,7 @@ impl Mooring {
             surface: self.surface.clone(),
             deferred: self.deferred.clone(),
             desk: self.desk.clone(),
-            nursery: self.nursery.clone(),
+            fork: self.fork.clone(),
             cancel: self.cancel.clone(),
             deferred_lease: self.deferred_lease,
             worker_cap: self.worker_cap,
@@ -305,11 +322,11 @@ impl Mooring {
 /// that parked it.  Holds an `Arc`-shared clone of the run's nursery, so it
 /// clears the same state every callee sees, and lives inside the run door's
 /// `catch_unwind`, so it fires on the panic path too.
-pub(crate) struct NurseryGuard(pub(crate) Option<Nursery>);
+pub(crate) struct NurseryGuard(pub(crate) Option<Fork>);
 
 impl Drop for NurseryGuard {
     fn drop(&mut self) {
-        if let Some(nursery) = self.0.as_ref() {
+        if let Some(Fork::Park(nursery)) = self.0.as_ref() {
             nursery.clear();
         }
     }

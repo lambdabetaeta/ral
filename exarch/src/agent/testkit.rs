@@ -119,7 +119,7 @@ fn root(interactive: bool, chat: bool) -> Agent {
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
             egress: crate::egress::Egress::for_test(),
-            hatchery: None,
+            dial: None,
         },
         RootSeat::Identity {
             scratch: Arc::new(scratch),

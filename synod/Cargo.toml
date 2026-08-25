@@ -52,9 +52,8 @@ guest-net  = { path = "../guest-net" }
 ruzstd     = "0.9"
 
 [target.'cfg(unix)'.dependencies]
-# `MachineHatchery`'s accept pump peeks a fresh dial's preamble without
-# consuming it — `UnixStream::peek` is still unstable, so this is one raw
-# `recv(MSG_PEEK)` call rather than a hand-rolled socket layer.
+# `workspace::history`'s advisory file lock (flock) and its free-space probe
+# (statvfs) — neither has a std equivalent.
 libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

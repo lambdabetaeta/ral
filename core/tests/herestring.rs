@@ -41,7 +41,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),

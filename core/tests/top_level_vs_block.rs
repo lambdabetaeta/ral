@@ -76,7 +76,7 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
@@ -203,7 +203,7 @@ fn recovered_try_clears_the_status_register() {
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.status(),

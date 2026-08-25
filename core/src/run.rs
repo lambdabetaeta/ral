@@ -19,7 +19,7 @@ use crate::syntax::parser::ParseError;
 use crate::transport::{Program, Run};
 use crate::typecheck::TypeError;
 use crate::types::{
-    Break, Capabilities, DeferredSink, Desk, Error, Escape, Mooring, Nursery, NurseryGuard,
+    Break, Capabilities, DeferredSink, Desk, Error, Escape, Fork, Mooring, NurseryGuard,
     Observation, Settled, Shell, SurfaceSink, TerminalPolicy, TrailScope, Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
@@ -103,10 +103,10 @@ pub struct RunRequest<'a> {
     /// to; `None` leaves it reachable only through `await`/`race`.
     pub deferred: Option<Arc<dyn DeferredSink>>,
     /// Run-local enquiry desk. Same-thread children inherit it, as they do the
-    /// nursery below; deferred workers get neither.
+    /// fork door below; deferred workers get neither.
     pub desk: Option<Desk>,
-    /// Run-local nursery for engine-side session forks.
-    pub nursery: Option<Nursery>,
+    /// How a forked session reaches this run's desk; `None` adopts none.
+    pub fork: Option<Fork>,
     pub lifecycle: Box<dyn RunLifecycle + 'a>,
 }
 
@@ -410,7 +410,7 @@ impl Shell {
             surface,
             deferred,
             desk,
-            nursery,
+            fork,
             lifecycle,
         } = req;
 
@@ -441,12 +441,12 @@ impl Shell {
             RequestedTerminalAccess::Denied => crate::types::TerminalAccess::Denied,
         };
 
-        let _nursery_guard = NurseryGuard(nursery.clone());
+        let _nursery_guard = NurseryGuard(fork.clone());
         let mooring = Mooring {
             surface,
             deferred,
             desk,
-            nursery,
+            fork,
             cancel: foreground,
             deferred_lease: run.deferred_lease,
             worker_cap: run.worker_cap,
@@ -724,7 +724,7 @@ mod tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         }
     }
@@ -857,7 +857,7 @@ mod tests {
         let parked_id: Arc<Mutex<Option<crate::types::NurseryId>>> = Arc::new(Mutex::new(None));
 
         let _ = shell.run(RunRequest {
-            nursery: Some(nursery.clone()),
+            fork: Some(crate::types::Fork::Park(nursery.clone())),
             lifecycle: Box::new(ParkDuringRun(parked_id.clone())),
             ..capture_req("$[1 + 1]")
         });

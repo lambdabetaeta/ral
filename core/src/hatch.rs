@@ -46,8 +46,6 @@ use crate::process::ChildHandle;
 use crate::serial::WireDecoder;
 use crate::subprocess::install_shell_mobile;
 use crate::types::{Capabilities, Shell};
-#[cfg(target_os = "linux")]
-use crate::types::{Mooring, NurseryId};
 use crate::wire::WireChannel;
 
 /// The engine's protocol socket lands on this descriptor, exactly as
@@ -297,64 +295,17 @@ fn accept(listener: &OwnedFd) -> io::Result<OwnedFd> {
     }
 }
 
-/// Dial the host's agent port, and spawn a child engine seeded from `shell`
-/// — the nursery-parked shell `` `agents `start ``'s wire arm parked, already
-/// scrubbed by [`Shell::fork_into_nursery`].
-///
-/// Answers the child's pid, so a caller whose later `` `agents `hatched ``
-/// enquiry is refused (a timeout, a dead desk) can [`kill_hatched`] this one
-/// child rather than leave it dialling into silence.
-///
-/// # Errors
-/// Returns a sentence describing whichever step failed: the dial, the seed
-/// socketpair, the seed encode, or the spawn.
-#[cfg(target_os = "linux")]
-pub fn hatch(host_port: u32, _token: u64, shell: &Shell, grant: String) -> Result<u32, String> {
-    let vsock = crate::vsock::dial_host(host_port)
-        .map_err(|e| format!("hatch: could not dial the host's agent port {host_port}: {e}"))?;
-    hatch_over(vsock, &packed_seed(shell, grant)?)
-}
-
 /// The forked session as the wire carries it: everything a child engine is
-/// given, and the only thing either hatch hands on.
+/// given, and all the listener thread ever holds.
 fn packed_seed(shell: &Shell, grant: String) -> Result<EngineSeed, String> {
     use crate::types::Break;
 
     pack_seed(shell, grant).map_err(|b| match b {
-        Break::Error(e) => format!(
-            "hatch: could not serialise the nursery shell: {}",
-            e.message
-        ),
+        Break::Error(e) => format!("hatch: could not serialise the forked shell: {}", e.message),
         Break::Escape(_) => {
-            "hatch: could not serialise the nursery shell: unexpected escape".to_string()
+            "hatch: could not serialise the forked shell: unexpected escape".to_string()
         }
     })
-}
-
-/// [`hatch`], reading its own seed straight out of `mooring`'s nursery
-/// instead of taking an already-adopted `Shell`.
-///
-/// The whole other half of `Shell::fork_into_nursery`, wrapped in one call
-/// because a nursery slot is this crate's own private field and a host
-/// builtin cannot reach it any other way.
-///
-/// # Errors
-/// Returns a sentence if `id` names no parked fork, or [`hatch`] itself
-/// fails.
-#[cfg(target_os = "linux")]
-pub fn hatch_from_nursery(
-    host_port: u32,
-    token: u64,
-    mooring: &Mooring,
-    id: NurseryId,
-    grant: String,
-) -> Result<u32, String> {
-    let shell = mooring
-        .nursery
-        .as_ref()
-        .and_then(|nursery| nursery.adopt(id))
-        .ok_or_else(|| "hatch: no forked session parked under this id".to_string())?;
-    hatch(host_port, token, &shell, grant)
 }
 
 /// The portable core of a hatch: everything past the connection itself,
@@ -444,32 +395,6 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed) -> Result<u32, String> {
     Ok(pid)
 }
 
-/// Kill and reap the hatched child whose pid this is.
-///
-/// [`hatch`]'s own caller, when a later `` `agents `hatched `` enquiry is
-/// refused (a timeout, a dead desk) after the hatch itself already succeeded:
-/// the child
-/// is left dialling into silence otherwise, since nothing else in this engine
-/// ever looks for it again.
-pub fn kill_hatched(pid: u32) {
-    // Removed under the lock, killed and reaped after it drops: `Hatched`
-    // holds a `ChildHandle` whose own teardown must never run while this
-    // table's mutex is still held.
-    let entry = {
-        let mut table = table()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        table
-            .iter()
-            .position(|h| h.child.id() == pid)
-            .map(|pos| table.remove(pos))
-    };
-    if let Some(mut entry) = entry {
-        let _ = entry.child.kill();
-        let _ = entry.child.wait_handling_stop(None, false);
-    }
-}
-
 /// Guest-side application of a wire seed: called from `engine_session` once
 /// the installer has booted `shell`, if [`RAL_ENGINE_SEED_FD_ENV`] names an
 /// fd. Hydrates scope and context exactly as `child_eval::eval_request`
@@ -516,7 +441,7 @@ pub(crate) fn apply_seed(fd: &str, shell: &mut Shell) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::subprocess::bare_child_shell;
-    use crate::types::{Mooring, Nursery, Value};
+    use crate::types::{Fork, Mooring, Nursery, Value};
 
     /// A grant narrower that just meets `own` against a fixed floor, so
     /// tests need no exarch-shaped base vocabulary.
@@ -541,7 +466,7 @@ mod tests {
 
         let nursery = Nursery::default();
         let mooring = Mooring {
-            nursery: Some(nursery.clone()),
+            fork: Some(Fork::Park(nursery.clone())),
             ..Mooring::adrift()
         };
         let id = parent
@@ -571,7 +496,6 @@ mod tests {
             recorded(pid),
             "hatch_over must record the child before returning"
         );
-        kill_hatched(pid);
     }
 
     const TOKEN: u64 = 0xdead_beef_1234_5678;
@@ -624,7 +548,6 @@ mod tests {
 
         let pid = hatching.join().expect("a child hatched");
         assert!(recorded(pid), "the thread hatched before it acked");
-        kill_hatched(pid);
     }
 
     #[test]

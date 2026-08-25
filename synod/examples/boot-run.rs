@@ -52,7 +52,7 @@ use ral_core::transport::{Liveness, WireTransport};
 use ral_core::types::Capabilities;
 use std::path::PathBuf;
 use std::sync::Arc;
-use synod::hatchery::MachineHatchery;
+use synod::machine_dial::MachineDial;
 use synod::workspace::{self, HistoryStore};
 use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
 
@@ -108,10 +108,10 @@ fn main() {
     // guest network of its own.
     let _net = NetStream::from(wires.net);
 
-    // The machine goes to the accept pump now — the same handoff
+    // The machine goes to the dialler now — the same handoff
     // `Conversation::begin` makes, and the reason `end`'s ordering below
-    // recovers it from the pump rather than from `machine` directly.
-    let hatchery = Arc::new(MachineHatchery::start(machine));
+    // recovers it from the dialler rather than from `machine` directly.
+    let dial = Arc::new(MachineDial::new(machine));
 
     let transport = WireTransport::adopt(wires.control, Liveness::default())
         .expect("adopt the guest's control plane");
@@ -129,7 +129,10 @@ fn main() {
         // `/bin/echo`, never the `echo` builtin: this example is the only
         // thing that boots a guest, so it is the only thing that can catch the
         // guest's spawn jail breaking, and a builtin spawns nothing.
-        ral_call("write", &format!("/bin/echo {HELPER_TEXT:?} > {HELPER_FILE}")),
+        ral_call(
+            "write",
+            &format!("/bin/echo {HELPER_TEXT:?} > {HELPER_FILE}"),
+        ),
         ral_call("reply", &format!("reply \"wrote {HELPER_FILE}\"")),
     ];
     let script = Script::new()
@@ -178,7 +181,7 @@ fn main() {
             disk_warn_bytes: None,
             fuel: SPAWN_FUEL,
             egress: Egress::for_test(),
-            hatchery: Some(hatchery.clone()),
+            dial: Some(dial.clone()),
         },
         root_seat,
         provider,
@@ -198,9 +201,9 @@ fn main() {
     // reproduced here rather than borrowed, since this example has no
     // `Conversation` to call it on.
     drop(agent);
-    let machine = Arc::try_unwrap(hatchery)
-        .unwrap_or_else(|_| panic!("the pump outlived the agent that was its only other owner"))
-        .join();
+    let machine = Arc::try_unwrap(dial)
+        .unwrap_or_else(|_| panic!("the dialler outlived the agent that was its only other owner"))
+        .into_machine();
 
     match &exchange {
         Ok(()) => println!("the exchange settled: the trunk parked and every helper finished"),

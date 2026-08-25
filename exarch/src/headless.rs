@@ -794,7 +794,7 @@ mod tests {
                 disk_warn_bytes: None,
                 fuel: 0,
                 egress: crate::egress::Egress::for_test(),
-                hatchery: None,
+                dial: None,
             },
             RootSeat::Identity {
                 scratch,
@@ -1158,7 +1158,7 @@ mod tests {
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
                 egress: crate::egress::Egress::for_test(),
-                hatchery: None,
+                dial: None,
             },
             RootSeat::Identity {
                 scratch,
@@ -1355,7 +1355,7 @@ mod tests {
     }
 
     /// `allow_schedule` is refused at construction, the same class of refusal
-    /// as the missing hatchery: an armed self-schedule may fire again with
+    /// as a missing dialler: an armed self-schedule may fire again with
     /// nothing left to wait it out once the fleet quiesces.
     #[test]
     fn converse_settled_refuses_an_allow_schedule_trunk() {

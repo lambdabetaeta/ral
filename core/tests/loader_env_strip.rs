@@ -75,7 +75,7 @@ fn confined_child_env(src: &str) -> String {
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     });
     let RunReport::Ran { ending, .. } = report else {

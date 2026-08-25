@@ -53,7 +53,7 @@ fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),

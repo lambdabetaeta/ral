@@ -34,7 +34,7 @@ fn run_capture(shell: &mut Shell, src: &str) -> (Settled<Value>, String) {
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }) {
         RunReport::Ran {

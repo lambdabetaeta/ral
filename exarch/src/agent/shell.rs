@@ -162,8 +162,7 @@ impl Agent {
             principal: ral_core::host::user(),
             pins: Some(self.pins.clone()),
             wire_seat,
-            hatchery: self.hatchery.clone(),
-            pending_hatches: self.pending_hatches.clone(),
+            dial: self.dial.clone(),
         }
     }
 
@@ -202,7 +201,7 @@ impl Agent {
                 // Stamped with the registry generation read now, so a batch
                 // from a worker that settles after a `/clear` is dropped.
                 deferred: shell_eval::deferred_sink(emit, self.id, &self.agents, self.recorder()),
-                nursery,
+                fork: ral_core::types::Fork::Park(nursery),
             });
             self.recorder()
                 .transient(crate::record::Transient::State(AgentState::Evaluating));

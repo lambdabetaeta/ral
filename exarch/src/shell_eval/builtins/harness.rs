@@ -3,11 +3,13 @@
 //! with the type schemes that gate them.
 //!
 //! Each body validates at the door before it enquires, so a malformed call
-//! never reaches the host. `agents`'s `` `start `` tag forks this shell into
-//! the run's nursery ([`ral_core::Shell::fork_into_nursery`]) and enquires
-//! with the parked fork's id: the reentrancy law bars a desk handler from
-//! holding `&mut Shell` to fork one itself. [`crate::fleet::desk::ExarchDesk`]
-//! answers every enquiry on the other side.
+//! never reaches the host. `agents`'s `` `start `` tag forks this shell and
+//! tells the host how to reach the fork, which is what the run's
+//! [`Fork`](ral_core::types::Fork) door says: an in-process host adopts a
+//! fork parked in the run's nursery, since the reentrancy law bars a desk
+//! handler from holding `&mut Shell` to fork one itself; a host across a wire
+//! is handed a guest port to dial, and dials it while it answers.
+//! [`crate::fleet::desk::ExarchDesk`] answers every enquiry on the other side.
 //!
 //! A registry is one enquiry class, named as the model names it: `agents` and
 //! `schedules` each carry the model's tag as a nested variant and its record
@@ -17,7 +19,7 @@ use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::serial::FOValue;
 use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
 use ral_core::typecheck::{Row, RowVar, Scheme, Ty, Unifier};
-use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled, sig};
+use ral_core::types::{BuiltinBody, BuiltinEntry, Fork, Mooring, Settled, sig};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 
@@ -172,106 +174,113 @@ fn roster(answer: FOValue) -> Settled<Value> {
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// Decode the wire seat's `` `hatch [token, port] `` payload.
-fn decode_hatch_answer(payload: FOValue) -> Settled<(u64, u32)> {
-    let FOValue::Map { entries } = payload else {
-        return Err(sig(
-            "agents: host's `hatch answer must be a record carrying token and port",
-        ));
-    };
-    let mut token = None;
-    let mut port = None;
-    for (key, value) in entries {
-        match (key.as_str(), value) {
-            // Bit-preserving: the token rides as whatever i64 bits the desk
-            // minted, never arithmetic on it.
-            ("token", FOValue::Int { value }) => token = Some(value.cast_unsigned()),
-            ("port", FOValue::Int { value }) => port = Some(value),
-            _ => {}
-        }
-    }
-    let token =
-        token.ok_or_else(|| sig("agents: host's `hatch answer is missing `token`".to_string()))?;
-    let port =
-        port.ok_or_else(|| sig("agents: host's `hatch answer is missing `port`".to_string()))?;
-    let port = u32::try_from(port).map_err(|_| {
-        sig("agents: host's `hatch answer carries an out-of-range port".to_string())
-    })?;
-    Ok((token, port))
-}
-
-/// The guest-side hatch itself: spawns the child engine over a fresh vsock
-/// dial to the port the desk named, seeded from the nursery-parked fork.
-/// Only ever reachable inside a Linux guest — the dial primitive means
-/// nothing anywhere else — so a wire trunk built on any other platform
-/// refuses here rather than at a silent no-op.
-#[cfg(target_os = "linux")]
-fn run_hatch(
-    port: u32,
-    token: u64,
-    mooring: &Mooring,
-    session: ral_core::types::NurseryId,
-    grant: String,
-) -> Result<u32, String> {
-    ral_core::hatch::hatch_from_nursery(port, token, mooring, session, grant)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_hatch(
-    _port: u32,
-    _token: u64,
-    _mooring: &Mooring,
-    _session: ral_core::types::NurseryId,
-    _grant: String,
-) -> Result<u32, String> {
-    Err(
-        "agents: this engine has no hatch support outside a Linux guest — a wire trunk's helper \
-         spawn only ever reaches one"
-            .to_string(),
+/// `` `start ``'s payload: the model's record verbatim, and how the fork it
+/// asks for reaches the desk.
+fn start_request(spec: FOValue, fork: FOValue) -> FOValue {
+    request(
+        "agents",
+        "start",
+        Some(FOValue::Map {
+            entries: vec![("spec".to_string(), spec), ("fork".to_string(), fork)],
+        }),
     )
 }
 
-fn enquire_hatched(mooring: &Mooring, shell: &Shell, token: u64) -> Settled<FOValue> {
-    Ok(shell.enquire(
-        mooring,
-        request(
-            "agents",
-            "hatched",
-            Some(FOValue::Int {
-                value: token.cast_signed(),
-            }),
-        ),
-    )?)
+/// `` `start ``'s `fork` tag for an in-process host: the nursery slot the
+/// fork is parked in, for the handler to adopt by id.
+fn parked(session: i64) -> FOValue {
+    FOValue::Variant {
+        label: "parked".to_string(),
+        payload: Some(Box::new(FOValue::Int { value: session })),
+    }
 }
 
+/// `` `start ``'s `fork` tag for a host across a wire: where this engine is
+/// listening, and the eight bytes the host must write when it dials.
 #[cfg(target_os = "linux")]
-fn kill_hatched(pid: u32) {
-    ral_core::hatch::kill_hatched(pid);
+fn listening(port: u32, token: u64) -> FOValue {
+    FOValue::Variant {
+        label: "listening".to_string(),
+        payload: Some(Box::new(FOValue::Map {
+            entries: vec![
+                (
+                    "port".to_string(),
+                    FOValue::Int {
+                        value: i64::from(port),
+                    },
+                ),
+                // Bit-preserving: the token rides as whatever i64 bits were
+                // minted, never arithmetic on it.
+                (
+                    "token".to_string(),
+                    FOValue::Int {
+                        value: token.cast_signed(),
+                    },
+                ),
+            ],
+        })),
+    }
 }
 
+/// Eight bytes the host must write before this engine hatches onto the
+/// connection it dialled. The guest kernel's refusal to route a guest-local
+/// dial is the standing defence; this is the second line, against a jailed
+/// command that guesses a CID rather than reading one.
+#[cfg(target_os = "linux")]
+fn mint_token() -> u64 {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).expect("OS randomness");
+    u64::from_le_bytes(bytes)
+}
+
+/// The wire arm of `` `start ``: bind a guest port for the duration of this
+/// one spawn, name it in the enquiry, and let the host dial while it answers.
+///
+/// The answer arrives only once the child exists, because the listener thread
+/// acknowledges the dial after `spawn()` succeeds. So there is one enquiry and
+/// one rule for its outcome: raise the thread's reason if it has one — it was
+/// nearer the failure — otherwise the host's.
+#[cfg(target_os = "linux")]
+fn hatch_over_the_wire(
+    spec: FOValue,
+    grant: String,
+    mooring: &Mooring,
+    shell: &Shell,
+) -> Settled<FOValue> {
+    let token = mint_token();
+    let (port, listener) = ral_core::hatch::listen_for_hatch(token, &shell.fork_scrubbed(), grant)
+        .map_err(|reason| sig(format!("agents: {reason}")))?;
+    let answer = shell.enquire(mooring, start_request(spec, listening(port, token)));
+    // A host that refused never dialled, so the thread is still in its poll:
+    // wake it, or the join below never returns.
+    if answer.is_err() {
+        listener.cancel();
+    }
+    match listener.join() {
+        Err(ral_core::hatch::Unhatched::Failed(reason)) => Err(sig(format!("agents: {reason}"))),
+        _ => Ok(answer?),
+    }
+}
+
+/// The dial this arm waits for means nothing outside a Linux guest, so a wire
+/// trunk built on any other platform refuses here rather than at a silent
+/// no-op.
 #[cfg(not(target_os = "linux"))]
-fn kill_hatched(_pid: u32) {
-    unreachable!("only the Linux run_hatch arm can return a child pid")
+fn hatch_over_the_wire(
+    _spec: FOValue,
+    _grant: String,
+    _mooring: &Mooring,
+    _shell: &Shell,
+) -> Settled<FOValue> {
+    Err(sig(
+        "agents: this engine has no hatch support outside a Linux guest — a wire trunk's helper \
+         spawn only ever reaches one",
+    ))
 }
 
-/// Best effort: the desk drops the pending hatch either way, and there is
-/// nothing more useful to do with a refusal here than with success.
-fn enquire_abort(mooring: &Mooring, shell: &Shell, token: u64) {
-    let _ = shell.enquire(
-        mooring,
-        request(
-            "agents",
-            "abort",
-            Some(FOValue::Int {
-                value: token.cast_signed(),
-            }),
-        ),
-    );
-}
-
-/// `` `start ``'s payload: validate, fork this shell into the run's nursery,
-/// enquire `` agents `start `` with the model's record and the parked fork;
-/// the desk's `launch` is the other half.
+/// `` `start ``'s payload: validate, fork this shell, and enquire
+/// `` agents `start `` with the model's record and the fork tag this run's
+/// [`Fork`] door calls for; the desk's `launch` is the other half.
 ///
 /// [`scheme_agents`]'s closed record row inside `` `start `` already
 /// guarantees the five fields, so the `else` arms below are unreachable
@@ -330,54 +339,17 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
     }
     let spec = verbatim(spec, "agents")?;
 
-    let session = shell.fork_into_nursery(mooring)?;
-    // `Nursery::park` mints ids from a monotonic per-run counter, so this
-    // never saturates; `unwrap_or` keeps the door total without an `as`
-    // cast's silent wraparound.
-    let session_id = i64::try_from(session.0).unwrap_or(i64::MAX);
-    let answer = shell.enquire(
-        mooring,
-        request(
-            "agents",
-            "start",
-            Some(FOValue::Map {
-                entries: vec![
-                    ("spec".to_string(), spec),
-                    (
-                        "fork".to_string(),
-                        FOValue::Variant {
-                            label: "parked".to_string(),
-                            payload: Some(Box::new(FOValue::Int { value: session_id })),
-                        },
-                    ),
-                ],
-            }),
-        ),
-    )?;
-
-    if !matches!(&answer, FOValue::Variant { label, .. } if label == "hatch") {
-        return Ok(answer);
-    }
-    // The wire seat: the trunk's own engine hatches the child itself, then
-    // enquires `` `hatched ``, whose answer is the roster.
-    let FOValue::Variant {
-        payload: Some(payload),
-        ..
-    } = answer
-    else {
-        return Err(sig("agents: host's `hatch answer carries no payload"));
-    };
-    let (token, port) = decode_hatch_answer(*payload)?;
-    match run_hatch(port, token, mooring, session, grant) {
-        Ok(pid) => enquire_hatched(mooring, shell, token).inspect_err(|_| {
-            // The dial never landed in time, or landed and was refused:
-            // either way the desk has given up, so this engine must not
-            // leave the hatched child dialling into silence.
-            kill_hatched(pid);
-        }),
-        Err(reason) => {
-            enquire_abort(mooring, shell, token);
-            Err(sig(format!("agents: {reason}")))
+    match mooring.fork() {
+        Some(Fork::Listen) => hatch_over_the_wire(spec, grant, mooring, shell),
+        // `fork_into_nursery` owns the sentence for both remaining doors: the
+        // park itself, and the honest absence when a host adopts no fork.
+        Some(Fork::Park(_)) | None => {
+            let session = shell.fork_into_nursery(mooring)?;
+            // `Nursery::park` mints ids from a monotonic per-run counter, so
+            // this never saturates; `unwrap_or` keeps the door total without
+            // an `as` cast's silent wraparound.
+            let session = i64::try_from(session.0).unwrap_or(i64::MAX);
+            Ok(shell.enquire(mooring, start_request(spec, parked(session)))?)
         }
     }
 }

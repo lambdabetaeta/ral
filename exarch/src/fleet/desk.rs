@@ -35,12 +35,41 @@ const HATCHED_CWD: &str = "/work";
 /// the workspace would litter it with whatever XDG-defaulting tools drop.
 const HATCHED_HOME: &str = "/tmp";
 
-/// Mint a fresh, single-use hatch token from the OS entropy source: the
-/// token, not the preamble's published magic, is the dial's real defense.
-fn mint_token() -> u64 {
-    let mut bytes = [0u8; 8];
-    getrandom::fill(&mut bytes).expect("OS randomness");
-    u64::from_le_bytes(bytes)
+/// The two words that bracket one hatch, in opposite directions: the host
+/// writes the eight token bytes the guest's listener is waiting for, and reads
+/// back the single byte that listener writes only once the child's `spawn` has
+/// returned. Both precede the first frame; neither is one.
+///
+/// The clock is the transport's own, so a dial carries no second deadline —
+/// and it is lifted again before the stream is adopted, since the reader
+/// thread must then park in `read_frame` for as long as the child lives.
+fn greet_hatch(stream: &mut ral_core::wire::WireStream, token: u64) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let patience = ral_core::transport::Liveness::default().deadline;
+    stream
+        .set_write_timeout(Some(patience))
+        .and_then(|()| stream.set_read_timeout(Some(patience)))
+        .map_err(|e| format!("could not put the hatch deadline on the dialled wire: {e}"))?;
+    stream
+        .write_all(&token.to_le_bytes())
+        .map_err(|e| format!("could not send the hatch token to the guest's listener: {e}"))?;
+    let mut ack = [0u8; 1];
+    stream.read_exact(&mut ack).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => {
+            "the guest closed the connection before acknowledging the hatch".to_string()
+        }
+        _ => format!("could not read the guest's hatch acknowledgement: {e}"),
+    })?;
+    if ack[0] != ral_core::transport::HATCH_ACK {
+        return Err(format!(
+            "the guest answered the hatch with byte {:#04x} rather than the acknowledgement — \
+             whatever is listening on that port is not a ral engine waiting to be hatched",
+            ack[0]
+        ));
+    }
+    stream
+        .set_read_timeout(None)
+        .map_err(|e| format!("could not lift the hatch deadline from the wire: {e}"))
 }
 
 /// The acts a desk verb can commit. One vocabulary for two readers: the rail's
@@ -236,12 +265,9 @@ pub(crate) struct HostServices {
     /// Stated, never inferred from `scratch`'s incidental absence:
     /// `` `start `` chooses its identity or wire arm on this one fact.
     pub wire_seat: bool,
-    /// The dial-side capability a wire trunk's `` `start `` hatches
-    /// through; `None` on every identity trunk.
-    pub hatchery: Option<Arc<dyn crate::agent::Hatchery>>,
-    /// Fleet-shared: `` `start ``'s wire arm reserves a name and a token
-    /// here, `` `hatched ``/`` `abort `` redeem or drop it.
-    pub pending_hatches: crate::fleet::hatch::PendingHatches,
+    /// The dial-side capability a wire trunk's `` `start `` reaches its
+    /// child's listener through; `None` on every identity trunk.
+    pub dial: Option<Arc<dyn crate::agent::Dial>>,
 }
 
 impl HostServices {
@@ -525,24 +551,61 @@ impl<'a> Fields<'a> {
 
 /// `` `start ``'s `fork` field: the one part of that payload no model wrote,
 /// minted engine-side because the reentrancy law bars a desk handler from
-/// holding the `&mut Shell` a fork needs.
-fn payload_fork(v: FOValue, class: &str) -> Result<u64, Error> {
+/// holding the `&mut Shell` a fork needs. Which tag is legal is the *host's*
+/// fact, not the guest's — see [`ExarchDesk::launch`].
+enum ForkClaim {
+    /// The fork is parked in this host's own nursery, under this id.
+    Parked(NurseryId),
+    /// The fork's engine holds a listener on `port`, and will hand its
+    /// connection to a child only for a dial that writes `token` first.
+    Listening { port: u32, token: u64 },
+}
+
+fn payload_fork(v: FOValue, class: &str) -> Result<ForkClaim, Error> {
     match v {
         FOValue::Variant {
             label,
             payload: Some(payload),
         } if label == "parked" => {
             let id = payload_int(*payload, class, "fork")?;
-            u64::try_from(id).map_err(|_| {
+            let id = u64::try_from(id).map_err(|_| {
                 Error::new(
                     format!("`{class}`: `fork `parked` carries a nursery id, never a negative Int"),
                     1,
                 )
-            })
+            })?;
+            Ok(ForkClaim::Parked(NurseryId(id)))
+        }
+        FOValue::Variant {
+            label,
+            payload: Some(payload),
+        } if label == "listening" => {
+            let mut fields = Fields::of(*payload, class, "`fork `listening`", "[port, token]")?;
+            let port = payload_int(
+                fields.take("port", "the guest port the host must dial")?,
+                class,
+                "port",
+            )?;
+            let port = u32::try_from(port).map_err(|_| {
+                Error::new(
+                    format!("`{class}`: `fork `listening`'s port must be a bound vsock port"),
+                    1,
+                )
+            })?;
+            // Bit-preserving: the eight bytes the host writes are the eight
+            // the listener compares, never arithmetic on them.
+            let token = payload_int(
+                fields.take("token", "the eight bytes the guest's listener expects")?,
+                class,
+                "token",
+            )?
+            .cast_unsigned();
+            Ok(ForkClaim::Listening { port, token })
         }
         other => Err(Error::new(
             format!(
-                "`{class}`: `fork` must be `parked <nursery id>`, got {}",
+                "`{class}`: `fork` must be `parked <nursery id>` or `listening [port, token]`, \
+                 got {}",
                 other.shape()
             ),
             1,
@@ -597,8 +660,8 @@ fn payload_label(v: FOValue, class: &str) -> Result<String, Error> {
 /// the `agent` builtin's `type`); every other step of the spawn spine is
 /// identical for both and lives once in [`ExarchDesk::launch`].
 struct Launch<'a> {
-    /// The nursery id the builtin body parked its fork under.
-    session_id: u64,
+    /// How the builtin body left its fork for this desk to reach.
+    fork: ForkClaim,
     grant: &'a str,
     /// Import the parent's model-visible conversation — a `mnemon` spawn only.
     inherit_context: bool,
@@ -644,15 +707,13 @@ impl ExarchDesk {
     }
 
     /// `` `agents `` — the agent registry, one class for the whole family.
-    /// Every tag answers the roster; only a wire seat's `` `start `` answers
-    /// `` `hatch `` instead, because its child does not exist yet.
+    /// Every tag answers the roster, both spawn arms included: a wire spawn
+    /// does not answer until its child exists, so it has one to be listed on.
     fn agents(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let (tag, payload) = family_tag(payload, "agents")?;
         match tag.as_str() {
             "list" => Ok(self.roster()),
             "start" => self.agent_start(payload),
-            "hatched" => self.agent_hatched(payload),
-            "abort" => self.agent_abort(payload),
             "message" => self.message(payload),
             "cancel" => self.agent_cancel(payload),
             other => Err(unknown_tag("agents", other)),
@@ -707,11 +768,9 @@ impl ExarchDesk {
             ));
         }
 
-        // Didactic, not race-free: `register` below (identity) or
-        // `PendingHatches::reserve` (wire) re-checks under its own lock, and
-        // that is what closes a same-name race. A name a wire spawn is still
-        // waiting to dial home under counts exactly like a live agent's.
-        if s.registry.name_live(&spec.name) || s.pending_hatches.name_reserved(&spec.name) {
+        // Didactic, not race-free: `register` below re-checks under its own
+        // lock, and that is what closes a same-name race.
+        if s.registry.name_live(&spec.name) {
             return Err(Error::new(
                 format!(
                     "`agents `start` refused: a live agent already bears the name '{}' — pick \
@@ -727,7 +786,15 @@ impl ExarchDesk {
             return self.launch_wire(spec);
         }
 
-        let Some(shell) = s.nursery.adopt(NurseryId(spec.session_id)) else {
+        let ForkClaim::Parked(session) = spec.fork else {
+            return Err(Error::new(
+                "`agents `start` refused: this host runs its children in its own process, so the \
+                 fork must be `parked <nursery id>` — a session that says it is listening for a \
+                 dial is describing a wire this desk does not have",
+                1,
+            ));
+        };
+        let Some(shell) = s.nursery.adopt(session) else {
             return Err(Error::new(
                 "`agents `start`: no forked session parked under this id — it may already have \
                  started, or the run that forked it has ended",
@@ -772,17 +839,15 @@ impl ExarchDesk {
             resume_summary: None,
             disk_warn_bytes: s.disk_warn_bytes,
             egress: s.egress.clone(),
-            hatchery: s.hatchery.clone(),
-            pending_hatches: s.pending_hatches.clone(),
+            dial: s.dial.clone(),
         });
 
         self.spawn_child(child, spec.name, spec.prompt)
     }
 
-    /// The child-log/capability half of the spawn spine, shared by both
-    /// arms: an identity spawn runs it once it has adopted its shell, a wire
-    /// spawn runs it at phase 1 and stashes the result for phase 2, since the
-    /// host has no shell of its own to gate on.
+    /// The child-log/capability half of the spawn spine, shared by both arms:
+    /// an identity spawn runs it once it has adopted its shell, a wire spawn
+    /// before it dials, since the host has no shell of its own to gate on.
     fn fork_child(
         &self,
         spec: &Launch,
@@ -826,109 +891,54 @@ impl ExarchDesk {
         Ok((child_caps, child_log, system_prompt))
     }
 
-    /// `` `start ``'s wire arm: no shell to adopt host-side, so mint a token,
-    /// stash everything `` `hatched `` will need to finish the spine, and
-    /// answer `` `hatch `` instead of the roster — the family's one other
-    /// answer, since the child does not exist yet to be listed.
+    /// `` `start ``'s wire arm: nothing is parked host-side, so the host
+    /// dials the listener the guest opened for this one spawn, writes the
+    /// token that listener is waiting for, and does not answer until the
+    /// guest acknowledges — which it does only once the child process
+    /// exists. The answer is the roster the identity arm gives; the builtin
+    /// cannot tell which served it.
     fn launch_wire(&self, spec: Launch) -> Result<FOValue, Error> {
         let s = &self.services;
-        let Some(hatchery) = s.hatchery.clone() else {
+        let ForkClaim::Listening { port, token } = spec.fork else {
             return Err(Error::new(
-                "`agents `start` refused: this wire session has no hatchery installed to dial a \
-                 helper engine through — a construction bug, since a fuelled wire trunk is \
+                "`agents `start` refused: this host reaches its children across a wire, so the \
+                 fork must be `listening [port, token]` — a session that says it is parked in \
+                 process is naming a nursery this desk does not have",
+                1,
+            ));
+        };
+        let Some(dial) = s.dial.clone() else {
+            return Err(Error::new(
+                "`agents `start` refused: this wire session has no dialler installed to reach a \
+                 helper engine's listener — a construction bug, since a fuelled wire trunk is \
                  refused at Agent::root without one",
                 1,
             ));
         };
         let (child_caps, child_log, system_prompt) = self.fork_child(&spec)?;
 
-        let token = mint_token();
-        s.pending_hatches.reserve(
-            token,
-            crate::fleet::hatch::PendingHatch::new(
-                spec.name,
-                spec.prompt,
-                child_caps,
-                child_log,
-                system_prompt,
-                s.search && spec.search,
-            ),
-        );
-        Ok(FOValue::Variant {
-            label: "hatch".to_string(),
-            payload: Some(Box::new(FOValue::Map {
-                entries: vec![
-                    (
-                        "token".to_string(),
-                        // Bit-preserving: the guest hands this same value
-                        // back verbatim, never arithmetic on it.
-                        FOValue::Int {
-                            value: token.cast_signed(),
-                        },
-                    ),
-                    (
-                        "port".to_string(),
-                        FOValue::Int {
-                            value: i64::from(hatchery.port()),
-                        },
-                    ),
-                ],
-            })),
-        })
-    }
-
-    /// `` `hatched `` — phase 2 of the wire arm: await the correlated dial,
-    /// check its preamble, adopt it as a wire seat, and finish the spawn spine
-    /// `launch_wire` stashed. The answer is the roster the identity arm gives;
-    /// the builtin cannot tell which served it.
-    fn agent_hatched(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "agents `hatched";
-        let s = &self.services;
-        let token = payload_value(payload, CLASS, "carrying the hatch token")?;
-        // The same bit-preserving cast `launch_wire` minted with.
-        let token = payload_int(token, CLASS, "token")?.cast_unsigned();
-
-        let Some(pending) = s.pending_hatches.take(token) else {
-            return Err(Error::new(
-                "`agents `hatched`: no pending hatch for this token — it may already have been \
-                 aborted, or it expired waiting",
+        let mut stream = dial.dial(port).map_err(|reason| {
+            Error::new(
+                format!(
+                    "`agents `start` refused: could not dial the helper engine's listener on \
+                     guest port {port} — {reason}"
+                ),
                 1,
-            ));
-        };
-        let Some(hatchery) = s.hatchery.clone() else {
-            return Err(Error::new(
-                "`agents `hatched`: this session has no hatchery installed — a construction bug",
-                1,
-            ));
-        };
+            )
+        })?;
+        greet_hatch(&mut stream, token)
+            .map_err(|reason| Error::new(format!("`agents `start` refused: {reason}"), 1))?;
 
-        let mut stream = hatchery
-            .await_dial(token, crate::agent::DIAL_PATIENCE)
-            .map_err(|reason| {
-                Error::new(
-                    format!(
-                        "`agents `hatched` refused: the helper's engine never dialled home within \
-                         {:?} — {reason}",
-                        crate::agent::DIAL_PATIENCE
-                    ),
-                    1,
-                )
-            })?;
-        let dialed = ral_core::hatch_preamble::read(&mut stream).map_err(|e| Error::new(e, 1))?;
-        if dialed != token {
-            return Err(Error::new(
-                "`agents `hatched` refused: the dial's own token did not match the one this hatch \
-                 was minted for",
-                1,
-            ));
-        }
+        // Past the ack the child is alive, so a refusal from here on simply
+        // drops the stream: the child reads EOF on fd 3 and the guest's own
+        // table reaps it. Nothing to kill, and nothing to tell it.
         let transport = ral_core::transport::WireTransport::adopt(
             stream,
             ral_core::transport::Liveness::default(),
         )
         .map_err(|e| {
             Error::new(
-                format!("`agents `hatched`: could not adopt the hatched wire: {e}"),
+                format!("`agents `start`: could not adopt the hatched wire: {e}"),
                 1,
             )
         })?;
@@ -942,11 +952,11 @@ impl ExarchDesk {
         let fuel = s.fuel - 1;
         let child = Agent::assemble(Build {
             system: s.system_template.clone(),
-            system_prompt: pending.system_prompt,
+            system_prompt,
             index: s.index.clone(),
-            caps: pending.child_caps,
+            caps: child_caps,
             seat,
-            log: pending.child_log,
+            log: child_log,
             parent: Some(s.parent),
             fuel,
             provider: ProviderHandle::new(s.provider.current()),
@@ -954,30 +964,16 @@ impl ExarchDesk {
             returns: true,
             allow_schedule: s.allow_schedule,
             tool_enabled: true,
-            search: pending.search,
+            search: s.search && spec.search,
             agents: s.registry.clone(),
             run_lock: None,
             resume_summary: None,
             disk_warn_bytes: s.disk_warn_bytes,
             egress: s.egress.clone(),
-            hatchery: Some(hatchery),
-            pending_hatches: s.pending_hatches.clone(),
+            dial: Some(dial),
         });
 
-        self.spawn_child(child, pending.name, pending.prompt)
-    }
-
-    /// `` `abort `` — the builtin's own cleanup when its guest-side hatch fails
-    /// after `` `start `` already minted a token: drop the pending hatch and
-    /// free the name it reserved. Idempotent: a token already redeemed or
-    /// already expired is simply gone.
-    fn agent_abort(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "agents `abort";
-        let s = &self.services;
-        let token = payload_value(payload, CLASS, "carrying the hatch token")?;
-        let token = payload_int(token, CLASS, "token")?.cast_unsigned();
-        s.pending_hatches.take(token);
-        Ok(self.roster())
+        self.spawn_child(child, spec.name, spec.prompt)
     }
 
     /// Hand `child` to `spawn_async` and answer the roster it now appears in —
@@ -1021,8 +1017,8 @@ impl ExarchDesk {
             "`spec`",
             "[prompt: …, name: …, type: …, grant: …, search: …]",
         )?;
-        let session_id = payload_fork(
-            req.take("fork", "the parked fork this spawn adopts")?,
+        let fork = payload_fork(
+            req.take("fork", "how this spawn's forked session is to be reached")?,
             CLASS,
         )?;
 
@@ -1061,7 +1057,7 @@ impl ExarchDesk {
         )?;
 
         self.launch(Launch {
-            session_id,
+            fork,
             grant: &grant,
             inherit_context: mnemon,
             name,
@@ -1071,8 +1067,7 @@ impl ExarchDesk {
     }
 
     /// The registry listing scoped to this agent's descendants, tagged
-    /// `` `roster `` — every `` `agents `` tag's answer but the wire spawn's
-    /// `` `hatch ``, and what the tag is there to tell apart.
+    /// `` `roster `` — the answer to every `` `agents `` tag there is.
     fn roster(&self) -> FOValue {
         let s = &self.services;
         let rows = FOValue::List {
@@ -1863,8 +1858,7 @@ mod tests {
             principal: ral_core::host::user(),
             pins: None,
             wire_seat: false,
-            hatchery: None,
-            pending_hatches: crate::fleet::hatch::PendingHatches::new(),
+            dial: None,
         }
     }
 
@@ -1987,11 +1981,11 @@ mod tests {
         }
     }
 
-    /// `` `agents `start ``: the model's own spec record beside the parked fork
-    /// the builtin body minted. Always `` `amnemon ``, the only kind the desk
-    /// tests exercise.
-    pub(super) fn start_req(
-        session: NurseryId,
+    /// `` `agents `start ``: the model's own spec record beside whichever
+    /// `fork` tag the engine minted. Always `` `amnemon ``, the only kind the
+    /// desk tests exercise.
+    pub(super) fn start_req_forked(
+        fork: FOValue,
         prompt: &str,
         name: &str,
         grant: &str,
@@ -2006,12 +2000,6 @@ mod tests {
                 ("search".to_string(), FOValue::Bool { value: search }),
             ],
         };
-        let fork = FOValue::Variant {
-            label: "parked".to_string(),
-            payload: Some(Box::new(FOValue::Int {
-                value: i64::try_from(session.0).expect("small test id"),
-            })),
-        };
         family_req(
             "agents",
             "start",
@@ -2019,6 +2007,23 @@ mod tests {
                 entries: vec![("spec".to_string(), spec), ("fork".to_string(), fork)],
             }),
         )
+    }
+
+    /// The in-process shape: the fork waits in this host's own nursery.
+    pub(super) fn start_req(
+        session: NurseryId,
+        prompt: &str,
+        name: &str,
+        grant: &str,
+        search: bool,
+    ) -> FOValue {
+        let fork = FOValue::Variant {
+            label: "parked".to_string(),
+            payload: Some(Box::new(FOValue::Int {
+                value: i64::try_from(session.0).expect("small test id"),
+            })),
+        };
+        start_req_forked(fork, prompt, name, grant, search)
     }
 
     /// `` `agents `message ``: the model's record, by the surface's own names.
@@ -3860,34 +3865,32 @@ mod tests {
     }
 }
 
-/// The desk's wire arm: `agent-start`'s hatch dance, over a fake hatchery and
-/// a re-exec'd `--engine` child standing in for a hatched guest — the same
-/// vehicle the wire seat's own tests already use, since a genuine vsock dial
-/// only means anything inside a real guest.
+/// The desk's wire arm: `agent-start` dialling a guest that is listening for
+/// exactly one connection, over a fake dialler and a re-exec'd `--engine`
+/// child standing in for the hatched guest — the same vehicle the wire seat's
+/// own tests already use, since a genuine vsock dial only means anything
+/// inside a real guest.
 #[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod wire_tests {
-    use super::tests::{family_req, message_req, roster_names, start_req};
+    use super::tests::{message_req, roster_names, start_req_forked};
     use super::*;
-    use crate::agent::Hatchery;
     use crate::agent::event::AgentLog;
     use crate::agent::testkit::ral_call;
     use crate::bus::Inbox;
     use crate::egress::Egress;
-    use crate::fleet::hatch::PendingHatches;
     use crate::fleet::registry::{EvalReach, InterruptTarget, Registration};
     use crate::provider::{
         Provider,
         scripted::{Reply, Script},
     };
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::sync::Mutex as StdMutex;
-    use std::time::Duration;
 
     /// Each log takes the next session id, so two of them are never the same
     /// session to the wire.
@@ -3918,60 +3921,11 @@ mod wire_tests {
         }
     }
 
-    /// A fake [`Hatchery`] whose `await_dial` answers whatever the test
-    /// queued through [`Self::queue`], or refuses with a fixed message —
-    /// standing in for both a landed dial and a `ral-daemon`-style timeout.
-    struct FakeHatchery {
-        port: u32,
-        dial: StdMutex<Option<Result<UnixStream, String>>>,
-    }
-
-    impl FakeHatchery {
-        fn new(port: u32) -> Self {
-            Self {
-                port,
-                dial: StdMutex::new(None),
-            }
-        }
-
-        fn queue(&self, dial: Result<UnixStream, String>) {
-            *self.dial.lock().unwrap() = Some(dial);
-        }
-    }
-
-    impl crate::agent::Hatchery for FakeHatchery {
-        fn await_dial(
-            &self,
-            _token: u64,
-            _patience: Duration,
-        ) -> Result<ral_core::wire::WireStream, String> {
-            self.dial
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or_else(|| Err("no dial queued".to_string()))
-        }
-
-        fn port(&self) -> u32 {
-            self.port
-        }
-    }
-
-    /// Spawn a bare `--engine` child over a fresh socketpair, exactly
-    /// [`crate::agent::seat::tests::spawn_engine`]'s vehicle — but write a
-    /// hatch preamble bearing `token` onto the guest's own end first, the way
-    /// [`ral_core::hatch::hatch_over`] writes it on the dial *before* handing
-    /// the same fd to the spawned child. The host end, `preamble` bytes
-    /// included, is what a real hatchery hands the desk to adopt.
-    fn hatched_engine(token: u64) -> (UnixStream, std::process::Child) {
-        let (host, guest) = UnixStream::pair().expect("socketpair standing in for the vsock dial");
-        {
-            let mut preamble = [0u8; 16];
-            preamble[..8].copy_from_slice(b"ralagent");
-            preamble[8..].copy_from_slice(&token.to_le_bytes());
-            let mut writer = guest.try_clone().expect("clone guest end");
-            writer.write_all(&preamble).expect("write preamble");
-        }
+    /// Re-exec this binary as a bare `--engine` child holding `guest` on fd 3,
+    /// exactly [`crate::agent::seat::tests::spawn_engine`]'s vehicle. The
+    /// caller drops its own copy afterwards, as `hatch_over` does, so the
+    /// child's death reads as EOF on the host's end.
+    fn spawn_engine_on(guest: &UnixStream) -> std::process::Child {
         let guest_fd = guest.as_raw_fd();
         let mut cmd = std::process::Command::new(std::env::current_exe().expect("current exe"));
         cmd.arg("--engine");
@@ -3992,9 +3946,93 @@ mod wire_tests {
                 Ok(())
             });
         }
-        let child = cmd.spawn().expect("spawn engine child");
-        drop(guest);
-        (host, child)
+        cmd.spawn().expect("spawn engine child")
+    }
+
+    /// What the guest at the far end of a [`FakeDial`] does with the dial.
+    enum Guest {
+        /// The whole spine: read the token, spawn the child, then ack — the
+        /// order [`ral_core::hatch::hatch_over`] keeps, since the ack is the
+        /// claim that the child exists.
+        Hatches,
+        /// A guest-side hatch that failed: read the token and close, saying
+        /// nothing. The host's ack read sees EOF.
+        ClosesWithoutAcking,
+        /// Nothing is listening on that port.
+        Refuses(String),
+    }
+
+    /// A fake [`crate::agent::Dial`] that plays the guest. `dial` hands back
+    /// one end of a socketpair and leaves a thread on the other end doing
+    /// whatever this fake's [`Guest`] says, so the desk under test drives a
+    /// real handshake against a real peer.
+    struct FakeDial {
+        guest: Guest,
+        /// Every port `dial` was asked for, in order.
+        ports: StdMutex<Vec<u32>>,
+        /// Every token a guest thread actually read off the wire.
+        tokens: Arc<StdMutex<Vec<u64>>>,
+        /// Engine children the guest threads spawned, for the test to reap.
+        children: Arc<StdMutex<Vec<std::process::Child>>>,
+    }
+
+    impl FakeDial {
+        fn new(guest: Guest) -> Arc<Self> {
+            Arc::new(Self {
+                guest,
+                ports: StdMutex::new(Vec::new()),
+                tokens: Arc::new(StdMutex::new(Vec::new())),
+                children: Arc::new(StdMutex::new(Vec::new())),
+            })
+        }
+
+        fn ports(&self) -> Vec<u32> {
+            self.ports.lock().unwrap().clone()
+        }
+
+        /// Recorded before the ack, so a caller that has the ack has these.
+        fn tokens(&self) -> Vec<u64> {
+            self.tokens.lock().unwrap().clone()
+        }
+
+        fn reap(&self) {
+            for mut child in self.children.lock().unwrap().drain(..) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    impl crate::agent::Dial for FakeDial {
+        fn dial(&self, port: u32) -> Result<ral_core::wire::WireStream, String> {
+            self.ports.lock().unwrap().push(port);
+            let hatches = match &self.guest {
+                Guest::Refuses(reason) => return Err(reason.clone()),
+                Guest::Hatches => true,
+                Guest::ClosesWithoutAcking => false,
+            };
+            let (host, guest) =
+                UnixStream::pair().map_err(|e| format!("socketpair for the fake dial: {e}"))?;
+            let tokens = self.tokens.clone();
+            let children = self.children.clone();
+            std::thread::spawn(move || {
+                let mut guest = guest;
+                let mut claim = [0u8; 8];
+                if guest.read_exact(&mut claim).is_err() {
+                    return;
+                }
+                tokens.lock().unwrap().push(u64::from_le_bytes(claim));
+                if !hatches {
+                    return;
+                }
+                let child = spawn_engine_on(&guest);
+                guest
+                    .write_all(&[ral_core::transport::HATCH_ACK])
+                    .expect("ack the hatch");
+                children.lock().unwrap().push(child);
+            });
+            Ok(host)
+        }
     }
 
     /// A [`EvalReach::Wire`] with a genuine `ControlSender` behind it — a
@@ -4002,7 +4040,9 @@ mod wire_tests {
     /// fixtures need a real reach value's *shape* but never actually cancel
     /// or interrupt through it.
     fn fake_wire_reach() -> EvalReach {
-        let (host, mut child) = hatched_engine(0);
+        let (host, guest) = UnixStream::pair().expect("socketpair standing in for the dial");
+        let mut child = spawn_engine_on(&guest);
+        drop(guest);
         let transport = ral_core::transport::WireTransport::adopt(
             host,
             ral_core::transport::Liveness::default(),
@@ -4016,11 +4056,8 @@ mod wire_tests {
 
     /// A wire-seat desk fixture, its parent registered so `agent-start`'s
     /// spawn spine runs end to end, exactly [`super::tests::spawnable_desk`]'s
-    /// identity shape with `wire_seat: true` and a hatchery installed.
-    fn wire_spawnable_desk(
-        fuel: u32,
-        hatchery: Arc<FakeHatchery>,
-    ) -> (ExarchDesk, AgentRegistry, Inbox) {
+    /// identity shape with `wire_seat: true` and a dialler installed.
+    fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, AgentRegistry, Inbox) {
         let parent_inbox = Inbox::new();
         let registry = AgentRegistry::new();
         let parent_id = crate::agent::fresh_id();
@@ -4066,89 +4103,77 @@ mod wire_tests {
                 principal: ral_core::host::user(),
                 pins: None,
                 wire_seat: true,
-                hatchery: Some(hatchery),
-                pending_hatches: PendingHatches::new(),
+                dial: Some(dial),
             },
         };
         (desk, registry, parent_inbox)
     }
 
-    /// The wire arm never adopts a parked fork, so any nursery id will do.
-    fn agent_start_req(name: &str) -> FOValue {
-        start_req(NurseryId(0), "go", name, "confined", false)
-    }
-
-    /// The token rides as whatever i64 bits the desk minted it with.
-    fn agent_hatched_req(token: u64) -> FOValue {
-        family_req(
-            "agents",
-            "hatched",
-            Some(FOValue::Int {
-                value: token.cast_signed(),
-            }),
-        )
-    }
-
-    /// Unwrap the wire `` `start ``'s `` `hatch [token, port] `` answer.
-    fn hatch_token(answer: FOValue) -> u64 {
-        let FOValue::Variant {
-            label,
-            payload: Some(payload),
-        } = answer
-        else {
-            panic!("expected a `hatch variant")
+    /// `` `agents `start `` as a listening engine sends it: the port its
+    /// listener is bound to, and the token that listener will check the
+    /// host's dial against.
+    fn wire_start_req(name: &str, port: u32, token: u64) -> FOValue {
+        let fork = FOValue::Variant {
+            label: "listening".to_string(),
+            payload: Some(Box::new(FOValue::Map {
+                entries: vec![
+                    (
+                        "port".to_string(),
+                        FOValue::Int {
+                            value: i64::from(port),
+                        },
+                    ),
+                    (
+                        "token".to_string(),
+                        FOValue::Int {
+                            value: token.cast_signed(),
+                        },
+                    ),
+                ],
+            })),
         };
-        assert_eq!(label, "hatch");
-        let FOValue::Map { entries } = *payload else {
-            panic!("expected a hatch record payload")
-        };
-        entries
-            .into_iter()
-            .find_map(|(k, v)| match (k.as_str(), v) {
-                ("token", FOValue::Int { value }) => Some(value.cast_unsigned()),
-                _ => None,
-            })
-            .expect("hatch answer must carry a token")
+        start_req_forked(fork, "go", name, "confined", false)
     }
 
-    /// The whole spine: `` `start `` mints a hatch, a re-exec'd `--engine`
-    /// child stands in for the guest's own hatch, `` `hatched `` adopts its
-    /// dial, and the model-driven helper's `reply` lands in the parent's
-    /// inbox exactly as an identity spawn's would.
+    /// The whole spine in one exchange: the desk dials the port the enquiry
+    /// named, writes the token that enquiry carried, waits for the guest's
+    /// ack, and answers a roster the child is already on — after which the
+    /// model-driven helper's `reply` lands in the parent's inbox exactly as
+    /// an identity spawn's would.
     #[test]
-    fn wire_hatch_spawns_and_delivers_result_to_parent_inbox() {
-        let port = 1731;
-        let hatchery = Arc::new(FakeHatchery::new(port));
-        let (desk, _registry, parent_inbox) = wire_spawnable_desk(3, hatchery.clone());
+    fn wire_spawn_dials_the_guest_and_delivers_its_result_to_the_parent_inbox() {
+        let port = 41_731;
+        // High bits set: the token crosses as an `Int` and must come back
+        // bit-for-bit, not as an arithmetic value.
+        let token = 0xF0DE_BA5E_1234_5678;
+        let dial = FakeDial::new(Guest::Hatches);
+        let (desk, _registry, parent_inbox) = wire_spawnable_desk(3, dial.clone());
 
-        let started = desk
-            .handle(agent_start_req("helper"))
-            .expect("`start must answer");
-        let token = hatch_token(started);
-        assert_eq!(
-            hatchery.port(),
-            port,
-            "the hatch answer's port must be the hatchery's own"
-        );
-
-        let (host, mut child) = hatched_engine(token);
-        hatchery.queue(Ok(host));
-
-        let provider = scripted_provider(Script::new().then(Reply::tool_calls(vec![ral_call(
-            "r1",
-            "reply 'hi from wire'",
-        )])));
-        // The assembled child seeds its own provider from the desk's
-        // captured handle, so swap it before `` `hatched `` assembles.
-        desk.services.provider.swap(provider);
+        // The assembled child seeds its own provider from the desk's captured
+        // handle, so swap it before `` `start `` assembles.
+        desk.services
+            .provider
+            .swap(scripted_provider(Script::new().then(Reply::tool_calls(
+                vec![ral_call("r1", "reply 'hi from wire'")],
+            ))));
 
         let answer = desk
-            .handle(agent_hatched_req(token))
-            .expect("`hatched must adopt the dial and spawn");
+            .handle(wire_start_req("helper", port, token))
+            .expect("`start must dial, hatch and spawn");
         assert_eq!(
             roster_names(answer),
             vec!["helper".to_string()],
             "the hatched child is on the roster the spawn answers with"
+        );
+        assert_eq!(
+            dial.ports(),
+            vec![port],
+            "the desk dials the port it was told"
+        );
+        assert_eq!(
+            dial.tokens(),
+            vec![token],
+            "the guest's listener reads back the very bits the enquiry carried"
         );
 
         match wait_for_settle(&parent_inbox) {
@@ -4162,95 +4187,74 @@ mod wire_tests {
             other => panic!("expected an Agent result item, got {other:?}"),
         }
 
-        let _ = child.kill();
-        let _ = child.wait();
+        dial.reap();
     }
 
-    /// A dial whose preamble carries the wrong token is refused, never
-    /// silently adopted: the token is the hatch's real defense, not the
-    /// magic alone.
+    /// A guest whose own hatch failed closes without acking. The host has a
+    /// connection and no child, and must say so rather than register one.
     #[test]
-    fn agent_hatched_refuses_a_dial_bearing_the_wrong_token() {
-        let hatchery = Arc::new(FakeHatchery::new(1731));
-        let (desk, _registry, _parent_inbox) = wire_spawnable_desk(3, hatchery.clone());
-
-        let started = desk
-            .handle(agent_start_req("mismatched"))
-            .expect("`start must answer");
-        let token = hatch_token(started);
-
-        // A dial genuinely hatched, but under a different token than the one
-        // this hatch was minted for — a stray or a confused sibling.
-        let (host, mut child) = hatched_engine(token.wrapping_add(1));
-        hatchery.queue(Ok(host));
+    fn wire_spawn_refuses_when_the_guest_closes_without_acking() {
+        let dial = FakeDial::new(Guest::ClosesWithoutAcking);
+        let (desk, registry, _parent_inbox) = wire_spawnable_desk(3, dial);
+        let parent = desk.services.parent;
 
         let err = desk
-            .handle(agent_hatched_req(token))
-            .expect_err("a token mismatch must be refused");
+            .handle(wire_start_req("unacked", 41_731, 7))
+            .expect_err("an unacknowledged hatch must be refused");
         assert!(
-            err.message.contains("did not match"),
+            err.message
+                .contains("the guest closed the connection before acknowledging the hatch"),
             "got: {}",
             err.message
         );
-
-        let _ = child.kill();
-        let _ = child.wait();
+        assert!(
+            registry.list(parent).is_empty(),
+            "a hatch that was never acknowledged names no child on the roster"
+        );
     }
 
-    /// A dial that never arrives — the hatchery's own timeout — answers a
-    /// refusal naming the wait, the failure-honesty path `` `hatched ``
-    /// owes a builtin that must then kill and reap its own hatched child.
+    /// A dial the guest refuses — nothing bound on that port — is refused
+    /// with a sentence naming the dial, so the builtin's own listener thread
+    /// learns why it was never reached.
     #[test]
-    fn agent_hatched_refuses_naming_the_wait_on_a_hatchery_timeout() {
-        let hatchery = Arc::new(FakeHatchery::new(1731));
-        let (desk, _registry, _parent_inbox) = wire_spawnable_desk(3, hatchery);
-
-        let started = desk
-            .handle(agent_start_req("never-dials"))
-            .expect("`start must answer");
-        let token = hatch_token(started);
-        // No dial queued: `FakeHatchery::await_dial` answers its own refusal.
+    fn wire_spawn_refuses_naming_the_dial_when_the_guest_refuses_it() {
+        let dial = FakeDial::new(Guest::Refuses("connection reset by peer".to_string()));
+        let (desk, _registry, _parent_inbox) = wire_spawnable_desk(3, dial);
 
         let err = desk
-            .handle(agent_hatched_req(token))
-            .expect_err("a hatchery timeout must be refused");
+            .handle(wire_start_req("never-reached", 41_731, 7))
+            .expect_err("a refused dial must be refused");
         assert!(
-            err.message.contains("never dialled home"),
-            "must name the wait, got: {}",
+            err.message.contains("could not dial") && err.message.contains("41731"),
+            "must name the dial and the port, got: {}",
             err.message
         );
     }
 
-    /// `` `abort `` drops the pending hatch and frees the name it reserved,
-    /// so a retry under the same name succeeds.
+    /// The identity tag on a wire desk is a guest claiming to be in process.
+    /// Refused, and before anything is dialled.
     #[test]
-    fn agent_abort_frees_the_reserved_name() {
-        let hatchery = Arc::new(FakeHatchery::new(1731));
-        let (desk, _registry, _parent_inbox) = wire_spawnable_desk(3, hatchery);
+    fn wire_spawn_refuses_a_parked_fork_without_dialling() {
+        let dial = FakeDial::new(Guest::Hatches);
+        let (desk, _registry, _parent_inbox) = wire_spawnable_desk(3, dial.clone());
 
-        let started = desk
-            .handle(agent_start_req("aborted"))
-            .expect("`start must answer");
-        let token = hatch_token(started);
-
-        let retry = desk.handle(agent_start_req("aborted"));
+        let err = desk
+            .handle(super::tests::start_req(
+                NurseryId(0),
+                "go",
+                "in-process",
+                "confined",
+                false,
+            ))
+            .expect_err("a wire desk has no nursery to adopt a parked fork from");
         assert!(
-            retry.is_err(),
-            "the name is reserved while the hatch is pending"
+            err.message.contains("`listening [port, token]`"),
+            "must name the tag this host does take, got: {}",
+            err.message
         );
-
-        desk.handle(family_req(
-            "agents",
-            "abort",
-            Some(FOValue::Int {
-                value: token.cast_signed(),
-            }),
-        ))
-        .expect("`abort always answers the roster");
-
         assert!(
-            desk.handle(agent_start_req("aborted")).is_ok(),
-            "aborting the pending hatch must free its reserved name"
+            dial.ports().is_empty(),
+            "a fork this desk cannot reach is refused before any dial"
         );
     }
 
@@ -4339,8 +4343,7 @@ mod wire_tests {
                 principal: ral_core::host::user(),
                 pins: None,
                 wire_seat: false,
-                hatchery: None,
-                pending_hatches: PendingHatches::new(),
+                dial: None,
             },
         };
 

@@ -221,10 +221,7 @@ pub(crate) fn spawn_async(
             }
         });
     match worker {
-        Ok(_) => Ok(SpawnedChild {
-            id: agent_id,
-            name,
-        }),
+        Ok(_) => Ok(SpawnedChild { id: agent_id, name }),
         Err(e) => {
             // Registration must precede the thread: registering after it would
             // race a conversing child's first `park_mode` read of `is_live`

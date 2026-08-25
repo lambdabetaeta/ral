@@ -1236,7 +1236,7 @@ mod tests {
     fn spawned_worker_never_receives_the_nursery() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
-        m.nursery = Some(crate::types::Nursery::default());
+        m.fork = Some(crate::types::Fork::Park(crate::types::Nursery::default()));
         let snap = Arc::new(shell.mobile().scope);
         let (tx, rx) = mpsc::channel::<crate::types::Settled<crate::types::NurseryId>>();
         let handle = spawn_child(
@@ -1550,7 +1550,7 @@ mod tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         };
         match shell.run(req) {
@@ -1581,7 +1581,7 @@ mod tests {
             surface: None,
             deferred: None,
             desk: None,
-            nursery: None,
+            fork: None,
             lifecycle: Box::new(()),
         };
         match shell.run(req) {

@@ -74,7 +74,7 @@ fn prompt_run(name: &str) -> RunRequest<'static> {
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }
 }

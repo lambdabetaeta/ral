@@ -53,7 +53,7 @@ fn printed(src: &str) -> String {
         surface: None,
         deferred: None,
         desk: None,
-        nursery: None,
+        fork: None,
         lifecycle: Box::new(()),
     }) {
         RunReport::Ran {

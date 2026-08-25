@@ -100,7 +100,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   as it stands, so undo ends with the conversation. The trunk's fuel is
   `SPAWN_FUEL` (3), the same depth budget exarch's own trunks carry —
   promoted `pub` for exactly this reuse — and `RootConfig` carries a
-  `Hatchery` implementation over `Machine::accept_agent` (below), so synod's
+  `Dial` implementation over `Machine::connect_guest` (below), so synod's
   office assistant may delegate to helpers that run concurrently in the
   same guest, against the same folder, under the same safety net. The model
   picker lives here too: `menu`/`refresh_menu` list what the computer's
@@ -298,32 +298,22 @@ backends.
   `com.apple.security.virtualization` entitlement — `vz::entitled()` is a
   process check, not a platform check.
 
-  A third listener sits beside the first two: `AGENT_PORT` (1731,
-  `vm-manager/src/lib.rs`), dialed however many times a wire trunk's fleet
-  hatches children — its delegate dups every accepted fd into an
-  `mpsc::Sender` rather than the control and net ports' one-shot announce,
-  since the agent port's whole meaning is that dials keep coming.
-  `Machine::accept_agent` is its `Wires`-style trait method, waiting up to a
-  patience for the next dial; `take_wires` stays one-shot and untouched, and
-  the `socketDevices().count() == 1` test still holds — one more listener
-  on the one socket device, never a second device. Every fresh dial opens
-  with the 16-byte preamble `vm-manager/src/preamble.rs` encodes and decodes
-  — 8-byte magic `b"ralagent"` plus a `u64` token, little-endian — read by
-  the host embedding, not by `vm-manager` itself, which hands back raw
-  handles and stays dumb about what rides them. Reading the preamble and
-  routing by token is synod's **accept pump**: one thread per conversation
-  over `accept_agent`, owned by `Conversation` and joined at `end` (agent
-  first, then net, machine last), reading each dial's preamble and routing
-  by token into a `Mutex<HashMap<u64, Sender<…>>>` — anything failing the
-  magic is closed and counted, never parsed further. This is synod's
-  `Hatchery` implementation ([[map/exarch/agent|agent]]): `await_dial(token,
-  patience)` blocks on the routed channel, `port()` answers `AGENT_PORT`.
-  The port is dialable from inside the guest jail today — the jail is uid +
-  cgroup + `NO_NEW_PRIVS`, with no seccomp filtering `socket(AF_VSOCK)`
-  ([[map/core/io-process|io-process]]) — so the pump treats a dial flood as
-  bounded noise (accept, fail the magic, close, count) and the token, minted
-  from the OS entropy source and single-use, is the standing defense until a
-  seccomp address-family filter closes that gap for real.
+  Those two listeners are the only ones: every other wire a machine carries
+  the *host* opens. `Machine::connect_guest(port)` dials a listener bound
+  inside the guest and hands back its host end — a `Command::Connect` on the
+  machine thread under this backend, defaulted to a refusal sentence on any
+  backend that cannot dial inwards. There is no third listener, no accept
+  pump, no published preamble, and no host-side token table: a connection the
+  host opened needs nothing to correlate it, because the side that opened it
+  already knows what it opened it for.
+
+  `synod/src/machine_dial.rs` is that seam's synod end — `MachineDial`, an
+  `exarch::agent::Dial` ([[map/exarch/agent|agent]]) over a machine it holds
+  in trust from `Conversation::begin` to `Conversation::end`, which takes it
+  back with `into_machine` once the agent that shared it is gone. The `Mutex`
+  it wraps the machine in is for `Sync`, not for the dial: `Machine` is
+  declared `Send` and no more, and one `Arc<dyn Dial>` crosses the desk's
+  threads.
 
 ## vm-manager/src/hcs/ — the Windows machine
 

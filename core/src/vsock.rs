@@ -9,8 +9,8 @@
 //! [`listen_any`]s for the duration of that one spawn and the host dials in,
 //! so the child exists before the host's roster names it. That listener is
 //! the one socket here whose address is asked for: nothing published its
-//! ephemeral port in advance. A dialled socket is never asked — both callers
-//! hold it only as std's owner of a connected stream, the same pretence
+//! ephemeral port in advance. A dialled socket is never asked — the daemon
+//! holds each only as std's owner of a connected stream, the same pretence
 //! [`crate::wire`] documents for [`crate::wire::WireStream`].
 
 use std::io;

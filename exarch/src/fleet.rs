@@ -10,7 +10,6 @@
 //! on — never fresh ones — so no node can disagree about what is shared.
 
 pub(crate) mod desk;
-pub(crate) mod hatch;
 pub mod registry;
 pub mod schedule;
 

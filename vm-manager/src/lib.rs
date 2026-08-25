@@ -47,7 +47,6 @@
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +54,6 @@ use serde::{Deserialize, Serialize};
 pub mod broker;
 #[cfg(windows)]
 pub mod hcs;
-pub mod preamble;
 #[cfg(target_os = "macos")]
 pub mod vz;
 
@@ -235,16 +233,6 @@ pub trait Hypervisor {
 /// two crates' constants happening to match.
 pub const NET_PORT: u32 = 1730;
 
-/// The `AF_VSOCK`/`AF_HYPERV` port a guest engine dials to hatch a sibling
-/// engine for a helper agent.
-///
-/// Unlike the control port (1729) and [`NET_PORT`], this port is dialed
-/// more than once over a machine's life: every hatched child opens its own
-/// connection here, correlated by the preamble's token ([`preamble`]), so
-/// the one-shot law the other two ports keep is deliberately not this
-/// one's.
-pub const AGENT_PORT: u32 = 1731;
-
 /// The guest's fixed address on the net wire's virtual link, and the subnet
 /// and gateway it is told alongside it.
 ///
@@ -313,12 +301,12 @@ pub struct Wires {
     pub net: std::os::windows::io::OwnedSocket,
 }
 
-/// One guest dial on [`AGENT_PORT`] — the owned handle a hatched child's
-/// connection arrives as, before the preamble on it has even been read.
+/// One connection into a guest — the owned handle
+/// [`Machine::connect_guest`] hands back.
 ///
 /// The same one-word-per-platform shape [`Wires`] carries per field: a
 /// single owned socket handle, `OwnedFd` on Unix and `OwnedSocket` on
-/// Windows, because that is what each platform's accept produces and
+/// Windows, because that is what each platform's dial produces and
 /// [`ral_core::wire::WireStream`](../../core/src/wire.rs) adopts either
 /// kind the same way.
 #[cfg(unix)]
@@ -329,25 +317,12 @@ pub type AgentDial = std::os::fd::OwnedFd;
 #[cfg(windows)]
 pub type AgentDial = std::os::windows::io::OwnedSocket;
 
-/// The refusal every backend without an [`accept_agent`](Machine::accept_agent)
-/// implementation of its own answers with — HCS and the broker today, gated
-/// on a Windows guest completing a boot at all — so an unsupported ask is
-/// named, never silently no-opped.
-#[cfg(windows)]
-pub(crate) fn agent_not_supported_yet() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "this machine cannot accept a helper agent's dial yet — Windows guests do not have that \
-         wire built (it lands once a Windows guest completes a boot at all)",
-    )
-}
-
 /// A running machine holding one workspace, walled off in a virtual
 /// machine.
 ///
 /// `Send` states a fact every backend already meets — the `!Send`
 /// `VZVirtualMachine` stays on its own thread, spoken to through a channel —
-/// and exists so an accept pump may own a `Machine` on a thread of its own.
+/// and exists so a machine may be moved to whichever thread holds a session.
 pub trait Machine: Send {
     /// Where the engine should work — the guest path a real hypervisor
     /// mounted the granted folder at.
@@ -366,28 +341,11 @@ pub trait Machine: Send {
     /// boot.
     fn take_wires(&mut self) -> Wires;
 
-    /// Wait up to `patience` for the next guest dial on [`AGENT_PORT`].
-    ///
-    /// Unlike [`take_wires`](Machine::take_wires) this may be called any
-    /// number of times: every helper a wire trunk hatches dials this port
-    /// afresh, so a machine's agent listener stays open for its whole life
-    /// rather than being spent on one connection. Reading the 16-byte
-    /// preamble off the returned handle — and so telling siblings apart, or
-    /// a stray dial from a real one — is the caller's job; this method hands
-    /// back the raw handle and stays dumb.
-    ///
-    /// # Errors
-    /// Returns an [`io::Error`] of kind [`io::ErrorKind::TimedOut`] if no
-    /// guest dials within `patience`, or [`io::ErrorKind::Unsupported`] on a
-    /// backend that cannot yet accept agent dials at all.
-    fn accept_agent(&mut self, patience: Duration) -> io::Result<AgentDial>;
-
     /// Dial a port the *guest* listens on, and hand back the host end.
     ///
-    /// The inverse of [`accept_agent`](Machine::accept_agent), and the reason
-    /// the inverse is worth having: a host-initiated connection needs no token
-    /// to correlate it, because the side that opened it already knows what it
-    /// opened it for.
+    /// The host opens every wire it does not accept at boot, and that is why
+    /// no token correlates one: the side that opened the connection already
+    /// knows what it opened it for.
     ///
     /// Defaulted, so a backend that cannot dial inwards refuses in a sentence
     /// rather than failing to compile.

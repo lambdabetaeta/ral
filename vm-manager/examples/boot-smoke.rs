@@ -151,25 +151,6 @@ fn main() {
     let wires = machine.take_wires();
     let net = NetStream::from(wires.net);
 
-    // The agent-dial probe: not a guest that actually dials — nothing spawns
-    // a helper here — but proof the substrate is real. A timeout means the
-    // listener exists and simply has no dialer yet, which is the honest
-    // answer before any agent has been hatched.
-    print!("probing the agent port ({})... ", vm_manager::AGENT_PORT);
-    match machine.accept_agent(Duration::from_millis(500)) {
-        Ok(_) => println!("something dialed it already (unexpected, but not wrong)"),
-        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
-            println!("listening, and quiet: no guest dialed within 500ms, as expected");
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::Unsupported => {
-            println!("not built on this backend yet: {err}");
-        }
-        Err(err) => {
-            eprintln!("\nagent probe failed unexpectedly: {err}");
-            std::process::exit(1);
-        }
-    }
-
     prove_the_host_can_dial_in(machine.as_ref(), wires.control, workspace);
 
     println!("booted: the agent can reach the granted folder and nothing else on this computer");
