@@ -177,9 +177,19 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   falls back to a plain in-process counter so the module's own tests stay
   portable — `linux.rs` remains the only place a decision reaches the
   kernel. `jail/linux.rs` is the thin platform edge that
-  realises a `JailPlan` — the cgroup mkdir and limit writes, the pre-exec
+  realises a `JailPlan` — the cgroup tree and limit writes, the pre-exec
   supplementary-group clear / `setresgid` / `setresuid` / `NO_NEW_PRIVS`,
-  kill-whole via `cgroup.kill`, and `EBUSY`-polled removal. `JailCgroup`
+  kill-whole via `cgroup.kill`, and `EBUSY`-polled removal. The tree is
+  built by descent, and the reason is a cgroup2 rule: a controller's files
+  appear in a child only once the parent's `cgroup.subtree_control` enables
+  it, so `memory.max` at the leaf needs an unbroken chain of enabling
+  parents up to the cgroup2 mount itself. `make_delegated` therefore climbs
+  to the first ancestor that already exists — the mount root at the latest,
+  which is exempt from the no-internal-process rule and so may delegate
+  while the daemon and engine still live in it — and enables on the way back
+  down, one level ahead of each mkdir. A parent that will not delegate is
+  refused outright rather than tolerated: a jail whose limits cannot be
+  written must not run the command uncapped instead. `JailCgroup`
   is plain data `RunningChild` carries uniformly (`None` off a real
   guest); a detached birth is handed none at all, since a caller that
   cannot name the process cannot know when its cgroup is empty — the
