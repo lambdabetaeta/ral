@@ -213,6 +213,13 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   and nothing about the agent-port design depends on the token being the
   only defense forever.
 
+  The mirror direction is narrower, and measured on 2026-08-24: a jailed
+  process cannot dial a *guest-local* vsock port at all. The guest kernel
+  refuses `VMADDR_CID_LOCAL` with `ECONNRESET`, and `/dev/vsock` — the only
+  way to read one's own CID — is `EACCES` under the jail. Reaching the host
+  needs neither, since its CID is a well-known constant, which is why the
+  gap above is about that direction and only that one.
+
 Spawning an external command is capability-gated; that gate lives in
 [[map/core/capabilities|capabilities]], and the command/pipeline dispatch that
 drives this plumbing in [[map/core/runtime|runtime]].
