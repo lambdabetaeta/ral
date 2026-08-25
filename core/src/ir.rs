@@ -70,7 +70,6 @@ pub enum Val {
         label: String,
         payload: Option<Box<Self>>,
     },
-    TildePath(TildePath),
 }
 
 impl Val {
@@ -151,6 +150,61 @@ pub struct RedirectV {
     pub fd: u32,
     pub mode: RedirectMode,
     pub target: ValRedirectTarget,
+}
+
+// ── Phrases ─────────────────────────────────────────────────────────────
+
+/// A whole program (or `source`d file): the phrases run in order, each
+/// extending the environment the next one sees.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Toplevel {
+    pub phrases: Vec<Spanned<Phrase>>,
+}
+
+/// One top-level statement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Phrase {
+    /// `let p = M` at the top level: run M, extend the session environment.
+    /// `schemes` has one entry per name `pattern` binds, closed and
+    /// generalised by the checker — a destructuring `let` carries one per
+    /// component, which today's single `Bind.scheme` could not.
+    Define {
+        pattern: Arc<IrPattern>,
+        comp: Arc<Comp>,
+        schemes: Vec<(String, crate::typecheck::Scheme)>,
+    },
+    /// `source path` at the top level: run the file's phrases as the session's own.
+    /// `path : F String` — a `~` or `$CWD` in it is a hoist inside the computation.
+    Source { path: Arc<Comp> },
+    /// Any other statement.
+    Run(Arc<Comp>),
+}
+
+impl Toplevel {
+    /// Every name any phrase can reference — the phrase-level analogue of
+    /// [`referenced_names`], for the same lease ledger.
+    pub fn referenced_names(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        for phrase in &self.phrases {
+            walk_phrase(&phrase.item, &mut out);
+        }
+        out
+    }
+}
+
+fn walk_phrase<'a>(phrase: &'a Phrase, out: &mut Vec<&'a str>) {
+    match phrase {
+        Phrase::Define {
+            pattern,
+            comp,
+            schemes: _,
+        } => {
+            walk_pattern_defaults(pattern, out);
+            walk_comp(comp, out);
+        }
+        Phrase::Source { path } => walk_comp(path, out),
+        Phrase::Run(comp) => walk_comp(comp, out),
+    }
 }
 
 // ── Computations ────────────────────────────────────────────────────────
@@ -243,11 +297,20 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
                 walk_val(v, out);
             }
         }
-        CompKind::LetRec { slot: _, bindings } => {
-            for (_name, rhs) in bindings.iter() {
-                walk_val(rhs, out);
+        // Over-approximate on purpose: every member's names renew, not just
+        // the one this projection picks — the group is one unit at runtime.
+        CompKind::Rec { group, index: _ } => {
+            for (_name, m) in group.iter() {
+                walk_comp(m, out);
             }
         }
+        CompKind::Source { path, rest } => {
+            walk_comp(path, out);
+            walk_comp(rest, out);
+        }
+        // No `Register` variant carries a name reference: the five
+        // pseudo-variables are computed, and a `~`-path names no variable.
+        CompKind::Observe(_) => {}
         CompKind::If { cond, then, else_ } => {
             walk_val(&cond.item, out);
             walk_comp(then, out);
@@ -260,19 +323,35 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
                 walk_comp(arm.body.comp(), out);
             }
         }
-        CompKind::Scope(op) => walk_scope_op(op, out),
+        CompKind::Try { body, handler } => {
+            walk_val(body, out);
+            walk_val(handler, out);
+        }
+        CompKind::Guard { body, cleanup } => {
+            walk_val(body, out);
+            walk_val(cleanup, out);
+        }
+        CompKind::Within { opts, body } => {
+            walk_val(opts, out);
+            walk_val(body, out);
+        }
+        CompKind::Grant { caps, body } => {
+            walk_val(caps, out);
+            walk_val(body, out);
+        }
+        CompKind::Audit { body } => walk_val(body, out),
+        CompKind::Hoisted { body } => walk_comp(body, out),
+        CompKind::Redirect { body, redirects } => {
+            walk_comp(body, out);
+            walk_redirects(redirects, out);
+        }
         CompKind::Capture(body) | CompKind::Decode(body) => walk_comp(body, out),
     }
 }
 
 fn walk_val<'a>(val: &'a Val, out: &mut Vec<&'a str>) {
     match val {
-        Val::Unit
-        | Val::String(_)
-        | Val::Int(_)
-        | Val::Float(_)
-        | Val::Bool(_)
-        | Val::TildePath(_) => {}
+        Val::Unit | Val::String(_) | Val::Int(_) | Val::Float(_) | Val::Bool(_) => {}
         Val::Variable(name) => out.push(name),
         Val::Thunk(comp) => walk_comp(comp, out),
         Val::List(elems) => {
@@ -349,33 +428,6 @@ fn walk_pattern_defaults<'a>(pattern: &'a IrPattern, out: &mut Vec<&'a str>) {
     }
 }
 
-fn walk_scope_op<'a>(op: &'a ScopeOp, out: &mut Vec<&'a str>) {
-    match op {
-        ScopeOp::Try { body, handler } => {
-            walk_val(body, out);
-            walk_val(handler, out);
-        }
-        ScopeOp::Guard { body, cleanup } => {
-            walk_val(body, out);
-            walk_val(cleanup, out);
-        }
-        ScopeOp::Within { opts, body } => {
-            walk_val(opts, out);
-            walk_val(body, out);
-        }
-        ScopeOp::Grant { caps, body } => {
-            walk_val(caps, out);
-            walk_val(body, out);
-        }
-        ScopeOp::Audit { body } => walk_val(body, out),
-        ScopeOp::Hoisted { body } => walk_comp(body, out),
-        ScopeOp::Redirect { body, redirects } => {
-            walk_comp(body, out);
-            walk_redirects(redirects, out);
-        }
-    }
-}
-
 /// What a [`CompKind::Pipeline`] returns to whoever ran it: the last stage's
 /// reported value, or unit because that stage's payload stayed on the byte
 /// channel and so never crossed the process boundary.
@@ -401,7 +453,7 @@ pub enum CompKind {
     /// M to x. N — run `comp`, bind its result, continue with `rest`.
     Bind {
         comp: Arc<Comp>,
-        pattern: IrPattern,
+        pattern: Arc<IrPattern>,
         rest: Arc<Comp>,
         /// Written by the annotation pass for a top-level `Bind` over a
         /// `Name` pattern, and installed beside the value so the next run's
@@ -412,7 +464,7 @@ pub enum CompKind {
     /// `M : A → B, V : A ⊢ M V : B` — the elimination form taken when the
     /// head resolves to a bound value (`$f x`, `(|x| body) x`).  It carries
     /// no redirects, those being a shell effect and not a property of
-    /// application; trailing ones become a [`ScopeOp::Redirect`] around it.
+    /// application; trailing ones become a [`CompKind::Redirect`] around it.
     App { head: Arc<Comp>, args: Args },
     /// Shell command invocation, and the effect boundary — nothing outside
     /// this variant reaches the dispatch chain or an external program.
@@ -454,15 +506,16 @@ pub enum CompKind {
     Interpolation(Vec<Val>),
     /// Sequence; the last value is the result.
     Seq(Vec<Arc<Comp>>),
-    /// Simultaneous fixed point for mutual recursion.  Each RHS is a thunk,
-    /// since the fixpoint must close over references to its siblings.
-    /// `slot: None` establishes the whole group in the current shell and
-    /// returns Unit; `Some(i)` re-establishes it in a temporary scope and
-    /// returns the lambda for binding `i`.
-    LetRec {
-        slot: Option<usize>,
-        bindings: Arc<Vec<(String, Val)>>,
+    /// The `index`-th member of a recursive group: `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, and the
+    /// node has type `C_index`. A group of one is Levy's `rec x. M`.
+    Rec {
+        group: Arc<[(String, Arc<Comp>)]>,
+        index: usize,
     },
+    /// `source path` in a block: the file's definitions scope over `rest`; `path : F String`.
+    Source { path: Arc<Comp>, rest: Arc<Comp> },
+    /// A read of the store, in computation position: what `$CWD` and `~/x` are.
+    Observe(Register),
     /// `if V then M else N` with `V : Bool` and `M, N : C`; the chosen
     /// branch runs inline.
     If {
@@ -479,9 +532,33 @@ pub enum CompKind {
         scrutinee: Spanned<Val>,
         arms: Vec<CaseArm>,
     },
-    /// Effect-frame scope: install an effect for the duration of a body,
-    /// then restore.
-    Scope(ScopeOp),
+    /// `try BODY HANDLER` — catch an error out of `body` and pass it to
+    /// `handler`, a thunk of one argument.
+    Try { body: Val, handler: Val },
+    /// `guard BODY CLEANUP` — `cleanup` runs unconditionally; a failure in
+    /// it is reported but does not mask the body's result.
+    Guard { body: Val, cleanup: Val },
+    /// `audit BODY` — record an audit subtree over `body` and reify it as a
+    /// `[status, value, error, children]` record.
+    Audit { body: Val },
+    /// `within OPTS BODY` — install the option overrides in `opts`, a map
+    /// evaluated at runtime, for the duration of `body`.
+    Within { opts: Val, body: Val },
+    /// `grant CAPS BODY` — attenuate the active capability set across `body`.
+    Grant { caps: Val, body: Val },
+    /// Redirect frame for a body that cannot fuse its own redirects — a
+    /// CBPV `App`, or a nested effect frame.  `body` is an `Arc<Comp>` and
+    /// not a thunk-shaped `Val`, so the invoke arm needs no runtime fallback.
+    Redirect {
+        body: Arc<Comp>,
+        redirects: Vec<RedirectV>,
+    },
+    /// Transitional (W1–W2f): the frame holding the temporaries elaboration
+    /// hoists out of a statement.  Their extent is `body` and nothing wider,
+    /// so the frame is what keeps a temporary out of the session scope, off
+    /// the PATH-shadow check, and off the binding-lease ledger. W2g deletes
+    /// it — a `To` frame's own environment is that hygiene.
+    Hoisted { body: Arc<Comp> },
     /// Checker-inserted value boundary: run `body` with its byte channel
     /// captured and hand those bytes over exactly, as `Bytes`. Total, and
     /// lossless. No surface syntax.
@@ -575,36 +652,17 @@ impl CommandWord {
     }
 }
 
-/// The effect frames: each installs an effect for the duration of a body,
-/// then restores it when the body returns or escapes.
+/// A read of the shell's store, in computation position: what `$CWD`,
+/// `$ENV`, and a `~`-path are. Never a value — reading the store is an
+/// effect, so it names a register rather than being spelled as one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ScopeOp {
-    /// `try BODY HANDLER` — catch an error out of `body` and pass it to
-    /// `handler`, a thunk of one argument.
-    Try { body: Val, handler: Val },
-    /// `guard BODY CLEANUP` — `cleanup` runs unconditionally; a failure in
-    /// it is reported but does not mask the body's result.
-    Guard { body: Val, cleanup: Val },
-    /// `within OPTS BODY` — install the option overrides in `opts`, a map
-    /// evaluated at runtime, for the duration of `body`.
-    Within { opts: Val, body: Val },
-    /// `grant CAPS BODY` — attenuate the active capability set across `body`.
-    Grant { caps: Val, body: Val },
-    /// `audit BODY` — record an audit subtree over `body` and reify it as a
-    /// `[status, value, error, children]` record.
-    Audit { body: Val },
-    /// Redirect frame for a body that cannot fuse its own redirects — a
-    /// CBPV `App`, or a nested `Scope`.  `body` is an `Arc<Comp>` and not a
-    /// thunk-shaped `Val`, so the invoke arm needs no runtime fallback.
-    Redirect {
-        body: Arc<Comp>,
-        redirects: Vec<RedirectV>,
-    },
-    /// The frame holding the temporaries elaboration hoists out of a
-    /// statement.  Their extent is `body` and nothing wider, so the frame is
-    /// what keeps a temporary out of the session scope, off the PATH-shadow
-    /// check, and off the binding-lease ledger.
-    Hoisted { body: Arc<Comp> },
+pub enum Register {
+    Env,
+    Args,
+    Nproc,
+    Cwd,
+    User,
+    Tilde(TildePath),
 }
 
 #[cfg(test)]
@@ -635,7 +693,7 @@ mod tests {
         Arc::new(Spanned::synthetic(CompKind::Return(var(name))))
     }
 
-    /// One synthetic `Comp` touching every `CompKind`, `Val`, and `ScopeOp`
+    /// One synthetic `Comp` touching every `CompKind` and `Val`
     /// variant: `r_*` labels what it references, `*_bound` what it merely
     /// binds.  The harvest is asserted *exactly* — a subset would hide a
     /// wildcard-arm regression, a superset a bound name over-renewing.
@@ -665,7 +723,7 @@ mod tests {
         };
         let bind = Spanned::synthetic(CompKind::Bind {
             comp: ret("r_bind_comp"),
-            pattern: bind_pattern,
+            pattern: Arc::new(bind_pattern),
             rest: ret("r_bind_rest"),
             scheme: None,
         });
@@ -727,10 +785,22 @@ mod tests {
             var("r_interp_b"),
         ]));
         let seq_inner = Spanned::synthetic(CompKind::Seq(vec![ret("r_seq_inner")]));
-        let letrec = Spanned::synthetic(CompKind::LetRec {
-            slot: None,
-            bindings: Arc::new(vec![("letrec_name_bound".to_string(), var("r_letrec_rhs"))]),
+        let rec_group: Arc<[(String, Arc<Comp>)]> = Arc::from(vec![(
+            "rec_name_bound".to_string(),
+            ret("r_rec_member"),
+        )]);
+        let rec = Spanned::synthetic(CompKind::Rec {
+            group: rec_group,
+            index: 0,
         });
+        let source = Spanned::synthetic(CompKind::Source {
+            path: ret("r_source_path"),
+            rest: ret("r_source_rest"),
+        });
+        let observe = Spanned::synthetic(CompKind::Observe(Register::Tilde(TildePath {
+            user: None,
+            suffix: None,
+        })));
         let if_ = Spanned::synthetic(CompKind::If {
             cond: Spanned::synthetic(var("r_if_cond")),
             then: ret("r_if_then"),
@@ -751,33 +821,36 @@ mod tests {
             }],
         });
 
-        let scope_try = Spanned::synthetic(CompKind::Scope(ScopeOp::Try {
+        let scope_try = Spanned::synthetic(CompKind::Try {
             body: var("r_try_body"),
             handler: var("r_try_handler"),
-        }));
-        let scope_guard = Spanned::synthetic(CompKind::Scope(ScopeOp::Guard {
+        });
+        let scope_guard = Spanned::synthetic(CompKind::Guard {
             body: var("r_guard_body"),
             cleanup: var("r_guard_cleanup"),
-        }));
-        let scope_within = Spanned::synthetic(CompKind::Scope(ScopeOp::Within {
+        });
+        let scope_within = Spanned::synthetic(CompKind::Within {
             opts: var("r_within_opts"),
             body: var("r_within_body"),
-        }));
-        let scope_grant = Spanned::synthetic(CompKind::Scope(ScopeOp::Grant {
+        });
+        let scope_grant = Spanned::synthetic(CompKind::Grant {
             caps: var("r_grant_caps"),
             body: var("r_grant_body"),
-        }));
-        let scope_audit = Spanned::synthetic(CompKind::Scope(ScopeOp::Audit {
+        });
+        let scope_audit = Spanned::synthetic(CompKind::Audit {
             body: var("r_audit_body"),
-        }));
-        let scope_redirect = Spanned::synthetic(CompKind::Scope(ScopeOp::Redirect {
+        });
+        let scope_redirect = Spanned::synthetic(CompKind::Redirect {
             body: ret("r_scope_redirect_body"),
             redirects: vec![RedirectV {
                 fd: 2,
                 mode: RedirectMode::Append,
                 target: ValRedirectTarget::File(var("r_scope_redirect_target")),
             }],
-        }));
+        });
+        let scope_hoisted = Spanned::synthetic(CompKind::Hoisted {
+            body: ret("r_hoisted_body"),
+        });
 
         let val_list = Spanned::synthetic(CompKind::Return(Val::List(vec![
             ValListElem::Single(Val::Unit),
@@ -785,10 +858,6 @@ mod tests {
             ValListElem::Single(Val::Int(1)),
             ValListElem::Single(Val::Float(1.0)),
             ValListElem::Single(Val::Bool(true)),
-            ValListElem::Single(Val::TildePath(TildePath {
-                user: None,
-                suffix: None,
-            })),
             ValListElem::Single(var("r_list_single")),
             ValListElem::Spread(var("r_list_spread")),
         ])));
@@ -825,7 +894,9 @@ mod tests {
             Arc::new(chain),
             Arc::new(interpolation),
             Arc::new(seq_inner),
-            Arc::new(letrec),
+            Arc::new(rec),
+            Arc::new(source),
+            Arc::new(observe),
             Arc::new(if_),
             Arc::new(case),
             Arc::new(scope_try),
@@ -834,6 +905,7 @@ mod tests {
             Arc::new(scope_grant),
             Arc::new(scope_audit),
             Arc::new(scope_redirect),
+            Arc::new(scope_hoisted),
             Arc::new(val_list),
             Arc::new(val_map),
             Arc::new(val_variant),
@@ -872,7 +944,9 @@ mod tests {
             "r_interp_a",
             "r_interp_b",
             "r_seq_inner",
-            "r_letrec_rhs",
+            "r_rec_member",
+            "r_source_path",
+            "r_source_rest",
             "r_if_cond",
             "r_if_then",
             "r_if_else",
@@ -890,6 +964,7 @@ mod tests {
             "r_audit_body",
             "r_scope_redirect_body",
             "r_scope_redirect_target",
+            "r_hoisted_body",
             "r_list_single",
             "r_list_spread",
             "r_map_key",
@@ -909,14 +984,14 @@ mod tests {
             expected.len(),
             "unexpected extra name in {found:?}; every bound-not-referenced \
              name (lam_param_bound, bind_map_bound, bind_rest_bound, \
-             letrec_name_bound, case_arm_bound) must be absent"
+             rec_name_bound, case_arm_bound) must be absent"
         );
 
         for bound in [
             "lam_param_bound",
             "bind_map_bound",
             "bind_rest_bound",
-            "letrec_name_bound",
+            "rec_name_bound",
             "case_arm_bound",
         ] {
             assert!(

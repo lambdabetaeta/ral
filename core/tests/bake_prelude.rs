@@ -38,12 +38,14 @@ fn schemes_on_binds(comp: &ral_core::ir::Comp) -> Vec<(String, String)> {
                 }
             }
             CompKind::Bind {
-                pattern: IrPattern::Name(name),
+                pattern,
                 rest,
                 scheme: Some(scheme),
                 ..
             } => {
-                out.push((name.clone(), fmt_scheme(scheme)));
+                if let IrPattern::Name(name) = pattern.as_ref() {
+                    out.push((name.clone(), fmt_scheme(scheme)));
+                }
                 walk(rest, out);
             }
             CompKind::Bind { rest, .. } => walk(rest, out),

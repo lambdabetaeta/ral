@@ -13,9 +13,10 @@
 //!
 //! Neither analysis is reimplemented here.  The edges reuse
 //! [`Ast::free_refs`](ral_core::syntax::ast) — the same free-variable
-//! analysis `syntax::group` (private to `ral_core`) uses to form `LetRec`
-//! groups.  The effect verdict reuses the checker's own IR: a binding whose
-//! RHS compiles to a [`CompKind::Exec`] or [`CompKind::Scope`], or whose RHS
+//! analysis `syntax::group` (private to `ral_core`) uses to form a `Rec`
+//! group.  The effect verdict reuses the checker's own IR: a binding whose
+//! RHS compiles to a [`CompKind::Exec`] or one of the effect-frame forms
+//! (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`, `Hoisted`), or whose RHS
 //! the checker wrapped in the `capture` coercion, is effectful — pure
 //! otherwise.  This is the mode-system verdict the typechecker already
 //! records, not a new heuristic.
@@ -139,7 +140,8 @@ fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
 
 /// Walk an annotated comp's top-level `Bind` nodes into `(name, effectful)`
 /// pairs, reading the checker's verdict off the IR.  A binding is effectful
-/// when its RHS compiles to a [`CompKind::Exec`] or [`CompKind::Scope`], or
+/// when its RHS compiles to a [`CompKind::Exec`] or one of the effect-frame
+/// forms (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`, `Hoisted`), or
 /// when the checker wrapped it in the byte-to-value coercion — a
 /// [`CompKind::Decode`] over a capture, which is the annotation pass's own
 /// verdict that the RHS is a byte-payload computation.
@@ -166,10 +168,18 @@ fn collect_bind_effects(comp: &Comp, out: &mut Vec<(String, bool)>) {
             rest,
             ..
         } => {
-            if let Pattern::Name(name) = pattern {
+            if let Pattern::Name(name) = pattern.as_ref() {
                 let effectful = matches!(
                     rhs.item,
-                    CompKind::Exec(_) | CompKind::Scope(_) | CompKind::Decode(_)
+                    CompKind::Exec(_)
+                        | CompKind::Try { .. }
+                        | CompKind::Guard { .. }
+                        | CompKind::Audit { .. }
+                        | CompKind::Within { .. }
+                        | CompKind::Grant { .. }
+                        | CompKind::Redirect { .. }
+                        | CompKind::Hoisted { .. }
+                        | CompKind::Decode(_)
                 );
                 out.push((name.clone(), effectful));
             }

@@ -10,7 +10,7 @@ use super::generalize::{generalize, instantiate};
 use super::scheme::Scheme;
 use super::ty::{CompTy, GroundRoute, PayloadRoute, Row, Ty};
 use crate::ir::{
-    ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, IrPattern, ScopeOp, Val,
+    ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, IrPattern, Register, Val,
     ValListElem, ValMapEntry,
 };
 use crate::source::Span;
@@ -72,7 +72,7 @@ fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
 ///
 /// The root is where a feed answers the stage's reads for its whole run: an
 /// [`Exec`](CompKind::Exec) fuses its redirects into the spawn, anything else
-/// wears them as a [`ScopeOp::Redirect`] frame, and the `Hoisted`/`Bind` arms
+/// wears them as a [`CompKind::Redirect`] frame, and the `Hoisted`/`Bind` arms
 /// walk past the binders elaboration hoists out of a redirect's own target
 /// (`b < $[locate f]`), whose innermost continuation is the stage as written.
 /// A read redirected deeper answers one command's reads and no others, which
@@ -80,8 +80,8 @@ fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
 fn stage_root_stdin_feed(stage: &Comp) -> Option<StdinFeed> {
     let redirects = match &stage.item {
         CompKind::Exec(exec) => &exec.redirects,
-        CompKind::Scope(ScopeOp::Redirect { redirects, .. }) => redirects,
-        CompKind::Scope(ScopeOp::Hoisted { body }) => return stage_root_stdin_feed(body),
+        CompKind::Redirect { redirects, .. } => redirects,
+        CompKind::Hoisted { body } => return stage_root_stdin_feed(body),
         CompKind::Bind { rest, .. } => return stage_root_stdin_feed(rest),
         _ => return None,
     };
@@ -310,7 +310,7 @@ impl Inferencer<'_> {
     fn discard_tail(comp: &Comp) -> &Comp {
         match &comp.item {
             CompKind::Bind { rest, .. } => Self::discard_tail(rest),
-            CompKind::Scope(ScopeOp::Hoisted { body }) => Self::discard_tail(body),
+            CompKind::Hoisted { body } => Self::discard_tail(body),
             CompKind::Seq(parts) => match parts.last() {
                 Some(last) => Self::discard_tail(last),
                 None => comp,
@@ -1099,7 +1099,7 @@ impl Inferencer<'_> {
     pub(super) fn infer_val(&mut self, val: &Val) -> Ty {
         match val {
             Val::Unit => Ty::Unit,
-            Val::TildePath(_) | Val::String(_) => Ty::String,
+            Val::String(_) => Ty::String,
             Val::Int(_) => Ty::Int,
             Val::Float(_) => Ty::Float,
             Val::Bool(_) => Ty::Bool,
@@ -1452,69 +1452,32 @@ impl Inferencer<'_> {
         self.merge_branches(arm_ctys, &Reason::CaseArms)
     }
 
-    /// Bind each name to a self-referential mono thunk, infer every RHS in that
-    /// recursive environment, and unify each against its own thunk type.  The
-    /// mono self-bindings are left installed: `infer_letrec` drops and
-    /// generalises them, `infer_letrec_slot` discards the whole scope.
-    fn infer_letrec_betas(&mut self, bindings: &[(String, Val)]) -> Vec<CompTy> {
-        let betas: Vec<CompTy> = bindings
+    /// The `Rec` rule of §3.5, without the memo `rec_groups` adds: bind each
+    /// name to a self-referential mono computation type, infer every member
+    /// in that recursive environment, unify each against its own type, unbind
+    /// the self-bindings, and answer the `index`-th member's type. Re-infers
+    /// the whole group at every projection — correct, `O(n²)` in the group
+    /// size — because nothing here remembers having done this already.
+    fn infer_rec(&mut self, group: &Arc<[(String, Arc<Comp>)]>, index: usize) -> CompTy {
+        let betas: Vec<CompTy> = group
             .iter()
             .map(|_| self.ctx.unifier.fresh_comp_ty())
             .collect();
 
-        for ((name, _), beta) in bindings.iter().zip(betas.iter()) {
+        for ((name, _), beta) in group.iter().zip(betas.iter()) {
             self.env.bind(
                 name.clone(),
                 Scheme::mono(Ty::Thunk(Box::new(beta.clone()))),
             );
         }
-        for ((_, lam_val), beta) in bindings.iter().zip(betas.iter()) {
-            let lam_ty = self.infer_val(lam_val);
-            self.ctx.unify_ty(
-                &lam_ty,
-                &Ty::Thunk(Box::new(beta.clone())),
-                Reason::LetRecSelf,
-            );
+        for ((_, member), beta) in group.iter().zip(betas.iter()) {
+            let member_ty = self.infer_comp(member);
+            self.ctx.unify_comp_ty(&member_ty, beta, Reason::LetRecSelf);
         }
-        betas
-    }
-
-    /// `LetRec { slot: Some(i) }` yields binding `i`'s lambda, inferring the
-    /// whole group in a throwaway scope so its errors surface and the
-    /// self-bindings do not leak.  `eval_letrec` synthesises these nodes, so
-    /// the path runs only when such IR is re-checked.
-    fn infer_letrec_slot(&mut self, bindings: &[(String, Val)], slot: usize) -> CompTy {
-        self.with_scope(|this| {
-            let betas = this.infer_letrec_betas(bindings);
-            let beta = betas
-                .get(slot)
-                .cloned()
-                .unwrap_or_else(|| this.ctx.unifier.fresh_comp_ty());
-            CompTy::pure(Ty::Thunk(Box::new(beta)))
-        })
-    }
-
-    fn infer_letrec(&mut self, bindings: &[(String, Val)]) -> CompTy {
-        let betas = self.infer_letrec_betas(bindings);
-        // Drop the mono self-bindings before generalising: left in env, their
-        // free vars would count as residuals in `env_free_vars` and
-        // `generalize` would refuse to quantify them, silently un-poly'ing
-        // every recursive scheme.  Rebound below with the polymorphic ones.
-        for (name, _) in bindings {
+        for (name, _) in group.iter() {
             self.env.unbind(name);
         }
-        let mut schemes: Vec<(String, Scheme)> = Vec::with_capacity(bindings.len());
-        self.ctx.solve_at_boundary(self.env);
-        for ((name, _), beta) in bindings.iter().zip(betas.iter()) {
-            let thunk_ty = Ty::Thunk(Box::new(beta.clone()));
-            let scheme = generalize(&mut self.ctx.unifier, self.env, &thunk_ty);
-            schemes.push((name.clone(), scheme));
-        }
-        for (name, scheme) in schemes {
-            self.env.bind(name, scheme);
-        }
-
-        CompTy::pure(Ty::Unit)
+        betas[index].clone()
     }
 
     pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
@@ -1564,7 +1527,7 @@ impl Inferencer<'_> {
                     }
                 };
 
-                if let IrPattern::Name(_) = pattern {
+                if let IrPattern::Name(_) = pattern.as_ref() {
                     self.ctx
                         .bind_tys
                         .insert(std::ptr::from_ref::<Comp>(comp) as usize, bound_ty.clone());
@@ -1632,14 +1595,17 @@ impl Inferencer<'_> {
                 // alias bindings die with the `Seq`.
                 self.with_scope(|this| this.infer_seq_with_alias_bindings(comps, Ty::Unit))
             }
-            CompKind::LetRec {
-                slot: None,
-                bindings,
-            } => self.infer_letrec(bindings),
-            CompKind::LetRec {
-                slot: Some(i),
-                bindings,
-            } => self.infer_letrec_slot(bindings, *i),
+            CompKind::Rec { group, index } => self.infer_rec(group, *index),
+            CompKind::Source { rest, .. } => self.infer_comp(rest),
+            CompKind::Observe(reg) => CompTy::pure(match reg {
+                Register::Cwd | Register::User | Register::Tilde(_) => Ty::String,
+                Register::Args => Ty::List(Box::new(Ty::String)),
+                Register::Nproc => Ty::Int,
+                // Nothing seeds a static scheme for `$ENV` (`seed_env`), so
+                // today it types as an unconstrained fresh variable — the
+                // same fallback `Val::Variable`'s lookup miss hits.
+                Register::Env => self.ctx.unifier.fresh_ty(),
+            }),
             CompKind::If { cond, then, else_ } => {
                 let cond_ty = self.infer_val(&cond.item);
                 // Underline just the cond, not the whole `if … else …` form.
@@ -1651,35 +1617,31 @@ impl Inferencer<'_> {
                 self.merge_branches(vec![then_cty, else_cty], &Reason::IfBranches)
             }
             CompKind::Case { scrutinee, arms } => self.infer_case(scrutinee, arms),
-            CompKind::Scope(op) => match op {
-                ScopeOp::Within { opts, body } => {
-                    let sig = self.infer_within(opts, body);
-                    CompTy::Return(sig.route, Box::new(sig.value))
-                }
-                ScopeOp::Grant { caps, body } => {
-                    let sig = self.infer_grant(caps, body);
-                    CompTy::Return(sig.route, Box::new(sig.value))
-                }
-                ScopeOp::Try { body, handler } => {
-                    let sig = self.infer_try(body, handler);
-                    CompTy::Return(sig.route, Box::new(sig.value))
-                }
-                ScopeOp::Guard { body, cleanup } => {
-                    let sig = self.infer_guard(body, cleanup);
-                    CompTy::Return(sig.route, Box::new(sig.value))
-                }
-                ScopeOp::Audit { body } => {
-                    let sig = self.infer_audit(body);
-                    CompTy::Return(sig.route, Box::new(sig.value))
-                }
-                // Neither frame touches its body's type — one installs fds,
-                // the other holds hoisted temporaries.  Both carry the body as
-                // an `Arc<Comp>` rather than a thunk-shaped `Val` like the
-                // scope ops above, so infer it directly.
-                ScopeOp::Redirect { body, .. } | ScopeOp::Hoisted { body } => {
-                    self.infer_comp(body)
-                }
-            },
+            CompKind::Within { opts, body } => {
+                let sig = self.infer_within(opts, body);
+                CompTy::Return(sig.route, Box::new(sig.value))
+            }
+            CompKind::Grant { caps, body } => {
+                let sig = self.infer_grant(caps, body);
+                CompTy::Return(sig.route, Box::new(sig.value))
+            }
+            CompKind::Try { body, handler } => {
+                let sig = self.infer_try(body, handler);
+                CompTy::Return(sig.route, Box::new(sig.value))
+            }
+            CompKind::Guard { body, cleanup } => {
+                let sig = self.infer_guard(body, cleanup);
+                CompTy::Return(sig.route, Box::new(sig.value))
+            }
+            CompKind::Audit { body } => {
+                let sig = self.infer_audit(body);
+                CompTy::Return(sig.route, Box::new(sig.value))
+            }
+            // Neither frame touches its body's type — one installs fds,
+            // the other holds hoisted temporaries.  Both carry the body as
+            // an `Arc<Comp>` rather than a thunk-shaped `Val` like the
+            // scope forms above, so infer it directly.
+            CompKind::Redirect { body, .. } | CompKind::Hoisted { body } => self.infer_comp(body),
             // Inserted by `annotate`'s write-back pass, so it is absent from a
             // freshly elaborated tree but present in every tree re-inferred
             // from a live value — a handler arm vetted at install, a bound

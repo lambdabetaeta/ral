@@ -13,8 +13,8 @@ use super::env::{InferCtx, TyEnv};
 use super::generalize::generalize;
 use super::ty::GroundRoute;
 use crate::ir::{
-    CaseArm, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV, ScopeOp, Val, ValListElem,
-    ValMapEntry, ValRedirectTarget,
+    CaseArm, Comp, CompKind, Exec, IrPattern, PipeYield, RedirectV, Val, ValListElem, ValMapEntry,
+    ValRedirectTarget,
 };
 use crate::source::Spanned;
 use crate::syntax::ast::MapPatternEntry;
@@ -158,9 +158,16 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
             let (rhs, scheme) = annotate_bind(comp, rhs, ctx, spine);
             let item = CompKind::Bind {
                 comp: rhs,
-                pattern: annotate_pattern(pattern, ctx),
+                pattern: Arc::new(annotate_pattern(pattern, ctx)),
                 rest: Arc::new(annotate_demand(rest, ctx, spine, demand)),
                 scheme,
+            };
+            return Spanned::with_span(comp.span, item);
+        }
+        CompKind::Source { path, rest } => {
+            let item = CompKind::Source {
+                path: Arc::new(annotate_demand(path, ctx, false, Demand::Value)),
+                rest: Arc::new(annotate_demand(rest, ctx, spine, demand)),
             };
             return Spanned::with_span(comp.span, item);
         }
@@ -206,7 +213,13 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, demand: Demand)
             };
             return Spanned::with_span(comp.span, item);
         }
-        CompKind::Scope(op) => return annotate_scope(comp, op, ctx, demand),
+        CompKind::Try { .. }
+        | CompKind::Guard { .. }
+        | CompKind::Within { .. }
+        | CompKind::Grant { .. }
+        | CompKind::Audit { .. }
+        | CompKind::Redirect { .. }
+        | CompKind::Hoisted { .. } => return annotate_scope(comp, ctx, demand),
         _ => {}
     }
 
@@ -290,15 +303,16 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
         CompKind::Interpolation(parts) => {
             CompKind::Interpolation(parts.iter().map(|v| annotate_val(v, ctx)).collect())
         }
-        CompKind::LetRec { slot, bindings } => CompKind::LetRec {
-            slot: *slot,
-            bindings: Arc::new(
-                bindings
+        CompKind::Rec { group, index } => CompKind::Rec {
+            group: Arc::from(
+                group
                     .iter()
-                    .map(|(name, value)| (name.clone(), annotate_val(value, ctx)))
-                    .collect(),
+                    .map(|(name, m)| (name.clone(), Arc::new(annotate(m, ctx, false))))
+                    .collect::<Vec<_>>(),
             ),
+            index: *index,
         },
+        CompKind::Observe(reg) => CompKind::Observe(reg.clone()),
         // `Capture` and `Decode` are checker-inserted only, by this very pass;
         // the rest are walked directly by `annotate_demand` and never reach
         // here.
@@ -306,10 +320,17 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx) -> CompKind {
         | CompKind::Decode(_)
         | CompKind::Seq(_)
         | CompKind::Bind { .. }
+        | CompKind::Source { .. }
         | CompKind::If { .. }
         | CompKind::Chain(_)
         | CompKind::Case { .. }
-        | CompKind::Scope(_) => unreachable!("not a plain-rebuild node"),
+        | CompKind::Try { .. }
+        | CompKind::Guard { .. }
+        | CompKind::Within { .. }
+        | CompKind::Grant { .. }
+        | CompKind::Audit { .. }
+        | CompKind::Redirect { .. }
+        | CompKind::Hoisted { .. } => unreachable!("not a plain-rebuild node"),
     }
 }
 
@@ -425,8 +446,7 @@ fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
         | Val::Int(_)
         | Val::Float(_)
         | Val::Bool(_)
-        | Val::Variable(_)
-        | Val::TildePath(_) => val.clone(),
+        | Val::Variable(_) => val.clone(),
     }
 }
 
@@ -458,37 +478,38 @@ fn annotate_redirect(redirect: &RedirectV, ctx: &mut InferCtx) -> RedirectV {
     }
 }
 
-fn annotate_scope(comp: &Comp, op: &ScopeOp, ctx: &mut InferCtx, demand: Demand) -> Comp {
-    let item = match op {
-        ScopeOp::Try { body, handler } => CompKind::Scope(ScopeOp::Try {
+fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, demand: Demand) -> Comp {
+    let item = match &comp.item {
+        CompKind::Try { body, handler } => CompKind::Try {
             body: annotate_scope_val(comp, body, ctx, false, demand),
             handler: annotate_scope_val(comp, handler, ctx, true, demand),
-        }),
-        ScopeOp::Guard { body, cleanup } => CompKind::Scope(ScopeOp::Guard {
+        },
+        CompKind::Guard { body, cleanup } => CompKind::Guard {
             body: annotate_scope_val(comp, body, ctx, false, demand),
             cleanup: annotate_val(cleanup, ctx),
-        }),
-        ScopeOp::Within { opts, body } => CompKind::Scope(ScopeOp::Within {
+        },
+        CompKind::Within { opts, body } => CompKind::Within {
             opts: annotate_val(opts, ctx),
             body: annotate_scope_val(comp, body, ctx, false, demand),
-        }),
-        ScopeOp::Grant { caps, body } => CompKind::Scope(ScopeOp::Grant {
+        },
+        CompKind::Grant { caps, body } => CompKind::Grant {
             caps: annotate_val(caps, ctx),
             body: annotate_scope_val(comp, body, ctx, false, demand),
-        }),
-        ScopeOp::Audit { body } => CompKind::Scope(ScopeOp::Audit {
+        },
+        CompKind::Audit { body } => CompKind::Audit {
             body: annotate_val(body, ctx),
-        }),
-        ScopeOp::Hoisted { body } => CompKind::Scope(ScopeOp::Hoisted {
+        },
+        CompKind::Hoisted { body } => CompKind::Hoisted {
             body: Arc::new(annotate_demand(body, ctx, false, demand)),
-        }),
-        ScopeOp::Redirect { body, redirects } => CompKind::Scope(ScopeOp::Redirect {
+        },
+        CompKind::Redirect { body, redirects } => CompKind::Redirect {
             body: Arc::new(annotate_demand(body, ctx, false, demand)),
             redirects: redirects
                 .iter()
                 .map(|r| annotate_redirect(r, ctx))
                 .collect(),
-        }),
+        },
+        _ => unreachable!("annotate_scope called on a non-scope node"),
     };
     Spanned::with_span(comp.span, item)
 }

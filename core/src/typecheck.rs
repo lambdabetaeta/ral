@@ -144,12 +144,14 @@ fn harvest_into(comp: &Comp, out: &mut Vec<(String, Scheme)>) {
             }
         }
         CompKind::Bind {
-            pattern: IrPattern::Name(name),
+            pattern,
             rest,
             scheme: Some(scheme),
             ..
         } => {
-            out.push((name.clone(), (**scheme).clone()));
+            if let IrPattern::Name(name) = pattern.as_ref() {
+                out.push((name.clone(), (**scheme).clone()));
+            }
             harvest_into(rest, out);
         }
         CompKind::Bind { rest, .. } => harvest_into(rest, out),

@@ -473,10 +473,11 @@ fn pipeline_ending_in_audit_binds_the_audit_record() {
     let mut bound = None;
     common::walk_comp(&comp, &mut |c| {
         if let CompKind::Bind {
-            pattern: IrPattern::Name(name),
+            pattern,
             scheme: Some(scheme),
             ..
         } = &c.item
+            && let IrPattern::Name(name) = pattern.as_ref()
             && name == "v"
         {
             bound = Some(scheme.ty.clone());
@@ -1560,9 +1561,10 @@ fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
     common::walk_comp(&comp, &mut |c| {
         if let CompKind::Bind {
             comp: rhs,
-            pattern: IrPattern::Name(name),
+            pattern,
             ..
         } = &c.item
+            && let IrPattern::Name(name) = pattern.as_ref()
         {
             let coerced = matches!(&rhs.item, CompKind::Decode(inner)
                 if matches!(inner.item, CompKind::Capture(_)));
@@ -1583,9 +1585,10 @@ fn bind_x_is_captured(src: &str) -> bool {
     common::walk_comp(&comp, &mut |c| {
         if let CompKind::Bind {
             comp: rhs,
-            pattern: IrPattern::Name(name),
+            pattern,
             ..
         } = &c.item
+            && let IrPattern::Name(name) = pattern.as_ref()
             && name == "x"
         {
             // A join's byte-side arms are captured individually (per-arm, not
@@ -1969,10 +1972,11 @@ fn nested_binds_carry_no_scheme_while_spine_does() {
     let mut nested_named = None;
     common::walk_comp(&comp, &mut |c| {
         if let CompKind::Bind {
-            pattern: IrPattern::Name(name),
+            pattern,
             scheme,
             ..
         } = &c.item
+            && let IrPattern::Name(name) = pattern.as_ref()
         {
             match name.as_str() {
                 "g" => spine_named = Some(scheme.is_some()),
@@ -2533,70 +2537,3 @@ fn duplicate_case_arm_is_refused() {
     );
 }
 
-// ─── LetRec slot inference (T7) ───────────────────────────────────────────────
-//
-// `LetRec { slot: Some(i) }` re-establishes a mutually-recursive group in a
-// throwaway scope and yields binding `i`'s lambda.  These nodes are synthesised
-// by the evaluator at runtime, never by elaboration, so they are built here
-// directly.  The arm used to return an unconstrained fresh type without
-// inferring the group's bodies, so a body type error never surfaced; it now
-// infers the group and returns binding `i`'s thunk type.
-
-use ral_core::source::Spanned;
-use std::sync::Arc;
-
-/// A one-binding letrec group `letrec { only = { |x| <body> } } in slot 0`,
-/// built as the `slot: Some(0)` IR the evaluator would synthesise.
-fn letrec_slot0(body: CompKind) -> Comp {
-    let lam = Spanned::synthetic(CompKind::Lam {
-        param: IrPattern::Name("x".into()),
-        body: Arc::new(Spanned::synthetic(body)),
-    });
-    let bindings = Arc::new(vec![(
-        "only".to_string(),
-        ral_core::ir::Val::Thunk(Arc::new(lam)),
-    )]);
-    Spanned::synthetic(CompKind::LetRec {
-        slot: Some(0),
-        bindings,
-    })
-}
-
-fn typecheck_comp(comp: &Comp) -> Vec<String> {
-    typecheck(
-        comp,
-        ral_core::SessionSchemes::from_schemes(
-            common::prelude_schemes(),
-            ral_core::HostSurface::default().builtin_table(),
-        ),
-    )
-    .err()
-    .unwrap_or_default()
-    .into_iter()
-    .map(|e| e.kind.render_message())
-    .collect()
-}
-
-/// A type error inside a `slot: Some` group's body surfaces: the lambda body
-/// forces an `Int`, which is not a thunk.
-#[test]
-fn letrec_slot_body_type_error_surfaces() {
-    let comp = letrec_slot0(CompKind::Force(ral_core::ir::Val::Int(1)));
-    let errs = typecheck_comp(&comp);
-    assert!(
-        !errs.is_empty(),
-        "expected a body type error from the slot group, got none"
-    );
-}
-
-/// A well-typed `slot: Some` group typechecks: the lambda body returns its
-/// parameter.
-#[test]
-fn letrec_slot_well_typed_group_ok() {
-    let comp = letrec_slot0(CompKind::Return(ral_core::ir::Val::Variable("x".into())));
-    let errs = typecheck_comp(&comp);
-    assert!(
-        errs.is_empty(),
-        "expected the slot group to typecheck, got: {errs:?}"
-    );
-}

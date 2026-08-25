@@ -16,7 +16,7 @@
 
 use crate::ir::{
     Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield,
-    RedirectV, ScopeOp, Val, ValListElem, ValMapEntry, ValRedirectTarget,
+    RedirectV, Register, Val, ValListElem, ValMapEntry, ValRedirectTarget,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
@@ -228,10 +228,11 @@ impl Elaborator {
 
     /// Elaborate a statement sequence into a single `Comp`.
     fn stmts(&mut self, stmts: &[Stmt]) -> Comp {
-        // `group_stmts` emits each recursive SCC as a `LetRec` at its head's
-        // source position and everything else as a `Single`.
+        // `group_stmts` emits each recursive SCC as a knot of `Bind`s over
+        // one shared `Rec` group, at its head's source position, and
+        // everything else as a `Single`.
         let groups = group_stmts(stmts);
-        let comps: Vec<Comp> = groups.into_iter().map(|g| self.emit_group(g)).collect();
+        let comps: Vec<Comp> = groups.into_iter().flat_map(|g| self.emit_group(g)).collect();
         match comps.len() {
             0 => comp!(self, CompKind::Return(Val::Unit)),
             1 => comps.into_iter().next().unwrap(),
@@ -242,20 +243,20 @@ impl Elaborator {
         }
     }
 
-    fn emit_group(&mut self, group: StmtGroup) -> Comp {
+    /// One `Single` is one `Comp`; a recursive knot of *n* members is *n*
+    /// `Bind`s over one shared `Rec` group, flattened into the caller's `Seq`.
+    fn emit_group(&mut self, group: StmtGroup) -> Vec<Comp> {
         match group {
-            StmtGroup::Single(stmt) => {
-                self.with_span(stmt.span, |this| {
-                    let Spanned { item: kind, .. } = stmt;
-                    let comp = this.stmt(&kind);
-                    // The bound names enter scope only after the RHS is
-                    // elaborated, so `let x = x` reads the outer `x`.
-                    if let Ast::Let { pattern, .. } = &kind {
-                        this.bind_pattern(&pattern.item);
-                    }
-                    comp
-                })
-            }
+            StmtGroup::Single(stmt) => vec![self.with_span(stmt.span, |this| {
+                let Spanned { item: kind, .. } = stmt;
+                let comp = this.stmt(&kind);
+                // The bound names enter scope only after the RHS is
+                // elaborated, so `let x = x` reads the outer `x`.
+                if let Ast::Let { pattern, .. } = &kind {
+                    this.bind_pattern(&pattern.item);
+                }
+                comp
+            })],
             StmtGroup::LetRec(bindings) => {
                 // Forward-declare the group's own names before any RHS, so a
                 // sibling reference resolves to a variable.  Confining that to
@@ -266,7 +267,7 @@ impl Elaborator {
                 for (name, _, _) in &bindings {
                     scope.insert(name.clone());
                 }
-                let elab: Vec<(String, Val)> = bindings
+                let group: Arc<[(String, Arc<Comp>)]> = bindings
                     .iter()
                     .map(|(name, value, span)| {
                         let mut empty = Vec::new();
@@ -283,16 +284,34 @@ impl Elaborator {
                             empty.is_empty(),
                             "lambda/block elaboration must not hoist into outer binds"
                         );
-                        (name.clone(), Val::Thunk(arc))
+                        (name.clone(), arc)
                     })
                     .collect();
-                comp!(
-                    self,
-                    CompKind::LetRec {
-                        slot: None,
-                        bindings: Arc::new(elab),
-                    }
-                )
+                bindings
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, _, _))| {
+                        let rec = comp!(
+                            self,
+                            CompKind::Rec {
+                                group: group.clone(),
+                                index,
+                            }
+                        );
+                        comp!(
+                            self,
+                            CompKind::Bind {
+                                comp: Arc::new(comp!(
+                                    self,
+                                    CompKind::Return(Val::Thunk(Arc::new(rec)))
+                                )),
+                                pattern: Arc::new(IrPattern::Name(name.clone())),
+                                rest: Arc::new(comp!(self, CompKind::Return(Val::Unit))),
+                                scheme: None,
+                            }
+                        )
+                    })
+                    .collect()
             }
         }
     }
@@ -318,7 +337,7 @@ impl Elaborator {
                     self,
                     CompKind::Bind {
                         comp: Arc::new(rhs),
-                        pattern: pattern_ir,
+                        pattern: Arc::new(pattern_ir),
                         rest: Arc::new(comp!(self, CompKind::Return(Val::Unit))),
                         scheme: None,
                     }
@@ -346,7 +365,9 @@ impl Elaborator {
                 comp!(self, CompKind::Return(v))
             }
             Ast::Word(Word::Tilde(path)) => {
-                comp!(self, CompKind::Return(Val::TildePath(path.clone())))
+                let observed = comp!(self, CompKind::Observe(Register::Tilde(path.clone())));
+                let v = self.hoist(observed, binds);
+                comp!(self, CompKind::Return(v))
             }
 
             Ast::Block(body) => {
@@ -461,28 +482,42 @@ impl Elaborator {
 
             Ast::Scope { op, redirects } => {
                 let redirect_vals = self.lower_redirects(redirects, binds);
-                let scope_op = match op {
-                    ScopeAst::Try { body, handler } => ScopeOp::Try {
-                        body: self.to_val(body, binds),
-                        handler: self.to_val(handler, binds),
-                    },
-                    ScopeAst::Guard { body, cleanup } => ScopeOp::Guard {
-                        body: self.to_val(body, binds),
-                        cleanup: self.to_val(cleanup, binds),
-                    },
-                    ScopeAst::Within { opts, body } => ScopeOp::Within {
-                        opts: self.to_val(opts, binds),
-                        body: self.to_val(body, binds),
-                    },
-                    ScopeAst::Grant { caps, body } => ScopeOp::Grant {
-                        caps: self.to_val(caps, binds),
-                        body: self.to_val(body, binds),
-                    },
-                    ScopeAst::Audit { body } => ScopeOp::Audit {
-                        body: self.to_val(body, binds),
-                    },
+                let inner = match op {
+                    ScopeAst::Try { body, handler } => comp!(
+                        self,
+                        CompKind::Try {
+                            body: self.to_val(body, binds),
+                            handler: self.to_val(handler, binds),
+                        }
+                    ),
+                    ScopeAst::Guard { body, cleanup } => comp!(
+                        self,
+                        CompKind::Guard {
+                            body: self.to_val(body, binds),
+                            cleanup: self.to_val(cleanup, binds),
+                        }
+                    ),
+                    ScopeAst::Within { opts, body } => comp!(
+                        self,
+                        CompKind::Within {
+                            opts: self.to_val(opts, binds),
+                            body: self.to_val(body, binds),
+                        }
+                    ),
+                    ScopeAst::Grant { caps, body } => comp!(
+                        self,
+                        CompKind::Grant {
+                            caps: self.to_val(caps, binds),
+                            body: self.to_val(body, binds),
+                        }
+                    ),
+                    ScopeAst::Audit { body } => comp!(
+                        self,
+                        CompKind::Audit {
+                            body: self.to_val(body, binds),
+                        }
+                    ),
                 };
-                let inner = comp!(self, CompKind::Scope(scope_op));
                 self.wrap_redirect(inner, redirect_vals)
             }
 
@@ -810,7 +845,7 @@ impl Elaborator {
         self.wrap_redirect(app, redirects)
     }
 
-    /// Attach trailing `redirects` to `body` as a [`ScopeOp::Redirect`] frame.
+    /// Attach trailing `redirects` to `body` as a [`CompKind::Redirect`] frame.
     /// `Exec` fuses its redirects into the syscall instead, and pipelines and
     /// chains take none at the surface, so this covers every remaining body.
     fn wrap_redirect(&self, body: Comp, redirects: Vec<RedirectV>) -> Comp {
@@ -819,10 +854,10 @@ impl Elaborator {
         }
         comp!(
             self,
-            CompKind::Scope(ScopeOp::Redirect {
+            CompKind::Redirect {
                 body: Arc::new(body),
                 redirects,
-            })
+            }
         )
     }
 
@@ -950,7 +985,7 @@ fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) ->
                 span,
                 CompKind::Bind {
                     comp: Arc::new(comp),
-                    pattern,
+                    pattern: Arc::new(pattern),
                     rest: Arc::new(rest),
                     scheme: None,
                 },
@@ -958,9 +993,9 @@ fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) ->
         });
     Spanned::with_span(
         span,
-        CompKind::Scope(ScopeOp::Hoisted {
+        CompKind::Hoisted {
             body: Arc::new(chain),
-        }),
+        },
     )
 }
 
@@ -1153,10 +1188,20 @@ mod tests {
         };
         let (name, _, _) = expect_exec_name(&parts[0]);
         assert_eq!(name, &CommandName::Bare("g".into()));
+        let CompKind::Bind {
+            pattern, comp: rhs, ..
+        } = &parts[1].item
+        else {
+            panic!("expected a self-recursive Bind, got {:?}", parts[1].item);
+        };
+        assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n == "g"));
+        let CompKind::Return(Val::Thunk(rec)) = &rhs.item else {
+            panic!("expected Return(Thunk(Rec)), got {:?}", rhs.item);
+        };
         assert!(
-            matches!(parts[1].item, CompKind::LetRec { .. }),
-            "expected the self-recursive binding to emit a LetRec, got {:?}",
-            parts[1].item
+            matches!(rec.item, CompKind::Rec { index: 0, .. }),
+            "expected the self-recursive binding to emit a Rec{{index: 0}}, got {:?}",
+            rec.item
         );
     }
 
@@ -1169,14 +1214,18 @@ mod tests {
         let CompKind::Seq(parts) = &comp.item else {
             panic!("expected a Seq, got {:?}", comp.item);
         };
-        let CompKind::LetRec { bindings, .. } = &parts[0].item else {
-            panic!("expected a LetRec group, got {:?}", parts[0].item);
+        let CompKind::Bind { comp: rhs, .. } = &parts[0].item else {
+            panic!("expected a Bind, got {:?}", parts[0].item);
         };
-        let Val::Thunk(body) = &bindings[0].1 else {
-            panic!("expected a thunked lambda binding, got {:?}", bindings[0].1);
+        let CompKind::Return(Val::Thunk(rec)) = &rhs.item else {
+            panic!("expected Return(Thunk(Rec)), got {:?}", rhs.item);
         };
-        let CompKind::Lam { body, .. } = &body.item else {
-            panic!("expected a lambda RHS, got {:?}", body.item);
+        let CompKind::Rec { group, index } = &rec.item else {
+            panic!("expected a Rec node, got {:?}", rec.item);
+        };
+        let (_, member) = &group[*index];
+        let CompKind::Lam { body, .. } = &member.item else {
+            panic!("expected a lambda RHS, got {:?}", member.item);
         };
         assert!(
             matches!(body.item, CompKind::App { .. }),

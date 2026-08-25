@@ -2,7 +2,7 @@
 //! command. Pipelines use the same dispatch, with byte transport handled by
 //! the runtime pipeline.
 
-use crate::ir::{Args, Comp, CompKind, RedirectV, ScopeOp, ValListElem};
+use crate::ir::{Args, Comp, CompKind, RedirectV, ValListElem};
 use crate::types::{Error, Mooring, Raw, Shell, Tail, TailCall, Value};
 use std::sync::Arc;
 
@@ -37,7 +37,7 @@ pub(crate) fn invoke(
             eval_app(head_val, arg_vals, tail, mooring, shell)
         }
 
-        CompKind::Scope(ScopeOp::Redirect { body, redirects }) => {
+        CompKind::Redirect { body, redirects } => {
             // Forwarding `tail` is safe: the frame absorbs the tail call
             // inside itself, so the callee still sees the redirected fds.
             redirect::within_redirect_frame(redirects, mooring, shell, |shell| {

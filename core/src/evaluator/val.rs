@@ -1,10 +1,9 @@
 //! Value-layer evaluator for the CBPV IR — literals, variables, thunks,
-//! collection literals, tilde expansion, none of them effectful. A thunk's
-//! body shape is decided at construction, so consumers never re-inspect the IR.
+//! collection literals, none of them effectful. A thunk's body shape is
+//! decided at construction, so consumers never re-inspect the IR.
 
 use crate::diagnostic;
 use crate::ir::{Comp, Val, ValListElem, ValMapEntry};
-use crate::path::tilde::{Unexpandable, expand_tilde_path};
 use crate::types::{Error, List, Shell, Value};
 
 /// Renders one interpolation piece for `eval_interpolation` in `comp.rs`.
@@ -61,27 +60,6 @@ pub(crate) fn eval_val(val: &Val, shell: &mut Shell) -> Result<Value, Error> {
             Ok(Value::Variant {
                 label: label.clone(),
                 payload,
-            })
-        }
-        Val::TildePath(path) => {
-            let home = shell.mobile.context.home();
-            expand_tilde_path(
-                path.user.as_deref(),
-                path.suffix.as_deref(),
-                home.as_deref(),
-            )
-            .map(Value::String)
-            .map_err(|cause| {
-                shell.err_hint(
-                    format!("cannot resolve {}: {}", path.to_literal(), cause.why()),
-                    match cause {
-                        Unexpandable::HomeUnknown => "set HOME, or spell out an explicit path",
-                        Unexpandable::ForeignUser => {
-                            "use bare ~ for the current user, or spell out an explicit path"
-                        }
-                    },
-                    1,
-                )
             })
         }
     }

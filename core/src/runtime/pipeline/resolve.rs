@@ -6,7 +6,7 @@
 use super::super::command::CommandIdentity;
 use super::super::command_call;
 use crate::evaluator::call;
-use crate::ir::{Comp, CompKind, RedirectV, ScopeOp, ValRedirectTarget};
+use crate::ir::{Comp, CompKind, RedirectV, ValRedirectTarget};
 use crate::source::Span;
 use crate::syntax::ast::RedirectMode;
 use crate::types::{Mooring, Settled, Shell, TerminalAccess, Value};
@@ -90,7 +90,7 @@ pub(super) struct StageSpec {
 fn diverts_stdout(stage: &Comp) -> bool {
     match &stage.item {
         CompKind::Exec(e) => redirects_divert_stdout(&e.redirects),
-        CompKind::Scope(ScopeOp::Redirect { body, redirects }) => {
+        CompKind::Redirect { body, redirects } => {
             redirects_divert_stdout(redirects) || diverts_stdout(body)
         }
         _ => false,

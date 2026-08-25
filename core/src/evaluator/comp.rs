@@ -6,14 +6,15 @@
 //! `TailCall` escapes through [`Raw`], and an absorption point above
 //! ([`super::absorb_tail`]) must land it before a settled caller sees it.
 
-use crate::ir::{Comp, CompKind, IrPattern, PipeYield, ScopeOp, Val};
+use crate::ir::{Comp, CompKind, IrPattern, PipeYield, Register, Val};
+use crate::path::tilde::{Unexpandable, expand_tilde_path};
 use crate::source::Spanned;
 use crate::typecheck::Scheme;
 use crate::types::{Binding, Break, Control, Error, Mooring, Raw, Shell, Tail, Value};
 use std::sync::Arc;
 
 use super::pattern::assign_pattern;
-use super::val::{eval_val, interpolate_piece};
+use super::val::{close_lam, eval_val, interpolate_piece};
 use super::{call, case, expr, scope};
 use crate::runtime::pipeline;
 
@@ -47,7 +48,9 @@ pub(crate) fn eval_comp(
             )
             .into()),
 
-        CompKind::LetRec { slot, bindings } => eval_letrec(*slot, bindings, shell),
+        CompKind::Rec { group, index } => eval_rec(group, *index, tail, mooring, shell),
+
+        CompKind::Observe(reg) => eval_observe(reg, shell).map_err(Into::into),
 
         CompKind::Force(val) => step_force(val, mooring, shell),
 
@@ -88,26 +91,30 @@ pub(crate) fn eval_comp(
             case::eval_case(&scrutinee.item, arms, tail, mooring, shell)
         }
 
-        CompKind::Scope(op) => match op {
-            // `invoke` runs the body inside the fd frame and absorbs its
-            // tail call there: a tail callee that escaped would land after
-            // restoration, writing to the parent instead of the target.
-            ScopeOp::Redirect { .. } => call::invoke(comp, tail, mooring, shell),
-            // These brackets apply their body thunk through the trampoline,
-            // which absorbs the body's tail call inside the frame, so they
-            // have no tail position to grant.
-            ScopeOp::Within { opts, body } => scope::eval_within(opts, body, mooring, shell),
-            ScopeOp::Grant { caps, body } => scope::eval_grant(caps, body, mooring, shell),
-            ScopeOp::Try { body, handler } => scope::eval_try(body, handler, mooring, shell),
-            ScopeOp::Guard { body, cleanup } => scope::eval_guard(body, cleanup, mooring, shell),
-            ScopeOp::Audit { body } => scope::eval_audit(body, mooring, shell),
-            // A temporary is dead once `body` is, so the frame pops here.
-            // Tail position passes through: a tail callee carries its own
-            // captured environment and never reads these slots.
-            ScopeOp::Hoisted { body } => {
-                with_scope(shell, |shell| eval_comp(body, mooring, shell, tail))
-            }
-        },
+        // `invoke` runs the body inside the fd frame and absorbs its
+        // tail call there: a tail callee that escaped would land after
+        // restoration, writing to the parent instead of the target.
+        CompKind::Redirect { .. } => call::invoke(comp, tail, mooring, shell),
+        // These brackets apply their body thunk through the trampoline,
+        // which absorbs the body's tail call inside the frame, so they
+        // have no tail position to grant.
+        CompKind::Within { opts, body } => scope::eval_within(opts, body, mooring, shell),
+        CompKind::Grant { caps, body } => scope::eval_grant(caps, body, mooring, shell),
+        CompKind::Try { body, handler } => scope::eval_try(body, handler, mooring, shell),
+        CompKind::Guard { body, cleanup } => scope::eval_guard(body, cleanup, mooring, shell),
+        CompKind::Audit { body } => scope::eval_audit(body, mooring, shell),
+        // A temporary is dead once `body` is, so the frame pops here.
+        // Tail position passes through: a tail callee carries its own
+        // captured environment and never reads these slots.
+        CompKind::Hoisted { body } => {
+            with_scope(shell, |shell| eval_comp(body, mooring, shell, tail))
+        }
+
+        // W1b's elaborator is the first thing to lower a `source` statement
+        // to this node; nothing constructs it yet.
+        CompKind::Source { .. } => unreachable!(
+            "CompKind::Source is not emitted before W1b's elaborator lowers `source`"
+        ),
 
         CompKind::Seq(comps) => eval_seq(comps, tail, mooring, shell),
     };
@@ -136,64 +143,85 @@ fn set_status_from_value(v: &Value, shell: &mut Shell) {
     }
 }
 
-/// Simultaneous fixed point for mutual recursion: each binding is installed
-/// as a thunk that re-enters `LetRec` at its own slot, so a sibling call
-/// resolves through this same rule. `slot = None` resolves the whole group
-/// into the caller's scope; `Some(i)` is that re-entry, yielding one lambda.
-fn eval_letrec(
-    slot: Option<usize>,
-    bindings: &Arc<Vec<(String, Val)>>,
+/// A fresh `Rec` node re-entering the group at member `j` — what a
+/// recursive reference forces, closed under whatever `E` is live when it
+/// runs, so the unfolding re-extends from there each time.
+fn rec_node(group: &Arc<[(String, Arc<Comp>)]>, index: usize) -> Arc<Comp> {
+    Arc::new(Spanned::synthetic(CompKind::Rec {
+        group: group.clone(),
+        index,
+    }))
+}
+
+/// Unfold a recursive group: bind every member's name to the thunk of its
+/// own projection, then run the chosen member. `rec f. M` is the group of
+/// one; a sibling reference forces its own name, which re-enters here and
+/// re-installs the whole group — no knot is tied by backpatching.
+fn eval_rec(
+    group: &Arc<[(String, Arc<Comp>)]>,
+    index: usize,
+    tail: Tail,
+    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    // Only the group install reaches the caller's scope, where a name could
-    // shadow a PATH command; the per-slot re-entry installs nothing there.
-    if slot.is_none() {
-        for (name, _) in bindings.iter() {
-            super::pattern::check_path_shadow(name, shell)?;
-        }
-    }
     let snap = shell.snapshot();
-    let install = |shell: &mut Shell| {
-        for (i, (name, _rhs)) in bindings.iter().enumerate() {
+    with_scope(shell, |shell| -> Raw<Value> {
+        for (j, (name, _)) in group.iter().enumerate() {
             shell.install_scope_binding(
                 name.clone(),
                 Binding {
                     value: Value::Block {
-                        body: Arc::new(Spanned::synthetic(CompKind::LetRec {
-                            slot: Some(i),
-                            bindings: bindings.clone(),
-                        })),
+                        body: rec_node(group, j),
                         captured: snap.clone(),
                     },
                     scheme: None,
                 },
             );
         }
-    };
-    match slot {
-        None => {
-            let lambdas = with_scope(shell, |shell| {
-                install(shell);
-                bindings
-                    .iter()
-                    .map(|(_, lam)| eval_val(lam, shell))
-                    .collect::<Result<Vec<_>, _>>()
-            })?;
-            for ((name, _), lambda) in bindings.iter().zip(lambdas) {
-                shell.install_scope_binding(
-                    name.clone(),
-                    Binding {
-                        value: lambda,
-                        scheme: None,
-                    },
-                );
-            }
-            Ok(Value::Unit)
+        let member = &group[index].1;
+        match close_lam(member, shell) {
+            Some(lambda) => Ok(lambda),
+            None => eval_comp(member, mooring, shell, tail),
         }
-        Some(i) => with_scope(shell, |shell| -> Raw<Value> {
-            install(shell);
-            Ok(eval_val(&bindings[i].1, shell)?)
-        }),
+    })
+}
+
+/// A read of the store: the five pseudo-variables, total by
+/// [`Shell::pseudo_var`], and a `~`-path awaiting `HOME`.
+fn eval_observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
+    match reg {
+        Register::Env => Ok(shell.pseudo_var("ENV").expect("ENV is a total pseudo-var")),
+        Register::Args => Ok(shell
+            .pseudo_var("ARGS")
+            .expect("ARGS is a total pseudo-var")),
+        Register::Nproc => Ok(shell
+            .pseudo_var("NPROC")
+            .expect("NPROC is a total pseudo-var")),
+        Register::Cwd => Ok(shell.pseudo_var("CWD").expect("CWD is a total pseudo-var")),
+        Register::User => Ok(shell
+            .pseudo_var("USER")
+            .expect("USER is a total pseudo-var")),
+        Register::Tilde(path) => {
+            let home = shell.mobile.context.home();
+            expand_tilde_path(
+                path.user.as_deref(),
+                path.suffix.as_deref(),
+                home.as_deref(),
+            )
+            .map(Value::String)
+            .map_err(|cause| {
+                shell.err_hint(
+                    format!("cannot resolve {}: {}", path.to_literal(), cause.why()),
+                    match cause {
+                        Unexpandable::HomeUnknown => "set HOME, or spell out an explicit path",
+                        Unexpandable::ForeignUser => {
+                            "use bare ~ for the current user, or spell out an explicit path"
+                        }
+                    },
+                    1,
+                )
+            })
+        }
     }
 }
 
