@@ -1771,7 +1771,7 @@ impl EnquiryDesk for DeskBinding {
     /// its captured `HostServices` without parking on another party — a spawn
     /// starts a detached worker and returns, a cancel signals a token and
     /// returns, neither waits for the far side to react. The one arm that
-    /// grows rather than finishing at once is `agent-start`'s `mnemon` copy of
+    /// grows rather than finishing at once is `` `start ``'s `mnemon` copy of
     /// the parent's inherited context (`ExarchDesk::launch`): still bounded,
     /// by the conversation so far, but the largest uncancellable window this
     /// desk ever holds open.
@@ -2106,7 +2106,7 @@ mod tests {
 
     /// A desk whose parent is itself registered — the precondition
     /// [`AgentRegistry::register`] enforces for any child — so
-    /// `agent-start`/`agent-cancel`/`message` run end to end, unlike [`desk`].
+    /// `` `start ``/`` `cancel ``/`` `message `` run end to end, unlike [`desk`].
     fn spawnable_desk(fuel: u32) -> (ExarchDesk, AgentRegistry, Inbox) {
         let parent_inbox = Inbox::new();
         let registry = AgentRegistry::new();
@@ -3865,7 +3865,7 @@ mod tests {
     }
 }
 
-/// The desk's wire arm: `agent-start` dialling a guest that is listening for
+/// The desk's wire arm: `` `start `` dialling a guest that is listening for
 /// exactly one connection, over a fake dialler and a re-exec'd `--engine`
 /// child standing in for the hatched guest — the same vehicle the wire seat's
 /// own tests already use, since a genuine vsock dial only means anything
@@ -4054,7 +4054,7 @@ mod wire_tests {
         EvalReach::Wire(control)
     }
 
-    /// A wire-seat desk fixture, its parent registered so `agent-start`'s
+    /// A wire-seat desk fixture, its parent registered so `` `start ``'s
     /// spawn spine runs end to end, exactly [`super::tests::spawnable_desk`]'s
     /// identity shape with `wire_seat: true` and a dialler installed.
     fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, AgentRegistry, Inbox) {

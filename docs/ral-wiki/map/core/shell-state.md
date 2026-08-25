@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 9de08107
-generated_at_date: 2026-08-12
+generated_at_commit: 8bd8b936
+generated_at_date: 2026-08-25
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -189,10 +189,10 @@ What a run *fixes* is not on the `Shell` at all. The eight run-invariant
 members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
 detached worker's completion delivery — `None` outside an agent host), the
 `desk` answering the run's enquiries
-([[decisions/260706_enquiry-channel|enquiry-channel]]), the `nursery` holding
-engine-side session forks a desk handler adopts (`None` outside a host that
-installs one; like `desk`, never given to a deferred worker), the foreground
-`cancel` scope, the deferred-worker `WorkerLease` (`deferred_lease` — the idle
+([[decisions/260706_enquiry-channel|enquiry-channel]]), the `fork` door
+naming how a forked session reaches the desk that adopts it (`None` outside a
+host that installs one; like `desk`, never given to a deferred worker), the
+foreground `cancel` scope, the deferred-worker `WorkerLease` (`deferred_lease` — the idle
 bound and absolute backstop travel as one value; `None` never reaps), the
 `worker_cap` admission bound (`Some(cap)` refuses a spawn of any class while
 `cap` workers still run; `None` admits freely), and the run's
@@ -201,11 +201,28 @@ door's own Rust stack frame, and reaches every callee as an explicit
 `&Mooring`, placed immediately before the `&Shell` / `&mut Shell` in every
 signature.
 
+The `fork` door is a two-armed sum, `Fork` (`mooring.rs`), read through
+`Mooring::fork`:
+
+- **`Fork::Park(Nursery)`** — in-process. The reentrancy law bars a
+  same-process desk handler from holding `&mut Shell`, so it cannot fork a
+  session itself: the builtin body forks through `Shell::fork_into_nursery`,
+  the fork waits in the run-local `Nursery`, and the handler redeems it by
+  `NurseryId` with `Nursery::adopt`.
+- **`Fork::Listen`** — across a wire. The builtin binds a guest port and names
+  it in its enquiry; the desk dials back and the child engine is spawned onto
+  that connection ([[map/core/transport|transport]]). There is no pen, and
+  `fork_into_nursery` says so in its own sentence rather than reusing the
+  absence one.
+
+Both arms fork the same shell, `Shell::fork_scrubbed`, which is the whole of
+[[design/agents|agents]]'s one-snapshot law: `` agents `start `` means one
+thing regardless of seat.
+
 Immutability is what makes the frame free. A value that never moves needs no
 putting back: an outer run's mooring is restored by the stack unwinding, and
-a `NurseryGuard` beside it empties its nursery on that same unwinding. In
-effect terms
-the split separates a Reader (`&Mooring`, with `Shell::run_nested` as its
+a `NurseryGuard` beside it empties a `Park` arm's pen on that same unwinding.
+In effect terms the split separates a Reader (`&Mooring`, with `Shell::run_nested` as its
 `local` — a nested run's frame is a child of the mooring it is handed) from
 State (`Io` under a loan). **Borrow when you can, loan when you must.**
 
@@ -214,14 +231,14 @@ an event while holding the shell mutably. `Mooring` is not `Clone`:
 `lend_terminal` is the one lawful derivation, so the raise-never-mint rule on
 `TerminalAccess` lives in one door rather than in every bulk copy. Outside
 core only `cancel`, `Mooring::surface`, `Mooring::lend_terminal` /
-`in_terminal_loan`, and `Mooring::adrift` are reachable — `adrift()`
-being the mooring a host builds to call a builtin body outside any run (no
-surface, no rail, no desk, no nursery, and a scope under a root nothing else
-holds, so cancelling it is how such a caller drives the body's poll points).
+`in_terminal_loan`, `Mooring::fork`, and `Mooring::adrift` are reachable —
+`adrift()` being the mooring a host builds to call a builtin body outside any
+run (no surface, no rail, no desk, no fork door, and a scope under a root
+nothing else holds, so cancelling it is how such a caller drives the body's poll points).
 
 A worker *rebuilds* rather than sharing (`Mooring::for_worker`): it keeps the
 deferred rail, lease, and cap, takes its own buffering surface, and gets
-neither desk nor nursery — both barred to something that outlives its run's
+neither desk nor fork door — both barred to something that outlives its run's
 Report — under a `worker` scope of the durable root, so a SIGTERM reaches it
 and a Ctrl-C does not.
 
@@ -330,7 +347,11 @@ default for a store that is not the session's:
   specialisation, sharing the parent's cancel root, so plugin code there is
   interruptible while it runs and older interrupts stay out of its reach.
 - `fork_session` — the host session fork (the sub-agent case), the session-scoped
-  specialisation of `child_from`. See [[map/exarch/agent|agent]].
+  specialisation of `child_from`. `fork_scrubbed` is the door every sub-agent
+  fork actually passes through: `fork_session` plus a scope stripped of
+  `Value::Handle` bindings, which have no wire form, so an in-process adoption
+  and a wire hatch's seed snapshot the same fragment
+  ([[map/core/transport|transport]]). See [[map/exarch/agent|agent]].
 
 Every genuine fork copies `session.builtins` (the dispatch table) and shares
 `session.guest_jail`, so dispatch reaches the child and a guest's workers,

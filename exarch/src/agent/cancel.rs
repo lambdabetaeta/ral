@@ -64,8 +64,8 @@ impl Token {
 
     /// Cancel this token and every share of it, recording `cause`.  Monotone,
     /// like `CancelScope::cancel`: a weaker cause arriving later (an Esc
-    /// `Interrupt` after an `agent-cancel` `Explicit`) can never mask a stronger
-    /// one already in force.
+    /// `Interrupt` after an `` agents `cancel `` `Explicit`) can never mask a
+    /// stronger one already in force.
     pub fn cancel(&self, cause: CancelCause) {
         self.0.fetch_max(cause as u8, Ordering::Relaxed);
     }

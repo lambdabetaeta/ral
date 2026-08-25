@@ -33,6 +33,6 @@ pub(crate) use sink::{drain_records, drain_transients};
 pub(crate) use emitter::dummy_emitter;
 
 /// The identity of an agent node — the trunk and every forked child alike.
-/// Opaque, and the fleet registry's key: `agents` and `agent-cancel` name a
-/// node by this and nothing else.
+/// Opaque, and the fleet registry's key: every `agents` tag names a node by
+/// this and nothing else.
 pub type AgentId = u64;

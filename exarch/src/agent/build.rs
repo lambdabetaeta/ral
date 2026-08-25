@@ -91,7 +91,7 @@ pub(crate) struct Build {
     /// IT's network policy, audit ledger, and rate budget — likewise a host
     /// setting, inherited verbatim.
     pub(crate) egress: crate::egress::Egress,
-    /// Shared verbatim by every fork — `agent-start`'s wire arm reads it off
+    /// Shared verbatim by every fork — `` agents `start ``'s wire arm reads it off
     /// its own agent, never off a fresh construction.
     pub(crate) dial: Option<Arc<dyn Dial>>,
 }
@@ -312,7 +312,7 @@ impl Agent {
         }
         // Stated, not discovered by a model calling `agent`: a fuelled wire
         // trunk with no dialler to reach helpers through cannot ever answer
-        // `agent-start`'s wire arm, so refuse the construction itself.
+        // `` agents `start ``'s wire arm, so refuse the construction itself.
         if matches!(&root_seat, RootSeat::Wire { .. }) && fuel > 0 && dial.is_none() {
             return Err(io::Error::other(
                 "a wire trunk with spawn fuel needs a dialler to reach helper engines through — \
@@ -434,7 +434,7 @@ impl Agent {
                 .log
                 .lock()
                 .import_context(vec![genai::chat::ChatMessage::user(
-                    "session resumed from disk; the shell is fresh: bindings, workers, and cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths in the old context are dead), pinned state and scheduled events are gone (pin-list and schedule-list to confirm), and any sub-agents from before have ended.",
+                    "session resumed from disk; the shell is fresh: bindings, workers, and cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths in the old context are dead), pinned state and scheduled events are gone (pin-list and schedules `list to confirm), and any sub-agents from before have ended.",
                 )])
                 .map_err(io::Error::other)?;
         }

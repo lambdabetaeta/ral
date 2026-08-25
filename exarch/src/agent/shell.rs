@@ -122,14 +122,14 @@ impl Agent {
         reply: ReplyCell,
     ) -> desk::HostServices {
         // A wire seat owns no host-side scratch — the session's real one lives
-        // in the guest the transport dials — and `agent-start`, the one
+        // in the guest the transport dials — and `` agents `start ``, the one
         // consumer, has already refused on fuel 0 by the time it would look.
         let scratch = match &self.seat {
             Seat::Identity { scratch, .. } => Some(scratch.clone()),
             Seat::Wire { .. } => None,
         };
         // Stated, not inferred from `scratch`'s incidental absence:
-        // `agent-start` chooses its arm on this one fact.
+        // `` agents `start `` chooses its arm on this one fact.
         let wire_seat = matches!(self.seat, Seat::Wire { .. });
         desk::HostServices {
             registry: self.agents.clone(),

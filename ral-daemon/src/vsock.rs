@@ -18,14 +18,16 @@
 //! In both cases the *guest* dials and the host listens, never the reverse.
 //! That asymmetry is worth stating because it is what makes the daemon so
 //! small: a connection that exists is already proof the host is there, so
-//! there is no accept loop, no readiness handshake, and no listening port
-//! inside the guest for anything to reach.
+//! there is no accept loop and no readiness handshake on any of them.  The
+//! daemon itself binds nothing; the one guest listener in this VM belongs to
+//! the engine, which binds an ephemeral port for the duration of a single
+//! child-engine spawn and closes it again (`ral_core::hatch`).
 //!
 //! The dial itself — the one `socket`/`connect` pair every caller above
-//! shares — lives in [`ral_core::vsock::dial_host`], not here: the engine
-//! this daemon starts dials the same host from inside its own guest, over
-//! the same `AF_VSOCK` port space, to hatch a child engine (`ral_core::hatch`),
-//! so the primitive moved to where both processes can reach it.
+//! shares — lives in [`ral_core::vsock::dial_host`], beside the
+//! `bind`/`listen` that hatch needs, not here: the engine this daemon starts
+//! opens its own `AF_VSOCK` endpoints in the same guest, over the same port
+//! space, so the primitives sit where both processes can reach them.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};

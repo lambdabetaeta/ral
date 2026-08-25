@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cbeb5457
-generated_at_date: 2026-08-17
+generated_at_commit: 8bd8b936
+generated_at_date: 2026-08-25
 covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 ---
 
@@ -36,8 +36,9 @@ through. `shell_eval/tools.rs` shrinks to:
   result target.
 - **`shell_eval/tools/agent.rs`** — no longer a tool module, but the
   fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
-  `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's `agent-start`
-  handler build on it, so `/branch` and the harness spawn verb share one
+  `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's
+  `` agents `start `` handler build on it — either arm of it, in-process or
+  across a wire — so `/branch` and the harness spawn verb share one
   mechanism ([[design/agents|agents]], [[map/exarch/agent|agent]]).
 
 The harness verbs are answered by the `ExarchDesk` (`exarch/src/fleet/desk.rs`),

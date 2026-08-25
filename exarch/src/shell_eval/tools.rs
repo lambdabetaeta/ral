@@ -1,5 +1,5 @@
 //! `ral` — the one tool the provider is offered — and the spawn plumbing
-//! behind `/branch` and the desk's `agent-start`.
+//! behind `/branch` and the desk's `` agents `start ``.
 //!
 //! Everything else the model reaches — spawning a sub-agent, messaging one,
 //! scheduling a wakeup, replying — is an ordinary ral builtin in

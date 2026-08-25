@@ -29,7 +29,7 @@
 //! # A known race, accepted rather than hidden
 //!
 //! A hatched helper's provider is a *snapshot of the trunk's own live one*
-//! (`agent-start`'s wire arm, `exarch::fleet::desk`), taken the instant its
+//! (`` agents `start ``'s wire arm, `exarch::fleet::desk`), taken the instant its
 //! wire is adopted — the same queue the trunk's own next turn also pulls
 //! from, and the helper's detached thread starts before the trunk's tool
 //! call has finished unwinding back to its own next turn. A scripted queue

@@ -76,7 +76,7 @@ pub struct Agent {
     parent: Option<AgentId>,
     /// Spawn generations still available below here.  Bounds depth, not
     /// fan-out: a fork spends none of the parent's, only handing the child one
-    /// less, and at zero the desk refuses `agent-start`.
+    /// less, and at zero the desk refuses `` agents `start ``.
     fuel: u32,
     /// A `/model` swaps this handle alone; a fork seeds the child's from a
     /// snapshot, so neither disturbs the other.
@@ -158,7 +158,7 @@ pub struct Agent {
     /// The IT-set network policy and its audit ledger — shared verbatim by
     /// every fork, like [`Self::disk_warn_bytes`].
     egress: crate::egress::Egress,
-    /// The dial-side capability a wire trunk's `agent-start` reaches its
+    /// The dial-side capability a wire trunk's `` agents `start `` reaches its
     /// helpers through; `None` on every identity trunk. Shared verbatim by
     /// every fork, so a wire child's own `agent` call dials through the same
     /// seam its parent did.
@@ -185,7 +185,7 @@ impl Agent {
 
 /// The depth budget exarch's trunks start with.
 ///
-/// At zero the desk refuses `agent-start`
+/// At zero the desk refuses `` agents `start ``
 /// ([`crate::fleet::desk::ExarchDesk::launch`]), so a runaway spawn chain
 /// exhausts fuel instead of threads.  Fan-out is unbounded.
 pub const SPAWN_FUEL: u32 = 3;

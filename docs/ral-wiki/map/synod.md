@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dae7e71d
-generated_at_date: 2026-08-12
+generated_at_commit: 8bd8b936
+generated_at_date: 2026-08-25
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
@@ -573,15 +573,21 @@ exarch's cross-by-copy position.
 - [[map/core/transport|core / transport]] — the framed seam the control plane
   rides, whose stream type is std's owner for a connected socket and not a claim
   about the address family.
-- [[map/exarch/agent|exarch / agent]] — the desk's two-phase wire spawn
-  (`agent-start` → `hatch` → `agent-hatched`) synod's fleet rides, and the
-  `Hatchery` trait synod implements above.
-- [[design/agents|agents]] — the one-snapshot law: an identity fork and a
-  wire hatch's `EngineSeed` scrub the same handle-carrying bindings, so
-  `` agents `start `` means one thing regardless of seat.
+- [[map/exarch/agent|exarch / agent]] — the one-exchange wire spawn synod's
+  fleet rides: the guest binds a port for the duration of one spawn and names
+  it in its enquiry, the desk dials it while answering, and the `Dial` trait
+  synod implements above is the seam it dials through.
+- [[design/agents|agents]] — the one-snapshot law: `Shell::fork_scrubbed` is
+  the one fork both the identity arm's nursery park and the wire arm's
+  `EngineSeed` take, so `` agents `start `` means one thing regardless of
+  seat.
+- [[decisions/260825_the-host-dials-in|the-host-dials-in]] — why the guest
+  listens and the host dials, and why that direction is what deleted the
+  correlation machinery rather than shrinking it.
 - [[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]
   — why synod's after-checkpoint waits for the whole fleet, not just the
   trunk.
 - [[map/core/io-process|core / io-process]] — the guest spawn jail
-  (`jail.rs`) the agent port's token stands in front of until a seccomp
-  address-family filter lands.
+  (`jail.rs`) whose unfiltered `socket(AF_VSOCK)` a hatch's eight token bytes
+  are the second line against, the guest kernel's refusal of a guest-local
+  dial being the first, until a seccomp address-family filter lands.

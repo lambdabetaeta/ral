@@ -70,7 +70,7 @@ pub(crate) fn tmp(tag: &str) -> tempfile::TempDir {
 /// Swap `session`'s live provider handle — the test-only door onto what
 /// `/model` mutates in production, so a forked child can run its own
 /// independent script rather than share its spawner's, the way a real
-/// `agent-start` does.
+/// `` agents `start `` does.
 pub(crate) fn set_provider(session: &mut Agent, provider: Arc<Provider>) {
     session.provider = ProviderHandle::new(provider);
 }

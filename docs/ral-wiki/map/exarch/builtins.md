@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cbeb5457
-generated_at_date: 2026-08-17
+generated_at_commit: 8bd8b936
+generated_at_date: 2026-08-25
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -175,6 +175,20 @@ door instead of a closed variant type: an unknown label errors before any
 enquiry crosses, naming the legal set, rather than a static row-unification
 error with no room for a didactic message.
 
+**The desk answers nine classes: two families and seven singletons.**
+`` `agents `` and `` `schedules `` each carry a tag naming what to do
+(`family_tag`), and an unrecognised tag is as loud one level down as an
+unrecognised class is at the top (`unknown_tag`) — never a silent default.
+The seven singletons — `` `reply ``, `` `pin-read ``, `` `pin-list ``,
+`` `context ``, `` `context-read ``, `` `context-drop ``, `` `context-fold ``
+— are the only ones still read positionally (`payload_list` and the scalar
+accessors); a family tag's own record crosses **by field name**, through
+`FOValue::try_from(&Value)`. The desk's decode is not a duplicate of the
+builtin's door but the **trust boundary**: the door checks engine-side so a
+bad value reaches the model with the parser's own message, and the desk checks
+again because a guest can send whatever it likes — which is why
+`CronSchedule::parse` runs on both sides deliberately.
+
 ### Context stewardship
 
 The context verbs address the model view by the exchange and digest reaches
@@ -245,11 +259,12 @@ queryable store.
   the entry under the lock — the half of the rule the fleet cannot honour.
   `next-s` saturates to `i64::MAX` for a cron with no next occurrence. Every
   tag is gated on the `--allow-schedule` grant, refused with a didactic text
-  otherwise.
+  that names the tag the model actually typed — never a spelling it was never
+  taught.
 
   Both verbs issue their transition and then the list, so a raise does not
   imply nothing happened — the act may have landed and the re-read failed.
-  The audit is unchanged: `agent-list` and `schedule-list` commit no `DeskAct`,
+  The audit is unchanged: `` `list `` commits no `DeskAct` in either family,
   so each transition is still one act.
 - **`pin-read <key>`** → `∀α. F α`. Enquiry over the caller's own pin
   register: the card pinned at `key`, canonically re-encoded

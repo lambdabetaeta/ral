@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
-covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs, core/src/hatch_preamble.rs]
+generated_at_commit: 8bd8b936
+generated_at_date: 2026-08-25
+covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs, core/src/vsock.rs]
 ---
 
 # Map: core / transport
@@ -18,15 +18,22 @@ Distinct from all of this is the crate-root `core/src/transport.rs`, the
 transport-parametric *host seam* — the frame algebra between a front-end and
 the engine, with `engine.rs` and the `wire.rs` socket channel —
 [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]].
-A wire-seat child's hatch (`core/src/hatch.rs`, with its host-port framing in
-the platform-neutral `core/src/hatch_preamble.rs`,
+A wire-seat child's hatch (`core/src/hatch.rs`,
 [[map/exarch/agent|exarch / agent]]) sits below both seams and reuses this
-one's machinery rather than the host seam's: the 16-byte agent-port preamble
-(8-byte magic `b"ralagent"` + a little-endian `u64` token) is read before a
-single protocol byte is parsed, so a hatch never touches `Frame` or
-`PROTOCOL_VERSION` at all — no new frame, no version bump. The split is
-load-bearing: spawning and seed hydration are Unix guest machinery, while the
-desk that validates a dial can run on a Windows host. The seed a
+one's machinery rather than the host seam's. The connection is opened from the
+*host's* side: the parent binds an ephemeral guest port for one spawn's
+duration (`listen_any`, `core/src/vsock.rs`) and names it in its enquiry, the
+host dials it and writes eight little-endian token bytes, and the listener
+thread checks them before handing the connection to `hatch_over` — which
+spawns `current_exe --engine` with it on fd 3 and the framed `EngineSeed` on
+the fd named by `RAL_ENGINE_SEED_FD`, then writes one `HATCH_ACK` byte back.
+That byte goes out *after* `spawn` returns, so a host that hears it has a live
+child; the frame algebra offers no substitute, since the host speaks first and
+`Attach` is its only legal opening frame. Neither the token nor the ack is a
+`Frame`, so a hatch never touches `PROTOCOL_VERSION` at all — no new frame, no
+version bump. `HATCH_ACK` sits in the platform-neutral
+`core/src/transport.rs` because the two ends need not share an operating
+system, while spawning and seed hydration are Unix guest machinery. The seed a
 hatch carries is this page's `EngineSeed`, below.)
 
 **Every wire↔runtime hop is an exhaustive, field-complete map: no hop may pass
@@ -105,17 +112,18 @@ reinstalled via the child-shell-extension hook + `install_shell_mobile`), so it
 cannot drop the host builtins. All
 conversions share the `InternCtx` from `serial.rs`.
 
-`core/src/child_eval.rs` also carries `EngineSeed` — a nursery-parked fork
-reified for a wire-seat hatch, `ChildEvalRequest`'s shape minus a body
+`core/src/child_eval.rs` also carries `EngineSeed` — a forked shell reified
+for a wire-seat hatch, `ChildEvalRequest`'s shape minus a body
 (`scope_table`, `mobile: WireMobile`, `captured: SerialEnvSnapshot`, the
 spawn's validated `grant` tag). `pack_seed` builds one from a `Shell`, and
 `apply_seed` hydrates it into a freshly booted engine through the same
 `WireDecoder::for_shell` `eval_request` already uses, before narrowing the
 shell's capabilities to the seed's grant. The scope it carries is never the
-parent's whole lexical scope: `Shell::fork_into_nursery` scrubs every
-handle-carrying binding before parking the fork (`Value::Handle` has no wire
-form, `serial.rs`'s `value_carries_handle`), so an in-process identity fork
-and a wire hatch's `EngineSeed` snapshot the same serialisable fragment and
+parent's whole lexical scope: `Shell::fork_scrubbed` strips every
+handle-carrying binding (`Value::Handle` has no wire form, `serial.rs`'s
+`value_carries_handle`), and it is the one door both seats pass through, so an
+in-process identity fork and a wire hatch's `EngineSeed` snapshot the same
+serialisable fragment and
 `` agents `start `` means one thing regardless of seat
 ([[design/agents|agents]]'s one-snapshot law).
 

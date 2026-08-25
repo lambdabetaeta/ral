@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 8bd8b936
+generated_at_date: 2026-08-25
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -201,24 +201,25 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   ([[map/core/runtime|runtime]], `docs/SPEC.md` §12.11).
 
   **The recorded gap.** The jail is uid + cgroup + `NO_NEW_PRIVS` — there is
-  no seccomp filter, and nothing stops a jailed process from calling
-  `socket(AF_VSOCK)` and dialing the host's `AGENT_PORT` itself
-  ([[map/synod|synod]]). A spawned command reaching that port is not yet
-  refused by the jail at all; the standing defense is the port's own
-  preamble token — minted from the OS entropy source, single-use, dead with
-  its pending hatch, so a guess gets one shot at 2⁻⁶⁴ inside a window
-  seconds wide — not confinement. A seccomp address-family filter that
-  closes this for real is unbuilt debt, not a design gap: the jail plan
-  above has room for it (one more syscall-time check beside `NO_NEW_PRIVS`),
-  and nothing about the agent-port design depends on the token being the
-  only defense forever.
-
-  The mirror direction is narrower, and measured on 2026-08-24: a jailed
-  process cannot dial a *guest-local* vsock port at all. The guest kernel
-  refuses `VMADDR_CID_LOCAL` with `ECONNRESET`, and `/dev/vsock` — the only
-  way to read one's own CID — is `EACCES` under the jail. Reaching the host
-  needs neither, since its CID is a well-known constant, which is why the
-  gap above is about that direction and only that one.
+  no seccomp filter, so nothing stops a jailed process from calling
+  `socket(AF_VSOCK)`. What that would buy it is a race with the host for the
+  ephemeral guest port a parent engine binds while spawning a child
+  ([[map/core/transport|transport]], [[map/synod|synod]]), and so a child
+  engine seeded with the parent's scope — impersonation, not escalation,
+  since grant narrowing is a plain meet and a run's capabilities are enforced
+  inside the guest engine regardless of who computes them. Two things stand in
+  the way, and only the first is confinement. A jailed process cannot dial a
+  *guest-local* vsock port at all — measured 2026-08-24: the guest kernel
+  refuses `VMADDR_CID_LOCAL` with `ECONNRESET`, and `/dev/vsock`, the only way
+  to read one's own CID, is `EACCES` under the jail. That refusal is the
+  standing defence. Behind it stand the eight token bytes the host must write
+  before the listener will hatch anything: minted from the OS entropy source,
+  held by the thread that owns the listener, dead when that one spawn ends.
+  The token is the second line, against a jailed process that *guesses* a CID
+  rather than reading one. A seccomp address-family filter
+  that closes this at the syscall is unbuilt debt, not a design gap: the jail
+  plan above has room for it (one more syscall-time check beside
+  `NO_NEW_PRIVS`).
 
 Spawning an external command is capability-gated; that gate lives in
 [[map/core/capabilities|capabilities]], and the command/pipeline dispatch that

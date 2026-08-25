@@ -86,10 +86,10 @@ that decision left open).
 
 The `` agents `start `` tag is **launch-only and always asynchronous**
 ([[decisions/260617_async-agent-tool|async-agent-tool]]). Its argument is a
-single closed record `[prompt: …, name: …, type: …, grant: …]` — a record
-literal, so a missing or misspelled field is a *static* error naming it, while
-the `type` (`` `amnemon ``/`` `mnemon ``) and `grant` tags are checked at the
-runtime door that enumerates their legal labels
+single closed record `[prompt: …, name: …, type: …, grant: …, search: …]` —
+a record literal, so a missing or misspelled field is a *static* error naming
+it, while the `type` (`` `amnemon ``/`` `mnemon ``) and `grant` tags are
+checked at the runtime door that enumerates their legal labels
 ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
 One call:
 
@@ -107,11 +107,11 @@ One call:
   [[#Wire-seat children: the same snapshot, a different wire|below]] for why
   "serialisable fragment" is the exact promise rather than "whole scope";
 - **runs it on a detached thread** through the same `attend` loop, answering
-  at once with the roster afterwards — the child's row carrying `name: Str`
-  and `log-dir: Str` — a ral record the script can bind and fan out over. The
-  child runs off the parent's critical path — the one shape in-exchange
-  concurrency cannot express, the parent exchange ending before the child
-  does;
+  at once with the roster afterwards — the child's row carrying `name`,
+  `elapsed-s`, and `log-dir` — a ral record the script can bind and fan out
+  over. The child runs off the parent's critical path — the one shape
+  in-exchange concurrency cannot express, the parent exchange ending before
+  the child does;
 - **delivers the child's single reply later** as a marked `Item` through the
   parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names —
   rendered to prose at the consuming edge.
@@ -163,63 +163,89 @@ model material.
 A `Seat::Wire` trunk ([[map/exarch/agent|agent]]) runs its shell in a guest
 engine, host-side of a vsock connection
 ([[decisions/260722_session-is-a-process|session-is-a-process]]) — the desk
-that answers `agent-start` sits in the host process, and cannot reach a
-`Shell` parked in another machine the way it reaches into its own nursery. A
-wire trunk's spawn is therefore **two-phase**, both phases plain `FOValue` on
-the existing enquiry channel, and every authority check the desk runs today
-still runs first, before anything is spawned:
+that answers `` agents `start `` sits in the host process, and cannot reach a
+`Shell` living in another machine the way it reaches into its own nursery.
+**The whole of that asymmetry is one field of one enquiry.** Beside the model's
+record, `` `start `` carries a `fork` tag saying how the child's forked session
+is to be reached: `` `parked <id> ``, a nursery slot the handler adopts by id,
+or `` `listening [port, token] ``, a port the guest has bound. Both arms run
+every authority check the desk runs before anything is spawned, and both answer
+the same roster, so the enquiring builtin cannot tell which one served it.
 
-1. `` `agent-start `` — as an identity trunk's, but on a wire trunk the desk
-   mints a token, registers a pending hatch reserving the child's name, and
-   answers `` `hatch [token, port] `` instead of adopting a nursery shell
-   directly.
-2. The builtin, seeing `` `hatch ``, runs the **hatch**: the parent engine
-   dials the host on the named port, writes a 16-byte preamble binding the
-   dial to the token, and spawns `current_exe --engine` with the dial handed
-   down as its protocol socket — the same re-exec shape a wire seat's own
-   construction already uses, one level in. It hands the child an
-   `EngineSeed` — the nursery-parked fork's scope, context, and validated
-   grant tag — over an inherited fd, then enquires `` `agent-hatched [token] ``.
-   The desk correlates the guest's dial by token through the **hatchery**, a
-   capability object the desk holds rather than a dependency on the
-   machine layer directly, adopts the stream as a `Seat::Wire` child exactly
-   as the trunk itself was seated, and hands it to the same `spawn_async` an
-   identity trunk's fork reaches. The enquiring builtin cannot tell which arm
-   served it — the same `` `started [name, log-dir] `` receipt comes back
-   either way.
+**The connection is opened by the side that knows what it is for.** A wire
+spawn is one exchange:
 
-A hatch that fails — the spawn errors, the dial is refused, the builtin dies
-before either enquiry lands — enquires `` `agent-abort [token] ``, and the
-desk drops the pending hatch and frees the reserved name; an abandoned
-pending hatch also expires on its own clock. Depth beyond one needs nothing
-extra: a wire child's own desk is host-side too, so a helper spawning a
-helper of its own rides the same hatchery, and `fuel` bounds the recursion
-exactly as the in-process lattice does.
+- the builtin **binds an ephemeral guest port for the duration of this one
+  spawn**, packs the scrubbed fork into an `EngineSeed` before the listener
+  thread starts — a `Shell` never crosses to it, and the seed is all it ever
+  holds of the parent's session — mints eight token bytes, and names port and
+  token in the enquiry;
+- the desk, *while answering*, dials that port, writes the token, and waits;
+- the listener thread checks the token, spawns `current_exe --engine` with the
+  dialled connection on its protocol fd and the seed on an inherited one — the
+  same re-exec shape a wire seat's own construction uses, one level in — and
+  only **then** writes the acknowledgement byte;
+- the desk reads the ack, adopts the stream as a `Seat::Wire` child exactly as
+  the trunk itself was seated, and hands it to the same `spawn_async` an
+  identity trunk's fork reaches.
+
+**A dialling side never has to ask which connection this is.** Correlation is
+the price of accepting: a listener anyone may dial must publish a preamble for
+callers to name themselves in, hold a table keyed by what that preamble
+carries, run a pump to accept into it, expire the entries nobody claims, and
+split the spawn into a phase that reserves a child and a phase that redeems it.
+Open the connection from the other side and none of that has anything left to
+do — the host dialled a port it was told about, in the enquiry it is still
+answering, so it already holds the spawn the connection is for. What is left is
+not a cheaper correlation mechanism but no correlation at all
+([[decisions/260825_the-host-dials-in|the-host-dials-in]]). The token
+changes job with the direction: no longer a key naming a rendezvous, it is a
+guard — the guest's proof that the connection it is about to hand a seeded
+engine was opened by the host, and not by something inside the guest racing it
+for the port ([[map/core/io-process|the spawn jail]] permits
+`socket(AF_VSOCK)`; the guest kernel's refusal of a guest-local dial is the
+standing defence, and the token stands behind it).
+
+**The child exists before the roster names it.** The listener acks only after
+`spawn()` has returned, and the desk registers the child only after reading the
+ack. There is no window in which a registered agent has no engine behind it —
+which is why the roster every tag answers carries no state column, and why
+`` agents `list `` reads as a fact rather than as an intent.
+
+A spawn that fails leaves nothing to reconcile. A desk that refuses never
+dials, so the builtin wakes its own listener thread rather than leave it in its
+poll; a child that will not spawn is never acked, and the reason raised is
+whichever stood nearer the failure — the guest thread's if it has one,
+otherwise the desk's. Nothing was reserved, so nothing has to expire. Past the
+ack the child is alive, and a refusal from there on simply drops the stream:
+the child reads EOF on its protocol fd and the guest's own table reaps it.
+
+Depth beyond one needs nothing extra: a wire child inherits the dialler its
+parent was built with, so a helper spawning a helper of its own binds its own
+port and is dialled exactly as it was, and `fuel` bounds the recursion as it
+does in the in-process lattice.
 
 **The one snapshot law.** A wire seed cannot carry a `Value::Handle` binding —
 a handle is live authority over a parent-side resource, with no wire form —
-while an in-process fork, left alone, would carry one unfiltered. Rather than
+while a fork of a scope, left alone, would carry one unfiltered. Rather than
 let `` agents `start `` mean two different things depending on which seat
-answered it, `fork_into_nursery` — the one place both an identity fork and a
-wire hatch
-pass through — scrubs every handle-carrying binding before parking the fork,
-so an identity fork and a wire seed's `EngineSeed` snapshot the same
-**serialisable fragment** of the parent's scope, never the unfiltered whole.
-This is why the fork description above says "serialisable fragment" rather
-than "whole lexical scope": every other line of the fork law already denies a
-child the parent's cancel domain, its terminal authority, its inbox, its
-provider handle — a live handle is exactly that class of authority, and this
-closes the one place it had still been slipping through. A round-trip test
-pins the law: fork a scope in memory, seed the same scope through
-`EngineSeed`, and the two children resolve every name to the same value or
-the same absence.
+answered it, the scrub lives at `Shell::fork_scrubbed`, the one fork both arms
+take: the identity arm is that fork parked in the nursery, the wire arm is that
+same fork packed into an `EngineSeed`, so neither snapshots more than the
+**serialisable fragment** of the parent's scope. This is why the fork
+description above says "serialisable fragment" rather than "whole lexical
+scope": every other line of the fork law already denies a child the parent's
+cancel domain, its terminal authority, its inbox, its provider handle, and a
+live handle is exactly that class of authority. A round-trip test pins the law:
+fork a scope in memory, seed the same scope through `EngineSeed`, and the two
+children resolve every name to the same value or the same absence.
 
-The hatchery is where the seat asymmetry ends and the fleet's uniformity
-resumes: `` agents `message ``, `` agents `cancel ``, and the idle-lease
-reaper all address a descendant by name through the registry, whatever seat
-it sits on, and a wire helper's `message` crosses as an enquiry on its own
-connection exactly as an identity peer's does — sender and recipient never
-learn each other's transport.
+Past that one field the seat asymmetry ends and the fleet's uniformity resumes:
+`` agents `message ``, `` agents `cancel ``, and the idle-lease reaper all
+address a descendant by name through the registry, whatever seat it sits on,
+and a wire helper's `message` crosses as an enquiry on its own connection
+exactly as an identity peer's does — sender and recipient never learn each
+other's transport.
 
 ## Returning: the deliberate `reply`
 
@@ -370,7 +396,11 @@ schedule labels, commitments retired),
 interrupt, not a subtree cascade),
 [[decisions/260705_branch-minimal|branch-minimal]] (the conversing child whose
 `returns` bit is fixed false at construction),
-[[map/synod|synod]] (the hatchery's landed home, and the helper surface built
+[[decisions/260825_the-host-dials-in|the-host-dials-in]] (why the guest
+listens and the host dials, and what that direction deletes),
+[[decisions/260825_the-wire-carries-the-value|the-wire-carries-the-value]] (one
+enquiry class per registry, every tag answering the registry's state),
+[[map/synod|synod]] (the dialler's landed home, and the helper surface built
 over wire-seat children),
 [[decisions/260806_exchange-ends-at-fleet-quiescence|synod's exchange ends at
 fleet quiescence]] (the product law a wire-seat fleet's caller must satisfy).

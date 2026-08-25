@@ -38,7 +38,7 @@ pub enum AgentOutcome {
     Empty,
     /// Stopped for a non-routine reason (content filter, step cap, …).
     Stopped(String),
-    /// By `agent-cancel`, `/clear`, or the worker ceiling.
+    /// By `` agents `cancel ``, `/clear`, or the worker ceiling.
     Cancelled,
     /// A provider error or a panic.
     Failed(String),

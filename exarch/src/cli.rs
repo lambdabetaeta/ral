@@ -86,8 +86,8 @@ pub struct Cli {
     /// stop reason, steps, duration, usage, cost — when the run ends.
     #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Text, requires = "headless")]
     pub output_format: OutputFormat,
-    /// Authorise the agent to schedule its own wakeups (`schedule`,
-    /// `schedules`, `unschedule`) — waking itself indefinitely is authority.
+    /// Authorise the agent to schedule its own wakeups (the `schedules`
+    /// enquiry) — waking itself indefinitely is authority.
     #[arg(long = "allow-schedule")]
     pub allow_schedule: bool,
 

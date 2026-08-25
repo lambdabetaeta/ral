@@ -359,15 +359,15 @@ impl AgentRegistry {
     }
 
     /// The cheap half of the spawn-uniqueness rule [`Self::register`] enforces
-    /// authoritatively: `agent-start` reads this before forking a nursery
+    /// authoritatively: `` agents `start `` reads this before forking a nursery
     /// session, so the ordinary duplicate refuses without a fork to unwind.
     pub fn name_live(&self, name: &str) -> bool {
         self.lock().entries.values().any(|e| e.name == name)
     }
 
     /// At most one entry can match, since [`Self::register`] keeps names unique
-    /// among the live.  `agent-cancel` and `message` come through here before
-    /// reaching the id-scoped primitives.
+    /// among the live.  The `` `cancel `` and `` `message `` tags come through
+    /// here before reaching the id-scoped primitives.
     pub fn resolve_name(&self, name: &str) -> Option<AgentId> {
         let g = self.lock();
         g.entries
@@ -517,7 +517,7 @@ impl AgentRegistry {
     /// The entries stay in the map — only [`Self::clear_subtree`] and
     /// [`Self::remove_subtree`] reap.  `pub(crate)` because it trusts the
     /// caller to have decided `id` is legitimate, which the model-facing
-    /// `agent-cancel` earns through [`Self::cancel_scoped`].
+    /// `` agents `cancel `` earns through [`Self::cancel_scoped`].
     pub(crate) fn cancel(&self, id: AgentId) -> bool {
         self.cancel_cause(id, CancelCause::Explicit)
     }
@@ -536,7 +536,7 @@ impl AgentRegistry {
         existed
     }
 
-    /// `agent-cancel`'s model-facing entry point: [`Self::cancel`], but only
+    /// `` agents `cancel ``'s model-facing entry point: [`Self::cancel`], but only
     /// down `caller`'s own subtree — an agent may stop what it started, never a
     /// sibling, an ancestor, or itself.  An unknown `target` is `Ok(false)`,
     /// the tool's no-op report, not an error.
@@ -643,13 +643,13 @@ pub enum MessageError {
     UnknownSender(AgentId),
     UnknownRecipient(AgentId),
     NotADescendant(AgentId),
-    /// The recipient's inbox is at quota; surfaced to the `message` tool's
-    /// caller rather than dropped silently.
+    /// The recipient's inbox is at quota; surfaced to the `` `message `` caller
+    /// rather than dropped silently.
     RecipientInboxFull(AgentId, InboxReject),
 }
 
-/// The scoping violation `agent-cancel` and `message` share: each takes a
-/// target id but may only reach a proper descendant of the caller.
+/// The scoping violation `` agents `cancel `` and `` agents `message `` share:
+/// each takes a target id but may only reach a proper descendant of the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotADescendant(pub AgentId);
 
@@ -972,10 +972,10 @@ mod tests {
     }
 
     /// The other reason the trunk's entry must never carry a `DurableRoot`: a
-    /// `cancel`/`agent-cancel`-class terminate landing on it must not poison
-    /// the session.  The trunk's registration states its reach pre-weakened
-    /// (`register_self_named` does the same), so a terminate never reaches
-    /// the root that registration captured.
+    /// terminate of the `cancel`/`` agents `cancel `` class landing on it must
+    /// not poison the session.  The trunk's registration states its reach
+    /// pre-weakened (`register_self_named` does the same), so a terminate never
+    /// reaches the root that registration captured.
     #[test]
     fn a_registry_terminate_on_the_trunk_leaves_its_session_root_uncancelled() {
         let reg = AgentRegistry::new();
@@ -1502,8 +1502,9 @@ mod tests {
         );
     }
 
-    /// The tail of a spawn racing a `/clear` or `agent-cancel` on its parent is
-    /// refused outright, rather than landing orphaned and uncancellable.
+    /// The tail of a spawn racing a `/clear` or `` agents `cancel `` on its
+    /// parent is refused outright, rather than landing orphaned and
+    /// uncancellable.
     #[test]
     fn register_refuses_when_the_parent_is_gone() {
         let reg = AgentRegistry::new();
@@ -1630,7 +1631,7 @@ mod tests {
         );
     }
 
-    /// A reaped agent and an `agent-cancel`ed one share one cascade,
+    /// A reaped agent and a cancelled one share one cascade,
     /// distinguished only by the cause each caller passes.  Pinned directly
     /// here, away from the lease chain's own timing.
     #[test]

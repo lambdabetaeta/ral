@@ -1,5 +1,5 @@
 //! The fork-detach-register spine behind `/branch` and the desk's
-//! `agent-start`.  Every spawn is launch-only: the child runs the same
+//! `` agents `start ``.  Every spawn is launch-only: the child runs the same
 //! [`Agent::attend`] loop on a detached thread, and its single result reaches
 //! the parent's inbox later, at quiescence.
 
@@ -52,9 +52,9 @@ pub(crate) fn spawn_branch(
     )
 }
 
-/// The half of an async spawn that varies between `agent-start`'s two kinds
-/// (`amnemon`/`mnemon`) and `/branch`; [`spawn_async`] holds the half they
-/// share.
+/// The half of an async spawn that varies between `` agents `start ``'s two
+/// kinds (`amnemon`/`mnemon`) and `/branch`; [`spawn_async`] holds the half
+/// they share.
 pub(crate) struct AsyncSpawn {
     pub name: String,
     /// `None` parks for the human rather than seeding a first exchange.
@@ -73,7 +73,7 @@ pub(crate) struct SpawnedChild {
 /// Callers differ only in how they built `child` and `spec`.
 ///
 /// [`AgentRegistry::register`] refuses, under its own lock, when this agent's
-/// entry vanished between the tool call and that lock (an `agent-cancel` or
+/// entry vanished between the tool call and that lock (an `` agents `cancel `` or
 /// `/clear` racing the spawn), or when `name` is already borne by a live agent
 /// (two same-name spawns racing in one batch); neither leaves an entry to
 /// unwind.  A thread that fails to spawn *after* a successful registration
