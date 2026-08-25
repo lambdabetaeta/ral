@@ -596,6 +596,13 @@ enum Ready {
 enum Command {
     /// Bring the machine down, and report whether it stopped cleanly.
     Stop(SyncSender<Result<(), String>>),
+    /// SPIKE: dial a port the *guest* listens on, the reverse of every wire
+    /// this backend opens today. The machine is `!Send` and lives on the
+    /// worker thread, so a connect has to arrive as a command like a stop.
+    Connect {
+        port: u32,
+        reply: SyncSender<Result<OwnedFd, String>>,
+    },
 }
 
 /// Be the thread that owns one machine, from build to power-off.
@@ -784,15 +791,97 @@ fn boot_machine(
 /// Wait for a stop command, or for the [`Guest`] to be dropped, then bring the
 /// machine down.
 fn wait_for_stop(queue: &DispatchQueue, machine: &VZVirtualMachine, commands: &Receiver<Command>) {
-    let answer = match commands.recv() {
-        Ok(Command::Stop(answer)) => Some(answer),
-        // The `Guest` was dropped: stop the machine anyway.
-        Err(_) => None,
+    let answer = loop {
+        match commands.recv() {
+            Ok(Command::Stop(answer)) => break Some(answer),
+            Ok(Command::Connect { port, reply }) => {
+                let _ = reply.send(connect_to_guest(queue, machine, port));
+            }
+            // The `Guest` was dropped: stop the machine anyway.
+            Err(_) => break None,
+        }
     };
     let result = stop_gracefully(queue, machine);
     if let Some(answer) = answer {
         let _ = answer.send(result);
     }
+}
+
+/// How long to wait for `connectToPort:`'s completion handler.
+///
+/// A backstop, not the normal path. The framework's own documentation says it
+/// *"does nothing if the guest does not listen on that port"*, which would make
+/// this deadline load-bearing — but measured against a real guest, a port with
+/// no listener answers `ECONNRESET` from the guest's own vsock stack in ~25ms.
+/// The deadline is kept for the case the docs describe and the machine did not.
+const GUEST_DIAL_PATIENCE: Duration = Duration::from_secs(5);
+
+/// SPIKE: dial `port` on the guest and hand back the host end.
+///
+/// The inverse of every wire this backend opens today: `setSocketListener_forPort`
+/// waits for the guest to dial the host, this asks the host to dial the guest.
+/// Requires something in the guest to be listening — no such listener exists
+/// yet, which is the other half of the work this spike measures.
+fn connect_to_guest(
+    queue: &DispatchQueue,
+    machine: &VZVirtualMachine,
+    port: u32,
+) -> Result<OwnedFd, String> {
+    let machine_ptr = core::ptr::from_ref(machine);
+    // Rendezvous rather than a plain channel: the completion handler runs on
+    // the machine's queue *after* `on_queue` returns, so the sender must
+    // outlive this call's synchronous part.
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<OwnedFd, String>>();
+
+    on_queue(queue, move || {
+        let done_tx = done_tx.clone();
+        // SAFETY: on the machine's queue. `socketDevices` is the same
+        // property the boot block reads; the completion block is retained by
+        // the framework for as long as the connect is outstanding, which is
+        // why an `RcBlock` created here may be dropped when this block ends.
+        unsafe {
+            let machine = &*machine_ptr;
+            let devices = machine.socketDevices();
+            let Some(device) = devices.firstObject() else {
+                let _ = done_tx.send(Err("the machine has no virtio socket device".to_string()));
+                return;
+            };
+            let Ok(socket) = device.downcast::<VZVirtioSocketDevice>() else {
+                let _ = done_tx.send(Err("the machine's socket device is not virtio".to_string()));
+                return;
+            };
+            let completion = RcBlock::new(
+                move |connection: *mut VZVirtioSocketConnection,
+                      error: *mut objc2_foundation::NSError| {
+                    // The same dup the accept path performs, and for the same
+                    // reason: VZ may close its connection object once this
+                    // handler returns.
+                    let outcome = if let Some(connection) = connection.as_ref() {
+                        BorrowedFd::borrow_raw(connection.fileDescriptor())
+                            .try_clone_to_owned()
+                            .map_err(|e| format!("could not dup the guest connection: {e}"))
+                    } else if let Some(error) = error.as_ref() {
+                        Err(format!("the guest refused the dial: {}", error.localizedDescription()))
+                    } else {
+                        Err("the connect completed with neither a connection nor an error".to_string())
+                    };
+                    let _ = done_tx.send(outcome);
+                },
+            );
+            socket.connectToPort_completionHandler(port, &completion);
+        }
+    });
+
+    done_rx
+        .recv_timeout(GUEST_DIAL_PATIENCE)
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "nothing in the guest answered a dial to port {port} within {}s — the framework \
+                 treats a missing listener as a no-op rather than an error, so this is what that \
+                 looks like",
+                GUEST_DIAL_PATIENCE.as_secs()
+            ))
+        })
 }
 
 /// Ask the guest to shut down, wait for the machine to come to rest, and only
@@ -1148,6 +1237,17 @@ impl Machine for Guest {
             })
     }
 
+    /// Dial `port` inside the guest and hand back the host end.
+    ///
+    /// # Errors
+    /// Returns a sentence if no listener answers — a guest with nothing bound
+    /// resets the connection, so this is prompt rather than a wait — or if the
+    /// machine thread is already gone.
+    fn connect_guest(&self, port: u32) -> std::io::Result<crate::AgentDial> {
+        self.dial_guest(port)
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, why))
+    }
+
     /// Ask the guest daemon to shut down, wait for the machine to reach the
     /// stopped state, and only then force it; the session disk is released by
     /// the machine thread as its last act, after the machine is down.
@@ -1157,6 +1257,28 @@ impl Machine for Guest {
     /// the machine had to be forced.
     fn shutdown(mut self: Box<Self>) -> Result<(), Error> {
         self.stop()
+    }
+}
+
+impl Guest {
+    /// The body of [`Machine::connect_guest`], in this backend's own error
+    /// vocabulary; the trait arm re-dresses it as `io::Error`.
+    fn dial_guest(&self, port: u32) -> Result<OwnedFd, String> {
+        let control = self
+            .control
+            .as_ref()
+            .ok_or_else(|| "the machine thread is already gone".to_string())?;
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(0);
+        control
+            .cmd_tx
+            .send(Command::Connect {
+                port,
+                reply: reply_tx,
+            })
+            .map_err(|_| "the machine thread stopped before the dial was sent".to_string())?;
+        reply_rx
+            .recv()
+            .map_err(|_| "the machine thread stopped while dialling the guest".to_string())?
     }
 }
 

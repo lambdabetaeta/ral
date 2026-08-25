@@ -9192,6 +9192,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-virtualization",
+ "ral-core",
  "ral-daemon",
  "ruzstd",
  "serde",
