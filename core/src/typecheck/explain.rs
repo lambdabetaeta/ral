@@ -4,7 +4,7 @@
 
 use super::error::{CompDiff, Reason, SpreadHead, TypeErrorKind};
 use super::fmt::{FmtCtx, fmt_route_ctx, fmt_ty_ctx};
-use super::ty::Ty;
+use super::ty::{Row, Ty};
 use crate::serial::plural;
 use crate::syntax::ast::BinaryOpKind;
 use crate::types::RefusedArg;
@@ -393,13 +393,17 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              with at least the named fields"
                 .to_string(),
         ),
-        Reason::Argument => Some(
-            "the function's parameter type and the argument's type \
-             must agree — check what the function expects and what \
-             you're passing in"
-                .to_string(),
-        ),
-        Reason::BuiltinBlockArg => Some("this builtin expects a block value here".to_string()),
+        Reason::Argument => argument_shape_hint(kind).or_else(|| {
+            Some(
+                "the function's parameter type and the argument's type \
+                 must agree — check what the function expects and what \
+                 you're passing in"
+                    .to_string(),
+            )
+        }),
+        Reason::BuiltinBlockArg | Reason::ErrorRecordArg | Reason::BuiltinTypedArg => {
+            argument_shape_hint(kind)
+        }
         Reason::NotOperand => Some(
             "`not` flips a Bool — its operand has to be a Bool (`true` / `false` or a comparison)"
                 .to_string(),
@@ -527,12 +531,6 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                 .to_string(),
         ),
         Reason::OptionField { form, key } => Some(format!("{form} {key}: wrong value type")),
-        Reason::ErrorRecordArg => Some(
-            "a failure is raised with an error record: at least `[status: Int]` with a \
-             nonzero status, optionally a `message` of String or Bytes, and any other \
-             fields you care to carry — `fail $e` re-raises a caught error as it stands"
-                .to_string(),
-        ),
         // The same pin fails two different ways.  A route clash is about
         // *where* the payload lives; a WF-2 failure is about the arm having a
         // returned value at all, and telling that author to "add a codec"
@@ -553,7 +551,6 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                   payload route; match the existing head's route or add a codec"
                 .to_string(),
         }),
-        Reason::BuiltinTypedArg => byte_writer_hint(kind),
         Reason::AliasParam
         | Reason::ReturnShape
         | Reason::TryHandler
@@ -572,13 +569,55 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
     }
 }
 
-/// A list where `Bytes` was wanted, or the reverse.  Every byte-channel writer
-/// takes one argument type, so the hint must hold for each of them; which side
-/// is `expected` is an accident of the call site, hence both orders.
-fn byte_writer_hint(kind: &TypeErrorKind) -> Option<String> {
+/// Help for a `TyMismatch` derived from the expected type's shape, not from
+/// which reason raised it — a `Ty::Thunk` parameter, an error-record `[status:
+/// Int | r]`, and a byte/list confusion each name what the mismatch *is*.
+/// Which side lands in `expected` is an accident of the call site, so every
+/// test here considers both orders.
+fn argument_shape_hint(kind: &TypeErrorKind) -> Option<String> {
     let TypeErrorKind::TyMismatch { expected, actual } = kind else {
         return None;
     };
+    let is_thunk = |t: &Ty| matches!(t, Ty::Thunk(_));
+    if is_thunk(expected) != is_thunk(actual) {
+        return Some(
+            "this position expects a block value: something built with \
+             `{ ... }` or `|x| ...`"
+                .to_string(),
+        );
+    }
+    let is_error_record = |t: &Ty| matches!(t, Ty::Record(row) if row_has_status_int(row));
+    if is_error_record(expected) || is_error_record(actual) {
+        return Some(
+            "a failure is raised with an error record: at least `[status: Int]` with a \
+             nonzero status, optionally a `message` of String or Bytes, and any other \
+             fields you care to carry — `fail $e` re-raises a caught error as it stands"
+                .to_string(),
+        );
+    }
+    byte_writer_hint(expected, actual)
+}
+
+/// Whether a row carries `status: Int`.  Only the fields written are visible:
+/// a `Row::Var` tail may still hide one, and this reads as absent.
+fn row_has_status_int(row: &Row) -> bool {
+    let mut rest = row;
+    loop {
+        match rest {
+            Row::Extend(label, ty, tail) => {
+                if label == "status" {
+                    return matches!(**ty, Ty::Int);
+                }
+                rest = tail;
+            }
+            Row::Empty | Row::Var(_) => return false,
+        }
+    }
+}
+
+/// A list where `Bytes` was wanted, or the reverse.  Every byte-channel writer
+/// takes one argument type, so the hint must hold for each of them.
+fn byte_writer_hint(expected: &Ty, actual: &Ty) -> Option<String> {
     let list_for_bytes = |a: &Ty, b: &Ty| matches!(a, Ty::List(_)) && matches!(b, Ty::Bytes);
     (list_for_bytes(expected, actual) || list_for_bytes(actual, expected)).then(|| {
         "a Bytes value and a list are different things: `from-bytes` yields Bytes \
