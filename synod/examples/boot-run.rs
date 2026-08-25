@@ -126,7 +126,10 @@ fn main() {
          confirming the write'#, name: 'helper', type: `amnemon, grant: `edit-only, search: false]"
     );
     let write_and_reply = vec![
-        ral_call("write", &format!("echo {HELPER_TEXT:?} > {HELPER_FILE}")),
+        // `/bin/echo`, never the `echo` builtin: this example is the only
+        // thing that boots a guest, so it is the only thing that can catch the
+        // guest's spawn jail breaking, and a builtin spawns nothing.
+        ral_call("write", &format!("/bin/echo {HELPER_TEXT:?} > {HELPER_FILE}")),
         ral_call("reply", &format!("reply \"wrote {HELPER_FILE}\"")),
     ];
     let script = Script::new()
@@ -146,11 +149,20 @@ fn main() {
 
     let engine = Engine::new();
     let provider = Arc::new(Provider::scripted("test-model", script));
+    // Made here, not by `Agent::root`: it takes the directory as given so that
+    // a `--resume` naming one that does not exist fails instead of quietly
+    // starting an empty session.
+    let run_dir = std::env::temp_dir().join(format!("boot-run-{}", std::process::id()));
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:boot-run-run-dir] Scratch setup before the trunk exists, in an example that is its own only caller — not model I/O."
+    )]
+    std::fs::create_dir_all(&run_dir).expect("make the run directory");
     let mut agent = Agent::root(
         RootConfig {
             system: "you are a helpful office assistant".to_string(),
             caps: Capabilities::root(),
-            run_dir: std::env::temp_dir().join(format!("boot-run-{}", std::process::id())),
+            run_dir,
             resume: None,
             no_logs: false,
             run_lock: None,
