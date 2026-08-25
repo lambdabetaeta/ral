@@ -11,7 +11,7 @@ use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
 use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Mailbox};
 use crate::egress;
-use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant};
+use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant, check_name};
 use crate::fleet::schedule::{CronSchedule, ScheduleRegistry, Trigger, parse_duration};
 use crate::record::commit::SurfaceBuffer;
 use crate::shell_eval::{self, PinDigests, Surface};
@@ -766,6 +766,13 @@ impl ExarchDesk {
                  its whole live subtree regardless of depth.",
                 1,
             ));
+        }
+
+        // Before a log is forked or a listener dialled: the in-process door
+        // checked this name, but a wire peer need not have come through one,
+        // and `register` — the authority — only refuses after all that work.
+        if let Err(why) = check_name(&spec.name) {
+            return Err(Error::new(format!("`agents `start` refused: {why}"), 1));
         }
 
         // Didactic, not race-free: `register` below re-checks under its own
@@ -3130,6 +3137,35 @@ mod tests {
             registry.list(desk.services.parent).len(),
             1,
             "the second, refused spawn must register no child"
+        );
+    }
+
+    /// The in-process door checks a name, but a wire peer need not have come
+    /// through one — so the spawn spine checks it too, before a log is forked
+    /// or a listener dialled, rather than leaving it all to `register`.
+    #[test]
+    fn agent_start_refuses_a_malformed_name_before_it_adopts_the_fork() {
+        let (desk, registry, _parent_inbox) = spawnable_desk(3);
+
+        let root = root_shell();
+        let shell = forkable_child_shell(&root);
+        let session = desk.services.nursery.park(shell);
+        let err = desk
+            .handle(start_req(session, "go", "help/er", "confined", true))
+            .expect_err("a malformed name must be refused");
+        assert!(
+            err.message.contains("ASCII letters"),
+            "the refusal must carry the name rule; got: {}",
+            err.message
+        );
+        assert!(
+            desk.services.nursery.adopt(session).is_some(),
+            "the name is refused before adopt, so the parked fork must stay \
+             for the run guard to reap"
+        );
+        assert!(
+            registry.list(desk.services.parent).is_empty(),
+            "a refused spawn registers no child"
         );
     }
 
