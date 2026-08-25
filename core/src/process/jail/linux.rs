@@ -65,24 +65,59 @@ fn write_cpu_max(cgroup: &Path, quota_pct: u32) -> io::Result<()> {
     write_control(cgroup, "cpu.max", &format!("{quota_us} {PERIOD_US}"))
 }
 
-/// Create the per-exec cgroup (and the jail root, lazily), write its limits,
-/// and hand back `cgroup.procs` still open: the pre-exec closure may not
-/// allocate, so it cannot build that path and open it itself.
+/// What each level of the jail's tree hands down to the next.
+const CONTROLLERS: &str = "+memory +pids +cpu";
+
+/// Create `cgroup` and every ancestor it lacks, delegating [`CONTROLLERS`] into
+/// each parent before making the child beneath it.
+///
+/// A controller's files appear in a child only once the parent's
+/// `cgroup.subtree_control` enables it, so the chain from the cgroup2 mount
+/// down to the leaf must be unbroken: a directory made under a parent that has
+/// not delegated yet is a directory with no `memory.max` to write.  Hence the
+/// descent — the recursion climbs to the first ancestor that already exists,
+/// the mount root at the latest, and enables on the way back down.
+///
+/// # Errors
+/// Returns the kernel's error for any mkdir, and refuses outright when a parent
+/// will not delegate: a jail that cannot be given its limits must not run the
+/// command uncapped instead.
+fn make_delegated(cgroup: &Path) -> io::Result<()> {
+    if cgroup.exists() {
+        return Ok(());
+    }
+    let parent = cgroup.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "{} has no parent, so it is not inside a cgroup2 mount. Is the jail root the \
+                 path this guest actually mounts cgroup2 at?",
+                cgroup.display()
+            ),
+        )
+    })?;
+    make_delegated(parent)?;
+    write_control(parent, "cgroup.subtree_control", CONTROLLERS).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "could not delegate {CONTROLLERS} from {}: {e}. Without them the cgroup below it \
+                 has no memory.max or pids.max to write, and the command would run uncapped.",
+                parent.display()
+            ),
+        )
+    })?;
+    mkdir_if_missing(cgroup)
+}
+
+/// Create the per-exec cgroup (and every level above it, lazily), write its
+/// limits, and hand back `cgroup.procs` still open: the pre-exec closure may
+/// not allocate, so it cannot build that path and open it itself.
 ///
 /// # Errors
 /// Returns the kernel's error for any mkdir/write/open along the way.
 pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(JailCgroup, OwnedFd)> {
-    // A controller's files appear in a child cgroup only once the parent's
-    // `cgroup.subtree_control` enables it.  Both writes are idempotent.
-    const CONTROLLERS: &str = "+memory +pids +cpu";
-    if let Some(root) = plan.cgroup.parent() {
-        mkdir_if_missing(root)?;
-        if let Some(mount) = root.parent() {
-            write_control(mount, "cgroup.subtree_control", CONTROLLERS)?;
-        }
-        write_control(root, "cgroup.subtree_control", CONTROLLERS)?;
-    }
-    mkdir_if_missing(&plan.cgroup)?;
+    make_delegated(&plan.cgroup)?;
     write_control(
         &plan.cgroup,
         "memory.max",

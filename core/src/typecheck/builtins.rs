@@ -166,6 +166,11 @@ pub fn fun(param: Ty, body: CompTy) -> CompTy {
 pub fn pure(ty: Ty) -> CompTy {
     CompTy::pure(ty)
 }
+/// An encoder's or terminal write's result: the byte channel itself is the
+/// payload, so WF-2 pins the value to `Unit`.
+pub fn ret_bytes() -> CompTy {
+    CompTy::Return(PayloadRoute::Bytes, Box::new(Ty::Unit))
+}
 
 // ── Scheme DSL ──────────────────────────────────────────────────────
 //
@@ -183,10 +188,32 @@ macro_rules! scheme {
             mk_scheme(&[], &[], &[], thunk(pure($ret)))
         }
     };
+    // scheme!(help: bytes); — nullary, the byte channel is the payload.
+    // Listed before the general `[params] -> $ret` arms below: `bytes` parses
+    // as a bare expression too, so a more specific arm must come first or it
+    // is never reached.
+    ($name:ident: bytes) => {
+        pub fn $name(_u: &mut Unifier) -> Scheme {
+            mk_scheme(&[], &[], &[], thunk(ret_bytes()))
+        }
+    };
+    // scheme!(to_bytes: [Ty::Bytes] -> bytes);
+    ($name:ident: [$($p:expr),*] -> bytes) => {
+        pub fn $name(_u: &mut Unifier) -> Scheme {
+            mk_scheme(&[], &[], &[], thunk(curry_bytes!($($p),*)))
+        }
+    };
     // scheme!(str_to_str: [Ty::String] -> Ty::String);
     ($name:ident: [$($p:expr),*] -> $ret:expr) => {
         pub fn $name(_u: &mut Unifier) -> Scheme {
             mk_scheme(&[], &[], &[], thunk(curry!($($p),* => $ret)))
+        }
+    };
+    // scheme!(to_line<av>: [Ty::Var(av)] -> bytes);
+    ($name:ident<$tv:ident>: [$($p:expr),*] -> bytes) => {
+        pub fn $name(u: &mut Unifier) -> Scheme {
+            let $tv = u.fresh_tyvar();
+            mk_scheme(&[$tv], &[], &[], thunk(curry_bytes!($($p),*)))
         }
     };
     // scheme!(length<av>: [Ty::Var(av)] -> Ty::Int);
@@ -209,6 +236,13 @@ macro_rules! scheme {
 macro_rules! curry {
     ($p:expr => $ret:expr) => { fun($p, pure($ret)) };
     ($p:expr, $($rest:expr),+ => $ret:expr) => { fun($p, curry!($($rest),+ => $ret)) };
+}
+
+/// [`curry`]'s encoder dual: the fold's base case is [`ret_bytes`], not a
+/// named return type.
+macro_rules! curry_bytes {
+    ($p:expr) => { fun($p, ret_bytes()) };
+    ($p:expr, $($rest:expr),+) => { fun($p, curry_bytes!($($rest),+)) };
 }
 
 /// Template signatures: a builtin's typing as const data.
@@ -361,10 +395,16 @@ pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
 /// `Bytes` — a union no row can spell.  [`Inferencer::check_error_message`]
 /// judges it once the row has been unified.
 pub(super) fn error_record_arg(u: &mut Unifier) -> Ty {
+    error_record_shape(u.fresh_row_var())
+}
+
+/// The shape [`error_record_arg`] builds, its open tail taken directly so a
+/// caller that must quantify that row itself — [`scheme::fail`] — can.
+pub(in crate::typecheck) fn error_record_shape(row: RowVar) -> Ty {
     Ty::Record(Row::Extend(
         "status".into(),
         Box::new(Ty::Int),
-        Box::new(Row::Var(u.fresh_row_var())),
+        Box::new(Row::Var(row)),
     ))
 }
 
@@ -482,8 +522,9 @@ pub fn fs_file_info_ty() -> Ty {
 /// function here rather than duplicating the body.
 pub mod scheme {
     use super::{
-        CompTy, PayloadRoute, PayloadVar, Row, Scheme, Ty, TyVar, Unifier, await_record,
-        fs_file_info_ty, fs_list_entry_ty, fun, mk_scheme, poll_variant, pure, thunk,
+        CompTy, PayloadRoute, PayloadVar, Row, Scheme, Ty, TyEnv, TyVar, Unifier, await_record,
+        error_record_shape, fs_file_info_ty, fs_list_entry_ty, fun, generalize, lines_step_ty,
+        mk_scheme, poll_variant, pure, ret_bytes, thunk,
     };
 
     // ── List operations ──────────────────────────────────────────────────
@@ -868,6 +909,115 @@ pub mod scheme {
     scheme!(source_op<av>: [Ty::String] -> Ty::Var(av));
 
     scheme!(use_op<av>: [Ty::String] -> Ty::Map(Box::new(Ty::Var(av))));
+
+    // ── Terminal, help & encoders ────────────────────────────────────────
+    //
+    // Each writes to the byte channel: `F[Bytes] ()`, WF-2's `value = Unit`
+    // pinned by [`ret_bytes`].
+
+    scheme!(terminal_control: bytes);
+    scheme!(help: bytes);
+    scheme!(explain: [Ty::String] -> bytes);
+    scheme!(to_bytes: [Ty::Bytes] -> bytes);
+    scheme!(ints_to_bytes: [Ty::List(Box::new(Ty::Int))] -> bytes);
+    scheme!(to_any_bytes<av>: [Ty::Var(av)] -> bytes);
+    scheme!(to_line<av>: [Ty::Var(av)] -> bytes);
+    scheme!(to_lines<av>: [Ty::List(Box::new(Ty::Var(av)))] -> bytes);
+
+    // ── Decoders ─────────────────────────────────────────────────────────
+    //
+    // Nullary: the bytes come from the channel, not an argument.
+
+    scheme!(from_bytes: pure Ty::Bytes);
+    scheme!(from_string: pure Ty::String);
+
+    /// `from-json`/`from-csv` :: ∀α. F α — decode whatever the channel holds.
+    pub fn from_json(u: &mut Unifier) -> Scheme {
+        let av = u.fresh_tyvar();
+        mk_scheme(&[av], &[], &[], thunk(pure(Ty::Var(av))))
+    }
+
+    /// `from-lines` :: F (Step of lines).
+    ///
+    /// The recursion closes through a comp var, which [`mk_scheme`] cannot
+    /// quantify (its `comp_ty_bindings` is always empty), so this goes
+    /// through [`generalize`] instead, exactly as the templates it replaces
+    /// did.
+    pub fn from_lines(u: &mut Unifier) -> Scheme {
+        let step = lines_step_ty(u);
+        generalize(u, &TyEnv::new(), &thunk(pure(step)))
+    }
+
+    // ── Range, paths, parsing ────────────────────────────────────────────
+
+    scheme!(range: [Ty::Int, Ty::Int] -> Ty::List(Box::new(Ty::Int)));
+    scheme!(chdir: [Ty::String] -> Ty::Unit);
+    scheme!(path_bool: [Ty::String] -> Ty::Bool);
+    scheme!(int_parse<av>: [Ty::Var(av)] -> Ty::Int);
+    scheme!(float_parse<av>: [Ty::Var(av)] -> Ty::Float);
+    scheme!(str_parse<av>: [Ty::Var(av)] -> Ty::String);
+    scheme!(round: [Ty::Float, Ty::Int] -> Ty::Float);
+    // Shared by `floor`, `ceil`, and `trunc`.
+    scheme!(float_to_int: [Ty::Float] -> Ty::Int);
+
+    // ── Aliasing, job control, plugins ───────────────────────────────────
+
+    /// `alias :: String → U(comp) → F Unit`.
+    ///
+    /// The block's own computation type is unconstrained here (only its
+    /// arity is checked elsewhere), so the comp var it mints must be
+    /// quantified through [`generalize`], not [`mk_scheme`], for the same
+    /// reason as [`from_lines`].
+    pub fn alias(u: &mut Unifier) -> Scheme {
+        let block = u.fresh_comp_ty();
+        let body = fun(Ty::String, fun(thunk(block), pure(Ty::Unit)));
+        generalize(u, &TyEnv::new(), &thunk(body))
+    }
+    scheme!(unalias: [Ty::String] -> Ty::Unit);
+
+    // Shared by `fg`/`bg`/`disown`, registered by the REPL host in
+    // `ral/src/repl/host_handlers.rs`: the job to act on, named.
+    scheme!(int_to_unit: [Ty::Int] -> Ty::Unit);
+    scheme!(string_to_unit: [Ty::String] -> Ty::Unit);
+
+    // ── Divergence ───────────────────────────────────────────────────────
+
+    /// `fail :: ∀α ρ r. {status: Int | r} → F[ρ] α`.
+    ///
+    /// An error record, open at the tail so a caught error re-raises with the
+    /// fields `try` gave it.  Divergent, so its route and value join whatever
+    /// the context needs rather than forcing `Unit` on the other arm of an
+    /// `if`.
+    pub fn fail(u: &mut Unifier) -> Scheme {
+        let row = u.fresh_row_var();
+        let av = u.fresh_tyvar();
+        let rv = u.fresh_routevar();
+        mk_scheme(
+            &[av],
+            &[rv],
+            &[row],
+            thunk(fun(
+                error_record_shape(row),
+                CompTy::Return(PayloadRoute::Var(rv), Box::new(Ty::Var(av))),
+            )),
+        )
+    }
+
+    /// `exit`/`quit` :: ∀α ρ. Int → F[ρ] α — a status, and no return.
+    /// Divergent like [`fail`]; the elaborator sugars bare `exit` to `exit 0`.
+    pub fn exit(u: &mut Unifier) -> Scheme {
+        let av = u.fresh_tyvar();
+        let rv = u.fresh_routevar();
+        mk_scheme(
+            &[av],
+            &[rv],
+            &[],
+            thunk(fun(
+                Ty::Int,
+                CompTy::Return(PayloadRoute::Var(rv), Box::new(Ty::Var(av))),
+            )),
+        )
+    }
 }
 
 /// The polytype a type rule names, whichever half of the manifest it came

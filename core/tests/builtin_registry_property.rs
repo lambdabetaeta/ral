@@ -8,13 +8,13 @@
 //! String-vs-Unit reconciliation lived.
 //!
 //! Runtime values are first-order, so inhabitation is a direct structural
-//! match.  For every `Scheme` builtin whose argument and return types are
-//! drawn from the inhabitable first-order fragment, we generate argument
-//! inhabitants, run the reducer, and assert the result inhabits the
-//! declared return type.  Polymorphic positions (`Ty::Var`) accept any
-//! value.  Builtins that need live resources (filesystem, stdin, spawned
-//! handles, a host event sink) cannot be swept by a pure reducer call and
-//! are listed in `RESOURCE_BACKED` with their reason.
+//! match.  For every builtin whose argument and return types are drawn from
+//! the inhabitable first-order fragment, we generate argument inhabitants,
+//! run the reducer, and assert the result inhabits the declared return
+//! type.  Polymorphic positions (`Ty::Var`) accept any value.  Builtins
+//! that need live resources (filesystem, stdin, spawned handles, a host
+//! event sink) cannot be swept by a pure reducer call and are listed in
+//! `RESOURCE_BACKED` with their reason.
 //!
 //! The roster is `CORE_BUILTINS`, the manifest's value half: a reducer taking
 //! its arguments is what a generated inhabitant can be applied to.  The argv
@@ -25,7 +25,7 @@
 mod common;
 
 use ral_core::builtins::CORE_BUILTINS;
-use ral_core::typecheck::builtins::BuiltinTypeRule;
+use ral_core::typecheck::builtins::rule_scheme;
 use ral_core::typecheck::{CompTy, Ty, Unifier};
 use ral_core::types::{Map, Mooring, Shell, Value};
 use ral_core::{Break, builtins};
@@ -45,6 +45,12 @@ const RESOURCE_BACKED: &[(&str, &str)] = &[
     ("cwd", "reads the shell's logical cwd"),
     ("fold-lines", "drains stdin"),
     ("ask", "reads the controlling terminal"),
+    ("from-bytes", "reads the byte channel"),
+    ("from-string", "reads the byte channel"),
+    ("from-line", "reads the byte channel"),
+    ("from-lines", "reads the byte channel"),
+    ("from-json", "reads the byte channel"),
+    ("from-csv", "reads the byte channel"),
     ("surface", "forwards to a host event sink"),
     ("spawn", "forks a concurrent worker"),
     ("await", "needs a live Handle"),
@@ -134,19 +140,16 @@ fn arg_and_return_types(u: &mut Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
 fn every_scheme_reducer_inhabits_its_return_type() {
     let mut checked = 0usize;
     for entry in CORE_BUILTINS {
-        let BuiltinTypeRule::Scheme(factory) = entry.type_rule else {
-            continue;
-        };
         let name = entry.name.as_ref();
         if RESOURCE_BACKED.iter().any(|(n, _)| *n == name) {
             continue;
         }
 
-        // The factory mints fresh unifier vars for each quantified
-        // position; nothing is unified, so a quantified `Ty::Var` stays
-        // unbound and is treated as a polymorphic (any-value) position.
+        // Fresh unifier vars for each quantified position; nothing is
+        // unified, so a quantified `Ty::Var` stays unbound and is treated as
+        // a polymorphic (any-value) position.
         let mut u = Unifier::new();
-        let scheme = factory(&mut u);
+        let scheme = rule_scheme(&entry.type_rule, &mut u);
         let Some((arg_tys, ret_ty)) = arg_and_return_types(&mut u, &scheme.ty) else {
             continue;
         };
@@ -172,9 +175,12 @@ fn every_scheme_reducer_inhabits_its_return_type() {
             Err(other) => panic!("builtin `{name}` escaped under the sweep: {other:?}"),
         }
     }
-    assert!(
-        checked >= 8,
-        "the registry sweep checked only {checked} builtins — the inhabitable \
-         fragment should not have shrunk this far"
+    // Pinned, not a floor: a floor cannot catch the roster growing, and this
+    // sweep's roster is derived, not written down.
+    assert_eq!(
+        checked, 53,
+        "the registry sweep checked {checked} builtins, not the pinned 53 — a manifest \
+         or RESOURCE_BACKED change moved the roster; update the expected count here, in \
+         the same commit, with a reason"
     );
 }
