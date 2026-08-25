@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 8bd8b936
+generated_at_commit: fb52275a
 generated_at_date: 2026-08-25
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
@@ -230,7 +230,11 @@ queryable store.
   spawn: launch-only and always asynchronous, the reply arriving later through
   the inbox, and the child's row in the answer carrying the `name` and
   `log-dir` the old receipt did. `name` is the child's identity — the tab-bar
-  contract (`valid_name`), unique among live agents or the call is refused;
+  contract (`check_name`, in `fleet/registry.rs` beside the rule it belongs
+  with), unique among live agents or the call is refused; this door refuses a
+  malformed one early and in the model's own words, and `register` refuses it
+  again for peers that never came through a door
+  ([[map/exarch/agent|agent]]);
   `type` is `` `amnemon `` (blank context) or `` `mnemon `` (imports the
   parent's model-visible context before the fresh final prompt); `grant` is one
   of the five spawnable [[map/exarch/policy|base]] names (`confined`,

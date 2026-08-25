@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 8bd8b936
+generated_at_commit: fb52275a
 generated_at_date: 2026-08-25
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs, core/src/vsock.rs]
 ---
@@ -27,7 +27,9 @@ host dials it and writes eight little-endian token bytes, and the listener
 thread checks them before handing the connection to `hatch_over`. Every partial
 token read polls beside the wake pipe, so a peer that sends a prefix and stalls
 cannot pin cancellation — though it does hold the accept loop, and so denies that
-one spawn. `hatch_over` spawns `current_exe --engine` with the dial on fd 3 and a
+one spawn. `hatch_over` re-execs `current_exe` on the recipe the hatch carries —
+`--engine` in production, one exact fixture under test, so the spawn itself never
+branches on `cfg(test)` — with the dial on fd 3 and a
 seed channel named by `RAL_ENGINE_SEED_FD`; the child drains the framed
 `EngineSeed` before waiting for `Attach`, the parent writes it after `spawn`, and
 only then sends one `HATCH_ACK` byte back. That ordering is what lets a seed
@@ -36,7 +38,10 @@ outgrow the socketpair's bounded buffer without deadlocking creation, and
 precede the drop that turns a dead child into `EPIPE` rather than a blocked
 writer. The write is bounded by the same stall the engine allows its own protocol
 writes, and a seed that only partly crosses kills its child instead of recording
-it: half a frame would leave it blocked in a read no sweep could notice. The ack
+it: half a frame would leave it blocked in a read forever, and the `HATCHED`
+table's sweep waits on exits, not on silence — it is `waitpid` and nothing else,
+since a child closes that seed channel the moment it has hydrated and so falls
+quiet long before it dies. The ack
 goes out only once `spawn` has returned and the seed has crossed, so a host that
 hears it has a live child holding its whole seed; the frame algebra offers no
 substitute, since the host speaks first and `Attach` is its only legal opening

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 8bd8b936
+generated_at_commit: fb52275a
 generated_at_date: 2026-08-25
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/registry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -318,9 +318,13 @@ disagree about what is shared.
 The single cascade serves the deliberate teardowns — `` agents `cancel ``, a
 returning agent's `reply`, and the `/clear` / `/close` subtree reaps.
 `AgentRegistry` lives in `fleet/registry.rs`; an entry's `name` is its
-identity — unique among live entries, enforced at `register`
-(`RegisterError::NameTaken`; the trunk holds `TRUNK_NAME`) and the handle
-`` agents `message ``/`` agents `cancel `` resolve descendants by. Each entry
+identity — well-formed and unique among live entries, both enforced at
+`register` (`RegisterError::NameMalformed`/`NameTaken`; the trunk holds
+`TRUNK_NAME`), which is where a name *becomes* identity and so the one place a
+wire peer cannot go around. The desk refuses both a beat earlier, before it
+forks a log or dials anything, but only `register` is authoritative. A name is
+also the handle `` agents `message ``/`` agents `cancel `` resolve descendants
+by. Each entry
 carries a `parent` link, so the registry is the
 spawn *tree*: `AgentRegistry::cancel(id)` walks descendants and cancels the whole
 subtree, `cancel_descendants(root)` abandons a returning agent's children without
@@ -555,7 +559,9 @@ enquiry never dialled, so the builtin wakes its listener through a pipe and
 joins it, raising the thread's own reason over the host's when it has one,
 since it was nearer the failure. Past the ack a refusal simply drops the
 stream — the child reads EOF on fd 3, and core's `HATCHED` table, swept at the
-next hatch and again at engine teardown, reaps whatever has gone EOF. A wire
+next hatch and again at engine teardown, reaps whatever has since exited. That
+sweep is `waitpid` and nothing lighter: a hatched child closes its seed channel
+as soon as it has hydrated, so silence there means *started*, never stopped. A wire
 trunk with fuel > 0 and no dialler is a construction error, refused at
 `Agent::root` with a sentence rather than discovered by a model calling
 `agent`; off Linux the wire arm refuses in one sentence too.

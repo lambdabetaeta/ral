@@ -86,7 +86,9 @@ The socketpair holds a couple of hundred kilobytes; a seed is as large as the
 parent's scope. So the parent writes the framed `EngineSeed` only *after* spawning
 and the child reads it *before* waiting for `Attach`, applying it once `Attach` has
 selected and booted the installer. Neither side is ever waiting on protocol startup
-while the other waits on the buffer, and no seed is too large to cross.
+while the other waits on the buffer, and no seed wedges the channel however far it
+outgrows it. The buffer is not a limit on a seed's size; the framing codec's
+256 MiB ceiling is the only size at which one fails, and it fails loudly.
 
 Three consequences, each load-bearing:
 
@@ -187,8 +189,9 @@ with `guest jail: No such file or directory`. It went unseen because it is
 `synod/src/hatchery.rs`'s pump entire, and with it an unswept `Slot::Dialed`
 branch that leaked one host file descriptor per stray dial bearing valid magic,
 uncounted by `refused_dials` because the magic was fine — fixed by deletion rather
-than by a sweep. `exarch/src/fleet/hatch.rs` entire, so `name_live` is the only
-name check left. Both copies of the preamble. `AGENT_PORT`,
+than by a sweep. `exarch/src/fleet/hatch.rs` entire, leaving the desk's own two
+cheap guards and `AgentRegistry::register`, which is authoritative for both the
+name's form and its uniqueness. Both copies of the preamble. `AGENT_PORT`,
 `Machine::accept_agent`, vz's `AgentReadiness` delegate and its listener
 registration. `mint_token`'s host-side reservation, `agent_hatched`, `agent_abort`,
 and engine-side `decode_hatch_answer`, `enquire_hatched`, `enquire_abort`.
