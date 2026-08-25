@@ -141,6 +141,31 @@ pub struct AgentInfo {
     pub elapsed: Duration,
 }
 
+/// The tab-bar contract every agent name must meet.
+///
+/// Non-empty, at most 24 characters, ASCII alphanumeric plus `-`/`_`, since the
+/// tab bar lays a name out as a single token.  Stated here because this is where
+/// a name becomes identity — [`AgentRegistry::register`] refuses whatever this
+/// refuses, so no door can mint an entry around it, however a name reached that
+/// door.
+///
+/// # Errors
+/// The sentence to show, naming the rule and the name that broke it.
+pub fn check_name(name: &str) -> Result<(), String> {
+    if !name.is_empty()
+        && name.len() <= 24
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "`name` must be non-empty, at most 24 characters, and only ASCII letters, digits, `-`, \
+         or `_` (the tab-bar contract) — got {name:?}"
+    ))
+}
+
 /// Threaded once at birth into [`AgentRegistry::register`].
 pub struct Registration {
     pub id: AgentId,
@@ -292,6 +317,10 @@ impl AgentRegistry {
     /// Also under that lock, so two same-name spawns racing within one turn
     /// cannot both succeed — the authoritative half of the spawn-uniqueness
     /// rule, [`Self::name_live`] the cheap one.
+    ///
+    /// [`RegisterError::NameMalformed`] when the name breaks [`check_name`].
+    /// Checked here and not only at the doors, because a wire peer is not
+    /// trusted to have used one.
     pub fn register(&self, reg: Registration) -> Result<u64, RegisterError> {
         let Registration {
             id,
@@ -304,6 +333,11 @@ impl AgentRegistry {
             mailbox,
             provider,
         } = reg;
+        // Before the lock, and before anything else reads the name: this is
+        // the one door through which a name becomes identity.
+        if let Err(why) = check_name(&name) {
+            return Err(RegisterError::NameMalformed(why));
+        }
         let mut g = self.lock();
         // One lookup, two answers: the parent must be live, and its generation
         // is the one the result must survive — the parent is who will read it.
@@ -636,6 +670,9 @@ pub enum RegisterError {
     SessionDead,
     /// Carries the offending name, so the caller can refuse didactically.
     NameTaken(String),
+    /// Carries [`check_name`]'s own sentence, so every door refuses in the
+    /// same words.
+    NameMalformed(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

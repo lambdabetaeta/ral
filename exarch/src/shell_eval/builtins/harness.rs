@@ -39,15 +39,6 @@ const PERMISSION_LABELS: [&str; 5] = [
     "dangerous",
 ];
 
-/// The tab-bar contract: non-empty, ≤24 chars, ASCII alphanumeric plus
-/// `-`/`_`, since the tab bar lays a name out as a single token.
-pub(crate) fn valid_name(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 24
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
 /// The label of a nullary tag — the shape both `type` and `grant` must have.
 fn bare_tag(v: &Value) -> Option<&str> {
     match v {
@@ -320,12 +311,9 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
     };
 
     let name = name.to_string();
-    if !valid_name(&name) {
-        return Err(sig(format!(
-            "agents: `name` must be non-empty, at most 24 characters, and only ASCII letters, \
-             digits, `-`, or `_` (the tab-bar contract) — got {name:?}"
-        )));
-    }
+    // The door's own early refusal; `AgentRegistry::register` is what makes it
+    // unskippable.
+    crate::fleet::registry::check_name(&name).map_err(|why| sig(format!("agents: {why}")))?;
     agent_type_label(kind)?;
     permission_label(grant)?;
     // The door admitted it, so the grant is a bare tag; the hatch needs its
@@ -1004,18 +992,6 @@ pub static HARNESS_BUILTINS: &[BuiltinEntry] = &HARNESS_BUILTINS_ARR;
 mod tests {
     use super::*;
     use crate::agent::testkit::ral_call;
-
-    #[test]
-    fn valid_name_boundaries() {
-        assert!(valid_name("a"));
-        assert!(valid_name("refactor-output"));
-        assert!(valid_name("audit_deps"));
-        assert!(valid_name(&"x".repeat(24)));
-        assert!(!valid_name(""));
-        assert!(!valid_name(&"x".repeat(25)));
-        assert!(!valid_name("has space"));
-        assert!(!valid_name("non-ascii-é"));
-    }
 
     #[test]
     fn permission_label_accepts_every_bake_in() {

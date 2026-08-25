@@ -63,8 +63,14 @@ engine and its shell run inside the VM and the desk runs on the host. Both
 validations stay. The two `CronSchedule::parse` calls are *not* redundant: the
 door's exists so a bad cron reaches the model with the parser's own message
 before anything crosses, the desk's because a guest can send whatever it likes.
-What changed is only that the host-side decode reads the shape the model wrote,
-by field name, instead of a dialect. Take "the wire carries the value" without
+The tab-bar name contract is the same shape of claim answered one level deeper:
+rather than have the desk recheck what the door already checked,
+`AgentRegistry::register` refuses whatever `check_name` refuses, so a wire peer's
+name cannot become registry identity unexamined *by any door*, present or future.
+The door keeps its own early refusal for the model's sake; what makes it safe is
+that it is not the only one. What changed is only that the host-side decode reads
+the shape the model wrote, by field name, instead of a dialect.
+Take "the wire carries the value" without
 this and you will delete the check that keeps whatever a guest cares to send from
 reaching host state unexamined.
 

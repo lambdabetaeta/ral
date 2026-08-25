@@ -131,6 +131,9 @@ pub(crate) fn spawn_async(
                  another, or wait for it to settle"
             ));
         }
+        Err(RegisterError::NameMalformed(why)) => {
+            return Err(format!("could not start agent {agent_id}: {why}"));
+        }
     };
     // `registry` itself stays free for the unwind path below.
     let worker_registry = AgentRegistry::clone(registry);
