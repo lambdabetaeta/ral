@@ -103,9 +103,26 @@ bindings made readable to a process that should not read them.
 Measurement narrowed this further. The guest kernel **refuses**
 `VMADDR_CID_LOCAL`, and a jailed command cannot read `/dev/vsock` to learn its own
 CID at all (`EACCES`). So the kernel's refusal is the **standing defence**, and the
-token is the second line, guarding a *guessed* CID rather than a read one. That is
-not nothing, and the price is eight bytes held by one thread, so it stays — but
-nobody should restore the handshake to defend a property it never had.
+token is the second line, guarding a *guessed* CID rather than a read one.
+
+The standing defence is in fact structural rather than incidental, and it is worth
+naming precisely because it is checkable in one line. The boot image ships exactly
+two vsock modules — `vsock` and `vmw_vsock_virtio_transport` (`boot-manifest.txt`'s
+`modules_shipped`). Guest-local vsock routing is the *loopback* transport's job,
+and no loopback transport is shipped. The virtio transport carries everything to
+the host, so there is nothing in the guest that can route a connect to the guest's
+own CID, whether that CID was read or guessed. (That the shipped set excludes it is
+verified; whether this kernel could have it built in rather than as a module was
+not.)
+
+So on this image the token guards a threat that is **unreachable by construction**.
+It stays anyway, and the reason is worth stating so nobody deletes it as dead
+weight: the defence rests on a *build-time module list*, enforced nowhere near the
+spawn, and one line added to `build-boot.sh` would make the threat live again. Eight
+bytes and a comparison, on a path that already forks and execs, is a cheap standing
+insurance against a change made somewhere else entirely. Nobody should restore the
+*handshake* to defend a property it never had; nobody should remove the *token* on
+the strength of a module list either.
 
 ## What was measured
 
