@@ -170,22 +170,6 @@ fn main() {
         }
     }
 
-    // The negative half of the reverse direction: nothing is listening in the
-    // guest yet, so what matters is *which* answer comes back and how fast. A
-    // prompt error means the framework reports a missing listener; a
-    // full-patience timeout would mean it does not, and any design built on
-    // this would have to carry its own deadline.
-    print!("dialling guest port {PROBE_PORT} with nothing listening... ");
-    let _ = std::io::stdout().flush();
-    let started = Instant::now();
-    match machine.connect_guest(PROBE_PORT) {
-        Ok(_) => println!("connected — something IS listening there, unexpectedly"),
-        Err(err) if err.kind() == std::io::ErrorKind::Unsupported => {
-            println!("not implemented on this backend: {err}");
-        }
-        Err(err) => println!("refused after {:?}: {err}", started.elapsed()),
-    }
-
     prove_the_host_can_dial_in(machine.as_ref(), wires.control, workspace);
 
     println!("booted: the agent can reach the granted folder and nothing else on this computer");

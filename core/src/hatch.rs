@@ -1,37 +1,44 @@
-//! The guest hatch: a parent engine spawning a child engine over a fresh
-//! vsock dial, and that child engine hydrating the seed it was spawned with.
+//! The guest hatch: a parent engine spawning a child engine onto a vsock
+//! connection to the host, and that child engine hydrating the seed it was
+//! spawned with.
 //!
-//! `hatch` mirrors [`crate::transport::WireTransport::new`]'s re-exec shape,
-//! with `ral-daemon`'s own fd discipline: dial the host, write a 16-byte
-//! preamble identifying the dial to the token the caller was already handed,
-//! seed a fresh socketpair with one framed [`EngineSeed`], and spawn
-//! `current_exe --engine` with the dial on fd 3 and the seed's fd named by
-//! `RAL_ENGINE_SEED_FD`. [`apply_seed`] is the other end: called from
-//! `engine_session` once a freshly booted shell exists, it hydrates the
-//! seed's scope and context, then narrows the shell's capabilities to the
-//! seed's validated grant through whichever host installed
-//! [`set_grant_narrower`] — core itself carries no capability vocabulary of
-//! its own to resolve a grant tag against.
+//! The connection is opened from the host's side. The parent binds a port for
+//! the duration of one spawn ([`listen_for_hatch`]) and tells the host where;
+//! the thread over that listener accepts, checks the eight token bytes the
+//! host writes, and hands the connection to [`hatch_over`], which mirrors
+//! [`crate::transport::WireTransport::new`]'s re-exec shape with
+//! `ral-daemon`'s own fd discipline: seed a fresh socketpair with one framed
+//! [`EngineSeed`], spawn `current_exe --engine` with the connection on fd 3
+//! and the seed's fd named by `RAL_ENGINE_SEED_FD`, and write
+//! [`crate::transport::HATCH_ACK`] back — after the spawn, so a host that
+//! hears the ack has a live child on the other end.
 //!
-//! The dial alone — [`crate::vsock::dial_host`] — is Linux-only, since
-//! `AF_VSOCK` only means something inside a real guest. Everything else here
-//! is plain Unix process/socket plumbing, exercised in tests by handing
-//! [`hatch_over`] one end of a `UnixStream` pair standing in for the vsock
-//! dial, the same vehicle the wire seat's own tests already re-exec
-//! `--engine` over.
+//! [`apply_seed`] is the other end: called from `engine_session` once a
+//! freshly booted shell exists, it hydrates the seed's scope and context,
+//! then narrows the shell's capabilities to the seed's validated grant
+//! through whichever host installed [`set_grant_narrower`] — core itself
+//! carries no capability vocabulary of its own to resolve a grant tag
+//! against.
 //!
-//! `hatch` itself is Linux-only, and everything below it that exists only to
-//! serve that one call or this file's own tests is therefore unreachable in
-//! a plain non-Linux, non-test build — an accurate fact about this
-//! milestone's shape, not a bug, so it is stated once here rather than
-//! peppering every such item with its own `#[allow(dead_code)]`.
+//! The sockets alone — [`crate::vsock`] — are Linux-only, since `AF_VSOCK`
+//! only means something inside a real guest. Everything else here is plain
+//! Unix process/socket plumbing, exercised in tests over a `UnixListener` and
+//! `UnixStream` pairs standing in for the guest's port, the same vehicle the
+//! wire seat's own tests already re-exec `--engine` over.
+//!
+//! Everything that exists only to serve the Linux-only calls or this file's
+//! own tests is therefore unreachable in a plain non-Linux, non-test build —
+//! an accurate fact about this milestone's shape, not a bug, so it is stated
+//! once here rather than peppering every such item with its own
+//! `#[allow(dead_code)]`.
 #![cfg_attr(not(any(target_os = "linux", test)), allow(dead_code, unused_imports))]
 
-use std::io::Write;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::child_eval::{EngineSeed, pack_seed};
@@ -110,24 +117,210 @@ pub(crate) fn teardown_hatched() {
     sweep_hatched();
 }
 
+/// Why a listener thread has no child to report.
+#[derive(Debug)]
+pub enum Unhatched {
+    /// Woken by its own caller before the host ever dialled, so it has no
+    /// account of its own: whatever refused the spawn said so elsewhere, and
+    /// that is the sentence to raise.
+    Cancelled,
+    /// Something this thread attempted failed, and this says what.
+    Failed(String),
+}
+
+/// One spawn's listener: the thread that owns it, and the pipe that wakes it.
+pub struct HatchListener {
+    wake: io::PipeWriter,
+    thread: JoinHandle<Result<u32, Unhatched>>,
+}
+
+impl HatchListener {
+    /// Wake the thread out of whichever poll it is parked in, so a caller
+    /// whose enquiry was refused can always have its thread back.
+    pub fn cancel(&self) {
+        let _ = (&self.wake).write(&[0]);
+    }
+
+    /// Wait for the thread, and answer the hatched child's pid.
+    ///
+    /// # Errors
+    /// [`Unhatched::Failed`] if the thread got as far as a reason of its own;
+    /// [`Unhatched::Cancelled`] if [`Self::cancel`] reached it first.
+    pub fn join(self) -> Result<u32, Unhatched> {
+        self.thread.join().unwrap_or_else(|_| {
+            Err(Unhatched::Failed(
+                "hatch: the thread listening for the host's dial panicked".to_string(),
+            ))
+        })
+    }
+}
+
+/// Listen on an ephemeral guest port for the host to dial, and answer with
+/// that port and the thread now waiting on it.
+///
+/// `token` is the eight bytes the host must write first. `shell` is packed
+/// here, on the caller's own thread: the seed is all the listener thread ever
+/// holds of the parent's session, and a `Shell` never leaves this one.
+///
+/// # Errors
+/// Returns a sentence if the shell will not pack, or no port could be bound.
+#[cfg(target_os = "linux")]
+pub fn listen_for_hatch(
+    token: u64,
+    shell: &Shell,
+    grant: String,
+) -> Result<(u32, HatchListener), String> {
+    let seed = packed_seed(shell, grant)?;
+    let (listener, port) = crate::vsock::listen_any().map_err(|e| {
+        format!(
+            "hatch: could not bind a guest port for the host to dial: {e} — is this engine running \
+             inside a VM with a vsock device?"
+        )
+    })?;
+    Ok((port, hatch_listener(listener, token, seed)?))
+}
+
+/// The portable core of [`listen_for_hatch`]: `listener` is a bound,
+/// listening socket — the guest's `AF_VSOCK` one, or a `UnixListener`'s in
+/// tests.
+fn hatch_listener(
+    listener: OwnedFd,
+    token: u64,
+    seed: EngineSeed,
+) -> Result<HatchListener, String> {
+    let (woken, wake) = io::pipe()
+        .map_err(|e| format!("hatch: could not open the pipe that wakes the listener: {e}"))?;
+    let thread = std::thread::spawn(move || await_dial(&listener, &woken, token, &seed));
+    Ok(HatchListener { wake, thread })
+}
+
+/// The listener thread's whole life: accept until the connection the host
+/// dialled arrives, hatch onto it, and answer the child's pid.
+///
+/// Two poll sites and no clock. Neither blocks without the wake end in its
+/// set, which is what makes the caller's join safe: the only party that can
+/// leave this thread waiting is the host, whose own wait on the ack carries
+/// the transport's deadline.
+fn await_dial(
+    listener: &OwnedFd,
+    woken: &io::PipeReader,
+    token: u64,
+    seed: &EngineSeed,
+) -> Result<u32, Unhatched> {
+    loop {
+        wait_readable(listener, woken)?;
+        let connection = accept(listener)
+            .map_err(|e| Unhatched::Failed(format!("hatch: could not accept a dial: {e}")))?;
+        wait_readable(&connection, woken)?;
+
+        let mut claim = [0u8; 8];
+        let mut stream = UnixStream::from(connection);
+        if stream.read_exact(&mut claim).is_err() || u64::from_le_bytes(claim) != token {
+            // Whoever this was did not know the token, so it is not the host.
+            // Losing the race costs it nothing but this connection.
+            continue;
+        }
+        return hatch_over(stream.into(), seed).map_err(Unhatched::Failed);
+    }
+}
+
+/// Block until `fd` is readable, or the caller writes the wake pipe.
+fn wait_readable(fd: &impl AsFd, woken: &io::PipeReader) -> Result<(), Unhatched> {
+    loop {
+        let mut fds = [
+            libc::pollfd {
+                fd: fd.as_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: woken.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: `fds` is two fully initialised pollfds and `2` is their
+        // count; `poll` writes only `revents`. No timeout: this thread's only
+        // clock is its caller.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(Unhatched::Failed(format!(
+                "hatch: could not wait for the host's dial: {err}"
+            )));
+        }
+        // The wake end is read first: a caller that has already given up
+        // outranks anything that arrived beside it.
+        if fds[1].revents != 0 {
+            return Err(Unhatched::Cancelled);
+        }
+        if fds[0].revents != 0 {
+            return Ok(());
+        }
+    }
+}
+
+/// `accept(2)` with the peer's address discarded: a vsock peer is a CID this
+/// guest has no use for, and std's `UnixListener` would refuse to read one as
+/// a path.
+fn accept(listener: &OwnedFd) -> io::Result<OwnedFd> {
+    loop {
+        // SAFETY: a plain `accept(2)`; a null address pair asks for no peer
+        // name, and the descriptor is adopted immediately below.
+        let raw = unsafe {
+            libc::accept(
+                listener.as_raw_fd(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if raw < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        // SAFETY: `raw` is a fresh descriptor this call owns.
+        let connection = unsafe { OwnedFd::from_raw_fd(raw) };
+        // `accept(2)` does not inherit the listener's CLOEXEC, and this fd
+        // must not leak into every command the engine runs meanwhile;
+        // `hatch_over` clears it on the one child that should have it.
+        // SAFETY: a plain `fcntl(2)` on a descriptor this call owns.
+        if unsafe { libc::fcntl(connection.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return Ok(connection);
+    }
+}
+
 /// Dial the host's agent port, and spawn a child engine seeded from `shell`
-/// — the nursery-parked shell `agent-start`'s wire arm parked, already
+/// — the nursery-parked shell `` `agents `start ``'s wire arm parked, already
 /// scrubbed by [`Shell::fork_into_nursery`].
 ///
-/// Answers the child's pid, so a caller whose later `agent-hatched` enquiry
-/// is refused (a timeout, a dead desk) can [`kill_hatched`] this one child
-/// rather than leave it dialling into silence.
+/// Answers the child's pid, so a caller whose later `` `agents `hatched ``
+/// enquiry is refused (a timeout, a dead desk) can [`kill_hatched`] this one
+/// child rather than leave it dialling into silence.
 ///
 /// # Errors
 /// Returns a sentence describing whichever step failed: the dial, the seed
 /// socketpair, the seed encode, or the spawn.
 #[cfg(target_os = "linux")]
-pub fn hatch(host_port: u32, token: u64, shell: &Shell, grant: String) -> Result<u32, String> {
-    use crate::types::Break;
-
+pub fn hatch(host_port: u32, _token: u64, shell: &Shell, grant: String) -> Result<u32, String> {
     let vsock = crate::vsock::dial_host(host_port)
         .map_err(|e| format!("hatch: could not dial the host's agent port {host_port}: {e}"))?;
-    let seed = pack_seed(shell, grant).map_err(|b| match b {
+    hatch_over(vsock, &packed_seed(shell, grant)?)
+}
+
+/// The forked session as the wire carries it: everything a child engine is
+/// given, and the only thing either hatch hands on.
+fn packed_seed(shell: &Shell, grant: String) -> Result<EngineSeed, String> {
+    use crate::types::Break;
+
+    pack_seed(shell, grant).map_err(|b| match b {
         Break::Error(e) => format!(
             "hatch: could not serialise the nursery shell: {}",
             e.message
@@ -135,8 +328,7 @@ pub fn hatch(host_port: u32, token: u64, shell: &Shell, grant: String) -> Result
         Break::Escape(_) => {
             "hatch: could not serialise the nursery shell: unexpected escape".to_string()
         }
-    })?;
-    hatch_over(vsock, token, &seed)
+    })
 }
 
 /// [`hatch`], reading its own seed straight out of `mooring`'s nursery
@@ -165,23 +357,16 @@ pub fn hatch_from_nursery(
     hatch(host_port, token, &shell, grant)
 }
 
-/// The portable core of [`hatch`]: everything past the vsock dial itself.
-/// `connection` stands in for the dial in tests.
+/// The portable core of a hatch: everything past the connection itself,
+/// which a `UnixStream` pair stands in for in tests.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:hatch-spawn] re-execs the current engine binary as a hatched child over a fresh vsock connection — infrastructure handoff exactly like WireTransport::new's engine-spawn door, not model turn-time I/O"
 )]
-fn hatch_over(connection: OwnedFd, token: u64, seed: &EngineSeed) -> Result<u32, String> {
+fn hatch_over(connection: OwnedFd, seed: &EngineSeed) -> Result<u32, String> {
     sweep_hatched();
 
     let mut vsock = UnixStream::from(connection);
-    let mut preamble = [0u8; 16];
-    preamble[..8].copy_from_slice(&crate::hatch_preamble::MAGIC);
-    preamble[8..].copy_from_slice(&token.to_le_bytes());
-    vsock
-        .write_all(&preamble)
-        .map_err(|e| format!("hatch: failed to write the agent-port preamble: {e}"))?;
-
     let (mut parent_seed, child_seed) =
         UnixStream::pair().map_err(|e| format!("hatch: failed to open the seed channel: {e}"))?;
     crate::subprocess_codec::write_frame(&mut parent_seed, seed)
@@ -233,6 +418,10 @@ fn hatch_over(connection: OwnedFd, token: u64, seed: &EngineSeed) -> Result<u32,
         .spawn()
         .map_err(|e| format!("hatch: could not start the child engine: {e}"))?;
     let pid = child.id();
+    // The child exists, so the host may now be told: the ack is written after
+    // the spawn and before the first frame, and it is all the host has to go
+    // on before it names this child on its roster.
+    let ack = vsock.write_all(&[crate::transport::HATCH_ACK]);
     // The parent must not hold either the dial or the child's seed end open,
     // or the child's death would never read as EOF on the ends this process
     // keeps — `vsock` drops here as `WireTransport::new`'s own `engine` end
@@ -240,6 +429,8 @@ fn hatch_over(connection: OwnedFd, token: u64, seed: &EngineSeed) -> Result<u32,
     drop(vsock);
     drop(child_seed);
 
+    // Recorded before the ack is reported on, so a child that started is
+    // reaped even when the host never heard of it.
     table()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -247,13 +438,17 @@ fn hatch_over(connection: OwnedFd, token: u64, seed: &EngineSeed) -> Result<u32,
             child: ChildHandle::from_std(child),
             seed: WireChannel::from_stream(parent_seed),
         });
+    ack.map_err(|e| {
+        format!("hatch: the child engine started, but the host could not be told so: {e}")
+    })?;
     Ok(pid)
 }
 
 /// Kill and reap the hatched child whose pid this is.
 ///
-/// [`hatch`]'s own caller, when a later `agent-hatched` enquiry is refused (a
-/// timeout, a dead desk) after the hatch itself already succeeded: the child
+/// [`hatch`]'s own caller, when a later `` `agents `hatched `` enquiry is
+/// refused (a timeout, a dead desk) after the hatch itself already succeeded:
+/// the child
 /// is left dialling into silence otherwise, since nothing else in this engine
 /// ever looks for it again.
 pub fn kill_hatched(pid: u32) {
@@ -354,38 +549,93 @@ mod tests {
             .expect("a nursery is installed");
         let nursery_shell = nursery.adopt(id).expect("adopt the parked fork");
 
-        let (a, b) = UnixStream::pair().expect("socketpair standing in for the vsock dial");
+        let (a, b) = UnixStream::pair().expect("socketpair standing in for the host's connection");
         let a: OwnedFd = a.into();
         let peer_thread = std::thread::spawn(move || {
             let mut b = b;
-            let mut preamble = [0u8; 16];
-            std::io::Read::read_exact(&mut b, &mut preamble).expect("read preamble");
-            preamble
+            let mut ack = [0u8; 1];
+            b.read_exact(&mut ack).expect("read the ack");
+            ack[0]
         });
 
-        hatch_over(
-            a,
-            0xdead_beef_1234_5678,
-            &pack_seed(&nursery_shell, "read-only".into()).unwrap(),
-        )
-        .expect("hatch over a socketpair");
+        let pid = hatch_over(a, &pack_seed(&nursery_shell, "read-only".into()).unwrap())
+            .expect("hatch over a socketpair");
 
-        let preamble = peer_thread.join().expect("peer thread");
-        assert_eq!(&preamble[..8], &crate::hatch_preamble::MAGIC);
         assert_eq!(
-            u64::from_le_bytes(preamble[8..].try_into().unwrap()),
-            0xdead_beef_1234_5678
+            peer_thread.join().expect("peer thread"),
+            crate::transport::HATCH_ACK,
+            "the host learns of the child only by its ack"
         );
 
-        assert_eq!(
-            table()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .len(),
-            1,
+        assert!(
+            recorded(pid),
             "hatch_over must record the child before returning"
         );
-        teardown_hatched();
+        kill_hatched(pid);
+    }
+
+    const TOKEN: u64 = 0xdead_beef_1234_5678;
+
+    /// The table is process-global and these tests run beside each other, so
+    /// each looks for its own child rather than counting.
+    fn recorded(pid: u32) -> bool {
+        table()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|hatched| hatched.child.id() == pid)
+    }
+
+    fn a_seed() -> EngineSeed {
+        let shell = Shell::new(crate::io::TerminalState::default());
+        packed_seed(&shell, "read-only".to_string()).expect("pack a seed")
+    }
+
+    /// A `UnixListener` stands in for the guest's bound vsock port.
+    fn listening(dir: &tempfile::TempDir) -> (std::path::PathBuf, HatchListener) {
+        let path = dir.path().join("spawn");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind a listener");
+        let hatching =
+            hatch_listener(listener.into(), TOKEN, a_seed()).expect("start the listener thread");
+        (path, hatching)
+    }
+
+    #[test]
+    fn the_host_dials_in_and_only_the_token_hatches_a_child() {
+        let dir = tempfile::tempdir().expect("a directory for the listening socket");
+        let (path, hatching) = listening(&dir);
+
+        let mut rogue = UnixStream::connect(&path).expect("a rogue dial");
+        rogue
+            .write_all(&0u64.to_le_bytes())
+            .expect("a wrong token, written first");
+        let mut end = [0u8; 1];
+        assert_eq!(
+            rogue.read(&mut end).ok(),
+            Some(0),
+            "a wrong token costs the dialler its connection, and nothing else"
+        );
+
+        let mut host = UnixStream::connect(&path).expect("the host's dial");
+        host.write_all(&TOKEN.to_le_bytes()).expect("the token");
+        let mut ack = [0u8; 1];
+        host.read_exact(&mut ack).expect("the ack");
+        assert_eq!(ack[0], crate::transport::HATCH_ACK);
+
+        let pid = hatching.join().expect("a child hatched");
+        assert!(recorded(pid), "the thread hatched before it acked");
+        kill_hatched(pid);
+    }
+
+    #[test]
+    fn a_cancelled_listener_has_no_reason_of_its_own() {
+        let dir = tempfile::tempdir().expect("a directory for the listening socket");
+        let (_path, hatching) = listening(&dir);
+        hatching.cancel();
+        match hatching.join() {
+            Err(Unhatched::Cancelled) => {}
+            other => panic!("a woken listener must have nothing to say, but said {other:?}"),
+        }
     }
 
     #[test]

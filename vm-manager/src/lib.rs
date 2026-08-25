@@ -382,24 +382,25 @@ pub trait Machine: Send {
     /// backend that cannot yet accept agent dials at all.
     fn accept_agent(&mut self, patience: Duration) -> io::Result<AgentDial>;
 
-    /// SPIKE: dial a port the *guest* listens on, and hand back the host end.
+    /// Dial a port the *guest* listens on, and hand back the host end.
     ///
     /// The inverse of [`accept_agent`](Machine::accept_agent), and the reason
-    /// it is interesting: a host-initiated connection needs no token to
-    /// correlate it, because the side that opened it already knows what it
+    /// the inverse is worth having: a host-initiated connection needs no token
+    /// to correlate it, because the side that opened it already knows what it
     /// opened it for.
     ///
-    /// Defaulted to `Unsupported` so a backend that has not implemented it
-    /// still compiles — which is the whole point of a spike.
+    /// Defaulted, so a backend that cannot dial inwards refuses in a sentence
+    /// rather than failing to compile.
     ///
     /// # Errors
-    /// Returns `Unsupported` unless the backend overrides this, and otherwise
-    /// whatever the dial itself reports.
+    /// Returns [`io::ErrorKind::Unsupported`] unless the backend overrides
+    /// this, and otherwise whatever the dial itself reports.
     fn connect_guest(&self, port: u32) -> io::Result<AgentDial> {
         let _ = port;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "this backend cannot dial into its guest yet",
+            "this backend cannot dial into its guest — it can only accept the connections a \
+             guest opens, so a port bound inside the guest is unreachable from here",
         ))
     }
 

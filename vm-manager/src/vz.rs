@@ -596,9 +596,9 @@ enum Ready {
 enum Command {
     /// Bring the machine down, and report whether it stopped cleanly.
     Stop(SyncSender<Result<(), String>>),
-    /// SPIKE: dial a port the *guest* listens on, the reverse of every wire
-    /// this backend opens today. The machine is `!Send` and lives on the
-    /// worker thread, so a connect has to arrive as a command like a stop.
+    /// Dial a port the *guest* listens on, the reverse of every wire this
+    /// backend opens. The machine is `!Send` and lives on the worker thread,
+    /// so a connect has to arrive as a command like a stop.
     Connect {
         port: u32,
         reply: SyncSender<Result<OwnedFd, String>>,
@@ -816,12 +816,12 @@ fn wait_for_stop(queue: &DispatchQueue, machine: &VZVirtualMachine, commands: &R
 /// The deadline is kept for the case the docs describe and the machine did not.
 const GUEST_DIAL_PATIENCE: Duration = Duration::from_secs(5);
 
-/// SPIKE: dial `port` on the guest and hand back the host end.
+/// Dial `port` on the guest and hand back the host end.
 ///
-/// The inverse of every wire this backend opens today: `setSocketListener_forPort`
+/// The inverse of every wire this backend opens: `setSocketListener_forPort`
 /// waits for the guest to dial the host, this asks the host to dial the guest.
-/// Requires something in the guest to be listening — no such listener exists
-/// yet, which is the other half of the work this spike measures.
+/// Something in the guest must be bound to `port`, or its own vsock stack
+/// resets the connection.
 fn connect_to_guest(
     queue: &DispatchQueue,
     machine: &VZVirtualMachine,
@@ -876,9 +876,9 @@ fn connect_to_guest(
         .recv_timeout(GUEST_DIAL_PATIENCE)
         .unwrap_or_else(|_| {
             Err(format!(
-                "nothing in the guest answered a dial to port {port} within {}s — the framework \
-                 treats a missing listener as a no-op rather than an error, so this is what that \
-                 looks like",
+                "nothing in the guest answered a dial to port {port} within {}s — a guest with \
+                 nothing bound there refuses within milliseconds, so a silence this long means \
+                 the machine never delivered the dial at all",
                 GUEST_DIAL_PATIENCE.as_secs()
             ))
         })
@@ -1240,11 +1240,29 @@ impl Machine for Guest {
     /// Dial `port` inside the guest and hand back the host end.
     ///
     /// # Errors
-    /// Returns a sentence if no listener answers — a guest with nothing bound
-    /// resets the connection, so this is prompt rather than a wait — or if the
-    /// machine thread is already gone.
+    /// Returns [`std::io::ErrorKind::BrokenPipe`] if the machine thread is
+    /// gone, and [`std::io::ErrorKind::ConnectionRefused`] if the dial itself
+    /// failed — promptly, since a guest with nothing bound resets rather than
+    /// hangs.
     fn connect_guest(&self, port: u32) -> std::io::Result<crate::AgentDial> {
-        self.dial_guest(port)
+        let gone = || {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the machine thread stopped before it could dial the guest",
+            )
+        };
+        let control = self.control.as_ref().ok_or_else(gone)?;
+        let (reply_tx, reply_rx) = mpsc::sync_channel(0);
+        control
+            .cmd_tx
+            .send(Command::Connect {
+                port,
+                reply: reply_tx,
+            })
+            .map_err(|_| gone())?;
+        reply_rx
+            .recv()
+            .map_err(|_| gone())?
             .map_err(|why| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, why))
     }
 
@@ -1257,28 +1275,6 @@ impl Machine for Guest {
     /// the machine had to be forced.
     fn shutdown(mut self: Box<Self>) -> Result<(), Error> {
         self.stop()
-    }
-}
-
-impl Guest {
-    /// The body of [`Machine::connect_guest`], in this backend's own error
-    /// vocabulary; the trait arm re-dresses it as `io::Error`.
-    fn dial_guest(&self, port: u32) -> Result<OwnedFd, String> {
-        let control = self
-            .control
-            .as_ref()
-            .ok_or_else(|| "the machine thread is already gone".to_string())?;
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(0);
-        control
-            .cmd_tx
-            .send(Command::Connect {
-                port,
-                reply: reply_tx,
-            })
-            .map_err(|_| "the machine thread stopped before the dial was sent".to_string())?;
-        reply_rx
-            .recv()
-            .map_err(|_| "the machine thread stopped while dialling the guest".to_string())?
     }
 }
 

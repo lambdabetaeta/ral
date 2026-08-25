@@ -31,6 +31,16 @@ use std::sync::OnceLock;
 
 pub const PROTOCOL_VERSION: u32 = 6;
 
+/// The byte before the first frame, written by a guest that has just spawned
+/// a child engine onto this connection and read by the host that dialled it.
+///
+/// The algebra offers no substitute: the host speaks first and `Attach` is the
+/// only legal first frame, so this byte is the whole of the guest's readiness
+/// signal — and without it a roster can name a child whose `spawn` has not yet
+/// returned. ASCII ACK, and portable, because the two ends need not share an
+/// operating system.
+pub const HATCH_ACK: u8 = 0x06;
+
 static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 
 // ── Dispatch identity ─────────────────────────────────────────────────
