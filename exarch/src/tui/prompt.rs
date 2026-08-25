@@ -148,8 +148,11 @@ impl PromptState {
     /// for as long as it is up, and reports whether it took the key.
     ///
     /// Enter takes the highlighted command into the line and closes rather
-    /// than submitting: the line under an open popup is not yet what the user
-    /// has chosen.  A second Enter, with the popup gone, sends it.
+    /// than submitting: a line under an open popup is not yet what the user
+    /// has chosen.  A second Enter, with the popup gone, sends it.  Unless the
+    /// line already spells the choice — the popup then has nothing to add, and
+    /// Enter belongs to the submit it looks like: the popup closes and declines
+    /// the key rather than eating a keystroke to no visible effect.
     pub(super) fn menu_key(&mut self, code: KeyCode) -> bool {
         let Some(menu) = self.menu.as_mut() else {
             return false;
@@ -159,7 +162,7 @@ impl PromptState {
             KeyCode::Up | KeyCode::BackTab => menu.select_prev(),
             KeyCode::Enter => {
                 let menu = self.menu.take().expect("the popup is open");
-                menu.accept(&mut self.editor);
+                return menu.accept(&mut self.editor);
             }
             KeyCode::Esc => self.menu = None,
             _ => return false,

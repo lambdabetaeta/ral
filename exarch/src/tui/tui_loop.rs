@@ -73,8 +73,8 @@ impl Control for ReplControl {
         let trimmed = raw.trim();
         let (head, rest) = commands::split_head(trimmed);
         if head == "/branch" {
-            let prompt = (!rest.is_empty()).then_some(rest);
-            match crate::shell_eval::tools::spawn_branch(session, prompt, emit) {
+            let name = (!rest.is_empty()).then_some(rest);
+            match crate::shell_eval::tools::spawn_branch(session, name, emit) {
                 Ok(child) => Agent::note(
                     format!("branch {} started (agent {})", child.name, child.id),
                     session,
@@ -258,7 +258,7 @@ pub fn run(
         if r.is_err() {
             // A rejected push (the inbox at quota) has nowhere to be reported:
             // `r`'s error is already the one in flight.
-            let _ = quit_mailbox.push(Post::Command("/quit".into()));
+            let _ = quit_mailbox.push(Post::Barrier("/quit".into()));
         }
         let _ = worker.join();
         r.map_err(|e| e.to_string())
@@ -616,7 +616,7 @@ mod tests {
         let mut session = Agent::for_test("system").unwrap();
         session
             .mailbox()
-            .push(Post::Command("/rewind 7".into()))
+            .push(Post::Barrier("/rewind 7".into()))
             .unwrap();
 
         let (tx, rx) = crate::bus::channel();

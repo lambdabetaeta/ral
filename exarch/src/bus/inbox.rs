@@ -300,14 +300,19 @@ impl Inbox {
         rows
     }
 
-    /// Pending user-authored prompts, oldest first, for the TUI's queue strip.
-    /// Other deliveries stay invisible: they are work, not queued user text.
-    pub(crate) fn queued_user_messages(&self) -> Vec<String> {
+    /// Everything the human typed and is still waiting on, oldest first, for
+    /// the TUI's queue strip: prompts and the commands queued among them, in
+    /// the one order they were typed.  A command earns its place because it can
+    /// be the reason the rest are waiting — a [`Boundary::Barrier`] holds the
+    /// queue behind it, and a strip that showed only prompts would leave that
+    /// wait with no visible cause.  Other deliveries stay invisible: they are
+    /// work, not queued human text.
+    pub(crate) fn queued_human_messages(&self) -> Vec<String> {
         self.shared
             .lock()
             .iter()
             .filter_map(|msg| match msg {
-                Post::UserSteering(s) => Some(s.clone()),
+                Post::UserSteering(s) | Post::Command(s) | Post::Barrier(s) => Some(s.clone()),
                 _ => None,
             })
             .collect()
@@ -331,32 +336,50 @@ impl Inbox {
         (!prompts.is_empty()).then_some(prompts)
     }
 
-    /// Mid-exchange drain at a tool-call boundary: the leading run of
-    /// tool-boundary messages, in order, each tagged with its source so the
-    /// attend loop renders it in its honest medium.  A consecutive run of user
-    /// steering coalesces into one [`Item::Human`].
+    /// Mid-exchange drain at a tool-call boundary: the tool-boundary messages
+    /// that may reach the model now, in order, each tagged with its source so
+    /// the attend loop renders it in its honest medium.  A consecutive run of
+    /// user steering coalesces into one [`Item::Human`].
     ///
-    /// The scan stops at the first [`Boundary::Exchange`] entry — a
-    /// [`Post::Command`], or a slash-prefixed steering line holding its place —
-    /// leaving it and whatever is queued behind it for [`Self::next_or_idle`],
-    /// which is what preserves the human's ordering: a `/model` typed before a
-    /// prompt swaps the model before the prompt runs.
+    /// A [`Boundary::Exchange`] entry — a session-reading command — is left
+    /// where it lies for [`Self::next_or_idle`] and the scan goes *on past* it:
+    /// it changes nothing about what a prompt behind it means, so making that
+    /// prompt wait out the whole exchange buys nothing and costs the human the
+    /// turn they were trying to steer.
+    ///
+    /// The scan stops at the first [`Boundary::Barrier`], where the human's
+    /// ordering is the meaning: `/rewind` then a prompt must not answer the
+    /// prompt in the context the rewind is about to drop.
     ///
     /// # Panics
-    /// Never: every `pop_front` follows a `front` check in the same iteration.
+    /// Never: every removal follows a same-iteration check of the same entry.
     pub(crate) fn drain_steering(&self) -> Vec<Item> {
         let mut q = self.shared.lock();
         let epoch = self.shared.epoch.load(Ordering::Acquire);
         let mut items = Vec::new();
-        while q.front().is_some_and(|m| m.boundary() == Boundary::Tool) {
-            if matches!(q.front(), Some(Post::UserSteering(_))) {
-                items.push(coalesce_steering(&mut q));
-            } else {
-                let msg = q.pop_front().expect("front present and tool-boundary");
-                if let Some(item) = to_item(msg, epoch) {
-                    items.push(item);
+        // Rebuilt rather than popped: a passed-over entry stays queued, so what
+        // this takes is not always a prefix.
+        let mut kept: VecDeque<Post> = VecDeque::with_capacity(q.len());
+        while let Some(front) = q.front() {
+            match front.boundary() {
+                Boundary::Barrier => break,
+                Boundary::Exchange => {
+                    kept.push_back(q.pop_front().expect("front present"));
+                }
+                Boundary::Tool => {
+                    if matches!(front, Post::UserSteering(_)) {
+                        items.push(coalesce_steering(&mut q));
+                    } else {
+                        let msg = q.pop_front().expect("front present and tool-boundary");
+                        if let Some(item) = to_item(msg, epoch) {
+                            items.push(item);
+                        }
+                    }
                 }
             }
+        }
+        while let Some(msg) = kept.pop_back() {
+            q.push_front(msg);
         }
         drop(q);
         items
@@ -511,7 +534,7 @@ fn to_item(msg: Post, epoch: u64) -> Option<Item> {
         Post::AgentResult(r) => Item::Agent(r),
         Post::AgentMessage(m) => Item::Message(m),
         Post::Nudge { exchange, text } => Item::Nudge { exchange, text },
-        Post::Command(s) => Item::Command(s),
+        Post::Command(s) | Post::Barrier(s) => Item::Command(s),
         Post::Surface {
             id,
             values,
@@ -849,43 +872,72 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// A slash command holds the line, so steering typed after a mid-exchange
-    /// `/model` runs only after the swap.  Deliveries ahead of it still drain.
+    /// A `/rewind` is a barrier: it drops the very context a prompt typed after
+    /// it would land in, so nothing queued behind it drains until it has run.
+    /// Deliveries ahead of it still drain.
     #[test]
-    fn inbox_tool_drain_stops_at_command_barrier() {
+    fn inbox_tool_drain_stops_at_a_barrier() {
         let inbox = Inbox::new();
         inbox.push_user("before".into());
         inbox.push(wakeup(1, "x", "@", "p")).unwrap();
-        inbox.push(Post::Command("/model".into())).unwrap();
-        inbox.push_user("after model".into());
+        inbox.push(Post::Barrier("/rewind 7".into())).unwrap();
+        inbox.push_user("after the rewind".into());
 
         assert!(matches!(
             inbox.drain_steering().as_slice(),
             [Item::Human(b), Item::Wakeup(_)] if b == "before"
         ));
         assert!(inbox.drain_steering().is_empty());
-        assert!(matches!(inbox.next_item(), Some(Item::Command(s)) if s == "/model"));
-        assert!(matches!(inbox.next_item(), Some(Item::Human(s)) if s == "after model"));
+        assert!(matches!(inbox.next_item(), Some(Item::Command(s)) if s == "/rewind 7"));
+        assert!(matches!(inbox.next_item(), Some(Item::Human(s)) if s == "after the rewind"));
         assert!(inbox.is_empty());
     }
 
-    /// The queue strip is a user-text projection, not an inbox debugger:
-    /// wakeups and control items stay out, and steering keeps its order.
+    /// A session-*reading* command waits for the exchange boundary itself, but
+    /// does not make the prompts queued behind it wait too: they reach the
+    /// model at the next tool boundary, and the command keeps its place.
     #[test]
-    fn inbox_queued_user_messages_shows_only_user_steering() {
+    fn inbox_tool_drain_passes_over_a_session_reading_command() {
+        let inbox = Inbox::new();
+        inbox.push(Post::Command("/branch scout".into())).unwrap();
+        inbox.push_user("look at the parser too".into());
+
+        assert!(
+            matches!(
+                inbox.drain_steering().as_slice(),
+                [Item::Human(s)] if s == "look at the parser too",
+            ),
+            "the prompt behind a /branch reaches the model mid-exchange",
+        );
+        assert!(matches!(
+            inbox.next_item(),
+            Some(Item::Command(s)) if s == "/branch scout"
+        ));
+        assert!(inbox.is_empty());
+    }
+
+    /// The queue strip is a projection of what the human typed, not an inbox
+    /// debugger: prompts and commands alike, in the order they were typed, and
+    /// a wakeup — which nobody typed — stays out.
+    #[test]
+    fn inbox_queued_human_messages_shows_typed_text_in_order() {
         let inbox = Inbox::new();
         inbox.push(wakeup(1, "morning", "@daily", "check")).unwrap();
         inbox.push_user("first".into());
-        inbox.push(Post::Command("/model".into())).unwrap();
+        inbox.push(Post::Command("/branch scout".into())).unwrap();
         inbox.push_user("second".into());
 
         assert_eq!(
-            inbox.queued_user_messages(),
-            vec!["first".to_string(), "second".to_string()]
+            inbox.queued_human_messages(),
+            vec![
+                "first".to_string(),
+                "/branch scout".to_string(),
+                "second".to_string()
+            ]
         );
         assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
         assert!(matches!(inbox.next_item(), Some(Item::Human(s)) if s == "first"));
-        assert!(matches!(inbox.next_item(), Some(Item::Command(s)) if s == "/model"));
+        assert!(matches!(inbox.next_item(), Some(Item::Command(s)) if s == "/branch scout"));
         assert!(matches!(inbox.next_item(), Some(Item::Human(s)) if s == "second"));
     }
 

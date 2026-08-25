@@ -30,7 +30,18 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   `Post`s (`bus/post.rs`), each carrying its source and drain boundary. User
   steering drains mid-exchange at a
   tool boundary (`drain_steering`); a scheduled wakeup or a settled async agent
-  drains at the exchange boundary as its own marked `Item` (`next_item`)
+  drains at the exchange boundary as its own marked `Item` (`next_item`).
+  The boundary is three-valued, because *waiting for a settled session* and
+  *being owed an audience first* are different debts: a `Boundary::Exchange`
+  post — a session command that only reads the context (`/branch`, `/context`,
+  `/resources`) — waits for the exchange boundary, but `drain_steering` passes
+  *over* it to the prompts queued behind, which it changes nothing about.
+  A `Boundary::Barrier` post stops the scan dead, because there the order the
+  human typed is part of what they said: a command that rewrites or ends the
+  context (`Post::Barrier` — `/clear`, `/compact`, `/rewind`, `/quit`), or a
+  slash-prefixed steering line, which is itself prompt text and so must reach
+  the model ahead of the prompt text typed after it. Without that split a
+  `/branch` typed mid-turn corked every prompt behind it until the turn ended
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]],
   [[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260617_async-agent-tool|async-agent-tool]]).
@@ -316,11 +327,16 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
- `/export`, `/model`, `/login`, `/thinking`, `/resources`) run on the UI thread; session commands
- (`/clear`, `/compact`, `/branch`, `/context`, `/rewind`, `/quit`) enter the focused
- agent's inbox as `Command` items and run in `ReplControl`. `/branch`
+ `/export`, `/model`, `/login`, `/thinking`, `/close`, `/focus`) run on the UI
+ thread; session commands (`/branch`, `/context`, `/resources`, `/clear`,
+ `/compact`, `/rewind`, `/quit`) enter the focused
+ agent's inbox as `Command` items and run in `ReplControl`; the registry's
+ `rewrites` field is what says which of those is a barrier in the queue and
+ which the prompts behind it may pass over. `/branch [name]`
  forks a *conversing* tab from the focused context — a peer conversation
- under [[decisions/260705_branch-minimal|branch-minimal]] — and `/close`,
+ under [[decisions/260705_branch-minimal|branch-minimal]], named by the human
+ or by a minted `branch-{N}`, and parked for them rather than seeded with a
+ prompt — and `/close`,
  admitted off the trunk like `/focus` and `/thinking`, kills the focused branch
  and its subtree. The idle wait
  selects over input, inbox (`bus/inbox.rs`), and the session bus (`bus/channel.rs`)
@@ -334,8 +350,11 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   no row, so the frame never shifts under the reader. A live popup owns ↓/Tab,
   ↑/⇧Tab, Enter and Esc: Enter takes the highlighted command *into the line* and
   closes rather than submitting, since the line under an open popup is not yet
-  what the user has chosen, and a second Enter sends it. Ctrl-C is never
-  offered to it: the interrupt outranks every overlay. This is deliberately
+  what the user has chosen, and a second Enter sends it — unless the line
+  already *spells* the highlighted command, where accepting would be the
+  identity: the popup then closes and declines the key, which falls through to
+  the submit it looked like all along. Ctrl-C is never
+  offered to it at all: the interrupt outranks every overlay. This is deliberately
   unlike ral's structural frontend, which opens its menu only on Tab and splices
   a lone match without showing one — typing here must never move the buffer on
   its own. Each row also carries the registry's own `SlashCommand.help` line —

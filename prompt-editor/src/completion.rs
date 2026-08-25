@@ -161,9 +161,11 @@ impl Menu {
 
     /// Apply the selected candidate: replace the token from `replace_from` to
     /// the current cursor (which has not moved while the menu owned the keys)
-    /// with the chosen replacement.  Reports whether the splice happened — it
-    /// does not if the cursor has left the trigger row, or if the recorded span
-    /// no longer fits that row.
+    /// with the chosen replacement.  Reports whether the buffer *changed* — it
+    /// does not if the cursor has left the trigger row, if the recorded span no
+    /// longer fits that row, or if the span already holds the chosen text.  A
+    /// host reads that last case as a menu with nothing left to offer, and
+    /// gives the key to whoever wants it next.
     pub fn accept(&self, prompt: &mut PromptEditor) -> bool {
         let row = prompt.row();
         if row != self.row {
@@ -173,12 +175,11 @@ impl Menu {
             return false;
         };
         let end = char_to_byte(&line, prompt.col());
-        prompt.replace_row_bytes(
-            row,
-            self.replace_from,
-            end,
-            &self.candidates[self.selected].replacement,
-        )
+        let replacement = &self.candidates[self.selected].replacement;
+        if line.get(self.replace_from..end) == Some(replacement.as_str()) {
+            return false;
+        }
+        prompt.replace_row_bytes(row, self.replace_from, end, replacement)
     }
 
     /// Draw the menu as a bordered popup at the top of `area`, dropping down,

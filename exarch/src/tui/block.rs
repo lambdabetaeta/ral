@@ -145,8 +145,14 @@ pub(super) enum Reveal {
     Full,
 }
 
-/// Rows for the prompts still waiting to be sent — the very chrome a committed
-/// prompt wears, washed to read as pending and capped to `max_rows`.
+/// Rows for what the human has typed and is still waiting on — prompts and the
+/// commands queued among them — in the very chrome a committed prompt wears,
+/// washed to read as pending and capped to `max_rows`.
+///
+/// Stripped to the ink, unlike the transcript: a chrome block frames itself in
+/// blank rows so it can breathe among its neighbours, and the strip has none —
+/// it is a stack of pending turns, each already fenced off from the last, in a
+/// band that grows downward into the reading the user is waiting on.
 pub(super) fn queued_prompt_rows(
     messages: &[String],
     width: u16,
@@ -159,19 +165,8 @@ pub(super) fn queued_prompt_rows(
     let mut out = Vec::new();
     for message in messages {
         let mut prompt = Block::chrome(RailShape::Prompt, line::user_prompt(message));
-        let rows = prompt.lines(width, AgentSlot::default(), true);
-        let first = if out.is_empty() || out.last().is_some_and(line::is_blank) {
-            rows.iter().take_while(|row| line::is_blank(row)).count()
-        } else {
-            0
-        };
-        append_visual_rows(
-            &mut out,
-            &rows[first..],
-            width,
-            true,
-            Some(QUEUED_PROMPT_BG),
-        );
+        let rows = trim_blanks(prompt.lines(width, AgentSlot::default(), true)).to_vec();
+        append_visual_rows(&mut out, &rows, width, true, Some(QUEUED_PROMPT_BG));
     }
 
     if out.len() > max_rows {

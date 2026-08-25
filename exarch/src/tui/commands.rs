@@ -28,6 +28,16 @@ pub(super) struct SlashCommand {
     /// rather than hand-listed in [`route_submit`], so a command cannot be
     /// added without saying which it is.
     pub(super) any_tab: bool,
+    /// Whether the command rewrites or ends the session, as against merely
+    /// reading it.  A rewrite rides the inbox as a [`Post::Barrier`] and holds
+    /// every prompt queued behind it at the exchange boundary, since it changes
+    /// what those prompts would mean; a read (`/branch` forks a projection of
+    /// the context, `/context` and `/resources` survey it) lets them pass and
+    /// reach the model mid-exchange.  Read only of a command that reaches the
+    /// inbox at all — `any_tab` above is what says which those are — but
+    /// declared for every one, here rather than hand-listed in [`route_submit`],
+    /// so a command cannot be added without saying which it is.
+    pub(super) rewrites: bool,
     pub(super) help: &'static str,
 }
 
@@ -38,6 +48,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/help",
         aliases: &[],
         arg: None,
+        rewrites: false,
         any_tab: false,
         help: "List the available commands.",
     },
@@ -45,6 +56,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/legend",
         aliases: &[],
         arg: None,
+        rewrites: false,
         any_tab: false,
         help: "Decode the rail, bars, grain, and fidelity treatments.",
     },
@@ -52,6 +64,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/thinking",
         aliases: &[],
         arg: None,
+        rewrites: false,
         any_tab: true,
         help: "Collapse or expand every thinking trace, on screen and to come.",
     },
@@ -59,6 +72,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/clear",
         aliases: &[],
         arg: None,
+        rewrites: true,
         any_tab: false,
         help: "Forget the conversation and clear the screen.",
     },
@@ -66,6 +80,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/copy",
         aliases: &[],
         arg: None,
+        rewrites: false,
         any_tab: false,
         help: "Copy the latest reply to the clipboard.",
     },
@@ -73,6 +88,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/export",
         aliases: &[],
         arg: Some("<path>"),
+        rewrites: false,
         any_tab: false,
         help: "Write the user view to a file.",
     },
@@ -80,6 +96,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/model",
         aliases: &[],
         arg: None,
+        rewrites: false,
         any_tab: false,
         help: "Switch the model or provider.",
     },
@@ -87,20 +104,23 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/login",
         aliases: &[],
         arg: None,
+        rewrites: false,
         any_tab: false,
         help: "Sign in with ChatGPT — adds a plan-backed provider.",
     },
     SlashCommand {
         name: "/branch",
         aliases: &[],
-        arg: Some("[prompt]"),
+        arg: Some("[name]"),
+        rewrites: false,
         any_tab: false,
-        help: "Fork this conversation into a new tab (same context).",
+        help: "Fork this conversation into a new tab (same context), under a name you choose.",
     },
     SlashCommand {
         name: "/close",
         aliases: &[],
         arg: None,
+        rewrites: false,
         any_tab: true,
         help: "Close this branch (its tab and any agents it spawned).",
     },
@@ -108,6 +128,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/focus",
         aliases: &[],
         arg: Some("<name>"),
+        rewrites: false,
         any_tab: true,
         help: "Jump focus to a tab by name — reaches one TAB skips (demoted).",
     },
@@ -115,6 +136,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/compact",
         aliases: &[],
         arg: None,
+        rewrites: true,
         any_tab: false,
         help: "Summarize the conversation to reclaim context.",
     },
@@ -122,6 +144,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/context",
         aliases: &[],
         arg: None,
+        rewrites: false,
         any_tab: false,
         help: "Survey the model context without changing it.",
     },
@@ -129,6 +152,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/rewind",
         aliases: &[],
         arg: Some("<exchange>"),
+        rewrites: true,
         any_tab: false,
         help: "Drop context from an exchange; descendants and the shell are untouched.",
     },
@@ -136,6 +160,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/resources",
         aliases: &[],
         arg: None,
+        rewrites: false,
         any_tab: false,
         help: "Show the agent's resource probes: workers, inbox, log, disk.",
     },
@@ -143,6 +168,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/quit",
         aliases: &["/exit"],
         arg: None,
+        rewrites: true,
         any_tab: false,
         help: "Leave exarch.",
     },
@@ -346,10 +372,16 @@ pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &AgentRegistry) {
     }
 }
 
-/// Post a session command to the worker's inbox, surfacing a full-inbox
-/// rejection rather than dropping the command silently.
-fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: String) {
-    if let Err(reject) = mailbox.push(Post::Command(cmd)) {
+/// Post a session command to the worker's inbox under the boundary its
+/// registry entry declares, surfacing a full-inbox rejection rather than
+/// dropping the command silently.
+fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: &SlashCommand, line: String) {
+    let post = if cmd.rewrites {
+        Post::Barrier(line)
+    } else {
+        Post::Command(line)
+    };
+    if let Err(reject) = mailbox.push(post) {
         tui.app
             .push_error(tui.app.tabs.root(), &format!("command dropped: {reject}"));
     }
@@ -417,9 +449,9 @@ pub(super) fn route_submit(
                 ctx.agents.interrupt(root);
                 ctx.agents.cancel_descendants(root);
                 tui.app.clear(info, tui.guard.term())?;
-                push_command(tui, mailbox, "/clear".into());
+                push_command(tui, mailbox, cmd, "/clear".into());
             }
-            _ => push_command(tui, mailbox, text.clone()),
+            _ => push_command(tui, mailbox, cmd, text.clone()),
         },
         // A typo is not a prompt in disguise: say so rather than mail it to the
         // model as one.

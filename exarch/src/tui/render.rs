@@ -84,9 +84,10 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     } else {
         0u16
     };
-    // Prompts submitted mid-exchange and still queued: only `UserSteering`
-    // surfaces, through the same chrome a committed prompt echo uses.
-    let queued = app.inbox.queued_user_messages();
+    // What the human typed mid-exchange and is still waiting on — prompts and
+    // the commands queued among them, in the order typed, through the same
+    // chrome a committed prompt echo uses.
+    let queued = app.inbox.queued_human_messages();
     let queued_lines = if queued.is_empty() {
         Vec::new()
     } else {

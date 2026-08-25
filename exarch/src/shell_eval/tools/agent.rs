@@ -11,34 +11,37 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Instant;
 
-/// Mints `branch-{N}` labels; a label need only be distinguishable from the
-/// siblings on screen, so a process-lifetime counter suffices.
+/// Mints `branch-{N}` labels for an unnamed branch; a label need only be
+/// distinguishable from the siblings on screen, so a process-lifetime counter
+/// suffices.
 static DISPATCH_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Fork the trunk's conversation into a new tab.  A branch converses, so it
-/// registers without a lease and pushes no result upward; `None` parks for
-/// the human instead of seeding a first exchange.
+/// Fork the trunk's conversation into a new tab under `name`, or under a minted
+/// `branch-{N}` where the human named none.  A branch converses: it registers
+/// without a lease, pushes no result upward, and parks for the human rather
+/// than seeding a first exchange — the fork *is* the whole of the command, and
+/// what to say next is said to the new tab.
 pub(crate) fn spawn_branch(
     session: &Agent,
-    prompt: Option<&str>,
+    name: Option<&str>,
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
-    let name = format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed));
+    let name = name.map_or_else(
+        || format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)),
+        str::to_string,
+    );
     let child = session.branch().map_err(|e| e.to_string())?;
     // The branch row's display commit, authored beside the legacy rail row
     // `spawn_async` emits from the same inputs; a harness spawn's recorded
     // row is the desk's own HarnessCall commit instead.
     if let Err(error) = session.recorder().emit(crate::record::Display::ToolCall {
         tool: "/branch".to_string(),
-        cmd: prompt.unwrap_or("(waiting for you)").to_string(),
+        cmd: "(waiting for you)".to_string(),
         summary: Some(format!("Agent {name} spawned (/branch).")),
     }) {
         session.recorder().report_fault(&error);
     }
-    let spec = AsyncSpawn {
-        name,
-        prompt: prompt.map(str::to_string),
-    };
+    let spec = AsyncSpawn { name, prompt: None };
     spawn_async(
         &session.agents,
         session.id,

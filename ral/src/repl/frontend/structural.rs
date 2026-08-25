@@ -288,8 +288,8 @@ impl StructuralFrontend {
                         continue;
                     }
                     KeyCode::Enter => {
-                        // Whether the splice landed or the cursor had wandered
-                        // off the trigger row, the menu is spent either way.
+                        // Splice or none — an identity choice, a wandered
+                        // cursor — the menu is spent either way.
                         menu.take().unwrap().accept(&mut prompt);
                         continue;
                     }

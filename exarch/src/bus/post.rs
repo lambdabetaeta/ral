@@ -16,9 +16,17 @@ use super::AgentId;
 pub(super) enum Boundary {
     /// Mid-exchange, as soon as the current tool batch settles.
     Tool,
-    /// Only where the session is `ReadyForUser`: a command, or a slash-prefixed
-    /// steering line keeping its place beside one.
+    /// Only where the session is `ReadyForUser`: a command that merely *reads*
+    /// the session.  A tool-boundary drain passes *over* it to what is queued
+    /// behind — waiting for a settled session is not the same as being owed an
+    /// audience first.
     Exchange,
+    /// As [`Self::Exchange`], and before anything queued behind it, because
+    /// here the order the human typed is part of what they said: a command that
+    /// rewrites or ends the very context a later prompt would land in, or a
+    /// slash-prefixed line that is itself prompt text and so must reach the
+    /// model ahead of the prompt text typed after it.
+    Barrier,
 }
 
 /// How an async agent settled, reduced to what the parent's synthetic item
@@ -138,11 +146,16 @@ pub(crate) enum Post {
         exchange: u64,
         text: String,
     },
-    /// A session-affecting slash command (`/clear`, `/model`, `/compact`,
-    /// `/quit`), raw.  The attend loop owns the session it mutates, so it hands
-    /// the line to its [`Control`](crate::agent::Control); view-only commands
-    /// (`/help`, `/copy`, …) are served frontend-side and never reach here.
+    /// A session command that only *reads* the session (`/branch` forks a
+    /// projection of it, `/context` and `/resources` survey it), raw.  The
+    /// attend loop owns the session, so it hands the line to its
+    /// [`Control`](crate::agent::Control); view-only commands (`/help`,
+    /// `/copy`, …) are served frontend-side and never reach here.
     Command(String),
+    /// A session command that rewrites or ends the context (`/clear`,
+    /// `/compact`, `/rewind`, `/quit`), raw — otherwise its sibling above in
+    /// every respect but the one [`Boundary::Barrier`] names.
+    Barrier(String),
     /// A deferred `spawn` worker's `surface` batch, delivered at settlement —
     /// the un-awaited path.  Stamped with the *root* session id, since a spawn
     /// worker registers no tab of its own.  Already once-only when posted:
@@ -159,8 +172,9 @@ pub(crate) enum Post {
 impl Post {
     pub(super) fn boundary(&self) -> Boundary {
         match self {
+            Self::Barrier(_) => Boundary::Barrier,
             Self::Command(_) => Boundary::Exchange,
-            Self::UserSteering(s) if is_slash(s) => Boundary::Exchange,
+            Self::UserSteering(s) if is_slash(s) => Boundary::Barrier,
             _ => Boundary::Tool,
         }
     }
@@ -189,7 +203,7 @@ pub(super) fn source_name(msg: &Post) -> &'static str {
         Post::AgentResult(_) => "agent",
         Post::AgentMessage(_) => "message",
         Post::Nudge { .. } => "nudge",
-        Post::Command(_) => "command",
+        Post::Command(_) | Post::Barrier(_) => "command",
         Post::Surface { .. } => "surface",
     }
 }
