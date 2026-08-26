@@ -1,7 +1,7 @@
-//! Two environment stores: [`Env`], the lexical scope chain that closures
-//! capture and carry themselves, and [`EnvVars`], the `within [env: …]`
-//! process-env override map that rides the [`Context`] subtree through
-//! `inherit_from` / `spawn_thread`.
+//! Two environment stores: [`Env`], the finite map a closure captures and
+//! carries itself, and [`EnvVars`], the `within [env: …]` process-env
+//! override map that rides the [`Context`] subtree through `inherit_from` /
+//! `spawn_thread`.
 //!
 //! [`Context`]: super::shell::Context
 
@@ -19,29 +19,64 @@ pub struct Binding {
     pub scheme: Option<Scheme>,
 }
 
-/// Lexical environment: a stack of name→[`Binding`] scopes, innermost last.
+/// Lexical environment: three tiers, checked in order.
 ///
-/// `builtins::register`'s prelude sits at `scopes[0]` and the user scope it
-/// pushes at `scopes[1]`, with the base native scope beneath them all —
-/// seeded once at boot ([`Self::install_natives`]), reached by [`Self::get`]
-/// only after every scope misses, outside every scope harvest, and
-/// removable by nothing: no method here unsets from it.
-///
-/// An `imbl::Vector` rather than a `Vec` because every closure call clones the
-/// chain: an O(1) refcount bump on the persistent root, not one Arc bump and a
-/// heap allocation per scope.  That clone dominated recursion profiles.
+/// `natives` are language constants — seeded once at boot
+/// ([`Self::install_natives`]), never written after. `prelude` is the baked
+/// prelude's bindings, one map per process, shared by every shell that boots
+/// from it. `bindings` is everything bound since: a persistent map, so
+/// `bind` is O(log₃₂ n) and cloning the whole environment is O(1) — the
+/// clone every closure capture and every save/restore bracket takes.
 #[derive(Debug, Clone)]
 pub struct Env {
-    scopes: imbl::Vector<Arc<HashMap<String, Binding>>>,
     natives: Arc<HashMap<String, Value>>,
+    prelude: Arc<HashMap<String, Binding>>,
+    bindings: imbl::HashMap<String, Binding>,
 }
 
 impl Env {
-    /// Fresh environment with one empty scope — no prelude yet.
+    /// The empty three-tier map: no natives, no prelude, nothing bound.
     pub fn new() -> Self {
         Self {
-            scopes: imbl::Vector::unit(Arc::new(HashMap::new())),
             natives: Arc::new(HashMap::new()),
+            prelude: Arc::new(HashMap::new()),
+            bindings: imbl::HashMap::new(),
+        }
+    }
+
+    /// `natives` alone, no prelude — what a prelude bake itself runs under.
+    pub(crate) fn with_natives(natives: Arc<HashMap<String, Value>>) -> Self {
+        Self {
+            natives,
+            prelude: Arc::new(HashMap::new()),
+            bindings: imbl::HashMap::new(),
+        }
+    }
+
+    /// Seat a shell: `natives` and the baked `prelude`, nothing bound yet.
+    pub(crate) fn with_prelude(
+        natives: Arc<HashMap<String, Value>>,
+        prelude: Arc<HashMap<String, Binding>>,
+    ) -> Self {
+        Self {
+            natives,
+            prelude,
+            bindings: imbl::HashMap::new(),
+        }
+    }
+
+    /// Rebuild an `Env` from its three tiers — `crate::serial`'s receiving
+    /// side, which decodes only `bindings` and seats it under the receiver's
+    /// own `natives`/`prelude`.
+    pub(crate) fn from_parts(
+        natives: Arc<HashMap<String, Value>>,
+        prelude: Arc<HashMap<String, Binding>>,
+        bindings: imbl::HashMap<String, Binding>,
+    ) -> Self {
+        Self {
+            natives,
+            prelude,
+            bindings,
         }
     }
 
@@ -53,8 +88,7 @@ impl Env {
         map.extend(entries);
     }
 
-    /// Look up `name`, innermost scope first, falling back to the base
-    /// native scope.
+    /// Look up `name`: `bindings`, then `prelude`, then `natives`.
     pub fn get(&self, name: &str) -> Option<&Value> {
         if let Some(b) = self.get_binding(name) {
             return Some(&b.value);
@@ -62,14 +96,11 @@ impl Env {
         self.natives.get(name)
     }
 
-    /// The whole [`Binding`] for `name`, innermost scope first.
+    /// The whole [`Binding`] for `name`: `bindings`, then `prelude`.  Natives
+    /// carry no [`Binding`] — no scheme, no source location — so a native-only
+    /// hit answers [`None`] here even though [`Self::get`] resolves it.
     pub fn get_binding(&self, name: &str) -> Option<&Binding> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(b) = scope.get(name) {
-                return Some(b);
-            }
-        }
-        None
+        self.bindings.get(name).or_else(|| self.prelude.get(name))
     }
 
     /// Every native's name — a host's tab completion or listing surface, the
@@ -78,67 +109,44 @@ impl Env {
         self.natives.keys().map(String::as_str)
     }
 
-    /// Look up `name` in the local scopes, skipping the prelude.
-    pub fn get_local(&self, name: &str) -> Option<&Value> {
-        self.get_local_binding(name).map(|b| &b.value)
-    }
-
-    /// The whole [`Binding`] for `name` in the local scopes, skipping the
-    /// prelude; a checked top-level `let` carries its generalised scheme here.
-    pub fn get_local_binding(&self, name: &str) -> Option<&Binding> {
-        if self.scopes.len() < 2 {
-            return None;
-        }
-        self.scopes
-            .iter()
-            .skip(1)
-            .rev()
-            .find_map(|scope| scope.get(name))
-    }
-
-    pub fn get_prelude(&self, name: &str) -> Option<&Value> {
-        self.get_prelude_binding(name).map(|b| &b.value)
-    }
-
     /// The prelude [`Binding`] for `name`; it carries the checker's harvested
     /// scheme, so a prelude function's type needs no separate registry.
-    pub fn get_prelude_binding(&self, name: &str) -> Option<&Binding> {
-        self.scopes.front().and_then(|s| s.get(name))
+    pub fn prelude_binding(&self, name: &str) -> Option<&Binding> {
+        self.prelude.get(name)
     }
 
-    /// Bind `name` in the innermost scope with no scheme.  A rebind through
-    /// here clears any stored scheme, which described a value that is gone.
-    pub fn set(&mut self, name: String, value: Value) {
-        self.set_binding(
-            name,
-            Binding {
-                value,
-                scheme: None,
-            },
-        );
+    /// The session [`Binding`] for `name` — everything bound since the
+    /// prelude, skipping it.  What `help`'s local-site lookups want.
+    pub fn session_binding(&self, name: &str) -> Option<&Binding> {
+        self.bindings.get(name)
     }
 
-    /// The single install point for a scope entry.  Copy-on-writes the top
-    /// scope so closures that captured it are unaffected.
-    pub fn set_binding(&mut self, name: String, binding: Binding) {
-        if let Some(scope) = self.scopes.back_mut() {
-            Arc::make_mut(scope).insert(name, binding);
-        }
+    /// Every name bound since the prelude — what the binding lease adopts.
+    pub fn session_names(&self) -> impl Iterator<Item = &str> {
+        self.bindings.keys().map(String::as_str)
     }
 
-    /// Remove `name` from the innermost scope, returning its value.
+    /// Bind `name` in the session tier, replacing any existing binding —
+    /// persistent, so an environment a closure already captured is
+    /// unaffected.  A rebind through here clears any stored scheme, which
+    /// described a value that is gone.
+    pub fn bind(&mut self, name: String, binding: Binding) {
+        self.bindings.insert(name, binding);
+    }
+
+    /// Remove `name` from the session tier, returning its value; a prelude
+    /// name of the same spelling reappears beneath.
     pub fn unset(&mut self, name: &str) -> Option<Value> {
-        self.scopes
-            .back_mut()
-            .and_then(|scope| Arc::make_mut(scope).remove(name))
+        self.bindings
+            .remove(name)
             .map(|mut b| std::mem::replace(&mut b.value, Value::Unit))
     }
 
-    /// The serializable fragment of this scope: every `Value::Handle`
-    /// binding, in every scope of the chain, replaced by its opaque
-    /// placeholder. The natives scope is untouched — it is seeded once at
-    /// boot from language constants, never from a running session, so no
-    /// handle ever reaches it.
+    /// The serializable fragment of this environment: every `Value::Handle`
+    /// binding in the session tier replaced by its opaque placeholder.  The
+    /// prelude is untouched — it is baked before any handle exists, so no
+    /// handle ever reaches it — and neither is `natives`, seeded once at
+    /// boot from language constants.
     ///
     /// The one snapshot law's whole mechanism: an identity fork and a wire
     /// seed must resolve every name to the same value or the same absence,
@@ -146,118 +154,91 @@ impl Env {
     /// this one, called from the one place both pass through,
     /// `Shell::fork_scrubbed`.
     pub(crate) fn scrub_handles(&self) -> Self {
-        let scopes = self
-            .scopes
+        let bindings = self
+            .bindings
             .iter()
-            .map(|scope| {
-                Arc::new(
-                    scope
-                        .iter()
-                        .map(|(name, binding)| {
-                            let value =
-                                crate::serial::scrub(&binding.value, &crate::serial::is_handle);
-                            (
-                                name.clone(),
-                                Binding {
-                                    value,
-                                    scheme: binding.scheme.clone(),
-                                },
-                            )
-                        })
-                        .collect(),
+            .map(|(name, binding)| {
+                let value = crate::serial::scrub(&binding.value, &crate::serial::is_handle);
+                (
+                    name.clone(),
+                    Binding {
+                        value,
+                        scheme: binding.scheme.clone(),
+                    },
                 )
             })
             .collect();
         Self {
-            scopes,
             natives: self.natives.clone(),
+            prelude: self.prelude.clone(),
+            bindings,
         }
     }
 
-    pub fn push_scope(&mut self) {
-        self.scopes.push_back(Arc::new(HashMap::new()));
-    }
-
-    /// Pop the innermost scope; refuses to pop the prelude.
-    pub fn pop_scope(&mut self) {
-        if self.scopes.len() > 1 {
-            self.scopes.pop_back();
-        }
-    }
-
-    /// The innermost scope, by reference.  `use` collects a module body's
-    /// bindings from here.
-    ///
-    /// # Panics
-    /// Never: [`pop_scope`](Self::pop_scope) always leaves the prelude.
-    pub fn top_scope(&self) -> &HashMap<String, Binding> {
-        self.scopes.back().unwrap()
-    }
-
-    /// Walk every scope innermost-first, projecting each binding on first sight
+    /// Walk `bindings` then `prelude`, projecting each binding on first sight
     /// of its name.  The single home of the shadowing rule.
-    fn fold_innermost_wins<T>(&self, project: impl Fn(&Binding) -> T) -> Vec<(String, T)> {
+    fn fold_union<T>(&self, project: impl Fn(&Binding) -> T) -> Vec<(String, T)> {
         let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-        for scope in self.scopes.iter().rev() {
-            for (k, b) in scope.as_ref() {
-                if seen.insert(k.clone()) {
-                    result.push((k.clone(), project(b)));
-                }
+        let mut result = Vec::with_capacity(self.bindings.len() + self.prelude.len());
+        for (k, b) in self.bindings.iter() {
+            seen.insert(k.as_str());
+            result.push((k.clone(), project(b)));
+        }
+        for (k, b) in self.prelude.iter() {
+            if !seen.contains(k.as_str()) {
+                result.push((k.clone(), project(b)));
             }
         }
         result
     }
 
-    /// Largest binding's shallow byte estimate, innermost wins, no value cloned.
+    /// Largest binding's shallow byte estimate, session wins, no value cloned.
     pub fn largest_shallow_size(&self) -> usize {
-        self.fold_innermost_wins(|b| b.value.shallow_size())
+        self.fold_union(|b| b.value.shallow_size())
             .into_iter()
             .map(|(_, size)| size)
             .max()
             .unwrap_or(0)
     }
 
-    /// All bindings across all scopes, innermost wins.
+    /// Every binding across prelude and session, session wins.
     pub fn all_bindings(&self) -> Vec<(String, Value)> {
-        self.fold_innermost_wins(|b| b.value.clone())
+        self.fold_union(|b| b.value.clone())
     }
 
-    /// Distinct bound names across the chain, a shadowed name counted once.
+    /// Distinct bound names across prelude and session, a shadowed name
+    /// counted once.
     pub fn distinct_name_count(&self) -> usize {
         let mut seen = std::collections::HashSet::new();
-        for scope in &self.scopes {
-            seen.extend(scope.keys().map(String::as_str));
-        }
+        seen.extend(self.bindings.keys().map(String::as_str));
+        seen.extend(self.prelude.keys().map(String::as_str));
         seen.len()
     }
 
-    /// Every bound name with its scheme, innermost wins.  Seeds the next run's
+    /// Every bound name with its scheme, session wins.  Seeds the next run's
     /// check: a name without a scheme is checked as a bare name.
     pub fn binding_schemes(&self) -> Vec<(String, Option<Scheme>)> {
-        self.fold_innermost_wins(|b| b.scheme.clone())
+        self.fold_union(|b| b.scheme.clone())
     }
 
-    /// Iterate the chain outermost-first.  `crate::serial` interns scopes by
-    /// pointer identity, so it needs the `Arc`s, not their contents.
-    pub(crate) fn scope_iter(&self) -> impl Iterator<Item = &Arc<HashMap<String, Binding>>> {
-        self.scopes.iter()
+    /// The session tier's persistent map root — `crate::serial` interns
+    /// environments by this root's identity, and needs the `imbl::HashMap`
+    /// itself, not its contents, to compare by [`imbl::HashMap::ptr_eq`].
+    pub(crate) fn bindings_root(&self) -> &imbl::HashMap<String, Binding> {
+        &self.bindings
     }
 
-    /// Rebuild an `Env` from scope `Arc`s — `crate::serial`'s receiving side.
-    ///
-    /// `natives` is the receiving manifest's own native map, not the
-    /// sender's: natives cross the wire by name only, so a hydrated
-    /// closure's base scope must be rebuilt here or its bare references
-    /// resolve to nothing.
-    pub(crate) fn from_scope_iter<I>(iter: I, natives: Arc<HashMap<String, Value>>) -> Self
-    where
-        I: IntoIterator<Item = Arc<HashMap<String, Binding>>>,
-    {
-        Self {
-            scopes: iter.into_iter().collect(),
-            natives,
-        }
+    /// This environment's native tier, for a decoder seating a hydrated
+    /// environment under the receiver's own — natives never ride the wire.
+    pub(crate) fn natives_arc(&self) -> Arc<HashMap<String, Value>> {
+        Arc::clone(&self.natives)
+    }
+
+    /// This environment's prelude tier, for a decoder seating a hydrated
+    /// environment under the receiver's own — the prelude never rides the
+    /// wire either.
+    pub(crate) fn prelude_arc(&self) -> Arc<HashMap<String, Binding>> {
+        Arc::clone(&self.prelude)
     }
 }
 
@@ -422,6 +403,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// (Regression: drop glue recursed once per link, and a sixty-thousand
     /// line stream aborted the process at teardown.)
     #[test]
@@ -432,5 +415,35 @@ mod tests {
             .expect("spawn")
             .join()
             .expect("a deep chain must drop without exhausting the stack");
+    }
+
+    /// A name a `let` shadows over a prelude binding of the same spelling
+    /// round-trips as the user's value, and `unset` reveals the prelude's
+    /// underneath — the same behaviour the old scope stack gave, now from a
+    /// flat map with no scope to pop.
+    #[test]
+    fn shadowed_prelude_name_round_trips_then_unset_reveals_it() {
+        let mut prelude = HashMap::new();
+        prelude.insert(
+            "map".to_string(),
+            Binding {
+                value: Value::String("prelude-map".into()),
+                scheme: None,
+            },
+        );
+        let mut env = Env::with_prelude(Arc::new(HashMap::new()), Arc::new(prelude));
+        assert_eq!(env.get("map"), Some(&Value::String("prelude-map".into())));
+
+        env.bind(
+            "map".to_string(),
+            Binding {
+                value: Value::Int(3),
+                scheme: None,
+            },
+        );
+        assert_eq!(env.get("map"), Some(&Value::Int(3)));
+
+        env.unset("map");
+        assert_eq!(env.get("map"), Some(&Value::String("prelude-map".into())));
     }
 }

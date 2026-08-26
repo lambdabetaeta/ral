@@ -248,12 +248,6 @@ impl BuiltinTable {
             .cloned()
     }
 
-    /// Every value row — what the base native scope is built from.
-    fn values(&self) -> impl Iterator<Item = &BuiltinEntry> {
-        self.rows()
-            .filter(|entry| entry.convention == Convention::Value)
-    }
-
     /// Every base-frame row — what the handler stack and the checker's handler
     /// bindings are both seeded from.
     pub fn base_frames(&self) -> impl Iterator<Item = &BuiltinEntry> {
@@ -264,19 +258,6 @@ impl BuiltinTable {
     /// Names of installed builtins, newest installed set first.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.rows().map(|entry| entry.name.as_ref())
-    }
-
-    /// The base native scope this manifest implies: every value row's
-    /// [`Value::Native`] plus the language constants — what a wire-hydrated
-    /// `Env` carries, since natives cross the wire by name only and a
-    /// receiver rebuilds them from its own manifest.
-    pub(crate) fn natives_arc(&self) -> Arc<std::collections::HashMap<String, Value>> {
-        let mut map = std::collections::HashMap::new();
-        for entry in self.values() {
-            map.insert(entry.name.clone().into_owned(), native_value(entry));
-        }
-        map.extend(language_constants());
-        Arc::new(map)
     }
 }
 

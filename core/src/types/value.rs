@@ -2,6 +2,8 @@
 //! what a builtin returns.
 
 use super::builtin::BuiltinEntry;
+#[cfg(test)]
+use super::env::Binding;
 use super::env::Env;
 use super::handle::HandleInner;
 use super::list::List;
@@ -352,7 +354,13 @@ pub(crate) fn deep_block_chain(n: usize) -> Value {
     let mut v = Value::Unit;
     for _ in 0..n {
         let mut env = Env::new();
-        env.set("tail".into(), v);
+        env.bind(
+            "tail".into(),
+            Binding {
+                value: v,
+                scheme: None,
+            },
+        );
         v = Value::Block {
             body: Arc::clone(&body),
             captured: Arc::new(env),
@@ -422,7 +430,13 @@ mod tests {
         assert!(block_size > 0, "a closure is a small nonzero constant");
 
         let mut heavy_env = crate::types::Env::new();
-        heavy_env.set("heavy".into(), Value::String("x".repeat(10_000)));
+        heavy_env.bind(
+            "heavy".into(),
+            Binding {
+                value: Value::String("x".repeat(10_000)),
+                scheme: None,
+            },
+        );
         let heavy_block = Value::Block {
             body: std::sync::Arc::new(crate::source::Spanned::synthetic(
                 crate::ir::CompKind::Return(crate::ir::Val::Unit),

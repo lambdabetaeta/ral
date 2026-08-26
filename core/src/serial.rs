@@ -4,10 +4,12 @@
 //! an extension slot uninhabited by default ([`NoExt`]).  [`SerialValue`]
 //! fills the slot with [`Closure`] so the re-exec'd child IPC (`child_eval`,
 //! `subprocess`, the pipeline stage helper) can ship a captured environment
-//! as JSON.  Scopes intern by `Arc` identity ([`InternCtx`]) and rebuild
-//! topologically ([`WireDecoder::for_shell`]), so sharing survives the
-//! crossing rather than unfolding into an exponential tree.  `into_runtime`,
-//! given a [`WireDecoder`], is the sole wire→runtime conversion.
+//! as JSON.  `serial.rs` interns *environments*, not scopes: one row per
+//! distinct session-tier root, by [`imbl::HashMap::ptr_eq`] identity
+//! ([`InternCtx`]), rebuilt topologically ([`WireDecoder::for_shell`]) and
+//! seated under the receiver's own natives and prelude — those two constant
+//! tiers never cross.  `into_runtime`, given a [`WireDecoder`], is the sole
+//! wire→runtime conversion.
 
 use crate::ir::Comp;
 use crate::types::{Binding, BuiltinTable, Env, Error, Shell, Value};
@@ -108,11 +110,13 @@ pub struct SerialNative {
     pub applied: Vec<SerialValue>,
 }
 
-/// An [`Env`] in wire form: one [`ScopeTable`] index per scope, resolved
-/// against the table carried on the enclosing request/response envelope.
+/// An [`Env`] in wire form: the [`ScopeTable`] row holding its session
+/// tier, resolved against the table carried on the enclosing
+/// request/response envelope.  The natives and prelude tiers never ride the
+/// wire, so they need no row of their own.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerialEnvSnapshot {
-    pub scopes: Vec<u32>,
+    pub bindings: u32,
 }
 
 /// Wire mirror of a [`Binding`]: the value converted, the scheme as itself.
@@ -122,67 +126,70 @@ pub struct SerialBinding {
     pub scheme: Option<crate::typecheck::Scheme>,
 }
 
-/// One row per `Arc`-shared scope, in discovery order;
-/// [`WireDecoder::for_shell`] rebuilds it into scope arcs on the receiving
-/// side.
+/// One row per interned environment, in discovery order;
+/// [`WireDecoder::for_shell`] rebuilds it into session-tier maps on the
+/// receiving side.
 pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 
 // ── Interning context ─────────────────────────────────────────────────────
 //
-// Scope references are unordered: a scope may hold a closure whose captured
-// env points at a scope interned before or after it.  `WireDecoder::for_shell`
-// therefore sorts by dependency rather than trusting id order.
+// Environment references are unordered: an environment may hold a closure
+// whose captured env points at a row interned before or after it.
+// `WireDecoder::for_shell` therefore sorts by dependency rather than trusting
+// id order.
 
 pub struct InternCtx {
     scope_table: ScopeTable,
-    ptr_to_id: HashMap<usize, u32>,
-    /// Scopes with an id but no row yet.  A stream is a chain of closures —
-    /// block → captured env → scope → binding → block — so encoding a scope's
-    /// bindings inside `intern_scope` would recurse once per link and bound
+    /// Every root interned in this message so far, scanned linearly by
+    /// [`imbl::HashMap::ptr_eq`] — a message holds a handful, so the scan
+    /// costs nothing a hash lookup would save.
+    roots: Vec<(imbl::HashMap<std::string::String, Binding>, u32)>,
+    /// Rows with an id but no encoding yet.  A stream is a chain of closures —
+    /// block → captured env → binding → block — so encoding an environment's
+    /// bindings inside `intern_env` would recurse once per link and bound
     /// stream length by the stack.  Interning only *reserves*; [`Self::finish`]
-    /// encodes from this queue, a worklist in place of that recursion.  The
-    /// held `Arc`s also keep every interned pointer alive, so an id cannot be
-    /// claimed by a reused allocation mid-encode.
-    pending: Vec<(u32, Arc<HashMap<std::string::String, Binding>>)>,
+    /// encodes from this queue, a worklist in place of that recursion.
+    pending: Vec<(u32, imbl::HashMap<std::string::String, Binding>)>,
 }
 
 impl InternCtx {
     pub fn new() -> Self {
         Self {
             scope_table: Vec::new(),
-            ptr_to_id: HashMap::new(),
+            roots: Vec::new(),
             pending: Vec::new(),
         }
     }
 
-    fn intern_scope(&mut self, scope: &Arc<HashMap<std::string::String, Binding>>) -> u32 {
-        let ptr = Arc::as_ptr(scope) as usize;
-        if let Some(&id) = self.ptr_to_id.get(&ptr) {
+    /// Intern `bindings` — an [`Env`]'s session tier — by its persistent
+    /// root's identity, reserving a row for [`Self::finish`] to encode.
+    fn intern_env(&mut self, bindings: &imbl::HashMap<std::string::String, Binding>) -> u32 {
+        if let Some(&(_, id)) = self.roots.iter().find(|(root, _)| root.ptr_eq(bindings)) {
             return id;
         }
         #[allow(
             clippy::cast_possible_truncation,
-            reason = "serialised scope id; the table holds a handful of scopes, far below 2^32"
+            reason = "serialised row id; the table holds a handful of environments, far below 2^32"
         )]
         let id = self.scope_table.len() as u32;
-        self.ptr_to_id.insert(ptr, id);
+        self.roots.push((bindings.clone(), id));
         self.scope_table.push(Vec::new()); // reserve the row; `finish` fills it
-        self.pending.push((id, Arc::clone(scope)));
+        self.pending.push((id, bindings.clone()));
         id
     }
 
-    /// Encode every pending scope's bindings — each may intern further scopes,
-    /// which join the queue rather than the stack — and yield the table.
-    /// Nothing ships without passing through here: the table has no other
-    /// accessor.
+    /// Encode every pending environment's bindings — each may intern further
+    /// environments, which join the queue rather than the stack — and yield
+    /// the table.  Nothing ships without passing through here: the table has
+    /// no other accessor.
     ///
     /// # Errors
-    /// Encoding one of a scope's bindings fails; handle-bearing bindings are
+    /// Encoding one of a binding's value fails; handle-bearing bindings are
     /// dropped rather than raised.
     pub fn finish(mut self) -> Result<ScopeTable, Error> {
-        while let Some((id, scope)) = self.pending.pop() {
-            let mut entries = Vec::with_capacity(scope.len());
-            for (k, b) in scope.iter() {
+        while let Some((id, bindings)) = self.pending.pop() {
+            let mut entries = Vec::with_capacity(bindings.len());
+            for (k, b) in bindings.iter() {
                 // A binding reaching a `Handle` cannot cross a process boundary.
                 // Drop it rather than fail the snapshot: an unrelated handle must
                 // not poison a stage that never names it, and one that does name
@@ -235,33 +242,41 @@ fn value_carries_handle(value: &Value) -> bool {
     }
 }
 
-/// One reconstructed `Arc<HashMap>` per scope table row (`None` until built).
-type ScopeArcs = Vec<Option<Arc<HashMap<String, Binding>>>>;
+/// One reconstructed session-tier map per scope table row (`None` until
+/// built).
+type EnvRows = Vec<Option<imbl::HashMap<String, Binding>>>;
 
-/// Decode capability for one wire envelope: the rebuilt scope arcs plus the
-/// [`BuiltinTable`] a captured [`Value::Native`]
-/// re-links its name against.
+/// Decode capability for one wire envelope: the rebuilt environment rows,
+/// the receiver's own natives and prelude tiers every row is seated under,
+/// and the [`BuiltinTable`] a captured [`Value::Native`] re-links its name
+/// against.
 ///
 /// Constructible only from the [`Shell`] that will run the decoded values,
-/// so no call site can pick a manifest of its own.
+/// so no call site can pick a manifest — or a prelude — of its own.
 #[derive(Debug)]
 pub struct WireDecoder {
-    arcs: ScopeArcs,
+    rows: EnvRows,
     manifest: BuiltinTable,
+    natives: Arc<HashMap<String, Value>>,
+    prelude: Arc<HashMap<String, Binding>>,
 }
 
 impl WireDecoder {
-    /// Rebuild one `Arc<HashMap>` per row of `scope_table`, each once its
-    /// dependencies are built, resolving natives against `shell`'s manifest.
+    /// Rebuild one session-tier map per row of `scope_table`, each once its
+    /// dependencies are built; every row is later seated under `shell`'s own
+    /// natives and prelude ([`SerialEnvSnapshot::into_runtime`]), never the
+    /// sender's — those two tiers never ride the wire.
     ///
     /// # Errors
-    /// A scope reference out of range or unresolved, a binding that fails to
-    /// decode, or a cycle — a pass in which no scope makes progress.
+    /// A row reference out of range or unresolved, a binding that fails to
+    /// decode, or a cycle — a pass in which no row makes progress.
     pub(crate) fn for_shell(shell: &Shell, scope_table: &ScopeTable) -> Result<Self, Error> {
         let n = scope_table.len();
         let mut dec = Self {
-            arcs: vec![None; n],
+            rows: vec![None; n],
             manifest: shell.session.builtins.clone(),
+            natives: shell.mobile.scope.natives_arc(),
+            prelude: shell.mobile.scope.prelude_arc(),
         };
         let deps: Vec<HashSet<u32>> = scope_table
             .iter()
@@ -287,13 +302,13 @@ impl WireDecoder {
         while built < n {
             let before = built;
             for id in 0..n {
-                if dec.arcs[id].is_some() {
+                if dec.rows[id].is_some() {
                     continue;
                 }
-                if !deps[id].iter().all(|&d| dec.arcs[d as usize].is_some()) {
+                if !deps[id].iter().all(|&d| dec.rows[d as usize].is_some()) {
                     continue;
                 }
-                let mut entries = HashMap::new();
+                let mut entries = imbl::HashMap::new();
                 for (k, b) in &scope_table[id] {
                     entries.insert(
                         k.clone(),
@@ -303,7 +318,7 @@ impl WireDecoder {
                         },
                     );
                 }
-                dec.arcs[id] = Some(Arc::new(entries));
+                dec.rows[id] = Some(entries);
                 built += 1;
             }
             if built == before {
@@ -320,14 +335,10 @@ impl WireDecoder {
 fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
     match value {
         SerialValue::Ext(Closure::Lambda(l)) => {
-            for id in &l.captured.scopes {
-                out.insert(*id);
-            }
+            out.insert(l.captured.bindings);
         }
         SerialValue::Ext(Closure::Block(t)) => {
-            for id in &t.captured.scopes {
-                out.insert(*id);
-            }
+            out.insert(t.captured.bindings);
         }
         SerialValue::Ext(Closure::Native(n)) => {
             for v in &n.applied {
@@ -657,40 +668,37 @@ impl From<FOValue> for Value {
 }
 
 impl SerialEnvSnapshot {
-    /// Intern every scope of `env` into `ctx`, recording their table ids.
-    /// Infallible: interning reserves ids, and any encoding failure surfaces
-    /// at [`InternCtx::finish`].
+    /// Intern `env`'s session tier into `ctx`, recording its row id.
+    /// Infallible: interning reserves the id, and any encoding failure
+    /// surfaces at [`InternCtx::finish`].
     pub fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Self {
-        let scopes = env
-            .scope_iter()
-            .map(|scope| ctx.intern_scope(scope))
-            .collect();
-        Self { scopes }
+        Self {
+            bindings: ctx.intern_env(env.bindings_root()),
+        }
     }
 
-    /// Rebuild an [`Env`] from this snapshot's scope ids; `dec`'s manifest
-    /// seeds its base native scope ([`BuiltinTable::natives_arc`]), since
-    /// natives never ride the wire.
+    /// Rebuild an [`Env`] from this snapshot's row, seated under `dec`'s
+    /// natives and prelude — the receiver's own, since neither tier rides
+    /// the wire.
     ///
     /// # Errors
-    /// A recorded scope id is out of range or unresolved.
+    /// The recorded row id is out of range or unresolved.
     pub fn into_runtime(self, dec: &WireDecoder) -> Result<Env, Error> {
-        let scopes = self
-            .scopes
-            .into_iter()
-            .map(|id| {
-                dec.arcs
-                    .get(id as usize)
-                    .and_then(std::clone::Clone::clone)
-                    .ok_or_else(|| {
-                        Error::new(
-                            format!("serial: scope ref {id} out of range or unresolved"),
-                            1,
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Env::from_scope_iter(scopes, dec.manifest.natives_arc()))
+        let bindings = dec
+            .rows
+            .get(self.bindings as usize)
+            .and_then(std::clone::Clone::clone)
+            .ok_or_else(|| {
+                Error::new(
+                    format!("serial: scope ref {} out of range or unresolved", self.bindings),
+                    1,
+                )
+            })?;
+        Ok(Env::from_parts(
+            Arc::clone(&dec.natives),
+            Arc::clone(&dec.prelude),
+            bindings,
+        ))
     }
 }
 
@@ -786,7 +794,7 @@ mod tests {
         let lambda = SerialValue::Ext(Closure::Lambda(SerialLambda {
             param: IrPattern::Name("x".to_string()),
             body: Arc::clone(&body),
-            captured: SerialEnvSnapshot { scopes: Vec::new() },
+            captured: SerialEnvSnapshot { bindings: 0 },
         }));
 
         // The same `serde_json` codec `subprocess_codec` frames with.
@@ -814,7 +822,7 @@ mod tests {
         let lambda = SerialValue::Ext(Closure::Lambda(SerialLambda {
             param: IrPattern::Name("x".to_string()),
             body: Arc::new(Spanned::synthetic(CompKind::Return(Val::Unit))),
-            captured: SerialEnvSnapshot { scopes: vec![5] },
+            captured: SerialEnvSnapshot { bindings: 5 },
         }));
         let table: ScopeTable = vec![vec![(
             "f".to_string(),
@@ -900,5 +908,37 @@ mod tests {
         let table = ctx.finish().expect("finish");
         let dec = WireDecoder::for_shell(&Shell::default(), &table).expect("decoder");
         assert_eq!(ipc.into_runtime(&dec).expect("from serial"), value);
+    }
+
+    /// A pipeline-stage request built from a shell with the prelude
+    /// installed carries no prelude binding in its table: the prelude is a
+    /// constant tier every process rebuilds by running the same source, not
+    /// a row on the wire (§6.2).
+    #[test]
+    fn pipeline_stage_request_carries_no_prelude_binding() {
+        let mut shell = crate::boot::boot_shell(
+            crate::io::TerminalState::default(),
+            &crate::boot::BakedPrelude::bake_runtime(),
+            &crate::boot::HostSurface::default(),
+        );
+        shell.mobile.scope.bind(
+            "only_mine".to_string(),
+            Binding {
+                value: Value::Int(1),
+                scheme: None,
+            },
+        );
+
+        let mut ctx = InternCtx::new();
+        let _ = SerialEnvSnapshot::from_runtime(&shell.mobile.scope, &mut ctx);
+        let table = ctx.finish().expect("finish");
+
+        assert_eq!(table.len(), 1, "one row: the session tier alone");
+        let names: Vec<&str> = table[0].iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["only_mine"],
+            "the prelude's own bindings never ride the wire"
+        );
     }
 }
