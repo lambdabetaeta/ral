@@ -256,56 +256,46 @@ impl Default for Env {
 }
 
 thread_local! {
-    /// `Some` while a dismantling [`Binding::drop`] is looping on this thread.
-    /// A binding drop reached from inside that loop pushes its value here
-    /// instead of letting drop glue recurse into it.
-    static DISMANTLE_QUEUE: std::cell::RefCell<Option<Vec<Value>>> =
+    /// `Some` while a dismantling [`Env::dismantle`] is looping on this
+    /// thread.  A closure dying inside that loop pushes its bindings here
+    /// instead of letting drop glue recurse into them.
+    static DISMANTLE_QUEUE: std::cell::RefCell<Option<Vec<BindingMap>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-impl Drop for Binding {
-    /// A stream is a chain of closures — block → captured env → scope →
-    /// binding → block — so plain drop glue recurses once per link and bounds
-    /// stream length by the stack.  Every link passes through a `Binding`, so
-    /// the chain is cut here, with a trampoline rather than a hand-rolled
-    /// walk: glue still does all traversal — a shared spine stays one
-    /// refcount decrement, nothing is cloned to be destroyed — but a binding
-    /// dying *inside* another binding's drop hands its value to that
-    /// dismantler's queue and returns, keeping the stack between any two
-    /// links constant.
-    fn drop(&mut self) {
-        // A value with no interior can reach no binding: let glue have it.
-        if matches!(
-            self.value,
-            Value::Unit
-                | Value::Bool(_)
-                | Value::Int(_)
-                | Value::Float(_)
-                | Value::String(_)
-                | Value::Bytes(_)
-                | Value::Variant { payload: None, .. }
-        ) {
+impl Env {
+    /// A stream is a chain of closures — block → captured env → binding →
+    /// block — so plain drop glue recurses once per link and bounds stream
+    /// length by the stack.  Every link passes through a closure, so
+    /// [`Closure`](super::Closure)'s drop cuts the chain here, with a
+    /// trampoline rather than a hand-rolled walk: glue still does all
+    /// traversal — a shared spine stays one refcount decrement, nothing is
+    /// cloned to be destroyed — but a closure dying *inside* another's
+    /// dismantling hands its bindings to that dismantler's queue and returns,
+    /// keeping the stack between any two links constant.
+    pub(crate) fn dismantle(&mut self) {
+        if self.bindings.is_empty() {
             return;
         }
-        let value = std::mem::replace(&mut self.value, Value::Unit);
-        // Hand the value to a dismantler above us, or become one.  If the
-        // queue is already torn down (a binding dying during thread-local
-        // destruction), the unrun closure drops `value` — glue alone, the
+        let bindings = std::mem::take(&mut self.bindings);
+        // Hand the map to a dismantler above us, or become one.  If the queue
+        // is already torn down (a closure dying during thread-local
+        // destruction), the unrun closure drops `bindings` — glue alone, the
         // honest fallback.
-        let Ok(value) = DISMANTLE_QUEUE.try_with(|slot| {
+        let Ok(bindings) = DISMANTLE_QUEUE.try_with(|slot| {
             let mut q = slot.borrow_mut();
             if let Some(queue) = q.as_mut() {
-                queue.push(value);
+                queue.push(bindings);
                 None
             } else {
                 *q = Some(Vec::new());
-                Some(value)
+                Some(bindings)
             }
         }) else {
             return;
         };
         // Enqueued: the dismantler above owns it now.
-        let Some(value) = value else { return };
+        let Some(bindings) = bindings else { return };
         /// Disarms the queue even on unwind; leftovers then elect fresh
         /// leaders of their own.
         struct Disarm;
@@ -315,9 +305,9 @@ impl Drop for Binding {
             }
         }
         let _disarm = Disarm;
-        let mut next = Some(value);
-        while let Some(v) = next {
-            drop(v);
+        let mut next = Some(bindings);
+        while let Some(b) = next {
+            drop(b);
             next = DISMANTLE_QUEUE.with(|slot| slot.borrow_mut().as_mut().and_then(Vec::pop));
         }
     }

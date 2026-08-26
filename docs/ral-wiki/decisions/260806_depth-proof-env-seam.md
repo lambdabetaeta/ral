@@ -9,9 +9,9 @@ binding → block — so any walk that crosses the captured-env link recursively
 spends stack once per line. Exactly two walks cross it: the serial encoder and
 drop glue. Both now cross it flat. `intern_scope` only reserves an id and
 queues the scope; `InternCtx::finish` — the table's sole accessor — drains the
-queue. Teardown is cut by a thread-local drop trampoline on `Binding`: glue
-still does all traversal, but a binding dying inside another binding's drop
-hands its value to that dismantler's queue instead of letting glue recurse,
+queue. Teardown is cut by a thread-local drop trampoline on `Closure`: glue
+still does all traversal, but a closure dying inside another closure's drop
+hands its bindings to that dismantler's queue instead of letting glue recurse,
 keeping the stack between any two links constant. No wire change, no new
 dependency, no stream redesign.**
 
@@ -41,18 +41,26 @@ a sixty-thousand-line stream aborted the process in drop glue at teardown.
   decoder needed nothing: `WireDecoder::for_shell` always resolved row
   dependencies rather than trusting id order, and rows were already flat.
 
-- **A drop trampoline on `Binding`, not a hand-rolled walk.** `Value` is
+- **A drop trampoline on `Closure`, not a hand-rolled walk.** `Value` is
   destructured by move throughout the evaluator, so `Drop for Value` is not
-  writable (E0509); every chain link passes through a `Binding`, whose only
-  mover was `Env::unset`. `Binding::drop` keeps a thread-local queue: when no
-  dismantler is active it becomes one — dropping its value by plain glue, then
-  draining the queue until quiet — and when one is already active above it on
-  this thread's stack, it pushes its value and returns. Glue therefore still
+  writable (E0509). Every chain link passes through a `Binding` and through a
+  `Closure`; the cut sat on `Binding` first (260806) and moved to `Closure`
+  (260826) once the persistent map made binding drops loop-resident — every
+  `bind` into a shared environment drops a copied node, one `Binding` per
+  neighbour, and a list in scope was paying the trampoline on every
+  iteration. Closures are rare where bindings are common. `Closure::drop`
+  calls `Env::dismantle`, which keeps a thread-local queue of binding maps:
+  when no dismantler is active it becomes one — dropping the map by plain
+  glue, then draining the queue until quiet — and when one is already active
+  above it on this thread's stack, it pushes the map and returns. The
+  machine's two closure destructurings go through `Closure::into_parts`
+  (`ManuallyDrop` + `ptr::read`), since `mem::take` would allocate an
+  `Env::new()` per step. Glue therefore still
   performs all traversal — a shared spine stays one refcount decrement,
   nothing is ever cloned in order to be destroyed, `Arc`'s own atomic elects
   the single deallocator under concurrent drops — but the stack between any
-  two links is a constant band of glue frames. Scalars and bare variants skip
-  the queue entirely; a binding dying during thread-local teardown falls back
+  two links is a constant band of glue frames. An empty binding map skips
+  the queue entirely; a closure dying during thread-local teardown falls back
   to plain glue, the only depth-honest option left there.
 
 ## Alternatives considered

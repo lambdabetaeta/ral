@@ -300,7 +300,7 @@ impl Machine {
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Focus {
-        let Closure { comp, env } = lam;
+        let (comp, env) = lam.into_parts();
         let Some((param, body)) = comp.arrow() else {
             unreachable!("a Terminal::Lambda's closure is always arrow-shaped (S3 eta-expansion)")
         };
@@ -423,7 +423,7 @@ impl Machine {
     // ── §2.2: rules on a computation closure in focus ───────────────────
 
     fn step_eval(&mut self, closure: Closure, mooring: &Mooring, shell: &mut Shell) -> Focus {
-        let Closure { comp, env } = closure;
+        let (comp, env) = closure.into_parts();
         let focus = match &comp.item {
             CompKind::Return(val) => match close(val, &env) {
                 Ok(v) => {
