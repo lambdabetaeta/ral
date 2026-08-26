@@ -113,11 +113,9 @@ pub(crate) struct Ran {
 
 /// Whose phrases these are.  Leases and the PATH-shadow check belong to
 /// `Session` alone; a block-local `source` and a `use` body run under a mode
-/// that leases nothing.  (`shell.env`'s per-`Define` session install — §1.3
-/// — waits on the field itself, which is W2a's: on the recursive evaluator
-/// the environment thread *is* `shell.env`, so a `Session` run's
-/// `Define`s are already visible to every later phrase without a separate
-/// write-back.)
+/// that leases nothing.  Only `Session` writes each landed `Define` back
+/// into `shell.env` (§1.3, §3.2) — a `Local`/`Module`/`Prelude` run threads
+/// its own `E` and never touches the session environment at all.
 #[derive(Clone, Copy)]
 pub(crate) enum Mode {
     Session,
@@ -126,10 +124,10 @@ pub(crate) enum Mode {
     Prelude,
 }
 
-/// Thread `phrases` over `shell.env`: install `env` at the start,
-/// run each phrase in order, and report the scope as it stood when the last
-/// one finished or the first one halted.  The one place `Phrase::Define`
-/// has meaning.
+/// Thread `phrases` over a local `E`, starting from `env`: run each phrase
+/// in order as its own closed machine, and report `E` as it stood when the
+/// last phrase finished or the first one halted.  The one place
+/// `Phrase::Define` has meaning.
 ///
 /// A phrase halting stops the loop; `Ran::env` is `env` as extended by the
 /// phrases that ran before the halt, never rolled back — the whole of "a
@@ -141,21 +139,21 @@ pub(crate) fn run_phrases(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Ran {
-    shell.env = env;
+    let mut env = env;
     let mut defined = Vec::new();
     let last = phrases.len().saturating_sub(1);
     let mut outcome = Ok(Value::Unit);
     for (i, phrase) in phrases.iter().enumerate() {
         let non_final = i != last;
         let result = crate::process::check(mooring).and_then(|()| match &phrase.item {
-            Phrase::Run(m) => run_phrase_run(m, non_final, mooring, shell),
+            Phrase::Run(m) => run_phrase_run(m, &env, non_final, mooring, shell),
             Phrase::Define {
                 pattern,
                 comp,
                 schemes,
-            } => run_phrase_define(pattern, comp, schemes, mode, mooring, shell, &mut defined),
+            } => run_phrase_define(pattern, comp, schemes, mode, &mut env, mooring, shell, &mut defined),
             Phrase::Source { path } => {
-                run_phrase_source(path, phrase.span, mode, mooring, shell, &mut defined)
+                run_phrase_source(path, phrase.span, mode, &mut env, mooring, shell, &mut defined)
             }
         });
         match result {
@@ -175,7 +173,7 @@ pub(crate) fn run_phrases(
         }
     }
     Ran {
-        env: shell.env.clone(),
+        env,
         defined,
         outcome,
     }
@@ -184,24 +182,27 @@ pub(crate) fn run_phrases(
 /// `Run(M)`: the last phrase's value is the run's value; a non-final one
 /// runs under the ambient sink exactly as a `Bind`'s RHS does (S11) — its
 /// bytes are effect, not the run's value.
-fn run_phrase_run(m: &Arc<Comp>, non_final: bool, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+fn run_phrase_run(m: &Arc<Comp>, env: &Env, non_final: bool, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let closure = crate::types::Closure { comp: Arc::clone(m), env: env.clone() };
     if !non_final {
-        return evaluate(m, mooring, shell);
+        return machine::evaluate(closure, mooring, shell);
     }
-    capture::with_ambient_stdout(shell, |shell| evaluate(m, mooring, shell))
+    capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))
 }
 
 /// `Define { pattern, comp, schemes }`: the RHS runs under the ambient sink
 /// (its bytes are effect, its value is what the pattern destructures); under
-/// `Mode::Session` alone, the PATH-shadow check runs first and
-/// [`Shell::note_define`] runs beside each name's install.  All-or-nothing,
-/// as [`pattern::bind_pattern`] stages it.  A `Define`'s own value is `Unit`
-/// — like a block ending in `let`, it is a value boundary by being one.
+/// `Mode::Session` alone, the PATH-shadow check runs first, the landed
+/// binding is written to `shell.env` beside `E`, and [`Shell::note_define`]
+/// runs beside each name's install.  All-or-nothing, as
+/// [`pattern::bind_pattern`] stages it.  A `Define`'s own value is `Unit` —
+/// like a block ending in `let`, it is a value boundary by being one.
 fn run_phrase_define(
     pattern: &crate::ir::IrPattern,
     comp: &Arc<Comp>,
     schemes: &[(String, crate::typecheck::Scheme)],
     mode: Mode,
+    env: &mut Env,
     mooring: &Mooring,
     shell: &mut Shell,
     defined: &mut Vec<String>,
@@ -212,17 +213,16 @@ fn run_phrase_define(
             Control::Tail(_) => unreachable!("a pattern-shadow check never applies a tail call"),
         })?;
     }
-    let v = capture::with_ambient_stdout(shell, |shell| evaluate(comp, mooring, shell))?;
+    let closure = crate::types::Closure { comp: Arc::clone(comp), env: env.clone() };
+    let v = capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))?;
     comp::set_status_from_value(&v, shell);
-    let env = pattern::bind_pattern(pattern, &v, schemes, shell.env.clone(), mooring, shell)?;
-    shell.env = env;
+    *env = pattern::bind_pattern(pattern, &v, schemes, env.clone(), mooring, shell)?;
     let mut names = Vec::new();
     pattern::pattern_names(pattern, &mut names);
     for name in names {
-        // `bind_pattern` just installed every one of these into
-        // `shell.env`, so the lookup cannot miss.
-        let binding = shell
-            .env
+        // `bind_pattern` just installed every one of these into `env`, so
+        // the lookup cannot miss.
+        let binding = env
             .get_binding(&name)
             .expect("bind_pattern bound every name in `pattern`")
             .clone();
@@ -231,6 +231,9 @@ fn run_phrase_define(
         }
         defined.push(name);
     }
+    if matches!(mode, Mode::Session) {
+        shell.env = env.clone();
+    }
     Ok(Value::Unit)
 }
 
@@ -238,16 +241,21 @@ fn run_phrase_define(
 /// `mode` — a session's top-level `source` defines session names, with
 /// leases; one nested inside a `use` body defines nothing.  A load refusal
 /// stops the run before any of the file's phrases do; the file's own halt
-/// (`ran.outcome`) stops it after its `Define`s are threaded (S12).
+/// (`ran.outcome`) stops it after its `Define`s are threaded (S12).  A
+/// `Session` load's own `shell.env` writes happen transitively, one per
+/// `Define` its (recursive) `run_phrases` call lands — nothing extra to
+/// write back here.
 fn run_phrase_source(
     path: &Arc<Comp>,
     span: Option<crate::source::Span>,
     mode: Mode,
+    env: &mut Env,
     mooring: &Mooring,
     shell: &mut Shell,
     defined: &mut Vec<String>,
 ) -> Settled<Value> {
-    let path_val = evaluate(path, mooring, shell)?;
+    let closure = crate::types::Closure { comp: Arc::clone(path), env: env.clone() };
+    let path_val = machine::evaluate(closure, mooring, shell)?;
     let Value::String(p) = path_val else {
         return Err(shell
             .err_hint(
@@ -257,9 +265,8 @@ fn run_phrase_source(
             )
             .into());
     };
-    let env = shell.env.clone();
-    let ran = crate::builtins::modules::source(&p, env, mode, span, mooring, shell)?;
-    shell.env = ran.env;
+    let ran = crate::builtins::modules::source(&p, env.clone(), mode, span, mooring, shell)?;
+    *env = ran.env;
     defined.extend(ran.defined);
     ran.outcome.map(|_| Value::Unit)
 }

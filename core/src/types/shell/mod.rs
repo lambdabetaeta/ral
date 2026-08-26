@@ -41,12 +41,10 @@ use super::env::EnvVars;
 use super::error::Error;
 use super::handler::HandlerStack;
 use super::mooring::{Fork, Mooring, NurseryId, SurfaceSink, TerminalAccess};
-use super::value::Value;
 use crate::diagnostic::CallSite;
 use crate::io::Io;
 use crate::process::{DurableRoot, ForegroundScope};
 use crate::source::{FileId, Source, SourceDb, Span};
-use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -363,86 +361,6 @@ impl Shell {
             .register_at(file, Source::from_text(name, text));
     }
 
-    /// Resolve the five pseudo-variables (`$ENV`, `$ARGS`, `$NPROC`, `$CWD`,
-    /// `$USER`); any other name is `None`.  `$SCRIPT` is not among them: the
-    /// elaborator bakes it to a literal from the file it compiles, so no
-    /// runtime reader exists.  These are computed, never stored in scope,
-    /// hence [`Self::lookup_value_name`] reaching them only after lexical
-    /// scope (natives included) misses.
-    pub fn pseudo_var(&self, name: &str) -> Option<Value> {
-        match name {
-            "ENV" => {
-                // The host's PWD / OLDPWD are stale the moment ral `cd`s:
-                // `context.cwd` is the live pair.  Drop them at the source.
-                let mut merged: HashMap<String, String> = std::env::vars()
-                    .filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"))
-                    .collect();
-                merged.extend(
-                    self.context
-                        .env_overrides
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone())),
-                );
-                let pairs: Vec<_> = merged
-                    .into_iter()
-                    .map(|(k, v)| (k, Value::String(v)))
-                    .collect();
-                Some(Value::map(pairs))
-            }
-            "ARGS" => Some(Value::list(
-                self.context
-                    .args
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            )),
-            "NPROC" => Some(Value::Int(std::thread::available_parallelism().map_or(
-                1,
-                |n| {
-                    #[allow(
-                        clippy::cast_possible_wrap,
-                        reason = "CPU count from available_parallelism is tiny"
-                    )]
-                    {
-                        n.get() as i64
-                    }
-                },
-            ))),
-            // A pseudo-var is total, so these two name their own placeholder for
-            // a host fact that is absent — the reader hands back no stand-in.
-            "CWD" => {
-                let p = self.cwd();
-                let home = self.context.home();
-                let cwd_str = crate::path::abbreviate_home(&p, home.as_deref());
-                let cwd_str = if cwd_str.is_empty() {
-                    "?".into()
-                } else {
-                    cwd_str
-                };
-                Some(Value::String(cwd_str))
-            }
-            "USER" => Some(Value::String(
-                crate::path::user_name(self.context.env_overrides())
-                    .unwrap_or_else(|| "?".into()),
-            )),
-            _ => None,
-        }
-    }
-
-    /// Resolve `name` at value position (`$name` and other
-    /// [`crate::ir::Val::Variable`] uses).  Binding-only: user aliases and
-    /// `within` handlers are operation handlers, not first-class values, so no
-    /// lookup here reaches the handler stack.  A value builtin is a plain env
-    /// hit — the native scope entry *is* the value — and a base frame has no
-    /// value form to find.
-    pub fn lookup_value_name(&self, name: &str) -> Option<Value> {
-        if let Some(v) = self.env.get(name) {
-            return Some(v.clone());
-        }
-        self.pseudo_var(name)
-    }
-
     /// Set `last_status` from a boolean (`true` → 0, `false` → 1).
     #[inline]
     pub fn set_status_from_bool(&mut self, ok: bool) {
@@ -503,41 +421,13 @@ impl Default for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::value::Value;
     use crate::types::Nursery;
     use std::sync::Mutex;
 
-    #[test]
-    fn pseudo_var_cwd_is_live() {
-        let shell = Shell::new(crate::io::TerminalState::default());
-        let val = shell.pseudo_var("CWD").expect("$CWD must resolve");
-        match val {
-            Value::String(s) => assert!(!s.is_empty(), "$CWD must be non-empty"),
-            other => panic!("$CWD must be a String, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pseudo_var_user_is_live() {
-        let shell = Shell::new(crate::io::TerminalState::default());
-        let val = shell.pseudo_var("USER").expect("$USER must resolve");
-        match val {
-            Value::String(s) => assert!(!s.is_empty(), "$USER must be non-empty"),
-            other => panic!("$USER must be a String, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pseudo_var_unknown_returns_none() {
-        let shell = Shell::new(crate::io::TerminalState::default());
-        assert!(shell.pseudo_var("NOSUCHVAR").is_none());
-    }
-
-    #[test]
-    fn lookup_value_name_sees_pseudo_vars() {
-        let shell = Shell::new(crate::io::TerminalState::default());
-        assert!(shell.lookup_value_name("CWD").is_some());
-        assert!(shell.lookup_value_name("USER").is_some());
-    }
+    // The five pseudo-variable reads (`$CWD`, `$USER`, …) live and are
+    // tested at `evaluator::observe`, their one reader since S8 hoisted them
+    // out of lexical-scope lookup into the `Observe` computation form.
 
     /// A `Fork::Listen` run has no pen, and says so rather than reusing the
     /// absent-host sentence: the two are different situations.

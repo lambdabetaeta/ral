@@ -213,6 +213,46 @@ fn source_leaks_bindings_into_caller_scope() {
     std::fs::remove_file(&path).ok();
 }
 
+/// `use` runs the module under the *session* environment (S7), not the
+/// caller's block scope: inside `{ let local = 1; use 'm' }`, a module
+/// reading `$local` fails with an undefined variable, while a session
+/// `Define` made before the block is visible to it either way.
+#[test]
+fn use_sees_the_session_but_not_a_blocks_local_let() {
+    let local_module = write_module("ral_use_block_local.ral", "let reads_local = $local\n");
+    let session_module = write_module("ral_use_block_session.ral", "let reads_outer = $outer_define\n");
+    let local_p = local_module.to_string_lossy().into_owned();
+    let session_p = session_module.to_string_lossy().into_owned();
+    let mut shell = fresh_shell();
+
+    let err = top_level(
+        &mut shell,
+        &format!("let outer_define = 41\n!{{ let local = 1; use '{local_p}' }}"),
+    )
+    .expect_err("a block-local `let` must not reach the module");
+    let message = match err {
+        Break::Error(e) => e.message,
+        Break::Escape(e) => panic!("expected an undefined-variable error, got an escape: {e:?}"),
+    };
+    assert!(
+        message.contains("undefined variable"),
+        "expected an undefined-variable error, got {message:?}"
+    );
+
+    let m = top_level(
+        &mut shell,
+        &format!("!{{ let local = 1; use '{session_p}' }}"),
+    )
+    .expect("a session Define made before the block reaches the module either way");
+    match m {
+        Value::Map(rec) => assert_eq!(rec.get("reads_outer"), Some(&Value::Int(41))),
+        other => panic!("expected Map, got {other:?}"),
+    }
+
+    std::fs::remove_file(&local_module).ok();
+    std::fs::remove_file(&session_module).ok();
+}
+
 // ── `RAL_PATH` fallback ─────────────────────────────────────────────────
 
 /// A fresh directory under the system temp dir, keyed on the pid.

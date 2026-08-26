@@ -2,9 +2,11 @@
 //!
 //! Both go through [`evaluate_source`] and differ only in scope and path
 //! policy: `source` runs the file in the caller's scope and yields its
-//! terminal value; `use` runs it in a fresh top scope and returns its
-//! bindings as a Map.  Nothing is cached, so the cycle and depth guards in
-//! [`evaluate_checked`] are what keep repeated loads terminating.
+//! terminal value; `use` runs it under the session environment (S7) —
+//! every `Define` of the current run already landed, none of the caller's
+//! own block-local names — and returns its bindings as a Map.  Nothing is
+//! cached, so the cycle and depth guards in [`evaluate_checked`] are what
+//! keep repeated loads terminating.
 //!
 //! Every runtime source load funnels through here: the plugin loader and
 //! [`crate::capability::load_capabilities_from_str`] call
@@ -343,11 +345,11 @@ pub(super) fn builtin_source(
     ))
 }
 
-/// `use` stays a native (§3.3, S7): it returns a map and binds nothing, so
-/// it needs only *an* environment to run the module's phrases under, isolated
-/// from the caller's — today's isolation bracket, a scope pushed and popped
-/// around the run.  The map it returns is `ran.defined` filtered by the `_`
-/// rule, each name read from `ran.env`.
+/// `use` stays a native (§3.3, S7): it returns a map and binds nothing, so it
+/// needs only *an* environment to run the module's phrases under — the
+/// session environment, `Mode::Module`, never the caller's own block-local
+/// `E`.  The map it returns is `ran.defined` filtered by the `_` rule, each
+/// name read from `ran.env`.
 pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = arg0_str(args);
     let resolved = resolve_relative_to_current_script(&path, shell);
@@ -362,7 +364,6 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     let source = read_and_normalize(abs_path.as_ref(), &abs_path, "use", shell)?;
     let top = compile_toplevel(&source, &abs_path, shell).map_err(|e| tag_loader_error("use", e))?;
 
-    let saved = shell.env.clone();
     let env = shell.env.clone();
     let load = ModuleLoad {
         top: &top,
@@ -370,8 +371,10 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         source_text: &source,
         span: None,
     };
+    // `Mode::Module` never writes `shell.env` (only `Session` does, §3.2),
+    // so the module's own top-level names die with `env` here — no save or
+    // restore needed to keep them from leaking into the caller.
     let ran = source_phrases(load, env, Mode::Module, mooring, shell);
-    shell.env = saved;
 
     let ran = ran.map_err(|e| tag_loader_error("use", e))?;
     ran.outcome
