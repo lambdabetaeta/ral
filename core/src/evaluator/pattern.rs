@@ -57,28 +57,6 @@ pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Settled<()> {
     Ok(())
 }
 
-/// Every name `pattern` binds, in pattern order — what `run_phrases`'s
-/// `Define` arm walks to report the names its RHS bound.
-pub(crate) fn pattern_names(pattern: &IrPattern, out: &mut Vec<String>) {
-    match pattern {
-        IrPattern::Wildcard => {}
-        IrPattern::Name(name) => out.push(name.clone()),
-        IrPattern::List { elems, rest } => {
-            for elem in elems {
-                pattern_names(elem, out);
-            }
-            if let Some(name) = rest {
-                out.push(name.clone());
-            }
-        }
-        IrPattern::Map(entries) => {
-            for entry in entries {
-                pattern_names(&entry.pattern, out);
-            }
-        }
-    }
-}
-
 /// Destructure `value` against `pattern`, attaching to each bound name the
 /// scheme `schemes` lists for it (empty for a scheme-less bind), and fold the
 /// result into `env`.
@@ -89,13 +67,33 @@ pub(crate) fn bind_pattern(
     pattern: &IrPattern,
     value: &Value,
     schemes: &[(String, Scheme)],
+    env: Env,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Env> {
+    bind_pattern_staged(pattern, value, schemes, env, mooring, shell, |_, _, _| {})
+}
+
+/// As [`bind_pattern`], but calls `observe` on each staged `(name, Binding)`
+/// pair just before it is folded into `env` — `run_phrase_define` uses this
+/// to feed `note_define` the binding it just staged, with no lookup back
+/// into `env` afterward.
+///
+/// # Errors
+/// The shape mismatches [`stage_pattern`] reports.
+pub(crate) fn bind_pattern_staged(
+    pattern: &IrPattern,
+    value: &Value,
+    schemes: &[(String, Scheme)],
     mut env: Env,
     mooring: &Mooring,
     shell: &mut Shell,
+    mut observe: impl FnMut(&str, &Binding, &mut Shell),
 ) -> Settled<Env> {
     let mut staged = Vec::new();
     stage_pattern(pattern, value, schemes, &env, mooring, shell, &mut staged)?;
     for (name, binding) in staged {
+        observe(&name, &binding, shell);
         env.bind(name, binding);
     }
     Ok(env)

@@ -137,22 +137,22 @@ fn run_phrase_define(
     let closure = crate::types::Closure { comp: Arc::clone(comp), env: env.clone() };
     let v = capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))?;
     machine::set_status(&v, shell);
-    *env = pattern::bind_pattern(pattern, &v, schemes, env.clone(), mooring, shell)?;
-    let mut names = Vec::new();
-    pattern::pattern_names(pattern, &mut names);
-    for name in names {
-        // `bind_pattern` just installed every one of these into `env`, so
-        // the lookup cannot miss.
-        let binding = env
-            .get_binding(&name)
-            .expect("bind_pattern bound every name in `pattern`")
-            .clone();
-        if matches!(mode, Mode::Session) {
-            shell.note_define(&name, &binding);
-        }
-        defined.push(name);
-    }
-    if matches!(mode, Mode::Session) {
+    let is_session = matches!(mode, Mode::Session);
+    *env = pattern::bind_pattern_staged(
+        pattern,
+        &v,
+        schemes,
+        env.clone(),
+        mooring,
+        shell,
+        |name, binding, shell| {
+            if is_session {
+                shell.note_define(name, binding);
+            }
+            defined.push(name.to_string());
+        },
+    )?;
+    if is_session {
         shell.env = env.clone();
     }
     Ok(Value::Unit)
