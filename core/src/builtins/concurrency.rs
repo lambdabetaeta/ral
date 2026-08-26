@@ -378,7 +378,7 @@ fn spawn_buffered(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    Ok(Value::Handle(spawn_child(
+    Ok(Value::Handle(Box::new(spawn_child(
         captured,
         mooring,
         shell,
@@ -386,7 +386,7 @@ fn spawn_buffered(
         LeaseClass::Worker,
         "<block>",
         worker_body(body),
-    )?))
+    )?)))
 }
 
 // ── watch ────────────────────────────────────────────────────────────────
@@ -426,7 +426,7 @@ fn spawn_labelled(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    Ok(Value::Handle(spawn_child(
+    Ok(Value::Handle(Box::new(spawn_child(
         captured,
         mooring,
         shell,
@@ -434,7 +434,7 @@ fn spawn_labelled(
         LeaseClass::Worker,
         "<watch>",
         worker_body(body),
-    )?))
+    )?)))
 }
 
 // ── service ──────────────────────────────────────────────────────────────
@@ -476,7 +476,7 @@ pub(super) fn builtin_service(
 ) -> Settled<Value> {
     let desc = one_line_desc(&args[0], "service")?;
     let (body, captured) = expect_thunk(&args[1], "service")?;
-    Ok(Value::Handle(spawn_child(
+    Ok(Value::Handle(Box::new(spawn_child(
         captured,
         mooring,
         shell,
@@ -484,7 +484,7 @@ pub(super) fn builtin_service(
         LeaseClass::Durable,
         &desc,
         worker_body(body),
-    )?))
+    )?)))
 }
 
 // ── detach ───────────────────────────────────────────────────────────────
@@ -927,7 +927,7 @@ mod tests {
     fn poll_reports_disconnected_worker_as_settled_err() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let handle = handle_with_disconnected_worker(b"out", b"err");
-        let args = [Value::Handle(handle)];
+        let args = [Value::Handle(Box::new(handle))];
         let poll1 = builtin_poll(&args, &mut shell).expect("poll must not re-raise a panic");
         assert_eq!(shell.last_status, 0, "poll itself succeeded");
 
@@ -1287,7 +1287,7 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
         while std::time::Instant::now() < deadline {
-            builtin_poll(&[Value::Handle(handle.clone())], &mut shell).expect("poll a live handle");
+            builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &mut shell).expect("poll a live handle");
             assert!(
                 !scope.is_cancelled(),
                 "a polled worker must never be idle-reaped"
@@ -1329,7 +1329,7 @@ mod tests {
             );
             // A poll may race the reap and see the cancelled body settle as
             // an error; only the touch matters here.
-            let _ = builtin_poll(&[Value::Handle(handle.clone())], &mut shell);
+            let _ = builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &mut shell);
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert_eq!(scope.cause(), Some(crate::process::CancelCause::Deadline));
@@ -1502,7 +1502,7 @@ mod tests {
         )
         .expect("durable spawn must succeed");
 
-        builtin_cancel(&[Value::Handle(handle.clone())], &mut shell)
+        builtin_cancel(&[Value::Handle(Box::new(handle.clone()))], &mut shell)
             .expect("cancel must succeed on a durable worker");
 
         assert!(
@@ -1850,7 +1850,7 @@ mod tests {
             cancel: crate::process::CancelScope::default(),
         };
 
-        builtin_poll(&[Value::Handle(handle.clone())], &mut shell).expect("poll ok");
+        builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &mut shell).expect("poll ok");
         assert_eq!(log.lock().unwrap().len(), 0, "poll must not replay surface");
 
         await_handle(&handle, &m, &mut shell).expect("await ok");
@@ -2173,7 +2173,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shell.local.workers.count(), 1);
-        builtin_cancel(&[Value::Handle(h2)], &mut shell).expect("cancel ok");
+        builtin_cancel(&[Value::Handle(Box::new(h2))], &mut shell).expect("cancel ok");
         assert_eq!(shell.local.workers.count(), 0, "cancel removes its entry");
 
         // A settled `poll` removes.
@@ -2189,7 +2189,7 @@ mod tests {
         )
         .unwrap();
         loop {
-            let polled = builtin_poll(&[Value::Handle(h3.clone())], &mut shell).unwrap();
+            let polled = builtin_poll(&[Value::Handle(Box::new(h3.clone()))], &mut shell).unwrap();
             if matches!(&polled, Value::Variant { label, .. } if label == "settled") {
                 break;
             }
@@ -2219,7 +2219,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shell.local.workers.count(), 1);
-        let pending = builtin_poll(&[Value::Handle(h4.clone())], &mut shell).unwrap();
+        let pending = builtin_poll(&[Value::Handle(Box::new(h4.clone()))], &mut shell).unwrap();
         assert!(
             matches!(&pending, Value::Variant { label, .. } if label == "pending"),
             "the worker is blocked, so poll must observe it pending: got {pending:?}"
@@ -2286,9 +2286,9 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 3);
 
         let args = [Value::list(vec![
-            Value::Handle(winner),
-            Value::Handle(loser1),
-            Value::Handle(loser2),
+            Value::Handle(Box::new(winner)),
+            Value::Handle(Box::new(loser1)),
+            Value::Handle(Box::new(loser2)),
         ])];
         builtin_race(&args, &m, &mut shell).expect("race must succeed");
         assert_eq!(
@@ -2505,7 +2505,7 @@ mod tests {
         shell.local.workers.sweep_retention();
         assert_eq!(shell.local.workers.snapshot()[0].settled_epoch, Some(1));
 
-        builtin_poll(&[Value::Handle(handle)], &mut shell).expect("poll ok");
+        builtin_poll(&[Value::Handle(Box::new(handle))], &mut shell).expect("poll ok");
         assert_eq!(
             shell.local.workers.count(),
             0,
@@ -2616,7 +2616,7 @@ mod tests {
             "a refused birth registers nothing"
         );
 
-        builtin_cancel(&[Value::Handle(handles[0].clone())], &mut shell).expect("cancel ok");
+        builtin_cancel(&[Value::Handle(Box::new(handles[0].clone()))], &mut shell).expect("cancel ok");
         spawn_child(
             Arc::new(shell.env.clone()),
             &m,

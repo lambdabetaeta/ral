@@ -954,7 +954,7 @@ mod tests {
         let env = session.seat.shell_mut().shell.env().clone();
         cancel_fn
             .run(
-                &[Value::Handle(entry.handle)],
+                &[Value::Handle(Box::new(entry.handle))],
                 &env,
                 &ral_core::types::Mooring::adrift(),
                 &mut session.seat.shell_mut().shell,

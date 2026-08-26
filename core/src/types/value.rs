@@ -46,7 +46,10 @@ pub enum Value {
         applied: Vec<Self>,
     },
     /// A computation spawned onto a worker thread, not a subprocess.
-    Handle(HandleInner),
+    /// Boxed: `HandleInner`'s eight `Arc` fields would otherwise be the
+    /// largest variant, inflating every `Value` move (`Focus`'s hot path
+    /// included) to its size.
+    Handle(Box<HandleInner>),
 }
 
 impl Value {

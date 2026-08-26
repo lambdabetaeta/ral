@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn wire_observation_scrubs_a_handle_instead_of_dying() {
         use std::sync::Mutex;
-        let handle = Value::Handle(crate::types::HandleInner {
+        let handle = Value::Handle(Box::new(crate::types::HandleInner {
             result: Arc::new(Mutex::new(None)),
             cached: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(crate::types::HandleState::Running)),
@@ -717,7 +717,7 @@ mod tests {
             last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "<test>".into(),
             cancel: crate::process::CancelScope::default(),
-        });
+        }));
         let obs = Observation::instant(
             crate::types::CallSite {
                 script: "<test>".into(),
@@ -821,7 +821,7 @@ mod tests {
         // A `Handle` fails the gate before the response is built, and reads
         // as a boundary error rather than a transport fault.
         use std::sync::Mutex;
-        let handle = Value::Handle(crate::types::HandleInner {
+        let handle = Value::Handle(Box::new(crate::types::HandleInner {
             result: Arc::new(Mutex::new(None)),
             cached: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(crate::types::HandleState::Completed)),
@@ -832,7 +832,7 @@ mod tests {
             last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "dummy".into(),
             cancel: crate::process::CancelScope::default(),
-        });
+        }));
         let mut ctx = InternCtx::new();
         let err =
             transfer_error(&SerialValue::from_runtime(&handle, &mut ctx).expect_err("must fail"));
@@ -904,7 +904,7 @@ mod tests {
         parent.set_var("kept".to_string(), Value::Int(7));
         parent.set_var(
             "live".to_string(),
-            Value::Handle(crate::types::HandleInner {
+            Value::Handle(Box::new(crate::types::HandleInner {
                 result: Arc::new(Mutex::new(None)),
                 cached: Arc::new(Mutex::new(None)),
                 state: Arc::new(Mutex::new(crate::types::HandleState::Running)),
@@ -915,7 +915,7 @@ mod tests {
                 last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
                 cmd: "<test>".into(),
                 cancel: crate::process::CancelScope::default(),
-            }),
+            })),
         );
 
         let nursery = Nursery::default();

@@ -651,7 +651,7 @@ mod tests {
     fn dummy_handle() -> Value {
         use crate::types::{HandleInner, HandleState};
         use std::sync::{Arc, Mutex};
-        Value::Handle(HandleInner {
+        Value::Handle(Box::new(HandleInner {
             result: Arc::new(Mutex::new(None)),
             cached: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(HandleState::Running)),
@@ -662,7 +662,7 @@ mod tests {
             last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
             cmd: "<test>".into(),
             cancel: crate::process::CancelScope::default(),
-        })
+        }))
     }
 
     /// A `Handle` reachable through `value` projects to its `opaque`

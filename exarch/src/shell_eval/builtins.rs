@@ -1024,7 +1024,7 @@ fn builtin_service_handle(args: &[Value], _mooring: &Mooring, shell: &mut Shell)
     };
     match shell.worker_by_id(id) {
         Some(entry) if entry.class == ral_core::types::LeaseClass::Durable => {
-            Ok(Value::Handle(entry.handle))
+            Ok(Value::Handle(Box::new(entry.handle)))
         }
         _ => Err(sig(format!(
             "service-handle: no durable service registered with id {} — an ephemeral \
