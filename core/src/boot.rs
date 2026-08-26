@@ -11,7 +11,7 @@
 //! binary takes [`BakedPrelude::bake_runtime`] instead.
 
 use crate::io::TerminalState;
-use crate::ir::Toplevel;
+use crate::ir::{CompKind, Phrase, Toplevel};
 use crate::typecheck::Scheme;
 use crate::types::{BuiltinEntry, BuiltinTable, Shell};
 use std::sync::{Arc, OnceLock};
@@ -72,10 +72,67 @@ impl BakedPrelude {
         let top = crate::elaborate(&ast, std::collections::HashSet::default(), "")
             .expect("prelude elaborate");
         let (annotated, schemes) = crate::bake_prelude(&top);
+        validate_prelude_shape(&annotated);
         let this = Self::from_blobs(&[], &[]);
         let _ = this.comp.set(Arc::new(annotated));
         let _ = this.schemes.set(schemes);
         this
+    }
+}
+
+/// Reject a prelude phrase that is not a `Define` of `Return(V)` — a literal
+/// or a thunk — naming the bound name(s) (§6.2).
+///
+/// The wire ships the prelude tier by name alone, never by value: a
+/// pipeline-stage helper re-derives it by running the same prelude source
+/// under its own process.  A `Define` whose right-hand side is anything but
+/// `Return` — an `if`, a call, a store read — could close over *this*
+/// process's facts (its stdout, its args, its clock) and so differ from the
+/// helper's own bake, silently.  `Return(V)` cannot: closing a literal or a
+/// thunk reads nothing about the process it runs in.
+///
+/// # Panics
+/// If any phrase fails the shape check.
+fn validate_prelude_shape(top: &Toplevel) {
+    for phrase in &top.phrases {
+        let Phrase::Define { comp, schemes, .. } = &phrase.item else {
+            panic!(
+                "prelude phrase must be a `Define`, found {}",
+                describe_phrase(&phrase.item)
+            );
+        };
+        if !matches!(comp.item, CompKind::Return(_)) {
+            let names: Vec<&str> = schemes.iter().map(|(n, _)| n.as_str()).collect();
+            panic!(
+                "prelude binding `{}` is computed at boot ({}), so it could differ between \
+                 processes; bind a value or a thunk",
+                names.join(", "),
+                describe_comp(&comp.item),
+            );
+        }
+    }
+}
+
+/// A phrase's shape, named for [`validate_prelude_shape`]'s message.
+fn describe_phrase(phrase: &Phrase) -> &'static str {
+    match phrase {
+        Phrase::Define { .. } => "a `Define`",
+        Phrase::Source { .. } => "a `source`",
+        Phrase::Run(_) => "a bare statement",
+    }
+}
+
+/// A computation's shape, named for [`validate_prelude_shape`]'s message.
+fn describe_comp(kind: &CompKind) -> &'static str {
+    match kind {
+        CompKind::If { .. } => "`if …`",
+        CompKind::Case { .. } => "`case …`",
+        CompKind::Observe(_) => "a store read",
+        CompKind::App { .. } => "a call",
+        CompKind::Exec(_) => "a command",
+        CompKind::Bind { .. } => "`to`",
+        CompKind::Force(_) => "`force`",
+        _ => "a computation",
     }
 }
 
@@ -207,6 +264,7 @@ pub fn bake_prelude_to_out_dir() {
         });
 
     let (annotated, schemes) = crate::bake_prelude(&top);
+    validate_prelude_shape(&annotated);
     let ir_bytes = postcard::to_allocvec(&annotated).expect("prelude IR serialization failed");
     let scheme_bytes =
         postcard::to_allocvec(&schemes).expect("prelude schemes serialization failed");
@@ -216,4 +274,33 @@ pub fn bake_prelude_to_out_dir() {
         .expect("failed to write prelude_baked.bin");
     std::fs::write(out.join("prelude_schemes.bin"), scheme_bytes)
         .expect("failed to write prelude_schemes.bin");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_prelude_shape;
+
+    /// A prelude phrase whose RHS is computed at boot — an `if`, here — fails
+    /// the bake, naming the bound name.
+    #[test]
+    #[should_panic(expected = "prelude binding `x` is computed at boot")]
+    fn non_return_prelude_binding_fails_the_bake() {
+        let ast = crate::parse("let x = if !{_ansi-ok} { return 1 } else { return 2 }")
+            .expect("parse");
+        let top = crate::elaborate(&ast, std::collections::HashSet::default(), "")
+            .expect("elaborate");
+        let (annotated, _schemes) = crate::bake_prelude(&top);
+        validate_prelude_shape(&annotated);
+    }
+
+    /// A prelude phrase whose RHS is `Return(V)` — a literal or a thunk —
+    /// passes the bake.
+    #[test]
+    fn return_prelude_binding_passes_the_bake() {
+        let ast = crate::parse("let x = 1\nlet f = { |y| return $y }").expect("parse");
+        let top = crate::elaborate(&ast, std::collections::HashSet::default(), "")
+            .expect("elaborate");
+        let (annotated, _schemes) = crate::bake_prelude(&top);
+        validate_prelude_shape(&annotated);
+    }
 }

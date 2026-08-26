@@ -18,7 +18,7 @@ use crate::types::{
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 mod codecs;
 mod collections;
@@ -475,22 +475,28 @@ static DETACH_BUILTIN_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
 #[cfg(unix)]
 pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 
-/// Clone the prelude's top-level bindings into `shell`'s environment.
+/// Run the prelude once per process and seat its bindings as `shell`'s
+/// prelude tier.
 ///
-/// The prelude — a ral script baked into the binary — is evaluated once per
-/// process; every later shell gets a copy of what that run left behind.
+/// The prelude — a ral script baked into the binary — is evaluated once
+/// under `shell`'s own natives; every phrase is a `Define` of `Return(V)`
+/// (§6.2, `bake_prelude`), so the run is a fold of closing values, and the
+/// resulting session tier, frozen, is the one map every shell in this
+/// process starts from.
 pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
-    static PRELUDE_BINDINGS: OnceLock<HashMap<String, Binding>> = OnceLock::new();
+    static PRELUDE: OnceLock<Arc<HashMap<String, Binding>>> = OnceLock::new();
 
-    let bindings = PRELUDE_BINDINGS.get_or_init(|| {
-        let mut prelude_env = Shell::new(crate::io::TerminalState::default());
+    let natives = shell.mobile.scope.natives_arc();
+    let prelude = PRELUDE.get_or_init(|| {
+        let mut prelude_shell = Shell::new(crate::io::TerminalState::default());
+        let env = crate::types::Env::with_natives(prelude_shell.mobile.scope.natives_arc());
 
         let ran = crate::evaluator::run_phrases(
             &prelude_top.phrases,
-            prelude_env.mobile.scope.clone(),
+            env,
             crate::evaluator::Mode::Prelude,
             &Mooring::adrift(),
-            &mut prelude_env,
+            &mut prelude_shell,
         );
         if let Err(e) = ran.outcome {
             let msg = match &e {
@@ -503,19 +509,22 @@ pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
             };
             diagnostic::cmd_error("prelude", &msg);
         }
-        prelude_env.mobile.scope.top_scope().clone()
+        Arc::new(
+            ran.env
+                .session_names()
+                .map(|name| {
+                    let binding = ran
+                        .env
+                        .session_binding(name)
+                        .expect("every name session_names lists has a session binding")
+                        .clone();
+                    (name.to_string(), binding)
+                })
+                .collect(),
+        )
     });
 
-    for (name, binding) in bindings {
-        shell
-            .mobile
-            .scope
-            .set_binding(name.clone(), binding.clone());
-    }
-
-    // Keep the prelude alone in scopes[0], so a lookup can tell a prelude
-    // binding from a user one.
-    shell.mobile.scope.push_scope();
+    shell.mobile.scope = crate::types::Env::with_prelude(natives, Arc::clone(prelude));
 }
 
 pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
