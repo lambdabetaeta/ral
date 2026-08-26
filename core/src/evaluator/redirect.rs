@@ -63,7 +63,7 @@ where
 
 /// What the body's result means for the writes this frame staged.
 #[derive(Clone, Copy)]
-enum WriteFate {
+pub(crate) enum WriteFate {
     /// The body settled: rename each temp onto its target.
     Commit,
     /// The body broke: leave every target exactly as it was.
@@ -91,11 +91,12 @@ struct WriteIntent {
     commit: Option<command::PendingWrite>,
 }
 
-/// The installed redirect state, undone by `tear_down` — explicitly on
-/// the normal path, from `Drop` when the body unwinds.
-struct RedirectFrame<'a> {
-    mooring: &'a Mooring,
-    shell: &'a mut Shell,
+/// The installed redirect state, owned — no borrow of `Shell` or
+/// `Mooring` survives `enter`. Undone by `tear_down`, called explicitly:
+/// on the normal path by every caller below, on a panic by `abandon`
+/// (the machine's unwind walk calls it once W2f lands; the transitional
+/// wrappers here call it themselves via `catch_unwind`).
+pub(crate) struct RedirectState {
     stdin_guard: Option<command::StdinRedirectGuard>,
     fd_guard: Option<command::RedirectGuard>,
     prev_stdout: Option<Sink>,
@@ -111,11 +112,6 @@ struct SinkRedirects {
     prev_stderr: Option<Sink>,
 }
 
-fn clone_redirect_sink(sink: &Sink, context: &str) -> Raw<Sink> {
-    sink.try_clone()
-        .map_err(|e| Break::Error(Error::new(format!("{context}: {e}"), 1)).into())
-}
-
 /// Opens one fd-1/2 write target. The intent is recorded *before* the
 /// open, so a failure still surfaces a `failed` write for that path.
 fn open_redirect_sink(
@@ -123,7 +119,7 @@ fn open_redirect_sink(
     mode: RedirectMode,
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
-) -> Raw<Sink> {
+) -> Settled<Sink> {
     intents.push(WriteIntent {
         path: path.to_string(),
         mode,
@@ -131,16 +127,16 @@ fn open_redirect_sink(
     });
     let (file, commit) = command::open_file(path, mode, shell)?;
     intents.last_mut().expect("intent pushed above").commit = commit;
-    Ok(Sink::File(file))
+    Ok(Sink::File(std::sync::Arc::new(file)))
 }
 
 fn install_sink_redirects(
     redirects: &[EvalRedirectV],
     shell: &mut Shell,
     intents: &mut Vec<WriteIntent>,
-) -> Raw<SinkRedirects> {
-    let mut stdout = clone_redirect_sink(&shell.io.stdout, "redirect: duplicate stdout")?;
-    let mut stderr = clone_redirect_sink(&shell.io.stderr, "redirect: duplicate stderr")?;
+) -> Settled<SinkRedirects> {
+    let mut stdout = shell.io.stdout.clone();
+    let mut stderr = shell.io.stderr.clone();
     let mut stdout_changed = false;
     let mut stderr_changed = false;
     let mut unhandled = Vec::new();
@@ -159,16 +155,16 @@ fn install_sink_redirects(
                 stderr_changed = true;
             }
             (1, EvalRedirect::Fd(1)) => {
-                stdout = clone_redirect_sink(&stdout, "redirect: duplicate stdout")?;
+                stdout = stdout.clone();
                 stdout_changed = true;
             }
             // Only 2→1: `1>&2` is not in the surface, so nothing can build it.
             (2, EvalRedirect::Fd(1)) => {
-                stderr = clone_redirect_sink(&stdout, "redirect: duplicate stdout as stderr")?;
+                stderr = stdout.clone();
                 stderr_changed = true;
             }
             (2, EvalRedirect::Fd(2)) => {
-                stderr = clone_redirect_sink(&stderr, "redirect: duplicate stderr")?;
+                stderr = stderr.clone();
                 stderr_changed = true;
             }
             (1 | 2, EvalRedirect::Fd(other)) => {
@@ -178,8 +174,7 @@ fn install_sink_redirects(
                          inside an in-process ral frame"
                     ),
                     1,
-                ))
-                .into());
+                )));
             }
             _ => unhandled.push(EvalRedirectV {
                 fd: *fd,
@@ -192,10 +187,8 @@ fn install_sink_redirects(
     // A redirect changes where bytes go, not which conduit they are on, so the
     // ambient sink follows stdout: under `!{ … } > f`, a discarded statement's
     // bytes belong in the file, which is now the visible stream.
-    let prev_ambient = stdout_changed
-        .then(|| clone_redirect_sink(&stdout, "redirect ambient"))
-        .transpose()?
-        .map(|amb| std::mem::replace(&mut shell.io.ambient, amb));
+    let prev_ambient =
+        stdout_changed.then(|| std::mem::replace(&mut shell.io.ambient, stdout.clone()));
     let prev_stdout = stdout_changed.then(|| std::mem::replace(&mut shell.io.stdout, stdout));
     let prev_stderr = stderr_changed.then(|| std::mem::replace(&mut shell.io.stderr, stderr));
 
@@ -225,10 +218,14 @@ fn emit_writes_failed(shell: &mut Shell, mooring: &Mooring, intents: Vec<WriteIn
     }
 }
 
-impl<'a> RedirectFrame<'a> {
-    fn enter(redirects: &[EvalRedirectV], mooring: &'a Mooring, shell: &'a mut Shell) -> Raw<Self> {
+impl RedirectState {
+    pub(crate) fn enter(
+        redirects: &[EvalRedirectV],
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Self> {
         // The stdin guard restores only when told to, and nothing owns it
-        // until the frame exists, so the error arms below undo it by hand.
+        // until the state exists, so the error arms below undo it by hand.
         let stdin_guard = command::install_stdin_redirect(redirects, mooring, shell)?;
         let mut write_intents = Vec::new();
         let sink_redirects = match install_sink_redirects(redirects, shell, &mut write_intents) {
@@ -253,12 +250,10 @@ impl<'a> RedirectFrame<'a> {
                     shell.io.stderr = s;
                 }
                 stdin_guard.restore(shell);
-                return Err(e.into());
+                return Err(e);
             }
         };
         Ok(Self {
-            mooring,
-            shell,
             stdin_guard: Some(stdin_guard),
             fd_guard: Some(fd_guard),
             prev_stdout: sink_redirects.prev_stdout,
@@ -273,7 +268,12 @@ impl<'a> RedirectFrame<'a> {
     /// returns the first commit failure. A failed body abandons every
     /// intent's temp; a stopped one hands the staged writes back for the
     /// caller to put on the escape.
-    fn settle_writes(&mut self, fate: WriteFate) -> Settled<Vec<command::PendingWrite>> {
+    pub(crate) fn settle_writes(
+        &mut self,
+        fate: WriteFate,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Vec<command::PendingWrite>> {
         let mut commit_err: Settled<()> = Ok(());
         let mut unfinished = Vec::new();
         for intent in std::mem::take(&mut self.write_intents) {
@@ -314,8 +314,8 @@ impl<'a> RedirectFrame<'a> {
                 }
             }
             observe(
-                self.shell,
-                self.mooring,
+                shell,
+                mooring,
                 Observed::Write {
                     path: intent.path,
                     mode: intent.mode,
@@ -329,24 +329,25 @@ impl<'a> RedirectFrame<'a> {
     }
 
     /// Flushes, restores the sinks and stdin, and hands back the pending
-    /// atomic commits; dropping `fd_guard` runs the kernel-level fd
-    /// restore. Idempotent — `Drop` re-runs it over emptied slots.
-    fn tear_down(&mut self) -> Vec<command::PendingWrite> {
+    /// atomic commits; the caller's `fd_guard` drop, taken here, runs the
+    /// kernel-level fd restore. Idempotent: a second call sees only
+    /// emptied slots.
+    pub(crate) fn tear_down(&mut self, shell: &mut Shell) -> Vec<command::PendingWrite> {
         use std::io::Write;
         // Flush before swapping the sinks back, or buffered bytes land at
         // the parent. The libc flushes catch the fd-level redirect arms.
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
-        let _ = self.shell.io.stdout.flush();
-        let _ = self.shell.io.stderr.flush();
+        let _ = shell.io.stdout.flush();
+        let _ = shell.io.stderr.flush();
         if let Some(s) = self.prev_stdout.take() {
-            self.shell.io.stdout = s;
+            shell.io.stdout = s;
         }
         if let Some(s) = self.prev_ambient.take() {
-            self.shell.io.ambient = s;
+            shell.io.ambient = s;
         }
         if let Some(s) = self.prev_stderr.take() {
-            self.shell.io.stderr = s;
+            shell.io.stderr = s;
         }
         let commits = self
             .fd_guard
@@ -354,17 +355,16 @@ impl<'a> RedirectFrame<'a> {
             .map(command::restore_redirects)
             .unwrap_or_default();
         if let Some(g) = self.stdin_guard.take() {
-            g.restore(self.shell);
+            g.restore(shell);
         }
         commits
     }
-}
 
-impl Drop for RedirectFrame<'_> {
-    fn drop(&mut self) {
-        // Dropping the commits removes their staging files, so an unwind
-        // never leaves a half-written file at the target.
-        let _ = self.tear_down();
+    /// The panic path: undo fds and sinks, and drop the commits `tear_down`
+    /// hands back — which unlinks their staging files. No write is
+    /// observed: a panic never reaches an audit trail.
+    pub(crate) fn abandon(mut self, shell: &mut Shell) {
+        let _ = self.tear_down(shell);
     }
 }
 
@@ -380,6 +380,10 @@ impl Drop for RedirectFrame<'_> {
 /// on `shell.io.stdin` by `install_stdin_redirect` — so the cached
 /// `startup_stdin_tty` is consulted only when stdin really is the
 /// inherited terminal.
+///
+/// Transitional wrapper over `RedirectState`: it owns the panic-safety
+/// that the machine's own unwind walk will own once W2f lands, via
+/// `catch_unwind` rather than a `Drop` impl on the state itself.
 pub(crate) fn with_redirects<F>(
     redirects: &[EvalRedirectV],
     mooring: &Mooring,
@@ -392,22 +396,28 @@ where
     if redirects.is_empty() {
         return body(shell);
     }
-    let mut frame = RedirectFrame::enter(redirects, mooring, shell)?;
-    let result = body(frame.shell);
+    let mut state = RedirectState::enter(redirects, mooring, shell).map_err(Control::Break)?;
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shell))) {
+        Ok(result) => result,
+        Err(payload) => {
+            state.abandon(shell);
+            std::panic::resume_unwind(payload);
+        }
+    };
     let fate = WriteFate::of(&result);
     // Restore before either the commits fire or the error propagates, so
     // both paths get a clean shell to write through.
-    let commits = frame.tear_down();
-    let settled = frame.settle_writes(fate);
-    drop(frame);
+    let commits = state.tear_down(shell);
+    let settled = state.settle_writes(fate, mooring, shell);
     match result {
         Ok(v) => {
-            settled?;
-            command::commit_atomics(commits)?;
+            settled.map_err(Control::Break)?;
+            command::commit_atomics(commits).map_err(Control::Break)?;
             Ok(v)
         }
         // A stop takes every staged write with it, fd-level and sink-level
-        // alike; any other break leaves them to the `Drop` that unlinks.
+        // alike; any other break leaves them to fall out of scope, which is
+        // how a `PendingWrite` without a destructor abandons a temp.
         Err(Control::Break(brk)) => {
             let unfinished = settled.unwrap_or_default();
             Err(Control::Break(command::defer_to_stop(

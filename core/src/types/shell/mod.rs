@@ -452,6 +452,17 @@ impl Shell {
         Self::write_sink(&mut self.io.stdout, bytes)
     }
 
+    /// Write `bytes` to the ambient sink — the visible stream a discarded
+    /// statement's or a Capture's overflowed prefix reaches for directly,
+    /// bypassing whatever `stdout` currently is.
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying write fails with anything other than
+    /// `BrokenPipe`, which is a clean shutdown rather than a fault.
+    pub fn write_ambient(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        Self::write_sink(&mut self.io.ambient, bytes)
+    }
+
     /// Write `bytes` to the current stderr sink — where `warn` and the shell's
     /// own diagnostics land, and what `2> f` rebinds.
     ///

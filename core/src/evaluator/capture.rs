@@ -60,15 +60,18 @@ where
 /// whose value is discarded: `echo b` in `{ echo b ; echo c }` writes where it
 /// is seen, at the moment it writes.
 ///
-/// # Errors
-/// Returns `Err` if the ambient sink's file descriptor cannot be duplicated.
-pub(crate) fn with_ambient_stdout<R, F>(shell: &mut Shell, f: F) -> std::io::Result<R>
+/// A thin bracket over [`crate::io::Io::to_ambient`]: the swap it performs is
+/// the primitive; this restores it on the way out, panic included.
+pub(crate) fn with_ambient_stdout<R, F>(shell: &mut Shell, f: F) -> R
 where
     F: FnOnce(&mut Shell) -> R,
 {
-    let ambient = shell.io.ambient.try_clone()?;
-    let scope = StdoutScope::enter(shell, ambient);
-    Ok(f(scope.shell))
+    let saved = shell.io.to_ambient();
+    let scope = StdoutScope {
+        shell,
+        saved: Some(saved),
+    };
+    f(scope.shell)
 }
 
 /// Restores all three sinks on `Drop`, panic included.
@@ -118,9 +121,6 @@ impl Drop for AuditCaptureScope<'_> {
 /// standalone external; direct-spawn pipeline stages never reach here, since
 /// their stdout is a kernel pipe to the next stage and `pipeline::collect`
 /// synthesises their node with no bytes.
-///
-/// A failed [`Sink::try_clone`] returns `Err` rather than falling back to the
-/// terminal, so a command under a redirect is never silently rerouted.
 pub(crate) fn with_audit_capture<R, F>(
     shell: &mut Shell,
     f: F,
@@ -131,9 +131,9 @@ where
     if !shell.local.audit.captures_bytes() {
         return Ok((f(shell), Vec::new(), Vec::new()));
     }
-    let out_base = shell.io.stdout.try_clone()?;
-    let amb_base = shell.io.ambient.try_clone()?;
-    let err_base = shell.io.stderr.try_clone()?;
+    let out_base = shell.io.stdout.clone();
+    let amb_base = shell.io.ambient.clone();
+    let err_base = shell.io.stderr.clone();
     let (out_sink, out_buf) = tee_with_buffer(out_base);
     let amb_sink = tee_into(amb_base, &out_buf);
     let (err_sink, err_buf) = tee_with_buffer(err_base);

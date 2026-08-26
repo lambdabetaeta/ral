@@ -22,8 +22,6 @@ pub use terminal::{
     console_mode_snapshot, enable_virtual_terminal_processing, restore_console_mode,
 };
 
-use std::io;
-
 /// Process-group role of a shell context: top-level orchestrator, or
 /// pipeline-local child.
 ///
@@ -68,35 +66,14 @@ pub struct Io {
 }
 
 impl Io {
-    /// Duplicate this bundle, dup'ing each sink's file descriptor.
-    ///
-    /// `stdin` is not propagated: it is read-once, so the caller installs the
-    /// new bundle's source itself.
-    ///
-    /// # Errors
-    /// Returns `Err` if any sink's file descriptor cannot be duplicated.
-    pub fn try_clone(&self) -> io::Result<Self> {
-        Ok(Self {
-            stdin: Source::Terminal,
-            stdout: self.stdout.try_clone()?,
-            ambient: self.ambient.try_clone()?,
-            stderr: self.stderr.try_clone()?,
-            interactive: self.interactive,
-            terminal: self.terminal,
-            launch_role: self.launch_role,
-        })
-    }
-
     /// Install `parent`'s IO into a cross-process pipeline-stage child — via
     /// `Shell::child_of`, over the throwaway parent `child_eval` rebuilds in the
-    /// helper process.  Sinks are `try_clone`d; stdin is *moved*, since only one
-    /// of the two may consume a read-once source.  A failed `try_clone`
-    /// collapses to the terminal sink, which routes to the inherited fd 1 the
-    /// child shares with that parent anyway.
+    /// helper process.  Sinks are cloned; stdin is *moved*, since only one of
+    /// the two may consume a read-once source.
     pub fn inherit_from(&mut self, parent: &mut Self) {
-        self.stdout = parent.stdout.try_clone().unwrap_or(Sink::Terminal);
-        self.ambient = parent.ambient.try_clone().unwrap_or(Sink::Terminal);
-        self.stderr = parent.stderr.try_clone().unwrap_or(Sink::Stderr);
+        self.stdout = parent.stdout.clone();
+        self.ambient = parent.ambient.clone();
+        self.stderr = parent.stderr.clone();
         self.terminal = parent.terminal;
         self.interactive = parent.interactive;
         self.launch_role = parent.launch_role;
@@ -109,6 +86,15 @@ impl Io {
     /// the unconsumed pipe.
     pub fn return_to(&mut self, parent: &mut Self) {
         parent.stdin = std::mem::replace(&mut self.stdin, Source::Terminal);
+    }
+
+    /// Swap `stdout` for the ambient sink, returning what `stdout` was.
+    /// `with_ambient_stdout` is a bracket over this; the `Bind` rule of a
+    /// binder's RHS is the other caller — the RHS's bytes are effect, so
+    /// they go where a discarded statement's do, and the frame that pushed
+    /// this swap restores it from the value handed back.
+    pub(crate) fn to_ambient(&mut self) -> Sink {
+        std::mem::replace(&mut self.stdout, self.ambient.clone())
     }
 }
 

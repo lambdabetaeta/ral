@@ -75,7 +75,7 @@ impl ChildStdioPlan {
     fn for_sink(sink: &Sink) -> io::Result<Self> {
         Ok(Self {
             stdio: crate::process::StdioSpec::piped(),
-            pump: Some(sink.try_clone()?),
+            pump: Some(sink.clone()),
         })
     }
 }
@@ -87,8 +87,11 @@ pub enum Sink {
     Terminal,
     /// The inherited fd 2, and the default `Io::stderr`.
     Stderr,
-    /// Redirect target, opened by `evaluator::redirect`.
-    File(std::fs::File),
+    /// Redirect target, opened by `evaluator::redirect`. `Arc` so a nested
+    /// `to_ambient` under a redirect clones the sink rather than `dup`ing
+    /// the fd — a `dup` shares the file offset anyway, so nothing about
+    /// where bytes land changes.
+    File(Arc<std::fs::File>),
     /// In-memory capture, as under `let x = cmd` or a spawned handle.
     Buffer(ByteBuffer),
     /// Both branches in order; a failure on the first skips the second.
@@ -174,28 +177,26 @@ impl Sink {
         })
     }
 
-    /// Duplicate this sink, sharing the same ultimate destination.
-    ///
-    /// # Errors
-    /// Returns `Err` if duplicating an underlying file descriptor fails.
-    pub fn try_clone(&self) -> io::Result<Self> {
+}
+
+impl Clone for Sink {
+    /// Share the same ultimate destination — cheap and infallible, since
+    /// every variant's handle is itself shared (`Arc`) or trivially copied.
+    fn clone(&self) -> Self {
         match self {
-            Self::Terminal => Ok(Self::Terminal),
-            Self::Stderr => Ok(Self::Stderr),
-            Self::File(f) => Ok(Self::File(f.try_clone()?)),
-            Self::Buffer(b) => Ok(Self::Buffer(b.clone())),
-            Self::Tee(a, b) => Ok(Self::Tee(
-                Box::new(a.try_clone()?),
-                Box::new(b.try_clone()?),
-            )),
-            Self::External(w) => Ok(Self::External(w.clone())),
-            Self::LineFramed { inner, prefix, .. } => Ok(Self::LineFramed {
-                inner: Box::new(inner.try_clone()?),
+            Self::Terminal => Self::Terminal,
+            Self::Stderr => Self::Stderr,
+            Self::File(f) => Self::File(f.clone()),
+            Self::Buffer(b) => Self::Buffer(b.clone()),
+            Self::Tee(a, b) => Self::Tee(Box::new((**a).clone()), Box::new((**b).clone())),
+            Self::External(w) => Self::External(w.clone()),
+            Self::LineFramed { inner, prefix, .. } => Self::LineFramed {
+                inner: Box::new((**inner).clone()),
                 prefix: prefix.clone(),
                 // Each clone carries its own partial line: sharing `pending`
                 // would let two threads interleave halves of one.
                 pending: Vec::new(),
-            }),
+            },
         }
     }
 }
@@ -308,7 +309,7 @@ impl Write for Sink {
         match self {
             Self::Terminal => io::stdout().write_all(bytes),
             Self::Stderr => io::stderr().write_all(bytes),
-            Self::File(f) => f.write_all(bytes),
+            Self::File(f) => (&**f).write_all(bytes),
             Self::Buffer(b) => {
                 write_capped(b, bytes);
                 Ok(())
@@ -345,7 +346,7 @@ impl Write for Sink {
         match self {
             Self::Terminal => io::stdout().flush(),
             Self::Stderr => io::stderr().flush(),
-            Self::File(f) => f.flush(),
+            Self::File(f) => (&**f).flush(),
             Self::Tee(a, b) => {
                 a.flush()?;
                 b.flush()
