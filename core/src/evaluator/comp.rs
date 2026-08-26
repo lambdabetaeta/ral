@@ -205,7 +205,8 @@ pub(crate) fn step_force(val: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw
         // An arity-0 native is a thunk, run like a `Block`; any other native
         // returns unchanged, like a `Lambda`.
         Value::Native { entry, applied } if entry.fixed_arity() == 0 => {
-            super::audit::run_native(&entry, &applied, mooring, shell)?
+            let env = shell.mobile.scope.clone();
+            super::audit::run_native(&entry, &applied, &env, mooring, shell).map_err(Control::from)?
         }
         native @ Value::Native { .. } => native,
         other => {
@@ -266,7 +267,6 @@ fn eval_capture(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<V
         super::capture::with_capture(shell, |shell| eval_comp(body, mooring, shell, Tail::No));
     if (result.is_err() || overflowed) && !bytes.is_empty() {
         super::capture::with_ambient_stdout(shell, |shell| shell.write_stdout(&bytes))
-            .and_then(std::convert::identity)
             .map_err(|e| shell.err(format!("capture flush: {e}"), 1))?;
     }
     // Type-ensured, not merely expected: every operation that grounds a route
@@ -356,8 +356,7 @@ fn eval_bind(
     crate::process::check(mooring)?;
     let step = super::capture::with_ambient_stdout(shell, |shell| {
         eval_comp(m, mooring, shell, Tail::No)
-    })
-    .map_err(|e| shell.err(format!("statement sink: {e}"), 1))?;
+    });
     let val = step.map_err(note_abandoned_steps)?;
     set_status_from_value(&val, shell);
     let env = pattern::bind_pattern(pattern, &val, &[], shell.mobile.scope.clone(), mooring, shell)?;

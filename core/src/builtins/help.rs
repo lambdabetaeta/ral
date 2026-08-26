@@ -7,7 +7,7 @@ use crate::ir::CommandName;
 use crate::prelude_manifest::PRELUDE_DOCS;
 use crate::runtime::command::CommandIdentity;
 use crate::typecheck::{builtin_type_hint, fmt_scheme};
-use crate::types::{Binding, HandlerLookup, Shell, Value};
+use crate::types::{Binding, Env, HandlerLookup, Shell, Value};
 use std::fmt::{self, Write};
 use std::path::PathBuf;
 
@@ -157,7 +157,7 @@ fn fmt_line(
     )
 }
 
-pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
+pub(super) fn builtin_help(_args: &[Value], _env: &Env, shell: &mut Shell) -> Value {
     let colors = Colors::current();
     let Colors {
         bold, dim, reset, ..
@@ -181,9 +181,9 @@ pub(super) fn builtin_help(_args: &[Value], shell: &mut Shell) -> Value {
     Value::Unit
 }
 
-pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
+pub(super) fn builtin_explain(args: &[Value], env: &Env, shell: &mut Shell) -> Value {
     let out = match args.first() {
-        Some(arg) => explanation(&arg.to_string(), shell, Colors::current()),
+        Some(arg) => explanation(&arg.to_string(), env, shell, Colors::current()),
         None => "explain: expected a name, e.g. `explain map`\n".to_string(),
     };
     let _ = shell.write_stdout(out.as_bytes());
@@ -195,9 +195,9 @@ pub(super) fn builtin_explain(args: &[Value], shell: &mut Shell) -> Value {
 /// and no registry documents falls to a search of the whole index; everything
 /// else prints the one entry block, an em dash standing in for whichever of
 /// the doc and the type no registry holds.
-fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
-    let sites = locate_all(name, shell);
-    let (doc, ty) = documented(name, sites.first(), shell);
+fn explanation(name: &str, env: &Env, shell: &Shell, colors: Colors) -> String {
+    let sites = locate_all(name, env, shell);
+    let (doc, ty) = documented(name, sites.first(), env, shell);
     if sites.is_empty() && doc.is_none() && ty.is_none() {
         return search(name, shell, colors);
     }
@@ -224,8 +224,12 @@ fn explanation(name: &str, shell: &Shell, colors: Colors) -> String {
 ///
 /// Every other site sweeps the documented registries, since a frame stacked
 /// over a native — a handler, an alias — inherits the native's doc.
-fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String>, Option<String>) {
-    let scope = &shell.mobile.scope;
+fn documented(
+    name: &str,
+    site: Option<&Where>,
+    scope: &Env,
+    shell: &Shell,
+) -> (Option<String>, Option<String>) {
     let manifest = || builtin_type_hint(&shell.session.builtins, name);
     let library_doc = || shell.session.library_docs.get(name).cloned();
 
@@ -315,8 +319,7 @@ impl fmt::Display for Where {
 /// Probes handlers before the manifest — the reverse of
 /// `command_call::resolve`'s env-first order — so a handler under a native's
 /// name reports as `handler` though only `^name` reaches it.
-fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
-    let scope = &shell.mobile.scope;
+fn locate_all(name: &str, scope: &Env, shell: &Shell) -> Vec<Where> {
     let mut sites = Vec::new();
     if scope.session_binding(name).is_some() {
         sites.push(Where::Local);
@@ -400,7 +403,8 @@ mod tests {
         let mut shell = Shell::default();
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_help(&[], &mut shell);
+        let env = shell.mobile.scope.clone();
+        builtin_help(&[], &env, &mut shell);
         let out = String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
             !out.contains("Library:"),
@@ -417,7 +421,8 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_help(&[], &mut shell);
+        let env = shell.mobile.scope.clone();
+        builtin_help(&[], &env, &mut shell);
         let help_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
@@ -427,7 +432,7 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_explain(&[Value::String("frob".into())], &mut shell);
+        builtin_explain(&[Value::String("frob".into())], &env, &mut shell);
         let explain_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
         assert!(
@@ -447,7 +452,8 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_help(&[], &mut shell);
+        let env = shell.mobile.scope.clone();
+        builtin_help(&[], &env, &mut shell);
         let help_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
@@ -457,7 +463,7 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_explain(&[Value::String("frob".into())], &mut shell);
+        builtin_explain(&[Value::String("frob".into())], &env, &mut shell);
         let explain_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
         assert!(

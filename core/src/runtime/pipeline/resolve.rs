@@ -118,7 +118,7 @@ fn classify_stage(stage: &Comp, shell: &Shell) -> StageKind {
     let CompKind::Exec(e) = &stage.item else {
         return StageKind::Ral;
     };
-    match command_call::resolve_command_word(&e.head, shell) {
+    match command_call::resolve_command_word(&e.head, &shell.mobile.scope, shell) {
         command_call::Resolution::External(id) => StageKind::External(id),
         _ => StageKind::Ral,
     }

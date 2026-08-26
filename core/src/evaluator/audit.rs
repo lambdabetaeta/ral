@@ -22,9 +22,9 @@
 //! `audit` force collection whether or not audit is on.
 
 use crate::types::{
-    AuditIo, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy, CommandOrigin, Control,
-    Decision, Escape, Map, Mooring, Observation, Observed, Raw, STDERR_CAP_BYTES, Settled, Shell,
-    Value, epoch_us, split,
+    AuditIo, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy, CommandOrigin, Decision,
+    Env, Escape, Map, Mooring, Observation, Observed, STDERR_CAP_BYTES, Settled, Shell, Value,
+    epoch_us, split,
 };
 
 /// Proof that a native body is running inside [`frame_call`]'s dynamic
@@ -152,48 +152,38 @@ pub(crate) fn frame_call<F>(
     mooring: &Mooring,
     shell: &mut Shell,
     body: F,
-) -> Raw<Value>
+) -> Settled<Value>
 where
-    F: FnOnce(&mut Shell, &Frame) -> Raw<Value>,
+    F: FnOnce(&mut Shell, &Frame) -> Settled<Value>,
 {
     let start = start(shell, mooring);
     let (result, stdout, stderr) = super::with_audit_capture(shell, |shell| {
         body(shell, &Frame(()))
     })
-    .map_err(|e| Control::Break(Break::Error(shell.err(format!("audit capture: {e}"), 1))))?;
+    .map_err(|e| Break::Error(shell.err(format!("audit capture: {e}"), 1)))?;
     finish_command(
-        shell,
-        mooring,
-        start,
-        cmd,
-        origin,
-        args,
-        &outcome_for_audit(&result),
-        stdout,
-        stderr,
+        shell, mooring, start, cmd, origin, args, &result, stdout, stderr,
     );
     result
 }
 
 /// Run a native body inside a fresh audit frame — the only way to reach
-/// [`BuiltinEntry::call_body`].
+/// [`BuiltinEntry::call_body`].  `env` is the lexical environment at the
+/// call: the `Apply` frame's, or the `Exec` rule's.
 pub(crate) fn run_native(
     entry: &BuiltinEntry,
     args: &[Value],
+    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Raw<Value> {
+) -> Settled<Value> {
     frame_call(
         &entry.name,
         args,
         CommandOrigin::Builtin,
         mooring,
         shell,
-        |shell, frame| {
-            entry
-                .call_body(frame, args, mooring, shell)
-                .map_err(Control::from)
-        },
+        |shell, frame| entry.call_body(frame, args, env, mooring, shell),
     )
 }
 
@@ -203,17 +193,8 @@ impl BuiltinEntry {
     ///
     /// # Errors
     /// Propagates a `Break` raised by the body.
-    pub fn run(&self, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        super::absorb_tail(run_native(self, args, mooring, shell), mooring, shell)
-    }
-}
-
-/// A tail call does not survive a command boundary, so it records as `Unit`.
-fn outcome_for_audit(raw: &Raw<Value>) -> Settled<Value> {
-    match raw {
-        Ok(v) => Ok(v.clone()),
-        Err(Control::Tail(_)) => Ok(Value::Unit),
-        Err(Control::Break(b)) => Err(b.clone()),
+    pub fn run(&self, args: &[Value], env: &Env, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+        run_native(self, args, env, mooring, shell)
     }
 }
 

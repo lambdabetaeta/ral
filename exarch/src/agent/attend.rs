@@ -951,9 +951,11 @@ mod tests {
             .shell
             .lookup_builtin("cancel")
             .expect("core registers cancel");
+        let env = session.seat.shell_mut().shell.mobile().scope;
         cancel_fn
             .run(
                 &[Value::Handle(entry.handle)],
+                &env,
                 &ral_core::types::Mooring::adrift(),
                 &mut session.seat.shell_mut().shell,
             )

@@ -58,9 +58,10 @@ pub(crate) fn detach(
                 );
             }
             Some(HandlerLookup::Base(entry)) => {
-                let raw =
-                    crate::runtime::command_call::run_base_frame(&entry, argv, &[], mooring, shell);
-                return crate::evaluator::absorb_tail(raw, mooring, shell);
+                let env = shell.mobile.scope.clone();
+                return crate::runtime::command_call::run_base_frame(
+                    &entry, argv, &[], &env, mooring, shell,
+                );
             }
             None => {}
         }

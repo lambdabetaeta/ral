@@ -12,6 +12,7 @@
 //! constructors, one per half: `BuiltinBody` has no bodiless variant, so no
 //! entry is expressible without a live body.
 
+use super::env::Env;
 use super::flow::Settled;
 use super::value::Value;
 use crate::typecheck::builtins::{BuiltinDiagnostic, BuiltinTypeRule, scheme_curry_depth};
@@ -36,6 +37,11 @@ pub type CapturedBuiltinFn = Arc<
 pub enum BuiltinBody {
     Static(fn(&[Value], &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>),
     Captured(CapturedBuiltinFn),
+    /// A body that reads the lexical environment at the call — `help` and
+    /// `explain` naming locals and their schemes are the only rows that need
+    /// it, so this stays a second variant rather than widening every native's
+    /// signature for two readers.
+    Scoped(fn(&[Value], &Env, &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>),
 }
 
 impl fmt::Debug for BuiltinBody {
@@ -43,6 +49,7 @@ impl fmt::Debug for BuiltinBody {
         match self {
             Self::Static(_) => f.write_str("BuiltinBody::Static(<fn>)"),
             Self::Captured(_) => f.write_str("BuiltinBody::Captured(<closure>)"),
+            Self::Scoped(_) => f.write_str("BuiltinBody::Scoped(<fn>)"),
         }
     }
 }
@@ -142,6 +149,8 @@ impl BuiltinEntry {
 
     /// Invoke the body — reachable only with a proof that a
     /// [`crate::evaluator::audit::frame_call`] is already open around it.
+    /// `env` is the lexical environment at the call; only a `Scoped` body
+    /// reads it.
     ///
     /// # Errors
     /// Propagates a `Break` raised by the body.
@@ -149,12 +158,14 @@ impl BuiltinEntry {
         &self,
         _frame: &crate::evaluator::audit::Frame,
         args: &[Value],
+        env: &Env,
         mooring: &crate::types::Mooring,
         shell: &mut crate::types::Shell,
     ) -> Settled<Value> {
         match &self.body {
             BuiltinBody::Static(f) => f(args, mooring, shell),
             BuiltinBody::Captured(f) => f(args, mooring, shell),
+            BuiltinBody::Scoped(f) => f(args, env, mooring, shell),
         }
     }
 }

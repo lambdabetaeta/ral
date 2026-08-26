@@ -145,7 +145,9 @@ fn apply_inner(
                         applied: collected,
                     });
                 }
-                let result = super::audit::run_native(&entry, &collected, mooring, shell);
+                let env = shell.mobile.scope.clone();
+                let result = super::audit::run_native(&entry, &collected, &env, mooring, shell)
+                    .map_err(Control::from);
                 if let Some(done) = step(result, &mut callee, &mut args, mooring) {
                     return done;
                 }

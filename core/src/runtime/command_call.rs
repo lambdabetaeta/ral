@@ -9,8 +9,8 @@
 use crate::ir::{CommandName, CommandWord};
 use crate::source::Span;
 use crate::types::{
-    Break, BuiltinEntry, CommandOrigin, HandlerArity, HandlerEntry, HandlerFrame, HandlerLookup,
-    Map, Mooring, Raw, Settled, Shell, Value,
+    Break, BuiltinEntry, CommandOrigin, Control, Env, HandlerArity, HandlerEntry, HandlerFrame,
+    HandlerLookup, Map, Mooring, Raw, Settled, Shell, Value,
 };
 
 use super::command::{self, CommandIdentity, EvalRedirectV};
@@ -34,10 +34,12 @@ pub(crate) enum Resolution {
     External(CommandIdentity),
 }
 
-/// Bare-name lookup: env → handlers → external.  No admission check and no
-/// audit — those belong to [`classify_command`].
-pub(crate) fn resolve(name: &str, shell: &Shell) -> Resolution {
-    if let Some(value) = shell.mobile.scope.get(name) {
+/// Bare-name lookup: env → handlers → external.  A head like `f x` is a
+/// lexical name, so `env` — not `shell.mobile.scope` — is what a bare name
+/// resolves through.  No admission check and no audit — those belong to
+/// [`classify_command`].
+pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
+    if let Some(value) = env.get(name) {
         return Resolution::Env(value.clone());
     }
     resolve_handler_then_external(name, shell)
@@ -45,14 +47,14 @@ pub(crate) fn resolve(name: &str, shell: &Shell) -> Resolution {
 
 /// Resolve a [`CommandWord`]: `^name` skips env but still consults handlers;
 /// a path-bearing head skips handlers too.
-pub(crate) fn resolve_command_word(head: &CommandWord, shell: &Shell) -> Resolution {
+pub(crate) fn resolve_command_word(head: &CommandWord, env: &Env, shell: &Shell) -> Resolution {
     let name = head.name();
     match name {
         CommandName::Path(_) | CommandName::TildePath(_) => Resolution::External(
             CommandIdentity::resolve(name.clone(), &shell.mobile.context),
         ),
         CommandName::Bare(s) => match head {
-            CommandWord::Name(_) => resolve(s, shell),
+            CommandWord::Name(_) => resolve(s, env, shell),
             CommandWord::External(_) => resolve_handler_then_external(s, shell),
         },
     }
@@ -75,10 +77,11 @@ fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
 /// dispatch can carry and the pure `Env::get` lookup cannot.
 pub(crate) fn classify_command(
     head: &CommandWord,
+    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Resolution> {
-    let r = resolve_command_word(head, shell);
+    let r = resolve_command_word(head, env, shell);
     if let Resolution::Env(_) = &r
         && let Some(name) = head.name().bare()
     {
@@ -136,18 +139,23 @@ pub(crate) fn run_call(
     if !matches!(head.name().bare(), Some(name) if name.starts_with('_')) {
         shell.local.audit.call_site = span;
     }
+    let env = shell.mobile.scope.clone();
 
-    match classify_command(head, mooring, shell)? {
+    match classify_command(head, &env, mooring, shell)? {
+        // W2g: the machine's `Exec` rule runs this arm itself (§2.2).
         Resolution::Env(value) => with_redirects(redirects, mooring, shell, |shell| {
             crate::evaluator::apply(value, args.to_vec(), mooring, shell).map_err(Into::into)
         }),
+        // W2g: `Unmask` is the frame; `run_handler`/`MaskedHandler` go.
         Resolution::Handler { entry, depth } => {
             with_redirects(redirects, mooring, shell, |shell| {
                 run_handler(&entry, depth, args, mooring, shell).map_err(Into::into)
             })
         }
-        Resolution::Base(entry) => run_base_frame(&entry, args, redirects, mooring, shell),
-        Resolution::External(id) => run_external(id, args, redirects, mooring, shell),
+        Resolution::Base(entry) => run_base_frame(&entry, args, redirects, &env, mooring, shell)
+            .map_err(Control::from),
+        Resolution::External(id) => run_external(id, args, redirects, &env, mooring, shell)
+            .map_err(Control::from),
     }
 }
 
@@ -156,24 +164,27 @@ pub(crate) fn run_call(
 ///
 /// The values arrive unrendered, unlike a ral arm's ([`run_handler`]): a native
 /// body renders what it writes and vets what it launches, and the exec
-/// boundary's refusal is a judgement on the value's shape.
+/// boundary's refusal is a judgement on the value's shape.  `env` is the
+/// lexical environment at the call — the native sees it (§4).
 pub(crate) fn run_base_frame(
     entry: &BuiltinEntry,
     args: &[Value],
     redirects: &[EvalRedirectV],
+    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Raw<Value> {
+) -> Settled<Value> {
     run_host_thunk(
         &entry.name,
         args,
         redirects,
         mooring,
         shell,
-        |a, s, frame| entry.call_body(frame, a, mooring, s),
+        |a, s, frame| entry.call_body(frame, a, env, mooring, s),
     )
 }
 
+// W2g: `Unmask` is the frame; this and `run_handler` go.
 /// Lifts the matched frame off the handler stack on [`Self::strip`] and puts it
 /// back at its position on `Drop`, unwinds included: the frame is held nowhere
 /// else, so losing it to a panic silently deletes a user's alias.
@@ -200,6 +211,7 @@ impl Drop for MaskedHandler<'_> {
     }
 }
 
+// W2g: `Unmask` is the frame; this and `MaskedHandler` go.
 /// Run a user handler.  The matched frame is masked for the body's dynamic
 /// extent, so a same-name call from inside reaches the next outer match.
 ///
@@ -240,7 +252,7 @@ fn run_host_thunk(
     mooring: &Mooring,
     shell: &mut Shell,
     f: impl FnOnce(&[Value], &mut Shell, &audit::Frame) -> Settled<Value>,
-) -> Raw<Value> {
+) -> Settled<Value> {
     audit::frame_call(
         name,
         args,
@@ -251,20 +263,29 @@ fn run_host_thunk(
             with_redirects(redirects, mooring, shell, |shell| {
                 f(args, shell, frame).map_err(Into::into)
             })
+            .map_err(|c| match c {
+                Control::Break(b) => b,
+                // A host thunk's body is always `Settled` before it meets
+                // `with_redirects`, so no tail call ever reaches here.
+                Control::Tail(_) => unreachable!("a host thunk body never emits a tail call"),
+            })
         },
     )
 }
 
 /// Run an external command.  No `with_redirects` frame, unlike the host arms:
 /// the child's redirects are wired onto its own fds, and a `<file` stdin is
-/// parked in `shell.io.stdin` for the spawn to collect.
+/// parked in `shell.io.stdin` for the spawn to collect.  `env` is unused —
+/// an external command reads no lexical scope — but carried for the same
+/// shape as [`run_base_frame`], since the `Exec` rule reaches both arms alike.
 fn run_external(
     id: CommandIdentity,
     args: &[Value],
     redirects: &[EvalRedirectV],
+    _env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Raw<Value> {
+) -> Settled<Value> {
     let stdin_guard = command::install_stdin_redirect(redirects, mooring, shell)?;
     let shown = id.shown.clone();
     let result = audit::frame_call(

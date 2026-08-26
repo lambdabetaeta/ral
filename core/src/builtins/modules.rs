@@ -19,7 +19,7 @@ use std::path::Path;
 use crate::evaluator::{Mode, Ran};
 use crate::ir::Toplevel;
 use crate::source::Span;
-use crate::types::{Break, CommandOrigin, Control, Env, Mooring, Settled, Shell, Value, sig};
+use crate::types::{Break, CommandOrigin, Env, Mooring, Settled, Shell, Value, sig};
 
 use super::util::arg0_str;
 
@@ -235,7 +235,7 @@ pub(crate) fn source_phrases(
             let ran = crate::evaluator::run_phrases(&top.phrases, env, mode, mooring, shell);
             let outcome = match &ran.outcome {
                 Ok(_) => Ok(Value::Unit),
-                Err(e) => Err(Control::Break(e.clone())),
+                Err(e) => Err(e.clone()),
             };
             ran_slot = Some(ran);
             outcome

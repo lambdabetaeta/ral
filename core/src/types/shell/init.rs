@@ -44,6 +44,7 @@ impl Shell {
         };
         shell.install_builtins(crate::builtins::CORE_BUILTINS);
         shell.install_builtins(crate::builtins::CORE_BASE_FRAMES);
+        shell.install_builtins(crate::builtins::CORE_HELP_BUILTINS);
         // Language-given names live in the base scope, ahead of the prelude.
         shell
             .mobile

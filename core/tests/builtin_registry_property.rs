@@ -157,7 +157,8 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         };
 
         let mut shell = fresh_shell();
-        match entry.run(&args, &Mooring::adrift(), &mut shell) {
+        let env = shell.mobile().scope.clone();
+        match entry.run(&args, &env, &Mooring::adrift(), &mut shell) {
             Ok(result) => {
                 assert!(
                     inhabits(&result, &ret_ty),
@@ -176,9 +177,14 @@ fn every_scheme_reducer_inhabits_its_return_type() {
     }
     // Pinned, not a floor: a floor cannot catch the roster growing, and this
     // sweep's roster is derived, not written down.
+    //
+    // 51, not 53: `help` and `explain` moved out of `CORE_BUILTINS` into
+    // `CORE_HELP_BUILTINS` (W2d) — they carry `BuiltinBody::Scoped`, since
+    // they are the only two rows that read the lexical environment, and this
+    // sweep runs the value half's roster alone.
     assert_eq!(
-        checked, 53,
-        "the registry sweep checked {checked} builtins, not the pinned 53 — a manifest \
+        checked, 51,
+        "the registry sweep checked {checked} builtins, not the pinned 51 — a manifest \
          or RESOURCE_BACKED change moved the roster; update the expected count here, in \
          the same commit, with a reason"
     );

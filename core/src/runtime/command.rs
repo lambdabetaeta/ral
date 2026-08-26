@@ -9,7 +9,7 @@
 //! same way.
 
 use crate::evaluator::audit::observe;
-use crate::types::{Break, Error, Mooring, Observed, Raw, Shell, Value, WriteOutcome};
+use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 
 mod child;
 #[cfg(unix)]
@@ -51,7 +51,7 @@ pub(crate) fn run(
     redirects: &[EvalRedirectV],
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Raw<Value> {
+) -> Settled<Value> {
     let rc = vet(id, args, shell)?;
     let cmd_name = rc.shown.clone();
 
@@ -98,7 +98,7 @@ pub(crate) fn run(
     )?;
 
     let stderr_pump = if stderr_piped {
-        Some(shell.io.stderr.try_clone().map_err(|e| pipe_err(&e))?)
+        Some(shell.io.stderr.clone())
     } else {
         None
     };
@@ -121,7 +121,7 @@ pub(crate) fn run(
         // `finish_command` builds the `Command{External}` observation from
         // whatever error reaches it, so a spawn failure needs no emission of
         // its own here.
-        Err(e) => return Err(spawn_error(confinement, &cmd_name, &e).into()),
+        Err(e) => return Err(spawn_error(confinement, &cmd_name, &e)),
     };
 
     let child_pid = child.id();
@@ -176,7 +176,7 @@ pub(crate) fn run(
                     },
                 );
             }
-            return Err(defer_to_stop(brk, atomic_commit.take()).into());
+            return Err(defer_to_stop(brk, atomic_commit.take()));
         }
     };
     let outcome = waited.outcome;
@@ -260,7 +260,7 @@ pub(crate) fn run(
             let mut pids = crate::sandbox::sample_descendants(child_pid);
             pids.insert(child_pid);
             let err = crate::sandbox::augment_failure(err, shell, &pids, started);
-            Err(Break::Error(err).into())
+            Err(Break::Error(err))
         }
     }
 }
