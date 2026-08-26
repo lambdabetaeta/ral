@@ -258,7 +258,7 @@ struct EvalOutcome {
 /// the checker read off the final stage.  An outer `Err` is a *pre-eval*
 /// fault — arc rebuild or mobile hydration, the body never ran — which
 /// [`run_child_eval`] folds into a [`break_response`].
-fn eval_request(request: ChildEvalRequest) -> Settled<EvalOutcome> {
+fn eval_request(request: ChildEvalRequest, prelude: &crate::boot::BakedPrelude) -> Settled<EvalOutcome> {
     let ChildEvalRequest {
         scope_table,
         body,
@@ -269,7 +269,7 @@ fn eval_request(request: ChildEvalRequest) -> Settled<EvalOutcome> {
         ..
     } = request;
 
-    let mut shell = bare_child_shell();
+    let mut shell = bare_child_shell(prelude);
     let dec = WireDecoder::for_shell(&shell, &scope_table)?;
     install_shell_mobile(mobile, &mut shell, &dec)?;
     shell.local.audit.install_active_policy(audit_policy);
@@ -368,9 +368,12 @@ fn break_to_outcome(b: Break) -> WireOutcome {
 
 /// The one child runner.  A value that `wants_value` asked for but cannot be
 /// serialized becomes a [`WireOutcome::Error`], not a transport fault.
-pub(crate) fn run_child_eval(request: ChildEvalRequest) -> ChildEvalResponse {
+pub(crate) fn run_child_eval(
+    request: ChildEvalRequest,
+    prelude: &crate::boot::BakedPrelude,
+) -> ChildEvalResponse {
     let wants_value = request.wants_value;
-    let outcome = match eval_request(request) {
+    let outcome = match eval_request(request, prelude) {
         Ok(outcome) => outcome,
         // The body never ran: no audit, no output value.
         Err(b) => return break_response(b),
@@ -513,8 +516,15 @@ pub(crate) fn decode_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boot::BakedPrelude;
     use crate::evaluator::evaluate;
     use crate::{Shell, elaborate, parse};
+    use std::sync::OnceLock;
+
+    fn prelude() -> &'static BakedPrelude {
+        static P: OnceLock<BakedPrelude> = OnceLock::new();
+        P.get_or_init(BakedPrelude::bake_runtime)
+    }
 
     fn compile_one(source: &str) -> Arc<Comp> {
         let ast = parse(source).expect("parse");
@@ -628,7 +638,7 @@ mod tests {
         let json = serde_json::to_vec(&request).expect("serialise request");
         let request: ChildEvalRequest = serde_json::from_slice(&json).expect("deserialise request");
 
-        let mut child = bare_child_shell();
+        let mut child = bare_child_shell(prelude());
         let dec = WireDecoder::for_shell(&child, &request.scope_table).expect("decoder");
         install_shell_mobile(request.mobile, &mut child, &dec).expect("install mobile");
         assert!(
@@ -777,7 +787,7 @@ mod tests {
         let shell = Shell::default();
         let stage = compile_one("return 7");
         let request = pack_stage(stage, &shell, false);
-        let response = run_child_eval(request);
+        let response = run_child_eval(request, prelude());
         assert!(
             matches!(response.outcome, WireOutcome::Ok(None)),
             "response value should be skipped"
@@ -792,7 +802,7 @@ mod tests {
 
         let stage = compile_one("twice 21");
         let request = pack_stage(stage, &shell, true);
-        let response = run_child_eval(request);
+        let response = run_child_eval(request, prelude());
         let _ = decode_response(response, &shell).expect("decode");
     }
 
@@ -881,8 +891,8 @@ mod tests {
         use std::sync::Mutex;
 
         let mut parent = Shell::default();
-        parent.mobile.scope.set("kept".to_string(), Value::Int(7));
-        parent.mobile.scope.set(
+        parent.set_var("kept".to_string(), Value::Int(7));
+        parent.set_var(
             "live".to_string(),
             Value::Handle(crate::types::HandleInner {
                 result: Arc::new(Mutex::new(None)),
@@ -918,7 +928,7 @@ mod tests {
             .expect("a nursery is installed");
         let nursery_shell = nursery.adopt(id_b).expect("adopt the parked fork");
         let seed = pack_seed(&nursery_shell, "confined".to_string()).expect("pack seed");
-        let mut wire_child = bare_child_shell();
+        let mut wire_child = bare_child_shell(prelude());
         let dec = WireDecoder::for_shell(&wire_child, &seed.scope_table).expect("decoder");
         install_shell_mobile(seed.mobile, &mut wire_child, &dec).expect("install mobile");
         wire_child.mobile.scope = seed.captured.into_runtime(&dec).expect("decode captured");

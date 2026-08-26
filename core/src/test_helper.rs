@@ -15,9 +15,17 @@
 pub fn run_pre_main_reexec_stages() -> Option<u8> {
     #[cfg(unix)]
     crate::uutils::init_signal_dispositions();
-    crate::try_run_pipeline_stage_helper()
+    crate::try_run_pipeline_stage_helper(test_prelude())
         .or_else(crate::sandbox::serve_sandbox_early_init)
         .or_else(try_birth_detached)
+}
+
+/// The prelude a test binary bakes at runtime, cached for every call this
+/// process makes — the pipeline-stage helper and the detach-birth fixture
+/// both need one, and there is no build-script blob to embed here.
+fn test_prelude() -> &'static crate::boot::BakedPrelude {
+    static PRELUDE: std::sync::OnceLock<crate::boot::BakedPrelude> = std::sync::OnceLock::new();
+    PRELUDE.get_or_init(crate::boot::BakedPrelude::bake_runtime)
 }
 
 /// Tail flag of the detach-birth helper below, re-exec'd by `core/tests/detach.rs`.
@@ -44,7 +52,7 @@ fn try_birth_detached() -> Option<u8> {
         );
         let mut shell = crate::boot::boot_shell(
             crate::io::TerminalState::default(),
-            &crate::boot::BakedPrelude::bake_runtime(),
+            test_prelude(),
             &crate::boot::HostSurface::default(),
         );
         shell.install_builtins(crate::builtins::DETACH_BUILTIN);

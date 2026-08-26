@@ -73,7 +73,7 @@ fn main() -> ExitCode {
         }]);
     }
 
-    if let Some(code) = ral_core::try_run_pipeline_stage_helper() {
+    if let Some(code) = ral_core::try_run_pipeline_stage_helper(&PRELUDE) {
         return ExitCode::from(code);
     }
     if let Some(code) = ral_core::test_helper::try_run_test_helper() {

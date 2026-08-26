@@ -11,7 +11,7 @@
 use crate::ir::{CompKind, Val};
 use crate::source::Spanned;
 use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
-use crate::types::{Env, Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint};
+use crate::types::{Binding, Env, Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint};
 use std::sync::Arc;
 
 use super::util::{arg0_str, as_byte_list, as_bytes, decode_utf8_strict};
@@ -66,7 +66,13 @@ pub(super) fn builtin_from_line(args: &[Value], shell: &mut Shell) -> Settled<Va
 
 fn stream_cons(head: String, tail: Value) -> Value {
     let mut captured = Env::new();
-    captured.set("__stream_tail".into(), tail);
+    captured.bind(
+        "__stream_tail".into(),
+        Binding {
+            value: tail,
+            scheme: None,
+        },
+    );
     let body = Arc::new(Spanned::synthetic(CompKind::Return(Val::Variable(
         "__stream_tail".into(),
     ))));

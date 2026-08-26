@@ -503,8 +503,15 @@ pub(crate) fn apply_seed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boot::BakedPrelude;
     use crate::subprocess::bare_child_shell;
     use crate::types::Value;
+    use std::sync::OnceLock;
+
+    fn prelude() -> &'static BakedPrelude {
+        static P: OnceLock<BakedPrelude> = OnceLock::new();
+        P.get_or_init(BakedPrelude::bake_runtime)
+    }
 
     /// A grant narrower that just meets `own` against a fixed floor, so
     /// tests need no exarch-shaped base vocabulary.
@@ -572,7 +579,7 @@ mod tests {
     #[test]
     fn a_seed_outgrowing_the_channel_crosses_to_a_real_child() {
         let mut parent = Shell::new(crate::io::TerminalState::default());
-        parent.mobile.scope.set(
+        parent.set_var(
             "larger-than-a-socket-buffer".to_string(),
             Value::String("x".repeat(2 * 1024 * 1024)),
         );
@@ -692,13 +699,13 @@ mod tests {
     #[test]
     fn apply_seed_hydrates_scope_and_narrows_capabilities() {
         let mut parent = Shell::new(crate::io::TerminalState::default());
-        parent.mobile.scope.set("kept".to_string(), Value::Int(7));
+        parent.set_var("kept".to_string(), Value::Int(7));
         let seed = pack_seed(&parent, "confined".to_string()).expect("pack seed");
 
         let (mut writer, reader) = UnixStream::pair().expect("socketpair");
         std::thread::spawn(move || send_seed(&mut writer, &seed).expect("send the seed"));
 
-        let mut shell = bare_child_shell();
+        let mut shell = bare_child_shell(prelude());
         apply_seed(read_seed(reader).expect("read seed"), &mut shell, deny_net)
             .expect("apply seed");
 

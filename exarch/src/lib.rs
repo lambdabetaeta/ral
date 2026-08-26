@@ -48,7 +48,7 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
             narrow: policy::narrow,
         }]);
     }
-    if let Some(code) = ral_core::try_run_pipeline_stage_helper() {
+    if let Some(code) = ral_core::try_run_pipeline_stage_helper(&shell_eval::PRELUDE) {
         return Some(code);
     }
     if let Some(code) = ral_core::test_helper::try_run_test_helper() {

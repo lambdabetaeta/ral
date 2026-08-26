@@ -210,11 +210,14 @@ pub(crate) fn install_shell_mobile(
     Ok(())
 }
 
-/// A fresh shell wearing the host's builtin surface: `Shell::new` carries
-/// core's manifest alone, so the child-shell hook reinstalls the rest before
-/// any [`WireDecoder`] is built against it.
-pub(crate) fn bare_child_shell() -> Shell {
+/// A fresh shell wearing the host's builtin surface and `prelude`'s baked
+/// tier: `Shell::new` carries core's manifest alone, so the child-shell hook
+/// reinstalls the rest — and seats the prelude — before any [`WireDecoder`]
+/// is built against it, since a decoder seats every hydrated environment
+/// under this shell's own prelude.
+pub(crate) fn bare_child_shell(prelude: &crate::boot::BakedPrelude) -> Shell {
     let mut shell = Shell::new(crate::io::TerminalState::default());
     crate::sandbox::run_child_shell_extension(&mut shell);
+    crate::builtins::register(&mut shell, prelude.comp());
     shell
 }

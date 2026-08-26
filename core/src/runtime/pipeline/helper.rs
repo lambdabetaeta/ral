@@ -59,7 +59,7 @@ trait HelperTransport {
     fn writer(desc: Self::Desc) -> Box<dyn std::io::Write>;
 }
 
-fn serve_from_env<P: HelperTransport>() -> u8 {
+fn serve_from_env<P: HelperTransport>(prelude: &crate::boot::BakedPrelude) -> u8 {
     let outcome: Result<u8, ()> = (|| {
         let job = P::read(P::JOB).map_err(report_helper_env_err)?;
         let report = P::read(P::REPORT).map_err(report_helper_env_err)?;
@@ -69,7 +69,7 @@ fn serve_from_env<P: HelperTransport>() -> u8 {
         let mut job_reader = P::reader(job);
         let mut report_writer = P::writer(report);
 
-        Ok(serve_stage_core(&mut *job_reader, &mut *report_writer))
+        Ok(serve_stage_core(&mut *job_reader, &mut *report_writer, prelude))
     })();
     outcome.unwrap_or(1)
 }
@@ -79,6 +79,7 @@ fn serve_from_env<P: HelperTransport>() -> u8 {
 fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
     job_reader: &mut R,
     report_writer: &mut W,
+    prelude: &crate::boot::BakedPrelude,
 ) -> u8 {
     let request: ChildEvalRequest = match read_frame(job_reader) {
         Ok(Some(request)) => request,
@@ -92,7 +93,7 @@ fn serve_stage_core<R: std::io::BufRead + ?Sized, W: std::io::Write + ?Sized>(
         }
     };
 
-    let report = run_child_eval(request);
+    let report = run_child_eval(request, prelude);
 
     if let Err(err) = write_frame(report_writer, &report) {
         crate::diagnostic::cmd_error(
@@ -244,7 +245,7 @@ impl HelperTransport for WindowsTransport {
 ///
 /// A stage's own errors ride home in the report frame, so the exit code is
 /// only ever `0`, or `1` for a failure below the protocol.
-pub fn try_run_pipeline_stage_helper() -> Option<u8> {
+pub fn try_run_pipeline_stage_helper(prelude: &crate::boot::BakedPrelude) -> Option<u8> {
     let mut args = std::env::args_os();
     let _argv0 = args.next();
     let mode = args.next()?.to_string_lossy().into_owned();
@@ -261,7 +262,7 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         }
         let code = match mode.as_str() {
-            HELPER_FLAG => serve_from_env::<UnixTransport>(),
+            HELPER_FLAG => serve_from_env::<UnixTransport>(prelude),
             ANCHOR_FLAG => serve_anchor_from_env_fd(),
             _ => return None,
         };
@@ -272,7 +273,7 @@ pub fn try_run_pipeline_stage_helper() -> Option<u8> {
         // The anchor is Unix-only: Windows has no pgid for a fast first
         // stage to strand.
         match mode.as_str() {
-            HELPER_FLAG => Some(serve_from_env::<WindowsTransport>()),
+            HELPER_FLAG => Some(serve_from_env::<WindowsTransport>(prelude)),
             ANCHOR_FLAG => {
                 eprintln!("ral: pipeline helper {mode} is Unix-only; not used on Windows");
                 Some(2)
