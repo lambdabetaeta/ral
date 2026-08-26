@@ -13,7 +13,7 @@ use crate::serial::{
     InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder, is_handle, scrub,
 };
 use crate::source::{FileId, SourceDb, Span};
-use crate::subprocess::{WireShell, bare_child_shell, install_shell_mobile};
+use crate::subprocess::{WireShell, bare_child_shell, install_wire_shell};
 use crate::types::{
     Break, CapturePolicy, Closure, Env, Error, Escape, Mooring, Observation, Settled, Shell,
     Status, Value,
@@ -49,10 +49,10 @@ impl WireScriptContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ChildEvalRequest {
     /// Interned once for the whole request, including the env scopes nested
-    /// inside `mobile` and `captured`.
+    /// inside `shell` and `captured`.
     pub scope_table: ScopeTable,
     pub body: Arc<Comp>,
-    pub mobile: WireShell,
+    pub shell: WireShell,
     /// Stage closure env: the child runs `body` as a closed machine over it
     /// (`evaluator::machine::evaluate`).
     pub captured: Option<SerialEnvSnapshot>,
@@ -80,7 +80,7 @@ pub(crate) struct ChildEvalRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EngineSeed {
     pub scope_table: ScopeTable,
-    pub mobile: WireShell,
+    pub shell: WireShell,
     pub captured: SerialEnvSnapshot,
     /// The spawn's validated base tag, meet-narrowed against the receiving
     /// engine's own ceiling once hydrated.
@@ -98,7 +98,7 @@ pub(crate) struct EngineSeed {
 pub(crate) fn pack_seed(shell: &Shell, grant: String) -> Settled<EngineSeed> {
     let mut ctx = InternCtx::new();
     let captured = SerialEnvSnapshot::from_runtime(&shell.env, &mut ctx);
-    let mobile = WireShell::from_runtime(
+    let wire_shell = WireShell::from_runtime(
         &shell.env,
         shell.last_status,
         shell.session.stack_limit,
@@ -107,7 +107,7 @@ pub(crate) fn pack_seed(shell: &Shell, grant: String) -> Settled<EngineSeed> {
     )?;
     Ok(EngineSeed {
         scope_table: ctx.finish()?,
-        mobile,
+        shell: wire_shell,
         captured,
         grant,
     })
@@ -221,7 +221,7 @@ pub(crate) fn transfer_error(err: &Error) -> Error {
     .with_hint(hint)
 }
 
-/// Reify `shell`'s mobile state and a body into a wire-ready
+/// Reify `shell`'s wire state and a body into a wire-ready
 /// [`ChildEvalRequest`].  `span` is the stage body's own, resolved against
 /// `shell.sources()` so the child sees the same source under the same
 /// [`FileId`].
@@ -235,7 +235,7 @@ pub(crate) fn pack_request(
 ) -> Settled<ChildEvalRequest> {
     let mut ctx = InternCtx::new();
     let captured = captured.map(|env| SerialEnvSnapshot::from_runtime(env, &mut ctx));
-    let mobile = WireShell::from_runtime(
+    let wire_shell = WireShell::from_runtime(
         &shell.env,
         shell.last_status,
         shell.session.stack_limit,
@@ -245,7 +245,7 @@ pub(crate) fn pack_request(
     Ok(ChildEvalRequest {
         scope_table: ctx.finish()?,
         body,
-        mobile,
+        shell: wire_shell,
         captured,
         audit_policy,
         wants_value,
@@ -266,13 +266,13 @@ struct EvalOutcome {
 /// ships as evaluated: it is the pipeline's own result, so forcing it here
 /// would run a suspension the program never forced and contradict the type
 /// the checker read off the final stage.  An outer `Err` is a *pre-eval*
-/// fault — arc rebuild or mobile hydration, the body never ran — which
+/// fault — arc rebuild or wire-shell hydration, the body never ran — which
 /// [`run_child_eval`] folds into a [`break_response`].
 fn eval_request(request: ChildEvalRequest, prelude: &crate::boot::BakedPrelude) -> Settled<EvalOutcome> {
     let ChildEvalRequest {
         scope_table,
         body,
-        mobile,
+        shell: wire_shell,
         captured,
         audit_policy,
         script,
@@ -281,7 +281,7 @@ fn eval_request(request: ChildEvalRequest, prelude: &crate::boot::BakedPrelude) 
 
     let mut shell = bare_child_shell(prelude);
     let dec = WireDecoder::for_shell(&shell, &scope_table)?;
-    install_shell_mobile(mobile, &mut shell, &dec)?;
+    install_wire_shell(wire_shell, &mut shell, &dec)?;
     shell.local.audit.install_active_policy(audit_policy);
     if let Some(ctx) = script {
         shell.install_remote_context(&ctx.name, ctx.file, &ctx.text);
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_stays_removable_across_the_mobile_wire() {
+    fn alias_stays_removable_across_the_wire_shell() {
         // An alias frame carries `removable_by_unalias`, the flag `unalias`
         // filters on.  Lose it in hydration and a stage cannot `unalias` a
         // name the parent aliased, diverging from local evaluation.
@@ -637,7 +637,7 @@ mod tests {
         let request = ChildEvalRequest {
             scope_table: ctx.finish().expect("finish"),
             body: compile_one("return ()"),
-            mobile: wire,
+            shell: wire,
             captured: None,
             audit_policy: None,
             wants_value: false,
@@ -650,7 +650,7 @@ mod tests {
 
         let mut child = bare_child_shell(prelude());
         let dec = WireDecoder::for_shell(&child, &request.scope_table).expect("decoder");
-        install_shell_mobile(request.mobile, &mut child, &dec).expect("install mobile");
+        install_wire_shell(request.shell, &mut child, &dec).expect("install shell");
         assert!(
             child.has_alias("ll"),
             "the hydrated child must see the alias as removable"
@@ -940,7 +940,7 @@ mod tests {
         let seed = pack_seed(&nursery_shell, "confined".to_string()).expect("pack seed");
         let mut wire_child = bare_child_shell(prelude());
         let dec = WireDecoder::for_shell(&wire_child, &seed.scope_table).expect("decoder");
-        install_shell_mobile(seed.mobile, &mut wire_child, &dec).expect("install mobile");
+        install_wire_shell(seed.shell, &mut wire_child, &dec).expect("install shell");
         wire_child.env = seed.captured.into_runtime(&dec).expect("decode captured");
 
         assert_eq!(

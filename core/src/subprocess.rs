@@ -1,4 +1,4 @@
-//! Serialisable mirror of the mobile half of a shell — `env`, `last_status`,
+//! Serialisable mirror of the wire half of a shell — `env`, `last_status`,
 //! `session.stack_limit`, `context` — what crosses to a re-exec'd child.
 //! `serial.rs` transports the values and closures inside;
 //! this module is the envelope around them.
@@ -74,7 +74,7 @@ impl WireHandlerFrame {
     }
 }
 
-/// Serialisable mirror of a shell's mobile state (`env`, `last_status`,
+/// Serialisable mirror of a shell's wire state (`env`, `last_status`,
 /// `session.stack_limit`, `context`).
 ///
 /// The inverses are total modulo handle-bearing values, which the serial
@@ -107,7 +107,7 @@ pub(crate) struct WireContext {
     pub cwd: crate::types::Cwd,
 }
 
-/// A decoded [`WireShell`], as the four fields `install_shell_mobile`'s
+/// A decoded [`WireShell`], as the four fields `install_wire_shell`'s
 /// caller needs to write onto a `Shell`.
 pub(crate) struct DecodedShell {
     pub env: Env,
@@ -179,14 +179,14 @@ impl WireContext {
     }
 }
 
-/// Install a wire mobile onto a fresh shell, splicing the wire's handler
+/// Install a wire shell onto a fresh shell, splicing the wire's handler
 /// frames atop the receiver's own.
 ///
 /// The receiver's builtin table survives, never having ridden the wire.
 /// Frames go through [`HandlerStack::push_frame`], which mints a handle from
 /// the receiver's counter and keeps every other field, so an alias frame
 /// stays removable by `unalias` in the child.
-pub(crate) fn install_shell_mobile(
+pub(crate) fn install_wire_shell(
     state: WireShell,
     shell: &mut Shell,
     dec: &WireDecoder,

@@ -586,7 +586,10 @@ pub(super) fn annotate_toplevel(
                 Phrase::Define { pattern, comp, .. } => Phrase::Define {
                     pattern: Arc::new(annotate_pattern(pattern, ctx)),
                     comp: annotate_value_rhs(comp, ctx, true),
-                    schemes: names,
+                    schemes: names
+                        .into_iter()
+                        .map(|(name, scheme)| (name, Arc::new(scheme)))
+                        .collect(),
                 },
                 Phrase::Source { path } => Phrase::Source {
                     path: annotate_value_rhs(path, ctx, true),

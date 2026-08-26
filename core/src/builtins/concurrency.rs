@@ -370,7 +370,7 @@ pub(crate) fn builtin_spawn(
 
 /// Buffered spawn: stdout/stderr accumulate in per-handle
 /// buffers and drain to the caller's sinks on `await`.  The worker's own
-/// `Shell` is the only one the body touches, so "blocks discard their mobile"
+/// `Shell` is the only one the body touches, so "blocks discard their state"
 /// falls out of the thread's lifecycle with no boundary ceremony.
 fn spawn_buffered(
     body: Arc<crate::ir::Comp>,

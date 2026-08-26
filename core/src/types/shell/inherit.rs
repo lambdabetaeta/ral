@@ -233,9 +233,9 @@ mod tests {
     /// body must not silently fall back to the compile-time default — though
     /// `last_status` does start fresh.
     #[test]
-    fn spawned_worker_inherits_the_recursion_limit() {
+    fn spawned_worker_inherits_the_stack_limit() {
         let mut parent = Shell::default();
-        parent.set_recursion_limit(DEFAULT_STACK_LIMIT + 7);
+        parent.set_stack_limit(DEFAULT_STACK_LIMIT + 7);
         let scopes = Arc::new(parent.env.clone());
         let (join, _cancel) =
             parent.spawn_thread(&Mooring::adrift(), Arc::new(()), scopes, |_, child| {

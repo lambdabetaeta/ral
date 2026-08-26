@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 6d48e9af
 verified_at_date: 2026-08-26
-anchors: [PipeNode, Frame::Pipe, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeYield, Capture, infer_pipeline]
+anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeYield, Capture, infer_pipeline]
 ---
 
 # Pipeline execution: byte edges, process groups, and helper final values
@@ -11,9 +11,10 @@ edge is an operating-system pipe from the left stage's stdout to the right
 stage's stdin, alike for every pair; only the final stage may report a value.
 The machine's `CompKind::Pipeline` arm
 ([[internals/evaluator-machine|the evaluator machine]]) reduces a single-stage
-form to its inner closure and hands a multi-stage form to `PipeNode::launch`,
-pushing the running node onto the stack as a `Frame::Pipe` whose `join` folds
-the outcome — resolve, launch, join (collect then finish) are the spine below.
+form to its inner closure and hands a multi-stage form to `PipeNode::launch`
+then `PipeNode::join`, in the same rule — no frame is pushed, since nothing
+runs beneath the node — resolve, launch, join (collect then finish) are the
+spine below.
 A stage's own stack is empty by construction: **no stage runs in the parent, so
 none can be in tail position, and no frame ever crosses the wire** — only
 ⟨comp, scrubbed E⟩ and the wire context ride along, `E` being the pipeline

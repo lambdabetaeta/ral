@@ -12,10 +12,9 @@ per-child confinement choice. It re-enters evaluation only through
 `evaluator::machine::apply` (a handler or alias arm's thunk, from
 `command_call.rs`) and `evaluator::machine::evaluate` (a re-exec'd stage's
 closure, from `child_eval.rs`) — stages carry closures, so the mutual
-recursion is irreducible; the evaluator reaches it at `Frame::Pipe`/
-`PipeNode::launch` and, dispatching an `Exec` node, at
-`command_call::classify_command` → `run_base_frame` / `run_handler` /
-`run_external`, and the `command` redirect guards
+recursion is irreducible; the evaluator reaches it at
+`PipeNode::launch`/`join` and, dispatching an `Exec` node, at
+`command_call::classify_command` → `run_base_frame` / `run_external`, and the `command` redirect guards
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
 - `command_call.rs` — `run_call`, the single site that resolves a head
@@ -104,10 +103,9 @@ recursion is irreducible; the evaluator reaches it at `Frame::Pipe`/
     rendering live in [[map/exarch/io-surface|io-surface]]
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 - `pipeline/` — pipeline planning and execution. A multi-stage `CompKind::Pipeline`
-  steps to a `Frame::Pipe(Box<PipeNode>)`: `PipeNode::launch` resolves the
-  plan and spawns every stage into one process group — the machine's `Frame`
-  is pushed and the placeholder focus is consumed the very next step —
-  and `join` (`collect` then `finish`) is what a `Return` on that frame
+  steps through a `PipeNode`: `PipeNode::launch` resolves the
+  plan and spawns every stage into one process group, and `join`
+  (`collect` then `finish`), called in the same rule, is what the arm
   meets, while `abandon` kills the group on the panic-unwind path; `group`
   (the pgid anchor, foreground guard, SIGINT relay) stays alive across both
   `collect` and `finish` rather than dropped early
@@ -180,7 +178,7 @@ recursion is irreducible; the evaluator reaches it at `Frame::Pipe`/
   helper drives, `run_child_eval` ([[decisions/260610_child-eval-unification|child-eval-unification]]).
   One request frame in, one response frame out: the child packs the body plus a
   `WireShell` snapshot, rebuilds its shell through `subprocess::bare_child_shell`
-  and `install_shell_mobile` — the manifest first, so the `WireDecoder` re-links
+  and `install_wire_shell` — the manifest first, so the `WireDecoder` re-links
   natives against it — evaluates the stage against its byte input, drains its
   audit fragment, and ships a single `ChildEvalResponse`. When the pipeline
   yields its last stage's value, `FinalValue::Report` asks this helper response

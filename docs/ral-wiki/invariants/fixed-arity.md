@@ -75,7 +75,7 @@ taking apart a list rather than an argument sequence, and this rule leaves them
 alone.
 
 **The discipline survives at that boundary by packing, not by banning.**
-`run_handler` (`core/src/runtime/command_call.rs`) hands a handler its arguments
+`render_handler_args` (`core/src/evaluator/machine.rs`) hands a handler its arguments
 as one list value — `[argv]` for a per-name entry, `[name, argv]` for a
 catch-all — every element rendered as it is packed, so a variadic operation is
 consumed by a fixed-arity lambda typed `Fun(List String, B)`

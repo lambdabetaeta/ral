@@ -1,6 +1,6 @@
 //! Typing rules for the `within`, `grant`, `try`, `guard` and `audit` scope
 //! nodes, plus the field schemas for the `within`/`grant` option maps.  The
-//! sixth scope node, `ScopeOp::Redirect`, is typed inline in `infer.rs`.
+//! sixth scope node, `CompKind::Redirect`, is typed inline in `infer.rs`.
 //!
 //! Unknown option keys are rejected at runtime — by `WithinScope::parse` and
 //! `decode_capability_map` — not by the schemas here.

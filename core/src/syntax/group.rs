@@ -1,11 +1,10 @@
 //! Pre-pass: partition a statement sequence into elaboration groups, telling
 //! the elaborator which `let` bindings form a recursive knot.
 //!
-//! Only a thunk-shaped RHS — lambda or block — may join a knot.  `eval_letrec`
-//! in `core/src/evaluator/comp.rs` installs every member as a thunk before any
-//! body is evaluated, so members may name each other in any source order; a
-//! plain value binding like `let n = f 5` would have to call `f` at binding
-//! time, and stays out.
+//! Only a thunk-shaped RHS — lambda or block — may join a knot.  The
+//! machine's `Rec` rule binds every member as a thunk before any body runs,
+//! so members may name each other in any source order; a plain value binding
+//! like `let n = f 5` would have to call `f` at binding time, and stays out.
 //!
 //! Knots are *strongly* connected components, not merely connected ones: an
 //! SCC generalises as a unit and is monomorphic within, so a binding that only

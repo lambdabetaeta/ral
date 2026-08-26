@@ -24,8 +24,9 @@ pub use capture::with_capture;
 
 /// What one [`run_phrases`] run left behind.
 pub(crate) struct Ran {
-    /// The scope as it stood when the last phrase finished or the first one
-    /// halted — `shell.env`'s value at that moment.
+    /// The threaded `E` as it stood when the last phrase finished or the
+    /// first one halted — written into `shell.env` only under
+    /// `Mode::Session`.
     pub env: Env,
     /// Every name a `Define` bound, in order — what `use` collects.
     pub defined: Vec<String>,
@@ -72,7 +73,14 @@ pub(crate) fn run_phrases(
                 pattern,
                 comp,
                 schemes,
-            } => run_phrase_define((pattern, comp, schemes), mode, &mut env, mooring, shell, &mut defined),
+            } => run_phrase_define(
+                DefinePhrase { pattern, comp, schemes },
+                mode,
+                &mut env,
+                mooring,
+                shell,
+                &mut defined,
+            ),
             Phrase::Source { path } => {
                 run_phrase_source(path, phrase.span, mode, &mut env, mooring, shell, &mut defined)
             }
@@ -112,6 +120,16 @@ fn run_phrase_run(m: &Arc<Comp>, env: &Env, non_final: bool, mooring: &Mooring, 
     capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))
 }
 
+/// A `Phrase::Define`'s three fields, borrowed together — spreading them
+/// across `run_phrase_define`'s own parameter list would push it past
+/// clippy's argument-count lint.
+#[derive(Clone, Copy)]
+struct DefinePhrase<'a> {
+    pattern: &'a crate::ir::IrPattern,
+    comp: &'a Arc<Comp>,
+    schemes: &'a [(String, Arc<crate::typecheck::Scheme>)],
+}
+
 /// `Define { pattern, comp, schemes }`: the RHS runs under the ambient sink
 /// (its bytes are effect, its value is what the pattern destructures); under
 /// `Mode::Session` alone, the PATH-shadow check runs first, the landed
@@ -120,17 +138,14 @@ fn run_phrase_run(m: &Arc<Comp>, env: &Env, non_final: bool, mooring: &Mooring, 
 /// [`pattern::bind_pattern`] stages it.  A `Define`'s own value is `Unit` —
 /// like a block ending in `let`, it is a value boundary by being one.
 fn run_phrase_define(
-    (pattern, comp, schemes): (
-        &crate::ir::IrPattern,
-        &Arc<Comp>,
-        &[(String, crate::typecheck::Scheme)],
-    ),
+    define: DefinePhrase<'_>,
     mode: Mode,
     env: &mut Env,
     mooring: &Mooring,
     shell: &mut Shell,
     defined: &mut Vec<String>,
 ) -> Settled<Value> {
+    let DefinePhrase { pattern, comp, schemes } = define;
     if matches!(mode, Mode::Session) {
         pattern::check_pattern_shadow(pattern, shell)?;
     }

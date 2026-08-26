@@ -29,7 +29,7 @@ use std::thread::JoinHandle;
 use crate::child_eval::{EngineSeed, pack_seed};
 use crate::process::ChildHandle;
 use crate::serial::WireDecoder;
-use crate::subprocess::install_shell_mobile;
+use crate::subprocess::install_wire_shell;
 use crate::types::{Capabilities, Shell};
 
 /// The engine's protocol socket lands on this descriptor, exactly as
@@ -486,7 +486,7 @@ pub(crate) fn apply_seed(
 ) -> Result<(), String> {
     let dec = WireDecoder::for_shell(shell, &seed.scope_table)
         .map_err(|e| format!("hatch: the seed's scope failed to decode: {}", e.message))?;
-    install_shell_mobile(seed.mobile, shell, &dec)
+    install_wire_shell(seed.shell, shell, &dec)
         .map_err(|e| format!("hatch: the seed's context failed to decode: {}", e.message))?;
     shell.env = seed
         .captured

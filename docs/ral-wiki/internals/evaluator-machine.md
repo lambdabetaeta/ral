@@ -38,7 +38,7 @@ read off the body's shape by `Comp::arrow`, never stored.
 its value, `Bind` swaps stdout to the ambient sink and pushes `To`, `App`
 closes its arguments then pushes `Apply` and evaluates the head, `Rec`
 unfolds the n-ary group, `Exec` classifies the head through the lexical
-environment, `Pipeline` launches and pushes `Pipe`, the six handler forms
+environment, `Pipeline` launches and joins its node, the six handler forms
 close their operands, install, push their frame and force the body …);
 `step_return` and `step_halt` have one arm per `Frame` — the two columns of
 the frame table. No arm calls another arm; no arm loops. A rule that raises
@@ -54,7 +54,7 @@ clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
 `Within(WithinUndo)` restores env overrides, dir and handlers, `Grant` pops
 the capability stack, `Unmask` restores the masked handler, `Try`/`Audit`
 close their trail scope. `Frame` is at most 128 bytes (asserted at compile
-time; `Redirect`, `Unmask`, `Pipe` and the `Env` of `Try`/`Guard` are boxed).
+time; `Redirect`, `Unmask` and the `Env` of `Try`/`Guard` are boxed).
 
 **Tail calls push nothing.** β binds the parameter into the closure's
 environment and puts the body in focus; an `Apply` frame is pushed only when
@@ -106,11 +106,11 @@ that nesting with a clean error. Natives that need the lexical environment
 
 **Pipes are nodes between machines** ([[internals/pipeline-execution|pipeline
 execution]]). A multi-stage pipeline is a configuration: each stage is a
-machine over the empty stack in its own process, and the parent holds
-`Frame::Pipe(PipeNode)` — the process group, the running stages, the yield
-mode — which `join`s (collect, then finish) when its placeholder terminal
-meets it, so the pipeline's outcome climbs the parent's frames like any
-other and a halt in the join unwinds the same stack. What crosses to a stage
+machine over the empty stack in its own process, and the parent's `Pipeline`
+rule holds a `PipeNode` — the process group, the running stages, the yield
+mode — which it `launch`es and `join`s (collect, then finish) in one step:
+no frame, because nothing runs beneath the node; the outcome climbs the
+parent's frames like any other rule's terminal. What crosses to a stage
 is `WireShell { env, last_status, stack_limit, context }`: the bindings tier
 of one environment, interned by the identity of its root, seated under the
 receiver's own natives and prelude — the two constant tiers never cross —

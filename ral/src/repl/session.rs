@@ -106,7 +106,7 @@ impl Session {
         let mut rc = boot::load_profiles(is_login, opts.no_rc, &mut shell, &runtime);
         // CLI flags win over rc — apply after load_profiles.
         if let Some(n) = opts.run.recursion_limit {
-            shell.set_recursion_limit(n);
+            shell.set_stack_limit(n);
         }
         if let Some(s) = opts.surface {
             rc.surface = s;

@@ -593,8 +593,9 @@ impl Elaborator {
                         self.exec(CommandName::Bare(s.clone()), arg_vals, redirect_vals, true)
                     }
                     Head::Bare(s) if self.is_bound(s) => {
-                        // The `Force` is what makes `step_force` run a bound
-                        // block inside the redirect frame wrapped around it.
+                        // The `Force` is what makes the `Force` rule run a
+                        // bound block inside the redirect frame wrapped
+                        // around it.
                         let head_comp = comp!(self, CompKind::Force(Val::Variable(s.clone())));
                         self.apply_head(head_comp, arg_vals, redirect_vals)
                     }

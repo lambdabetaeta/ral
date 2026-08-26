@@ -19,8 +19,9 @@ use std::sync::Arc;
 /// There is one thunk value, `Thunk(Closure)`: a computation closed over the
 /// environment it was captured against. `{ |params| body }` and `{ body }`
 /// are told apart only by the closure's own comp shape —
-/// `Comp::arrow` answers `Some` for a `Lam`, so `apply` and `step_force` read
-/// the shape rather than a separate variant (S10, the CEK plan §1.1).
+/// `Comp::arrow` answers `Some` for a `Lam`, so `apply` and the machine's
+/// `force` rule read the shape rather than a separate variant (S10, the CEK
+/// plan §1.1).
 #[derive(Debug, Clone)]
 pub enum Value {
     Unit,

@@ -118,7 +118,7 @@ pub struct SessionState {
     pub(crate) root_file: FileId,
     pub(crate) exit_hints: crate::exit_hints::ExitHints,
     /// Builtin bodies are Rust fn pointers or captured host closures, hence
-    /// process-local: the receiver of a wire mobile installs its own table
+    /// process-local: the receiver of a wire shell installs its own table
     /// rather than having one shipped to it.
     pub(crate) builtins: BuiltinTable,
     /// Host-installed `name -> doc` for a sourced closure library (exarch's
@@ -209,7 +209,7 @@ impl Drop for LocalState {
 /// `last_status`), or is host scratch ([`LocalState`]).
 ///
 /// Every field is `pub(crate)`, because the partition encodes run safety,
-/// capability attenuation, and mobile framing — core's invariant, not an API a
+/// capability attenuation, and wire framing — core's invariant, not an API a
 /// host may reach past.  Hosts drive a session through the intent verbs
 /// ([`mod@host`], plus the scope and context verbs), and the run door
 /// ([`Shell::run`]) checkpoints and rolls back `env`, `context` and

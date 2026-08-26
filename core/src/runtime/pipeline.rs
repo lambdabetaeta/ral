@@ -23,11 +23,11 @@ use group::PipelineGroup;
 use launch::launch_pipeline;
 use resolve::resolve_pipeline;
 
-/// A multi-stage pipeline between two launches and one join: what a
-/// `Frame::Pipe` owns while its stages run in their own process group
-/// (§5 of the CEK plan). `group` — the pgid anchor, foreground guard and
-/// SIGINT relay — stays alive across both `collect` and `finish`, so it
-/// lives here rather than as a local dropped early.
+/// A multi-stage pipeline between two launches and one join: the node the
+/// `Pipeline` rule launches and joins while its stages run in their own
+/// process group (§5 of the CEK plan). `group` — the pgid anchor, foreground
+/// guard and SIGINT relay — stays alive across both `collect` and `finish`,
+/// so it lives here rather than as a local dropped early.
 pub(crate) struct PipeNode {
     group: PipelineGroup,
     running: Running,
@@ -80,11 +80,6 @@ impl PipeNode {
     pub(crate) fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
         let Self { group: _group, running, yields, started } = self;
         running.collect(mooring, shell, started).finish(shell, yields)
-    }
-
-    /// The panic path: kill the group, observing nothing.
-    pub(crate) fn abandon(self) {
-        self.group.terminate();
     }
 }
 

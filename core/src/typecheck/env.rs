@@ -89,9 +89,10 @@ impl TyEnv {
         );
     }
 
-    /// Remove a binding from whichever scope owns it.  `infer_letrec` drops its
-    /// mono self-bindings before generalising: left in place, their free vars
-    /// read as environment residuals and block quantification.
+    /// Remove a binding from whichever scope owns it.  The `Rec` group
+    /// inference drops its mono self-bindings before generalising: left in
+    /// place, their free vars read as environment residuals and block
+    /// quantification.
     pub fn unbind(&mut self, name: &str) {
         for scope in self.scopes.iter_mut().rev() {
             if scope.bindings.remove(name).is_some() {

@@ -5,12 +5,13 @@
 //! run frames and the base layer alike; a path head skips handlers too.
 //! `evaluator::machine`'s `Exec` rule is the entry that classifies and runs
 //! every arm; pipeline staging and `command::detach` reach
-//! `resolve_command_word`/`classify_command` and `run_handler` directly.
+//! `resolve_command_word`/`classify_command` and `machine::apply_handler`
+//! directly.
 
 use crate::ir::{CommandName, CommandWord};
 use crate::types::{
-    Break, BuiltinEntry, CommandOrigin, Env, HandlerArity, HandlerEntry, HandlerFrame,
-    HandlerLookup, Map, Mooring, Settled, Shell, Value,
+    Break, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Map, Mooring, Settled,
+    Shell, Value,
 };
 
 use super::command::{self, CommandIdentity, EvalRedirectV};
@@ -123,9 +124,9 @@ fn refuse_head(id: &CommandIdentity, mooring: &Mooring, shell: &mut Shell) -> Br
 /// Run a base handler frame directly with the argv slice — no adapter, no
 /// masking: a native body never self-forwards.
 ///
-/// The values arrive unrendered, unlike a ral arm's ([`run_handler`]): a native
-/// body renders what it writes and vets what it launches, and the exec
-/// boundary's refusal is a judgement on the value's shape.  `env` is the
+/// The values arrive unrendered, unlike a ral arm's (`machine::apply_handler`):
+/// a native body renders what it writes and vets what it launches, and the
+/// exec boundary's refusal is a judgement on the value's shape.  `env` is the
 /// lexical environment at the call — the native sees it (§4).
 pub(crate) fn run_base_frame(
     entry: &BuiltinEntry,
@@ -143,70 +144,6 @@ pub(crate) fn run_base_frame(
         shell,
         |a, s, frame| entry.call_body(frame, a, env, mooring, s),
     )
-}
-
-/// Lifts the matched frame off the handler stack on [`Self::strip`] and puts it
-/// back at its position on `Drop`, unwinds included: the frame is held nowhere
-/// else, so losing it to a panic silently deletes a user's alias.
-///
-/// The machine's own `Exec` rule masks a handler inline with a `Frame::Unmask`
-/// (§2.2); this is for [`run_handler`]'s other caller, `command::detach`,
-/// which runs a matched handler as a one-shot call outside the machine's step
-/// loop, with no frame stack of its own to hold the mask.
-struct MaskedHandler<'a> {
-    shell: &'a mut Shell,
-    frame: Option<HandlerFrame>,
-}
-
-impl<'a> MaskedHandler<'a> {
-    fn strip(shell: &'a mut Shell, depth: usize) -> Self {
-        let frame = shell.context.handlers.strip_matched(depth);
-        Self {
-            shell,
-            frame: Some(frame),
-        }
-    }
-}
-
-impl Drop for MaskedHandler<'_> {
-    fn drop(&mut self) {
-        if let Some(frame) = self.frame.take() {
-            self.shell.context.handlers.restore_matched(frame);
-        }
-    }
-}
-
-/// Run a user handler.  The matched frame is masked for the body's dynamic
-/// extent, so a same-name call from inside reaches the next outer match.
-///
-/// The arm receives the argv, and an argv is a list of strings: every element
-/// arrives rendered, by the same total text conversion a base frame and the
-/// exec boundary apply.  That is what makes an arm interchangeable with the
-/// command it stands for — it consumes what an exec call would.
-pub(crate) fn run_handler(
-    entry: &HandlerEntry,
-    depth: usize,
-    args: &[Value],
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    let thunk = entry.thunk.clone();
-    let argv = Value::list(
-        Value::render_argv(args)
-            .into_iter()
-            .map(Value::String)
-            .collect(),
-    );
-    let call_args = match entry.arity {
-        HandlerArity::CatchAll => {
-            vec![Value::String(entry.name.clone().into_owned()), argv]
-        }
-        HandlerArity::Unary => vec![argv],
-    };
-    let masked = MaskedHandler::strip(shell, depth);
-    let result = crate::evaluator::machine::apply(thunk, call_args, mooring, masked.shell);
-    drop(masked);
-    result
 }
 
 fn run_host_thunk(

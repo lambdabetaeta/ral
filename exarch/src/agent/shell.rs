@@ -646,7 +646,7 @@ mod tests {
         );
         assert!(
             !scope_has(&mut session, "panic_prune_x"),
-            "the pruned name must not resurrect across the panic's mobile rollback"
+            "the pruned name must not resurrect across the panic's rollback"
         );
     }
 

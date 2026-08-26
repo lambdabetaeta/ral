@@ -777,7 +777,7 @@ mod tests {
         );
     }
 
-    /// `logical_cwd` rides the mobile across the tool-call boundary: a `cd` in
+    /// `logical_cwd` rides the shell across the tool-call boundary: a `cd` in
     /// one call is observable to `cwd` in the next.
     #[test]
     fn tool_call_cd_persists_across_calls() {

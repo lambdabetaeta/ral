@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 6d48e9af
 verified_at_date: 2026-08-26
-anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, restore_matched, run_handler, Frame::Unmask, WithinUndo]
+anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, restore_matched, apply_handler, render_handler_args, Frame::Unmask, WithinUndo]
 ---
 
 # Handler dispatch: deep, self-masking, by frame
@@ -46,7 +46,7 @@ that reaches an outer handler.
 **The calling convention is fixed by surface form, not value shape.** A per-name
 entry (and every alias) is a unary lambda `{ |args| … }`, applied to the command's
 argument list; a catch-all is a binary lambda `{ |name args| … }`, applied to the
-name and the argument list. That list is a `List String` — `run_handler` renders
+name and the argument list. That list is a `List String` — `machine::render_handler_args` renders
 every element through the total `to-string` as it packs the argv, so an arm
 consumes what an exec call would
 ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).

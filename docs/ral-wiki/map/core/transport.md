@@ -140,13 +140,13 @@ past them):
   carrying each alias arm's scheme so a re-exec'd helper stage does not strip it
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
-`install_shell_mobile` reinstates a received `WireShell` into a child `Shell`,
+`install_wire_shell` reinstates a received `WireShell` into a child `Shell`,
 splicing the wire's handler frames atop the receiver's own so the receiver's
 own builtin table survives, never having ridden the wire.
 `reexec_child_shell` is the one constructor the
 [[internals/pipeline-execution|pipeline-stage helper]] — the sole re-exec'd
 eval path — builds its shell through (`Shell::new` + the host's `HostSurface`
-reinstalled via the child-shell-extension hook + `install_shell_mobile`), so it
+reinstalled via the child-shell-extension hook + `install_wire_shell`), so it
 cannot drop the host builtins. All
 conversions share the `InternCtx` from `serial.rs`.
 

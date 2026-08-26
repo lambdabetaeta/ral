@@ -10,9 +10,9 @@ use crate::types::Value;
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
-/// One scope entry.  `eval_bind` installs value and scheme together, so the two
+/// One scope entry: value and scheme are installed together, so the two
 /// never drift apart.
 #[derive(Debug, Clone)]
 pub struct Binding {
@@ -29,6 +29,12 @@ pub(crate) type PreludeMap = HashMap<String, Binding, FxBuildHasher>;
 pub(crate) type BindingMap =
     imbl::GenericHashMap<String, Binding, FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
 
+/// Shared empty tiers, so `Env::new` and `Env::with_natives` clone an `Arc`
+/// rather than allocate a fresh empty map.
+static EMPTY_NATIVES: LazyLock<Arc<NativeMap>> = LazyLock::new(|| Arc::new(NativeMap::default()));
+static EMPTY_PRELUDE: LazyLock<Arc<PreludeMap>> =
+    LazyLock::new(|| Arc::new(PreludeMap::default()));
+
 /// Lexical environment: three tiers, checked in order.
 ///
 /// `natives` are language constants — seeded once at boot
@@ -36,7 +42,7 @@ pub(crate) type BindingMap =
 /// prelude's bindings, one map per process, shared by every shell that boots
 /// from it. `bindings` is everything bound since: a persistent map, so
 /// `bind` is O(log₃₂ n) and cloning the whole environment is O(1) — the
-/// clone every closure capture and every save/restore bracket takes.
+/// clone every closure capture takes.
 #[derive(Debug, Clone)]
 pub struct Env {
     natives: Arc<NativeMap>,
@@ -48,8 +54,8 @@ impl Env {
     /// The empty three-tier map: no natives, no prelude, nothing bound.
     pub fn new() -> Self {
         Self {
-            natives: Arc::new(NativeMap::default()),
-            prelude: Arc::new(PreludeMap::default()),
+            natives: Arc::clone(&EMPTY_NATIVES),
+            prelude: Arc::clone(&EMPTY_PRELUDE),
             bindings: BindingMap::default(),
         }
     }
@@ -58,7 +64,7 @@ impl Env {
     pub(crate) fn with_natives(natives: Arc<NativeMap>) -> Self {
         Self {
             natives,
-            prelude: Arc::new(PreludeMap::default()),
+            prelude: Arc::clone(&EMPTY_PRELUDE),
             bindings: BindingMap::default(),
         }
     }
@@ -135,8 +141,7 @@ impl Env {
 
     /// Bind `name` in the session tier, replacing any existing binding —
     /// persistent, so an environment a closure already captured is
-    /// unaffected.  A rebind through here clears any stored scheme, which
-    /// described a value that is gone.
+    /// unaffected.
     pub fn bind(&mut self, name: String, binding: Binding) {
         self.bindings.insert(name, binding);
     }

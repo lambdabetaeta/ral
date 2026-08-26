@@ -283,7 +283,7 @@ fn apply_rc_key(
                 reason = "filtered > 0; a recursion limit far below usize::MAX on 64-bit"
             )]
             let limit = n as usize;
-            shell.set_recursion_limit(limit);
+            shell.set_stack_limit(limit);
             Ok(())
         }
         "plugins" => {
@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn rc_recursion_limit_applied() {
         let shell = apply_rc("return [recursion_limit: 256]\n");
-        assert_eq!(shell.recursion_limit(), 256);
+        assert_eq!(shell.stack_limit(), 256);
     }
 
     /// A non-positive `recursion_limit` is refused with a diagnostic; the
@@ -620,7 +620,7 @@ mod tests {
     fn rc_recursion_limit_zero_rejected() {
         let shell = apply_rc("return [recursion_limit: 0]\n");
         assert_eq!(
-            shell.recursion_limit(),
+            shell.stack_limit(),
             ral_core::types::DEFAULT_STACK_LIMIT
         );
     }
@@ -633,7 +633,7 @@ mod tests {
             Value::String("lots".into()),
         )]));
         assert_eq!(
-            shell.recursion_limit(),
+            shell.stack_limit(),
             ral_core::types::DEFAULT_STACK_LIMIT
         );
     }
@@ -788,7 +788,7 @@ mod tests {
             ("edit_mode".into(), Value::Int(42)),
             ("recursion_limit".into(), Value::Int(256)),
         ]));
-        assert_eq!(shell.recursion_limit(), 256);
+        assert_eq!(shell.stack_limit(), 256);
         assert_eq!(settings.edit_mode, EditMode::Emacs);
     }
 

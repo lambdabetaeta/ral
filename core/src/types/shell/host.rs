@@ -412,12 +412,12 @@ impl Shell {
 
     /// The active stack cap (§2.1, §6.3 of the CEK plan): frames, not host
     /// stack frames.
-    pub fn recursion_limit(&self) -> usize {
+    pub fn stack_limit(&self) -> usize {
         self.session.stack_limit
     }
 
     /// Set that ceiling — rc `recursion_limit:` and `--recursion-limit`.
-    pub fn set_recursion_limit(&mut self, n: usize) {
+    pub fn set_stack_limit(&mut self, n: usize) {
         self.session.stack_limit = n;
     }
 

@@ -16,7 +16,7 @@
 //! analysis `syntax::group` (private to `ral_core`) uses to form a `Rec`
 //! group.  The effect verdict reuses the checker's own IR: a binding whose
 //! RHS compiles to a [`CompKind::Exec`] or one of the effect-frame forms
-//! (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`, `Hoisted`), or whose RHS
+//! (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`), or whose RHS
 //! the checker wrapped in the `capture` coercion, is effectful — pure
 //! otherwise.  This is the mode-system verdict the typechecker already
 //! records, not a new heuristic.
@@ -141,7 +141,7 @@ fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
 /// Walk an annotated toplevel's `Phrase::Define`s into `(name, effectful)`
 /// pairs, reading the checker's verdict off the IR.  A binding is effectful
 /// when its RHS compiles to a [`CompKind::Exec`] or one of the effect-frame
-/// forms (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`, `Hoisted`), or
+/// forms (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`), or
 /// when the checker wrapped it in the byte-to-value coercion — a
 /// [`CompKind::Decode`] over a capture, which is the annotation pass's own
 /// verdict that the RHS is a byte-payload computation.

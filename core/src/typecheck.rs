@@ -132,12 +132,17 @@ pub fn typecheck(top: &Toplevel, schemes: SessionSchemes) -> Result<Toplevel, Ve
 
 /// The (name, scheme) pairs on an *annotated* [`Toplevel`]'s `Phrase::Define`s,
 /// in phrase order — `Define.schemes` needs no tree walk, since every phrase
-/// already carries its own.
+/// already carries its own.  `bake_prelude` is a one-time build-time pass, so
+/// unwrapping each `Arc<Scheme>` back to an owned `Scheme` here — for
+/// `BakedPrelude::schemes`' postcard blob — costs nothing worth avoiding.
 fn harvest_schemes(top: &Toplevel) -> Vec<(String, Scheme)> {
     top.phrases
         .iter()
         .flat_map(|phrase| match &phrase.item {
-            Phrase::Define { schemes, .. } => schemes.clone(),
+            Phrase::Define { schemes, .. } => schemes
+                .iter()
+                .map(|(name, scheme)| (name.clone(), (**scheme).clone()))
+                .collect(),
             Phrase::Source { .. } | Phrase::Run(_) => Vec::new(),
         })
         .collect()

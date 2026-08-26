@@ -4691,9 +4691,9 @@ capability push — so a refused push commits nothing.
 
 A multi-stage pipeline is a configuration, not a sub-evaluation: each stage is
 this same machine started fresh, over the empty stack, in its own process; the
-parent holds one frame, `Pipe`, standing for the running group, whose rule
-joins the stages' outcomes and returns them to the parent's own `κ` like any
-other frame's terminal. No frame ever crosses a stage boundary — bytes cross
+parent's `Pipeline` rule launches the group, joins the stages' outcomes and
+returns them to the parent's own `κ` like any other rule's terminal — no
+frame stands for the running group, since nothing runs beneath it. No frame ever crosses a stage boundary — bytes cross
 by the wiring of §7.1, and the bindings a stage's `Γ` starts from cross the
 same way, as store rather than continuation.
 

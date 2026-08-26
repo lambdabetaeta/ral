@@ -144,7 +144,7 @@ pub enum ValRedirectTarget {
 }
 
 /// An I/O redirect.  Always owned by whatever it applies to — [`Exec`] or
-/// [`ScopeOp::Redirect`] — never a wrapper of its own.
+/// [`CompKind::Redirect`] — never a wrapper of its own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedirectV {
     pub fd: u32,
@@ -171,7 +171,7 @@ pub enum Phrase {
     Define {
         pattern: Arc<IrPattern>,
         comp: Arc<Comp>,
-        schemes: Vec<(String, crate::typecheck::Scheme)>,
+        schemes: Vec<(String, Arc<crate::typecheck::Scheme>)>,
     },
     /// `source path` at the top level: run the file's phrases as the session's own.
     /// `path : F String` — a `~` or `$CWD` in it is a hoist inside the computation.

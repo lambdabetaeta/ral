@@ -479,8 +479,8 @@ impl Inferencer<'_> {
             match self.ctx.unifier.resolve_comp_ty(&cty) {
                 CompTy::Return(_, ty) => match self.ctx.unifier.resolve_ty(&ty) {
                     Ty::Thunk(inner) => cty = *inner,
-                    // A still-free head must become a thunk: the trampoline's
-                    // `apply` forces a block-shaped `Value::Thunk` callee
+                    // A still-free head must become a thunk: the machine's
+                    // `apply` rule forces a block-shaped `Value::Thunk` callee
                     // before applying args, so a parameter `$f` of unknown
                     // type has to unfold
                     // the same way rather than fail to unify.

@@ -24,7 +24,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 /// Host-supplied constructor a re-exec'd child calls to rebuild its
-/// [`HostSurface`](crate::boot::HostSurface): a mobile cannot carry one across
+/// [`HostSurface`](crate::boot::HostSurface): a wire shell cannot carry one across
 /// processes, its entries being function pointers, and `Shell::new` installs
 /// core's manifest alone.  `subprocess::bare_child_shell` runs the hook before
 /// any [`crate::serial::WireDecoder`] is built, so the child's own manifest is

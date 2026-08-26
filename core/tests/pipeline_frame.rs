@@ -1,7 +1,8 @@
 #![allow(clippy::disallowed_methods)]
 
-//! W3: a `Frame::Pipe` reports through the frames above it exactly as any
-//! other frame does (§5 of the CEK plan, `dev/docs/plans/260825_cek_machine.md`).
+//! W3: a pipeline's failure reports through the frames above it exactly as
+//! any other rule's does (§5 of the CEK plan,
+//! `dev/docs/plans/260825_cek_machine.md`).
 //!
 //! Drives the public run door, so the test is the session a user has: a
 //! failing pipeline stage's error must climb through the `Capture` frame
@@ -62,11 +63,11 @@ fn run(shell: &mut Shell, source: &str) -> Settled<Value> {
     }
 }
 
-/// The stack when the pipeline's `Pipe` frame joins is `Try`, `Capture`,
-/// `Pipe` — a pipeline sitting under a byte capture sitting under a
-/// handler.  `fail` in the second stage raises inside the child machine and
-/// crosses back as the pipeline's own error (`collect::PipelineCollector`);
-/// `Pipe::join` turns it into `Halt`; `Capture`'s `Halt` rule flushes
+/// The stack when the pipeline joins is `Try`, `Capture` — a pipeline
+/// sitting under a byte capture sitting under a handler.  `fail` in the
+/// second stage raises inside the child machine and crosses back as the
+/// pipeline's own error (`collect::PipelineCollector`); the `Pipeline` rule
+/// turns it into `Halt` on the spot; `Capture`'s `Halt` rule flushes
 /// whatever bytes `echo a` wrote and re-raises; `Try`'s `Halt` rule is what
 /// finally converts it into the handler's argument.  No step here is
 /// special-cased for a pipeline — the same `Halt` column every frame walks.
@@ -82,11 +83,10 @@ fn a_failing_pipeline_under_try_and_capture_reports_through_both_frames() {
     assert_eq!(v, Value::Int(7));
 }
 
-// A test that the `Pipe` frame's `abandon` path (the panic-unwind walk in
-// `machine::run`) leaves no live child is not implemented here: `abandon`
-// only runs when a panic unwinds through a live `Pipe` frame, and by
-// construction (§5) that frame's placeholder `Return(Unit)` is consumed the
-// very next step after it is pushed — so the only window in which a panic
-// could reach it is *inside* `PipeNode::join` itself, a private call this
-// test has no way to interrupt without adding test-only hooks to the
-// machine. There is no sane way to provoke that from outside the crate.
+// A test that a panic mid-pipeline leaves no live child is not implemented
+// here: the `Pipeline` rule launches and joins within a single step, with
+// no frame of its own on the stack in between — so the only window in which
+// a panic could interrupt a live pipeline is *inside* `PipeNode::join`
+// itself, a private call this test has no way to interrupt without adding
+// test-only hooks to the machine. There is no sane way to provoke that from
+// outside the crate.

@@ -19,8 +19,8 @@ use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
 use crate::source::Span;
 use crate::types::{
-    Binding, Break, CapturePolicy, Closure, Env, Error, HandlerArity, HandlerFrame, Mooring,
-    Settled, Shell, TrailScope, Value, as_map, tree_value,
+    Binding, Break, CapturePolicy, Closure, Env, Error, HandlerArity, HandlerEntry, HandlerFrame,
+    Mooring, Settled, Shell, TrailScope, Value, as_map, tree_value,
 };
 
 use super::pattern;
@@ -50,7 +50,7 @@ pub(crate) enum Focus {
 
 /// One elimination form with a pending sub-computation. Frames hold `Arc`s
 /// into the IR and an `Env`, never cloned IR, never a `Context` clone. The
-/// two large ones, `Redirect` and `Pipe`, are boxed.
+/// two large ones, `Redirect` and `Unmask`, are boxed.
 enum Frame {
     /// `M to x. N`: `bind` is the `Bind` node itself, read for its pattern,
     /// rest and span.
@@ -106,10 +106,9 @@ enum Frame {
         scope: TrailScope,
         saved: CapturePolicy,
     },
-    Pipe(Box<pipeline::PipeNode>),
 }
 
-/// `Redirect`, `Unmask`, and `Pipe` are boxed: any alone would exceed the cap.
+/// `Redirect` and `Unmask` are boxed: any alone would exceed the cap.
 const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
 
 /// The state: a focus and a stack. Private — nothing outside this module
@@ -117,6 +116,16 @@ const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
 pub(crate) struct Machine {
     focus: Focus,
     stack: Vec<Frame>,
+}
+
+impl Default for Machine {
+    /// The one placeholder state: a `Unit` return over the empty stack.
+    fn default() -> Self {
+        Self {
+            focus: Focus::Return(Terminal::Value(Value::Unit)),
+            stack: Vec::new(),
+        }
+    }
 }
 
 /// Nested `machine::evaluate`/`machine::apply` re-entry cap (§2.1, §4): a
@@ -224,20 +233,9 @@ fn render_handler_args(name: &str, arity: HandlerArity, argv: &[Value]) -> Vec<V
 }
 
 impl Machine {
-    /// The initial state: ⟨M, E⟩ over the empty stack.
-    fn inject(closure: Closure) -> Self {
-        Self {
-            focus: Focus::Eval(closure),
-            stack: Vec::new(),
-        }
-    }
-
     /// The initial state for `apply`: an empty stack, focus set by `apply_rule` (§2.4).
     fn applying(f: Value, args: Vec<Value>, env: &Env, mooring: &Mooring, shell: &mut Shell) -> Self {
-        let mut m = Self {
-            focus: Focus::Return(Terminal::Value(Value::Unit)),
-            stack: Vec::new(),
-        };
+        let mut m = Self::default();
         m.focus = m.apply_rule(f, args, env, None, mooring, shell);
         m
     }
@@ -270,7 +268,7 @@ impl Machine {
 
     /// One transition: §2.2 on `Eval`, §2.3 on `Return`/`Halt`.
     fn step(&mut self, mooring: &Mooring, shell: &mut Shell) {
-        let focus = std::mem::replace(&mut self.focus, Focus::Return(Terminal::Value(Value::Unit)));
+        let focus = std::mem::replace(&mut self.focus, Self::default().focus);
         self.focus = match focus {
             Focus::Eval(closure) => self.step_eval(closure, mooring, shell),
             Focus::Return(t) => {
@@ -624,18 +622,14 @@ impl Machine {
                         env,
                     });
                 }
-                if let Err(b) = self.reserve(shell) {
-                    break 'arm Focus::Halt(b);
-                }
                 let node = match pipeline::PipeNode::launch(stages, *yields, &env, mooring, shell) {
                     Ok(node) => node,
                     Err(b) => break 'arm Focus::Halt(b),
                 };
-                self.push(Frame::Pipe(Box::new(node)));
-                // A placeholder the `Pipe` frame consumes immediately, on
-                // the very next step: the frame's real outcome comes from
-                // `PipeNode::join`, not from this value.
-                Focus::Return(Terminal::Value(Value::Unit))
+                match node.join(mooring, shell) {
+                    Ok(v) => Focus::Return(Terminal::Value(v)),
+                    Err(b) => Focus::Halt(b),
+                }
             }
 
             CompKind::Capture(body) => 'arm: {
@@ -1109,11 +1103,6 @@ impl Machine {
                 };
                 Focus::Return(Terminal::Value(tree_value(status, v, None, &children)))
             }
-
-            Frame::Pipe(node) => match node.join(mooring, shell) {
-                Ok(v) => Focus::Return(Terminal::Value(v)),
-                Err(b) => Focus::Halt(b),
-            },
         }
     }
 
@@ -1241,11 +1230,6 @@ impl Machine {
                     Focus::Halt(Break::Escape(esc))
                 }
             },
-
-            Frame::Pipe(_) => unreachable!(
-                "a Pipe frame's placeholder Return(Unit) is consumed the step it is pushed, \
-                 so step_halt never meets one"
-            ),
         }
     }
 }
@@ -1255,8 +1239,8 @@ impl Frame {
     /// files, audit scopes (§2.6). `To`/`Capture` restore `io.stdout`;
     /// `Redirect` as its own rule; `Unmask` restores; `Try`/`Audit`
     /// `audit.close(scope)` then `set_capture(saved)`; `Within` applies its
-    /// undo; `Grant` pops; `Pipe` kills the group. `Chain`, `Apply`,
-    /// `Decode`, `Source`, `Guard`, `Cleanup` do nothing.
+    /// undo; `Grant` pops. `Chain`, `Apply`, `Decode`, `Source`, `Guard`,
+    /// `Cleanup` do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
             Self::To { prev_stdout, .. } | Self::Capture { prev: prev_stdout, .. } => {
@@ -1272,7 +1256,6 @@ impl Frame {
             Self::Grant => {
                 shell.context.grants.pop();
             }
-            Self::Pipe(node) => node.abandon(),
             Self::Chain { .. }
             | Self::Apply { .. }
             | Self::Decode { .. }
@@ -1319,10 +1302,7 @@ fn run(
         ));
     }
     shell.local.machine_depth += 1;
-    let mut m = Machine {
-        focus: Focus::Return(Terminal::Value(Value::Unit)),
-        stack: Vec::new(),
-    };
+    let mut m = Machine::default();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         seed(&mut m, mooring, shell);
         while !(m.stack.is_empty() && matches!(m.focus, Focus::Return(_) | Focus::Halt(_))) {
@@ -1341,9 +1321,10 @@ fn run(
     }
 }
 
-/// `inject`, then step until the stack is empty.
+/// The initial state ⟨M, E⟩ over the empty stack, then step until the stack
+/// is empty.
 pub(crate) fn evaluate(closure: Closure, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    run(|m, _, _| *m = Machine::inject(closure), mooring, shell)
+    run(|m, _, _| m.focus = Focus::Eval(closure), mooring, shell)
 }
 
 /// The same, from a closed value meeting arguments — `Machine::applying`
@@ -1359,28 +1340,44 @@ pub(crate) fn apply(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut S
     )
 }
 
+/// Run a user handler outside the machine's step loop: `command::detach`'s
+/// one-shot call on a matched handler frame, with no frame stack of its own
+/// to hold the mask. The matched frame is masked for the body's dynamic
+/// extent (`Frame::Unmask`, as the `Exec` rule masks it inline for a call
+/// inside the machine), so a same-name call from inside reaches the next
+/// outer match.
+pub(crate) fn apply_handler(
+    entry: &HandlerEntry,
+    depth: usize,
+    args: &[Value],
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    run(
+        |m, mooring, shell| {
+            if let Err(b) = m.reserve(shell) {
+                m.focus = Focus::Halt(b);
+                return;
+            }
+            let frame = Box::new(shell.context.handlers.strip_matched(depth));
+            m.push(Frame::Unmask { frame });
+            let call_args = render_handler_args(&entry.name, entry.arity, args);
+            m.focus = m.apply_rule(entry.thunk.clone(), call_args, &shell.env.clone(), None, mooring, shell);
+        },
+        mooring,
+        shell,
+    )
+}
+
 /// `force v` on a value already in hand (a host door — the hook table's
-/// arity-0 entries — rather than a `CompKind::Force` node): `force(thunk M)
-/// = M`, run as its own machine; an arity-0 native runs; any other native
-/// stands as itself.  Unreachable on a `Thunk` whose body is a bare `Lam`
-/// for a checked program (S3 rules it out of a `Force` position), so this
-/// mirrors `Machine::force`'s rule without that unreachable arm's `Focus`
-/// plumbing.
+/// arity-0 entries — rather than a `CompKind::Force` node): `Machine::force`'s
+/// rule, run as its own machine.
 pub(crate) fn force(v: Value, env: &Env, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    match v {
-        Value::Thunk(c) => evaluate(c, mooring, shell),
-        Value::Native { entry, applied } if entry.fixed_arity() == 0 => {
-            let v = super::audit::run_native(&entry, &applied, env, mooring, shell)?;
-            set_status(&v, shell);
-            Ok(v)
-        }
-        native @ Value::Native { .. } => Ok(native),
-        other => Err(Break::Error(shell.err_hint(
-            format!("cannot force {}: ! requires a Block", other.type_name()),
-            "wrap in a block: !{ expr }",
-            1,
-        ))),
-    }
+    run(
+        |m, mooring, shell| m.focus = Machine::force(v, env, mooring, shell),
+        mooring,
+        shell,
+    )
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

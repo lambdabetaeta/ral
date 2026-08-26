@@ -82,7 +82,7 @@ Internals:
   from the outer environment; a group of one is Levy's `rec f. M`.
   `CompKind::Exec` classifies the head through the lexical environment and
   dispatches into [[map/core/runtime|runtime]]'s `command_call`.
-  `CompKind::Pipeline` pushes `Frame::Pipe(Box<PipeNode>)`
+  `CompKind::Pipeline` launches and joins a `PipeNode` in one rule
   ([[map/core/runtime|runtime]]). `step_case` selects the arm carrying the
   scrutinee's tag, binds the payload (`Unit` for a nullary tag) to that arm's
   pattern in a fresh environment, and evaluates the arm's body there — a
@@ -128,9 +128,9 @@ Internals:
   pipeline planning and execution, and the in-process-vs-sandboxed-child
   dispatch choice — lives in [[map/core/runtime|runtime]], which the machine
   reaches by dispatching an `Exec` node through `command_call::classify_command`
-  → `run_base_frame` / `run_handler` / `run_external`, and at `Frame::Pipe`/
-  `PipeNode::launch`; runtime re-enters the machine only through
-  `machine::apply` (a handler/alias thunk) and `machine::evaluate` (a re-exec'd
+  → `run_base_frame` / `run_external`, and at
+  `PipeNode::launch`/`join`; runtime re-enters the machine only through
+  `machine::apply_handler` (`detach`'s one-shot handler call) and `machine::evaluate` (a re-exec'd
   stage's closure) — the boundary itself always evaluates its body in
   process, OS confinement being per-child in `build_command`
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).

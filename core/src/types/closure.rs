@@ -1,7 +1,6 @@
 //! A closure: a computation paired with the environment its free variables
 //! read (§1.1 of the CEK plan).
 
-use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use crate::ir::Comp;
@@ -17,11 +16,11 @@ pub struct Closure {
 }
 
 impl Closure {
-    /// Both halves by move, past the `Drop` below.
-    pub fn into_parts(self) -> (Arc<Comp>, Env) {
-        let this = ManuallyDrop::new(self);
-        // SAFETY: `this` is never dropped, so each field is read exactly once.
-        unsafe { (std::ptr::read(&raw const this.comp), std::ptr::read(&raw const this.env)) }
+    /// Both halves, leaving `self.env` empty so `Drop` below has nothing to dismantle.
+    pub fn into_parts(mut self) -> (Arc<Comp>, Env) {
+        let comp = Arc::clone(&self.comp);
+        let env = std::mem::take(&mut self.env);
+        (comp, env)
     }
 }
 

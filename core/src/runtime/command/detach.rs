@@ -53,7 +53,7 @@ pub(crate) fn detach(
         // does, and a base frame runs rather than being spawned.
         match shell.lookup_handler(bare) {
             Some(HandlerLookup::Frame(entry, depth)) => {
-                return crate::runtime::command_call::run_handler(
+                return crate::evaluator::machine::apply_handler(
                     &entry, depth, argv, mooring, shell,
                 );
             }

@@ -556,7 +556,7 @@ fn audit_tree_has_command(observation: &Value, name: &str) -> bool {
 
 // ── (7) handler self-masking survives a panic mid-body (finding E5; rec. A4) ──
 //
-// `run_handler` lifts the matched handler frame off the stack for the
+// `machine::apply_handler` lifts the matched handler frame off the stack for the
 // dynamic extent of the body (so a same-name call from inside reaches
 // the next outer match), then re-inserts it.  Pre-A4 the re-insertion
 // was straight-line code skipped on an unwind: a Rust panic from inside
@@ -609,8 +609,8 @@ fn handler_self_mask_survives_panic_mid_body() {
         "alias must be installed before the call"
     );
 
-    // The dispatch of `boom` runs `run_handler`, which strips the alias
-    // frame, then `apply`s the body — which panics.  Default panic
+    // The dispatch of `boom` runs `machine::apply_handler`, whose `Unmask`
+    // frame strips the alias, then applies the body — which panics.  Default panic
     // output is noisy; silence the hook for the duration of the catch.
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));

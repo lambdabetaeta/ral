@@ -148,7 +148,7 @@ pub(crate) fn run_batch(
     shell.set_exit_hints(load_exit_hints());
     tick!("builtins");
     if let Some(n) = recursion_limit {
-        shell.set_recursion_limit(n);
+        shell.set_stack_limit(n);
     }
     shell.set_args(script_args);
 

@@ -66,7 +66,7 @@ pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Settled<()> {
 pub(crate) fn bind_pattern(
     pattern: &IrPattern,
     value: &Value,
-    schemes: &[(String, Scheme)],
+    schemes: &[(String, Arc<Scheme>)],
     env: Env,
     mooring: &Mooring,
     shell: &mut Shell,
@@ -84,7 +84,7 @@ pub(crate) fn bind_pattern(
 pub(crate) fn bind_pattern_staged(
     pattern: &IrPattern,
     value: &Value,
-    schemes: &[(String, Scheme)],
+    schemes: &[(String, Arc<Scheme>)],
     mut env: Env,
     mooring: &Mooring,
     shell: &mut Shell,
@@ -113,13 +113,13 @@ pub(crate) fn bind_pattern_staged(
     Ok(env)
 }
 
-/// The scheme a `Define` harvested for `name`, wrapped for sharing: a bound
-/// scheme is copied on every environment node clone, never read by a step.
-fn scheme_for(schemes: &[(String, Scheme)], name: &str) -> Option<Arc<Scheme>> {
+/// The scheme a `Define` harvested for `name`, shared rather than cloned: a
+/// bound scheme is copied on every environment node clone, never read by a step.
+fn scheme_for(schemes: &[(String, Arc<Scheme>)], name: &str) -> Option<Arc<Scheme>> {
     schemes
         .iter()
         .find(|(n, _)| n == name)
-        .map(|(_, s)| Arc::new(s.clone()))
+        .map(|(_, s)| Arc::clone(s))
 }
 
 /// Recursive worker for [`bind_pattern`]: pushes each binding onto `staged`
@@ -129,7 +129,7 @@ fn scheme_for(schemes: &[(String, Scheme)], name: &str) -> Option<Arc<Scheme>> {
 fn stage_pattern(
     pattern: &IrPattern,
     value: &Value,
-    schemes: &[(String, Scheme)],
+    schemes: &[(String, Arc<Scheme>)],
     env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
