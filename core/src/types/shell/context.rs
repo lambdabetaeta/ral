@@ -1,7 +1,7 @@
 //! `impl Context`: verbs over the dynamic context — env overrides, `$HOME` /
 //! `$USER`, the audit gate, and the [`Resolver`] bound to the live home/cwd pair.
 //!
-//! [`Context`] is the `mobile.context` subtree that `Shell::inherit_from` and
+//! [`Context`] is the `Shell::context` field that `Shell::inherit_from` and
 //! `Shell::spawn_thread` clone into a child.  `PWD` / `OLDPWD` stay out of
 //! `env_overrides`; the canonical pair lives on `context.cwd`.
 

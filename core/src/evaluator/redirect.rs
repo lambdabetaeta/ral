@@ -30,7 +30,7 @@ pub(crate) fn eval_redirects(
                 mode: r.mode,
                 target: match &r.target {
                     ValRedirectTarget::File(v) => {
-                        EvalRedirect::File(close(v, &shell.mobile.scope)?.to_string())
+                        EvalRedirect::File(close(v, &shell.env)?.to_string())
                     }
                     ValRedirectTarget::Fd(n) => EvalRedirect::Fd(*n),
                 },

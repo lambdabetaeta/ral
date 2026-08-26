@@ -309,7 +309,7 @@ impl Machine {
             Ok(e) => e,
             Err(b) => return Focus::Halt(b),
         };
-        shell.mobile.control.last_status = 0;
+        shell.last_status = 0;
         if let Err(b) = crate::process::check(mooring) {
             return Focus::Halt(b);
         }
@@ -709,7 +709,7 @@ impl Machine {
                     Ok(v) => v,
                     Err(e) => break 'arm Focus::Halt(Break::Error(e)),
                 };
-                let home = shell.mobile.context.home();
+                let home = shell.context.home();
                 let cwd = shell.cwd();
                 let ctx = FreezeCtx {
                     home: home.as_deref(),
@@ -726,7 +726,7 @@ impl Machine {
                 if let Err(err) = self.reserve(shell) {
                     break 'arm Focus::Halt(err);
                 }
-                shell.mobile.context.grants.push(caps);
+                shell.context.grants.push(caps);
                 shell.audit_deputy_prefixes();
                 self.push(Frame::Grant);
                 self.force(b, &env, mooring, shell)
@@ -886,7 +886,7 @@ impl Machine {
                 if let Err(b) = self.reserve(shell) {
                     return Focus::Halt(b);
                 }
-                let frame = Box::new(shell.mobile.context.handlers.strip_matched(depth));
+                let frame = Box::new(shell.context.handlers.strip_matched(depth));
                 self.push(Frame::Unmask { frame });
                 let call_args = render_handler_args(&entry.name, entry.arity, &argv);
                 self.apply_rule(entry.thunk.clone(), call_args, env.clone(), span, mooring, shell)
@@ -1049,14 +1049,14 @@ impl Machine {
             }
 
             Frame::Unmask { frame } => {
-                shell.mobile.context.handlers.restore_matched(*frame);
+                shell.context.handlers.restore_matched(*frame);
                 Focus::Return(t)
             }
 
             Frame::Try { scope, saved, .. } => {
                 let _children = shell.local.audit.close(scope);
                 shell.local.audit.set_capture(saved);
-                shell.mobile.control.last_status = 0;
+                shell.last_status = 0;
                 Focus::Return(t)
             }
 
@@ -1083,14 +1083,14 @@ impl Machine {
             }
 
             Frame::Grant => {
-                shell.mobile.context.grants.pop();
+                shell.context.grants.pop();
                 Focus::Return(t)
             }
 
             Frame::Audit { scope, saved } => {
                 let children = shell.local.audit.close(scope);
                 shell.local.audit.set_capture(saved);
-                let status = shell.mobile.control.last_status;
+                let status = shell.last_status;
                 let v = match as_value(t) {
                     Ok(v) => v,
                     Err(b) => return Focus::Halt(b),
@@ -1121,7 +1121,7 @@ impl Machine {
 
             Frame::Chain { node, next, env } => match s {
                 Break::Error(e) => {
-                    shell.mobile.control.last_status = e.exit_code();
+                    shell.last_status = e.exit_code();
                     let CompKind::Chain(parts) = &node.item else {
                         unreachable!("a Chain frame's node is always a Chain comp")
                     };
@@ -1166,7 +1166,7 @@ impl Machine {
             }
 
             Frame::Unmask { frame } => {
-                shell.mobile.context.handlers.restore_matched(*frame);
+                shell.context.handlers.restore_matched(*frame);
                 Focus::Halt(s)
             }
 
@@ -1176,7 +1176,7 @@ impl Machine {
                     shell.local.audit.set_capture(saved);
                     let outcome = classify(&BodyResult::Error(e), &children, shell);
                     let record = error_record(&outcome.cmd, outcome.status, &outcome.message, outcome.line, outcome.col);
-                    shell.mobile.control.last_status = 0;
+                    shell.last_status = 0;
                     self.apply_rule(handler, vec![record], *env, None, mooring, shell)
                 }
                 Break::Escape(esc) => {
@@ -1202,7 +1202,7 @@ impl Machine {
             }
 
             Frame::Grant => {
-                shell.mobile.context.grants.pop();
+                shell.context.grants.pop();
                 Focus::Halt(s)
             }
 
@@ -1210,7 +1210,7 @@ impl Machine {
                 Break::Error(e) => {
                     let children = shell.local.audit.close(scope);
                     shell.local.audit.set_capture(saved);
-                    shell.mobile.control.last_status = e.exit_code();
+                    shell.last_status = e.exit_code();
                     Focus::Return(Terminal::Value(tree_value(
                         e.exit_code(),
                         Value::Unit,
@@ -1241,14 +1241,14 @@ impl Frame {
                 shell.io.stdout = prev_stdout;
             }
             Frame::Redirect(state) => state.abandon(shell),
-            Frame::Unmask { frame } => shell.mobile.context.handlers.restore_matched(*frame),
+            Frame::Unmask { frame } => shell.context.handlers.restore_matched(*frame),
             Frame::Try { scope, saved, .. } | Frame::Audit { scope, saved } => {
                 let _children = shell.local.audit.close(scope);
                 shell.local.audit.set_capture(saved);
             }
             Frame::Within(undo) => undo.apply(shell),
             Frame::Grant => {
-                shell.mobile.context.grants.pop();
+                shell.context.grants.pop();
             }
             Frame::Chain { .. }
             | Frame::Apply { .. }
@@ -1328,7 +1328,7 @@ pub(crate) fn evaluate(closure: Closure, mooring: &Mooring, shell: &mut Shell) -
 pub(crate) fn apply(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     run(
         |m, mooring, shell| {
-            let env = shell.mobile.scope.clone();
+            let env = shell.env.clone();
             *m = Machine::applying(f, args, env, mooring, shell);
         },
         mooring,
@@ -1339,6 +1339,10 @@ pub(crate) fn apply(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut S
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs scaffolding for the sourced-file-halt test"
+)]
 mod tests {
     use super::*;
     use crate::evaluator::with_capture;
@@ -1363,7 +1367,7 @@ mod tests {
 
     fn run_with(source: &str, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
         let top = toplevel(source);
-        let mut env = shell.mobile.scope.clone();
+        let mut env = shell.env.clone();
         let mut value = Ok(Value::Unit);
         for phrase in &top.phrases {
             match &phrase.item {
@@ -1379,7 +1383,7 @@ mod tests {
                 Phrase::Source { .. } => unreachable!("no test source uses top-level `source`"),
             }
         }
-        shell.mobile.scope = env;
+        shell.env = env;
         value
     }
 
@@ -1465,7 +1469,7 @@ mod tests {
         let app = Spanned::with_span(Some(span), CompKind::App { head, args });
         let closure = Closure {
             comp: Arc::new(app),
-            env: shell.mobile.scope.clone(),
+            env: shell.env.clone(),
         };
         let out = evaluate(closure, &Mooring::adrift(), &mut shell);
         match out {

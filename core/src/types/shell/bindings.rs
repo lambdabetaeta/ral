@@ -912,23 +912,23 @@ mod chokepoint_tests {
     }
 
     /// A ledger entry whose install a panic rollback undid — simulated with
-    /// the same mobile save/restore motion the run door performs — is
+    /// the same env save/restore motion the run door performs — is
     /// dropped silently at the next prune: no notice, no error.
     #[test]
     fn orphan_entry_dropped_silently() {
         let mut shell = armed_shell(2);
-        let pre = shell.mobile();
+        let pre_env = shell.env.clone();
         top_level(&mut shell, "let orphan_x = 1").expect("define");
         assert!(is_leased(&shell, "orphan_x"));
 
-        shell.install_mobile(pre);
+        shell.env = pre_env;
         assert!(
             shell.scope_lookup("orphan_x").is_none(),
             "the rollback must remove it from scope"
         );
         assert!(
             is_leased(&shell, "orphan_x"),
-            "the ledger entry is not part of the rolled-back Mobile — it orphans"
+            "the ledger entry is not part of the rolled-back environment — it orphans"
         );
 
         idle_spin(&mut shell, 2);

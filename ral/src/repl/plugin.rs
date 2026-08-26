@@ -378,8 +378,9 @@ pub(super) fn call_plugin_hook(
         HookFraming::InFrame(mooring) => {
             // Lifecycle hook: resolve the hook from the table and
             // apply it directly inside the existing command frame.
-            let result = match shell.mobile().context.hooks.get(hook) {
-                Some(prog) => ral_core::builtins::apply(&prog.binding.value, args, mooring, shell),
+            let value = shell.hook(hook).map(|prog| prog.binding.value.clone());
+            let result = match value {
+                Some(value) => ral_core::builtins::apply(&value, args, mooring, shell),
                 None => Err(Break::Error(ral_core::types::Error::new(
                     format!("hook '{hook}' is not registered"),
                     1,

@@ -221,7 +221,7 @@ fn write_stdout_ok(name: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     shell
         .write_stdout(bytes)
         .map_err(|e| sig(format!("{name}: {e}")))?;
-    shell.mobile.control.last_status = 0;
+    shell.last_status = 0;
     Ok(())
 }
 

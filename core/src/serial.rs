@@ -265,8 +265,8 @@ impl WireDecoder {
         let mut dec = Self {
             rows: vec![None; n],
             manifest: shell.session.builtins.clone(),
-            natives: shell.mobile.scope.natives_arc(),
-            prelude: shell.mobile.scope.prelude_arc(),
+            natives: shell.env.natives_arc(),
+            prelude: shell.env.prelude_arc(),
         };
         let deps: Vec<HashSet<u32>> = scope_table
             .iter()
@@ -905,7 +905,7 @@ mod tests {
             &crate::boot::BakedPrelude::bake_runtime(),
             &crate::boot::HostSurface::default(),
         );
-        shell.mobile.scope.bind(
+        shell.env.bind(
             "only_mine".to_string(),
             Binding {
                 value: Value::Int(1),
@@ -914,7 +914,7 @@ mod tests {
         );
 
         let mut ctx = InternCtx::new();
-        let _ = SerialEnvSnapshot::from_runtime(&shell.mobile.scope, &mut ctx);
+        let _ = SerialEnvSnapshot::from_runtime(&shell.env, &mut ctx);
         let table = ctx.finish().expect("finish");
 
         assert_eq!(table.len(), 1, "one row: the session tier alone");

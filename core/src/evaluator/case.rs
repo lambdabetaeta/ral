@@ -28,7 +28,7 @@ pub(crate) fn eval_case(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let (label, payload) = match close(scrutinee, &shell.mobile.scope)? {
+    let (label, payload) = match close(scrutinee, &shell.env)? {
         Value::Variant { label, payload } => (label, payload),
         other => {
             return Err(shell
@@ -68,11 +68,11 @@ pub(crate) fn eval_case(
             &arm.pattern,
             &payload,
             &[],
-            shell.mobile.scope.clone(),
+            shell.env.clone(),
             mooring,
             shell,
         )?;
-        shell.mobile.scope = env;
+        shell.env = env;
         eval_comp(arm.body.comp(), mooring, shell, tail)
     })
 }

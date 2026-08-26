@@ -245,7 +245,7 @@ pub(crate) fn run(
     // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
     waited.drain();
     let code = outcome.to_user_exit_code();
-    shell.mobile.control.last_status = code;
+    shell.last_status = code;
     commit_result?;
     // A command inside a helper stage can no longer take SIGPIPE from an
     // interior edge — the parent holds that edge's read end — so any SIGPIPE

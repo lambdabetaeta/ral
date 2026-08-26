@@ -36,7 +36,7 @@ pub(crate) struct SpawnPlan {
 pub(crate) fn vet(id: &CommandIdentity, args: &[Value], shell: &mut Shell) -> Settled<SpawnPlan> {
     check_existence(id)?;
     let arg_strs = validate_argv(id, args, shell)?;
-    let policy_names = id.policy_names(&shell.mobile.context);
+    let policy_names = id.policy_names(&shell.context);
     let policy_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
     let deny_names = id.deny_names_from(policy_names.clone());
     let deny_refs: Vec<&str> = deny_names.iter().map(String::as_str).collect();
@@ -165,11 +165,10 @@ mod tests {
         let mut shell = Shell::default();
         shell.seed_cwd(here.path().to_path_buf());
         shell
-            .mobile
             .context
             .set_env_var("PATH", format!("{};", elsewhere.path().to_string_lossy()));
 
-        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.mobile.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.context);
         match check_existence(&id) {
             Err(Break::Error(e)) => {
                 assert_eq!(e.exit_code(), 127);
@@ -195,14 +194,14 @@ mod tests {
         let elsewhere = tempfile::tempdir().unwrap();
 
         let mut shell = Shell::default();
-        shell.mobile.context.set_env_var("PATH", "./bin");
+        shell.context.set_env_var("PATH", "./bin");
         shell.seed_cwd(tmp.path().to_path_buf());
-        let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.mobile.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.context);
         assert_eq!(id.resolved, bin.join(&name).to_string_lossy());
         check_existence(&id).expect("a resolved name must vet");
 
         shell.seed_cwd(elsewhere.path().to_path_buf());
-        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.mobile.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.context);
         match check_existence(&id) {
             Err(Break::Error(e)) => assert_eq!(e.exit_code(), 127),
             other => panic!("expected 127, got {other:?}"),
@@ -217,11 +216,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut shell = Shell::default();
         shell
-            .mobile
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
-        let id = CommandIdentity::resolve(CommandName::Bare("ls".into()), &shell.mobile.context);
+        let id = CommandIdentity::resolve(CommandName::Bare("ls".into()), &shell.context);
         check_existence(&id).expect("bundled name must not 127");
         assert_eq!(id.shown, "ls");
     }
@@ -232,13 +230,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut shell = Shell::default();
         shell
-            .mobile
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
         let id = CommandIdentity::resolve(
             CommandName::Bare("definitely-not-a-real-tool-xyz".into()),
-            &shell.mobile.context,
+            &shell.context,
         );
         match check_existence(&id) {
             Err(Break::Error(e)) => assert_eq!(e.exit_code(), 127),

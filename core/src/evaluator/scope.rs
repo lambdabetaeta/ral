@@ -154,7 +154,7 @@ impl WithinScope {
                     let map = as_map(v, "within handlers")?;
                     let schemes = crate::typecheck::SessionSchemes {
                         bindings: env.binding_schemes(),
-                        aliases: shell.mobile.context.handlers.alias_schemes(),
+                        aliases: shell.context.handlers.alias_schemes(),
                         builtins: shell.session.builtins.clone(),
                     };
                     entries = map
@@ -196,13 +196,13 @@ impl WithinScope {
             handlers,
         } = self;
         let saved_env = env_overrides.map(|overrides| {
-            let saved = shell.mobile.context.env_overrides.clone();
-            shell.mobile.context.extend_env(overrides);
+            let saved = shell.context.env_overrides.clone();
+            shell.context.extend_env(overrides);
             saved
         });
         let saved_dir = cwd.map(|path| shell.swap_cwd_override(path));
         let handlers = handlers
-            .map(|(entries, catch_all)| shell.mobile.context.handlers.push(entries, catch_all));
+            .map(|(entries, catch_all)| shell.context.handlers.push(entries, catch_all));
         WithinUndo {
             saved_env,
             saved_dir,
@@ -224,13 +224,13 @@ impl WithinUndo {
     /// Undo in the reverse of install order: handlers, then dir, then env.
     pub(crate) fn apply(self, shell: &mut Shell) {
         if let Some(handle) = self.handlers {
-            shell.mobile.context.handlers.remove_by_handle(handle);
+            shell.context.handlers.remove_by_handle(handle);
         }
         if let Some(saved) = self.saved_dir {
             shell.restore_cwd_override(saved);
         }
         if let Some(saved) = self.saved_env {
-            shell.mobile.context.env_overrides = saved;
+            shell.context.env_overrides = saved;
         }
     }
 }
@@ -243,11 +243,11 @@ pub(crate) fn eval_within(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let opts_val = close(opts, &shell.mobile.scope)?;
+    let opts_val = close(opts, &shell.env)?;
     let opts_map = as_map(&opts_val, "within")?;
-    let env = shell.mobile.scope.clone();
+    let env = shell.env.clone();
     let scope = WithinScope::parse(&opts_map, &env, shell)?;
-    let body = close(body, &shell.mobile.scope)?;
+    let body = close(body, &shell.env)?;
     let undo = scope.enter(shell);
     let result = apply(body, vec![], mooring, shell);
     undo.apply(shell);
@@ -260,8 +260,8 @@ pub(crate) fn eval_grant(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let caps_val = close(caps, &shell.mobile.scope)?;
-    let home = shell.mobile.context.home();
+    let caps_val = close(caps, &shell.env)?;
+    let home = shell.context.home();
     let cwd = shell.cwd();
     let ctx = crate::path::sigil::FreezeCtx {
         home: home.as_deref(),
@@ -269,7 +269,7 @@ pub(crate) fn eval_grant(
     };
     let caps =
         crate::capability::decode_capability_map(&caps_val, "grant", &ctx).map_err(Break::from)?;
-    let body = close(body, &shell.mobile.scope)?;
+    let body = close(body, &shell.env)?;
     shell
         .with_capabilities(caps, |shell| apply(body, vec![], mooring, shell))
         .map_err(Into::into)
@@ -284,8 +284,8 @@ pub(crate) fn eval_try(
     // Pure control flow: bytes keep flowing through fd 1/2, hence
     // `CapturePolicy::Off`.  Children are still forced so the error record can
     // name the failing command; `Exit`/`Stopped` leave via `?` before `classify`.
-    let body_val = close(body, &shell.mobile.scope)?;
-    let handler_val = close(handler, &shell.mobile.scope)?;
+    let body_val = close(body, &shell.env)?;
+    let handler_val = close(handler, &shell.env)?;
     let (body_result, children) = audit::delimited(shell, CapturePolicy::Off, |s| {
         apply(body_val, vec![], mooring, s)
     })
@@ -302,7 +302,7 @@ pub(crate) fn eval_try(
     );
 
     // `try` recovers, so the failure's status must not leak past it.
-    shell.mobile.control.last_status = 0;
+    shell.last_status = 0;
 
     if outcome.ok {
         Ok(outcome.value)
@@ -317,8 +317,8 @@ pub(crate) fn eval_guard(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let body_val = close(body, &shell.mobile.scope)?;
-    let cleanup_val = close(cleanup, &shell.mobile.scope)?;
+    let body_val = close(body, &shell.env)?;
+    let cleanup_val = close(cleanup, &shell.env)?;
     let body_result = apply(body_val, vec![], mooring, shell);
     // One rule for both signals: any halt of the cleanup pre-empts the body's
     // outcome, error exactly as escape.  A cleanup that cannot fail the
@@ -330,16 +330,16 @@ pub(crate) fn eval_guard(
 }
 
 pub(crate) fn eval_audit(body: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
-    let body_val = close(body, &shell.mobile.scope)?;
+    let body_val = close(body, &shell.env)?;
     let (body_result, children) = audit::delimited(shell, CapturePolicy::Bytes, |s| {
         apply(body_val, vec![], mooring, s)
     })
     .map_err(Break::Escape)?;
     let (status, value, error) = match &body_result {
-        BodyResult::Value(v) => (shell.mobile.control.last_status, v.clone(), None),
+        BodyResult::Value(v) => (shell.last_status, v.clone(), None),
         BodyResult::Error(e) => (e.exit_code(), Value::Unit, Some(e.message_with_hint())),
     };
-    shell.mobile.control.last_status = status;
+    shell.last_status = status;
     Ok(tree_value(status, value, error, &children))
 }
 

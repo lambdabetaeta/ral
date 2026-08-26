@@ -22,7 +22,7 @@ pub(crate) mod val;
 
 use crate::ir::{Comp, Phrase};
 use crate::source::Spanned;
-use crate::types::{Break, Control, Env, Mooring, Settled, Shell, Tail, TailCall, ThunkBody, Value};
+use crate::types::{Break, Control, Env, Mooring, Settled, Shell, Tail, TailCall, Value};
 use std::sync::Arc;
 
 pub(crate) use capture::with_audit_capture;
@@ -47,11 +47,11 @@ pub(crate) fn absorb_tail(
     }
 }
 
-/// Tail-absorbed run of `comp` in place — no mobile install or discard, no
-/// scope frame, no transport dispatch.
+/// Tail-absorbed run of `comp` in place — no rescope or discard, no scope
+/// frame, no transport dispatch.
 ///
 /// For callers already inside a session (prelude bootstrap, module loading,
-/// REPL prompt and config), where a run boundary would round-trip a mobile
+/// REPL prompt and config), where a run boundary would round-trip state
 /// they never wanted snapshotted. [`Tail::No`], since the caller has
 /// obligations beyond `comp`.
 ///
@@ -59,7 +59,7 @@ pub(crate) fn absorb_tail(
 /// A `Break` from `comp` — a recoverable error, or an escape such as `exit`.
 pub fn evaluate(comp: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     debug_assert!(
-        !shell.mobile.context.grants.is_empty(),
+        !shell.context.grants.is_empty(),
         "grants must be non-empty; Shell::new pre-pushes root"
     );
     absorb_tail(
@@ -75,18 +75,17 @@ pub fn evaluate(comp: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Settl
 // scope, not a process boundary, so OS confinement happens per child in
 // `build_command` (`runtime::command::process`), never at body entry.
 
-/// Run a thunk body as a block: scope-isolated, mobile discarded on exit, so
-/// `let`, `cd`, module loads, plugin registrations, and env-var changes do
-/// not propagate.  Only `last_status` and observations, which the body posts
-/// straight to the shared trail, cross the boundary.
+/// Run a thunk body as a block: scope-isolated, its whole store discarded on
+/// exit, so `let`, `cd`, module loads, plugin registrations, and env-var
+/// changes do not propagate.  Only `last_status` and observations, which the
+/// body posts straight to the shared trail, cross the boundary.
 ///
 /// `captured` is the environment a block-shaped `Value::Thunk`'s `Closure`
-/// carries; [`Shell::with_thunk_body`] rescopes the body's mobile to it plus
-/// a fresh frame and, as a [`ThunkBody::Block`], folds only `last_status`
-/// back.
+/// carries; [`Shell::eval_block_body`] rescopes the body to it and folds only
+/// `last_status` back.
 ///
 /// `tail` is the block's own tail position, granted [`Tail::Yes`] only by the
-/// trampoline's final argument.  The body's mobile is installed for the
+/// trampoline's final argument.  The body's store is rescoped for the
 /// absorption either way; tail-ness only chooses whether it trampolines.
 ///
 /// Outside the crate the block contract is reached through [`apply`].
@@ -97,10 +96,8 @@ pub(crate) fn eval_block(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    shell.with_thunk_body(ThunkBody::Block, captured, |shell, mobile| {
-        shell.run_with_mobile(mobile, |shell| {
-            absorb_tail(comp::eval_comp(body, mooring, shell, tail), mooring, shell)
-        })
+    shell.eval_block_body(captured, |shell| {
+        absorb_tail(comp::eval_comp(body, mooring, shell, tail), mooring, shell)
     })
 }
 
@@ -109,7 +106,7 @@ pub(crate) fn eval_block(
 /// What one [`run_phrases`] run left behind.
 pub(crate) struct Ran {
     /// The scope as it stood when the last phrase finished or the first one
-    /// halted — `shell.mobile.scope`'s value at that moment.
+    /// halted — `shell.env`'s value at that moment.
     pub env: Env,
     /// Every name a `Define` bound, in order — what `use` collects.
     pub defined: Vec<String>,
@@ -120,7 +117,7 @@ pub(crate) struct Ran {
 /// `Session` alone; a block-local `source` and a `use` body run under a mode
 /// that leases nothing.  (`shell.env`'s per-`Define` session install — §1.3
 /// — waits on the field itself, which is W2a's: on the recursive evaluator
-/// the environment thread *is* `shell.mobile.scope`, so a `Session` run's
+/// the environment thread *is* `shell.env`, so a `Session` run's
 /// `Define`s are already visible to every later phrase without a separate
 /// write-back.)
 #[derive(Clone, Copy)]
@@ -131,7 +128,7 @@ pub(crate) enum Mode {
     Prelude,
 }
 
-/// Thread `phrases` over `shell.mobile.scope`: install `env` at the start,
+/// Thread `phrases` over `shell.env`: install `env` at the start,
 /// run each phrase in order, and report the scope as it stood when the last
 /// one finished or the first one halted.  The one place `Phrase::Define`
 /// has meaning.
@@ -146,7 +143,7 @@ pub(crate) fn run_phrases(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Ran {
-    shell.mobile.scope = env;
+    shell.env = env;
     let mut defined = Vec::new();
     let last = phrases.len().saturating_sub(1);
     let mut outcome = Ok(Value::Unit);
@@ -180,7 +177,7 @@ pub(crate) fn run_phrases(
         }
     }
     Ran {
-        env: shell.mobile.scope.clone(),
+        env: shell.env.clone(),
         defined,
         outcome,
     }
@@ -219,16 +216,15 @@ fn run_phrase_define(
     }
     let v = capture::with_ambient_stdout(shell, |shell| evaluate(comp, mooring, shell))?;
     comp::set_status_from_value(&v, shell);
-    let env = pattern::bind_pattern(pattern, &v, schemes, shell.mobile.scope.clone(), mooring, shell)?;
-    shell.mobile.scope = env;
+    let env = pattern::bind_pattern(pattern, &v, schemes, shell.env.clone(), mooring, shell)?;
+    shell.env = env;
     let mut names = Vec::new();
     pattern::pattern_names(pattern, &mut names);
     for name in names {
         // `bind_pattern` just installed every one of these into
-        // `shell.mobile.scope`, so the lookup cannot miss.
+        // `shell.env`, so the lookup cannot miss.
         let binding = shell
-            .mobile
-            .scope
+            .env
             .get_binding(&name)
             .expect("bind_pattern bound every name in `pattern`")
             .clone();
@@ -263,9 +259,9 @@ fn run_phrase_source(
             )
             .into());
     };
-    let env = shell.mobile.scope.clone();
+    let env = shell.env.clone();
     let ran = crate::builtins::modules::source(&p, env, mode, span, mooring, shell)?;
-    shell.mobile.scope = ran.env;
+    shell.env = ran.env;
     defined.extend(ran.defined);
     ran.outcome.map(|_| Value::Unit)
 }
@@ -294,7 +290,7 @@ mod tests {
         let mut shell = Shell::default();
         let ran = run_phrases(
             &phrases,
-            shell.mobile.scope.clone(),
+            shell.env.clone(),
             Mode::Session,
             &Mooring::adrift(),
             &mut shell,
@@ -303,7 +299,7 @@ mod tests {
         assert_eq!(ran.defined, vec!["rp_a".to_string(), "rp_b".to_string()]);
         assert_eq!(ran.env.get("rp_a"), Some(&Value::Int(1)));
         assert_eq!(ran.env.get("rp_b"), Some(&Value::Int(2)));
-        assert_eq!(shell.mobile.scope.get("rp_a"), Some(&Value::Int(1)));
+        assert_eq!(shell.env.get("rp_a"), Some(&Value::Int(1)));
     }
 
     #[test]
@@ -312,7 +308,7 @@ mod tests {
         let mut shell = Shell::default();
         let ran = run_phrases(
             &phrases,
-            shell.mobile.scope.clone(),
+            shell.env.clone(),
             Mode::Session,
             &Mooring::adrift(),
             &mut shell,
@@ -334,7 +330,7 @@ mod tests {
         let before = shell.leased_binding_count();
         let ran = run_phrases(
             &phrases,
-            shell.mobile.scope.clone(),
+            shell.env.clone(),
             Mode::Local,
             &Mooring::adrift(),
             &mut shell,
@@ -353,13 +349,13 @@ mod tests {
         let mut shell = Shell::default();
         let _ = run_phrases(
             &phrases,
-            shell.mobile.scope.clone(),
+            shell.env.clone(),
             Mode::Session,
             &Mooring::adrift(),
             &mut shell,
         );
         assert!(
-            shell.mobile.scope.get("persist_top").is_some(),
+            shell.env.get("persist_top").is_some(),
             "the run door must persist `let` bindings even on Exit"
         );
     }
@@ -380,10 +376,10 @@ mod tests {
             panic!("expected a thunked block, got {:?}", comp.item);
         };
         let mut shell = Shell::default();
-        let captured = shell.mobile.scope.clone();
+        let captured = shell.env.clone();
         let _ = eval_block(body, &captured, Tail::No, &Mooring::adrift(), &mut shell);
         assert!(
-            shell.mobile.scope.get("leak_block").is_none(),
+            shell.env.get("leak_block").is_none(),
             "block boundary must discard `let` bindings"
         );
     }

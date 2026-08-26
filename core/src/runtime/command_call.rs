@@ -35,7 +35,7 @@ pub(crate) enum Resolution {
 }
 
 /// Bare-name lookup: env → handlers → external.  A head like `f x` is a
-/// lexical name, so `env` — not `shell.mobile.scope` — is what a bare name
+/// lexical name, so `env` — not `shell.env` — is what a bare name
 /// resolves through.  No admission check and no audit — those belong to
 /// [`classify_command`].
 pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
@@ -50,9 +50,9 @@ pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
 pub(crate) fn resolve_command_word(head: &CommandWord, env: &Env, shell: &Shell) -> Resolution {
     let name = head.name();
     match name {
-        CommandName::Path(_) | CommandName::TildePath(_) => Resolution::External(
-            CommandIdentity::resolve(name.clone(), &shell.mobile.context),
-        ),
+        CommandName::Path(_) | CommandName::TildePath(_) => {
+            Resolution::External(CommandIdentity::resolve(name.clone(), &shell.context))
+        }
         CommandName::Bare(s) => match head {
             CommandWord::Name(_) => resolve(s, env, shell),
             CommandWord::External(_) => resolve_handler_then_external(s, shell),
@@ -66,7 +66,7 @@ fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
         Some(HandlerLookup::Base(entry)) => Resolution::Base(entry),
         None => Resolution::External(CommandIdentity::resolve(
             CommandName::Bare(name.to_string()),
-            &shell.mobile.context,
+            &shell.context,
         )),
     }
 }
@@ -88,7 +88,7 @@ pub(crate) fn classify_command(
         shell.local.bindings.renew_one(name);
     }
     if let Resolution::External(id) = &r
-        && !crate::capability::admits_head(&shell.mobile.context, id)
+        && !crate::capability::admits_head(&shell.context, id)
     {
         return Err(refuse_head(id, mooring, shell));
     }
@@ -139,7 +139,7 @@ pub(crate) fn run_call(
     if !matches!(head.name().bare(), Some(name) if name.starts_with('_')) {
         shell.local.audit.call_site = span;
     }
-    let env = shell.mobile.scope.clone();
+    let env = shell.env.clone();
 
     match classify_command(head, &env, mooring, shell)? {
         // W2g: the machine's `Exec` rule runs this arm itself (§2.2).
@@ -195,7 +195,7 @@ struct MaskedHandler<'a> {
 
 impl<'a> MaskedHandler<'a> {
     fn strip(shell: &'a mut Shell, depth: usize) -> Self {
-        let frame = shell.mobile.context.handlers.strip_matched(depth);
+        let frame = shell.context.handlers.strip_matched(depth);
         Self {
             shell,
             frame: Some(frame),
@@ -206,7 +206,7 @@ impl<'a> MaskedHandler<'a> {
 impl Drop for MaskedHandler<'_> {
     fn drop(&mut self) {
         if let Some(frame) = self.frame.take() {
-            self.shell.mobile.context.handlers.restore_matched(frame);
+            self.shell.context.handlers.restore_matched(frame);
         }
     }
 }

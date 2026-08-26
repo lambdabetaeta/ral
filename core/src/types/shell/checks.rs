@@ -11,8 +11,7 @@ impl Shell {
     /// True when capability checks should emit an observation: a live trail
     /// and an `audit: true` grants layer must both call for it.
     pub fn should_audit_capabilities(&self) -> bool {
-        self.mobile
-            .context
+        self.context
             .should_audit_capabilities(&self.local.audit)
     }
 
@@ -21,7 +20,7 @@ impl Shell {
     /// # Errors
     /// `Err` if a layer of the active stack withholds it.
     pub fn check_editor_read(&self, subcmd: &str) -> Settled<()> {
-        crate::capability::check_editor_read(&self.mobile.context, subcmd)
+        crate::capability::check_editor_read(&self.context, subcmd)
     }
 
     /// Check `editor.write`.
@@ -29,7 +28,7 @@ impl Shell {
     /// # Errors
     /// `Err` if a layer of the active stack withholds it.
     pub fn check_editor_write(&self, subcmd: &str) -> Settled<()> {
-        crate::capability::check_editor_write(&self.mobile.context, subcmd)
+        crate::capability::check_editor_write(&self.context, subcmd)
     }
 
     /// Check `editor.tui`.
@@ -37,7 +36,7 @@ impl Shell {
     /// # Errors
     /// `Err` if a layer of the active stack withholds it.
     pub fn check_editor_tui(&self) -> Settled<()> {
-        crate::capability::check_editor_tui(&self.mobile.context)
+        crate::capability::check_editor_tui(&self.context)
     }
 
     /// Check `shell.chdir`, the capability `cd` needs.
@@ -45,15 +44,15 @@ impl Shell {
     /// # Errors
     /// `Err` if a layer of the active stack withholds it.
     pub fn check_shell_chdir(&self) -> Settled<()> {
-        crate::capability::check_shell_chdir(&self.mobile.context)
+        crate::capability::check_shell_chdir(&self.context)
     }
 
-    /// Every audit-emitting check funnels through here: `mobile.context` and
+    /// Every audit-emitting check funnels through here: `context` and
     /// `local.audit` are disjoint fields, and the site is taken by value so it
     /// keeps no borrow on the session's source registry.
     fn audit_call<R>(&mut self, f: impl FnOnce(&Context, &mut Audit, CallSite) -> R) -> R {
         let site = self.call_site();
-        f(&self.mobile.context, &mut self.local.audit, site)
+        f(&self.context, &mut self.local.audit, site)
     }
 
     /// Check `exec` for a command with one identity set — `policy_names` both
@@ -125,7 +124,7 @@ impl Shell {
     /// The OS-renderable projection of the live capability stack; `None` when
     /// no layer restricts enough to need an OS sandbox at all.
     pub fn sandbox_projection(&self) -> Option<SandboxProjection> {
-        let ctx = &self.mobile.context;
+        let ctx = &self.context;
         let path_env = ctx.env_overrides().get("PATH").map_or("", String::as_str);
         crate::capability::sandbox_projection(&ctx.grants, &ctx.resolver(), path_env)
     }
@@ -133,7 +132,7 @@ impl Shell {
     /// Whether the live stack permits birthing a process this session stops
     /// owning.  Read at the `detach` call, so an enclosing `grant` frame binds.
     pub fn permits_detach(&self) -> bool {
-        self.mobile.context.grants.permits_detach()
+        self.context.grants.permits_detach()
     }
 
     /// The guest process jail installed on this session — `None` anywhere but

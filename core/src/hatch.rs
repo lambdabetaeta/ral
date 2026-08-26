@@ -488,12 +488,12 @@ pub(crate) fn apply_seed(
         .map_err(|e| format!("hatch: the seed's scope failed to decode: {}", e.message))?;
     install_shell_mobile(seed.mobile, shell, &dec)
         .map_err(|e| format!("hatch: the seed's context failed to decode: {}", e.message))?;
-    shell.mobile.scope = seed
+    shell.env = seed
         .captured
         .into_runtime(&dec)
         .map_err(|e| format!("hatch: the seed's scope failed to decode: {}", e.message))?;
 
-    let own = shell.mobile().context.grants.effective();
+    let own = shell.context.grants.effective();
     let cwd = shell.cwd();
     let narrowed = narrow(&own, &seed.grant, &cwd.to_string_lossy())?;
     shell.push_session_capabilities(narrowed);
@@ -709,9 +709,9 @@ mod tests {
         apply_seed(read_seed(reader).expect("read seed"), &mut shell, deny_net)
             .expect("apply seed");
 
-        assert_eq!(shell.mobile.scope.get("kept"), Some(&Value::Int(7)));
+        assert_eq!(shell.env.get("kept"), Some(&Value::Int(7)));
         assert_eq!(
-            shell.mobile().context.grants.effective().net,
+            shell.context.grants.effective().net,
             Some(false),
             "the installer's narrower must land its floor on the hydrated shell"
         );

@@ -6,8 +6,6 @@
 mod env;
 pub use env::{Binding, Env, EnvVars, EnvVarsIter};
 
-pub use shell::control::ControlState;
-
 pub use shell::repl::ReplScratch;
 
 mod capability;
@@ -88,13 +86,10 @@ pub use mooring::{
 pub(crate) use mooring::{NurseryGuard, TerminalAccess};
 
 mod shell;
-pub(crate) use shell::ThunkBody;
 pub use shell::hooks::{
     DefaultPolicy, Hook, HookName, HookSig, Namespace, RegisterError, TerminalPolicy,
 };
-pub use shell::{
-    Context, DEFAULT_RECURSION_LIMIT, DEFAULT_STACK_LIMIT, LocalState, Mobile, SessionState, Shell,
-};
+pub use shell::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 
 pub(crate) use shell::workers::{CapReached, WorkerRegistry};
 pub use shell::workers::{LeaseClass, ReapCause, ReapNotice, WorkerEntry, WorkerId, WorkerLease};

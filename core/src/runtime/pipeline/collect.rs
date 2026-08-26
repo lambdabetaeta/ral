@@ -62,7 +62,7 @@ fn synth_external_stage_audit(
         return AuditFragment::empty();
     }
     let site = shell.call_site();
-    let principal = shell.mobile.context.principal();
+    let principal = shell.context.principal();
     let (status, value, error) = match err {
         Some(e) => (e.exit_code(), Value::Unit, Some(e.message.clone())),
         None => (status, Value::Unit, None),
@@ -245,7 +245,7 @@ impl PipelineCollector {
             }
         }
         if is_pipeline_final {
-            shell.mobile.control.last_status = obs.status;
+            shell.last_status = obs.status;
             self.final_value = obs.final_value;
         }
     }
@@ -255,7 +255,7 @@ impl PipelineCollector {
             return Err(match br {
                 PipelineBreak::Control(esc) => Break::Escape(esc),
                 PipelineBreak::Failure(error) => {
-                    shell.mobile.control.last_status = error.exit_code();
+                    shell.last_status = error.exit_code();
                     Break::Error(error)
                 }
             });
@@ -512,7 +512,7 @@ mod tests {
             true,
             StageObservation::ok(42),
         );
-        assert_eq!(shell.mobile.control.last_status, 42);
+        assert_eq!(shell.last_status, 42);
         assert!(c.break_.is_none());
     }
 
@@ -520,7 +520,7 @@ mod tests {
     fn final_status_not_recorded_when_control_preempts() {
         let mut c = PipelineCollector::new();
         let mut shell = Shell::default();
-        shell.mobile.control.last_status = 0;
+        shell.last_status = 0;
         c.fold(
             &Mooring::adrift(),
             &mut shell,
@@ -532,7 +532,7 @@ mod tests {
                 audit: AuditFragment::empty(),
             },
         );
-        assert_eq!(shell.mobile.control.last_status, 0);
+        assert_eq!(shell.last_status, 0);
     }
 
     #[test]

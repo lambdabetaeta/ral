@@ -16,8 +16,8 @@ use crate::serial::{
 use crate::source::{FileId, SourceDb, Span};
 use crate::subprocess::{WireMobile, bare_child_shell, install_shell_mobile};
 use crate::types::{
-    Break, CapturePolicy, Env, Error, Escape, Mobile, Mooring, Observation, Settled, Shell, Status,
-    Tail, Value,
+    Break, CapturePolicy, Env, Error, Escape, Mooring, Observation, Settled, Shell, Status, Tail,
+    Value,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -97,10 +97,15 @@ pub(crate) struct EngineSeed {
 /// accurate, not a bug.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 pub(crate) fn pack_seed(shell: &Shell, grant: String) -> Settled<EngineSeed> {
-    let scope = shell.mobile();
     let mut ctx = InternCtx::new();
-    let captured = SerialEnvSnapshot::from_runtime(&scope.scope, &mut ctx);
-    let mobile = WireMobile::from_runtime(&scope, &mut ctx)?;
+    let captured = SerialEnvSnapshot::from_runtime(&shell.env, &mut ctx);
+    let mobile = WireMobile::from_runtime(
+        &shell.env,
+        shell.last_status,
+        shell.session.stack_limit,
+        &shell.context,
+        &mut ctx,
+    )?;
     Ok(EngineSeed {
         scope_table: ctx.finish()?,
         mobile,
@@ -217,21 +222,27 @@ pub(crate) fn transfer_error(err: &Error) -> Error {
     .with_hint(hint)
 }
 
-/// Reify a [`Mobile`] and a body into a wire-ready [`ChildEvalRequest`].
-/// `span` is the stage body's own, resolved against `sources` so the child
-/// sees the same source under the same [`FileId`].
+/// Reify `shell`'s mobile state and a body into a wire-ready
+/// [`ChildEvalRequest`].  `span` is the stage body's own, resolved against
+/// `shell.sources()` so the child sees the same source under the same
+/// [`FileId`].
 pub(crate) fn pack_request(
     body: Arc<Comp>,
-    mobile: &Mobile,
+    shell: &Shell,
     captured: Option<&Env>,
     audit_policy: Option<CapturePolicy>,
     wants_value: bool,
     span: Option<Span>,
-    sources: &SourceDb,
 ) -> Settled<ChildEvalRequest> {
     let mut ctx = InternCtx::new();
     let captured = captured.map(|env| SerialEnvSnapshot::from_runtime(env, &mut ctx));
-    let mobile = WireMobile::from_runtime(mobile, &mut ctx)?;
+    let mobile = WireMobile::from_runtime(
+        &shell.env,
+        shell.last_status,
+        shell.session.stack_limit,
+        &shell.context,
+        &mut ctx,
+    )?;
     Ok(ChildEvalRequest {
         scope_table: ctx.finish()?,
         body,
@@ -239,7 +250,7 @@ pub(crate) fn pack_request(
         captured,
         audit_policy,
         wants_value,
-        script: WireScriptContext::capture(span, sources),
+        script: WireScriptContext::capture(span, &shell.session.sources),
     })
 }
 
@@ -313,7 +324,7 @@ fn eval_request(request: ChildEvalRequest, prelude: &crate::boot::BakedPrelude) 
         result.is_ok(),
         audit_observations.len()
     );
-    let last_status = shell.mobile().control.last_status;
+    let last_status = shell.last_status;
     Ok(EvalOutcome {
         result,
         audit_observations,
@@ -544,16 +555,15 @@ mod tests {
 
     /// A stage request from a freshly captured snapshot.
     fn pack_stage(stage: Arc<Comp>, shell: &Shell, wants_value: bool) -> ChildEvalRequest {
-        let captured = shell.snapshot();
+        let captured = Arc::new(shell.env.clone());
         let span = stage.span;
         pack_request(
             stage,
-            &shell.mobile,
+            shell,
             Some(&captured),
             shell.local.audit.active_policy(),
             wants_value,
             span,
-            &shell.session.sources,
         )
         .expect("pack")
     }
@@ -621,9 +631,15 @@ mod tests {
             .expect("install alias");
         assert!(parent.has_alias("ll"), "parent installs a removable alias");
 
-        let mobile = parent.mobile();
         let mut ctx = InternCtx::new();
-        let wire = WireMobile::from_runtime(&mobile, &mut ctx).expect("to wire");
+        let wire = WireMobile::from_runtime(
+            &parent.env,
+            parent.last_status,
+            parent.session.stack_limit,
+            &parent.context,
+            &mut ctx,
+        )
+        .expect("to wire");
         let request = ChildEvalRequest {
             scope_table: ctx.finish().expect("finish"),
             body: compile_one("return ()"),
@@ -931,25 +947,25 @@ mod tests {
         let mut wire_child = bare_child_shell(prelude());
         let dec = WireDecoder::for_shell(&wire_child, &seed.scope_table).expect("decoder");
         install_shell_mobile(seed.mobile, &mut wire_child, &dec).expect("install mobile");
-        wire_child.mobile.scope = seed.captured.into_runtime(&dec).expect("decode captured");
+        wire_child.env = seed.captured.into_runtime(&dec).expect("decode captured");
 
         assert_eq!(
-            identity_child.mobile.scope.get("kept"),
-            wire_child.mobile.scope.get("kept"),
+            identity_child.env.get("kept"),
+            wire_child.env.get("kept"),
             "both arms must resolve a kept binding to the same value"
         );
         assert_eq!(
-            identity_child.mobile.scope.get("absent"),
-            wire_child.mobile.scope.get("absent"),
+            identity_child.env.get("absent"),
+            wire_child.env.get("absent"),
             "both arms must agree on the same absence"
         );
         let opaque = |v: Option<&Value>| matches!(v, Some(Value::Variant { label, .. }) if label == crate::serial::OPAQUE_TAG);
         assert!(
-            opaque(identity_child.mobile.scope.get("live")),
+            opaque(identity_child.env.get("live")),
             "an identity fork must scrub a handle-carrying binding"
         );
         assert!(
-            opaque(wire_child.mobile.scope.get("live")),
+            opaque(wire_child.env.get("live")),
             "a wire seed must scrub the same binding the same way"
         );
     }

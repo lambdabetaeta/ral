@@ -1,5 +1,6 @@
-//! Serialisable mirror of the [`Mobile`] half of a shell — what crosses to a
-//! re-exec'd child.  `serial.rs` transports the values and closures inside;
+//! Serialisable mirror of the mobile half of a shell — `env`, `last_status`,
+//! `session.stack_limit`, `context` — what crosses to a re-exec'd child.
+//! `serial.rs` transports the values and closures inside;
 //! this module is the envelope around them.
 //!
 //! Nothing host-local rides: the builtin table holds fn pointers, hooks are
@@ -11,8 +12,7 @@
 use crate::serial::{InternCtx, SerialEnvSnapshot, SerialValue, WireDecoder};
 use crate::typecheck;
 use crate::types::{
-    Context, ControlState, Error, GrantStack, HandlerEntry, HandlerFrame, HandlerStack, Mobile,
-    Shell,
+    Context, Env, Error, GrantStack, HandlerEntry, HandlerFrame, HandlerStack, Shell,
 };
 use serde::{Deserialize, Serialize};
 
@@ -74,38 +74,19 @@ impl WireHandlerFrame {
     }
 }
 
-/// Wire mirror of [`ControlState`].
-///
-/// All three counters ride, so the child continues the parent's depth budget
-/// under the parent's rc / CLI-configured ceiling rather than the
-/// compile-time default.  Tail-ness does not: the child absorbs its body's
-/// terminal tail call locally.
+/// Wire mirror of the two registers that ride beside the environment and the
+/// context: `$?` and the stack cap.  The cap rides so the child continues the
+/// parent's rc / CLI-configured ceiling rather than the compile-time default.
+/// Tail-ness does not: the child absorbs its body's terminal tail call
+/// locally.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct WireControl {
     pub last_status: i32,
-    pub call_depth: usize,
-    pub recursion_limit: usize,
+    pub stack_limit: usize,
 }
 
-impl WireControl {
-    fn from_runtime(c: &ControlState) -> Self {
-        Self {
-            last_status: c.last_status,
-            call_depth: c.call_depth,
-            recursion_limit: c.recursion_limit,
-        }
-    }
-
-    fn into_runtime(self) -> ControlState {
-        ControlState {
-            last_status: self.last_status,
-            call_depth: self.call_depth,
-            recursion_limit: self.recursion_limit,
-        }
-    }
-}
-
-/// Serialisable mirror of [`Mobile`].
+/// Serialisable mirror of a shell's mobile state (`env`, `last_status`,
+/// `session.stack_limit`, `context`) — renamed off `Mobile` waits for W3.
 ///
 /// The inverses are total modulo handle-bearing values, which the serial
 /// layer drops with a clean error.
@@ -133,20 +114,39 @@ pub(crate) struct WireContext {
     pub cwd: crate::types::Cwd,
 }
 
+/// A decoded [`WireMobile`], as the four fields `install_shell_mobile`'s
+/// caller needs to write onto a `Shell`.
+pub(crate) struct DecodedMobile {
+    pub env: Env,
+    pub last_status: i32,
+    pub stack_limit: usize,
+    pub context: Context,
+}
+
 impl WireMobile {
     /// Inverse of [`Self::into_runtime`].
-    pub(crate) fn from_runtime(mobile: &Mobile, ctx: &mut InternCtx) -> Result<Self, Error> {
+    pub(crate) fn from_runtime(
+        env: &Env,
+        last_status: i32,
+        stack_limit: usize,
+        context: &Context,
+        ctx: &mut InternCtx,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            scope: SerialEnvSnapshot::from_runtime(&mobile.scope, ctx),
-            control: WireControl::from_runtime(&mobile.control),
-            context: WireContext::from_runtime(&mobile.context, ctx)?,
+            scope: SerialEnvSnapshot::from_runtime(env, ctx),
+            control: WireControl {
+                last_status,
+                stack_limit,
+            },
+            context: WireContext::from_runtime(context, ctx)?,
         })
     }
 
-    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Mobile, Error> {
-        Ok(Mobile {
-            scope: self.scope.into_runtime(dec)?,
-            control: self.control.into_runtime(),
+    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<DecodedMobile, Error> {
+        Ok(DecodedMobile {
+            env: self.scope.into_runtime(dec)?,
+            last_status: self.control.last_status,
+            stack_limit: self.control.stack_limit,
             context: self.context.into_runtime(dec)?,
         })
     }
@@ -200,13 +200,21 @@ pub(crate) fn install_shell_mobile(
     shell: &mut Shell,
     dec: &WireDecoder,
 ) -> Result<(), Error> {
-    let mut mobile = state.into_runtime(dec)?;
-    let wire_frames: Vec<HandlerFrame> = std::mem::take(&mut mobile.context.handlers).into();
-    mobile.context.handlers = std::mem::take(&mut shell.mobile.context.handlers);
+    let DecodedMobile {
+        env,
+        last_status,
+        stack_limit,
+        mut context,
+    } = state.into_runtime(dec)?;
+    let wire_frames: Vec<HandlerFrame> = std::mem::take(&mut context.handlers).into();
+    context.handlers = std::mem::take(&mut shell.context.handlers);
     for frame in wire_frames {
-        mobile.context.handlers.push_frame(frame);
+        context.handlers.push_frame(frame);
     }
-    shell.install_mobile(mobile);
+    shell.env = env;
+    shell.last_status = last_status;
+    shell.session.stack_limit = stack_limit;
+    shell.context = context;
     Ok(())
 }
 

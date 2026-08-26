@@ -1385,7 +1385,7 @@ mod tests {
         let await_fn = shell
             .lookup_builtin("await")
             .expect("core must register `await`");
-        let env = shell.mobile().scope;
+        let env = shell.env().clone();
         let result = await_fn
             .run(&[Value::Handle(handle)], &env, &m, &mut shell)
             .expect("await on the reacquired handle must succeed");
@@ -1435,7 +1435,7 @@ mod tests {
         let await_fn = shell
             .lookup_builtin("await")
             .expect("core must register `await`");
-        let env = shell.mobile().scope;
+        let env = shell.env().clone();
         let result = await_fn
             .run(&[Value::Handle(handle)], &env, &m, &mut shell)
             .expect("await on a retaken, already-settled handle must deliver the cached result");

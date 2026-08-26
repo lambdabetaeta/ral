@@ -5,11 +5,18 @@
 
 use super::Shell;
 use crate::types::{
-    Binding, Capabilities, Decision, HandlerEntry, HandlerRole, Map, Observation, Observed,
+    Binding, Capabilities, Decision, Env, HandlerEntry, HandlerRole, Map, Observation, Observed,
     Settled, Value,
 };
 
 impl Shell {
+    /// The session's whole lexical environment, for a host that must hand it
+    /// to a builtin reducer directly ([`crate::types::BuiltinEntry::run`])
+    /// rather than reading one name at a time.
+    pub fn env(&self) -> &Env {
+        &self.env
+    }
+
     /// Run `f` with `capabilities` pushed for its dynamic extent.  The single
     /// gate into capability-checked code — `grant { … }` blocks and plugin
     /// hook / keybinding / alias dispatch all funnel through here.  The push
@@ -20,10 +27,10 @@ impl Shell {
         capabilities: Capabilities,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        self.mobile.context.grants.push(capabilities);
+        self.context.grants.push(capabilities);
         self.audit_deputy_prefixes();
         let r = f(self);
-        self.mobile.context.grants.pop();
+        self.context.grants.pop();
         r
     }
 
@@ -32,7 +39,7 @@ impl Shell {
     /// lands, above the [`Capabilities::root`] frame [`Shell::new`] installs.
     /// Lexical attenuation (`grant {}`) wants [`Self::with_capabilities`].
     pub fn push_session_capabilities(&mut self, capabilities: Capabilities) {
-        self.mobile.context.grants.push(capabilities);
+        self.context.grants.push(capabilities);
         self.audit_deputy_prefixes();
     }
 
@@ -43,14 +50,12 @@ impl Shell {
     /// is live and some layer opted into capability auditing.
     pub(crate) fn audit_deputy_prefixes(&mut self) {
         if !self
-            .mobile
             .context
             .should_audit_capabilities(&self.local.audit)
         {
             return;
         }
         let Some(folded) = self
-            .mobile
             .context
             .grants
             .iter()
@@ -64,7 +69,7 @@ impl Shell {
             return;
         }
         let site = self.call_site();
-        let principal = self.mobile.context.principal();
+        let principal = self.context.principal();
         let mut fields = Map::new();
         fields.insert(
             "prefixes".into(),
@@ -92,7 +97,7 @@ impl Shell {
 
     /// True when a non-root capabilities layer is active.
     pub fn has_active_capabilities(&self) -> bool {
-        self.mobile.context.grants.is_restrictive()
+        self.context.grants.is_restrictive()
     }
 
     /// Run `f` with `overrides` merged into the ambient environment — the
@@ -102,10 +107,10 @@ impl Shell {
         overrides: std::collections::HashMap<String, String>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let saved = self.mobile.context.env_overrides.clone();
-        self.mobile.context.extend_env(overrides);
+        let saved = self.context.env_overrides.clone();
+        self.context.extend_env(overrides);
         let result = f(self);
-        self.mobile.context.env_overrides = saved;
+        self.context.env_overrides = saved;
         result
     }
 
@@ -123,12 +128,12 @@ impl Shell {
     /// (`evaluator::scope`) reaches it through this pair rather than the
     /// field directly.
     pub(crate) fn swap_cwd_override(&mut self, cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
-        self.mobile.context.dir.replace(cwd)
+        self.context.dir.replace(cwd)
     }
 
     /// Restore a `within [dir: …]` override saved by [`Self::swap_cwd_override`].
     pub(crate) fn restore_cwd_override(&mut self, saved: Option<std::path::PathBuf>) {
-        self.mobile.context.dir = saved;
+        self.context.dir = saved;
     }
 
     /// Run `f` with a handler frame pushed for its dynamic extent — the
@@ -140,9 +145,9 @@ impl Shell {
         catch_all: Option<Value>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let handle = self.mobile.context.handlers.push(entries, catch_all);
+        let handle = self.context.handlers.push(entries, catch_all);
         let result = f(self);
-        self.mobile.context.handlers.remove_by_handle(handle);
+        self.context.handlers.remove_by_handle(handle);
         result
     }
 
@@ -158,8 +163,8 @@ impl Shell {
     /// mode.
     pub fn install_alias(&mut self, name: String, thunk: Value) -> Settled<()> {
         let entry = HandlerEntry::vet(name, thunk, self.session_schemes(), HandlerRole::Alias)?;
-        self.mobile.context.handlers.remove_alias(&entry.name);
-        self.mobile.context.handlers.push_alias(vec![entry]);
+        self.context.handlers.remove_alias(&entry.name);
+        self.context.handlers.push_alias(vec![entry]);
         Ok(())
     }
 
@@ -180,7 +185,7 @@ impl Shell {
         let scheme = arm.map(|(param, body)| {
             crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
         });
-        self.mobile.scope.bind(name, Binding { value, scheme });
+        self.env.bind(name, Binding { value, scheme });
     }
 
     /// Bind `name` → `value` as a plain scope variable, inferring no scheme.
@@ -190,7 +195,7 @@ impl Shell {
     /// stay distinct to hold the line an rc draws between its typed
     /// `bindings:` and its untyped `env:` / `prompt:` keys.
     pub fn set_var(&mut self, name: String, value: Value) {
-        self.mobile.scope.bind(name, Binding { value, scheme: None });
+        self.env.bind(name, Binding { value, scheme: None });
     }
 
     /// The evaluator's single install point for a scope entry.  Lease
@@ -199,7 +204,7 @@ impl Shell {
     /// `Bind`'s pattern is a local lexical name, never a session write, so
     /// it installs unleased here.
     pub(crate) fn install_scope_binding(&mut self, name: String, binding: Binding) {
-        self.mobile.scope.bind(name, binding);
+        self.env.bind(name, binding);
     }
 
     /// Record a `Phrase::Define`'s binding on the lease ledger: starts a
@@ -224,14 +229,14 @@ impl Shell {
     /// the pseudo-variable namespace [`Self::lookup_value_name`] also
     /// consults.  The read dual of [`Self::set_var`] / [`Self::bind_value`].
     pub fn scope_lookup(&self, name: &str) -> Option<&Value> {
-        self.mobile.scope.get(name)
+        self.env.get(name)
     }
 
     /// Every lexical binding across the whole scope chain, innermost
     /// shadowing outermost — what a host drives tab-completion and the
     /// worksheet from.
     pub fn bindings(&self) -> Vec<(String, Value)> {
-        self.mobile.scope.all_bindings()
+        self.env.all_bindings()
     }
 
     /// The largest single lexical binding's shallow byte estimate — the
@@ -239,22 +244,21 @@ impl Shell {
     /// probe that cloned the scope to size it would be its own cautionary
     /// tale.
     pub fn largest_binding_shallow_size(&self) -> usize {
-        self.mobile.scope.largest_shallow_size()
+        self.env.largest_shallow_size()
     }
 
     /// Every bound name with its installed scheme, innermost binding wins —
     /// the scope half of [`Self::session_schemes`], surfaced on its own for
     /// the worksheet's type column.
     pub fn binding_schemes(&self) -> Vec<(String, Option<crate::typecheck::Scheme>)> {
-        self.mobile.scope.binding_schemes()
+        self.env.binding_schemes()
     }
 
     /// The names of every installed handler entry — `within` arms and aliases
     /// alike — for tab completion.  The handler-stack counterpart of
     /// [`Self::builtin_names`].
     pub fn handler_names(&self) -> impl Iterator<Item = &str> {
-        self.mobile
-            .context
+        self.context
             .handlers
             .entries()
             .map(|e| e.name.as_ref())
@@ -267,9 +271,9 @@ impl Shell {
     /// cycle and depth guards and the source registration; this owns only the
     /// scope frame.
     pub fn in_fresh_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        let saved = self.mobile.scope.clone();
+        let saved = self.env.clone();
         let r = f(self);
-        self.mobile.scope = saved;
+        self.env = saved;
         r
     }
 
@@ -278,22 +282,21 @@ impl Shell {
     /// persistent handler frames.
     pub fn session_schemes(&self) -> crate::typecheck::SessionSchemes {
         crate::typecheck::SessionSchemes {
-            bindings: self.mobile.scope.binding_schemes(),
-            aliases: self.mobile.context.handlers.alias_schemes(),
+            bindings: self.env.binding_schemes(),
+            aliases: self.context.handlers.alias_schemes(),
             builtins: self.session.builtins.clone(),
         }
     }
 
     /// Remove the alias for `name`, returning whether anything was removed.
     pub fn remove_alias(&mut self, name: &str) -> bool {
-        self.mobile.context.handlers.remove_alias(name).is_some()
+        self.context.handlers.remove_alias(name).is_some()
     }
 
     /// True if an alias frame is installed for `name`.  A scoped `within`
     /// frame is not an alias even when it has the same one-entry shape.
     pub fn has_alias(&self, name: &str) -> bool {
-        self.mobile
-            .context
+        self.context
             .handlers
             .iter()
             .any(|f| f.is_alias_for(name))
@@ -303,6 +306,6 @@ impl Shell {
     /// base frame.  A named run-frame entry at any depth outranks every
     /// catch-all, and a base frame outranks a catch-all too.
     pub fn lookup_handler(&self, name: &str) -> Option<crate::types::HandlerLookup> {
-        self.mobile.context.handlers.lookup(name)
+        self.context.handlers.lookup(name)
     }
 }

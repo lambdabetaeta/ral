@@ -32,7 +32,7 @@ impl Shell {
     /// Every path-resolving builtin routes through here, so a `within` scope or
     /// a prior `cd` binds the whole interpreter, not just spawned children.
     pub fn cwd(&self) -> PathBuf {
-        if let Some(p) = self.mobile.context.cwd_chain() {
+        if let Some(p) = self.context.cwd_chain() {
             return p.to_path_buf();
         }
         process_cwd().unwrap_or_else(|| PathBuf::from("."))
@@ -42,12 +42,12 @@ impl Shell {
     /// [`Shell::seed_default_env_vars`] adopted, for a host that never
     /// `chdir`s the process — exarch's `boot_root_shell` seats a session here.
     pub fn seed_cwd(&mut self, cwd: PathBuf) {
-        self.mobile.context.cwd.current = Some(cwd);
+        self.context.cwd.current = Some(cwd);
     }
 
     /// The `cd`-recorded previous cwd — what `apply_env` exports as `OLDPWD`.
     pub(crate) fn oldpwd(&self) -> Option<&std::path::Path> {
-        self.mobile.context.cwd.previous.as_deref()
+        self.context.cwd.previous.as_deref()
     }
 
     /// Move the logical cwd to `target`, recording the prior effective cwd —
@@ -65,7 +65,7 @@ impl Shell {
     pub fn apply_chdir(&mut self, target: &str) -> Result<(String, String), Error> {
         let old = self.cwd();
 
-        let home = self.mobile.context.home();
+        let home = self.context.home();
         let raw: String = if let Some(path) = TildePath::parse(target) {
             expand_tilde_path(
                 path.user.as_deref(),
@@ -90,9 +90,9 @@ impl Shell {
 
         let old_str = old.to_string_lossy().into_owned();
         let new_str = resolved.to_string_lossy().into_owned();
-        self.mobile.context.cwd.previous = Some(old);
-        self.mobile.context.cwd.current = Some(resolved);
-        self.mobile.control.last_status = 0;
+        self.context.cwd.previous = Some(old);
+        self.context.cwd.current = Some(resolved);
+        self.last_status = 0;
 
         Ok((old_str, new_str))
     }
@@ -101,7 +101,7 @@ impl Shell {
     /// [`crate::path::ResolvedPath`] that the fs gates consume directly; a
     /// caller that opens the file takes `.into_inner()` / `.as_path()`.
     pub fn resolve(&self, path: &str) -> crate::path::ResolvedPath {
-        self.mobile.context.resolver().resolve(path)
+        self.context.resolver().resolve(path)
     }
 
     /// Absolute path of the executable the shell would run for `name`, via the
@@ -111,7 +111,7 @@ impl Shell {
     /// (head alone) and [`Self::check_exec_args`] (full call).  `which` and the
     /// dispatch error path pair the two to tell denied-but-installed from absent.
     pub fn locate_command(&self, name: &str) -> Option<PathBuf> {
-        let env_path = self.mobile.context.env_overrides.get_or_host("PATH");
+        let env_path = self.context.env_overrides.get_or_host("PATH");
         let cwd = self.cwd();
         crate::path::locate(
             name,

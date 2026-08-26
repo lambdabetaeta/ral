@@ -234,14 +234,14 @@ mod tests {
     #[test]
     fn render_expands_tilde_against_env_home() {
         let mut shell = Shell::default();
-        shell.mobile.context.set_env_var("HOME", "/tmp/home");
+        shell.context.set_env_var("HOME", "/tmp/home");
         assert_eq!(
             render(
                 &CommandName::TildePath(crate::path::tilde::TildePath {
                     user: None,
                     suffix: Some("/.local/bin/claude".into()),
                 }),
-                &shell.mobile.context,
+                &shell.context,
             ),
             "/tmp/home/.local/bin/claude",
         );
@@ -252,11 +252,8 @@ mod tests {
         let dir = std::env::temp_dir().join("jq_src").join("jq-1.7");
         let mut shell = Shell::default();
         let names = shell.with_cwd(dir.clone(), |shell| {
-            CommandIdentity::resolve(
-                CommandName::Path("./configure".into()),
-                &shell.mobile.context,
-            )
-            .policy_names(&shell.mobile.context)
+            CommandIdentity::resolve(CommandName::Path("./configure".into()), &shell.context)
+                .policy_names(&shell.context)
         });
         assert_eq!(
             names,
@@ -276,8 +273,8 @@ mod tests {
             .into_owned();
         let shell = Shell::default();
         let names =
-            CommandIdentity::resolve(CommandName::Path(head.clone()), &shell.mobile.context)
-                .policy_names(&shell.mobile.context);
+            CommandIdentity::resolve(CommandName::Path(head.clone()), &shell.context)
+                .policy_names(&shell.context);
         assert_eq!(names, vec![head]);
     }
 
@@ -536,9 +533,9 @@ mod tests {
 
         let mut shell = Shell::default();
         shell.seed_cwd(tmp.path().to_path_buf());
-        shell.mobile.context.set_env_var("PATH", "./bin");
+        shell.context.set_env_var("PATH", "./bin");
 
-        let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.mobile.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.context);
         assert_eq!(id.resolved, bin.join(&name).to_string_lossy());
     }
 
@@ -559,10 +556,10 @@ mod tests {
 
         let mut shell = Shell::default();
         shell.seed_cwd(cd_to.path().to_path_buf());
-        shell.mobile.context.set_env_var("PATH", "./bin");
+        shell.context.set_env_var("PATH", "./bin");
 
         let id = shell.with_cwd(overridden.path().to_path_buf(), |shell| {
-            CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.mobile.context)
+            CommandIdentity::resolve(CommandName::Bare(name.clone()), &shell.context)
         });
         assert_eq!(
             id.resolved,
@@ -577,11 +574,8 @@ mod tests {
         let dir = std::env::temp_dir().join("jq_src").join("jq-1.7");
         let mut shell = Shell::default();
         shell.seed_cwd(dir.clone());
-        let names = CommandIdentity::resolve(
-            CommandName::Path("./configure".into()),
-            &shell.mobile.context,
-        )
-        .policy_names(&shell.mobile.context);
+        let names = CommandIdentity::resolve(CommandName::Path("./configure".into()), &shell.context)
+            .policy_names(&shell.context);
         assert!(
             names.iter().any(|n| Path::new(n) == dir.join("configure")),
             "got {names:?}",
@@ -595,12 +589,11 @@ mod tests {
 
         let mut shell = Shell::default();
         shell
-            .mobile
             .context
             .set_env_var("PATH", dir.path().to_string_lossy().into_owned());
 
-        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.mobile.context);
-        let names = id.policy_names(&shell.mobile.context);
+        let id = CommandIdentity::resolve(CommandName::Bare(name), &shell.context);
+        let names = id.policy_names(&shell.context);
         assert_eq!(names, vec![id.resolved]);
     }
 }

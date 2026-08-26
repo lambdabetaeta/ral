@@ -119,7 +119,7 @@ impl Shell {
     /// Every native's name — what a `$name` reference can reach, unlike
     /// [`Self::builtin_names`], which also lists the base-frame names.
     pub fn native_names(&self) -> impl Iterator<Item = &str> {
-        self.mobile.scope.native_names()
+        self.env.native_names()
     }
 
     /// The test-dressing door, with [`Self::install_captured_builtins`]; a
@@ -209,7 +209,7 @@ impl Shell {
     /// what `crate::transport::answer_probe` serves exarch's `/resources` fold.
     /// Names only, never the values, and renewing nothing.
     pub fn binding_count(&self) -> usize {
-        self.mobile.scope.distinct_name_count()
+        self.env.distinct_name_count()
     }
 
     /// Names the binding-lease ledger tracks — non-baseline only, so a
@@ -324,8 +324,7 @@ impl Shell {
     /// the prior ledger and reseals; a host that never arms sees no expiry.
     pub fn arm_binding_lease(&mut self, lease: BindingLease) {
         let baseline = self
-            .mobile
-            .scope
+            .env
             .all_bindings()
             .into_iter()
             .map(|(name, _)| name);
@@ -354,7 +353,7 @@ impl Shell {
         }
         let mut notices = Vec::new();
         for (name, idle_calls) in self.local.bindings.expired() {
-            match self.mobile.scope.get(&name) {
+            match self.env.get(&name) {
                 None => {
                     // Orphaned by a rollback: nothing to prune.
                     self.local.bindings.drop_entry(&name);
@@ -364,7 +363,7 @@ impl Shell {
                 }
                 Some(value) => {
                     let kind = value.type_name();
-                    self.mobile.scope.unset(&name);
+                    self.env.unset(&name);
                     self.local.bindings.drop_entry(&name);
                     notices.push(BindingPruneNotice {
                         name,
@@ -374,7 +373,7 @@ impl Shell {
                 }
             }
         }
-        let session_names: Vec<String> = self.mobile.scope.session_names().map(str::to_string).collect();
+        let session_names: Vec<String> = self.env.session_names().map(str::to_string).collect();
         for name in session_names {
             self.local.bindings.adopt(&name);
         }
@@ -400,7 +399,7 @@ impl Shell {
     /// no surface spelling, since a failure is an `Err` carrying its own
     /// status — so this is a host's own exit code and nothing else.
     pub fn last_status(&self) -> i32 {
-        self.mobile.control.last_status
+        self.last_status
     }
 
     /// Plant the status explicitly.  It is the run's own result, so core writes
@@ -408,36 +407,37 @@ impl Shell {
     /// tests, which prime a sentinel to prove what evaluation resets and cannot
     /// reach a `#[cfg(test)]` item to do it.
     pub fn set_last_status(&mut self, status: i32) {
-        self.mobile.control.last_status = status;
+        self.last_status = status;
     }
 
-    /// The active non-tail call-depth ceiling.
+    /// The active stack cap (§2.1, §6.3 of the CEK plan): frames, not host
+    /// stack frames.
     pub fn recursion_limit(&self) -> usize {
-        self.mobile.control.recursion_limit
+        self.session.stack_limit
     }
 
     /// Set that ceiling — rc `recursion_limit:` and `--recursion-limit`.
     pub fn set_recursion_limit(&mut self, n: usize) {
-        self.mobile.control.recursion_limit = n;
+        self.session.stack_limit = n;
     }
 
     /// The invocation positionals (`$ARGS`, `$1`, …) a CLI host passes after
     /// the program path.
     pub fn set_args(&mut self, args: Vec<String>) {
-        self.mobile.context.args = args;
+        self.context.args = args;
     }
 
     /// The acting principal: `$USER` from the dynamic env, with no host-env
     /// fallback, so it names nobody until a front end seeds it.
     pub fn principal(&self) -> Option<String> {
-        self.mobile.context.principal()
+        self.context.principal()
     }
 
     /// Set a dynamic env-var override for the rest of the session — how a host
     /// seeds `NO_COLOR`, `EXARCH_SESSION_DIR`, and the like.  `within [env: …]`
     /// wants the scoped [`Shell::with_env`] instead, which restores on exit.
     pub fn set_env_var(&mut self, k: impl Into<String>, v: impl Into<String>) {
-        self.mobile.context.set_env_var(k, v);
+        self.context.set_env_var(k, v);
     }
 
     /// [`Self::set_env_var`] in bulk, for a host seeding a batch at boot.
@@ -447,20 +447,20 @@ impl Shell {
         K: Into<String>,
         V: Into<String>,
     {
-        self.mobile.context.extend_env(items);
+        self.context.extend_env(items);
     }
 
     /// Read an env var through the dynamic overlay, falling back to the host
     /// process environment — the overlay-on-process rule `within [env: …]`
     /// obeys.  A host driving command completion reads `PATH` here.
     pub fn env_var(&self, name: &str) -> Option<String> {
-        self.mobile.context.env_overrides().get_or_host(name)
+        self.context.env_overrides().get_or_host(name)
     }
 
     /// The dynamic overlay itself, for a host handing it to an overlay-aware
     /// helper (the `RAL_PATH` plugin search) rather than reading one key.
     pub fn env_overrides(&self) -> &crate::types::EnvVars {
-        self.mobile.context.env_overrides()
+        self.context.env_overrides()
     }
 
     /// Capability frames on the grant stack — the ambient root plus every live
@@ -468,7 +468,7 @@ impl Shell {
     /// across a run boundary.  [`Shell::has_active_capabilities`] asks
     /// qualitatively.
     pub fn grant_depth(&self) -> usize {
-        self.mobile.context.grants.len()
+        self.context.grants.len()
     }
 }
 
@@ -492,8 +492,8 @@ fn seed_natives_and_base(shell: &mut Shell, entries: &[BuiltinEntry]) {
         .filter(|entry| entry.convention == Convention::Argv)
         .cloned()
         .collect();
-    shell.mobile.scope.install_natives(natives);
-    shell.mobile.context.handlers.install_base(&base);
+    shell.env.install_natives(natives);
+    shell.context.handlers.install_base(&base);
 }
 
 #[cfg(test)]

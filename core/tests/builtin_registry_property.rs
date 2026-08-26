@@ -157,7 +157,7 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         };
 
         let mut shell = fresh_shell();
-        let env = shell.mobile().scope.clone();
+        let env = shell.env().clone();
         match entry.run(&args, &env, &Mooring::adrift(), &mut shell) {
             Ok(result) => {
                 assert!(

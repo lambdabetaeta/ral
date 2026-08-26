@@ -522,7 +522,7 @@ pub(super) fn builtin_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value
     let handle = expect_handle(&args[0], "cancel")?;
     stop_handle(handle);
     shell.local.workers.remove(handle);
-    shell.mobile.control.last_status = 0;
+    shell.last_status = 0;
     Ok(Value::Unit)
 }
 
@@ -530,7 +530,7 @@ pub(super) fn builtin_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value
 /// wait for or sample, so observing one is an error.
 fn ensure_live(handle: &HandleInner, shell: &mut Shell) -> Settled<()> {
     if *handle.state.lock().unwrap() == HandleState::Cancelled {
-        shell.mobile.control.last_status = 1;
+        shell.last_status = 1;
         return Err(Break::Error(
             Error::new("handle is cancelled", 1)
                 .with_hint("use try around await to handle cancellation"),
@@ -709,7 +709,7 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         ]);
         variant("pending", Some(Box::new(pending)))
     };
-    shell.mobile.control.last_status = 0;
+    shell.last_status = 0;
     Ok(result)
 }
 
@@ -783,7 +783,7 @@ fn break_record(e: &Break, shell: &Shell) -> Value {
 }
 
 fn set_status_from_outcome(outcome: &Settled<Value>, shell: &mut Shell) {
-    shell.mobile.control.last_status = match outcome {
+    shell.last_status = match outcome {
         Ok(_) => 0,
         Err(e) => error_exit_code(e),
     };
@@ -912,7 +912,7 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(e.exit_code(), 1);
-                assert_eq!(shell.mobile.control.last_status, 1);
+                assert_eq!(shell.last_status, 1);
             }
             other => panic!("expected Some(failed outcome), got {other:?}"),
         }
@@ -926,7 +926,7 @@ mod tests {
         let handle = handle_with_disconnected_worker(b"out", b"err");
         let args = [Value::Handle(handle)];
         let poll1 = builtin_poll(&args, &mut shell).expect("poll must not re-raise a panic");
-        assert_eq!(shell.mobile.control.last_status, 0, "poll itself succeeded");
+        assert_eq!(shell.last_status, 0, "poll itself succeeded");
 
         let settled = expect_variant(&poll1, "settled");
         let fields = expect_map(settled);
@@ -947,7 +947,7 @@ mod tests {
         shell: &Shell,
         cancel_via: impl FnOnce(&crate::process::CancelScope),
     ) -> (i32, crate::process::CancelScope) {
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let (_join, worker_cancel) = shell.spawn_thread(
@@ -979,7 +979,7 @@ mod tests {
         let (_idle_join, sibling) = shell.spawn_thread(
             &Mooring::adrift(),
             Arc::new(()),
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             |_, _| (),
         );
         let (observed, worker_scope) = spawn_polling_worker(&shell, |c| {
@@ -1017,7 +1017,7 @@ mod tests {
     #[test]
     fn foreground_cancel_spares_detached_worker() {
         let shell = Shell::new(crate::io::TerminalState::default());
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let m = Mooring::adrift();
         let (_join, worker_scope) = shell.spawn_thread(&m, Arc::new(()), snap, |_, _| ());
         m.cancel.cancel(crate::process::CancelCause::Interrupt);
@@ -1099,7 +1099,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 10_000));
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -1146,7 +1146,7 @@ mod tests {
     fn spawn_under_interactive_frame_arms_no_lease() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -1198,7 +1198,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.desk = Some(Arc::new(EchoDesk) as crate::types::Desk);
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let (tx, rx) = mpsc::channel::<Result<crate::serial::FOValue, crate::types::Error>>();
         let handle = spawn_child(
             snap,
@@ -1231,7 +1231,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.fork = Some(crate::types::Fork::Park(crate::types::Nursery::default()));
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let (tx, rx) = mpsc::channel::<crate::types::Settled<crate::types::NurseryId>>();
         let handle = spawn_child(
             snap,
@@ -1266,7 +1266,7 @@ mod tests {
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(200, 10_000));
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -1305,7 +1305,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(150, 400));
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -1343,7 +1343,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(100, 10_000));
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -1387,7 +1387,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 10_000));
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -1426,7 +1426,7 @@ mod tests {
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(40, 150));
 
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let durable = spawn_child(
             snap,
             &m,
@@ -1438,7 +1438,7 @@ mod tests {
         )
         .expect("durable spawn must succeed");
         let born = std::time::Instant::now();
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let sibling = spawn_child(
             snap,
             &m,
@@ -1487,7 +1487,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         m.deferred_lease = Some(lease_ms(10_000, 20_000));
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -1805,7 +1805,7 @@ mod tests {
             Some(&Value::String("the greeter".into()))
         );
         assert!(matches!(fields.get("pid"), Some(Value::Int(p)) if *p > 0));
-        assert_eq!(shell.mobile.control.last_status, 0);
+        assert_eq!(shell.last_status, 0);
     }
 
     /// A detached worker's `surface` events replay through the *awaiting* run
@@ -1912,7 +1912,7 @@ mod tests {
             let batches = Arc::new(Mutex::new(Vec::new()));
             let mut m = Mooring::adrift();
             m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
-            let snap = Arc::new(shell.mobile().scope);
+            let snap = Arc::new(shell.env.clone());
             // Hold the handle so the channel stays connected until the flush;
             // never observed, so no eliminator competes for the `joined` latch.
             let _handle = spawn_child(
@@ -1957,7 +1957,7 @@ mod tests {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let mut m = Mooring::adrift();
         m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
 
         let handle = spawn_child(
             snap,
@@ -2006,7 +2006,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let mut m = Mooring::adrift();
         assert!(m.deferred.is_none(), "a bare REPL installs none");
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -2056,7 +2056,7 @@ mod tests {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let mut m = Mooring::adrift();
         m.deferred = Some(Arc::new(RecDeferred(batches.clone())));
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -2108,7 +2108,7 @@ mod tests {
     fn spawn_child_registers_one_entry_with_matching_handle() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let handle = spawn_child(
             snap,
             &m,
@@ -2143,7 +2143,7 @@ mod tests {
         let m = Mooring::adrift();
 
         // `await` removes.
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let h1 = spawn_child(
             snap,
             &m,
@@ -2158,7 +2158,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 0, "await removes its entry");
 
         // `cancel` removes.
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let h2 = spawn_child(
             snap,
             &m,
@@ -2174,7 +2174,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 0, "cancel removes its entry");
 
         // A settled `poll` removes.
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let h3 = spawn_child(
             snap,
             &m,
@@ -2201,7 +2201,7 @@ mod tests {
         // Block the worker on its own channel so the sample is deterministically
         // `` `pending ``, with no timing guess.
         let (unblock_tx, unblock_rx) = mpsc::channel::<()>();
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let h4 = spawn_child(
             snap,
             &m,
@@ -2236,7 +2236,7 @@ mod tests {
     fn race_removes_winner_and_cancelled_losers() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let winner = spawn_child(
             snap,
             &m,
@@ -2251,7 +2251,7 @@ mod tests {
         // The losers block on their own channels, so the winner always settles
         // first and these two are cancelled.
         let (l1_tx, l1_rx) = mpsc::channel::<()>();
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let loser1 = spawn_child(
             snap,
             &m,
@@ -2266,7 +2266,7 @@ mod tests {
         )
         .unwrap();
         let (l2_tx, l2_rx) = mpsc::channel::<()>();
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let loser2 = spawn_child(
             snap,
             &m,
@@ -2308,7 +2308,7 @@ mod tests {
     fn nested_spawn_registers_into_the_owning_shells_registry() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
-        let snap = Arc::new(shell.mobile().scope);
+        let snap = Arc::new(shell.env.clone());
         let (go_tx, go_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<usize>();
         let _outer = spawn_child(
@@ -2320,7 +2320,7 @@ mod tests {
             "<outer>",
             move |mooring, child_shell| {
                 go_rx.recv().unwrap();
-                let child_snap = Arc::new(child_shell.mobile().scope);
+                let child_snap = Arc::new(child_shell.env.clone());
                 let _inner = spawn_child(
                     child_snap,
                     mooring,
@@ -2371,7 +2371,7 @@ mod tests {
         let m = Mooring::adrift();
         shell.arm_worker_retention(2);
         let handle = spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,
@@ -2420,7 +2420,7 @@ mod tests {
         let m = Mooring::adrift();
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let _handle = spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,
@@ -2458,7 +2458,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let handle = spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,
@@ -2486,7 +2486,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let m = Mooring::adrift();
         let handle = spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,
@@ -2525,7 +2525,7 @@ mod tests {
         let m = Mooring::adrift();
         let (gate_tx, gate_rx) = mpsc::channel::<()>();
         let handle = spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,
@@ -2570,7 +2570,7 @@ mod tests {
         for cmd in ["<one>", "<two>"] {
             let (gate_tx, gate_rx) = mpsc::channel::<()>();
             let handle = spawn_child(
-                Arc::new(shell.mobile().scope),
+                Arc::new(shell.env.clone()),
                 &m,
                 &mut shell,
                 ChildIoMode::Buffered,
@@ -2588,7 +2588,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 2);
 
         let refused = spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,
@@ -2615,7 +2615,7 @@ mod tests {
 
         builtin_cancel(&[Value::Handle(handles[0].clone())], &mut shell).expect("cancel ok");
         spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,
@@ -2646,7 +2646,7 @@ mod tests {
         ] {
             let (gate_tx, gate_rx) = mpsc::channel::<()>();
             spawn_child(
-                Arc::new(shell.mobile().scope),
+                Arc::new(shell.env.clone()),
                 &m,
                 &mut shell,
                 ChildIoMode::Buffered,
@@ -2662,7 +2662,7 @@ mod tests {
         }
 
         let refused = spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,
@@ -2688,7 +2688,7 @@ mod tests {
         let mut m = Mooring::adrift();
         m.worker_cap = Some(1);
         let first = spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,
@@ -2701,7 +2701,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 1, "the settled entry lingers");
 
         spawn_child(
-            Arc::new(shell.mobile().scope),
+            Arc::new(shell.env.clone()),
             &m,
             &mut shell,
             ChildIoMode::Buffered,

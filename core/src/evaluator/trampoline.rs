@@ -7,18 +7,15 @@ use super::comp::eval_comp;
 use super::pattern;
 use crate::ir::IrPattern;
 use crate::types::{
-    Break, Closure, Control, Env, Error, Mooring, Raw, Settled, Shell, Tail, TailCall, ThunkBody,
-    Value,
+    Break, Closure, Control, Env, Error, Mooring, Raw, Settled, Shell, Tail, TailCall, Value,
 };
 
-/// One β-step, run in place on the caller's shell: [`Shell::with_thunk_body`]
-/// swaps in a mobile rescoped to `captured` plus a fresh frame, `pat` is bound
-/// to `arg` there, and `body` runs — sharing the caller's run, session and
-/// local state by identity.
-///
-/// As a [`ThunkBody::Lambda`] the frame enters with a fresh `$?` and folds
-/// `{last_status, cwd}` back on the way out. The fold happens even when `body`
-/// escapes with a tail call, which is what lets that call abandon the frame.
+/// One β-step, run in place on the caller's shell: [`Shell::eval_lambda_body`]
+/// rescopes to `captured` with a fresh `$?`, `pat` is bound to `arg` there,
+/// and `body` runs — sharing the caller's run, session and local state by
+/// identity, and folding `{last_status, cwd}` back on the way out.  The fold
+/// happens even when `body` escapes with a tail call, which is what lets that
+/// call abandon the frame.
 fn apply_lambda_frame(
     captured: &Env,
     pat: &IrPattern,
@@ -27,33 +24,33 @@ fn apply_lambda_frame(
     shell: &mut Shell,
     body: impl FnOnce(&mut Shell) -> Raw<Value>,
 ) -> Raw<Value> {
-    shell.with_thunk_body(ThunkBody::Lambda, captured, |shell, mobile| {
-        shell.run_with_mobile(mobile, |shell| {
-            let env = pattern::bind_pattern(pat, arg, &[], shell.mobile.scope.clone(), mooring, shell)?;
-            shell.mobile.scope = env;
-            body(shell)
-        })
+    shell.eval_lambda_body(captured, |shell| {
+        let env = pattern::bind_pattern(pat, arg, &[], shell.env.clone(), mooring, shell)?;
+        shell.env = env;
+        body(shell)
     })
 }
 
 /// Applies `callee` to `args`, looping on [`TailCall`] for O(1) tail-call
 /// space.
 ///
-/// The `recursion_limit` cap raises a clean error before the host stack can
+/// The `stack_limit` cap raises a clean error before the host stack can
 /// overflow; a tail call re-enters the loop rather than a frame, so it never
-/// counts against the cap.
+/// counts against the cap.  `shell.local.call_depth` is this path's own
+/// counter — the recursive evaluator's stand-in for the machine's frame
+/// count — retired along with it at the W2g cutover.
 pub(crate) fn apply(
     callee: Value,
     args: Vec<Value>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Value> {
-    if shell.mobile.control.call_depth >= shell.mobile.control.recursion_limit {
+    if shell.local.call_depth >= shell.session.stack_limit {
         return Err(Break::Error(
             Error::new(
                 format!(
                     "recursion limit exceeded ({})",
-                    shell.mobile.control.recursion_limit
+                    shell.session.stack_limit
                 ),
                 1,
             )
@@ -63,9 +60,9 @@ pub(crate) fn apply(
             ),
         ));
     }
-    shell.mobile.control.call_depth += 1;
+    shell.local.call_depth += 1;
     let result = apply_inner(callee, args, mooring, shell);
-    shell.mobile.control.call_depth -= 1;
+    shell.local.call_depth -= 1;
     result
 }
 
@@ -106,7 +103,7 @@ fn apply_inner(
                     match body.item {
                         crate::ir::CompKind::Lam { .. } => Ok(Value::Thunk(Closure {
                             comp: body.clone(),
-                            env: child.mobile.scope.clone(),
+                            env: child.env.clone(),
                         })),
                         _ => eval_comp(&body, mooring, child, body_tail),
                     }
@@ -145,7 +142,7 @@ fn apply_inner(
                         applied: collected,
                     });
                 }
-                let env = shell.mobile.scope.clone();
+                let env = shell.env.clone();
                 let result = super::audit::run_native(&entry, &collected, &env, mooring, shell)
                     .map_err(Control::from);
                 if let Some(done) = step(result, &mut callee, &mut args, mooring) {
@@ -209,8 +206,8 @@ mod tests {
     #[test]
     fn cap_fires_at_limit() {
         let mut shell = Shell::new(TerminalState::default());
-        shell.mobile.control.recursion_limit = 8;
-        shell.mobile.control.call_depth = 8;
+        shell.session.stack_limit = 8;
+        shell.local.call_depth = 8;
         let result = apply(
             Value::Unit,
             vec![Value::Unit],
@@ -228,7 +225,7 @@ mod tests {
             other => panic!("expected recursion-limit error, got {other:?}"),
         }
         // The early return must leave the counter untouched.
-        assert_eq!(shell.mobile.control.call_depth, 8);
+        assert_eq!(shell.local.call_depth, 8);
     }
 
     /// `Value::Unit` with no arguments returns without recursing, so the
@@ -236,9 +233,9 @@ mod tests {
     #[test]
     fn cap_not_fired_below_limit() {
         let mut shell = Shell::new(TerminalState::default());
-        shell.mobile.control.recursion_limit = 8;
-        shell.mobile.control.call_depth = 7;
+        shell.session.stack_limit = 8;
+        shell.local.call_depth = 7;
         let _ = apply(Value::Unit, vec![], &Mooring::adrift(), &mut shell);
-        assert_eq!(shell.mobile.control.call_depth, 7);
+        assert_eq!(shell.local.call_depth, 7);
     }
 }

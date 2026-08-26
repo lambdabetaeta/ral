@@ -1,8 +1,9 @@
 //! Interpreter state, partitioned by lifetime: the field name *is* the
-//! invariant.  [`Mobile`] persists and crosses evaluation boundaries and
-//! thread spawns; `io` ([`Io`]) belongs to one run, swapped in and restored on
-//! teardown by [`crate::run::IoLoan`]; [`SessionState`] survives every run;
-//! [`LocalState`] is host scratch whose members each carry their own rule.
+//! invariant.  `env` and `context` persist and cross evaluation boundaries
+//! and thread spawns; `io` ([`Io`]) belongs to one run, swapped in and
+//! restored on teardown by [`crate::run::IoLoan`]; [`SessionState`] survives
+//! every run; [`LocalState`] is host scratch whose members each carry their
+//! own rule.
 //!
 //! What a run fixes *once* — where its events go, who answers it, what stops
 //! it, its terminal authority — is not here at all: it is the [`Mooring`] on
@@ -15,7 +16,6 @@
 pub(crate) mod bindings;
 mod checks;
 mod context;
-pub(crate) mod control;
 pub(crate) mod cwd;
 pub(crate) mod detached;
 pub(crate) mod hooks;
@@ -27,10 +27,7 @@ pub(crate) mod repl;
 mod scope;
 pub(crate) mod workers;
 
-pub(crate) use inherit::ThunkBody;
-
 use self::bindings::BindingLedger;
-use self::control::ControlState;
 use self::cwd::Cwd;
 use self::detached::DetachPolicy;
 use self::modules::Modules;
@@ -54,11 +51,6 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Default cap on non-tail closure-call depth: insurance against a
-/// stack-guard SIGABRT the typechecker cannot catch.  Tail calls land in the
-/// trampoline loop and do not count.
-pub const DEFAULT_RECURSION_LIMIT: usize = 1024;
-
 /// Default cap on the machine's stack (§2.1, §6.3 of the CEK plan): frames,
 /// not host stack frames, so it can sit far above the old host-frame count.
 pub const DEFAULT_STACK_LIMIT: usize = 100_000;
@@ -66,10 +58,11 @@ pub const DEFAULT_STACK_LIMIT: usize = 100_000;
 /// The Send+Clone dynamic context every child computation carries — a thunk
 /// body, a spawned thread (`spawn`, `par`, pipeline stage), a REPL aside.
 ///
-/// It clones wholesale into a child, so what is *not* here is the point: its
-/// [`Mobile`] siblings each flow by their own rule, the run's own frame is
-/// installed afresh, and call site and builtin table stay run and session
-/// state — so a clone carries no render registry and no host dispatch.
+/// It clones wholesale into a child, so what is *not* here is the point: the
+/// lexical environment and `last_status` each flow by their own rule, the
+/// run's own frame is installed afresh, and call site and builtin table stay
+/// run and session state — so a clone carries no render registry and no host
+/// dispatch.
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     // ── attenuable by within / grant ─────────────────────────────────────
@@ -103,20 +96,6 @@ pub struct Context {
 // The `capability::check_*(&Context, …)` decisions fold the whole stack from
 // this one borrow, so the type system bars policy code from ever reading
 // lexical scope, REPL scratch, control state, or exit hints.
-
-/// The persistable half of a [`Shell`]: cloned on every
-/// [`Shell::inherit_from`] / [`Shell::spawn_thread`], snapshotted across
-/// evaluation boundaries by [`Shell::mobile`] / [`Shell::install_mobile`].
-#[derive(Clone)]
-pub struct Mobile {
-    /// Closure-captured, so it does *not* flow through `inherit_from` or
-    /// `spawn_thread` the way the rest of `Mobile` does.
-    pub scope: Env,
-    /// `last_status`, `call_depth`, `recursion_limit` — each with its own flow
-    /// rule, spelled out in [`ControlState::inherit_from`].
-    pub control: ControlState,
-    pub context: Context,
-}
 
 /// State that outlives every run's teardown.
 pub struct SessionState {
@@ -198,6 +177,12 @@ pub struct LocalState {
     /// applying a user function, guarded by an RAII depth token so a panic
     /// unwinding out never leaves it raised.
     pub(crate) machine_depth: usize,
+    /// The recursive evaluator's own non-tail call depth
+    /// (`evaluator::trampoline::apply`), capped against `session.stack_limit`
+    /// — the machine's `Vec`-backed stack has no analogous counter.  Always
+    /// fresh in a child: no fork or spawn carries it across.  Retired with
+    /// the recursive path at the W2g cutover.
+    pub(crate) call_depth: usize,
 }
 
 impl Default for LocalState {
@@ -210,6 +195,7 @@ impl Default for LocalState {
             detach: None,
             workers_owned: true,
             machine_depth: 0,
+            call_depth: 0,
         }
     }
 }
@@ -228,16 +214,23 @@ impl Drop for LocalState {
 }
 
 /// The runtime: a field changes within a run (`io`), survives a run
-/// ([`SessionState`]), crosses evaluation boundaries ([`Mobile`]), or is host
-/// scratch ([`LocalState`]).
+/// ([`SessionState`]), crosses evaluation boundaries (`env`, `context`,
+/// `last_status`), or is host scratch ([`LocalState`]).
 ///
 /// Every field is `pub(crate)`, because the partition encodes run safety,
 /// capability attenuation, and mobile framing — core's invariant, not an API a
 /// host may reach past.  Hosts drive a session through the intent verbs
 /// ([`mod@host`], plus the scope and context verbs), and the run door
-/// ([`Shell::run`]) checkpoints and rolls back the [`Mobile`] around each run.
+/// ([`Shell::run`]) checkpoints and rolls back `env`, `context` and
+/// `last_status` around each run.
 pub struct Shell {
-    pub(crate) mobile: Mobile,
+    /// The session environment (§1.3 of the CEK plan): the machine's focus
+    /// environment between runs, extended by every `Define` that lands.
+    pub(crate) env: Env,
+    pub(crate) context: Context,
+    /// `$?` — the one register control flow folds back across a boundary
+    /// that discards everything else (S1, §7).
+    pub(crate) last_status: i32,
     pub(crate) io: Io,
     pub(crate) session: SessionState,
     pub(crate) local: LocalState,
@@ -306,7 +299,7 @@ impl Shell {
     /// value or the same absence.
     pub fn fork_scrubbed(&self) -> Self {
         let mut fork = self.fork_session();
-        fork.mobile.scope = fork.mobile.scope.scrub_handles();
+        fork.env = fork.env.scrub_handles();
         fork
     }
 
@@ -385,8 +378,7 @@ impl Shell {
                     .filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"))
                     .collect();
                 merged.extend(
-                    self.mobile
-                        .context
+                    self.context
                         .env_overrides
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone())),
@@ -398,8 +390,7 @@ impl Shell {
                 Some(Value::map(pairs))
             }
             "ARGS" => Some(Value::list(
-                self.mobile
-                    .context
+                self.context
                     .args
                     .iter()
                     .cloned()
@@ -422,7 +413,7 @@ impl Shell {
             // a host fact that is absent — the reader hands back no stand-in.
             "CWD" => {
                 let p = self.cwd();
-                let home = self.mobile.context.home();
+                let home = self.context.home();
                 let cwd_str = crate::path::abbreviate_home(&p, home.as_deref());
                 let cwd_str = if cwd_str.is_empty() {
                     "?".into()
@@ -432,7 +423,7 @@ impl Shell {
                 Some(Value::String(cwd_str))
             }
             "USER" => Some(Value::String(
-                crate::path::user_name(self.mobile.context.env_overrides())
+                crate::path::user_name(self.context.env_overrides())
                     .unwrap_or_else(|| "?".into()),
             )),
             _ => None,
@@ -446,7 +437,7 @@ impl Shell {
     /// hit — the native scope entry *is* the value — and a base frame has no
     /// value form to find.
     pub fn lookup_value_name(&self, name: &str) -> Option<Value> {
-        if let Some(v) = self.mobile.scope.get(name) {
+        if let Some(v) = self.env.get(name) {
             return Some(v.clone());
         }
         self.pseudo_var(name)
@@ -455,7 +446,7 @@ impl Shell {
     /// Set `last_status` from a boolean (`true` → 0, `false` → 1).
     #[inline]
     pub fn set_status_from_bool(&mut self, ok: bool) {
-        self.mobile.control.last_status = i32::from(!ok);
+        self.last_status = i32::from(!ok);
     }
 
     /// Write `bytes` to the current stdout sink.
@@ -501,12 +492,6 @@ impl Shell {
         }
     }
 
-    /// Snapshot the scope chain for closure capture.  `Arc` so that every
-    /// closure taken from one snapshot — a `letrec` bank, say — shares the one
-    /// allocation, and later thunk clones are refcount bumps.
-    pub fn snapshot(&self) -> Arc<Env> {
-        Arc::new(self.mobile.scope.clone())
-    }
 }
 
 impl Default for Shell {
@@ -616,7 +601,7 @@ mod tests {
             .expect("the parked fork must be adoptable");
 
         assert_eq!(
-            child.mobile.scope.get("parent_binding"),
+            child.env.get("parent_binding"),
             Some(&Value::Int(42)),
             "the fork must carry the parent's lexical scope"
         );

@@ -87,9 +87,9 @@ fn eval_call_args(args: &Args, shell: &mut Shell) -> Result<Vec<Value>, Error> {
     let mut out = Vec::with_capacity(args.len());
     for elem in args {
         match &elem.item {
-            ValListElem::Single(v) => out.push(close(v, &shell.mobile.scope)?),
+            ValListElem::Single(v) => out.push(close(v, &shell.env)?),
             ValListElem::Spread(v) => {
-                let spread = close(v, &shell.mobile.scope)?;
+                let spread = close(v, &shell.env)?;
                 let Value::List(list) = spread else {
                     return Err(spread_type_err(&spread));
                 };

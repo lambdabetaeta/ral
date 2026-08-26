@@ -254,7 +254,7 @@ mod tests {
             &pat,
             &value,
             &[],
-            shell.mobile.scope.clone(),
+            shell.env.clone(),
             &Mooring::adrift(),
             &mut shell,
         );
@@ -268,8 +268,8 @@ mod tests {
             }
             other => panic!("expected length error, got {other:?}"),
         }
-        assert!(shell.mobile.scope.get("a").is_none());
-        assert!(shell.mobile.scope.get("b").is_none());
+        assert!(shell.env.get("a").is_none());
+        assert!(shell.env.get("b").is_none());
     }
 
     #[test]
@@ -285,7 +285,7 @@ mod tests {
             &pat,
             &value,
             &[],
-            shell.mobile.scope.clone(),
+            shell.env.clone(),
             &Mooring::adrift(),
             &mut shell,
         );
@@ -299,8 +299,8 @@ mod tests {
             }
             other => panic!("expected length error, got {other:?}"),
         }
-        assert!(shell.mobile.scope.get("a").is_none());
-        assert!(shell.mobile.scope.get("b").is_none());
+        assert!(shell.env.get("a").is_none());
+        assert!(shell.env.get("b").is_none());
     }
 
     #[test]
@@ -316,7 +316,7 @@ mod tests {
             &pat,
             &value,
             &[],
-            shell.mobile.scope.clone(),
+            shell.env.clone(),
             &Mooring::adrift(),
             &mut shell,
         )

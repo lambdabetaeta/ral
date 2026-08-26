@@ -155,7 +155,7 @@ pub(super) fn pipe_err(e: &std::io::Error) -> Break {
 /// is set unconditionally because `cd` moves shell state and leaves the process
 /// cwd alone, so an inherited `getcwd(3)` would be the wrong directory.
 pub fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
-    for (k, v) in shell.mobile.context.env_overrides() {
+    for (k, v) in shell.context.env_overrides() {
         cmd.env(k, v);
     }
     let cwd = shell.cwd();
@@ -193,7 +193,6 @@ fn dyld_vars(shell: &Shell) -> Vec<std::ffi::OsString> {
         .map(|(k, _)| k)
         .filter(|k| k.to_string_lossy().starts_with(PREFIX));
     let overridden = shell
-        .mobile
         .context
         .env_overrides()
         .iter()

@@ -503,10 +503,10 @@ pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
     static PRELUDE: OnceLock<Arc<HashMap<String, Binding>>> = OnceLock::new();
 
-    let natives = shell.mobile.scope.natives_arc();
+    let natives = shell.env.natives_arc();
     let prelude = PRELUDE.get_or_init(|| {
         let mut prelude_shell = Shell::new(crate::io::TerminalState::default());
-        let env = crate::types::Env::with_natives(prelude_shell.mobile.scope.natives_arc());
+        let env = crate::types::Env::with_natives(prelude_shell.env.natives_arc());
 
         let ran = crate::evaluator::run_phrases(
             &prelude_top.phrases,
@@ -541,7 +541,7 @@ pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
         )
     });
 
-    shell.mobile.scope = crate::types::Env::with_prelude(natives, Arc::clone(prelude));
+    shell.env = crate::types::Env::with_prelude(natives, Arc::clone(prelude));
 }
 
 pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};

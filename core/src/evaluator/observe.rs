@@ -26,7 +26,7 @@ pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
             .pseudo_var("USER")
             .expect("USER is a total pseudo-var")),
         Register::Tilde(path) => {
-            let home = shell.mobile.context.home();
+            let home = shell.context.home();
             expand_tilde_path(
                 path.user.as_deref(),
                 path.suffix.as_deref(),

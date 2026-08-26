@@ -64,7 +64,7 @@ pub(crate) fn observe_stamped(shell: &mut Shell, mooring: &Mooring, obs: Observa
 
 /// An instantaneous door: stamped now, at the current dispatch site.
 pub(crate) fn observe(shell: &mut Shell, mooring: &Mooring, what: Observed) {
-    let obs = Observation::instant(shell.call_site(), shell.mobile.context.principal(), what);
+    let obs = Observation::instant(shell.call_site(), shell.context.principal(), what);
     observe_stamped(shell, mooring, obs);
 }
 
@@ -116,7 +116,7 @@ fn finish_command(
         return;
     }
     let (status, value, error) = match result {
-        Ok(v) => (shell.mobile.control.last_status, v.clone(), None),
+        Ok(v) => (shell.last_status, v.clone(), None),
         Err(Break::Error(e)) => (e.exit_code(), Value::Unit, Some(e.message.clone())),
         Err(_) => return,
     };
@@ -130,7 +130,7 @@ fn finish_command(
         start.site,
         start.time,
         epoch_us(),
-        shell.mobile.context.principal(),
+        shell.context.principal(),
         Observed::Command {
             argv,
             status,
@@ -204,7 +204,7 @@ impl BuiltinEntry {
 pub(crate) fn record_capability(shell: &mut Shell, mooring: &Mooring, resource: &str, fields: Map) {
     let obs = Observation::instant(
         shell.call_site(),
-        shell.mobile.context.principal(),
+        shell.context.principal(),
         Observed::Capability {
             resource: resource.to_string(),
             decision: Decision::Denied,

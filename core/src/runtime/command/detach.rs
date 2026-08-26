@@ -58,7 +58,7 @@ pub(crate) fn detach(
                 );
             }
             Some(HandlerLookup::Base(entry)) => {
-                let env = shell.mobile.scope.clone();
+                let env = shell.env.clone();
                 return crate::runtime::command_call::run_base_frame(
                     &entry, argv, &[], &env, mooring, shell,
                 );
@@ -77,7 +77,7 @@ pub(crate) fn detach(
     // the same judgments an ordinary external passes, so a bundled uutils tool
     // falls out as its own image with no special case here.
     let plan = vet(
-        &CommandIdentity::resolve(name, &shell.mobile.context),
+        &CommandIdentity::resolve(name, &shell.context),
         argv,
         shell,
     )?;
@@ -134,7 +134,7 @@ pub(crate) fn detach(
             value: Value::Unit,
         },
     );
-    shell.mobile.control.last_status = 0;
+    shell.last_status = 0;
     Ok(Value::map(vec![
         ("pid".into(), Value::Int(i64::from(pid))),
         ("desc".into(), Value::String(desc.to_string())),

@@ -201,17 +201,16 @@ fn spawn_stage(
             });
         }
         StageLaunch::HelperEval => {
-            let captured = cx.shell.snapshot();
+            let captured = Arc::new(cx.shell.env.clone());
             // Only the final value-typed stage ships a return value home.
             let wants_value = matches!(route.final_value, FinalValue::Report);
             pack_request(
                 Arc::clone(stage),
-                &cx.shell.mobile,
+                &*cx.shell,
                 Some(&captured),
                 cx.shell.local.audit.active_policy(),
                 wants_value,
                 stage.span,
-                &cx.shell.session.sources,
             )?
         }
     };

@@ -44,9 +44,8 @@ pub fn evaluate_checked(
     virtual_path: &str,
 ) -> Settled<Value> {
     let key = virtual_path.to_string();
-    if shell.mobile.context.modules.stack.contains(&key) {
+    if shell.context.modules.stack.contains(&key) {
         let cycle: Vec<&str> = shell
-            .mobile
             .context
             .modules
             .stack
@@ -58,22 +57,22 @@ pub fn evaluate_checked(
             cycle.join(" -> ")
         )));
     }
-    if shell.mobile.context.modules.stack.len() >= MAX_SOURCE_DEPTH {
+    if shell.context.modules.stack.len() >= MAX_SOURCE_DEPTH {
         return Err(sig(format!(
             "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
         )));
     }
     shell.install_script_context(&key, source);
-    shell.mobile.context.modules.stack.push(key);
+    shell.context.modules.stack.push(key);
     let result = crate::evaluator::run_phrases(
         &top.phrases,
-        shell.mobile.scope.clone(),
+        shell.env.clone(),
         Mode::Local,
         mooring,
         shell,
     )
     .outcome;
-    shell.mobile.context.modules.stack.pop();
+    shell.context.modules.stack.pop();
     result
 }
 
@@ -202,9 +201,8 @@ pub(crate) fn source_phrases(
         span,
     } = load;
     let key = virtual_path.to_string();
-    if shell.mobile.context.modules.stack.contains(&key) {
+    if shell.context.modules.stack.contains(&key) {
         let cycle: Vec<&str> = shell
-            .mobile
             .context
             .modules
             .stack
@@ -216,7 +214,7 @@ pub(crate) fn source_phrases(
             cycle.join(" -> ")
         )));
     }
-    if shell.mobile.context.modules.stack.len() >= MAX_SOURCE_DEPTH {
+    if shell.context.modules.stack.len() >= MAX_SOURCE_DEPTH {
         return Err(sig(format!(
             "recursion depth limit ({MAX_SOURCE_DEPTH}) exceeded"
         )));
@@ -252,14 +250,14 @@ struct ModuleStackFrame<'a> {
 
 impl<'a> ModuleStackFrame<'a> {
     fn enter(shell: &'a mut Shell, key: String) -> Self {
-        shell.mobile.context.modules.stack.push(key);
+        shell.context.modules.stack.push(key);
         Self { shell }
     }
 }
 
 impl Drop for ModuleStackFrame<'_> {
     fn drop(&mut self) {
-        self.shell.mobile.context.modules.stack.pop();
+        self.shell.context.modules.stack.pop();
     }
 }
 
@@ -358,14 +356,14 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         .resolve(&resolved.to_string_lossy())
         .canonicalise_strict()
         .ok()
-        .or_else(|| crate::path::ral_path::find_file(&path, shell.mobile.context.env_overrides()))
+        .or_else(|| crate::path::ral_path::find_file(&path, shell.context.env_overrides()))
         .map_or_else(|| path.clone(), |p| p.to_string_lossy().into_owned());
 
     let source = read_and_normalize(abs_path.as_ref(), &abs_path, "use", shell)?;
     let top = compile_toplevel(&source, &abs_path, shell).map_err(|e| tag_loader_error("use", e))?;
 
-    let saved = shell.mobile.scope.clone();
-    let env = shell.mobile.scope.clone();
+    let saved = shell.env.clone();
+    let env = shell.env.clone();
     let load = ModuleLoad {
         top: &top,
         virtual_path: &abs_path,
@@ -373,7 +371,7 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         span: None,
     };
     let ran = source_phrases(load, env, Mode::Module, mooring, shell);
-    shell.mobile.scope = saved;
+    shell.env = saved;
 
     let ran = ran.map_err(|e| tag_loader_error("use", e))?;
     ran.outcome
@@ -394,7 +392,7 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
 /// the top of the stack [`evaluate_checked`] pushes to — falling back to
 /// the run's own root source at top level, where the stack is empty.
 fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::PathBuf {
-    let script = shell.mobile.context.modules.stack.last().map_or_else(
+    let script = shell.context.modules.stack.last().map_or_else(
         || {
             shell
                 .session
@@ -431,7 +429,7 @@ mod tests {
         let path = write_temp("ral_w1d_source_ok.ral", "let sourced_ok = 5");
         let p = path.to_string_lossy().into_owned();
         let mut shell = Shell::default();
-        let env = shell.mobile.scope.clone();
+        let env = shell.env.clone();
         let ran = source(&p, env, Mode::Local, None, &Mooring::adrift(), &mut shell)
             .expect("a well-formed file must load");
         assert!(
@@ -453,7 +451,7 @@ mod tests {
         );
         let p = path.to_string_lossy().into_owned();
         let mut shell = Shell::default();
-        let env = shell.mobile.scope.clone();
+        let env = shell.env.clone();
         let ran = source(&p, env, Mode::Local, None, &Mooring::adrift(), &mut shell)
             .expect("a load refusal is a different Err; the file itself loaded fine");
         assert!(ran.outcome.is_err(), "the file's own halt is Ran::outcome");

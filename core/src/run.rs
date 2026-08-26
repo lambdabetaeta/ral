@@ -236,7 +236,7 @@ impl Shell {
     /// Completion is *this call returning*, never a channel disconnecting: a
     /// worker may hold a clone of the surface sink forever without keeping the
     /// run alive. It is also the durability boundary — a panic anywhere in the
-    /// run restores the [`Mobile`](crate::types::Mobile) checkpointed at entry,
+    /// run restores the `env`/`context`/`last_status` checkpointed at entry,
     /// so the shell rolls itself back and no snapshot crosses the host seam.
     pub fn run(&mut self, req: RunRequest<'_>) -> RunReport {
         let anchor = self.session.anchor.clone();
@@ -279,7 +279,7 @@ impl Shell {
     /// granularity. A panic reports `Static` by declaration — the trail
     /// closes and is discarded, never attached.
     fn enter(&mut self, under: &ForegroundScope, req: RunRequest<'_>) -> RunReport {
-        let checkpoint = self.mobile.clone();
+        let checkpoint = (self.env.clone(), self.context.clone(), self.last_status);
         let saved_capture = self.local.audit.capture_policy();
         let scope: Option<TrailScope> = req.run.trail.map(|policy| {
             self.local
@@ -308,7 +308,7 @@ impl Shell {
                 report
             }
             Err(payload) => {
-                self.mobile = checkpoint;
+                (self.env, self.context, self.last_status) = checkpoint;
                 RunReport::Static {
                     diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
                         format!("run panicked: {}", panic_text(payload.as_ref())),
@@ -352,7 +352,7 @@ impl Shell {
                 self.run_built(req, foreground, wall, single_command, root, |m, s| {
                     crate::evaluator::run_phrases(
                         &top.phrases,
-                        s.mobile.scope.clone(),
+                        s.env.clone(),
                         crate::evaluator::Mode::Session,
                         m,
                         s,
@@ -361,7 +361,7 @@ impl Shell {
                 })
             }
             Program::Hook { ref name, ref args } => {
-                let Some(hook) = self.mobile.context.hooks.get(name).cloned() else {
+                let Some(hook) = self.context.hooks.get(name).cloned() else {
                     return RunReport::Static {
                         diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
                             format!("hook '{name}' is not registered"),
@@ -535,7 +535,7 @@ fn classify_ending(
 /// The transport status of one settled run, computed once.
 fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
     match result {
-        Ok(_) => shell.mobile.control.last_status,
+        Ok(_) => shell.last_status,
         Err(Break::Error(e)) => e.exit_code(),
         Err(Break::Escape(Escape::Exit(code))) => *code,
         #[cfg(unix)]
@@ -1369,7 +1369,7 @@ mod tests {
     // ── Run-door durability ──────────────────────────────────────────
     //
     // A panic anywhere in the run reports as a failed run with the shell's
-    // `Mobile` already rolled back to its run-entry state.
+    // fields already rolled back to their run-entry state.
 
     /// Stands in for any Rust panic the evaluator can raise mid-run.
     fn builtin_panic_now(

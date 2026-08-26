@@ -1,8 +1,8 @@
 //! Building a `Shell`, and the startup pass that adopts the host process env.
 
-use super::{Context, LocalState, Mobile, SessionState, Shell};
+use super::{Context, LocalState, SessionState, Shell};
 use crate::source::FileId;
-use crate::types::{ControlState, Env, GrantStack};
+use crate::types::{Env, GrantStack};
 use std::path::PathBuf;
 
 impl Shell {
@@ -15,14 +15,12 @@ impl Shell {
     pub fn new(terminal: crate::io::TerminalState) -> Self {
         let root = crate::process::DurableRoot::new();
         let mut shell = Self {
-            mobile: Mobile {
-                scope: Env::new(),
-                control: ControlState::default(),
-                context: Context {
-                    grants: GrantStack::root(),
-                    ..Context::default()
-                },
+            env: Env::new(),
+            context: Context {
+                grants: GrantStack::root(),
+                ..Context::default()
             },
+            last_status: 0,
             io: crate::io::Io {
                 terminal,
                 ..Default::default()
@@ -48,8 +46,7 @@ impl Shell {
         shell.install_builtins(crate::builtins::CORE_HELP_BUILTINS);
         // Language-given names live in the base scope, ahead of the prelude.
         shell
-            .mobile
-            .scope
+            .env
             .install_natives(crate::types::builtin::language_constants());
         shell
     }
@@ -104,17 +101,17 @@ impl Shell {
 
         // Only when unseeded: a front end whose working directory is not the
         // process cwd states it first through `Shell::seed_cwd`.
-        if self.mobile.context.cwd.current.is_none() {
-            self.mobile.context.cwd.current = crate::path::process_cwd();
+        if self.context.cwd.current.is_none() {
+            self.context.cwd.current = crate::path::process_cwd();
         }
-        if self.mobile.context.cwd.previous.is_none() {
+        if self.context.cwd.previous.is_none() {
             // The launching shell already resolved it; adopt verbatim.
             #[allow(clippy::disallowed_methods)]
             let oldpwd = std::env::var_os("OLDPWD").map(PathBuf::from);
-            self.mobile.context.cwd.previous = oldpwd;
+            self.context.cwd.previous = oldpwd;
         }
 
-        let context = &mut self.mobile.context;
+        let context = &mut self.context;
         let mut install = |k: &str, v: String| {
             context.set_env_var_or_keep(k, v);
         };
@@ -152,7 +149,7 @@ impl Shell {
             .unwrap_or(0)
             .saturating_add(1)
             .to_string();
-        self.mobile.context.set_env_var("SHLVL", shlvl);
+        self.context.set_env_var("SHLVL", shlvl);
 
         // Compile-time facts, in `$ENV` so rc can branch on the machine
         // without shelling out to `uname`.
@@ -161,7 +158,7 @@ impl Shell {
             ("OS_ARCH", crate::host::arch()),
             ("OS_FAMILY", crate::host::family()),
         ] {
-            self.mobile.context.set_env_var(k, v);
+            self.context.set_env_var(k, v);
         }
     }
 }

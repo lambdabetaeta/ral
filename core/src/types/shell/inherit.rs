@@ -1,11 +1,5 @@
 //! Moving state from a parent shell into a child computation.
 //!
-//! A same-thread β-step is no fork: [`Shell::with_thunk_body`] runs the body
-//! on the caller's [`Shell`], swapping only the [`Mobile`] for one rescoped to
-//! the closure's captured environment, while `io`,
-//! [`SessionState`](super::SessionState) and [`LocalState`](super::LocalState)
-//! stay shared by identity — no second store to drift from the first.
-//!
 //! The owned-[`Shell`] routines below — spawned thread, cross-process pipeline
 //! stage, REPL aside, sub-agent session — are genuine forks over a different
 //! store, so each spells out what it carries across.  Every one starts from a
@@ -14,102 +8,16 @@
 //! the run's access *and* the session's lease, so a fork fails the second half
 //! whatever [`Mooring`] it later runs under.
 
-use super::{Mobile, Mooring, Shell, SurfaceSink};
-use crate::types::{ControlState, Env};
+use super::{Mooring, Shell, SurfaceSink};
+use crate::types::Env;
 use std::sync::Arc;
 
-/// Which same-thread thunk body [`Shell::with_thunk_body`] is eliminating.
-/// A forced block and an applied lambda differ in exactly two places: the
-/// entry `last_status` and the fold-back set.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum ThunkBody {
-    /// `!{ … }` — enters with the caller's `$?` and folds only `last_status`
-    /// back, so a block's `let` / `cd` and any `chpwd` it queues die with the
-    /// body mobile.
-    Block,
-    /// `λx. …` applied to an argument: a fresh `$?` on entry, `{last_status,
-    /// cwd}` folded back, so a `cd` inside a function, alias, or handler
-    /// persists like every other shell.  The caller's closure binds the
-    /// parameter — pattern binding lives in the evaluator, above `Shell`.
-    Lambda,
-}
-
 impl Shell {
-    /// Clone the persistable half of this shell: the bundle that crosses an
-    /// evaluation boundary, leaving `io`, audit and REPL scratch behind.
-    pub fn mobile(&self) -> Mobile {
-        self.mobile.clone()
-    }
-
-    /// Replace `self.mobile` wholesale; snapshot with [`Self::mobile`] to keep
-    /// what it displaces.
-    ///
-    /// `pub(crate)` so nothing outside core can overwrite the handler stack
-    /// behind the evaluator's back.  A wire-borne mobile goes through
-    /// [`crate::subprocess::install_shell_mobile`], which splices the wire's
-    /// handler frames atop the receiver's own.
-    pub(crate) fn install_mobile(&mut self, mobile: Mobile) {
-        self.mobile = mobile;
-    }
-
-    /// Swap `mobile` in, run `f`, swap back out; the post-run bundle comes
-    /// back beside `f`'s result, to keep or to discard.
-    ///
-    /// An unwind through `f` would leave the passed-in bundle installed —
-    /// harmless only because ral carries control flow in its own signals, not
-    /// in Rust panics.
-    pub fn run_with_mobile<R>(
-        &mut self,
-        mobile: Mobile,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> (Mobile, R) {
-        let saved = std::mem::replace(&mut self.mobile, mobile);
-        let result = f(self);
-        let post = std::mem::replace(&mut self.mobile, saved);
-        (post, result)
-    }
-
-    /// Evaluate a same-thread thunk body — a forced block or an applied
-    /// lambda — in place on this shell.  The single routine block and lambda
-    /// elimination meet at: `f` installs the body's [`Mobile`] and hands it
-    /// back, and the [`ThunkBody`]-specific set is folded onto the caller's.
-    ///
-    /// `local.repl.pending_chpwd` is bracketed for a [`ThunkBody::Block`] — a
-    /// block has no business persisting a REPL notification the parent would
-    /// replay — and left to ride the shared `local.repl` for a
-    /// [`ThunkBody::Lambda`], the notification analogue of its `cwd` fold-back.
-    pub(crate) fn with_thunk_body<R>(
-        &mut self,
-        kind: ThunkBody,
-        captured: &Env,
-        f: impl FnOnce(&mut Self, Mobile) -> (Mobile, R),
-    ) -> R {
-        let mut mobile = self.mobile.clone();
-        mobile.scope = captured.clone();
-        if matches!(kind, ThunkBody::Lambda) {
-            mobile.control.last_status = ControlState::default().last_status;
-        }
-        let saved_pending_chpwd = match kind {
-            ThunkBody::Block => self.local.repl.pending_chpwd.take(),
-            ThunkBody::Lambda => None,
-        };
-        let (post, result) = f(self, mobile);
-        if matches!(kind, ThunkBody::Block) {
-            self.local.repl.pending_chpwd = saved_pending_chpwd;
-        }
-        self.mobile.control.last_status = post.control.last_status;
-        if matches!(kind, ThunkBody::Lambda) {
-            self.mobile.context.cwd.current = post.context.cwd.current;
-            self.mobile.context.cwd.previous = post.context.cwd.previous;
-        }
-        result
-    }
-
     /// A defaulted [`Shell`] scoped to `captured`: no inherited grants, env
     /// vars, or call site.  The base every fork below builds on.
     fn from_captured(captured: &Env) -> Self {
         let mut shell = Self::new(crate::io::TerminalState::default());
-        shell.mobile.scope = captured.clone();
+        shell.env = captured.clone();
         shell
     }
 
@@ -136,12 +44,13 @@ impl Shell {
     /// parent's births rather than a fresh allowance.
     pub fn child_from(captured: &Env, parent: &Self) -> Self {
         let mut child = Self::from_captured(captured);
-        child.mobile.context = parent.mobile.context.clone();
+        child.context = parent.context.clone();
         child.local.audit.call_site = parent.local.audit.call_site;
         // Rides with the call site: without the registry, the child's spans
         // name sources it does not hold.
         child.session.sources = parent.session.sources.clone();
         child.session.builtins = parent.session.builtins.clone();
+        child.session.stack_limit = parent.session.stack_limit;
         child
             .session
             .library_docs
@@ -168,7 +77,7 @@ impl Shell {
     /// one place, where a hand-copying call site would quietly sever a datum
     /// it forgot.
     pub fn fork_session(&self) -> Self {
-        Self::child_from(&self.mobile.scope, self)
+        Self::child_from(&self.env, self)
     }
 
     /// Join this session as an *aside*: a second [`Shell`] the host runs
@@ -182,7 +91,7 @@ impl Shell {
     /// frame the aside will mint, so the aside can neither absorb it nor keep
     /// it from the run it was aimed at.
     pub fn join_session(&self) -> Self {
-        let mut aside = Self::child_from(&self.mobile.scope, self);
+        let mut aside = Self::child_from(&self.env, self);
         aside.session.root = self.session.root.clone();
         aside.session.anchor = aside.session.root.worker();
         aside
@@ -194,7 +103,7 @@ impl Shell {
     /// of the spawning run's live one; per-fork IO setup lives inside `f`.
     ///
     /// The worker's counters start fresh, since it continues no call stack,
-    /// but the `recursion_limit` ceiling is the parent's: a limit set by rc or
+    /// but the `stack_limit` ceiling is the parent's: a limit set by rc or
     /// CLI belongs to the session, not to one stack.
     ///
     /// Its [`Mooring`] is a *rebuild* ([`Mooring::for_worker`]), never a
@@ -220,8 +129,8 @@ impl Shell {
         F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let context = self.mobile.context.clone();
-        let recursion_limit = self.mobile.control.recursion_limit;
+        let context = self.context.clone();
+        let stack_limit = self.session.stack_limit;
         let root = self.session.root.clone();
         let builtins = self.session.builtins.clone();
         let library_docs = self.session.library_docs.clone();
@@ -233,8 +142,8 @@ impl Shell {
         let live = self.local.workers.live_ticket();
         let handle = std::thread::spawn(move || {
             let mut child = Self::from_captured(&scopes);
-            child.mobile.context = context;
-            child.mobile.control.recursion_limit = recursion_limit;
+            child.context = context;
+            child.session.stack_limit = stack_limit;
             child.session.anchor = mooring.cancel.clone();
             child.session.root = root;
             child.session.builtins = builtins;
@@ -260,13 +169,13 @@ impl Shell {
     /// inherit rule, whose asymmetry with [`Self::return_to`] is the flow
     /// matrix.
     pub fn inherit_from(&mut self, parent: &mut Self) {
-        self.mobile.context = parent.mobile.context.clone();
-        self.mobile.control.inherit_from(&parent.mobile.control);
+        self.context = parent.context.clone();
         self.io.inherit_from(&mut parent.io);
         self.local.audit.inherit_from(&mut parent.local.audit);
         self.local.repl.inherit_from(&mut parent.local.repl);
         self.session.builtins = parent.session.builtins.clone();
         self.session.library_docs = parent.session.library_docs.clone();
+        self.session.stack_limit = parent.session.stack_limit;
         self.session.root = parent.session.root.clone();
         self.session.anchor = parent.session.anchor.clone();
         self.session.guest_jail = parent.session.guest_jail.clone();
@@ -277,12 +186,48 @@ impl Shell {
     /// `cd` in a stage persists like every other shell.  A spawned thread
     /// never runs this, so its own `cd`s stay private.
     pub fn return_to(&mut self, parent: &mut Self) {
-        self.mobile.control.return_to(&mut parent.mobile.control);
+        parent.last_status = self.last_status;
         self.local.audit.return_to(&mut parent.local.audit);
         self.local.repl.return_to(&mut parent.local.repl);
         self.io.return_to(&mut parent.io);
-        parent.mobile.context.cwd.current = self.mobile.context.cwd.current.take();
-        parent.mobile.context.cwd.previous = self.mobile.context.cwd.previous.take();
+        parent.context.cwd.current = self.context.cwd.current.take();
+        parent.context.cwd.previous = self.context.cwd.previous.take();
+    }
+
+    /// Evaluate a same-thread applied-lambda body in place: rescope to
+    /// `captured`, enter with a fresh `$?`, and fold `{last_status, cwd}`
+    /// back on the way out — the recursive evaluator's β-step contract
+    /// (`evaluator::trampoline`'s only caller), kept until the W2g cutover
+    /// deletes the recursive path entirely.
+    pub(crate) fn eval_lambda_body<R>(&mut self, captured: &Env, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved_env = std::mem::replace(&mut self.env, captured.clone());
+        let saved_context = self.context.clone();
+        self.last_status = 0;
+        let result = f(self);
+        let last_status = self.last_status;
+        let cwd = self.context.cwd.clone();
+        self.env = saved_env;
+        self.context = saved_context;
+        self.last_status = last_status;
+        self.context.cwd = cwd;
+        result
+    }
+
+    /// Evaluate a same-thread forced-block body in place: rescope to
+    /// `captured`, discard every store write on the way out but `$?` —
+    /// `evaluator::eval_block`'s only mechanism, kept until the W2g cutover
+    /// deletes the recursive path entirely.
+    pub(crate) fn eval_block_body<R>(&mut self, captured: &Env, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved_env = std::mem::replace(&mut self.env, captured.clone());
+        let saved_context = self.context.clone();
+        let saved_pending_chpwd = self.local.repl.pending_chpwd.take();
+        let result = f(self);
+        self.local.repl.pending_chpwd = saved_pending_chpwd;
+        let last_status = self.last_status;
+        self.env = saved_env;
+        self.context = saved_context;
+        self.last_status = last_status;
+        result
     }
 }
 
@@ -293,7 +238,7 @@ impl Shell {
 mod tests {
     use super::*;
     use crate::process::TerminalLease;
-    use crate::types::shell::{DEFAULT_RECURSION_LIMIT, TerminalAccess};
+    use crate::types::shell::{DEFAULT_STACK_LIMIT, TerminalAccess};
 
     /// A same-thread lambda body runs in place on the caller's shell, so it
     /// observes the session-owned terminal lease *by identity*: a foreground
@@ -312,14 +257,12 @@ mod tests {
             "precondition: the session holds a Leased lease",
         );
 
-        let captured = shell.mobile.scope.clone();
-        shell.with_thunk_body(ThunkBody::Lambda, &captured, |shell, mobile| {
-            shell.run_with_mobile(mobile, |body| {
-                assert!(
-                    body.terminal_lease(&mooring).is_some(),
-                    "a Leased lambda body shares the session lease",
-                );
-            })
+        let captured = shell.env.clone();
+        shell.eval_lambda_body(&captured, |body| {
+            assert!(
+                body.terminal_lease(&mooring).is_some(),
+                "a Leased lambda body shares the session lease",
+            );
         });
 
         assert!(
@@ -353,21 +296,21 @@ mod tests {
     }
 
     /// An rc `recursion_limit:` key or a `--recursion-limit` flag configures
-    /// the session, so a `spawn` / `par` / `watch` body must not silently fall
-    /// back to the compile-time default — though its counters do start fresh.
+    /// the session as `session.stack_limit`, so a `spawn` / `par` / `watch`
+    /// body must not silently fall back to the compile-time default — though
+    /// `last_status` does start fresh.
     #[test]
     fn spawned_worker_inherits_the_recursion_limit() {
         let mut parent = Shell::default();
-        parent.set_recursion_limit(DEFAULT_RECURSION_LIMIT + 7);
-        let scopes = Arc::new(parent.mobile().scope);
+        parent.set_recursion_limit(DEFAULT_STACK_LIMIT + 7);
+        let scopes = Arc::new(parent.env.clone());
         let (join, _cancel) =
             parent.spawn_thread(&Mooring::adrift(), Arc::new(()), scopes, |_, child| {
-                child.mobile.control.clone()
+                (child.session.stack_limit, child.last_status)
             });
 
-        let control = join.join().expect("worker thread");
-        assert_eq!(control.recursion_limit, DEFAULT_RECURSION_LIMIT + 7);
-        assert_eq!(control.call_depth, 0, "a worker starts a fresh call stack");
-        assert_eq!(control.last_status, 0, "a worker starts with a fresh `$?`");
+        let (stack_limit, last_status) = join.join().expect("worker thread");
+        assert_eq!(stack_limit, DEFAULT_STACK_LIMIT + 7);
+        assert_eq!(last_status, 0, "a worker starts with a fresh `$?`");
     }
 }

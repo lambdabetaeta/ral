@@ -263,7 +263,7 @@ impl Shell {
         origin: Span,
     ) -> Result<(), RegisterError> {
         // Short-circuit before any scheme inference.
-        if self.mobile.context.hooks.contains_key(&name) {
+        if self.context.hooks.contains_key(&name) {
             return Err(RegisterError::AlreadyRegistered { name, origin });
         }
 
@@ -289,31 +289,36 @@ impl Shell {
         };
         hook.validate(&name)?;
 
-        self.mobile.context.hooks.insert(name, hook);
+        self.context.hooks.insert(name, hook);
         Ok(())
     }
 
     /// Whether a hook named `name` is registered.
     pub fn has_hook(&self, name: &HookName) -> bool {
-        self.mobile.context.hooks.contains_key(name)
+        self.context.hooks.contains_key(name)
+    }
+
+    /// The hook registered under `name`, for a host applying it directly
+    /// inside an existing command frame rather than through a dispatch door.
+    pub fn hook(&self, name: &HookName) -> Option<&Hook> {
+        self.context.hooks.get(name)
     }
 
     /// Remove one hook by name, reporting whether it was there — the inverse of
     /// [`Self::register_hook`] for a spent one-shot entry point, such as a
     /// plugin factory.
     pub fn unregister_hook(&mut self, name: &HookName) -> bool {
-        self.mobile.context.hooks.remove(name).is_some()
+        self.context.hooks.remove(name).is_some()
     }
 
     /// Drop every hook under a plugin's namespace, returning the count.  One
     /// sweep at unload, so no dispatchable entry point outlives the plugin that
     /// owned it; also the rollback path for a load that fails partway.
     pub fn remove_plugin_hooks(&mut self, plugin_id: &str) -> usize {
-        let before = self.mobile.context.hooks.len();
-        self.mobile
-            .context
+        let before = self.context.hooks.len();
+        self.context
             .hooks
             .retain(|name, _| !matches!(&name.namespace, Namespace::Plugin(id) if id == plugin_id));
-        before - self.mobile.context.hooks.len()
+        before - self.context.hooks.len()
     }
 }

@@ -177,7 +177,7 @@ pub(super) fn builtin_help(_args: &[Value], _env: &Env, shell: &mut Shell) -> Va
     );
 
     let _ = shell.write_stdout(out.as_bytes());
-    shell.mobile.control.last_status = 0;
+    shell.last_status = 0;
     Value::Unit
 }
 
@@ -187,7 +187,7 @@ pub(super) fn builtin_explain(args: &[Value], env: &Env, shell: &mut Shell) -> V
         None => "explain: expected a name, e.g. `explain map`\n".to_string(),
     };
     let _ = shell.write_stdout(out.as_bytes());
-    shell.mobile.control.last_status = 0;
+    shell.last_status = 0;
     Value::Unit
 }
 
@@ -364,8 +364,8 @@ fn grant_admits(name: &str, shell: &Shell) -> bool {
     } else {
         CommandName::Bare(name.into())
     };
-    let id = CommandIdentity::resolve(head, &shell.mobile.context);
-    crate::capability::admits_head(&shell.mobile.context, &id)
+    let id = CommandIdentity::resolve(head, &shell.context);
+    crate::capability::admits_head(&shell.context, &id)
 }
 
 #[cfg(test)]
@@ -403,7 +403,7 @@ mod tests {
         let mut shell = Shell::default();
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        let env = shell.mobile.scope.clone();
+        let env = shell.env.clone();
         builtin_help(&[], &env, &mut shell);
         let out = String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
@@ -421,7 +421,7 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        let env = shell.mobile.scope.clone();
+        let env = shell.env.clone();
         builtin_help(&[], &env, &mut shell);
         let help_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
@@ -452,7 +452,7 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        let env = shell.mobile.scope.clone();
+        let env = shell.env.clone();
         builtin_help(&[], &env, &mut shell);
         let help_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");

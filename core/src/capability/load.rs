@@ -86,7 +86,7 @@ pub fn apply_session_profiles(
     if paths.is_empty() {
         return Ok(());
     }
-    let home = shell.mobile.context.home();
+    let home = shell.context.home();
     let cwd = shell.cwd();
     let ctx = crate::path::sigil::FreezeCtx {
         home: home.as_deref(),
@@ -246,13 +246,12 @@ mod tests {
 
         let mut shell = shell();
         shell
-            .mobile
             .context
             .set_env_var("HOME", home.path().to_string_lossy().into_owned());
         apply_session_profiles(&Mooring::adrift(), &mut shell, &[profile_path]).unwrap();
 
         let expected = home.path().join("data");
-        let pushed = shell.mobile.context.grants.iter().last().unwrap();
+        let pushed = shell.context.grants.iter().last().unwrap();
         let read_prefixes = &pushed
             .fs
             .as_ref()

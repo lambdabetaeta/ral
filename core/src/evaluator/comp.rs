@@ -55,10 +55,10 @@ pub(crate) fn eval_comp(
         CompKind::Interpolation(parts) => eval_interpolation(parts, shell),
 
         CompKind::Binary(op, lhs, rhs) => {
-            expr::eval_binary(*op, lhs, rhs, &shell.mobile.scope).map_err(Into::into)
+            expr::eval_binary(*op, lhs, rhs, &shell.env).map_err(Into::into)
         }
-        CompKind::Negate(val) => expr::eval_negate(val, &shell.mobile.scope).map_err(Into::into),
-        CompKind::Not(val) => expr::eval_not(val, &shell.mobile.scope).map_err(Into::into),
+        CompKind::Negate(val) => expr::eval_negate(val, &shell.env).map_err(Into::into),
+        CompKind::Not(val) => expr::eval_not(val, &shell.env).map_err(Into::into),
 
         CompKind::Index { target, keys, .. } => eval_index(target, keys, shell),
 
@@ -122,7 +122,7 @@ pub(crate) fn eval_comp(
 // ── Per-rule helpers ─────────────────────────────────────────────────────
 
 fn eval_return(val: &Val, shell: &mut Shell) -> Raw<Value> {
-    let v = close(val, &shell.mobile.scope)?;
+    let v = close(val, &shell.env)?;
     set_status_from_value(&v, shell);
     Ok(v)
 }
@@ -158,7 +158,7 @@ fn eval_rec(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let snap = shell.mobile.scope.clone();
+    let snap = shell.env.clone();
     with_scope(shell, |shell| -> Raw<Value> {
         for (j, (name, _)) in group.iter().enumerate() {
             shell.install_scope_binding(
@@ -182,7 +182,7 @@ fn eval_rec(
         match member.item {
             crate::ir::CompKind::Lam { .. } => Ok(Value::Thunk(Closure {
                 comp: Arc::clone(member),
-                env: shell.mobile.scope.clone(),
+                env: shell.env.clone(),
             })),
             _ => eval_comp(member, mooring, shell, tail),
         }
@@ -195,7 +195,7 @@ fn eval_rec(
 /// (S10). Not `Comp::arrow`: a `Rec` thunk must re-enter `eval_rec` on every
 /// force (§2.5), which `Comp::arrow`'s see-through-`Rec` reading would skip.
 pub(crate) fn step_force(val: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
-    let v = close(val, &shell.mobile.scope)?;
+    let v = close(val, &shell.env)?;
     let result = match v {
         // Not a tail position: the caller threads this value onward.
         Value::Thunk(closure) if !matches!(closure.comp.item, crate::ir::CompKind::Lam { .. }) => {
@@ -205,7 +205,7 @@ pub(crate) fn step_force(val: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw
         // An arity-0 native is a thunk, run like a `Block`; any other native
         // returns unchanged, like a `Lambda`.
         Value::Native { entry, applied } if entry.fixed_arity() == 0 => {
-            let env = shell.mobile.scope.clone();
+            let env = shell.env.clone();
             super::audit::run_native(&entry, &applied, &env, mooring, shell).map_err(Control::from)?
         }
         native @ Value::Native { .. } => native,
@@ -229,7 +229,7 @@ fn eval_interpolation(parts: &[Val], shell: &mut Shell) -> Raw<Value> {
     parts
         .iter()
         .try_fold(String::new(), |mut s, p| {
-            s.push_str(&interpolate_piece(&close(p, &shell.mobile.scope)?)?);
+            s.push_str(&interpolate_piece(&close(p, &shell.env)?)?);
             Ok::<_, Error>(s)
         })
         .map(Value::String)
@@ -239,9 +239,9 @@ fn eval_interpolation(parts: &[Val], shell: &mut Shell) -> Raw<Value> {
 /// `V[k1][k2]…` — computation-typed only because indexing can fail (key
 /// not found, out of bounds); target and keys are pure values.
 fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Value> {
-    let mut v = close(target, &shell.mobile.scope)?;
+    let mut v = close(target, &shell.env)?;
     for key in keys {
-        let k = close(&key.item, &shell.mobile.scope)?;
+        let k = close(&key.item, &shell.env)?;
         v = expr::index_value(&v, &k)?;
     }
     Ok(v)
@@ -359,15 +359,15 @@ fn eval_bind(
     });
     let val = step.map_err(note_abandoned_steps)?;
     set_status_from_value(&val, shell);
-    let env = pattern::bind_pattern(pattern, &val, &[], shell.mobile.scope.clone(), mooring, shell)?;
-    shell.mobile.scope = env;
+    let env = pattern::bind_pattern(pattern, &val, &[], shell.env.clone(), mooring, shell)?;
+    shell.env = env;
     eval_comp(rest, mooring, shell, tail)
 }
 
 /// `source path` in a block: run the file's phrases in [`super::Mode::Local`]
 /// — a block-local `source` leases nothing (§3.2) — then continue with
 /// `rest` under the file's `Define`s, already installed into
-/// `shell.mobile.scope`: today's install-into-ambient-scope made this
+/// `shell.env`: today's install-into-ambient-scope made this
 /// structural.  The file's own halt halts the block, after its `Define`s
 /// before the halt are threaded (S12).
 fn eval_source(
@@ -388,10 +388,10 @@ fn eval_source(
             )
             .into());
     };
-    let env = shell.mobile.scope.clone();
+    let env = shell.env.clone();
     let ran = crate::builtins::modules::source(&p, env, super::Mode::Local, span, mooring, shell)
         .map_err(Control::Break)?;
-    shell.mobile.scope = ran.env;
+    shell.env = ran.env;
     match ran.outcome {
         Ok(_) => eval_comp(rest, mooring, shell, tail),
         Err(e) => Err(Control::Break(e)),
@@ -429,7 +429,7 @@ fn eval_chain(parts: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Sh
         match with_scope(shell, |shell| eval_comp(part, mooring, shell, arm_tail)) {
             Ok(result) => return Ok(result),
             Err(Control::Break(Break::Error(e))) => {
-                shell.mobile.control.last_status = e.exit_code();
+                shell.last_status = e.exit_code();
                 last_err = Some(e);
             }
             Err(other) => return Err(other),
@@ -450,7 +450,7 @@ fn eval_if(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let cond_val = close(cond, &shell.mobile.scope)?;
+    let cond_val = close(cond, &shell.env)?;
     let b = match cond_val {
         Value::Bool(b) => b,
         other => {
@@ -491,8 +491,8 @@ pub(crate) fn note_abandoned_steps(control: Control) -> Control {
 /// selected `if` branch, each `?`-chain arm, the letrec fixpoint frame, and
 /// the thread workers in `builtins::concurrency`.
 pub(crate) fn with_scope<T>(shell: &mut Shell, f: impl FnOnce(&mut Shell) -> T) -> T {
-    let saved = shell.mobile.scope.clone();
+    let saved = shell.env.clone();
     let r = f(shell);
-    shell.mobile.scope = saved;
+    shell.env = saved;
     r
 }

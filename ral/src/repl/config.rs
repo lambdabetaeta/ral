@@ -621,7 +621,7 @@ mod tests {
         let shell = apply_rc("return [recursion_limit: 0]\n");
         assert_eq!(
             shell.recursion_limit(),
-            ral_core::types::DEFAULT_RECURSION_LIMIT
+            ral_core::types::DEFAULT_STACK_LIMIT
         );
     }
 
@@ -634,7 +634,7 @@ mod tests {
         )]));
         assert_eq!(
             shell.recursion_limit(),
-            ral_core::types::DEFAULT_RECURSION_LIMIT
+            ral_core::types::DEFAULT_STACK_LIMIT
         );
     }
 
