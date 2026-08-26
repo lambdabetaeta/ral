@@ -16,7 +16,7 @@ use std::path::PathBuf;
 /// prelude's `Bind` nodes carry theirs too.  `None` for a binding from an
 /// unchecked path, which has no scheme to show.
 fn scheme_of(binding: Option<&Binding>) -> Option<String> {
-    binding?.scheme.as_ref().map(fmt_scheme)
+    binding?.scheme.as_deref().map(fmt_scheme)
 }
 
 fn prelude_doc(name: &str) -> Option<&'static str> {

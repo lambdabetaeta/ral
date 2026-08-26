@@ -98,7 +98,7 @@ pub(crate) fn bind_pattern_staged(
         );
         let binding = Binding {
             value: value.clone(),
-            scheme: scheme_for(schemes, name).cloned(),
+            scheme: scheme_for(schemes, name),
         };
         observe(name, &binding, shell);
         env.bind(name.clone(), binding);
@@ -113,8 +113,13 @@ pub(crate) fn bind_pattern_staged(
     Ok(env)
 }
 
-fn scheme_for<'a>(schemes: &'a [(String, Scheme)], name: &str) -> Option<&'a Scheme> {
-    schemes.iter().find(|(n, _)| n == name).map(|(_, s)| s)
+/// The scheme a `Define` harvested for `name`, wrapped for sharing: a bound
+/// scheme is copied on every environment node clone, never read by a step.
+fn scheme_for(schemes: &[(String, Scheme)], name: &str) -> Option<Arc<Scheme>> {
+    schemes
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, s)| Arc::new(s.clone()))
 }
 
 /// Recursive worker for [`bind_pattern`]: pushes each binding onto `staged`
@@ -141,7 +146,7 @@ fn stage_pattern(
                 name.clone(),
                 Binding {
                     value: value.clone(),
-                    scheme: scheme_for(schemes, name).cloned(),
+                    scheme: scheme_for(schemes, name),
                 },
             ));
             Ok(())
@@ -193,7 +198,7 @@ fn stage_pattern(
                     name.clone(),
                     Binding {
                         value: Value::List(tail),
-                        scheme: scheme_for(schemes, name).cloned(),
+                        scheme: scheme_for(schemes, name),
                     },
                 ));
             }

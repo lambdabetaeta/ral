@@ -17,7 +17,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct Binding {
     pub value: Value,
-    pub scheme: Option<Scheme>,
+    /// Shared, not owned: a scheme dwarfs the value it describes, and every
+    /// `bind` into a shared environment copies a whole node of these.
+    pub scheme: Option<Arc<Scheme>>,
 }
 
 /// Every key hashed below is a program identifier, never attacker-controlled
@@ -223,7 +225,7 @@ impl Env {
     /// Every bound name with its scheme, session wins.  Seeds the next run's
     /// check: a name without a scheme is checked as a bare name.
     pub fn binding_schemes(&self) -> Vec<(String, Option<Scheme>)> {
-        self.fold_union(|b| b.scheme.clone())
+        self.fold_union(|b| b.scheme.as_deref().cloned())
     }
 
     /// The session tier's persistent map root — `crate::serial` interns

@@ -198,7 +198,7 @@ impl InternCtx {
                     k.clone(),
                     SerialBinding {
                         value: SerialValue::from_runtime(&b.value, &mut self)?,
-                        scheme: b.scheme.clone(),
+                        scheme: b.scheme.as_deref().cloned(),
                     },
                 ));
             }
@@ -310,7 +310,7 @@ impl WireDecoder {
                         k.clone(),
                         Binding {
                             value: b.value.clone().into_runtime(&dec)?,
-                            scheme: b.scheme.clone(),
+                            scheme: b.scheme.clone().map(Arc::new),
                         },
                     );
                 }

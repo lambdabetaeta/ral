@@ -182,9 +182,11 @@ impl Shell {
             },
             _ => None,
         };
-        let scheme = arm.map(|(param, body)| {
-            crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
-        });
+        let scheme = arm
+            .map(|(param, body)| {
+                crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
+            })
+            .map(std::sync::Arc::new);
         self.env.bind(name, Binding { value, scheme });
     }
 
