@@ -317,8 +317,10 @@ fn a_cd_handler_is_shadowed_at_the_bare_head_and_answers_under_caret() {
 
 // ── (4) Block non-leakage — grant ───────────────────────────────────────
 
-/// A `let` inside `grant [...] { ... }` must not be visible afterwards:
-/// the block boundary discards the body's post-run mobile.  Capabilities
+/// A `let` inside `grant [...] { ... }` must not be visible afterwards: it
+/// is a machine-local `Bind`, never a `Phrase::Define`, so it never reaches
+/// `shell.env` (S10: `grant`'s body itself no longer discards anything —
+/// this is lexical scoping, not a block boundary).  Capabilities
 /// inside the grant are an empty exec policy + permissive fs/net — the
 /// minimum that still parses and lets `let` run.  Mirrors the policy
 /// shape exarch's tool grants use without inducing OS sandbox setup
@@ -339,8 +341,10 @@ fn block_grant_does_not_leak_let_binding() {
 
 // ── (5) Block non-leakage — within / try / guard / audit ────────────────
 
-/// `within [...] { let ... }` does not leak: the body is a forced thunk
-/// and routes through `eval_block`, which drops the post-run mobile.
+/// `within [...] { let ... }` does not leak: its `let` is a machine-local
+/// `Bind`, never a `Phrase::Define`, so it can never reach `shell.env`
+/// regardless of how the block is entered (S10: `within`'s body no longer
+/// discards `cd`, but a `let`'s lexical scoping was never that mechanism).
 #[test]
 fn block_within_does_not_leak_let_binding() {
     let mut shell = fresh_shell();
@@ -393,9 +397,9 @@ fn block_guard_does_not_leak_let_binding() {
     );
 }
 
-/// `audit { body }` records the body's audit trail but the body is
-/// still a forced thunk — its mobile is discarded under the same
-/// block rule.
+/// `audit { body }` records the body's audit trail; its `let` is a
+/// machine-local `Bind`, never a `Phrase::Define`, so it never reaches
+/// `shell.env` regardless of how the body is entered.
 #[test]
 fn block_audit_does_not_leak_let_binding() {
     let mut shell = fresh_shell();
