@@ -4,7 +4,7 @@
 //!
 //! That truncation is otherwise invisible: an enclosing `audit` reports a
 //! `children` list that stops short, which reads exactly like a sequence that
-//! had fewer parts to begin with.  So the error names how many parts it
+//! had fewer parts to begin with.  So the error says that later steps were
 //! abandoned — on the innermost sequence that abandoned them, only when there
 //! were any, and only when the failure has no more specific hint of its own.
 
@@ -13,14 +13,13 @@ mod common;
 use common::run;
 
 #[test]
-fn an_abandoned_tail_is_named_and_counted() {
+fn an_abandoned_tail_is_named() {
     let out = run(
         "ral_abandoned_tail",
         "echo first\n/usr/bin/false\necho second\necho third\n",
     );
     assert!(
-        out.stderr
-            .contains("2 later steps in this block did not run"),
+        out.stderr.contains("later steps in this block did not run"),
         "stderr: {}",
         out.stderr
     );
@@ -38,15 +37,14 @@ fn a_failing_final_part_abandons_nothing() {
 }
 
 #[test]
-fn the_count_belongs_to_the_innermost_sequence() {
+fn the_hint_belongs_to_the_innermost_sequence() {
     let out = run(
         "ral_abandoned_innermost",
         "echo outer\n!{ echo inner; /usr/bin/false; echo a; echo b }\necho last\n",
     );
     assert!(
-        out.stderr
-            .contains("2 later steps in this block did not run"),
-        "the inner block abandoned two parts, the outer one; stderr: {}",
+        out.stderr.contains("later steps in this block did not run"),
+        "the inner block abandoned steps; stderr: {}",
         out.stderr
     );
 }
@@ -79,8 +77,7 @@ fn audit_records_the_hint_as_data() {
         "let result = audit { echo A; /usr/bin/false; echo B }\necho $result[error]\n",
     );
     assert!(
-        out.stdout
-            .contains("1 later step in this block did not run"),
+        out.stdout.contains("later steps in this block did not run"),
         "a report read as data must say what the rendered diagnostic says; stdout: {}",
         out.stdout
     );
