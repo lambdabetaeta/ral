@@ -1,5 +1,5 @@
 ---
-generated_at_commit: be7c59e3
+generated_at_commit: 68f1964e
 generated_at_date: 2026-08-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
@@ -32,17 +32,24 @@ everything `crate::types::*`.
   disagree ([[invariants/exec-argv-is-words|exec-argv-is-words]]).
 - `list.rs` / `map.rs` — `List` and `Map`, opaque newtypes over persistent
   `imbl::Vector` / `imbl::OrdMap`.
-- `flow.rs` — the control-flow surface: `Settled`, `Escape`, `Break`, and the
-  crate-internal `Control` / `Raw` / `Tail`
+- `flow.rs` — the whole control-flow surface, four declarations:
+  `Settled<T> = Result<T, Break>`, `Break` (`Error` catchable, `Escape`
+  propagating), `Escape` (`Exit`, and `Stopped` on Unix), and `PolicyError`
   ([[decisions/260514_completion-escape-refactor|completion-escape-refactor]]). No `Option`/null appears;
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
 - `error.rs` — `Error`, `Status`, and the `BodyResult` split. `audit.rs` — the
   `Audit` collector, over `observation.rs`'s `Observation` / `Observed` — the
   one vocabulary shared by the trail, the surface rail, `--audit`'s JSON, and
   the wire. `env.rs` — lexical `Env` and
-  `EnvVars` process-env overrides; a scope entry is `Binding { value, scheme }`,
-  so the checker's verdict rides next to the value
+  `EnvVars` process-env overrides; a scope entry is
+  `Binding { value, scheme: Option<Arc<Scheme>> }`, so the checker's verdict
+  rides next to the value
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
+  **The scheme is shared, not copied**: `imbl` stores entries inline in a
+  fixed-width node array, so an entry's own width is what a `bind` into a
+  shared environment allocates — one `Arc` behind the scheme that no machine
+  step reads takes a `Binding` from 360 bytes to 72. The wire form and
+  `binding_schemes` keep their own types and convert at their boundaries.
 - `coerce.rs` — the `sig` / `sig_hint` runtime-error constructors and the
   `as_map` family of `Value` → `Map` coercions, sitting below both the builtin
   and capability layers so each reaches them through `crate::types::*`.
@@ -64,8 +71,7 @@ field name *is* the invariant — joined by `Shell`
 [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]):
 `env` (the session environment, extended by every `Define` that lands),
 `context` (dynamic context — `cd`, aliases, hooks), and `last_status` (`$?`)
-— the three flat fields `Mobile` dissolved into once the evaluator became a
-CEK machine, since a step's own focus now carries its own environment and
+— three flat fields, since a step's focus carries its own environment and
 there is no ambient `scope` for a bundle to snapshot — plus `Io`,
 `SessionState`, and `LocalState` below. The run door checkpoints and rolls
 back the `(env, context, last_status)` tuple around every run
@@ -323,10 +329,9 @@ trail, byte sinks, builtin table, cancel scope, and terminal lease without any
 of them being copied — there is no second store to drift from the first.
 Entry still differs by one rule: `beta` resets `$?` to 0 before a lambda's
 body runs; `force` does not, so a block sees the caller's `$?`. Beyond that
-one reset, block and lambda are now uniform where they used to diverge — an
-unbracketed store write in either body (`cd`, `alias`, a hook registration)
-persists to the caller, since there is no `Mobile` snapshot left to fold a
-change back into or discard on the way out
+one reset, block and lambda are uniform: an unbracketed store write in either
+body (`cd`, `alias`, a hook registration) persists to the caller, no snapshot
+standing between the body and the store
 ([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]);
 `within [dir:]`/`within [handlers:]` are the scoped forms for a caller that
 wants the old bracketing back.

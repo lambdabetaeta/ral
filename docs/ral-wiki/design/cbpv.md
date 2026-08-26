@@ -6,7 +6,8 @@ from *commands*:**
 - *values* are inert data: strings, integers, lists, records, thunks;
 - *commands* are computations that read, write, fail, or return;
 - a thunk `{M}` suspends a command as a value; `!` forces it back into a
-  command.
+  command, exactly — `force(thunk M) = M`, one thunk value and no bracket
+  around the body ([[design/scoping|scoping]]).
 
 The typed calculus is ordinary call-by-push-value with one annotation on the
 returner: `F[ρ] A` records which of a command's two products — its returned

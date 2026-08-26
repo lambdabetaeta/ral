@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1eff3390
-generated_at_date: 2026-08-13
+generated_at_commit: 6d48e9af
+generated_at_date: 2026-08-26
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -34,11 +34,14 @@ Submodules:
   one layer that excuses the discard device (`ResolvedPath::is_discard`)
   before either region is consulted;
 - `sandbox.rs` — the OS-renderable `sandbox_projection` builder;
-- `deputy.rs` — `deputy_prefixes`, the confused-deputy predicate: a
-  prefix both `exec`-admitted and `fs`-writable, judged with `path::covers`
-  on a *folded* `Capabilities` (neither layer of a meet is guilty alone).
-  It reports rather than denies, and its findings surface at grant push and
-  at an exarch profile load ([[design/grant|grant]]);
+- `deputy.rs` — `deputy_prefixes`, the confused-deputy report: the prefixes a
+  grant makes both `exec`-admitted and `fs`-writable, judged with
+  `path::covers` on a *folded* `Capabilities` (neither layer of a meet is
+  guilty alone). **What it locates is where a write becomes runnable, not an
+  escalation**: within one projection the dropped binary is spawned under the
+  confinement that wrote it, and only a runner outside the projection turns
+  the shape into an escape — so it reports and never denies. Findings surface at grant push and at an exarch profile load
+  ([[design/grant|grant]]);
 - `exec.rs` — per-layer exec verdicts; the admitted arm carries `Admit`
   (`Any` / `Subcommands`), so a `Deny` cannot reach an allowed verdict; the
   literal comparison is case- and PATHEXT-insensitive under Windows path
@@ -136,7 +139,10 @@ never frozen (a bare exec-dir string, a `~`-headed fs prefix).
 
 XDG base directories resolve through one resolver, `basedir.rs`
 (`XdgKind`, `resolve_xdg`): an absolute `$XDG_*_HOME` override else the
-home-joined Linux default on every platform. Both the `xdg:` grant sigil
+home-joined Linux default on every platform, and `None` where there is neither
+— a host fact answers with an `Option`, so each caller picks its own fallback
+rather than inheriting a fabricated home (the Windows sandbox ledger takes the
+temp dir, keeping itself out of the cwd). Both the `xdg:` grant sigil
 (`sigil.rs`) and the binary's own config/data loaders (`config.rs`) defer to
 it, so a grant and the rc/history/plugin paths can never name different
 directories — [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-consolidation]].
@@ -237,7 +243,13 @@ never case-folded, so a case-sensitive directory's two distinct names cannot
 merge into one authority — and thence a capability SID via
 `DeriveCapabilitySidsFromName` (`dacl::fs_capability_name`).
 `dacl::ensure_fs_grant` stamps that SID's
-inheritable ACE once and never reverts it; two witnesses gate skipping a stamp —
+inheritable ACE once and never reverts it. **A read-write grant is two
+permanent mutations, and neither witnesses the other**: the mandatory-integrity
+check runs before the `AppContainer` pass, and an unlabeled object defaults to
+`Medium`, refusing every `Low`-IL child whatever the DACL says — so
+`ensure_low_integrity_label` also stamps a `Low` `SYSTEM_MANDATORY_LABEL_ACE`,
+asked *before* the ACE's witness is consulted and witnessed under its own stamp
+key and its own SACL probe. For each mutation two witnesses gate skipping it —
 the grow-only stamp store (`stamps.json`, atomic tmp+rename, per-path
 named-mutex merge) recording completed propagations, and a probe of the root's
 own DACL confirming the tree was not deleted and recreated. Recording follows

@@ -1,7 +1,7 @@
 ---
-verified_at_commit: ff0a764
-verified_at_date: 2026-08-11
-anchors: [run_pipeline, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeYield, Capture, infer_pipeline]
+verified_at_commit: 6d48e9af
+verified_at_date: 2026-08-26
+anchors: [PipeNode, Frame::Pipe, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeYield, Capture, infer_pipeline]
 ---
 
 # Pipeline execution: byte edges, process groups, and helper final values
@@ -9,11 +9,16 @@ anchors: [run_pipeline, resolve_pipeline, StageLaunch, open_stage_routes, FinalV
 [[design/pipelines|The design]] makes `|` a positional byte wire. Every interior
 edge is an operating-system pipe from the left stage's stdout to the right
 stage's stdin, alike for every pair; only the final stage may report a value.
-`eval_pipeline` (`evaluator/comp.rs`) reduces a single-stage form to its inner
-computation and hands a multi-stage form to
-`runtime::pipeline::run_pipeline`, whose three phases — resolve, launch,
-collect — are the spine below. Ordinary application and bind compose values in
-the evaluator and do not enter this pipeline runtime.
+The machine's `CompKind::Pipeline` arm
+([[internals/evaluator-machine|the evaluator machine]]) reduces a single-stage
+form to its inner closure and hands a multi-stage form to `PipeNode::launch`,
+pushing the running node onto the stack as a `Frame::Pipe` whose `join` folds
+the outcome — resolve, launch, join (collect then finish) are the spine below.
+A stage's own stack is empty by construction: **no stage runs in the parent, so
+none can be in tail position, and no frame ever crosses the wire** — only
+⟨comp, scrubbed E⟩ and the wire context ride along, `E` being the pipeline
+node's own lexical environment rather than `shell.env`. Ordinary application
+and bind compose values in the machine and do not enter this pipeline runtime.
 
 **Resolve freezes a `StageLaunch` per stage from resolve-time facts.**
 `resolve_pipeline` (`pipeline/resolve.rs`) reads redirects, the terminal plan,
@@ -58,14 +63,14 @@ from the wire to the collector.
 **The final value report remains helper-staged for now.**
 When the pipeline yields its last stage's value, `FinalValue::Report` selects
 the helper's value report. The parent sends one `ChildEvalRequest` with the stage body and
-`WireMobile` snapshot; the helper evaluates it and returns the value in one
+`WireShell` snapshot; the helper evaluates it and returns the value in one
 `ChildEvalResponse`, alongside status and observations. The parent does not
 run a special in-process tail yet. Moving that tail into the parent is a
 separate future decision ([[internals/compilation-ladder|compilation-ladder]]).
 
 **A helper serves one `ChildEvalRequest` / `ChildEvalResponse` frame pair.**
 A `HelperEval` stage uses the shared `run_child_eval` runner
-(`core/src/child_eval.rs`). The parent packs the stage body plus a `WireMobile`
+(`core/src/child_eval.rs`). The parent packs the stage body plus a `WireShell`
 snapshot into one request frame and gates the helper on it; the helper
 reconstructs a child shell (`Shell::child_of` over the captured closure
 environment), evaluates the stage, and ships one response frame carrying the
@@ -85,17 +90,18 @@ executes in a subprocess sharing one pgid the parent ral process is *not* a
 member of. `PipelineGroup` (`pipeline/group.rs`) owns that pgid through a
 stable *anchor* process, spawned by `prepare` because a later stage's `setpgid`
 join needs a target that cannot die first. The `n ≥ 2` guard on that spawn is a
-formality: `eval_pipeline` reduces a single-stage form to its inner computation,
-so `run_pipeline` never sees one. The SIGINT-forwarding relay is claimed on the
-first `spawn` — *after* `spawn_with_pgid` plus `setpgid` in `pre_exec` has put a
+formality: the machine's `Pipeline` arm reduces a single-stage form to its
+inner closure, so `PipeNode::launch` never sees one. The SIGINT-forwarding
+relay is claimed on the first `spawn` — *after* `spawn_with_pgid` plus `setpgid` in `pre_exec` has put a
 real child in the group — so a signal is never forwarded to a child-less pgid;
 the module doc of `group.rs` states this SIGINT/relay invariant in full. Between
 `prepare` and the first `spawn`, a racing SIGINT only cancels the run's
 foreground scope, which the launch loop's per-stage `process::check` turns into
 a prompt abort.
 
-**A helper-evaluated stage can itself launch a pipeline.** `eval_pipeline` is
-`run_pipeline`'s only caller and runs in the helper exactly as in the parent, so
+**A helper-evaluated stage can itself launch a pipeline.** The machine's
+`Pipeline` arm is `PipeNode`'s only caller and steps in the helper exactly as in
+the parent, so
 a stage whose body is itself a pipeline spawns its own nested helpers. Nested
 stages still receive only the byte routes and the helper control frames relevant
 to their own launch; no interior typed-value descriptor is an inheritance
@@ -168,7 +174,7 @@ and finish on their own once a later `fg` runs it to completion. For a pipeline,
 `PipelineCollector::note_stop` (`pipeline/collect.rs`) records the stopped pgid
 and `SIGSTOP`s the whole `-pgid` so any still-running siblings park together,
 then the collect loop `abandon()`s the remaining stage handles so their `Drop`
-does not `SIGKILL` the parked group. As `run_pipeline` returns, `PipelineGroup`'s
+does not `SIGKILL` the parked group. As `PipeNode::join` returns, `PipelineGroup`'s
 drop has the `ForegroundGuard` restore the terminal to the shell and
 `AnchorProcess::finish` `SIGCONT` *just the anchor's own pid* (not `-pgid`), so
 the anchor wakes, sees EOF on its release fd, and exits without disturbing the

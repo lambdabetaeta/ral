@@ -28,7 +28,7 @@ and `run_shell` owns only the run it builds and the outcome it formats:
   [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]); the
   prelude's schemes ride scope[0], installed when the annotated prelude was
   evaluated at boot. The check is strict — any type error is fatal — over the
-  single mode-inference engine every evaluated path shares
+  one inference pass every evaluated path shares
   ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
   Parse/type errors come back as `Report::Static { diagnostics }`, which
   `run_shell` formats to `Outcome::Static`; on success the *annotated* comp
@@ -37,9 +37,10 @@ and `run_shell` owns only the run it builds and the outcome it formats:
   **This is the sandbox**: the boundary is the pushed [[design/grant|grant]]
   frame plus the [[map/core/evaluator|top-level contract]], not a source-level
   `grant { … }` the model could escape. External commands route through the same
-  OS sandbox as ral ([[map/core/capabilities|capabilities]]). The post-run
-  `Mobile` installs onto the shell, so `let`, `cd`, and env persist across tool
-  calls (the in-module tests pin this);
+  OS sandbox as ral ([[map/core/capabilities|capabilities]]). The eval runs in
+  `Mode::Session`, so each landed `Define` writes back into `shell.env` as it
+  lands and the run's `Context` is the session's own: `let`, `cd`, and env
+  persist across tool calls (the in-module tests pin this);
 - **`io: RunIo::Capture`** — core mints the stdout/stderr buffers and returns
   them in `Report::Ran`'s `captured`: the full, model-visible and logged
   text. Nothing echoes live; the [[map/exarch/frontend|rail]] surfaces cards

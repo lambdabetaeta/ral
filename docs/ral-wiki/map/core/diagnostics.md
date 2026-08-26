@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 6d48e9af
+generated_at_date: 2026-08-26
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -84,7 +84,10 @@ character offset, the unit ariadne and a `TextArea` cursor both count in) and
 label phrase) are `pub`. The structural [[map/repl/frontend|frontend]] reuses
 them to paint an in-place type-error underline whose label and caret agree
 word-for-word and column-for-column with the post-Enter ariadne report — the
-inline rendering belongs to that page, not here. Type-error *prose* generally
+inline rendering belongs to that page, not here. `text.rs` is also the single
+home of the `nucleo` fuzzy matcher (`rank`, and `rank_by` for an item that is
+not its own haystack), so every filtered list a user is offered — completion
+menus, pickers, the exarch command popup — ranks the same way. Type-error *prose* generally
 lives beside the checker now: provenance is data on the error (`Reason`,
 `typecheck/error.rs`) and every user-facing sentence is a pure function of it
 in `typecheck/explain.rs` ([[map/core/typecheck|typecheck]]).

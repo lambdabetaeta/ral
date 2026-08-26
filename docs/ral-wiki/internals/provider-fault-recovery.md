@@ -1,6 +1,6 @@
 ---
-verified_at_commit: cbeb5457
-verified_at_date: 2026-08-17
+verified_at_commit: 6d48e9af
+verified_at_date: 2026-08-26
 anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS]
 ---
 
@@ -96,9 +96,10 @@ caller's to fix and stays `Terminal`.
 
 **The `_ => Terminal` floor makes the walk total.** A genai version that adds a
 new variant defaults to "surface it," never to a silent retry on a guess —
-since genai is [[map/exarch/provider|vendored]], a new transient shape is a
-deliberate edit to `Fault::of`, not something a string heuristic catches by
-luck. (The walk replaced an earlier `status_of` + `Display`-substring fallback
+and since `exarch/Cargo.toml` names one exact genai prerelease, a new transient
+shape arrives only with a deliberate bump and a deliberate edit to `Fault::of`,
+never caught by luck from a string heuristic. (The walk replaced an earlier
+`status_of` + `Display`-substring fallback
 that both over-matched — the word "body" appears in a non-JSON error's own
 `Display` — and under-matched. The string never decides recovery now.)
 

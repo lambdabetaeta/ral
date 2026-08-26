@@ -1,6 +1,6 @@
 ---
-verified_at_commit: f5720be
-verified_at_date: 2026-08-11
+verified_at_commit: 6d48e9af
+verified_at_date: 2026-08-26
 anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, CaseArm, ArmWalk, eta_expand_captured]
 ---
 
@@ -23,7 +23,10 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
   effectful sub-expressions to fresh temporaries (a *binds* accumulator folded
   into `Comp::Bind` chains), resolves command heads against lexical scope, and
   runs `group_stmts` first to find mutually recursive binding groups, which
-  lower to `LetRec` / `Rec`. What it emits carries no parser syntax
+  lower to an n-ary `Rec` with a projection per member. A statement sequence
+  `a; b` is itself a binder — `a to _. b` — so a block is a right-nested chain
+  of `Bind`s and the top level is a list of `Phrase`s (`Define` / `Source` /
+  `Run`). What it emits carries no parser syntax
   ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]). ([[map/core/elaboration|elaboration]])
 - **IR → typed IR.** Hindley–Milner inference annotates the `Val` / `Comp` tree
   ([[design/types|types]]). The checker is a transformation, `annotate`. It
@@ -55,8 +58,9 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
 
   A value demand reaches:
 
-  - a `Seq`'s tail;
-  - a `Bind`'s RHS;
+  - a `Bind`'s RHS, unless its pattern is a wildcard: a discarded statement is
+    a wildcard binder, so its own value is discarded while the ambient demand
+    flows on into the binder's `rest`;
   - each arm of an `If`, a `Case`, a fallback chain, or a `try`;
   - the body of a force of a syntactic thunk.
 
@@ -81,12 +85,11 @@ artifact. `core/src/lib.rs` exposes the whole descent as two functions: `compile
   demand walks into every one of them
   ([[decisions/260811_case-is-syntax-try-is-not|case-is-syntax-try-is-not]]).
 
-  With the second mode-inference engine retired
-  ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]), this
-  rung is the *only* source of the evaluator's modes and `Capture` nodes. The
-  pass runs on every evaluated path. Neither is ever re-derived at runtime.
-  A node inference never visited keeps the elaborator's placeholder — `Empty`
-  for a wire, `Unit` for a stage type. The verdict rides inside the comp;
+  This rung is the *only* source of `Capture` nodes, and it runs on every
+  evaluated path: no route reaches the evaluator at all — the checker grounds
+  every route here and leaves its verdict as syntax, never re-derived at
+  runtime. A node inference never visited keeps the elaborator's placeholder —
+  `Unit` for a stage type. The verdict rides inside the comp;
   `CompileOutcome` is unchanged in shape. ([[map/core/typecheck|typecheck]])
 
 Each run's check is seeded from the live session — one `SessionSchemes`, the

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: be7c59e3
+generated_at_commit: 68f1964e
 generated_at_date: 2026-08-26
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
@@ -37,8 +37,8 @@ crate-private.** Two reach outside the module:
   is unconstructable.
 
 The result surface is `Settled<Value>` carrying `Escape` / `BodyResult`.
-There is no trampoline and no `Control::Tail` currency: a tail call binds its
-argument into the closure's environment and puts the body straight in focus,
+A tail call binds its argument into the closure's environment and puts the body
+straight in focus,
 so it costs no frame and depth is simply `stack.len()`; `reserve` — checked
 before any pushing rule's effect — is the cap (`session.stack_limit`, the
 `--recursion-limit` knob). The escape-propagation guarantees (try does not
@@ -51,9 +51,9 @@ in place on the caller's `Shell`, no snapshot or restore: `force`/`beta` in
 `local` state are simply the one `Shell`'s and the caller's `&Mooring` is
 passed along. `beta` resets `$?` to 0 before a lambda's body runs; `force`
 does not, so a block sees the caller's `$?`. Beyond that one reset, block and
-lambda are now uniform: an unbracketed store write in either body (`cd`,
-`alias`, a hook registration) persists to the caller, since there is no
-`Mobile` snapshot left to fold a change back into or discard on the way out
+lambda are uniform: an unbracketed store write in either body (`cd`,
+`alias`, a hook registration) persists to the caller, no snapshot standing
+between the body and the store
 ([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]).
 The `Value`-level force/block split stays intact
 ([[decisions/260616_force-eliminates-blocks|force-eliminates-blocks]]); only

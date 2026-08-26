@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 95449d4
-verified_at_date: 2026-08-10
+verified_at_commit: 6d48e9af
+verified_at_date: 2026-08-26
 against: [design/types, design/cbpv, design/capture]
 ---
 

@@ -56,14 +56,20 @@ the elaborator can see the sequence.
 The static path is the common one and is correct by construction. The dynamic
 path is the one that must name the *visible* sink rather than the enclosing one.
 
-**Why `;` is not a bind.** A bind at a byte payload installs the buffer — that
-is what having a bound variable to decode into means — so `M to (ignore x. N)`
-*destroys* `M`'s bytes. A statement boundary installs no buffer and lets them
-out. The two have the same type: a payload route says where a value boundary
-looks, never whether anything was written, so `F[Value] Unit` is honest about a
-computation that writes and about one that could but doesn't. Only the
-evaluator distinguishes them, which is why the boundary has to be its own former
-rather than sugar for a bind on a dropped variable.
+**Why a statement boundary is a bind whose pattern discards.** A bind at a byte
+payload installs the buffer — that is what having a bound variable to decode
+into means — so `M to x. N` *destroys* `M`'s bytes, and a statement boundary
+must not. Both are `Bind`; the pattern is what separates them. `a; b`
+elaborates to a bind on `IrPattern::Wildcard`, while a surface `_` gets a
+hygienic gensym `Name`, so a discard the *user* wrote is an ordinary binder and
+a statement boundary is not one. Coercion insertion reads exactly that: a
+wildcard RHS carries `Demand::Discard`, so no `Capture` wraps it and the bytes
+leave for the visible stream; every other pattern's RHS carries
+`Demand::Value`. The two shapes share a type — a payload route says where a
+value boundary looks, never whether anything was written, so `F[Value] Unit` is
+honest about a computation that writes and about one that could but doesn't —
+which is why the distinction has to be *syntax the checker reads*, and not a
+verdict the evaluator reaches on its own.
 
 **The node returns bytes; the text is composed.** `capture M : F[Value] Bytes`
 is total and exact — precisely the bytes the handler collected, nothing

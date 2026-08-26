@@ -1,6 +1,6 @@
 ---
-generated_at_commit: be7c59e3
-generated_at_date: undefined
+generated_at_commit: 68f1964e
+generated_at_date: 2026-08-26
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -73,8 +73,8 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
 - [[map/core/typecheck|typecheck]] — Hindley–Milner inference with row types
   (`core/src/typecheck/`), the sole inference engine; the payload-route types in
   `route.rs` are covered by the same page.
-- [[map/core/evaluator|evaluator]] — the CBPV machine: trampoline, scope frames,
-  matching, audit (`core/src/evaluator/`).
+- [[map/core/evaluator|evaluator]] — the CEK machine over computation closures:
+  focus, frame stack, matching, audit (`core/src/evaluator/`).
 - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the
   machine dispatches into, and the shared re-exec'd-child eval runner
   (`core/src/runtime/`, `core/src/child_eval.rs`).

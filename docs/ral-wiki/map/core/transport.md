@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7155c76f
+generated_at_commit: 68f1964e
 generated_at_date: 2026-08-26
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs]
 ---

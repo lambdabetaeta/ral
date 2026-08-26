@@ -1,7 +1,7 @@
 ---
-verified_at_commit: a590f4f
-verified_at_date: 2026-06-18
-anchors: [lex, parse, Head, scan_expr_block]
+verified_at_commit: 6d48e9af
+verified_at_date: 2026-08-26
+anchors: [lex, parse, Head, scan_expr_block, WordLiteral::classify, is_bare_word]
 ---
 
 # Surface syntax: lexing and parsing
@@ -25,7 +25,11 @@ reads a bare word and nothing else — no expected type, no scope, no head — s
 numeral denotes its number wherever it stands and a token meaning bytes is
 quoted ([[invariants/numerals-denote-numbers|numerals-denote-numbers]]). Both the
 parser (skipping the `Call` wrapper for a value head) and elaboration (through
-`Val::from_word`) read that one answer.
+`Val::from_word`) read that one answer. Its dual is `quote.rs`'s
+`is_bare_word`: whatever the numeral grammar claims cannot be emitted bare, or
+printed text would come back as a value. The remaining literals are
+*punctuation*, not words — `()` for unit beside `[]` and `[:]` — so no
+spelling of a name can collide with them.
 
 **Parsing is recursive descent with a Pratt core for expressions.**
 `parse(source)` returns `Vec<Stmt>` or a `ParseError`. Statement and pipeline

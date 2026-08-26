@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 5afa1c81
-verified_at_date: 2026-08-12
-anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, restore_matched, run_handler]
+verified_at_commit: 6d48e9af
+verified_at_date: 2026-08-26
+anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, restore_matched, run_handler, Frame::Unmask, WithinUndo]
 ---
 
 # Handler dispatch: deep, self-masking, by frame
@@ -56,11 +56,13 @@ wrong-arity lambda is rejected at install time (`docs/SPEC.md` §9.4), so no
 malformed entry ever reaches lookup.
 
 **Self-masking is a strip-and-restore of one frame.** For the dynamic extent of
-the matched handler's body, `strip_matched(depth)` lifts *only that frame* off the
-stack. Frames newer or older than it stay in place, so outer handlers for *other*
-names remain visible, and a same-name call inside the body reaches the next outer
-handler — or the OS — never itself. `restore_matched` re-inserts the frame
-afterwards, using the monotonically allocated `FrameHandle` to find the position
+the matched handler's body, `strip_matched(depth)` lifts *only that frame* off
+the stack and the machine holds it in a `Frame::Unmask` — so the restore is a
+continuation frame, run on the returning path, the halting path, and the
+abandon path alike. Frames newer or older than it stay in place, so outer
+handlers for *other* names remain visible, and a same-name call inside the body
+reaches the next outer handler — or the OS — never itself. `restore_matched`
+re-inserts the frame afterwards, using the monotonically allocated `FrameHandle` to find the position
 that preserves the original ordering even if the body pushed frames of its own.
 This is what makes the wrap-and-forward idiom
 `within [handlers: [git: { |args| my-git ...$args }]] { … }` terminate rather than
@@ -69,7 +71,8 @@ diverge.
 **Deep** means the frame persists across the body's whole extent, re-reached by
 each successive operation — a consequence of the stack living on the dynamic
 [[design/scoping|frame]] `Context` and not being consumed at first use. Frames
-are pushed by the `within` guard (`evaluator/scope.rs`); at an IPC boundary a
+are pushed by `WithinScope::enter` (`evaluator/scope.rs`), whose `WithinUndo`
+the machine carries in a `Frame::Within`; at an IPC boundary a
 deserialised stack is rebuilt with fresh handles, since the wire format does not
 carry them.
 

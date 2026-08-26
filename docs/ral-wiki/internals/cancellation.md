@@ -1,6 +1,6 @@
 ---
-verified_at_commit: cbeb5457
-verified_at_date: 2026-08-17
+verified_at_commit: 6d48e9af
+verified_at_date: 2026-08-26
 anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, RailShape, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
@@ -153,8 +153,9 @@ into the signal handler.
 A cancel is a *request*; nothing stops until the evaluator next polls. The poll is
 `process::check(mooring)`, called at:
 
-- the **trampoline** (`evaluator/comp.rs`, `evaluator/trampoline.rs`) — every tail
-  step, so any loop of `ral` calls is preemptible (the original
+- the **machine's step arms** (`evaluator/machine.rs`) — the β-step, `Bind`,
+  `App`, `Rec`, `Source`, the exec step, and the `Chain` frame each poll, so
+  any loop of `ral` calls is preemptible (the original
   [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] insight);
 - the **iterating builtins** (`builtins/collections.rs`, `builtins/concurrency.rs`)
   — `map`/`filter`/`each` and the worker-join loops poll between elements;

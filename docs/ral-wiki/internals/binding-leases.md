@@ -1,6 +1,6 @@
 ---
-verified_at_commit: cbeb5457
-verified_at_date: 2026-08-17
+verified_at_commit: 6d48e9af
+verified_at_date: 2026-08-26
 anchors: [BindingLedger, arm_binding_lease, install_scope_binding, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS, renew_one]
 ---
 
@@ -55,10 +55,13 @@ past the bound is examined: a name whose value still structurally reaches a
 (`pins_running_work` — it recurses lists, maps, and variant payloads, and
 deliberately never looks inside a closure's captured environment);
 everything else is unset — value and type-scheme seed
-in one act — and one dim transcript card names what fell. The verb returns
-the prune notices *together with* a post-prune `MobileSnapshot` the host must
-adopt as its panic-recovery checkpoint, so a later panic rollback cannot
-resurrect a pruned name; the pairing is the signature, not a discipline.
+in one act — and one dim transcript card names what fell. A pruned name cannot
+come back through a panic rollback: `Shell::run` checkpoints `env` / `context` /
+`last_status` at *run entry*, after any earlier prune, so the rollback target
+already excludes what fell. Pruning is the ready boundary's own door — reached
+only between runs, on the session scope by construction — so a mid-frame caller
+such as a lifecycle hook is refused rather than allowed to unset from a
+transient frame.
 
 What it does not do: it never frees memory by itself (it removes the future
 name, not the bytes), it never touches a closure, and it never tells the

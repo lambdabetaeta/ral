@@ -56,8 +56,9 @@ This stamp is what keeps the volatile layer honest — see Lint.
 
 **Operational — `internals/`.** The *how it runs*. A small, curated set of
 narratives that thread several subsystems into one flow — the compilation ladder
-from source to typed IR, the evaluator as a trampolined CBPV machine, the
-lifecycle of one run. These are *semi-durable*: the high-level machine outlives
+from source to typed IR, the evaluator as a CEK machine over computation
+closures, the lifecycle of one run. These are *semi-durable*: the high-level
+machine outlives
 file moves and renames, but a deep architectural decision can rewrite it. An
 internals page explains *how a behaviour is realised* in terms stable across
 refactors; it links **down** to `map/` for the symbols that realise it and
@@ -73,7 +74,7 @@ a single `map/` page. Each page carries a light stamp:
 ---
 verified_at_commit: 8cd5879
 verified_at_date: 2026-05-31
-anchors: [eval_top_level, Settled<Value>, trampoline, Mobile]
+anchors: [run_phrases, Settled<Value>, Machine, Frame]
 ---
 ```
 

@@ -121,9 +121,9 @@ Three nested loops, the same for trunk and child alike:
   `deliberate` call is a
   *host-side* fault (provider transport, surface decode, render, digest),
   recorded as `AgentOutcome::Failed`; an eval-side panic never unwinds this far —
-  the engine's own run door (`Shell::run`) checkpoints the `Mobile`
-  at entry, rolls it back, and reports the failed run, durability being
-  engine-owned ([[decisions/260612_exarch-panic-recovery|panic-recovery]]).
+  the engine's own run door (`Shell::run`) checkpoints `env` / `context` /
+  `last_status` at entry, rolls them back, and reports the failed run,
+  durability being engine-owned ([[decisions/260612_exarch-panic-recovery|panic-recovery]]).
   The per-call desk install retires on *every* exit, panic included, via
   `seat::RunGuard`.
 - `deliberate` — one prompt stepped to quiescence over the agent's *own* provider
@@ -582,11 +582,12 @@ child's inbox, so the prompt enters through the same item path.
 Routing the fork through core matters because the builtin table is the easiest
 thing to drop. The exarch host builtins — `view-text`/`view-hash`, `grep-files`,
 `edit-hash`, `edit-replace`, `explore-dir`, `fff`, the skill loaders
-([[map/exarch/builtins|builtins]]) — live in the agent's dispatch table,
-*outside* `Mobile`, and the `view-text-around` helper in `agent.ral` calls
-`view-text`. A fork that copied only `mobile.scope` and `mobile.context` would
-leave the child's `view-text-around` resolving to nothing and falling through
-to a failed PATH lookup. `fork_session` copies `agent.builtins` as part of the
+([[map/exarch/builtins|builtins]]) — live in the agent's own dispatch table
+rather than in the environment, and the
+`view-text-around` helper in `agent.ral` calls `view-text`. A fork that copied
+only the scope and the context would leave the child's `view-text-around`
+resolving to nothing and falling through to a failed PATH lookup.
+`fork_session` snapshots scope, context, *and* the builtin table as part of the
 flow matrix, so the decision lives in one place and the table cannot be
 silently severed at this call site.
 
