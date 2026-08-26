@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 7a4bf71e
-generated_at_date: 2026-08-25
+generated_at_commit: be7c59e3
+generated_at_date: 2026-08-26
 covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 ---
 
@@ -8,7 +8,10 @@ covers_paths: [core/src/elaborator.rs, core/src/syntax/group.rs]
 
 `core/src/elaborator.rs` lowers the surface AST into CBPV [[map/core/ir|IR]]. Its
 sole public function is
-`elaborate(ast, bindings, name) -> Result<Comp, ParseError>`.
+`elaborate(ast, bindings, name) -> Result<Toplevel, ParseError>`: each `let`
+becomes a `Phrase::Define`, a `let`-knot becomes one `Define` per member
+sharing a `Rec` group, an unbound bare `source path` becomes a `Source`, and
+everything else a `Run` ([[map/core/ir|`Toplevel`/`Phrase`]]).
 
 This is the one phase that knows about surface sugar: it enforces the
 value/computation split by binding effectful sub-expressions to fresh temporaries
@@ -20,9 +23,9 @@ elaborator hands on carries no surface conveniences
 A temporary's extent is bounded by two mechanisms, and both are load-bearing.
 `wrap_binds` wraps the chain in a `ScopeOp::Hoisted` frame, so the temporaries
 die with the computation that reads them; nothing else pops them, and a
-top-level `Bind` installs into the session scope, so without the frame a
-temporary stayed readable as `$_var1`, was PATH-shadow-checked on the way in,
-and was harvested by the binding-lease ledger. A `let`'s temporaries wrap its
+top-level `Phrase::Define` installs into the session scope, so without the
+frame a temporary stayed readable as `$_var1`, was PATH-shadow-checked on the
+way in, and was harvested by the binding-lease ledger. A `let`'s temporaries wrap its
 right-hand side rather than its `Bind`, since only the right-hand side reads
 them and a frame around the `Bind` would take the user's own binding down with
 it. `Elaborator::gensym` then skips any name already bound: `_` is ral's

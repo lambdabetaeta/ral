@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 8bd8b936
-generated_at_date: 2026-08-25
+generated_at_commit: be7c59e3
+generated_at_date: 2026-08-26
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -58,15 +58,19 @@ permissions remain sticky vetoes.
 
 ## Shell
 
-`shell/` partitions the interpreter state into **four fields by lifetime — the
-field name *is* the invariant** — joined by `Shell`
-([[decisions/260617_turn-local-state|turn-local-state]]):
-
-- **`Mobile`** — the persistable computation state (lexical `scope` +
-  `ControlState` + dynamic `Context`) that crosses evaluation boundaries and
-  thread spawns. `mobile` is the public embedding seam. The run door
-  checkpoints and rolls back the `Mobile` around every run, so a
-  panicking run reports as a failed run instead of corrupting the store.
+`shell/` partitions the interpreter state into fields by lifetime — the
+field name *is* the invariant — joined by `Shell`
+([[decisions/260617_turn-local-state|turn-local-state]],
+[[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]):
+`env` (the session environment, extended by every `Define` that lands),
+`context` (dynamic context — `cd`, aliases, hooks), and `last_status` (`$?`)
+— the three flat fields `Mobile` dissolved into once the evaluator became a
+CEK machine, since a step's own focus now carries its own environment and
+there is no ambient `scope` for a bundle to snapshot — plus `Io`,
+`SessionState`, and `LocalState` below. The run door checkpoints and rolls
+back the `(env, context, last_status)` tuple around every run
+(`Shell::enter`), so a panicking run reports as a failed run instead of
+corrupting the store.
 - **`Io`** — the run's *byte streams*, and the only part of the frame the
   `Shell` carries (as the field `io`): stdin / stdout / stderr, the terminal
   snapshot, the launch role ([[map/core/io-process|io-process]]). These
@@ -311,17 +315,21 @@ datum (the host builtin table among them) can be silently severed by a call site
 copying only the fields it happened to remember. There are two regimes.
 
 A **same-thread β-step** — forcing a block or applying a lambda — does not fork:
-`Shell::with_thunk_body` runs the body *in* the caller's `Shell`. Only the
-`Mobile` is swapped, rescoped to the closure's captured `Env` plus a fresh frame;
-the `io`, `session`, and `local` state are shared *by identity*, and the
-caller's `&Mooring` is simply passed along, so the body observes the caller's
-audit trail, byte sinks, builtin table, cancel scope, and terminal lease
-without any of them being copied. There is no second store to
-drift from the first ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]).
-The `ThunkBody` kind fixes the only two places a block and a lambda differ: a
-block enters with the caller's `$?` and folds only `last_status` back; a lambda
-enters with a fresh `$?` and folds `{last_status, cwd}` back, so a `cd` inside a
-function, alias, or handler persists like every other shell.
+`force`/`beta` in `evaluator::machine` step the body's `Closure` *in* the
+caller's `Shell`, no snapshot or restore around the call ([[map/core/evaluator|evaluator]]).
+The `io`, `session`, and `local` state are simply the one `Shell`'s, and the
+caller's `&Mooring` is passed along, so the body observes the caller's audit
+trail, byte sinks, builtin table, cancel scope, and terminal lease without any
+of them being copied — there is no second store to drift from the first.
+Entry still differs by one rule: `beta` resets `$?` to 0 before a lambda's
+body runs; `force` does not, so a block sees the caller's `$?`. Beyond that
+one reset, block and lambda are now uniform where they used to diverge — an
+unbracketed store write in either body (`cd`, `alias`, a hook registration)
+persists to the caller, since there is no `Mobile` snapshot left to fold a
+change back into or discard on the way out
+([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]);
+`within [dir:]`/`within [handlers:]` are the scoped forms for a caller that
+wants the old bracketing back.
 
 The owned-`Shell` modes *are* genuine runtime forks — a different store — and so
 copy state explicitly. Each starts from a freshly-defaulted `SessionState` and so

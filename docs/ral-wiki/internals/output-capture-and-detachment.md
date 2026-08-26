@@ -1,7 +1,7 @@
 ---
-verified_at_commit: cbeb5457
-verified_at_date: 2026-08-17
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, eval_seq]
+verified_at_commit: be7c59e3
+verified_at_date: 2026-08-26
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, swap_ambient_stdout]
 ---
 
 # Output capture and detachment
@@ -24,28 +24,32 @@ the canonical example: `let v = echo hi`. It does not inspect the operand's
 produced value. The operand's type already routes its payload to stdout, so
 there is nothing left to discriminate.
 
-- `eval_capture` (`core/src/evaluator/comp.rs`) installs the buffer through
-  `with_capture` (`core/src/evaluator/capture.rs`). It swaps `shell.io.stdout`
+- `CompKind::Capture` pushes `Frame::Capture` (`core/src/evaluator/machine.rs`,
+  [[internals/evaluator-machine|evaluator-machine]]) and swaps `shell.io.stdout`
   to a fresh `Sink::Buffer` for the run of its operand.
-- On success, it returns the buffer exactly, as `Value::Bytes`. The text a
-  value boundary reads comes from the `Decode` node the checker composes over
-  it, evaluated by `eval_decode` beside it: one trailing terminator stripped,
-  then `decode_utf8_strict`, over the buffer it moves out of the capture's
-  value. A decode failure names `| from-bytes` as the route for output that is
-  not valid UTF-8.
-- On failure, it releases whatever bytes the operand already wrote to the
-  outer stream, before the error propagates. A failed operand's partial
-  output is therefore not silently lost.
+- On success, `Frame::Capture`'s return rule takes the buffer exactly, as
+  `Value::Bytes`. The text a value boundary reads comes from the `Decode`
+  node the checker composes over it, met by `Frame::Decode` beside it: one
+  trailing terminator stripped, then `decode_utf8_strict`, over the buffer it
+  moves out of the capture's value. A decode failure names `| from-bytes` as
+  the route for output that is not valid UTF-8.
+- On failure, `Frame::Capture`'s halt rule releases whatever bytes the
+  operand already wrote to the outer stream, before the error propagates. A
+  failed operand's partial output is therefore not silently lost.
 - An operand may contain an external child. That child's stdout still drains
   through the ordinary pump-to-EOF machinery below. It lands in the
   `Capture` buffer rather than in the terminal.
 
-**Flush-through routes a non-final write past the innermost buffer.**
-`eval_seq` (`core/src/evaluator/comp.rs`) flushes every non-final part's
-bytes to the sink one level out. Only the sequence's tail is its payload.
-This is what keeps a syntactic thunk and an opaque one in agreement:
-`!{M}` and `let b = {M}; !$b` observe the same bytes in a capturing context.
-They differ only in buffering latency.
+**Flush-through routes a non-final write past the innermost buffer.** A
+block is a right-nested `Bind`, `a; b` being `a to _. b`
+([[internals/evaluator-machine|evaluator-machine]]), and stepping a `Bind`
+swaps `shell.io.stdout` to the ambient sink (`swap_ambient_stdout`,
+`core/src/evaluator/machine.rs`) before evaluating its left-hand computation,
+restoring the prior sink when the `To` frame it pushed returns. Every
+non-final part therefore writes to the sink one level out; only the
+sequence's tail is its payload. This is what keeps a syntactic thunk and an
+opaque one in agreement: `!{M}` and `let b = {M}; !$b` observe the same
+bytes in a capturing context. They differ only in buffering latency.
 
 ## Capture is a drain to EOF
 
@@ -118,8 +122,8 @@ The escape is detachment — the *handle* is its evidence
   or not the handle is ever awaited — so the report travels in band, and
   `await` hands on a prefix that says where it stopped. Where the bytes *are*
   the value — `capture` — the buffer is drained by the very step that would
-  bind them, so `eval_capture` reads `buffer_overflowed` once the writers have
-  joined and fails, flushing the prefix visibly rather than binding it
+  bind them, so `Frame::Capture`'s return rule reads `buffer_overflowed` once
+  the writers have joined and fails, flushing the prefix visibly rather than binding it
   ([[design/capture|capture]]). One flag on the buffer, two readings of it.
 
 ## Detachment decays by neglect, not by age

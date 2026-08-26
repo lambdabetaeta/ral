@@ -1,16 +1,17 @@
 ---
-generated_at_commit: fb52275a
-generated_at_date: 2026-08-25
+generated_at_commit: be7c59e3
+generated_at_date: 2026-08-26
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs]
 ---
 
 # Map: core / transport
 
 The wire layer that carries a shell across a process boundary. When a pipeline
-stage runs in a re-exec'd helper, the [[internals/evaluator-machine|Mobile half]]
-of the shell — a computation, its captured closure, the relevant parent state —
-is serialised to JSON, framed, and reconstituted on the other side of a re-exec
-of this [[invariants/single-binary|same binary]]. (A [[design/grant|grant]] does
+stage runs in a re-exec'd helper, the shell's mobile state — `env`,
+`last_status`, `context`, the relevant parent state — is serialised to JSON,
+framed, and reconstituted on the other side of a re-exec of this
+[[invariants/single-binary|same binary]] ([[map/core/shell-state|shell-state]]).
+(A [[design/grant|grant]] does
 not ride this wire: its body evaluates locally, and external children are
 confined per-command — see
 [[decisions/260617_sandbox-external-children|sandbox-external-children]].
@@ -115,21 +116,27 @@ silently treated as handle-free or dependency-free:
 ## Mobile envelope — `core/src/subprocess.rs`
 
 `serial.rs` owns value and closure transport; this module owns the surrounding
-*mobile envelope* — the wire mirror of the `Mobile` bundle that crosses an
-evaluation boundary. Each `Wire*` type mirrors one subtree of the runtime tree
-and its conversions compose strictly (a parent's `from_X` calls its children's,
-never reaching past them):
+*mobile envelope* — the wire mirror of the `env`/`last_status`/`context`
+fields that cross an evaluation boundary ([[map/core/shell-state|shell-state]]).
+Each `Wire*` type mirrors one subtree of the runtime tree and its conversions
+compose strictly (a parent's `from_X` calls its children's, never reaching
+past them):
 
-- `WireMobile` / `WireContext` — the top;
+- `WireShell { env, last_status, stack_limit, context: WireContext }` — the
+  top, a serialisable mirror of a shell's mobile state;
+- `WireContext` — the [`Context`] mirror (`env_overrides`, `dir`/`cwd`,
+  `grants`, `handlers`, `args`, `modules`); `hooks` is dropped outright and
+  the receiver starts with an empty table;
 - `WireObservation` — the [[design/audit|audit]] trail fragment, one flat list
   with no recursion, living beside the request it rides in
   `core/src/child_eval.rs` ([[map/core/runtime|runtime]]);
 - `WireHandlerFrame` — a [[internals/handler-dispatch|handler stack]] frame,
   carrying each alias arm's scheme so a re-exec'd helper stage does not strip it
-  ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]);
-- `WireControl`.
+  ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
-`install_shell_mobile` reinstates a received mobile bundle into a child `Shell`.
+`install_shell_mobile` reinstates a received `WireShell` into a child `Shell`,
+splicing the wire's handler frames atop the receiver's own so the receiver's
+own builtin table survives, never having ridden the wire.
 `reexec_child_shell` is the one constructor the
 [[internals/pipeline-execution|pipeline-stage helper]] — the sole re-exec'd
 eval path — builds its shell through (`Shell::new` + the host's `HostSurface`
@@ -139,7 +146,7 @@ conversions share the `InternCtx` from `serial.rs`.
 
 `core/src/child_eval.rs` also carries `EngineSeed` — a forked shell reified
 for a wire-seat hatch, `ChildEvalRequest`'s shape minus a body
-(`scope_table`, `mobile: WireMobile`, `captured: SerialEnvSnapshot`, the
+(`scope_table`, `mobile: WireShell`, `captured: SerialEnvSnapshot`, the
 spawn's validated `grant` tag). `pack_seed` builds one from a `Shell`, and
 `seed_from_env` takes it before the engine waits for `Attach` — striking the env
 var as it takes the fd, so no descendant inherits a number that has stopped being
@@ -164,6 +171,7 @@ followed by the `serde_json` body). One codec carries the
 — the single re-exec'd eval protocol — and the host seam's front-end⇄engine
 `WireChannel` frames (`core/src/wire.rs`).
 
-This layer is the mechanism behind the Mobile/Local split that the
-[[internals/evaluator-machine|evaluator machine]] describes and that the
-pipeline-stage helper relies on for out-of-process stage evaluation.
+This layer is the mechanism behind the mobile/local split — `env` /
+`last_status` / `context` cross a re-exec boundary, `io` / `session` / `local`
+do not ([[map/core/shell-state|shell-state]]) — that the pipeline-stage helper
+relies on for out-of-process stage evaluation.

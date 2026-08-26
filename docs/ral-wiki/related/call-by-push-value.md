@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 95449d4
-verified_at_date: 2026-08-10
+verified_at_commit: be7c59e3
+verified_at_date: undefined
 against: [design/cbpv, design/types, design/pipelines, internals/evaluator-machine]
 ---
 
@@ -31,12 +31,15 @@ touches the world ([[design/cbpv|cbpv]],
   call-by-value image; passing a `{M}` thunk recovers a call-by-name call site
   term-by-term. Both disciplines are expressible and neither is baked in —
   which is Levy's theorem used as a language-design budget.
-- **The machine is the CK reading.** ral's evaluator is a trampolined CBPV
-  machine: a tail call is emitted as `Control::Tail` and absorbed by a loop,
-  never a host frame ([[internals/evaluator-machine|evaluator-machine]]). That
-  is Levy's jumping intuition — *calling a procedure is a jump, and returning
-  is also a jump* — with the stack discipline enforced by `pub(crate)`
-  visibility rather than by a calculus of stacks.
+- **The machine is the CK reading, now literally a CEK machine.** ral's
+  evaluator steps a focus ⟨M, E⟩ against a stack of frames, each frame
+  carrying the environment it resumes under
+  ([[internals/evaluator-machine|evaluator-machine]]). A tail call pushes no
+  frame — β binds the argument into the closure's own environment and puts
+  the body in focus, so depth is exactly `stack.len()`. That is Levy's
+  jumping intuition — *calling a procedure is a jump, and returning is also a
+  jump* — with the stack discipline enforced by the module's two doors,
+  `evaluate` and `apply`, rather than by a calculus of stacks.
 
 ## Divergences (extensions, mostly)
 
@@ -71,9 +74,9 @@ touches the world ([[design/cbpv|cbpv]],
 
 - **The proof vocabulary, when SPEC §4 is formalised.** Levy's stack machine
   and the adjunction models with stacks are the off-the-shelf framework in
-  which `Control::Tail` / `Settled` become statements about stacks, and the
-  trampoline's correctness a simulation result — the jumping-semantics paper
-  is the bridge.
+  which the frame stack and `Settled<Value>` become statements about stacks,
+  and the machine's correctness a simulation result — the jumping-semantics
+  paper is the bridge.
 - **The βη-theory for the pure fragment.** [[design/cbpv|cbpv]]'s "equational
   reasoning in the pure fragment" can cite CBPV's equational theory verbatim
   rather than re-deriving it.

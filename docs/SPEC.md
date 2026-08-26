@@ -1,4 +1,4 @@
-<!-- verified_at_commit: f5720bee -->
+<!-- verified_at_commit: be7c59e3 -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -359,8 +359,9 @@ The block in the second example is inside a map, but its own braces are the
 innermost delimiters. Its newline therefore separates the `let` and `return`
 statements.
 
-Parentheses group expressions inside `$[...]` and delimit names in
-`$(name)`. They are not a general command-grouping form.
+Parentheses have three uses: `()` alone is the unit literal (§4.1), they
+group expressions inside `$[...]`, and they delimit names in `$(name)`. They
+are not a general command-grouping form.
 
 Postfix indexing requires no space before `[`. Thus `$item[key]` is one
 indexed value, while `$item [key]` is two values in a command.

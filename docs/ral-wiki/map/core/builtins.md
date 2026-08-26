@@ -1,6 +1,6 @@
 ---
-generated_at_commit: bf7610ab
-generated_at_date: 2026-08-24
+generated_at_commit: be7c59e3
+generated_at_date: 2026-08-26
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -143,9 +143,10 @@ Bodies are grouped by concern, one submodule each:
   result is claimed, so the sweep only catches what nobody claimed.
   A worker runs its thunk on a fresh
   `std::thread` via `Shell::spawn_thread` ([[map/core/shell-state|shell-state]]),
-  which inherits a snapshot of the parent's mobile state; the body is evaluated
-  *directly* with `eval_comp(.., Tail::Yes)` under a child scope, deliberately
-  bypassing the `eval_top_level` / `eval_block` boundary, because the worker's own
+  which inherits a snapshot of the parent's env; `worker_body` closes the
+  thunk's `Comp` over that snapshot as a `Closure` and hands it straight to
+  `machine::evaluate` ([[map/core/evaluator|evaluator]]), deliberately
+  bypassing the `Toplevel`/`Phrase` boundary, because the worker's own
   `Shell` is the only one its bindings touch and they die with the thread. The
   worker carries the parent's grant stack, so a forced block *inside* the worker
   still meets the standard boundary rule and any external child it spawns is

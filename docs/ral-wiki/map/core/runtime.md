@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 9de08107
-generated_at_date: 2026-08-12
+generated_at_commit: be7c59e3
+generated_at_date: 2026-08-26
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -8,10 +8,14 @@ covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 
 `core/src/runtime/` is the OS plumbing the CBPV [[map/core/evaluator|machine]]
 dispatches into — command execution, pipeline orchestration, and the
-per-child confinement choice. It re-enters evaluation only through `call::invoke`,
-`eval_block`, and `absorb_tail`; the evaluator reaches it at
-`pipeline::run_pipeline`, `command_call::run_call`, and the `command` redirect
-guards
+per-child confinement choice. It re-enters evaluation only through
+`evaluator::machine::apply` (a handler or alias arm's thunk, from
+`command_call.rs`) and `evaluator::machine::evaluate` (a re-exec'd stage's
+closure, from `child_eval.rs`) — stages carry closures, so the mutual
+recursion is irreducible; the evaluator reaches it at `Frame::Pipe`/
+`PipeNode::launch` and, dispatching an `Exec` node, at
+`command_call::classify_command` → `run_base_frame` / `run_handler` /
+`run_external`, and the `command` redirect guards
 ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 
 - `command_call.rs` — `run_call`, the single site that resolves a head
@@ -99,9 +103,15 @@ guards
     `Observation::from_value`. The observation *shapes* and their card
     rendering live in [[map/exarch/io-surface|io-surface]]
     ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
-- `pipeline/` — pipeline planning and execution
-  (`pipeline.rs`'s `run_pipeline` is the few-line orchestrator: resolve →
-  launch → collect). `resolve.rs` freezes each stage's launch decision once as
+- `pipeline/` — pipeline planning and execution. A multi-stage `CompKind::Pipeline`
+  steps to a `Frame::Pipe(Box<PipeNode>)`: `PipeNode::launch` resolves the
+  plan and spawns every stage into one process group — the machine's `Frame`
+  is pushed and the placeholder focus is consumed the very next step —
+  and `join` (`collect` then `finish`) is what a `Return` on that frame
+  meets, while `abandon` kills the group on the panic-unwind path; `group`
+  (the pgid anchor, foreground guard, SIGINT relay) stays alive across both
+  `collect` and `finish` rather than dropped early
+  ([[map/core/evaluator|evaluator]]). `resolve.rs` freezes each stage's launch decision once as
   `StageLaunch` (`Direct` | `HelperEval`) from the head's resolution, redirects,
   terminal ownership, and audit state, so launch reads a decision rather than
   re-deriving a dispatch gate. **No route enters that classification**: a
@@ -140,8 +150,8 @@ guards
     already assigned before resume
     ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
 - **A `grant` is a dynamic effect scope, not a process boundary, so the grant
-  body always evaluates locally** — the boundary verbs (`eval_top_level` /
-  `eval_block`) run their body in process, with no router in between:
+  body always evaluates locally** — the machine steps its body in process, with
+  no router in between:
   nested grants compose by intersection over authority, an algebra of the
   evaluator's dynamic context. Confinement happens elsewhere — the
   RAL-owned effects are decided in process by `capability::check_*`
@@ -169,7 +179,7 @@ guards
   under `runtime/`) — the one re-exec'd-child eval runner the pipeline stage
   helper drives, `run_child_eval` ([[decisions/260610_child-eval-unification|child-eval-unification]]).
   One request frame in, one response frame out: the child packs the body plus a
-  `WireMobile` snapshot, rebuilds its shell through `subprocess::bare_child_shell`
+  `WireShell` snapshot, rebuilds its shell through `subprocess::bare_child_shell`
   and `install_shell_mobile` — the manifest first, so the `WireDecoder` re-links
   natives against it — evaluates the stage against its byte input, drains its
   audit fragment, and ships a single `ChildEvalResponse`. When the pipeline

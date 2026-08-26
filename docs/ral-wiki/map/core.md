@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 95449d4
-generated_at_date: 2026-08-10
+generated_at_commit: be7c59e3
+generated_at_date: undefined
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -15,9 +15,11 @@ binaries, `ral` and [[map/exarch|exarch]], embed it.
 `core/src/lib.rs` is the front door. The compilation ladder is *source → tokens →
 flat AST → CBPV IR → typed IR*, bundled as two functions: `compile` (parse →
 elaborate) and `compile_and_typecheck` (parse → elaborate → typecheck →
-`CompileOutcome`). Evaluation is not on the crate root — `evaluate`, `parse`,
-`elaborate`, and `Comp` are crate-private, reached by the owning module path when
-a host deliberately steps past the seam
+`CompileOutcome`), both returning a `Toplevel` — a sequence of phrases
+(`Define`/`Source`/`Run`) run by `evaluator::run_phrases`, which replaced the
+flat `Comp`-rooted top level. Evaluation is not on the crate root — `parse`,
+`elaborate`, and `Toplevel` are crate-private, reached by the owning module path
+when a host deliberately steps past the seam
 ([[decisions/260618_after-turn-api-simplifications|after-turn-api-simplifications]]).
 
 ## The evaluation seam

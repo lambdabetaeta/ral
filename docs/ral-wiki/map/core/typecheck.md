@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 9de08107
-generated_at_date: 2026-08-12
+generated_at_commit: be7c59e3
+generated_at_date: 2026-08-26
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -12,12 +12,15 @@ covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 
 Entry points (`typecheck.rs`):
 
-- `typecheck(comp, SessionSchemes) -> Result<Comp, Vec<TypeError>>` — this
-  function checks a program. On success it returns an *annotated* `Comp`.
-  `annotate` rebuilds the IR after inference and writes three things onto
-  it: a generalised `Scheme` on each top-level `Bind` node, resolved against
-  the final unifier and closed by quantifying its residuals — that is,
-  generalised against the empty environment; a `PipeYield` and a `Vec<Ty>` of
+- `typecheck(top: &Toplevel, SessionSchemes) -> Result<Toplevel, Vec<TypeError>>`
+  — this function checks a program: infer each phrase in order, extending
+  `TyEnv` at each `Define`, then `annotate::annotate_toplevel` writes the
+  verdict back, on success returning an *annotated* `Toplevel`. `annotate`
+  writes three things onto the rebuilt IR: a generalised `Scheme` per name a
+  `Phrase::Define` binds — landed on its own phrase, not a shared spine —
+  resolved against the final unifier and closed by quantifying its
+  residuals, that is, generalised against the empty environment; a
+  `PipeYield` and a `Vec<Ty>` of
   per-stage value types on each `Pipeline`; and a `Capture` node wherever a
   value demand meets a computation whose payload route grounds `Bytes`
   ([[map/core/ir|ir]]). `infer_pipeline` records each stage's value type in
@@ -42,10 +45,12 @@ Entry points (`typecheck.rs`):
   scheme, which lands in the env so that `lookup_handler` finds a base frame as
   it finds a handler
   ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
-- `bake_prelude(comp) -> (Comp, Vec<(String, Scheme)>)` — called by the consumer
-  `build.rs`: returns the annotated prelude comp alongside the schemes harvested
-  off its `Bind` nodes (`harvest_schemes`), one walk behind both the build-time
-  bake and a run's installs.
+- `bake_prelude(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>)` — called by
+  `boot::bake_prelude_to_out_dir` from each host's build script: returns the
+  annotated prelude `Toplevel` alongside the schemes harvested off its
+  `Phrase::Define`s (`harvest_schemes`), which needs no tree walk since every
+  phrase already carries its own — one pass behind both the build-time bake
+  and a run's installs.
 - `alias_arm_scheme(head, param, body, SessionSchemes) -> Result<Scheme, PinFailure>`
   — infers an alias arm under the runtime handler calling convention, pins it to
   `head` (`Inferencer::pin_arm_to_head`), and closes it, for `install_alias` and
@@ -295,9 +300,9 @@ propagation, through the one constructor `captured_string`, which builds
 nodes of syntax, so no name is resolved and no binder installed where the
 checker composes them
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
-A `Demand` is `Value` or `Discard`. It reaches a `Seq`'s tail,
-a `Bind`'s `rhs`, each arm of an `If`, `Chain`, `Try`, or `Case`, and the body
-of a force of a syntactic thunk.
+A `Demand` is `Value` or `Discard`. It reaches a `Bind`/`Phrase::Define`/
+`Phrase::Source`'s right-hand side, each arm of an `If`, `Chain`, `Try`, or
+`Case`, and the body of a force of a syntactic thunk.
 Where a `Value` demand meets a node whose recorded route grounds `Bytes`,
 `annotate_demand` wraps it. `ArmWalk` (`Plain`, `Descend`, `Wrap`)
 decides how a join arm is rebuilt; `Wrap` is the subsumption instance, wrapping

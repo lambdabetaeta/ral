@@ -1,7 +1,7 @@
 ---
-verified_at_commit: cbeb5457
-verified_at_date: 2026-08-17
-anchors: [run, run_under, run_nested, enter, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, eval_top_level, Mobile, compile_and_typecheck]
+verified_at_commit: be7c59e3
+verified_at_date: 2026-08-26
+anchors: [run, run_under, run_nested, enter, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck]
 ---
 
 # A run, end to end
@@ -106,13 +106,16 @@ module's framed scaffold:
   surely as on the clean one. The root context is installed, the pre-exec hook
   fires (taking `&Mooring` beside the shell, as every in-run body does), and
   `with_capabilities(caps, body)` runs the run's program under the request's
-  capability ceiling — `eval_top_level(&comp, mooring, shell)` for the source
-  arm, the in-frame `builtins::apply` of the resolved hook for the hook arm
+  capability ceiling — `run_phrases(&top.phrases, shell.env.clone(),
+  Mode::Session, mooring, shell)` for the source arm, the in-frame
+  `builtins::apply` of the resolved hook for the hook arm
   ([[internals/evaluator-machine|the machine]];
   [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
-- `eval_top_level` installs the post-run `Mobile` on **every** outcome, so a
-  `let`, `cd`, or env change persists to the next run — the run is a resume
-  point regardless of completion, error, or `exit`
+- `run_phrases` writes each `let` straight into `shell.env` as its `Define`
+  lands, and a `cd`, `alias`, or hook registration is an unbracketed write
+  straight to `shell.context` — there is no post-run install step, so a
+  halted run keeps every write that landed before the halt and the run
+  remains a resume point regardless of completion, error, or `exit`
   ([[invariants/turn-ends-ready|exchange-ends-ready]]). Before the status is
   read, `run_framed` polls `process::check(mooring)` once more so a sticky
   cancellation cannot be absorbed by `try`; it then computes the transport
@@ -132,8 +135,8 @@ module's framed scaffold:
   funnel through — a `Run.trail: Some` holds a `TrailScope`
   *outside* the `catch_unwind` that recovers a mid-run panic, opened before
   `dispatch` runs and closed once it returns, on every exit. That placement is
-  load-bearing: the `Mobile` checkpoint the panic arm rolls back does not
-  cover `local.audit`, so only a scope the panic itself cannot skip keeps
+  load-bearing: the `(env, context, last_status)` checkpoint the panic arm
+  rolls back does not cover `local.audit`, so only a scope the panic itself cannot skip keeps
   the trail's close law true at dispatch granularity. A clean exit's
   observations land in `RunReport::Ran.trail`; a caught panic's are drained
   and discarded — the panicked dispatch reports `Static`, never a trail.

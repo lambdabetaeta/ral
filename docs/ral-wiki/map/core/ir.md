@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 9de08107
-generated_at_date: 2026-08-12
+generated_at_commit: be7c59e3
+generated_at_date: 2026-08-26
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -9,6 +9,13 @@ covers_paths: [core/src/ir.rs]
 `core/src/ir.rs` is the [[design/cbpv|call-by-push-value]] intermediate
 representation — the target of [[map/core/elaboration|elaboration]] and the input
 to the [[map/core/evaluator|evaluator]].
+
+A whole program is a `Toplevel { phrases: Vec<Spanned<Phrase>> }`: each
+`Phrase` — `Define` (a top-level `let`, one closed `Scheme` per name the
+pattern binds), `Source` (a top-level `source path`), or `Run` (anything
+else) — runs in order, extending the session environment the next phrase
+sees. `Toplevel::referenced_names` is the phrase-level analogue of the
+`Comp`-level walk below, for the same lease ledger.
 
 The two categories:
 
@@ -60,6 +67,10 @@ representable state.
   meaning is fixed where the checker writes it
   ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]).
+
+- `CompKind::Rec { group, index }` is the `index`-th member of a recursive
+  group — `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, typed `Cᵢₙdₑₓ` — an n-ary generalisation of
+  Levy's `rec x. M`, which is a group of one.
 
 The route types live in `core/src/typecheck/route.rs`, a private module of the
 checker, and no name from them is reachable from `ir`, `evaluator`, or
