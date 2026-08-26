@@ -1,8 +1,5 @@
-//! The runtime error type, and [`split`] — the one decomposition of a body's
-//! outcome into the ([`BodyResult`], [`Escape`]) pair `evaluator::audit` consumes.
+//! The runtime error type.
 
-use super::flow::{Break, Escape};
-use super::value::Value;
 use crate::process::CommandFailure;
 use crate::source::Span;
 use std::fmt;
@@ -97,24 +94,3 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
-
-/// A delimited body's non-escape outcome: a value, or an error — catchable by
-/// `try`, recorded as a non-zero-status record by `audit`.
-#[derive(Debug)]
-pub enum BodyResult {
-    Value(Value),
-    Error(Error),
-}
-
-/// Sort a body's outcome into its non-escape and escape halves.
-///
-/// # Errors
-/// An escape returns `Err`; an error stays in `Ok`, since `try`/`audit` must
-/// still classify or record it.
-pub fn split(settled: super::flow::Settled<Value>) -> Result<BodyResult, Escape> {
-    match settled {
-        Ok(v) => Ok(BodyResult::Value(v)),
-        Err(Break::Error(e)) => Ok(BodyResult::Error(e)),
-        Err(Break::Escape(esc)) => Err(esc),
-    }
-}

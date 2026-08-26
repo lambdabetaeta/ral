@@ -50,7 +50,7 @@ mod map;
 pub use map::Map;
 
 mod error;
-pub use error::{BodyResult, Error, Status, split};
+pub use error::{Error, Status};
 
 mod flow;
 pub use flow::{Break, Escape, PolicyError, Settled};
