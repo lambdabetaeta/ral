@@ -388,7 +388,7 @@ impl Shell {
                 };
 
                 self.run_built(req, foreground, wall, false, FileId::DUMMY, |m, s| {
-                    crate::builtins::apply(&hook.binding.value, &args, m, s)
+                    crate::builtins::apply(&hook.binding.value, args, m, s)
                 })
             }
         }

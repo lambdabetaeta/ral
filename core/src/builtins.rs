@@ -558,7 +558,7 @@ pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 ///
 /// # Errors
 /// If `val` is not a function value, or the applied body fails.
-pub fn apply(val: &Value, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn apply(val: &Value, args: Vec<Value>, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     match val {
         // Zero arguments is a force, not an application (the machine's
         // `apply` boundary demands at least one) — the hook door's arity-0
@@ -568,7 +568,7 @@ pub fn apply(val: &Value, args: &[Value], mooring: &Mooring, shell: &mut Shell) 
             crate::evaluator::machine::force(val.clone(), &shell.env.clone(), mooring, shell)
         }
         Value::Thunk(_) | Value::Native { .. } => {
-            crate::evaluator::machine::apply(val.clone(), args.to_vec(), mooring, shell)
+            crate::evaluator::machine::apply(val.clone(), args, mooring, shell)
         }
         _ => Err(Break::Error(
             Error::new(format!("cannot call {} '{}'", val.type_name(), val), 1)

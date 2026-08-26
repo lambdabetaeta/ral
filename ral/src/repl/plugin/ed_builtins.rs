@@ -272,7 +272,7 @@ pub fn builtin_ed_tui(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
     // A TUI plugin's own screen output, not a value the program binds: the
     // truncation marker is the whole report a 16 MiB draw deserves.
     let (result, bytes, _overflowed) = ral_core::evaluator::with_capture(shell, |shell| {
-        ral_core::builtins::apply(&args[0], &[], &loaned, shell)
+        ral_core::builtins::apply(&args[0], Vec::new(), &loaned, shell)
     });
     match result {
         Ok(v) => {
@@ -566,7 +566,7 @@ pub fn builtin_ed_state(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
             default.clone()
         }
     };
-    let new_val = ral_core::builtins::apply(updater, &[current], mooring, shell)?;
+    let new_val = ral_core::builtins::apply(updater, vec![current], mooring, shell)?;
     let pc = ctx_mut(shell)?;
     pc.state_cell = Some(new_val.clone());
     pc.state_default_used = true;

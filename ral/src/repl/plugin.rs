@@ -380,7 +380,7 @@ pub(super) fn call_plugin_hook(
             // apply it directly inside the existing command frame.
             let value = shell.hook(hook).map(|prog| prog.binding.value.clone());
             let result = match value {
-                Some(value) => ral_core::builtins::apply(&value, args, mooring, shell),
+                Some(value) => ral_core::builtins::apply(&value, args.to_vec(), mooring, shell),
                 None => Err(Break::Error(ral_core::types::Error::new(
                     format!("hook '{hook}' is not registered"),
                     1,

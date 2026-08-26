@@ -30,7 +30,7 @@ pub(super) fn builtin_each(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     let mut last = Value::Unit;
     for item in &items {
         crate::process::check(mooring)?;
-        last = apply(func, std::slice::from_ref(item), mooring, shell)?;
+        last = apply(func, vec![item.clone()], mooring, shell)?;
     }
     Ok(last)
 }
@@ -41,7 +41,7 @@ pub(super) fn builtin_map(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     let mut out = Vec::with_capacity(items.len());
     for item in &items {
         crate::process::check(mooring)?;
-        out.push(apply(func, std::slice::from_ref(item), mooring, shell)?);
+        out.push(apply(func, vec![item.clone()], mooring, shell)?);
     }
     Ok(Value::list(out))
 }
@@ -56,7 +56,7 @@ pub(super) fn builtin_filter(
     let mut results = Vec::new();
     for item in &items {
         crate::process::check(mooring)?;
-        let result = apply(func, std::slice::from_ref(item), mooring, shell)?;
+        let result = apply(func, vec![item.clone()], mooring, shell)?;
         let keep = match &result {
             Value::Bool(b) => *b,
             _ => {
@@ -110,7 +110,7 @@ pub(super) fn builtin_sort_by(
         .into_iter()
         .map(|item| {
             crate::process::check(mooring)?;
-            let key = apply(func, std::slice::from_ref(&item), mooring, shell)?;
+            let key = apply(func, vec![item.clone()], mooring, shell)?;
             Ok((key, item))
         })
         .collect::<Settled<Vec<_>>>()?;
@@ -168,7 +168,7 @@ pub(super) fn builtin_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     let items = as_list(&args[2], "fold")?;
     for item in &items {
         crate::process::check(mooring)?;
-        acc = apply(func, &[acc, item.clone()], mooring, shell)?;
+        acc = apply(func, vec![acc, item.clone()], mooring, shell)?;
     }
     Ok(acc)
 }
@@ -182,7 +182,7 @@ pub(super) fn builtin_fold_lines(
     let func = args[0].clone();
     let mut acc = args[1].clone();
     super::util::for_each_stdin_line("fold-lines", shell, |line, shell| {
-        acc = apply(&func, &[acc.clone(), Value::String(line)], mooring, shell)?;
+        acc = apply(&func, vec![acc.clone(), Value::String(line)], mooring, shell)?;
         Ok(())
     })?;
     Ok(acc)

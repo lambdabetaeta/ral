@@ -233,7 +233,7 @@ impl Machine {
     }
 
     /// The initial state for `apply`: an empty stack, focus set by `apply_rule` (§2.4).
-    fn applying(f: Value, args: Vec<Value>, env: Env, mooring: &Mooring, shell: &mut Shell) -> Self {
+    fn applying(f: Value, args: Vec<Value>, env: &Env, mooring: &Mooring, shell: &mut Shell) -> Self {
         let mut m = Self {
             focus: Focus::Return(Terminal::Value(Value::Unit)),
             stack: Vec::new(),
@@ -332,7 +332,7 @@ impl Machine {
         &mut self,
         f: Value,
         mut args: Vec<Value>,
-        env: Env,
+        env: &Env,
         span: Option<Span>,
         mooring: &Mooring,
         shell: &mut Shell,
@@ -343,7 +343,7 @@ impl Machine {
                 if let Err(b) = self.reserve(shell) {
                     return Focus::Halt(b);
                 }
-                self.push(Frame::Apply { args, env, span });
+                self.push(Frame::Apply { args, env: env.clone(), span });
                 Focus::Eval(c)
             }
             Value::Native { entry, applied } => {
@@ -355,13 +355,13 @@ impl Machine {
                 if collected.len() < needed {
                     return Focus::Return(Terminal::Value(Value::Native { entry, applied: collected }));
                 }
-                match super::audit::run_native(&entry, &collected, &env, mooring, shell) {
+                match super::audit::run_native(&entry, &collected, env, mooring, shell) {
                     Ok(v) => {
                         if !rest.is_empty() {
                             if let Err(b) = self.reserve(shell) {
                                 return Focus::Halt(b);
                             }
-                            self.push(Frame::Apply { args: rest, env, span });
+                            self.push(Frame::Apply { args: rest, env: env.clone(), span });
                         }
                         Focus::Return(Terminal::Value(v))
                     }
@@ -888,7 +888,7 @@ impl Machine {
                 if argv.is_empty() {
                     Self::force(v, env, mooring, shell)
                 } else {
-                    self.apply_rule(v, argv, env.clone(), span, mooring, shell)
+                    self.apply_rule(v, argv, env, span, mooring, shell)
                 }
             }
             Resolution::Handler { entry, depth } => {
@@ -901,7 +901,7 @@ impl Machine {
                 let frame = Box::new(shell.context.handlers.strip_matched(depth));
                 self.push(Frame::Unmask { frame });
                 let call_args = render_handler_args(&entry.name, entry.arity, &argv);
-                self.apply_rule(entry.thunk.clone(), call_args, env.clone(), span, mooring, shell)
+                self.apply_rule(entry.thunk.clone(), call_args, env, span, mooring, shell)
             }
             Resolution::Base(entry) => {
                 match command_call::run_base_frame(&entry, &argv, &redirs, env, mooring, shell) {
@@ -946,7 +946,7 @@ impl Machine {
             Frame::Apply { args, env, span } => match t {
                 Terminal::Lambda(c) => stamp_focus(self.beta(c, args, env, span, mooring, shell), span),
                 Terminal::Value(v) => {
-                    stamp_focus(self.apply_rule(v, args, env, span, mooring, shell), span)
+                    stamp_focus(self.apply_rule(v, args, &env, span, mooring, shell), span)
                 }
             },
 
@@ -1196,7 +1196,7 @@ impl Machine {
                     let outcome = classify(&e, &children, shell);
                     let record = error_record(&outcome.cmd, outcome.status, &outcome.message, outcome.line, outcome.col);
                     shell.last_status = 0;
-                    self.apply_rule(handler, vec![record], *env, None, mooring, shell)
+                    self.apply_rule(handler, vec![record], &env, None, mooring, shell)
                 }
                 Break::Escape(esc) => {
                     let _children = shell.local.audit.close(scope);
@@ -1352,7 +1352,7 @@ pub(crate) fn apply(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut S
     run(
         |m, mooring, shell| {
             let env = shell.env.clone();
-            *m = Machine::applying(f, args, env, mooring, shell);
+            *m = Machine::applying(f, args, &env, mooring, shell);
         },
         mooring,
         shell,
