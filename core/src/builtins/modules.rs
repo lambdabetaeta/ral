@@ -66,16 +66,22 @@ pub fn evaluate_checked(
     }
     shell.install_script_context(&key, source);
     shell.context.modules.stack.push(key);
-    let result = crate::evaluator::run_phrases(
+    let ran = crate::evaluator::run_phrases(
         &top.phrases,
         shell.env.clone(),
         Mode::Local,
         mooring,
         shell,
-    )
-    .outcome;
+    );
     shell.context.modules.stack.pop();
-    result
+    // Unlike a nested `source`/`use`, this loader's whole point is to install
+    // its defines into the running session — rc, a plugin, a capability
+    // file, exarch's agent library — so its own `Ran::env` lands in
+    // `shell.env` here, the one write-back `Mode::Local` itself skips (no
+    // lease, no PATH-shadow check: this is host-installed library code, not
+    // an interactive `let`).
+    shell.env = ran.env;
+    ran.outcome
 }
 
 /// Parse, elaborate, check, and evaluate `source` under `virtual_path`.
