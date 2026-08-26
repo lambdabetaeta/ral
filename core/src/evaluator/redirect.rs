@@ -1,65 +1,14 @@
 //! Redirect frames: open the targets, route fd 1/2 through the shell's
-//! sinks, run a body, restore. `within_redirect_frame` wraps the bodies
-//! of `ScopeOp::Redirect` scopes for `evaluator::call`; `with_redirects`
-//! is entered directly by `runtime::command_call` for in-process
-//! commands whose redirects are already evaluated.
+//! sinks, run a body, restore.  [`RedirectState`] is entered directly by
+//! `evaluator::machine`'s `Frame::Redirect`, and by [`with_redirects`] for a
+//! base-frame native's synchronous call; the targets themselves are closed
+//! in `machine::close_redirects`, over the machine's own `Env`.
 
-use super::absorb_tail;
 use super::audit::observe;
-use super::val::close;
 use crate::io::Sink;
-use crate::ir::{RedirectV, ValRedirectTarget};
 use crate::runtime::command::{self, EvalRedirect, EvalRedirectV};
 use crate::syntax::ast::RedirectMode;
-use crate::types::{
-    Break, Control, Error, Mooring, Observed, Raw, Settled, Shell, Value, WriteOutcome,
-};
-
-/// Resolves redirect targets to concrete paths or fd numbers. `Exec`
-/// arrives here through `call::eval_call_parts` and hands the result to
-/// the spawn rather than opening a frame.
-pub(crate) fn eval_redirects(
-    redirects: &[RedirectV],
-    shell: &mut Shell,
-) -> Result<Vec<EvalRedirectV>, Error> {
-    redirects
-        .iter()
-        .map(|r| {
-            Ok(EvalRedirectV {
-                fd: r.fd,
-                mode: r.mode,
-                target: match &r.target {
-                    ValRedirectTarget::File(v) => {
-                        EvalRedirect::File(close(v, &shell.env)?.to_string())
-                    }
-                    ValRedirectTarget::Fd(n) => EvalRedirect::Fd(*n),
-                },
-            })
-        })
-        .collect()
-}
-
-/// Installs `redirects` for `body`, then restores. The tail call is
-/// absorbed *inside* the frame: the callee is the redirect's consumer,
-/// and landing it after restoration would aim its output back at the
-/// parent.
-pub(crate) fn within_redirect_frame<F>(
-    redirects: &[RedirectV],
-    mooring: &Mooring,
-    shell: &mut Shell,
-    body: F,
-) -> Raw<Value>
-where
-    F: FnOnce(&mut Shell) -> Raw<Value>,
-{
-    if redirects.is_empty() {
-        return body(shell);
-    }
-    let evaluated = eval_redirects(redirects, shell)?;
-    with_redirects(&evaluated, mooring, shell, |shell| {
-        absorb_tail(body(shell), mooring, shell).map_err(Control::Break)
-    })
-}
+use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 
 /// What the body's result means for the writes this frame staged.
 #[derive(Clone, Copy)]
@@ -71,16 +20,6 @@ pub(crate) enum WriteFate {
     /// The body stopped: the writes are unfinished and belong to the job now,
     /// so the frame surrenders them rather than deciding for it.
     Defer,
-}
-
-impl WriteFate {
-    fn of<T>(result: &Raw<T>) -> Self {
-        match result {
-            Ok(_) => Self::Commit,
-            Err(Control::Break(brk)) if brk.is_stop() => Self::Defer,
-            Err(_) => Self::Abort,
-        }
-    }
 }
 
 /// An fd-1/2 file target opened in the frame, held until settle so its
@@ -368,9 +307,13 @@ impl RedirectState {
     }
 }
 
-/// Runs `body` with `redirects` installed, always restoring. Atomic
-/// commits fire on success and are dropped on failure, discarding the
-/// staging file.
+/// Runs `body` with `redirects` installed, always restoring. Atomic commits
+/// fire on success and are dropped on failure, discarding the staging file.
+///
+/// For a base-frame native's call: unlike the `Exec` rule's own arms, that
+/// call runs synchronously to completion inside one machine step, so the
+/// install/teardown pair needs no frame on the machine's own stack — this
+/// is the whole of its panic safety.
 ///
 /// fd 1/2 route through the shell's `Sink`s, not `dup2`: libtest, the
 /// REPL frontend, and sibling ral threads all share the process-global
@@ -380,23 +323,19 @@ impl RedirectState {
 /// on `shell.io.stdin` by `install_stdin_redirect` — so the cached
 /// `startup_stdin_tty` is consulted only when stdin really is the
 /// inherited terminal.
-///
-/// Transitional wrapper over `RedirectState`: it owns the panic-safety
-/// that the machine's own unwind walk will own once W2f lands, via
-/// `catch_unwind` rather than a `Drop` impl on the state itself.
 pub(crate) fn with_redirects<F>(
     redirects: &[EvalRedirectV],
     mooring: &Mooring,
     shell: &mut Shell,
     body: F,
-) -> Raw<Value>
+) -> Settled<Value>
 where
-    F: FnOnce(&mut Shell) -> Raw<Value>,
+    F: FnOnce(&mut Shell) -> Settled<Value>,
 {
     if redirects.is_empty() {
         return body(shell);
     }
-    let mut state = RedirectState::enter(redirects, mooring, shell).map_err(Control::Break)?;
+    let mut state = RedirectState::enter(redirects, mooring, shell)?;
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shell))) {
         Ok(result) => result,
         Err(payload) => {
@@ -404,27 +343,30 @@ where
             std::panic::resume_unwind(payload);
         }
     };
-    let fate = WriteFate::of(&result);
+    let fate = match &result {
+        Ok(_) => WriteFate::Commit,
+        Err(brk) if brk.is_stop() => WriteFate::Defer,
+        Err(_) => WriteFate::Abort,
+    };
     // Restore before either the commits fire or the error propagates, so
     // both paths get a clean shell to write through.
     let commits = state.tear_down(shell);
     let settled = state.settle_writes(fate, mooring, shell);
     match result {
         Ok(v) => {
-            settled.map_err(Control::Break)?;
-            command::commit_atomics(commits).map_err(Control::Break)?;
+            settled?;
+            command::commit_atomics(commits)?;
             Ok(v)
         }
         // A stop takes every staged write with it, fd-level and sink-level
         // alike; any other break leaves them to fall out of scope, which is
         // how a `PendingWrite` without a destructor abandons a temp.
-        Err(Control::Break(brk)) => {
+        Err(brk) => {
             let unfinished = settled.unwrap_or_default();
-            Err(Control::Break(command::defer_to_stop(
+            Err(command::defer_to_stop(
                 brk,
                 commits.into_iter().chain(unfinished),
-            )))
+            ))
         }
-        Err(tail) => Err(tail),
     }
 }

@@ -1117,28 +1117,16 @@ impl Elaborator {
 /// Fold `binds` into a chain of `Comp::Bind` nodes around `inner`, the first
 /// binding outermost so the chain runs in the order the hoists were pushed.
 fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) -> Comp {
-    if binds.is_empty() {
-        return inner;
-    }
-    let chain = binds
-        .into_iter()
-        .rev()
-        .fold(inner, |rest, (pattern, comp)| {
-            Spanned::with_span(
-                span,
-                CompKind::Bind {
-                    comp: Arc::new(comp),
-                    pattern: Arc::new(pattern),
-                    rest: Arc::new(rest),
-                },
-            )
-        });
-    Spanned::with_span(
-        span,
-        CompKind::Hoisted {
-            body: Arc::new(chain),
-        },
-    )
+    binds.into_iter().rev().fold(inner, |rest, (pattern, comp)| {
+        Spanned::with_span(
+            span,
+            CompKind::Bind {
+                comp: Arc::new(comp),
+                pattern: Arc::new(pattern),
+                rest: Arc::new(rest),
+            },
+        )
+    })
 }
 
 /// One statement of a block, elaborated but not yet nested over what
@@ -1577,11 +1565,8 @@ mod tests {
         let Phrase::Source { path } = &top.phrases[0].item else {
             panic!("expected a Source phrase, got {:?}", top.phrases[0].item);
         };
-        let CompKind::Hoisted { body } = &path.item else {
-            panic!("expected the path's tilde hoist wrapped in Hoisted, got {:?}", path.item);
-        };
-        let CompKind::Bind { comp, .. } = &body.item else {
-            panic!("expected a Bind over the hoisted temporary, got {:?}", body.item);
+        let CompKind::Bind { comp, .. } = &path.item else {
+            panic!("expected a Bind over the hoisted temporary, got {:?}", path.item);
         };
         assert!(matches!(comp.item, CompKind::Observe(Register::Tilde(_))));
     }
@@ -1674,11 +1659,8 @@ mod tests {
         let Phrase::Run(comp) = &top.phrases[0].item else {
             panic!("expected a Run phrase, got {:?}", top.phrases[0].item);
         };
-        let CompKind::Hoisted { body } = &comp.item else {
-            panic!("expected the $CWD hoist wrapped in Hoisted, got {:?}", comp.item);
-        };
-        let CompKind::Bind { comp: rhs, rest, .. } = &body.item else {
-            panic!("expected a Bind over the hoisted temporary, got {:?}", body.item);
+        let CompKind::Bind { comp: rhs, rest, .. } = &comp.item else {
+            panic!("expected a Bind over the hoisted temporary, got {:?}", comp.item);
         };
         assert!(matches!(rhs.item, CompKind::Observe(Register::Cwd)));
         assert!(matches!(rest.item, CompKind::Exec(_)));

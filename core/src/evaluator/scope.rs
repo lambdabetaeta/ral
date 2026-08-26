@@ -1,27 +1,19 @@
-//! Evaluator arms for the scope IR nodes — `within`, `grant`, `try`,
-//! `guard`, `audit` — and the vocabulary they share.
-//!
-//! The arms live here rather than inline in `eval_comp` so that match's
-//! unoptimised debug frame stays small enough for deep recursion under the
-//! default 2 MiB test-thread stack (`deeply_nested_calls`).
+//! Vocabulary shared by the scope IR nodes — `within`, `grant`, `try`,
+//! `guard`, `audit` — whose machine arms live in `evaluator::machine`:
+//! parsing and installing `within`'s options, and classifying a delimited
+//! body's result into the record `try` and `poll` hand their handler.
 
-use crate::ir::Val;
 use crate::types::{
-    BodyResult, Break, CapturePolicy, Env, EnvVars, FrameHandle, HandlerEntry, HandlerRole, Map,
-    Mooring, Observation, Observed, Raw, Settled, Shell, Value, as_map, sig, tree_value,
-    validate_handler_arity,
+    Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Observation, Observed,
+    Settled, Shell, Value, as_map, sig, validate_handler_arity,
 };
 
-use crate::evaluator::val::close;
-use crate::evaluator::{apply, audit};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// `try`'s body result, flattened for the handler-call decision.
+/// A failed `try`/`guard`/`audit` body, flattened for the error record.
 pub(crate) struct Outcome {
-    pub ok: bool,
     pub status: i32,
-    pub value: Value,
     pub message: String,
     pub cmd: String,
     pub line: usize,
@@ -55,35 +47,20 @@ pub(crate) fn error_record(
 /// error falls back to the run's call site.  Only a [`Observed::Command`]
 /// names the failing command: a capability check's denial no longer
 /// masquerades as one via the old status pun (D4).
-pub(crate) fn classify(body: &BodyResult, children: &[Observation], shell: &Shell) -> Outcome {
-    match body {
-        BodyResult::Value(v) => Outcome {
-            ok: true,
-            status: 0,
-            value: v.clone(),
-            message: String::new(),
-            cmd: String::new(),
-            line: 0,
-            col: 0,
-        },
-        BodyResult::Error(e) => {
-            let failing = children.iter().rev().find_map(|obs| match &obs.what {
-                Observed::Command { status, argv, .. } if *status != 0 => argv.first().cloned(),
-                _ => None,
-            });
-            let site = e
-                .span
-                .map_or_else(|| shell.call_site(), |s| shell.site_of(Some(s)));
-            Outcome {
-                ok: false,
-                status: e.exit_code(),
-                value: Value::Unit,
-                message: e.message.clone(),
-                cmd: failing.unwrap_or_else(|| "<runtime>".into()),
-                line: site.line,
-                col: site.col,
-            }
-        }
+pub(crate) fn classify(e: &Error, children: &[Observation], shell: &Shell) -> Outcome {
+    let failing = children.iter().rev().find_map(|obs| match &obs.what {
+        Observed::Command { status, argv, .. } if *status != 0 => argv.first().cloned(),
+        _ => None,
+    });
+    let site = e
+        .span
+        .map_or_else(|| shell.call_site(), |s| shell.site_of(Some(s)));
+    Outcome {
+        status: e.exit_code(),
+        message: e.message.clone(),
+        cmd: failing.unwrap_or_else(|| "<runtime>".into()),
+        line: site.line,
+        col: site.col,
     }
 }
 
@@ -235,119 +212,12 @@ impl WithinUndo {
     }
 }
 
-// ── Lifted `eval_comp` arms ──────────────────────────────────────────────
-
-pub(crate) fn eval_within(
-    opts: &Val,
-    body: &Val,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Raw<Value> {
-    let opts_val = close(opts, &shell.env)?;
-    let opts_map = as_map(&opts_val, "within")?;
-    let env = shell.env.clone();
-    let scope = WithinScope::parse(&opts_map, &env, shell)?;
-    let body = close(body, &shell.env)?;
-    let undo = scope.enter(shell);
-    let result = apply(body, vec![], mooring, shell);
-    undo.apply(shell);
-    result.map_err(Into::into)
-}
-
-pub(crate) fn eval_grant(
-    caps: &Val,
-    body: &Val,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Raw<Value> {
-    let caps_val = close(caps, &shell.env)?;
-    let home = shell.context.home();
-    let cwd = shell.cwd();
-    let ctx = crate::path::sigil::FreezeCtx {
-        home: home.as_deref(),
-        cwd: &cwd,
-    };
-    let caps =
-        crate::capability::decode_capability_map(&caps_val, "grant", &ctx).map_err(Break::from)?;
-    let body = close(body, &shell.env)?;
-    shell
-        .with_capabilities(caps, |shell| apply(body, vec![], mooring, shell))
-        .map_err(Into::into)
-}
-
-pub(crate) fn eval_try(
-    body: &Val,
-    handler: &Val,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Raw<Value> {
-    // Pure control flow: bytes keep flowing through fd 1/2, hence
-    // `CapturePolicy::Off`.  Children are still forced so the error record can
-    // name the failing command; `Exit`/`Stopped` leave via `?` before `classify`.
-    let body_val = close(body, &shell.env)?;
-    let handler_val = close(handler, &shell.env)?;
-    let (body_result, children) = audit::delimited(shell, CapturePolicy::Off, |s| {
-        apply(body_val, vec![], mooring, s)
-    })
-    .map_err(Break::Escape)?;
-
-    let outcome = classify(&body_result, &children, shell);
-
-    let err_record = error_record(
-        &outcome.cmd,
-        outcome.status,
-        &outcome.message,
-        outcome.line,
-        outcome.col,
-    );
-
-    // `try` recovers, so the failure's status must not leak past it.
-    shell.last_status = 0;
-
-    if outcome.ok {
-        Ok(outcome.value)
-    } else {
-        apply(handler_val, vec![err_record], mooring, shell).map_err(Into::into)
-    }
-}
-
-pub(crate) fn eval_guard(
-    body: &Val,
-    cleanup: &Val,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Raw<Value> {
-    let body_val = close(body, &shell.env)?;
-    let cleanup_val = close(cleanup, &shell.env)?;
-    let body_result = apply(body_val, vec![], mooring, shell);
-    // One rule for both signals: any halt of the cleanup pre-empts the body's
-    // outcome, error exactly as escape.  A cleanup that cannot fail the
-    // computation is a cleanup whose failures are unreportable; whoever wants
-    // log-and-continue writes `guard { … } { try { … } { |e| … } }`.
-    apply(cleanup_val, vec![], mooring, shell)
-        .and(body_result)
-        .map_err(Into::into)
-}
-
-pub(crate) fn eval_audit(body: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
-    let body_val = close(body, &shell.env)?;
-    let (body_result, children) = audit::delimited(shell, CapturePolicy::Bytes, |s| {
-        apply(body_val, vec![], mooring, s)
-    })
-    .map_err(Break::Escape)?;
-    let (status, value, error) = match &body_result {
-        BodyResult::Value(v) => (shell.last_status, v.clone(), None),
-        BodyResult::Error(e) => (e.exit_code(), Value::Unit, Some(e.message_with_hint())),
-    };
-    shell.last_status = status;
-    Ok(tree_value(status, value, error, &children))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::run::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
     use crate::transport::{Program, Run};
+    use crate::types::Mooring;
     use crate::types::{BuiltinBody, BuiltinEntry, Capabilities};
 
     fn capture_req(src: &str) -> RunRequest<'static> {

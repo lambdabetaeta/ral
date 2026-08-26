@@ -19,8 +19,8 @@ use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
 use crate::source::Span;
 use crate::types::{
-    Binding, BodyResult, Break, CapturePolicy, Closure, Env, Error, HandlerArity, HandlerFrame,
-    Mooring, Settled, Shell, TrailScope, Value, as_map, tree_value,
+    Binding, Break, CapturePolicy, Closure, Env, Error, HandlerArity, HandlerFrame, Mooring,
+    Settled, Shell, TrailScope, Value, as_map, tree_value,
 };
 
 use super::pattern;
@@ -130,7 +130,7 @@ pub(crate) const NESTED_MACHINE_LIMIT: usize = 24;
 
 /// A Bool result becomes `last_status` (true → 0); any other value leaves it
 /// untouched.
-fn set_status(v: &Value, shell: &mut Shell) {
+pub(crate) fn set_status(v: &Value, shell: &mut Shell) {
     if let Value::Bool(b) = v {
         shell.set_status_from_bool(*b);
     }
@@ -180,7 +180,7 @@ fn rec_node(group: &Arc<[(String, Arc<Comp>)]>, index: usize) -> Arc<Comp> {
     }))
 }
 
-fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
+pub(crate) fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
     let mut out = Vec::with_capacity(args.len());
     for elem in args {
         match &elem.item {
@@ -194,7 +194,7 @@ fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
     Ok(out)
 }
 
-fn close_redirects(redirects: &[RedirectV], env: &Env) -> Result<Vec<EvalRedirectV>, Error> {
+pub(crate) fn close_redirects(redirects: &[RedirectV], env: &Env) -> Result<Vec<EvalRedirectV>, Error> {
     redirects
         .iter()
         .map(|r| {
@@ -610,10 +610,7 @@ impl Machine {
                 } else {
                     match pipeline::run_pipeline(stages, *yields, &env, mooring, shell) {
                         Ok(v) => Focus::Return(Terminal::Value(v)),
-                        Err(crate::types::Control::Break(b)) => Focus::Halt(b),
-                        Err(crate::types::Control::Tail(_)) => {
-                            unreachable!("run_pipeline never escapes as a tail call")
-                        }
+                        Err(b) => Focus::Halt(b),
                     }
                 }
             }
@@ -786,12 +783,6 @@ impl Machine {
                 self.push(Frame::Audit { scope, saved });
                 self.force(b, &env, mooring, shell)
             }
-
-            // Transitional until W2g: a To frame's own environment is this hygiene.
-            CompKind::Hoisted { body } => Focus::Eval(Closure {
-                comp: Arc::clone(body),
-                env,
-            }),
         };
         stamp_focus(focus, comp.span)
     }
@@ -1173,7 +1164,7 @@ impl Machine {
                 Break::Error(e) => {
                     let children = shell.local.audit.close(scope);
                     shell.local.audit.set_capture(saved);
-                    let outcome = classify(&BodyResult::Error(e), &children, shell);
+                    let outcome = classify(&e, &children, shell);
                     let record = error_record(&outcome.cmd, outcome.status, &outcome.message, outcome.line, outcome.col);
                     shell.last_status = 0;
                     self.apply_rule(handler, vec![record], *env, None, mooring, shell)

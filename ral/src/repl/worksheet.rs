@@ -167,7 +167,6 @@ fn bind_effects(top: &Toplevel) -> Vec<(String, bool)> {
                     | CompKind::Within { .. }
                     | CompKind::Grant { .. }
                     | CompKind::Redirect { .. }
-                    | CompKind::Hoisted { .. }
                     | CompKind::Decode(_)
             );
             Some((name.clone(), effectful))

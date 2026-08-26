@@ -14,7 +14,7 @@ mod route;
 mod stage;
 
 use crate::ir::{Comp, PipeYield};
-use crate::types::{Env, Error, Mooring, Raw, Shell, Value};
+use crate::types::{Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
 use launch::launch_pipeline;
@@ -24,7 +24,7 @@ use resolve::resolve_pipeline;
 ///
 /// Every multi-stage pipeline is process-staged.  The final helper reports
 /// its value over the response frame when the form yields it.  No stage runs
-/// in the parent, so none can be granted tail position.
+/// in the parent, so none can be in tail position.
 ///
 /// `env` is the pipeline node's own lexical environment — the machine's `E`
 /// in focus, not necessarily `shell.env` (a nested machine, inside a lambda
@@ -36,13 +36,13 @@ pub(crate) fn run_pipeline(
     env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Raw<Value> {
+) -> Settled<Value> {
     // The first signal-checked seam, since a top-level pipeline sits under
     // no Bind/Chain/Seq.  An earlier SIGINT cancelled the foreground scope
     // but claimed no relay pgid, so without this the pipeline would launch
     // anyway and collect would block on a child that never saw the signal.
     crate::process::check(mooring)?;
-    let plan = resolve_pipeline(stages, yields, mooring, shell)?;
+    let plan = resolve_pipeline(stages, yields, env, mooring, shell)?;
 
     // Window start for the sandbox-denial reader, anchored before any stage
     // spawns so a kernel deny logged by a stage falls inside it.
@@ -55,10 +55,7 @@ pub(crate) fn run_pipeline(
     // The last helper carries its value home in its `ChildEvalResponse`
     // frame; collect reads it only after waiting on the helper, since one
     // blocked on a stopped upstream would deadlock us.
-    running
-        .collect(mooring, shell, started)
-        .finish(shell, plan.yields)
-        .map_err(Into::into)
+    running.collect(mooring, shell, started).finish(shell, plan.yields)
 }
 
 /// Attach a kernel-denial diagnostic to a failed pipeline stage's error.

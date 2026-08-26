@@ -134,9 +134,9 @@ pub struct SessionState {
     /// spawns from sibling Shells mint distinct uids and cgroups off one counter.
     pub(crate) guest_jail: Option<std::sync::Arc<crate::process::jail::GuestJail>>,
     /// The machine's stack cap (§2.1 of the CEK plan): `Machine::reserve`
-    /// refuses a push at `stack.len() >= stack_limit`.  Default
-    /// [`DEFAULT_RECURSION_LIMIT`]'s successor for the machine — frames, not
-    /// host stack frames — until W2g retires `ControlState::recursion_limit`.
+    /// refuses a push at `stack.len() >= stack_limit`.  Counts machine
+    /// frames, not host stack frames; `--recursion-limit`/rc's
+    /// `recursion_limit:` key set it.
     pub(crate) stack_limit: usize,
 }
 
@@ -175,12 +175,6 @@ pub struct LocalState {
     /// applying a user function, guarded by an RAII depth token so a panic
     /// unwinding out never leaves it raised.
     pub(crate) machine_depth: usize,
-    /// The recursive evaluator's own non-tail call depth
-    /// (`evaluator::trampoline::apply`), capped against `session.stack_limit`
-    /// — the machine's `Vec`-backed stack has no analogous counter.  Always
-    /// fresh in a child: no fork or spawn carries it across.  Retired with
-    /// the recursive path at the W2g cutover.
-    pub(crate) call_depth: usize,
 }
 
 impl Default for LocalState {
@@ -193,7 +187,6 @@ impl Default for LocalState {
             detach: None,
             workers_owned: true,
             machine_depth: 0,
-            call_depth: 0,
         }
     }
 }

@@ -198,15 +198,6 @@ impl Shell {
         self.env.bind(name, Binding { value, scheme: None });
     }
 
-    /// The evaluator's single install point for a scope entry.  Lease
-    /// bookkeeping lives in [`Self::note_define`] alone, called from
-    /// `run_phrases`'s `Define` arm under `Mode::Session` — a nested
-    /// `Bind`'s pattern is a local lexical name, never a session write, so
-    /// it installs unleased here.
-    pub(crate) fn install_scope_binding(&mut self, name: String, binding: Binding) {
-        self.env.bind(name, binding);
-    }
-
     /// Record a `Phrase::Define`'s binding on the lease ledger: starts a
     /// fresh non-baseline name's lease and renews an existing one — writing
     /// a name is itself interest in it — and, when the lease is armed and

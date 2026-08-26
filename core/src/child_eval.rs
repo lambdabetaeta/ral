@@ -522,7 +522,6 @@ pub(crate) fn decode_response(
 mod tests {
     use super::*;
     use crate::boot::BakedPrelude;
-    use crate::evaluator::evaluate;
     use crate::{Shell, elaborate, parse};
     use std::sync::OnceLock;
 
@@ -544,7 +543,8 @@ mod tests {
     }
 
     fn eval_value(source: &str, shell: &mut Shell) -> Value {
-        evaluate(&compile_one(source), &Mooring::adrift(), shell).expect("eval")
+        let closure = Closure { comp: compile_one(source), env: shell.env.clone() };
+        machine::evaluate(closure, &Mooring::adrift(), shell).expect("eval")
     }
 
     /// A stage request from a freshly captured snapshot.

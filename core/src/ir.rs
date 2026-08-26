@@ -244,7 +244,7 @@ pub fn is_single_command(top: &Toplevel) -> bool {
     let mut c = comp.as_ref();
     loop {
         c = match &c.item {
-            CompKind::Hoisted { body } | CompKind::Decode(body) | CompKind::Capture(body) => body,
+            CompKind::Decode(body) | CompKind::Capture(body) => body,
             _ => break,
         };
     }
@@ -368,7 +368,7 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             walk_comp(body, out);
             walk_redirects(redirects, out);
         }
-        CompKind::Hoisted { body } | CompKind::Capture(body) | CompKind::Decode(body) => {
+        CompKind::Capture(body) | CompKind::Decode(body) => {
             walk_comp(body, out);
         }
     }
@@ -572,12 +572,6 @@ pub enum CompKind {
         body: Arc<Comp>,
         redirects: Vec<RedirectV>,
     },
-    /// Transitional (W1–W2f): the frame holding the temporaries elaboration
-    /// hoists out of a statement.  Their extent is `body` and nothing wider,
-    /// so the frame is what keeps a temporary out of the session scope, off
-    /// the PATH-shadow check, and off the binding-lease ledger. W2g deletes
-    /// it — a `To` frame's own environment is that hygiene.
-    Hoisted { body: Arc<Comp> },
     /// Checker-inserted value boundary: run `body` with its byte channel
     /// captured and hand those bytes over exactly, as `Bytes`. Total, and
     /// lossless. No surface syntax.
@@ -865,10 +859,6 @@ mod tests {
                 target: ValRedirectTarget::File(var("r_scope_redirect_target")),
             }],
         });
-        let scope_hoisted = Spanned::synthetic(CompKind::Hoisted {
-            body: ret("r_hoisted_body"),
-        });
-
         let val_list = Spanned::synthetic(CompKind::Return(Val::List(vec![
             ValListElem::Single(Val::Unit),
             ValListElem::Single(Val::String("s".into())),
@@ -921,7 +911,6 @@ mod tests {
             Arc::new(scope_grant),
             Arc::new(scope_audit),
             Arc::new(scope_redirect),
-            Arc::new(scope_hoisted),
             Arc::new(val_list),
             Arc::new(val_map),
             Arc::new(val_variant),
@@ -979,7 +968,6 @@ mod tests {
             "r_audit_body",
             "r_scope_redirect_body",
             "r_scope_redirect_target",
-            "r_hoisted_body",
             "r_list_single",
             "r_list_spread",
             "r_map_key",

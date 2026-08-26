@@ -1,103 +1,24 @@
-//! CBPV evaluation verbs: the top-level run, the bare in-session run, and
-//! the block.
-//!
-//! Each funnels its result through [`absorb_tail`], the one seam that lands
-//! an escaping [`TailCall`], so `Tail` never leaves this module tree.
+//! CBPV evaluation: the machine (`machine::evaluate`), and the phrase-level
+//! verbs (`run_phrases`) that thread a session, a `source`, or a `use` over
+//! it.
 
 pub mod audit;
-pub(crate) mod call;
 pub(crate) mod capture;
-pub(crate) mod case;
-pub(crate) mod comp;
 pub mod expr;
 pub(crate) mod machine;
 pub(crate) mod observe;
 pub(crate) mod pattern;
 pub(crate) mod redirect;
 pub(crate) mod scope;
-pub(crate) mod trampoline;
 pub(crate) mod val;
 
 use crate::ir::{Comp, Phrase};
 use crate::source::Spanned;
-use crate::types::{Break, Control, Env, Mooring, Settled, Shell, Tail, TailCall, Value};
+use crate::types::{Break, Env, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
 pub(crate) use capture::with_audit_capture;
 pub use capture::with_capture;
-pub(crate) use trampoline::apply;
-
-// ── Tail absorption ──────────────────────────────────────────────────────
-
-/// Land an escaping [`TailCall`] through the trampoline; pass `Break`
-/// verbatim.  The one `Raw<Value>` → `Settled<Value>` seam: the verbs here,
-/// thread-worker roots, `child_eval`'s cross-process stage, redirect bodies,
-/// [`BuiltinEntry::run`](crate::types::BuiltinEntry::run).
-pub(crate) fn absorb_tail(
-    raw: crate::types::Raw<Value>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    match raw {
-        Ok(v) => Ok(v),
-        Err(Control::Tail(TailCall { callee, args })) => apply(callee, args, mooring, shell),
-        Err(Control::Break(b)) => Err(b),
-    }
-}
-
-/// Tail-absorbed run of `comp` in place — no rescope or discard, no scope
-/// frame, no transport dispatch.
-///
-/// For callers already inside a session (prelude bootstrap, module loading,
-/// REPL prompt and config), where a run boundary would round-trip state
-/// they never wanted snapshotted. [`Tail::No`], since the caller has
-/// obligations beyond `comp`.
-///
-/// # Errors
-/// A `Break` from `comp` — a recoverable error, or an escape such as `exit`.
-pub fn evaluate(comp: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    debug_assert!(
-        !shell.context.grants.is_empty(),
-        "grants must be non-empty; Shell::new pre-pushes root"
-    );
-    absorb_tail(
-        comp::eval_comp(comp, mooring, shell, Tail::No),
-        mooring,
-        shell,
-    )
-}
-
-// ── Boundary verbs ───────────────────────────────────────────────────────
-//
-// Both evaluate the body in this process: a `grant` is a dynamic effect
-// scope, not a process boundary, so OS confinement happens per child in
-// `build_command` (`runtime::command::process`), never at body entry.
-
-/// Run a thunk body as a block: scope-isolated, its whole store discarded on
-/// exit, so `let`, `cd`, module loads, plugin registrations, and env-var
-/// changes do not propagate.  Only `last_status` and observations, which the
-/// body posts straight to the shared trail, cross the boundary.
-///
-/// `captured` is the environment a block-shaped `Value::Thunk`'s `Closure`
-/// carries; [`Shell::eval_block_body`] rescopes the body to it and folds only
-/// `last_status` back.
-///
-/// `tail` is the block's own tail position, granted [`Tail::Yes`] only by the
-/// trampoline's final argument.  The body's store is rescoped for the
-/// absorption either way; tail-ness only chooses whether it trampolines.
-///
-/// Outside the crate the block contract is reached through [`apply`].
-pub(crate) fn eval_block(
-    body: &Arc<Comp>,
-    captured: &Env,
-    tail: Tail,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    shell.eval_block_body(captured, |shell| {
-        absorb_tail(comp::eval_comp(body, mooring, shell, tail), mooring, shell)
-    })
-}
 
 // ── Phrases (§3.2) ───────────────────────────────────────────────────────
 
@@ -158,12 +79,13 @@ pub(crate) fn run_phrases(
         });
         match result {
             Ok(v) => outcome = Ok(v),
+            // A non-final phrase's own hintless error gets the same
+            // abandonment hint `Frame::To`'s halt gives a chain step.
             Err(Break::Error(e)) if non_final && e.hint.is_none() => {
-                outcome = Err(match comp::note_abandoned_steps(Control::Break(Break::Error(e))) {
-                    Control::Break(b) => b,
-                    // `note_abandoned_steps` never returns `Tail`.
-                    Control::Tail(_) => unreachable!("a phrase's own error never turns tail"),
-                });
+                outcome = Err(Break::Error(e.with_hint(
+                    "later steps in this block did not run; wrap a step in `attempt` if its \
+                     failure should not stop the rest",
+                )));
                 break;
             }
             Err(err) => {
@@ -208,14 +130,11 @@ fn run_phrase_define(
     defined: &mut Vec<String>,
 ) -> Settled<Value> {
     if matches!(mode, Mode::Session) {
-        pattern::check_pattern_shadow(pattern, shell).map_err(|control| match control {
-            Control::Break(b) => b,
-            Control::Tail(_) => unreachable!("a pattern-shadow check never applies a tail call"),
-        })?;
+        pattern::check_pattern_shadow(pattern, shell)?;
     }
     let closure = crate::types::Closure { comp: Arc::clone(comp), env: env.clone() };
     let v = capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))?;
-    comp::set_status_from_value(&v, shell);
+    machine::set_status(&v, shell);
     *env = pattern::bind_pattern(pattern, &v, schemes, env.clone(), mooring, shell)?;
     let mut names = Vec::new();
     pattern::pattern_names(pattern, &mut names);
@@ -369,7 +288,9 @@ mod tests {
     fn block_discards_let() {
         // A bare `{ … }` statement elaborates to `Run(Return(Thunk(body)))`;
         // unwrap it to reach the block's own body — real source text, never
-        // hand-built IR.
+        // hand-built IR.  Its `let` is a machine-local `Bind`, never a
+        // `Phrase::Define`, so it can never reach `shell.env` regardless of
+        // how the block is entered.
         let phrases = toplevel("{ let leak_block = 1 }");
         let [phrase] = phrases.as_slice() else {
             panic!("expected one phrase, got {phrases:?}");
@@ -382,7 +303,8 @@ mod tests {
         };
         let mut shell = Shell::default();
         let captured = shell.env.clone();
-        let _ = eval_block(body, &captured, Tail::No, &Mooring::adrift(), &mut shell);
+        let closure = crate::types::Closure { comp: body.clone(), env: captured };
+        let _ = machine::evaluate(closure, &Mooring::adrift(), &mut shell);
         assert!(
             shell.env.get("leak_block").is_none(),
             "block boundary must discard `let` bindings"

@@ -10,21 +10,19 @@
 //!
 //! `within`, `grant`, `guard`, `try`, and `audit` are all collection
 //! boundaries, not observations: none of them constructs one.  `try`/`audit`
-//! force collection on regardless of the surrounding state via
-//! [`delimited`], which opens a trail scope before `body` runs and closes it
-//! after — draining and closing the trail if `body` is the one that opened
+//! force collection on regardless of the surrounding state — `evaluator::machine`'s
+//! `Try`/`Audit` arms open a trail scope before their body runs and close it
+//! after — draining and closing the trail if the body is the one that opened
 //! it, reading a suffix and leaving it open otherwise (`Audit::open` /
 //! `Audit::close`, `core/src/types/audit.rs`). The opener owns closing on
 //! every exit, panics included.
 //!
 //! With nobody listening the recorders are no-ops, so the dispatcher can call
-//! them unconditionally; [`delimited`] is the exception, since `try` and
-//! `audit` force collection whether or not audit is on.
+//! them unconditionally.
 
 use crate::types::{
-    AuditIo, BodyResult, Break, BuiltinEntry, CallSite, CapturePolicy, CommandOrigin, Decision,
-    Env, Escape, Map, Mooring, Observation, Observed, STDERR_CAP_BYTES, Settled, Shell, Value,
-    epoch_us, split,
+    AuditIo, Break, BuiltinEntry, CallSite, CapturePolicy, CommandOrigin, Decision, Env, Map,
+    Mooring, Observation, Observed, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
 };
 
 /// Proof that a native body is running inside [`frame_call`]'s dynamic
@@ -214,39 +212,6 @@ pub(crate) fn record_capability(shell: &mut Shell, mooring: &Mooring, resource: 
     mooring.surface(&obs.to_value());
     if shell.should_audit_capabilities() {
         shell.local.audit.push(obs);
-    }
-}
-
-/// Force collection on for `body` and return the observations it produced;
-/// used by `try` (to name the failing command) and `audit` (to return the
-/// subtree).  The observations stay in the trail, flat among whatever else it
-/// collects.
-///
-/// Opens a scope, runs `body` under `catch_unwind`, and closes the scope
-/// before deciding what to do with the outcome — a panicking `body` still
-/// gets its trail closed, so the delimiter that opened it never leaves the
-/// trail dangling for the next dispatch to inherit. The unwind then resumes:
-/// a harness defect is not this delimiter's to swallow.
-pub(crate) fn delimited(
-    shell: &mut Shell,
-    capture: CapturePolicy,
-    body: impl FnOnce(&mut Shell) -> Settled<Value>,
-) -> Result<(BodyResult, Vec<Observation>), Escape> {
-    let saved_capture = shell.local.audit.capture_policy();
-    shell
-        .local
-        .audit
-        .set_capture(merge_capture(saved_capture, capture));
-    let scope = shell.local.audit.open();
-
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(shell)));
-
-    let children = shell.local.audit.close(scope);
-    shell.local.audit.set_capture(saved_capture);
-
-    match outcome {
-        Ok(settled) => Ok((split(settled)?, children)),
-        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 

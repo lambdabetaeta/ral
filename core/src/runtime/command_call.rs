@@ -1,16 +1,16 @@
-//! Command dispatch: resolve a head, then run the arm resolution names.
+//! Command dispatch: resolve a head, then run the arm.
 //!
 //! Order is env → handlers → external; `^name` skips env, so it skips every
 //! value builtin (a native is an env hit), but still consults handlers —
 //! run frames and the base layer alike; a path head skips handlers too.
-//! [`run_call`] is the entry from `evaluator::call`; pipeline staging and
-//! `command::detach` reach `resolve_command_word` and `run_handler` directly.
+//! `evaluator::machine`'s `Exec` rule is the entry that classifies and runs
+//! every arm; pipeline staging and `command::detach` reach
+//! `resolve_command_word`/`classify_command` and `run_handler` directly.
 
 use crate::ir::{CommandName, CommandWord};
-use crate::source::Span;
 use crate::types::{
-    Break, BuiltinEntry, CommandOrigin, Control, Env, HandlerArity, HandlerEntry, HandlerFrame,
-    HandlerLookup, Map, Mooring, Raw, Settled, Shell, Value,
+    Break, BuiltinEntry, CommandOrigin, Env, HandlerArity, HandlerEntry, HandlerFrame,
+    HandlerLookup, Map, Mooring, Settled, Shell, Value,
 };
 
 use super::command::{self, CommandIdentity, EvalRedirectV};
@@ -120,45 +120,6 @@ fn refuse_head(id: &CommandIdentity, mooring: &Mooring, shell: &mut Shell) -> Br
 
 // ── Runners ─────────────────────────────────────────────────────────────
 
-/// Runtime entry: admit `head`, then run the arm.
-///
-/// `span` becomes the run's call site, but not under `_`-prefixed names (the
-/// host-registered `_ed-*` REPL surface), so the register keeps naming the
-/// user's call rather than the wrapper's.  The [`Resolution::Env`] arm is
-/// every native head's path — natives are invisible to the elaborator's
-/// `is_bound`, so their heads stay commands — plus any binding installed
-/// after elaboration.
-pub(crate) fn run_call(
-    head: &CommandWord,
-    args: &[Value],
-    redirects: &[EvalRedirectV],
-    span: Option<Span>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Raw<Value> {
-    if !matches!(head.name().bare(), Some(name) if name.starts_with('_')) {
-        shell.local.audit.call_site = span;
-    }
-    let env = shell.env.clone();
-
-    match classify_command(head, &env, mooring, shell)? {
-        // W2g: the machine's `Exec` rule runs this arm itself (§2.2).
-        Resolution::Env(value) => with_redirects(redirects, mooring, shell, |shell| {
-            crate::evaluator::apply(value, args.to_vec(), mooring, shell).map_err(Into::into)
-        }),
-        // W2g: `Unmask` is the frame; `run_handler`/`MaskedHandler` go.
-        Resolution::Handler { entry, depth } => {
-            with_redirects(redirects, mooring, shell, |shell| {
-                run_handler(&entry, depth, args, mooring, shell).map_err(Into::into)
-            })
-        }
-        Resolution::Base(entry) => run_base_frame(&entry, args, redirects, &env, mooring, shell)
-            .map_err(Control::from),
-        Resolution::External(id) => run_external(id, args, redirects, &env, mooring, shell)
-            .map_err(Control::from),
-    }
-}
-
 /// Run a base handler frame directly with the argv slice — no adapter, no
 /// masking: a native body never self-forwards.
 ///
@@ -184,10 +145,14 @@ pub(crate) fn run_base_frame(
     )
 }
 
-// W2g: `Unmask` is the frame; this and `run_handler` go.
 /// Lifts the matched frame off the handler stack on [`Self::strip`] and puts it
 /// back at its position on `Drop`, unwinds included: the frame is held nowhere
 /// else, so losing it to a panic silently deletes a user's alias.
+///
+/// The machine's own `Exec` rule masks a handler inline with a `Frame::Unmask`
+/// (§2.2); this is for [`run_handler`]'s other caller, `command::detach`,
+/// which runs a matched handler as a one-shot call outside the machine's step
+/// loop, with no frame stack of its own to hold the mask.
 struct MaskedHandler<'a> {
     shell: &'a mut Shell,
     frame: Option<HandlerFrame>,
@@ -211,7 +176,6 @@ impl Drop for MaskedHandler<'_> {
     }
 }
 
-// W2g: `Unmask` is the frame; this and `MaskedHandler` go.
 /// Run a user handler.  The matched frame is masked for the body's dynamic
 /// extent, so a same-name call from inside reaches the next outer match.
 ///
@@ -240,7 +204,7 @@ pub(crate) fn run_handler(
         HandlerArity::Unary => vec![argv],
     };
     let masked = MaskedHandler::strip(shell, depth);
-    let result = crate::evaluator::apply(thunk, call_args, mooring, masked.shell);
+    let result = crate::evaluator::machine::apply(thunk, call_args, mooring, masked.shell);
     drop(masked);
     result
 }
@@ -259,17 +223,7 @@ fn run_host_thunk(
         CommandOrigin::Builtin,
         mooring,
         shell,
-        |shell, frame| {
-            with_redirects(redirects, mooring, shell, |shell| {
-                f(args, shell, frame).map_err(Into::into)
-            })
-            .map_err(|c| match c {
-                Control::Break(b) => b,
-                // A host thunk's body is always `Settled` before it meets
-                // `with_redirects`, so no tail call ever reaches here.
-                Control::Tail(_) => unreachable!("a host thunk body never emits a tail call"),
-            })
-        },
+        |shell, frame| with_redirects(redirects, mooring, shell, |shell| f(args, shell, frame)),
     )
 }
 

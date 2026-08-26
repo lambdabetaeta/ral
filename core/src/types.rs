@@ -54,7 +54,6 @@ pub use error::{BodyResult, Error, Status, split};
 
 mod flow;
 pub use flow::{Break, Escape, PolicyError, Settled};
-pub(crate) use flow::{Control, Raw, Tail, TailCall};
 
 // `sig` rides along with the coercions: both sit below the builtins and the
 // capability layer, which reach them without importing each other.

@@ -74,8 +74,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         | CompKind::Return(Val::Thunk(c))
         | CompKind::Capture(c)
         | CompKind::Decode(c)
-        | CompKind::Redirect { body: c, .. }
-        | CompKind::Hoisted { body: c } => walk_comp(c, visit),
+        | CompKind::Redirect { body: c, .. } => walk_comp(c, visit),
         _ => {}
     }
 }

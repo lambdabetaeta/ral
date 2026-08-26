@@ -9,7 +9,6 @@
 //! run may be over — and reach a sink exactly once, by an eliminator's replay
 //! or by the completion delivery, whichever wins the `joined` latch.
 
-use crate::evaluator::absorb_tail;
 use crate::evaluator::audit::observe;
 use crate::evaluator::machine;
 use crate::evaluator::scope::error_record;
@@ -17,7 +16,7 @@ use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::serial::FOValue;
 use crate::types::{
     Break, CapReached, Closure, CompletedHandle, DeferredSink, Env, Error, Escape, EventSink,
-    HandleInner, HandleState, LeaseClass, Mooring, Observed, Raw, ReapCause, Settled, Shell,
+    HandleInner, HandleState, LeaseClass, Mooring, Observed, ReapCause, Settled, Shell,
     SurfaceBuffer, Value, WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
 };
 use std::sync::mpsc::TryRecvError;
@@ -132,10 +131,6 @@ impl Drop for FlushGuard {
 
 /// Spawn a child concurrent block on a new OS thread and return its handle.
 ///
-/// `work` returns [`Raw<Value>`] so a terminal tail call surfaces at the
-/// worker's trampoline and is absorbed there: a tail call cannot cross a thread
-/// boundary, and only a [`Settled`] value may enter the channel.
-///
 /// Under a frame with a `worker_cap` the seat is reserved before any thread or
 /// entry exists and released only into the `register` below, so a sibling birth
 /// racing on another thread never sees a seat mid-fill as free.  A
@@ -152,7 +147,7 @@ pub(super) fn spawn_child<F>(
     work: F,
 ) -> Settled<HandleInner>
 where
-    F: FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static,
+    F: FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static,
 {
     let reservation = match shell.local.workers.reserve(mooring.worker_cap) {
         Ok(reservation) => reservation,
@@ -225,7 +220,7 @@ where
                 armed: true,
             };
 
-            let result = absorb_tail(work(mooring, child_env), mooring, child_env);
+            let result = work(mooring, child_env);
             if flush_pending {
                 let _ = child_env.io.stdout.flush_pending();
                 let _ = child_env.io.stderr.flush_pending();
@@ -353,13 +348,13 @@ fn lease_fire(chain: &LeaseChain) {
 /// by `Shell::spawn_thread`.
 fn worker_body(
     body: Arc<crate::ir::Comp>,
-) -> impl FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static {
+) -> impl FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static {
     move |mooring, child_env| {
         let closure = Closure {
             comp: body,
             env: child_env.env.clone(),
         };
-        machine::evaluate(closure, mooring, child_env).map_err(Into::into)
+        machine::evaluate(closure, mooring, child_env)
     }
 }
 
@@ -1082,7 +1077,7 @@ mod tests {
 
     /// A body that stays `Running` until cancelled, polling `process::check` so
     /// a reap genuinely unwinds the thread rather than flag a scope nobody reads.
-    fn check_loop(mooring: &Mooring, _child: &mut Shell) -> Raw<Value> {
+    fn check_loop(mooring: &Mooring, _child: &mut Shell) -> Settled<Value> {
         loop {
             crate::process::check(mooring)?;
             std::thread::yield_now();
@@ -1914,7 +1909,7 @@ mod tests {
     #[test]
     fn detached_worker_flushes_done_to_deferred_sink() {
         fn run(
-            work: impl FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static,
+            work: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value> + Send + 'static,
         ) -> Vec<FOValue> {
             let mut shell = Shell::new(crate::io::TerminalState::default());
             let batches = Arc::new(Mutex::new(Vec::new()));

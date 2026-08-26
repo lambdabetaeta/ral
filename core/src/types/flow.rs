@@ -1,15 +1,6 @@
-//! The evaluator's control-flow currencies: `Escape` and `Break` for exits,
-//! `Tail` and `TailCall` for the trampoline, `Control` for their union.
-//!
-//! `Tail` is not machine state: an eliminator is handed its own tail-ness and
-//! may grant it to one final sub-computation, so failing to thread it costs a
-//! frame rather than letting a tail call escape a live one.  That a tail call
-//! never crosses a public boundary is enforced by visibility alone —
-//! `TailCall`, `Control` and `Raw` are `pub(crate)`, and `absorb_tail` in
-//! `core/src/evaluator.rs` is the seam that lands one.
+//! The evaluator's control-flow currencies: `Escape` and `Break` for exits.
 
 use super::error::Error;
-use super::value::Value;
 
 /// Non-catchable exits from a delimited scope.
 #[derive(Debug, Clone)]
@@ -96,34 +87,8 @@ impl From<Error> for PolicyError {
     }
 }
 
-/// The tail-position property of an evaluation context: whether the redex sits
-/// under a trivial continuation.  Threaded as a parameter of `eval_comp`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Tail {
-    Yes,
-    No,
-}
-
-/// The tail-call signal, emitted by the application and `case` eliminators
-/// only when handed [`Tail::Yes`].
-#[derive(Debug)]
-pub(crate) struct TailCall {
-    pub callee: Value,
-    pub args: Vec<Value>,
-}
-
-/// Evaluator-internal union: an absorbable tail call, or a [`Break`] untouched.
-#[derive(Debug)]
-pub(crate) enum Control {
-    Break(Break),
-    Tail(TailCall),
-}
-
-/// Result whose error is a [`Break`]: tail calls have been absorbed.
+/// Result whose error is a [`Break`].
 pub type Settled<T> = Result<T, Break>;
-
-/// Evaluator return that may still carry a tail call.
-pub(crate) type Raw<T> = Result<T, Control>;
 
 impl From<Error> for Break {
     fn from(e: Error) -> Self {
@@ -134,29 +99,5 @@ impl From<Error> for Break {
 impl From<Escape> for Break {
     fn from(e: Escape) -> Self {
         Self::Escape(e)
-    }
-}
-
-impl From<Break> for Control {
-    fn from(b: Break) -> Self {
-        Self::Break(b)
-    }
-}
-
-impl From<Error> for Control {
-    fn from(e: Error) -> Self {
-        Self::Break(Break::Error(e))
-    }
-}
-
-impl From<Escape> for Control {
-    fn from(e: Escape) -> Self {
-        Self::Break(Break::Escape(e))
-    }
-}
-
-impl From<TailCall> for Control {
-    fn from(t: TailCall) -> Self {
-        Self::Tail(t)
     }
 }

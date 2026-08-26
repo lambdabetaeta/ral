@@ -242,8 +242,7 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -
         | CompKind::Within { .. }
         | CompKind::Grant { .. }
         | CompKind::Audit { .. }
-        | CompKind::Redirect { .. }
-        | CompKind::Hoisted { .. } => return annotate_scope(comp, ctx, eta, demand),
+        | CompKind::Redirect { .. } => return annotate_scope(comp, ctx, eta, demand),
         _ => {}
     }
 
@@ -357,8 +356,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
         | CompKind::Within { .. }
         | CompKind::Grant { .. }
         | CompKind::Audit { .. }
-        | CompKind::Redirect { .. }
-        | CompKind::Hoisted { .. } => unreachable!("not a plain-rebuild node"),
+        | CompKind::Redirect { .. } => unreachable!("not a plain-rebuild node"),
     }
 }
 
@@ -526,9 +524,6 @@ fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) ->
         },
         CompKind::Audit { body } => CompKind::Audit {
             body: annotate_val(body, ctx),
-        },
-        CompKind::Hoisted { body } => CompKind::Hoisted {
-            body: Arc::new(annotate_demand(body, ctx, eta, demand)),
         },
         CompKind::Redirect { body, redirects } => CompKind::Redirect {
             body: Arc::new(annotate_demand(body, ctx, eta, demand)),

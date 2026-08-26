@@ -73,8 +73,8 @@ fn looks_like_nested_quote_mistake(head: &Comp, args: &[&Val]) -> bool {
 ///
 /// The root is where a feed answers the stage's reads for its whole run: an
 /// [`Exec`](CompKind::Exec) fuses its redirects into the spawn, anything else
-/// wears them as a [`CompKind::Redirect`] frame, and the `Hoisted`/`Bind` arms
-/// walk past the binders elaboration hoists out of a redirect's own target
+/// wears them as a [`CompKind::Redirect`] frame, and the `Bind` arm walks past
+/// the binders elaboration hoists out of a redirect's own target
 /// (`b < $[locate f]`), whose innermost continuation is the stage as written.
 /// A read redirected deeper answers one command's reads and no others, which
 /// is that command's business alone, so this walk never sees it.
@@ -82,7 +82,6 @@ fn stage_root_stdin_feed(stage: &Comp) -> Option<StdinFeed> {
     let redirects = match &stage.item {
         CompKind::Exec(exec) => &exec.redirects,
         CompKind::Redirect { redirects, .. } => redirects,
-        CompKind::Hoisted { body } => return stage_root_stdin_feed(body),
         CompKind::Bind { rest, .. } | CompKind::Source { rest, .. } => {
             return stage_root_stdin_feed(rest);
         }
@@ -380,15 +379,14 @@ impl Inferencer<'_> {
     }
 
     /// The statement whose type `comp`'s own type actually is: a `Bind`'s
-    /// type is its `rest`'s, a `Source`'s is its `rest`'s, and a hoist
-    /// frame's is its body's, all the way down, so `let a = 1; let b = 2;
-    /// cd`'s discarded value is `cd`'s, not the outermost node's.
+    /// type is its `rest`'s and a `Source`'s is its `rest`'s, all the way
+    /// down, so `let a = 1; let b = 2; cd`'s discarded value is `cd`'s, not
+    /// the outermost node's.
     fn discard_tail(comp: &Comp) -> &Comp {
         match &comp.item {
             CompKind::Bind { rest, .. } | CompKind::Source { rest, .. } => {
                 Self::discard_tail(rest)
             }
-            CompKind::Hoisted { body } => Self::discard_tail(body),
             _ => comp,
         }
     }
@@ -1772,11 +1770,10 @@ impl Inferencer<'_> {
                 let sig = self.infer_audit(body);
                 CompTy::Return(sig.route, Box::new(sig.value))
             }
-            // Neither frame touches its body's type — one installs fds,
-            // the other holds hoisted temporaries.  Both carry the body as
-            // an `Arc<Comp>` rather than a thunk-shaped `Val` like the
-            // scope forms above, so infer it directly.
-            CompKind::Redirect { body, .. } | CompKind::Hoisted { body } => self.infer_comp(body),
+            // Installs fds, not its own type; carries the body as an
+            // `Arc<Comp>` rather than a thunk-shaped `Val` like the scope
+            // forms above, so infer it directly.
+            CompKind::Redirect { body, .. } => self.infer_comp(body),
             // Inserted by `annotate`'s write-back pass, so it is absent from a
             // freshly elaborated tree but present in every tree re-inferred
             // from a live value — a handler arm vetted at install, a bound

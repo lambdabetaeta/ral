@@ -193,42 +193,6 @@ impl Shell {
         parent.context.cwd.current = self.context.cwd.current.take();
         parent.context.cwd.previous = self.context.cwd.previous.take();
     }
-
-    /// Evaluate a same-thread applied-lambda body in place: rescope to
-    /// `captured`, enter with a fresh `$?`, and fold `{last_status, cwd}`
-    /// back on the way out — the recursive evaluator's β-step contract
-    /// (`evaluator::trampoline`'s only caller), kept until the W2g cutover
-    /// deletes the recursive path entirely.
-    pub(crate) fn eval_lambda_body<R>(&mut self, captured: &Env, f: impl FnOnce(&mut Self) -> R) -> R {
-        let saved_env = std::mem::replace(&mut self.env, captured.clone());
-        let saved_context = self.context.clone();
-        self.last_status = 0;
-        let result = f(self);
-        let last_status = self.last_status;
-        let cwd = self.context.cwd.clone();
-        self.env = saved_env;
-        self.context = saved_context;
-        self.last_status = last_status;
-        self.context.cwd = cwd;
-        result
-    }
-
-    /// Evaluate a same-thread forced-block body in place: rescope to
-    /// `captured`, discard every store write on the way out but `$?` —
-    /// `evaluator::eval_block`'s only mechanism, kept until the W2g cutover
-    /// deletes the recursive path entirely.
-    pub(crate) fn eval_block_body<R>(&mut self, captured: &Env, f: impl FnOnce(&mut Self) -> R) -> R {
-        let saved_env = std::mem::replace(&mut self.env, captured.clone());
-        let saved_context = self.context.clone();
-        let saved_pending_chpwd = self.local.repl.pending_chpwd.take();
-        let result = f(self);
-        self.local.repl.pending_chpwd = saved_pending_chpwd;
-        let last_status = self.last_status;
-        self.env = saved_env;
-        self.context = saved_context;
-        self.last_status = last_status;
-        result
-    }
 }
 
 // Unix-only: the lease tests assert a minted `TerminalLease` is `Some`, and
@@ -239,37 +203,6 @@ mod tests {
     use super::*;
     use crate::process::TerminalLease;
     use crate::types::shell::{DEFAULT_STACK_LIMIT, TerminalAccess};
-
-    /// A same-thread lambda body runs in place on the caller's shell, so it
-    /// observes the session-owned terminal lease *by identity*: a foreground
-    /// external inside a function, alias, or handler body can take the
-    /// controlling terminal whenever the run is `Leased`.
-    #[test]
-    fn lambda_body_shares_the_session_terminal_lease() {
-        let mut shell = Shell::default();
-        shell.session.terminal_lease = TerminalLease::mint_at_startup(true);
-        let mooring = Mooring {
-            terminal_access: TerminalAccess::Leased,
-            ..Mooring::adrift()
-        };
-        assert!(
-            shell.terminal_lease(&mooring).is_some(),
-            "precondition: the session holds a Leased lease",
-        );
-
-        let captured = shell.env.clone();
-        shell.eval_lambda_body(&captured, |body| {
-            assert!(
-                body.terminal_lease(&mooring).is_some(),
-                "a Leased lambda body shares the session lease",
-            );
-        });
-
-        assert!(
-            shell.terminal_lease(&mooring).is_some(),
-            "the session still holds the lease after the body — it never moved",
-        );
-    }
 
     /// A forked session builds over a defaulted `SessionState` and so mints no
     /// lease witness: a sub-agent can never foreground an external command and

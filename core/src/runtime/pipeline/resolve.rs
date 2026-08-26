@@ -5,11 +5,11 @@
 
 use super::super::command::CommandIdentity;
 use super::super::command_call;
-use crate::evaluator::call;
+use crate::evaluator::machine;
 use crate::ir::{Comp, CompKind, RedirectV, ValRedirectTarget};
 use crate::source::Span;
 use crate::syntax::ast::RedirectMode;
-use crate::types::{Mooring, Settled, Shell, TerminalAccess, Value};
+use crate::types::{Env, Mooring, Settled, Shell, TerminalAccess, Value};
 use std::sync::Arc;
 
 // ── TerminalPlan ────────────────────────────────────────────────────────
@@ -114,11 +114,11 @@ fn redirects_divert_stdout(redirects: &[RedirectV]) -> bool {
 /// Windows where there is no `.exe` to spawn.  Admission is left to
 /// `command::vet` at launch, so a head the grant denies still routes through
 /// here and surfaces its refusal as an ordinary error.
-fn classify_stage(stage: &Comp, shell: &Shell) -> StageKind {
+fn classify_stage(stage: &Comp, env: &Env, shell: &Shell) -> StageKind {
     let CompKind::Exec(e) = &stage.item else {
         return StageKind::Ral;
     };
-    match command_call::resolve_command_word(&e.head, &shell.env, shell) {
+    match command_call::resolve_command_word(&e.head, env, shell) {
         command_call::Resolution::External(id) => StageKind::External(id),
         _ => StageKind::Ral,
     }
@@ -127,15 +127,12 @@ fn classify_stage(stage: &Comp, shell: &Shell) -> StageKind {
 /// Evaluate a stage's argv, for the `Direct` path alone — a `HelperEval`
 /// external re-evaluates it inside the child.  `direct_spawnable` admits only
 /// redirect-free stages, so the evaluated redirects are always empty here.
-fn eval_external_stage(
-    id: CommandIdentity,
-    stage: &Comp,
-    shell: &mut Shell,
-) -> Settled<ExternalStage> {
+fn eval_external_stage(id: CommandIdentity, stage: &Comp, env: &Env) -> Settled<ExternalStage> {
     let CompKind::Exec(e) = &stage.item else {
         unreachable!("classify_stage yields an identity only for Exec stages")
     };
-    let (args, redirects) = call::eval_call_parts(&e.args, &e.redirects, shell)?;
+    let args = machine::close_args(&e.args, env)?;
+    let redirects = machine::close_redirects(&e.redirects, env)?;
     debug_assert!(
         redirects.is_empty(),
         "direct_spawnable gates on no redirects"
@@ -158,12 +155,17 @@ fn direct_spawnable(stage: &Comp, terminal: TerminalPlan, shell: &Shell) -> bool
 /// Freeze one stage's launch decision.  A bundled tool still becomes an
 /// external stage, while redirects, foreground ownership, and byte-capturing
 /// audits keep the evaluator in a helper.
-fn resolve_launch(stage: &Comp, terminal: TerminalPlan, shell: &mut Shell) -> Settled<StageLaunch> {
-    Ok(match classify_stage(stage, shell) {
+fn resolve_launch(
+    stage: &Comp,
+    terminal: TerminalPlan,
+    env: &Env,
+    shell: &mut Shell,
+) -> Settled<StageLaunch> {
+    Ok(match classify_stage(stage, env, shell) {
         StageKind::Ral => StageLaunch::HelperEval,
         StageKind::External(id) => {
             if direct_spawnable(stage, terminal, shell) {
-                StageLaunch::Direct(eval_external_stage(id, stage, shell)?)
+                StageLaunch::Direct(eval_external_stage(id, stage, env)?)
             } else {
                 StageLaunch::HelperEval
             }
@@ -171,8 +173,13 @@ fn resolve_launch(stage: &Comp, terminal: TerminalPlan, shell: &mut Shell) -> Se
     })
 }
 
-fn analyze_stage(stage: &Comp, terminal: TerminalPlan, shell: &mut Shell) -> Settled<StageSpec> {
-    let launch = resolve_launch(stage, terminal, shell)?;
+fn analyze_stage(
+    stage: &Comp,
+    terminal: TerminalPlan,
+    env: &Env,
+    shell: &mut Shell,
+) -> Settled<StageSpec> {
+    let launch = resolve_launch(stage, terminal, env, shell)?;
     Ok(StageSpec {
         launch,
         span: stage.span,
@@ -221,6 +228,7 @@ fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
 pub(super) fn resolve_pipeline(
     stages: &[Arc<Comp>],
     yields: crate::ir::PipeYield,
+    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<PipelinePlan> {
@@ -229,7 +237,7 @@ pub(super) fn resolve_pipeline(
     let terminal = resolve_terminal_plan(mooring, shell);
     let specs = stages
         .iter()
-        .map(|stage| analyze_stage(stage, terminal, shell))
+        .map(|stage| analyze_stage(stage, terminal, env, shell))
         .collect::<Settled<Vec<_>>>()?;
     Ok(PipelinePlan {
         specs,

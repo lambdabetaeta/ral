@@ -6,14 +6,14 @@
 
 use crate::ir::IrPattern;
 use crate::typecheck::Scheme;
-use crate::types::{Binding, Closure, Control, Env, Mooring, Raw, Settled, Shell, Value};
+use crate::types::{Binding, Closure, Env, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
 /// Refuse every name a `let` pattern binds that would shadow a PATH command.
 /// `run_phrases`'s `Define` arm alone calls this, under `Mode::Session`: a
 /// nested `Bind`'s pattern is a local lexical name, not a command name, so
-/// the trampoline binds one unchecked.
-pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Raw<()> {
+/// it binds one unchecked.
+pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Settled<()> {
     match pattern {
         IrPattern::Wildcard => Ok(()),
         IrPattern::Name(name) => check_path_shadow(name, shell),
@@ -41,7 +41,7 @@ pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Raw<()
 /// this, so every call here is already at session scope; block, lambda and
 /// prelude bindings never enter the command namespace, so they go unchecked
 /// by never calling in.
-pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Raw<()> {
+pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Settled<()> {
     if let Some(path) = shell.locate_command(name) {
         return Err(shell
             .err_hint(
@@ -84,8 +84,7 @@ pub(crate) fn pattern_names(pattern: &IrPattern, out: &mut Vec<String>) {
 /// result into `env`.
 ///
 /// # Errors
-/// The shape mismatches [`stage_pattern`] reports; never a `Tail`, so the
-/// caller need not thread [`Raw`] any further than here.
+/// The shape mismatches [`stage_pattern`] reports.
 pub(crate) fn bind_pattern(
     pattern: &IrPattern,
     value: &Value,
@@ -95,12 +94,7 @@ pub(crate) fn bind_pattern(
     shell: &mut Shell,
 ) -> Settled<Env> {
     let mut staged = Vec::new();
-    stage_pattern(pattern, value, schemes, &env, mooring, shell, &mut staged).map_err(
-        |control| match control {
-            Control::Break(b) => b,
-            Control::Tail(_) => unreachable!("pattern staging never applies a tail call"),
-        },
-    )?;
+    stage_pattern(pattern, value, schemes, &env, mooring, shell, &mut staged)?;
     for (name, binding) in staged {
         env.bind(name, binding);
     }
@@ -123,7 +117,7 @@ fn stage_pattern(
     mooring: &Mooring,
     shell: &mut Shell,
     staged: &mut Vec<(String, Binding)>,
-) -> Raw<()> {
+) -> Settled<()> {
     match pattern {
         IrPattern::Wildcard => Ok(()),
         IrPattern::Name(name) => {
