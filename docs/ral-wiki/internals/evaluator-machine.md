@@ -1,147 +1,131 @@
 ---
-verified_at_commit: 19d53bb
-verified_at_date: 2026-07-28
-anchors: [eval_top_level, evaluate, with_thunk_body, Settled, trampoline, Mobile, Mooring, IoLoan, SessionState]
+verified_at_commit: 1dd9935f
+verified_at_date: 2026-08-26
+anchors: [Machine, step_eval, step_return, step_halt, Frame, Focus, Terminal, Closure, Env, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
 ---
 
-# The evaluator today: a trampolined tree-walker over call-by-push-value IR
+# The evaluator: a CEK machine over computation closures
 
-The evaluator runs the typed [[internals/compilation-ladder|IR]] by recursive
-descent, not as an explicit-state machine: `eval_comp`
-(`core/src/evaluator/comp.rs`) walks a `Comp` and recurses into its
-sub-`Comp`s on the Rust call stack, threading two things through every call —
-the run's immutable `&Mooring` and one mutable `Shell`. There is one ambient
-lexical environment, not per-closure environments passed as data: bindings
-live in `shell.mobile.scope` (`Env`), and entering a scope
-(`with_scope`, `comp.rs`) pushes a frame there and pops it on the way out
-rather than building a new environment value. The one place this *is* an
-explicit machine is tail position: `apply` (`core/src/evaluator/trampoline.rs`)
-loops on an escaping `TailCall` instead of letting a tail call recurse, which
-is what keeps a tail loop in O(1) host frames. Every other reduction —
-non-tail calls, `if`/`case` arms, bind continuations — is host recursion, so
-depth is capped by `recursion_limit` (default 1024 frames) to fail cleanly
-before the Rust stack would overflow. *The evaluator is `core/src/evaluator/`
-alone* — `comp`, `expr`, `val`, `call`, `case`, `pattern`, `scope`,
-`trampoline`, `capture`, redirect frames, `audit`; the command / pipeline /
-transport plumbing it delegates to lives in `core/src/runtime/` and re-enters
-the evaluator only through three verbs
-([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
+The evaluator is one abstract machine, `core/src/evaluator/machine.rs`. Its
+state is a **focus** and a **stack**: `Machine { focus: Focus, stack:
+Vec<Frame> }`, stepped against the store `&mut Shell` and the run's
+`&Mooring`. Nothing else in the crate constructs a state or sees the stack;
+the module's two doors are `evaluate(closure, …)` — inject ⟨M, E⟩ over the
+empty stack and step until it is empty — and `apply(f, args, …)`, the same
+from a closed value meeting arguments. Both return `Settled<Value>`.
 
-**Planned:** a CEK-style machine — explicit closures, frames, and one `step`
-— replacing this tree-walker and its ambient scope is designed in
-`dev/docs/plans/260825_cek_machine.md`; nothing below this line describes
-that machine as built.
+**What is in focus is a closure.** `Closure { comp: Arc<Comp>, env: Env }`
+pairs a [[map/core/ir|computation]] with the environment its free variables
+read. `Focus::Eval(closure)` is a computation to step; `Focus::Return(t)` is a
+terminal meeting the frame above; `Focus::Halt(Break)` is a signal climbing
+the stack. A terminal has two shapes, `Terminal::Value(v)` and
+`Terminal::Lambda(closure)` — a λ is canonical at `A → C` and is never a
+value, so a `Lam` in focus returns as `Lambda` and the frame above decides:
+`Apply` consumes it by β, a computation-holed frame (`Redirect`, `Unmask`,
+`Within`, `Grant`, `Try`, `Chain`) passes it through, a value-holed frame
+(`To`, `Decode`, `Capture`, `Source`, `Guard`, `Cleanup`, `Audit`) halts with
+the bare-lambda error — unreachable for a checked program, since the checker
+η-expands every arrow-typed computation into a thunked λ (SPEC §17.8, S3).
 
-**Evaluation is entered only through the framed run door; the machine's own
-verbs are crate-private.** Two verbs reach outside the module:
+**One thunk value.** `Value::Thunk(Closure)` is a computation closure held
+as data; `force` of it puts the closure in focus and pushes nothing, so
+`force(thunk M) = M` and a forced block's `cd` persists exactly as a
+lambda's does ([[design/scoping|scoping]]). Whether a thunk "is a lambda" is
+read off the body's shape by `Comp::arrow`, never stored.
 
-- `eval_top_level` (`pub(crate)`) — the run-evaluation verb a tool call, a
-  REPL line, or a script line *settles through*. Hosts never call it: they
-  enter through the framed `Shell::run` door
-  ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]). It is a
-  *resume point*: the post-run `Mobile` is installed on the shell on **every**
-  outcome (Ok / Error / Exit), so `let`, `cd`, and env persist to the next run
-  ([[invariants/turn-ends-ready|exchange-ends-ready]]).
-- `evaluate` — a bare tail-absorbed run with no mobile contract, for callers
-  already inside a session (module load, prelude bootstrap, capability
-  profiles, REPL plugin / config loading). Wrapping these in a run boundary
-  would round-trip a mobile they never wanted snapshotted.
+**`step` is the tables.** `Machine::step` dispatches on the focus:
+`step_eval` has one match arm per `CompKind` (the ξ-rules: `Return` closes
+its value, `Bind` swaps stdout to the ambient sink and pushes `To`, `App`
+closes its arguments then pushes `Apply` and evaluates the head, `Rec`
+unfolds the n-ary group, `Exec` classifies the head through the lexical
+environment, `Pipeline` launches and pushes `Pipe`, the six handler forms
+close their operands, install, push their frame and force the body …);
+`step_return` and `step_halt` have one arm per `Frame` — the two columns of
+the frame table. No arm calls another arm; no arm loops. A rule that raises
+stamps the span of the node that pushed the frame.
 
-`apply` (`pub(crate)`) reduces a `Value` (closure or thunk) applied to
-arguments, absorbing tail signals through the trampoline. It is reached from
-outside the module only through `Shell::run`'s hook arm (`Program::Hook`) or
-the in-frame builtin wrapper (`crate::builtins::apply`), so a host cannot
-start an unframed reduction.
+**Frames hold environments, which is what makes extent structural.** `M to
+x. N` pushes `To { bind, env: E, prev_stdout }` *before* M runs; when M
+returns a value, `E[x ↦ v]` is built from the frame's own `E`, so `x`
+scopes over `N` and nothing else whatever M did. `Chain`, `Apply`, `Source`,
+`Try` and `Guard` likewise carry the `Env` they resume under. Frames hold
+`Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
+clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
+`Within(WithinUndo)` restores env overrides, dir and handlers, `Grant` pops
+the capability stack, `Unmask` restores the masked handler, `Try`/`Audit`
+close their trail scope. `Frame` is at most 128 bytes (asserted at compile
+time; `Redirect`, `Unmask`, `Pipe` and the `Env` of `Try`/`Guard` are boxed).
 
-**The run's frame is split by mutability.** What the run fixed — its `surface`
-sink, the `deferred` rail with its worker lease and cap, the `desk`, the
-`nursery`, the foreground `cancel` scope, and its terminal authority — is the
-`Mooring`, which lives on the run door's Rust stack frame and is only ever
-borrowed. Nothing saves or restores it, because nothing moved it: the stack
-does that work, and the `NurseryGuard` beside it empties the nursery on the
-unwinding path too. `&Mooring` and `&mut Shell` are disjoint borrows, so a body
-can surface an event while holding the shell mutably.
+**Tail calls push nothing.** β binds the parameter into the closure's
+environment and puts the body in focus; an `Apply` frame is pushed only when
+arguments remain (currying). So a call in tail position costs no frame, and
+depth is simply `stack.len()`. `reserve` is the cap — `session.stack_limit`,
+default 100 000 frames, the `--recursion-limit` knob — and every pushing rule
+calls it *before* any effect (sink swap, redirect entry, grant push), so a
+refused push leaks nothing; `push` itself cannot fail.
 
-**The `Shell` is partitioned into four regions by lifetime — the field name
-*is* the invariant** ([[decisions/260617_turn-local-state|turn-local-state]];
-[[map/core/shell-state|shell-state]]):
+**Recursion is `rec`, n-ary.** `Rec { group, index }` binds every member's
+name to the thunk of its own projection and runs the chosen member; a
+recursive reference forces its name, which re-enters `Rec` and re-extends
+from the outer environment. Bodies are never rewritten; a group of one is
+Levy's `rec f. M`. Cancellation is polled here and at `Bind`, `App`, `Exec`,
+`Source`, `Chain` advance and β, so `let f = { !f }; !f` is interruptible.
 
-- *Mobile* — the persistable computation state that crosses evaluation
-  boundaries and thread spawns: the lexical `scope` (`Env`), the `ControlState`
-  counters (`last_status`, `call_depth`, `recursion_limit`), and the dynamic
-  `Context` (cwd, env overlays, grants, handlers, args, modules). The public
-  embedding seam.
-- *Io* — the mutable residue of the run's frame: the pipeline-stage byte
-  streams, taken on loan by an `IoLoan` at install and restored on teardown
-  together with the two `Copy` registers the run owns for its life, the
-  root-source register `session.root_file` and the dispatch register
-  `local.audit.call_site`.
-- *SessionState* — what outlives every run's teardown: the durable cancel
-  `root` detached workers parent under, the `sources` registry rendered against
-  after a run returns, the `exit_hints` table, the host-installed `builtins`,
-  and the session's `terminal_lease`.
-- *LocalState* — host-local scratch with its own flow rules: the `Audit` tree
-  and REPL scratch; the residue once run and session state are named.
+**The environment is a map, and it is not the store.** `Env`
+(`core/src/types/env.rs`) is three tiers — the language natives, the frozen
+prelude, and a persistent `imbl::HashMap` of everything bound since. `bind`
+is an insert that disturbs no environment a closure captured; `clone` is
+O(1). The **store** is everything else on `Shell`: sinks, `$?`, the dynamic
+`Context` (grants, handlers, env overrides, cwd, args, modules, hooks), the
+trail, workers, leases. `Context` is read in O(1) by capability checks and
+command dispatch and changed only by frames holding their own undo; it is
+never part of a closure ([[map/core/shell-state|shell-state]]).
 
-Hot loops poll the mooring's `cancel` scope cooperatively, through
-`process::check(mooring, shell)`
-([[decisions/260504_hot-path-cancellation|hot-path-cancellation]]).
+**The top level is a sequence of phrases** (`core/src/evaluator.rs`,
+`run_phrases`). A `Toplevel` is `Phrase::{Define, Source, Run}`; each phrase
+is a closed computation over the session environment `shell.env`, and a
+`Define` extends that environment *for every phrase after it, in this run
+and every later one* — installed as it lands, so a `use` in the next phrase
+sees it, and a run that halts has installed exactly the `Define`s that ran.
+A block is a right-nested `Bind` chain, `a; b` being `a to _. b`, so a `let`
+inside a block scopes over the rest of the block by structure. `source` is
+a form: `Phrase::Source` at the top level, `CompKind::Source { path, rest }`
+in a block, its `Define`s scoping over `rest`; a file that halts halts its
+caller after the definitions before the halt are installed. `run_phrases`
+takes a `Mode` — `Session`, `Local`, `Module`, `Prelude` — which alone
+decides leases and the PATH-shadow check.
 
-**A same-thread thunk body runs *in* the caller's session, not a copy.**
-Forcing a block or applying a lambda is one β-step over one threaded store: the
-runtime evaluates the body on the live `Shell` through `Shell::with_thunk_body`,
-sharing run, session, and local state by identity — the mooring is the
-caller's own, lent onward — and swapping in only a `Mobile` rescoped to the
-closure's `captured` environment plus a fresh frame
-([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]).
+**Boundaries.** Three things start a fresh machine over the empty stack: a
+run-door phrase, a worker thread (`spawn`/`watch`/`service`), and a pipeline
+stage child (`child_eval`). A native that applies a user function — the
+collection combinators, hook dispatch, pattern defaults — runs a *nested*
+machine on the host stack through `machine::apply`; `NESTED_MACHINE_LIMIT`
+(set by `nested_machines_fit_a_worker_stack` against a 2 MiB thread) caps
+that nesting with a clean error. Natives that need the lexical environment
+(`help`, `explain`) receive it as a parameter.
 
-- The `ThunkBody` kind fixes the only two places block and lambda differ: a
-  *Block* enters with the caller's `last_status` and folds only `last_status`
-  back, discarding the body's `cd`; a *Lambda* enters with a fresh
-  `last_status`, binds its parameter in the pushed frame, and folds back
-  `{last_status, cwd}`.
-- The store the body inherits — cancel root, source registry, builtin table,
-  terminal lease, audit trail — is shared by *being* the same evaluation, never
-  re-attached field by field. Only a genuine runtime fork (a `spawn_thread`
-  worker, a cross-process pipeline helper, a REPL aside) copies `Context` into
-  a freshly-defaulted `SessionState`, and so correctly holds no terminal
-  authority by default.
+**Pipes are nodes between machines** ([[internals/pipeline-execution|pipeline
+execution]]). A multi-stage pipeline is a configuration: each stage is a
+machine over the empty stack in its own process, and the parent holds
+`Frame::Pipe(PipeNode)` — the process group, the running stages, the yield
+mode — which `join`s (collect, then finish) when its placeholder terminal
+meets it, so the pipeline's outcome climbs the parent's frames like any
+other and a halt in the join unwinds the same stack. What crosses to a stage
+is `WireShell { env, last_status, stack_limit, context }`: the bindings tier
+of one environment, interned by the identity of its root, seated under the
+receiver's own natives and prelude — the two constant tiers never cross —
+and **no frame ever crosses**: a stage's stack is empty by construction.
 
-**The trampoline gives tail calls O(1) space.** The evaluator emits a tail call
-as an internal `Control::Tail`; `apply` loops on it rather than recursing, so a
-tail call lands in the loop without a new host frame and does not count against
-the recursion cap (which raises a clean error before the Rust stack could
-overflow). The discipline is enforced *by the type system, not a runtime guard*:
-`Tail` / `TailCall` / `Control` / `Raw` are `pub(crate)`, so a tail call cannot
-cross a public boundary. Callers see `Settled<Value>` (`Result<T, Break>` — tail
-calls already absorbed); only the evaluator's interior sees `Raw<T>`
-(`Result<T, Control>`). The seam `absorb_tail` turns one into the other at every
-boundary. This is the
-[[decisions/260514_completion-escape-refactor|completion-escape refactor]].
+**Panics and cancellation.** `evaluate`/`apply` wrap the step loop in
+`catch_unwind`; on a panic every frame is `abandon`ed top-down — sinks
+restored, redirects torn down, trail scopes closed, undo applied — and the
+run door restores its checkpoint `(env, context, last_status)`, so a panic
+commits nothing. The depth counter is lowered on both paths.
 
-**Two exit channels.** `Break` is what `try` decides about — `Error` is
-catchable, `Escape` (process `Exit`, or a `Stopped` job) propagates uncatchably
-through delimited scopes. The earlier try-swallows-exit and grant tail-call
-bypass bugs are fixed and regression-tested
-([[decisions/260514_escape-propagation-bugs|escape-propagation-bugs]]).
-
-**Dynamic frames nest by their own algebras** ([[design/scoping|scoping]]):
-
-- `within` / `grant` guards push scope frames;
-- the capability stack meets ([[design/grant|grant]]);
-- the handler stack is deep and self-masking
-  ([[design/effects-handlers|effects-handlers]]).
-
-**The plumbing re-enters through a narrow seam.** The boundary verbs —
-`eval_top_level` for a top-level run, `eval_block` for a block — always
-evaluate their body in process; OS confinement is decided per-child, in
-`build_command` (`crate::runtime::command::process`). A byte pipeline reaches
-`runtime::pipeline::run_pipeline` ([[internals/pipeline-execution|pipeline
-execution]]). The runtime climbs *back* into the machine only through
-`call::invoke`, `eval_block`, and `absorb_tail` — a stage body carries closures,
-so the mutual recursion is irreducible and the seam makes it visible
-(`core/src/runtime.rs` names every edge).
-
-See also [[design/cbpv|cbpv]], [[design/pipelines|pipelines]]; code maps
-[[map/core/evaluator|evaluator]], [[map/core/shell-state|shell-state]],
-[[map/core/runtime|runtime]]. The formal account is `docs/SPEC.md` §17.8.
+See also [[design/cbpv|cbpv]], [[design/scoping|scoping]],
+[[design/control-operators|control-operators]],
+[[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]];
+code maps [[map/core/evaluator|evaluator]],
+[[map/core/shell-state|shell-state]], [[map/core/runtime|runtime]]. The
+formal account is `docs/SPEC.md` §17.8; the kernel in
+`dev/abstract-machines` is due to be rewritten as this machine.
