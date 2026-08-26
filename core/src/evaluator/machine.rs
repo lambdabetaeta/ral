@@ -550,6 +550,13 @@ impl Machine {
             CompKind::Chain(parts) => {
                 if parts.is_empty() {
                     Focus::Return(Terminal::Value(Value::Unit))
+                } else if parts.len() == 1 {
+                    // One arm, nothing to fall back to: a true tail position,
+                    // no frame to catch a failure and retry.
+                    Focus::Eval(Closure {
+                        comp: Arc::clone(&parts[0]),
+                        env,
+                    })
                 } else if let Err(b) = self.reserve(shell) {
                     Focus::Halt(b)
                 } else {
@@ -1128,7 +1135,11 @@ impl Machine {
                         if let Err(b) = crate::process::check(mooring) {
                             return Focus::Halt(b);
                         }
-                        self.push(Frame::Chain { node, next: next + 1, env: env.clone() });
+                        // The last arm has no further fallback, so it is a
+                        // true tail position: no frame to catch its failure.
+                        if next + 1 < parts.len() {
+                            self.push(Frame::Chain { node, next: next + 1, env: env.clone() });
+                        }
                         Focus::Eval(Closure { comp: part, env })
                     } else {
                         Focus::Halt(Break::Error(e))
