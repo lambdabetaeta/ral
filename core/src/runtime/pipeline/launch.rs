@@ -13,7 +13,7 @@ use super::route::{ByteIn, ByteOut, FinalValue, StageRoute, open_stage_routes};
 use super::stage::{HelperStageHandle, launch_helper_stage};
 use crate::child_eval::pack_request;
 use crate::io::Sink;
-use crate::types::{Break, Mooring, Settled, Shell};
+use crate::types::{Break, Env, Mooring, Settled, Shell};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -157,6 +157,10 @@ pub(super) fn spawn_into_group(
 struct LaunchCx<'a> {
     mooring: &'a Mooring,
     shell: &'a mut Shell,
+    /// The pipeline node's own lexical environment (§4 of the CEK plan) — a
+    /// helper stage's captured closure env, distinct from `shell.env` inside
+    /// a nested machine (a lambda body, say).
+    env: &'a Env,
     group: &'a mut PipelineGroup,
     park_on_stop: bool,
 }
@@ -201,7 +205,7 @@ fn spawn_stage(
             });
         }
         StageLaunch::HelperEval => {
-            let captured = Arc::new(cx.shell.env.clone());
+            let captured = Arc::new(cx.env.clone());
             // Only the final value-typed stage ships a return value home.
             let wants_value = matches!(route.final_value, FinalValue::Report);
             pack_request(
@@ -295,6 +299,7 @@ impl PipelineBuild {
         &mut self,
         stage: &Arc<crate::ir::Comp>,
         spec: &StageSpec,
+        env: &Env,
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<()> {
@@ -306,6 +311,7 @@ impl PipelineBuild {
         let cx = LaunchCx {
             mooring,
             shell,
+            env,
             group: &mut self.resources.group,
             park_on_stop: self.park_on_stop,
         };
@@ -397,12 +403,13 @@ fn spawn_all_stages(
     build: &mut PipelineBuild,
     stages: &[Arc<crate::ir::Comp>],
     plan: &PipelinePlan,
+    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
     for (ix, stage) in stages.iter().enumerate() {
         crate::process::check(mooring)?;
-        build.step(stage, &plan.specs[ix], mooring, shell)?;
+        build.step(stage, &plan.specs[ix], env, mooring, shell)?;
     }
     Ok(())
 }
@@ -412,12 +419,13 @@ fn spawn_all_stages(
 pub(super) fn launch_pipeline(
     stages: &[Arc<crate::ir::Comp>],
     plan: &PipelinePlan,
+    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Result<(PipelineGroup, RunningPipeline), Break> {
     let routes = open_stage_routes(plan)?.into();
     let mut build = PipelineBuild::new(plan, routes, shell)?;
-    match spawn_all_stages(&mut build, stages, plan, mooring, shell) {
+    match spawn_all_stages(&mut build, stages, plan, env, mooring, shell) {
         Ok(()) => build.finish(shell, mooring),
         Err(e) => {
             build.abort();

@@ -121,10 +121,10 @@ pub(crate) struct Machine {
 /// Nested `machine::evaluate`/`machine::apply` re-entry cap (§2.1, §4): a
 /// native such as `map` applying a user function runs a machine over the
 /// *host* stack, so this bounds how deep those nest rather than the
-/// machine's own frame count. 256 is the first value tried; W2g calibrates
-/// it against `nested_machines_fit_a_worker_stack`, which needs `map`
-/// routed through the machine.
-pub(crate) const NESTED_MACHINE_LIMIT: usize = 256;
+/// machine's own frame count. Calibrated by `nested_machines_fit_a_worker_stack`
+/// against a debug build's per-frame cost on a 2 MiB worker stack — 256 and
+/// 64 both overflowed before tripping the check; 24 leaves headroom.
+pub(crate) const NESTED_MACHINE_LIMIT: usize = 24;
 
 // ── Small pure helpers, named in §2.2/§2.3 ─────────────────────────────
 
@@ -608,8 +608,7 @@ impl Machine {
                         env,
                     })
                 } else {
-                    // W2g passes E; today's pipeline snapshots the shell's scope.
-                    match pipeline::run_pipeline(stages, *yields, mooring, shell) {
+                    match pipeline::run_pipeline(stages, *yields, &env, mooring, shell) {
                         Ok(v) => Focus::Return(Terminal::Value(v)),
                         Err(crate::types::Control::Break(b)) => Focus::Halt(b),
                         Err(crate::types::Control::Tail(_)) => {
@@ -1336,6 +1335,30 @@ pub(crate) fn apply(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut S
     )
 }
 
+/// `force v` on a value already in hand (a host door — the hook table's
+/// arity-0 entries — rather than a `CompKind::Force` node): `force(thunk M)
+/// = M`, run as its own machine; an arity-0 native runs; any other native
+/// stands as itself.  Unreachable on a `Thunk` whose body is a bare `Lam`
+/// for a checked program (S3 rules it out of a `Force` position), so this
+/// mirrors `Machine::force`'s rule without that unreachable arm's `Focus`
+/// plumbing.
+pub(crate) fn force(v: Value, env: &Env, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    match v {
+        Value::Thunk(c) => evaluate(c, mooring, shell),
+        Value::Native { entry, applied } if entry.fixed_arity() == 0 => {
+            let v = super::audit::run_native(&entry, &applied, env, mooring, shell)?;
+            set_status(&v, shell);
+            Ok(v)
+        }
+        native @ Value::Native { .. } => Ok(native),
+        other => Err(Break::Error(shell.err_hint(
+            format!("cannot force {}: ! requires a Block", other.type_name()),
+            "wrap in a block: !{ expr }",
+            1,
+        ))),
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1577,5 +1600,38 @@ mod tests {
             .cancel(crate::process::cancel::CancelCause::Explicit);
         let out = run_with("let f = { !$f }\n!$f", &mooring, &mut shell);
         assert!(out.is_err(), "a cancelled tight loop must halt rather than spin");
+    }
+
+    /// §2.1/§4: a native (`map`) applying a function that itself calls `map`
+    /// nests one host stack frame's worth of `machine::run` per level.  That
+    /// must fit the 2 MiB default stack a worker thread gets
+    /// (`Shell::spawn_thread`, `scope.rs:4-6`) up to `NESTED_MACHINE_LIMIT`,
+    /// and stop there with the depth-exceeded error rather than a raw
+    /// overflow — run on a fresh thread with no explicit stack size, so it
+    /// inherits the platform default rather than the test harness thread's.
+    #[test]
+    fn nested_machines_fit_a_worker_stack() {
+        let handle = std::thread::spawn(|| {
+            let mut shell = new_shell();
+            let out = run(
+                "let f = { |n| if $[$n <= 0] { return 0 } else { \
+                 let r = map $f [$[$n - 1]]; return $r[0] } }\n\
+                 f 100000",
+                &mut shell,
+            );
+            match out {
+                Err(Break::Error(e)) => {
+                    assert!(
+                        e.message.contains("native re-entry depth exceeded"),
+                        "expected the depth-exceeded error, got {:?}",
+                        e.message
+                    );
+                }
+                other => panic!("expected the native re-entry cap to fire, got {other:?}"),
+            }
+        });
+        handle
+            .join()
+            .expect("nested map re-entry must not overflow a worker's own stack");
     }
 }

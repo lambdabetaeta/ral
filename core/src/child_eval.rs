@@ -6,8 +6,7 @@
 //! audit fragment after eval rather than streaming it live, so no per-node
 //! frame loop exists.
 
-use crate::evaluator::absorb_tail;
-use crate::evaluator::call;
+use crate::evaluator::machine;
 use crate::io::TerminalState;
 use crate::ir::Comp;
 use crate::serial::{
@@ -16,8 +15,8 @@ use crate::serial::{
 use crate::source::{FileId, SourceDb, Span};
 use crate::subprocess::{WireMobile, bare_child_shell, install_shell_mobile};
 use crate::types::{
-    Break, CapturePolicy, Env, Error, Escape, Mooring, Observation, Settled, Shell, Status, Tail,
-    Value,
+    Break, CapturePolicy, Closure, Env, Error, Escape, Mooring, Observation, Settled, Shell,
+    Status, Value,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -54,8 +53,8 @@ pub(crate) struct ChildEvalRequest {
     pub scope_table: ScopeTable,
     pub body: Arc<Comp>,
     pub mobile: WireMobile,
-    /// Stage closure env: the child pushes a child scope and applies `body`
-    /// via [`call::invoke`].
+    /// Stage closure env: the child runs `body` as a closed machine over it
+    /// (`evaluator::machine::evaluate`).
     pub captured: Option<SerialEnvSnapshot>,
     /// An instruction to the child rather than snapshot state, hence its own
     /// field — see [`Audit::active_policy`](crate::types::Audit::active_policy).
@@ -117,8 +116,8 @@ pub(crate) fn pack_seed(shell: &Shell, grant: String) -> Settled<EngineSeed> {
 /// Structured body outcome returned by the child.
 ///
 /// `pgid` / `signal` cross as raw `i32` because `Pgid` / `Signal` derive no
-/// serde impls; [`decode_response`] rebuilds the newtypes.  [`Tail`] has no
-/// wire variant — the child's trampoline absorbs it before encoding.
+/// serde impls; [`decode_response`] rebuilds the newtypes.  No tail call has
+/// a wire variant — the child's machine settles fully before encoding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum WireOutcome {
     Ok(Option<SerialValue>),
@@ -255,8 +254,8 @@ pub(crate) fn pack_request(
 }
 
 /// One request evaluated in the child.  `result` is already settled: the
-/// local trampoline absorbed any terminal [`Tail`], which cannot cross a
-/// process boundary.
+/// machine has no tail call that could escape, so nothing crosses the
+/// process boundary but a value or a halt.
 struct EvalOutcome {
     result: Settled<Value>,
     audit_observations: Vec<Observation>,
@@ -307,13 +306,8 @@ fn eval_request(request: ChildEvalRequest, prelude: &crate::boot::BakedPrelude) 
         })?
         .into_runtime(&dec)?;
     let mut child = Shell::child_of(&captured, &mut shell);
-    // A tail call cannot cross the boundary — the parent's callee and args
-    // are meaningless in this address space — so settle it here.
-    let result = absorb_tail(
-        call::invoke(&body, Tail::No, &mooring, &mut child),
-        &mooring,
-        &mut child,
-    );
+    let closure = Closure { comp: body, env: captured };
+    let result = machine::evaluate(closure, &mooring, &mut child);
     // Before `return_to`, which would merge the fragment into the outer shell.
     let audit_observations = child.local.audit.take_fragment().into_observations();
     child.return_to(&mut shell);

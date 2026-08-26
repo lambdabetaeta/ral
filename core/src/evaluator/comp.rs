@@ -412,7 +412,8 @@ fn eval_pipeline(
     if stages.len() == 1 {
         return eval_comp(&stages[0], mooring, shell, tail);
     }
-    pipeline::run_pipeline(stages, yields, mooring, shell)
+    let env = shell.env.clone();
+    pipeline::run_pipeline(stages, yields, &env, mooring, shell)
 }
 
 /// `a ? b ? c` — the first arm to succeed wins, else the last error (`Unit`

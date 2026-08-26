@@ -11,14 +11,14 @@
 
 use crate::evaluator::absorb_tail;
 use crate::evaluator::audit::observe;
-use crate::evaluator::comp::{eval_comp, with_scope};
+use crate::evaluator::machine;
 use crate::evaluator::scope::error_record;
 use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::serial::FOValue;
 use crate::types::{
-    Break, CapReached, CompletedHandle, DeferredSink, Env, Error, Escape, EventSink, HandleInner,
-    HandleState, LeaseClass, Mooring, Observed, Raw, ReapCause, Settled, Shell, SurfaceBuffer,
-    Tail, Value, WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
+    Break, CapReached, Closure, CompletedHandle, DeferredSink, Env, Error, Escape, EventSink,
+    HandleInner, HandleState, LeaseClass, Mooring, Observed, Raw, ReapCause, Settled, Shell,
+    SurfaceBuffer, Value, WorkerEntry, WorkerId, WorkerLease, WorkerRegistry, sig,
 };
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
@@ -348,11 +348,19 @@ fn lease_fire(chain: &LeaseChain) {
 // ── spawn ────────────────────────────────────────────────────────────────
 
 /// The worker body handed to [`spawn_child`]: the whole computation of a fresh
-/// thread, so it runs at [`Tail::Yes`] and `spawn_child` absorbs its tail call.
+/// thread, run as its own closed machine over the thunk's own closure — the
+/// worker `Shell`'s `env` is already the thunk's captured environment, seeded
+/// by `Shell::spawn_thread`.
 fn worker_body(
     body: Arc<crate::ir::Comp>,
 ) -> impl FnOnce(&Mooring, &mut Shell) -> Raw<Value> + Send + 'static {
-    move |mooring, child_env| with_scope(child_env, |s| eval_comp(&body, mooring, s, Tail::Yes))
+    move |mooring, child_env| {
+        let closure = Closure {
+            comp: body,
+            env: child_env.env.clone(),
+        };
+        machine::evaluate(closure, mooring, child_env).map_err(Into::into)
+    }
 }
 
 /// `spawn <thunk>` -- spawn a concurrent block on a worker thread, return a handle.

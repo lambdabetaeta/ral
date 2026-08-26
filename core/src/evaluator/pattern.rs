@@ -4,10 +4,10 @@
 //! pattern that fails partway — `let [[p],[q,r]] = [[1],[2]]` — leaves the
 //! environment it was given untouched.
 
-use super::comp::eval_comp;
 use crate::ir::IrPattern;
 use crate::typecheck::Scheme;
-use crate::types::{Binding, Control, Env, Mooring, Raw, Settled, Shell, Tail, Value};
+use crate::types::{Binding, Closure, Control, Env, Mooring, Raw, Settled, Shell, Value};
+use std::sync::Arc;
 
 /// Refuse every name a `let` pattern binds that would shadow a PATH command.
 /// `run_phrases`'s `Define` arm alone calls this, under `Mode::Session`: a
@@ -95,7 +95,7 @@ pub(crate) fn bind_pattern(
     shell: &mut Shell,
 ) -> Settled<Env> {
     let mut staged = Vec::new();
-    stage_pattern(pattern, value, schemes, mooring, shell, &mut staged).map_err(
+    stage_pattern(pattern, value, schemes, &env, mooring, shell, &mut staged).map_err(
         |control| match control {
             Control::Break(b) => b,
             Control::Tail(_) => unreachable!("pattern staging never applies a tail call"),
@@ -119,6 +119,7 @@ fn stage_pattern(
     pattern: &IrPattern,
     value: &Value,
     schemes: &[(String, Scheme)],
+    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
     staged: &mut Vec<(String, Binding)>,
@@ -176,7 +177,7 @@ fn stage_pattern(
                     .into());
             }
             for (i, pat) in elems.iter().enumerate() {
-                stage_pattern(pat, &items[i], schemes, mooring, shell, staged)?;
+                stage_pattern(pat, &items[i], schemes, env, mooring, shell, staged)?;
             }
             if let Some(name) = rest {
                 // `imbl::Vector` splits in O(log n) by sharing structure: no element clones.
@@ -206,10 +207,15 @@ fn stage_pattern(
                 let key_label = entry.key.row_label();
                 let val = match (m.get(&key_label), &entry.default) {
                     (Some(v), _) => v.clone(),
-                    // A default's value is bound, never returned, so it is
-                    // never in tail position.
+                    // A default runs as its own closed machine, over the
+                    // environment at the pattern's binding site — never in
+                    // tail position, since its value is bound, not returned.
                     (None, Some(default_comp)) => {
-                        eval_comp(default_comp, mooring, shell, Tail::No)?
+                        let closure = Closure {
+                            comp: Arc::clone(default_comp),
+                            env: env.clone(),
+                        };
+                        crate::evaluator::machine::evaluate(closure, mooring, shell)?
                     }
                     (None, None) => {
                         let ks: Vec<&str> = m.keys().map(std::string::String::as_str).collect();
@@ -222,7 +228,7 @@ fn stage_pattern(
                             .into());
                     }
                 };
-                stage_pattern(&entry.pattern, &val, schemes, mooring, shell, staged)?;
+                stage_pattern(&entry.pattern, &val, schemes, env, mooring, shell, staged)?;
             }
             Ok(())
         }

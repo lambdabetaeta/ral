@@ -14,7 +14,7 @@ mod route;
 mod stage;
 
 use crate::ir::{Comp, PipeYield};
-use crate::types::{Error, Mooring, Raw, Shell, Value};
+use crate::types::{Env, Error, Mooring, Raw, Shell, Value};
 use std::sync::Arc;
 
 use launch::launch_pipeline;
@@ -25,9 +25,15 @@ use resolve::resolve_pipeline;
 /// Every multi-stage pipeline is process-staged.  The final helper reports
 /// its value over the response frame when the form yields it.  No stage runs
 /// in the parent, so none can be granted tail position.
+///
+/// `env` is the pipeline node's own lexical environment — the machine's `E`
+/// in focus, not necessarily `shell.env` (a nested machine, inside a lambda
+/// body say, runs under its own frame env) — and is what a helper stage's
+/// closure captures.
 pub(crate) fn run_pipeline(
     stages: &[Arc<Comp>],
     yields: PipeYield,
+    env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
@@ -44,7 +50,7 @@ pub(crate) fn run_pipeline(
 
     // `_group` keeps the anchor, foreground guard, and SIGINT relay alive to
     // end of scope, so they outlive `finish`.
-    let (_group, running) = launch_pipeline(stages, &plan, mooring, shell)?;
+    let (_group, running) = launch_pipeline(stages, &plan, env, mooring, shell)?;
 
     // The last helper carries its value home in its `ChildEvalResponse`
     // frame; collect reads it only after waiting on the helper, since one
