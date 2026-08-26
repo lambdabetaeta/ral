@@ -364,7 +364,7 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
     let source = read_and_normalize(abs_path.as_ref(), &abs_path, "use", shell)?;
     let top = compile_toplevel(&source, &abs_path, shell).map_err(|e| tag_loader_error("use", e))?;
 
-    shell.mobile.scope.push_scope();
+    let saved = shell.mobile.scope.clone();
     let env = shell.mobile.scope.clone();
     let load = ModuleLoad {
         top: &top,
@@ -373,7 +373,7 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         span: None,
     };
     let ran = source_phrases(load, env, Mode::Module, mooring, shell);
-    shell.mobile.scope.pop_scope();
+    shell.mobile.scope = saved;
 
     let ran = ran.map_err(|e| tag_loader_error("use", e))?;
     ran.outcome

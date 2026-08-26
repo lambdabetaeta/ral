@@ -165,9 +165,7 @@ impl Shell {
         let scheme = arm.map(|(param, body)| {
             crate::typecheck::binding_value_scheme(param, body, self.session_schemes())
         });
-        self.mobile
-            .scope
-            .set_binding(name, Binding { value, scheme });
+        self.mobile.scope.bind(name, Binding { value, scheme });
     }
 
     /// Bind `name` → `value` as a plain scope variable, inferring no scheme.
@@ -177,7 +175,7 @@ impl Shell {
     /// stay distinct to hold the line an rc draws between its typed
     /// `bindings:` and its untyped `env:` / `prompt:` keys.
     pub fn set_var(&mut self, name: String, value: Value) {
-        self.mobile.scope.set(name, value);
+        self.mobile.scope.bind(name, Binding { value, scheme: None });
     }
 
     /// The evaluator's single install point for a scope entry.  Lease
@@ -186,7 +184,7 @@ impl Shell {
     /// `Bind`'s pattern is a local lexical name, never a session write, so
     /// it installs unleased here.
     pub(crate) fn install_scope_binding(&mut self, name: String, binding: Binding) {
-        self.mobile.scope.set_binding(name, binding);
+        self.mobile.scope.bind(name, binding);
     }
 
     /// Record a `Phrase::Define`'s binding on the lease ledger: starts a
@@ -254,9 +252,9 @@ impl Shell {
     /// cycle and depth guards and the source registration; this owns only the
     /// scope frame.
     pub fn in_fresh_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        self.mobile.scope.push_scope();
+        let saved = self.mobile.scope.clone();
         let r = f(self);
-        self.mobile.scope.pop_scope();
+        self.mobile.scope = saved;
         r
     }
 

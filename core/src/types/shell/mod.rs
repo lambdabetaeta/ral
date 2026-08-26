@@ -575,10 +575,7 @@ mod tests {
     #[test]
     fn nursery_round_trips_a_forked_session() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        shell
-            .mobile
-            .scope
-            .set("parent_binding".to_string(), Value::Int(42));
+        shell.set_var("parent_binding".to_string(), Value::Int(42));
         let nursery = Nursery::default();
         let mooring = Mooring {
             fork: Some(Fork::Park(nursery.clone())),

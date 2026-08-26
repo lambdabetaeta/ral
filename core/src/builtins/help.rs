@@ -230,14 +230,14 @@ fn documented(name: &str, site: Option<&Where>, shell: &Shell) -> (Option<String
     let library_doc = || shell.session.library_docs.get(name).cloned();
 
     if matches!(site, Some(Where::Local)) {
-        return (library_doc(), scheme_of(scope.get_local_binding(name)));
+        return (library_doc(), scheme_of(scope.session_binding(name)));
     }
     shell
         .lookup_builtin(name)
         .map(|entry| (Some(entry.doc.to_owned()), manifest()))
         .or_else(|| {
             prelude_doc(name).map(|doc| {
-                let ty = scheme_of(scope.get_prelude_binding(name)).or_else(manifest);
+                let ty = scheme_of(scope.prelude_binding(name)).or_else(manifest);
                 (Some(doc.to_owned()), ty)
             })
         })
@@ -318,10 +318,10 @@ impl fmt::Display for Where {
 fn locate_all(name: &str, shell: &Shell) -> Vec<Where> {
     let scope = &shell.mobile.scope;
     let mut sites = Vec::new();
-    if scope.get_local(name).is_some() {
+    if scope.session_binding(name).is_some() {
         sites.push(Where::Local);
     }
-    if scope.get_prelude(name).is_some() {
+    if scope.prelude_binding(name).is_some() {
         sites.push(Where::Prelude);
     }
     // An alias is a handler frame too, so it must be named before the stack

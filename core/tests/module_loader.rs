@@ -390,7 +390,6 @@ fn a_sourced_failure_keeps_the_defines_before_it() {
 /// returns exactly the names the module's own `Define`s bound, minus the
 /// `_`-prefixed ones (S7).
 #[test]
-#[ignore = "W2a: use runs under the session environment"]
 fn use_sees_earlier_session_defines_and_returns_only_defined_names() {
     let path = write_module(
         "ral_use_defines.ral",

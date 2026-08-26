@@ -477,8 +477,8 @@ pub(crate) fn note_abandoned_steps(control: Control) -> Control {
 /// selected `if` branch, each `?`-chain arm, the letrec fixpoint frame, and
 /// the thread workers in `builtins::concurrency`.
 pub(crate) fn with_scope<T>(shell: &mut Shell, f: impl FnOnce(&mut Shell) -> T) -> T {
-    shell.mobile.scope.push_scope();
+    let saved = shell.mobile.scope.clone();
     let r = f(shell);
-    shell.mobile.scope.pop_scope();
+    shell.mobile.scope = saved;
     r
 }

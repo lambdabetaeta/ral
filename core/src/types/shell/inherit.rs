@@ -86,7 +86,6 @@ impl Shell {
     ) -> R {
         let mut mobile = self.mobile.clone();
         mobile.scope = captured.clone();
-        mobile.scope.push_scope();
         if matches!(kind, ThunkBody::Lambda) {
             mobile.control.last_status = ControlState::default().last_status;
         }

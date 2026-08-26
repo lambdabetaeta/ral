@@ -374,8 +374,8 @@ impl Shell {
                 }
             }
         }
-        let top_scope_names: Vec<String> = self.mobile.scope.top_scope().keys().cloned().collect();
-        for name in top_scope_names {
+        let session_names: Vec<String> = self.mobile.scope.session_names().map(str::to_string).collect();
+        for name in session_names {
             self.local.bindings.adopt(&name);
         }
         notices
