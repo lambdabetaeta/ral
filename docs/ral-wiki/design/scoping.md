@@ -38,22 +38,32 @@ The lexical scoping above is one mechanism; *crossing a shell boundary* is a
 different one, and they should not be conflated.
 
 - **Lexical scope within a shell** is the `Env` type (`core/src/types/env.rs`):
-  a stack of name→`Binding` scopes, innermost last, with the prelude at index 0
-  and locals `push_scope`d / `pop_scope`d above it. Lookup walks innermost-first,
-  so the inner binding wins. The stack is an `imbl::Vector<Arc<HashMap<…>>>`
-  rather than a `Vec`, so a closure captures its defining environment by *cloning*
-  the `Env` — an O(1) refcount bump on the structurally-shared chain, not an
-  allocation per scope. This is the hot path for recursion.
+  three tiers checked in order — natives, the frozen prelude, and a persistent
+  `imbl` map of everything bound since. `bind` is an insert into the session
+  tier that disturbs no environment a closure already captured, so extent is
+  structural rather than a pushed-and-popped frame: `M to x. N` closes `N` over
+  the environment the `To` frame carries, extended with `x`, and nothing else
+  whatever `M` did along the way. Cloning an `Env` is O(1) — the persistent
+  map's root is shared, not copied — which is the hot path for recursion and
+  for every closure capture.
 - **Fork inheritance** is [[map/core/shell-state|the flow matrix]] in
   `inherit.rs`: when a genuine runtime fork (a `spawn` worker, a pipeline stage,
   a REPL aside, a sub-agent session) needs the parent's lexical environment, it
   clones the *whole* `Env` into the new shell, alongside the rest of the
   parent→child manifest (builtin table, dynamic context, cancel root).
 
-A same-thread β-step bridges the two: `with_thunk_body` sets the body's
-`mobile.scope` to the closure's captured `Env` and `push_scope`s a fresh frame —
-lexical-scope machinery — while sharing the surrounding shell store *by identity*
-rather than forking it ([[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]).
+A same-thread β-step bridges the two: applying a thunk puts its closure's
+`Env` in focus directly — `force(thunk M) = M` pushes nothing — while the
+store (`Shell` minus its lexical scope) is shared by identity rather than
+forked. A block and a lambda are told apart only by the body's shape
+(`Comp::arrow`), never by how force treats them: an unbracketed store write in
+either body — `cd`, `alias`, a hook registration — persists past the force: a
+plain block is not a boundary for the store. `within [dir:]` / `within
+[handlers:]` are the scoped forms
+([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]],
+superseding
+[[decisions/260620_same-thread-body-shares-the-session|same-thread-body-shares-the-session]]
+as a description of the mechanism).
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (dynamic scope is for the authority over effects), [[design/cbpv|cbpv]], [[design/control-operators|control-operators]].
 

@@ -198,8 +198,8 @@ decode (capture M)
 **`capture` is total and exact.** `capture M : F[Value] Bytes` runs `M` with its
 stdout captured and returns precisely the bytes the handler collected — nothing
 stripped, nothing decoded, nothing that can fail which `M` would not
-(`CompKind::Capture` in `core/src/ir.rs`, evaluated by `eval_capture` in
-`core/src/evaluator/comp.rs`). Its one further clause is handler semantics
+(`CompKind::Capture` in `core/src/ir.rs`, stepped by the `Frame::Capture` rules
+in `core/src/evaluator/machine.rs`). Its one further clause is handler semantics
 rather than decoding, so it stays in the node: bytes `M` wrote before failing
 are flushed to the nearest visible stream rather than lost
 ([[design/capture|capture]]).
@@ -207,7 +207,7 @@ are flushed to the nearest visible stream rather than lost
 **`decode : F[Value] Bytes → F[Value] String` owns everything lossy.** One
 trailing terminator goes, and the rest must decode as strict UTF-8 or the step
 fails, naming `| from-bytes` as the way to keep output that is not text. It is
-its own node (`CompKind::Decode`, evaluated by `eval_decode`) rather than a step
+its own node (`CompKind::Decode`, stepped by `Frame::Decode`) rather than a step
 folded into `capture`, so every partial or lossy step on the way from bytes to
 `String` is syntax the operational semantics reads.
 

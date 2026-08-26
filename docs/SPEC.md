@@ -164,14 +164,18 @@ At the session level, completed changes remain available to the next run. This
 includes bindings and the shell's current directory. Changes made before a
 top-level failure remain too.
 
-A block is a boundary. Bindings, directory changes, module loads, and similar
-shell-state changes made inside it do not escape when it returns. The block's
-value, output, failure, and recorded observations can cross the boundary.
+A block is a boundary for bindings: a `let` made inside it does not escape
+when it returns, and neither does anything else lexical — the block's value,
+output, failure, and recorded observations are what crosses. A directory
+change, a module load, or any other unbracketed shell-state write made inside
+a block persists past it exactly as it would outside one; a block is not a
+boundary for the shell's state.
 
-Some settings follow calls instead of being captured by blocks. `within`
-temporarily changes the directory, environment, or command handlers. `grant`
-temporarily reduces authority. Code called inside either scope sees that scope,
-even if the code was defined elsewhere.
+`within` and `grant` are the scoped forms: `within` temporarily changes the
+directory, environment, or command handlers for its body's whole extent, and
+`grant` temporarily reduces authority the same way. Code called inside either
+scope sees that scope, even if the code was defined elsewhere, and the change
+is undone when the scope returns.
 
 ### 2.7. One complete example
 
@@ -2077,7 +2081,11 @@ source 'shared/settings.ral'
 echo $project_name
 ```
 
-Bindings created by the file, including names beginning with `_`, become caller bindings. `source` returns the file’s final value.
+Bindings created by the file, including names beginning with `_`, become caller
+bindings, installed as each is reached. `source`’s own value is `()`: it is a
+definition form, not an expression that returns the file’s last value. If the
+file halts, the halt propagates to the caller, after the definitions that
+preceded it have already been installed.
 
 A relative path inside a script or module is resolved from the directory containing that file. A relative path at the REPL or in source with no file identity is resolved from `$CWD`.
 
@@ -3629,7 +3637,7 @@ The recognized fields are:
 | `edit_mode: String` | `emacs` or `vi`; default `emacs`. |
 | `bell: Bool` | Enable or disable the audible line-editor bell; default `false`. |
 | `surface: String` | `minimal`, `readline`, or `structural`; default `readline`. |
-| `recursion_limit: Int` | A positive function-call recursion limit; default `1024`. |
+| `recursion_limit: Int` | A positive function-call recursion limit; default `100_000`. |
 | `plugins: List` | Plugins to load before the first prompt; see below. |
 | `startup: Block` | A zero-argument block run once after the map is applied. |
 | `theme: Map` | `value_prefix: String` and `value_color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
@@ -4601,46 +4609,93 @@ runtime decoding.
 
 ### 17.8. Operational outcomes
 
-Evaluation is big-step here only as a compact presentation. The implementation
-uses an evaluator plus a tail-call trampoline. Write:
+Evaluation is a small-step machine, presented here at the level the rest of
+this section uses; the implementation is exactly this shape, one Rust match
+arm per rule. A state is a **focus** over a **stack** of frames, stepped
+against a store:
 
 ```text
-<M, Σ, κ> ⇓ <R, Σ', κ'>
-
-R ::= value v | error e | escape q
-q ::= exit n | stopped job | tail call
+⟨M, Γ⟩ / κ, Σ  ⟶  ⟨N, Γ'⟩ / κ', Σ'
+R / κ, Σ                          (κ nonempty: meets its top frame next step)
+X / κ, Σ                          (climbs to the first frame whose rule catches it)
 ```
 
-`Σ` contains lexical bindings, session state, current directory, environment,
-handlers, capabilities, status, and audit state. `κ` contains the current byte
-endpoints and cancellation scope. Ordinary errors are recoverable; escapes are
-a separate control channel.
+- The focus is either a **closure** ⟨M, Γ⟩ — a computation paired with the
+  environment its free variables read — a **terminal** `R` meeting the frame
+  atop `κ`, or a **break** `X` climbing past it.
+- `κ` is a stack of **frames**, one per enclosing `to`, application, or scope
+  form still open; a frame carries the environment it resumes under, `Γ`, so a
+  binder's extent is exactly the frame pushed for it and nothing wider.
+  Applying a thunk puts its closure in focus directly, in place, and pushes no
+  frame — `force(thunk M) = M` — so a tail call costs no stack: depth is
+  `|κ|`, and a call in tail position leaves it unchanged.
+- `Σ` is everything not lexical: current directory, environment overrides,
+  handlers, capabilities, status, and audit state. Lexical bindings live in
+  `Γ`, never in `Σ`.
+- `R` has two shapes, `value v` or `lambda ⟨M, Γ⟩` — a λ-closure standing for
+  an unapplied function, since `lambda p.M` is never a value (§17.2). Only an
+  `Apply` frame consumes a `lambda` by β; every other frame's hole wants a
+  value, and meeting a `lambda` there is a case the checker excludes by
+  η-expanding every arrow-typed computation into a thunked λ.
+- `X` has two shapes, `error e` and `escape q` (`q ::= exit n | stopped job`).
+  A break climbs `κ` past every frame whose rule does not catch it, each
+  frame's own rule running once on the way up to close what it opened — a
+  redirect settled, a handler frame popped, an audit scope closed. `try` and
+  `?` are among the few frames an ordinary error does not climb past; nothing
+  catches an escape but the run boundary itself.
 
 The central rules are:
 
 ```text
-<return v, Σ, κ> ⇓ <value v, Σ, κ>
+⟨return v, Γ⟩ / κ, Σ  ⟶  value v / κ, Σ
 
-<M, Σ, κ> ⇓ <value v, Σ1, κ1>
-<N[v/p], Σ1, κ1> ⇓ R
--------------------------------- Bind
-<M to p.N, Σ, κ> ⇓ R
+⟨M to p.N, Γ⟩ / κ, Σ  ⟶  ⟨M, Γ⟩ / (to p.N, Γ) :: κ, Σ      To-push
+value v / (to p.N, Γ) :: κ, Σ  ⟶  ⟨N, Γ[p ↦ v]⟩ / κ, Σ      To-return
 
-<M, Σ, κ> ⇓ error e
--------------------------------- Propagate
-<M ; N, Σ, κ> ⇓ error e
+value v / (·;N, Γ) :: κ, Σ  ⟶  ⟨N, Γ⟩ / κ, Σ
+error e / (·;N, Γ) :: κ, Σ  ⟶  error e / κ, Σ                Propagate
 ```
 
-Sequences evaluate left to right, stop on the first error or escape, and
-return the final value. `if` evaluates its Boolean condition and only the
-selected branch, in a fresh lexical scope. `case` evaluates the scrutinee,
-selects the arm carrying its tag, binds the payload — `()` for a nullary tag
-— to that arm's pattern in a fresh lexical scope, and runs that arm's body
-there. The body is a branch and not an applied function: it runs in the
-`case`'s own tail position and in the ambient shell context, so a tail call in
-an arm escapes as it would from an `if` body, the recorded status enters the
-arm as the scrutinee left it, and the arm's own effects on the shell outlive
-the `case`.
+`M to p.N` pushes its frame *before* `M` runs, carrying the environment `N`
+resumes under; `p ↦ v` is built from that frame's own `Γ` when `M` returns, so
+`p` scopes over `N` alone. A sequence `M;N` is `M to _.N`: it evaluates left
+to right, stops on the first error or escape, and its value is its last
+statement's. `if` evaluates its Boolean condition and only the selected
+branch, closed over the same `Γ`. `case` evaluates the scrutinee, selects the
+arm carrying its tag, and runs that arm's body closed over `Γ[p ↦ payload]` —
+`()` for a nullary tag. The body is a branch and not an applied function: it
+runs in the `case`'s own tail position and in the ambient shell context, so a
+tail call in an arm costs no frame just as one in an `if` body does not, the
+recorded status enters the arm as the scrutinee left it, and the arm's own
+effects on the shell outlive the `case`.
+
+Recursion is one frame form, `Rec`, n-ary: `letrec {xi = vi}` binds every
+group member's name to the thunk of its own projection and puts the chosen
+member in focus; a recursive reference forces its name, which re-enters `Rec`
+and re-extends from the outer `Γ`. No body is ever rewritten; a group of one
+is Levy's `rec f. M`.
+
+A `Define` at the top level — `let x = v` outside any block — extends the
+*session* environment, not a frame's: it is installed as it is reached, so a
+later top-level phrase, or a `use` inside one, sees it, and a run that halts
+has installed exactly the `Define`s that ran before the halt. `source` is
+this same form read from a file: its own value is `()`, and its `Define`s
+scope over whatever follows it, in the file or, at the top level, in the
+caller (§10.3).
+
+The stack is capped: a rule that would push a frame first checks `|κ| <
+stack_limit` (`session.stack_limit`, default 100 000, the `--recursion-limit` /
+rc `recursion_limit:` knob) and raises rather than pushing, *before* any
+effect the frame would hold undo for — a sink swap, a redirect's file open, a
+capability push — so a refused push commits nothing.
+
+A multi-stage pipeline is a configuration, not a sub-evaluation: each stage is
+this same machine started fresh, over the empty stack, in its own process; the
+parent holds one frame, `Pipe`, standing for the running group, whose rule
+joins the stages' outcomes and returns them to the parent's own `κ` like any
+other frame's terminal. No frame ever crosses a stage boundary — bytes cross
+by the wiring of §7.1, and the bindings a stage's `Γ` starts from cross the
+same way, as store rather than continuation.
 
 For `M ? N`, a value from `M` wins; an ordinary error from `M` evaluates `N`;
 an escape from `M` propagates. A longer chain repeats this rule and reports the

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: be7c59e3
+generated_at_commit: 7155c76f
 generated_at_date: 2026-08-26
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs]
 ---
@@ -113,17 +113,23 @@ silently treated as handle-free or dependency-free:
 - `value_carries_handle` — the handle-sanitiser;
 - `collect_scope_deps` — the dependency collector.
 
-## Mobile envelope — `core/src/subprocess.rs`
+## The mirrored shell state — `core/src/subprocess.rs`
 
 `serial.rs` owns value and closure transport; this module owns the surrounding
-*mobile envelope* — the wire mirror of the `env`/`last_status`/`context`
-fields that cross an evaluation boundary ([[map/core/shell-state|shell-state]]).
-Each `Wire*` type mirrors one subtree of the runtime tree and its conversions
+envelope — the wire mirror of the `env`/`last_status`/`context` fields that
+cross an evaluation boundary ([[map/core/shell-state|shell-state]]). No frame
+ever crosses: a stage's [[internals/evaluator-machine|machine]] starts over
+the empty stack, so what rides the wire is store, never continuation. Each
+`Wire*` type mirrors one subtree of the runtime tree and its conversions
 compose strictly (a parent's `from_X` calls its children's, never reaching
 past them):
 
 - `WireShell { env, last_status, stack_limit, context: WireContext }` — the
-  top, a serialisable mirror of a shell's mobile state;
+  top, a serialisable mirror of a shell's mobile state. `env`'s wire row is
+  only the bindings tier of one [[design/scoping|`Env`]] — the persistent map
+  of everything bound since the prelude — interned by the identity of its
+  root; the receiving side seats it under the receiver's own `natives` and
+  `prelude`, so the two constant tiers never cross the wire at all;
 - `WireContext` — the [`Context`] mirror (`env_overrides`, `dir`/`cwd`,
   `grants`, `handlers`, `args`, `modules`); `hooks` is dropped outright and
   the receiver starts with an empty table;

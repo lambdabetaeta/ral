@@ -81,10 +81,11 @@ resolves ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
 worker from growing without end ([[internals/output-capture-and-detachment|output-capture-and-detachment]]).
 Past the cap it appends a truncation marker and drops the rest — bytes the
 program could not tell from the command's own. So a capture that reaches the
-cap *fails*: `eval_capture` reads the buffer's overflow flag once every writer
-has joined, and refuses rather than bind a prefix. Nothing on the write path
-can raise it — a pump hands back `()` from its own thread — which is why the
-flag rides on the buffer and is read where the bytes become a value.
+cap *fails*: the `Frame::Capture` return rule reads the buffer's overflow flag
+once every writer has joined, and refuses rather than bind a prefix. Nothing on
+the write path can raise it — a pump hands back `()` from its own thread —
+which is why the flag rides on the buffer and is read where the bytes become a
+value.
 
 Nothing is destroyed by the refusal. It is a failure like any other, so the
 prefix takes the road the next clause describes — out to the visible stream —
