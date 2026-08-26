@@ -90,6 +90,20 @@ pub(crate) fn bind_pattern_staged(
     shell: &mut Shell,
     mut observe: impl FnMut(&str, &Binding, &mut Shell),
 ) -> Settled<Env> {
+    // A bare Name can't partially fail, so it skips the staging Vec entirely.
+    if let IrPattern::Name(name) = pattern {
+        debug_assert!(
+            crate::syntax::ast::WordLiteral::classify(name).is_none(),
+            "parser guarantees a binding name is never a word literal",
+        );
+        let binding = Binding {
+            value: value.clone(),
+            scheme: scheme_for(schemes, name).cloned(),
+        };
+        observe(name, &binding, shell);
+        env.bind(name.clone(), binding);
+        return Ok(env);
+    }
     let mut staged = Vec::new();
     stage_pattern(pattern, value, schemes, &env, mooring, shell, &mut staged)?;
     for (name, binding) in staged {
