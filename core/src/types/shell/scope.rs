@@ -112,10 +112,23 @@ impl Shell {
     /// Run `f` with `cwd` as the ambient working directory — the
     /// `within [dir: …]` pair.
     pub fn with_cwd<R>(&mut self, cwd: std::path::PathBuf, f: impl FnOnce(&mut Self) -> R) -> R {
-        let saved = self.mobile.context.dir.replace(cwd);
+        let saved = self.swap_cwd_override(cwd);
         let result = f(self);
-        self.mobile.context.dir = saved;
+        self.restore_cwd_override(saved);
         result
+    }
+
+    /// Install `cwd` as the `within [dir: …]` override, returning the value
+    /// it displaces.  `dir` is private to this module, so `WithinUndo`
+    /// (`evaluator::scope`) reaches it through this pair rather than the
+    /// field directly.
+    pub(crate) fn swap_cwd_override(&mut self, cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
+        self.mobile.context.dir.replace(cwd)
+    }
+
+    /// Restore a `within [dir: …]` override saved by [`Self::swap_cwd_override`].
+    pub(crate) fn restore_cwd_override(&mut self, saved: Option<std::path::PathBuf>) {
+        self.mobile.context.dir = saved;
     }
 
     /// Run `f` with a handler frame pushed for its dynamic extent — the

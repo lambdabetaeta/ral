@@ -7,8 +7,9 @@
 
 use crate::ir::Val;
 use crate::types::{
-    BodyResult, Break, CapturePolicy, HandlerEntry, HandlerRole, Map, Mooring, Observation,
-    Observed, Raw, Settled, Shell, Value, as_map, sig, tree_value, validate_handler_arity,
+    BodyResult, Break, CapturePolicy, Env, EnvVars, FrameHandle, HandlerEntry, HandlerRole, Map,
+    Mooring, Observation, Observed, Raw, Settled, Shell, Value, as_map, sig, tree_value,
+    validate_handler_arity,
 };
 
 use crate::evaluator::val::close;
@@ -94,7 +95,10 @@ pub(crate) struct WithinScope {
 }
 
 impl WithinScope {
-    pub(crate) fn parse(opts: &Map, shell: &mut Shell) -> Settled<Self> {
+    /// `shell` resolves and permission-checks `dir:`; handler validation
+    /// reads its schemes off `env`, the lexical environment the `within`
+    /// itself closes under, not the shell's mutable scope.
+    pub(crate) fn parse(opts: &Map, env: &Env, shell: &mut Shell) -> Settled<Self> {
         let mut env_overrides = None;
         let mut cwd = None;
         let mut entries: Vec<HandlerEntry> = Vec::new();
@@ -148,15 +152,15 @@ impl WithinScope {
                 }
                 "handlers" => {
                     let map = as_map(v, "within handlers")?;
+                    let schemes = crate::typecheck::SessionSchemes {
+                        bindings: env.binding_schemes(),
+                        aliases: shell.mobile.context.handlers.alias_schemes(),
+                        builtins: shell.session.builtins.clone(),
+                    };
                     entries = map
                         .into_iter()
                         .map(|(cmd, thunk_val)| {
-                            HandlerEntry::vet(
-                                cmd,
-                                thunk_val,
-                                shell.session_schemes(),
-                                HandlerRole::Scoped,
-                            )
+                            HandlerEntry::vet(cmd, thunk_val, schemes.clone(), HandlerRole::Scoped)
                         })
                         .collect::<Settled<Vec<HandlerEntry>>>()?;
                     saw_handlers = true;
@@ -182,25 +186,51 @@ impl WithinScope {
         })
     }
 
-    /// Nest the parsed keys as `with_*` scopes around `body`: env outermost,
-    /// then cwd, handlers innermost.
-    pub(crate) fn enter<R>(self, shell: &mut Shell, body: impl FnOnce(&mut Shell) -> R) -> R {
+    /// Install the parsed keys into the store — env, then cwd, then
+    /// handlers — and return the token that undoes them, in reverse, once
+    /// the body has run.
+    pub(crate) fn enter(self, shell: &mut Shell) -> WithinUndo {
         let Self {
             env_overrides,
             cwd,
             handlers,
         } = self;
-        let wrapped = |shell: &mut Shell| match handlers {
-            Some((entries, catch_all)) => shell.with_handlers(entries, catch_all, body),
-            None => body(shell),
-        };
-        let wrapped = |shell: &mut Shell| match cwd {
-            Some(path) => shell.with_cwd(path, wrapped),
-            None => wrapped(shell),
-        };
-        match env_overrides {
-            Some(o) => shell.with_env(o, wrapped),
-            None => wrapped(shell),
+        let saved_env = env_overrides.map(|overrides| {
+            let saved = shell.mobile.context.env_overrides.clone();
+            shell.mobile.context.extend_env(overrides);
+            saved
+        });
+        let saved_dir = cwd.map(|path| shell.swap_cwd_override(path));
+        let handlers = handlers
+            .map(|(entries, catch_all)| shell.mobile.context.handlers.push(entries, catch_all));
+        WithinUndo {
+            saved_env,
+            saved_dir,
+            handlers,
+        }
+    }
+}
+
+/// The undo token `WithinScope::enter` returns: what to put back, and in
+/// what order, once `within`'s body has run.  Frames hold this, never a
+/// `Context` clone.
+pub(crate) struct WithinUndo {
+    saved_env: Option<EnvVars>,
+    saved_dir: Option<Option<PathBuf>>,
+    handlers: Option<FrameHandle>,
+}
+
+impl WithinUndo {
+    /// Undo in the reverse of install order: handlers, then dir, then env.
+    pub(crate) fn apply(self, shell: &mut Shell) {
+        if let Some(handle) = self.handlers {
+            shell.mobile.context.handlers.remove_by_handle(handle);
+        }
+        if let Some(saved) = self.saved_dir {
+            shell.restore_cwd_override(saved);
+        }
+        if let Some(saved) = self.saved_env {
+            shell.mobile.context.env_overrides = saved;
         }
     }
 }
@@ -215,11 +245,13 @@ pub(crate) fn eval_within(
 ) -> Raw<Value> {
     let opts_val = close(opts, &shell.mobile.scope)?;
     let opts_map = as_map(&opts_val, "within")?;
-    let scope = WithinScope::parse(&opts_map, shell)?;
+    let env = shell.mobile.scope.clone();
+    let scope = WithinScope::parse(&opts_map, &env, shell)?;
     let body = close(body, &shell.mobile.scope)?;
-    scope
-        .enter(shell, |shell| apply(body, vec![], mooring, shell))
-        .map_err(Into::into)
+    let undo = scope.enter(shell);
+    let result = apply(body, vec![], mooring, shell);
+    undo.apply(shell);
+    result.map_err(Into::into)
 }
 
 pub(crate) fn eval_grant(
