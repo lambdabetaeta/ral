@@ -50,7 +50,7 @@ pub(crate) enum Focus {
 
 /// One elimination form with a pending sub-computation. Frames hold `Arc`s
 /// into the IR and an `Env`, never cloned IR, never a `Context` clone. The
-/// two large ones, `Redirect` and (W3) `Pipe`, are boxed.
+/// two large ones, `Redirect` and `Pipe`, are boxed.
 enum Frame {
     /// `M to x. N`: `bind` is the `Bind` node itself, read for its pattern,
     /// rest and span.
@@ -106,9 +106,10 @@ enum Frame {
         scope: TrailScope,
         saved: CapturePolicy,
     },
+    Pipe(Box<pipeline::PipeNode>),
 }
 
-/// `Redirect` and `Unmask` are boxed: either alone would exceed the cap.
+/// `Redirect`, `Unmask`, and `Pipe` are boxed: any alone would exceed the cap.
 const _: () = assert!(std::mem::size_of::<Frame>() <= 128);
 
 /// The state: a focus and a stack. Private — nothing outside this module
@@ -616,18 +617,25 @@ impl Machine {
 
             CompKind::Exec(exec) => self.step_exec(exec, comp.span, &env, mooring, shell),
 
-            CompKind::Pipeline { stages, yields, .. } => {
+            CompKind::Pipeline { stages, yields, .. } => 'arm: {
                 if stages.len() == 1 {
-                    Focus::Eval(Closure {
+                    break 'arm Focus::Eval(Closure {
                         comp: Arc::clone(&stages[0]),
                         env,
-                    })
-                } else {
-                    match pipeline::run_pipeline(stages, *yields, &env, mooring, shell) {
-                        Ok(v) => Focus::Return(Terminal::Value(v)),
-                        Err(b) => Focus::Halt(b),
-                    }
+                    });
                 }
+                if let Err(b) = self.reserve(shell) {
+                    break 'arm Focus::Halt(b);
+                }
+                let node = match pipeline::PipeNode::launch(stages, *yields, &env, mooring, shell) {
+                    Ok(node) => node,
+                    Err(b) => break 'arm Focus::Halt(b),
+                };
+                self.push(Frame::Pipe(Box::new(node)));
+                // A placeholder the `Pipe` frame consumes immediately, on
+                // the very next step: the frame's real outcome comes from
+                // `PipeNode::join`, not from this value.
+                Focus::Return(Terminal::Value(Value::Unit))
             }
 
             CompKind::Capture(body) => 'arm: {
@@ -1101,6 +1109,11 @@ impl Machine {
                 };
                 Focus::Return(Terminal::Value(tree_value(status, v, None, &children)))
             }
+
+            Frame::Pipe(node) => match node.join(mooring, shell) {
+                Ok(v) => Focus::Return(Terminal::Value(v)),
+                Err(b) => Focus::Halt(b),
+            },
         }
     }
 
@@ -1228,6 +1241,11 @@ impl Machine {
                     Focus::Halt(Break::Escape(esc))
                 }
             },
+
+            Frame::Pipe(_) => unreachable!(
+                "a Pipe frame's placeholder Return(Unit) is consumed the step it is pushed, \
+                 so step_halt never meets one"
+            ),
         }
     }
 }
@@ -1237,8 +1255,8 @@ impl Frame {
     /// files, audit scopes (§2.6). `To`/`Capture` restore `io.stdout`;
     /// `Redirect` as its own rule; `Unmask` restores; `Try`/`Audit`
     /// `audit.close(scope)` then `set_capture(saved)`; `Within` applies its
-    /// undo; `Grant` pops. `Chain`, `Apply`, `Decode`, `Source`, `Guard`,
-    /// `Cleanup` do nothing.
+    /// undo; `Grant` pops; `Pipe` kills the group. `Chain`, `Apply`,
+    /// `Decode`, `Source`, `Guard`, `Cleanup` do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
             Self::To { prev_stdout, .. } | Self::Capture { prev: prev_stdout, .. } => {
@@ -1254,6 +1272,7 @@ impl Frame {
             Self::Grant => {
                 shell.context.grants.pop();
             }
+            Self::Pipe(node) => node.abandon(),
             Self::Chain { .. }
             | Self::Apply { .. }
             | Self::Decode { .. }

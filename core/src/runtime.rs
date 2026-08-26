@@ -2,7 +2,7 @@
 //! stdio, and running multi-stage pipelines as process groups.
 //!
 //! The seam with `crate::evaluator` is narrow both ways.  Down, the machine
-//! enters at `pipeline::run_pipeline` and `command_call::run_call`.  Up, a
+//! enters at `pipeline::PipeNode::launch` and `command_call::run_call`.  Up, a
 //! stage runner re-enters the machine only through `call::invoke`,
 //! `eval_block`, and `absorb_tail` — stages carry closures, so the mutual
 //! recursion is irreducible.  `crate::child_eval` carries the wire protocol

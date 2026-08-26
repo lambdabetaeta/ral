@@ -4,7 +4,7 @@
 //! sandbox, reap.
 //!
 //! Pipeline stages never reach [`run`] — they take
-//! [`super::pipeline::run_pipeline`] — but share `vet` and
+//! [`super::pipeline::PipeNode::launch`] — but share `vet` and
 //! `build_command` with it, so both paths resolve and confine a call the
 //! same way.
 

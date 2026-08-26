@@ -101,6 +101,23 @@ impl PipelineGroup {
         Ok((child, jail))
     }
 
+    /// SIGTERM the pgid so helpers and externals that honour it leave before
+    /// each stage's own `Drop` follows with SIGKILL.  No-op off Unix — a
+    /// dropped stage handle takes its job down on its own there.
+    #[cfg(unix)]
+    pub(super) fn terminate(&self) {
+        if let Some(pgid) = self.leader {
+            pgid.signal_group(crate::process::Signal::new(libc::SIGTERM));
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[allow(
+        clippy::unused_self,
+        reason = "the signature is the Unix arm's, which reads the group's leader pgid off `self`"
+    )]
+    pub(super) fn terminate(&self) {}
+
     pub(super) fn claim_foreground(&mut self, shell: &Shell, mooring: &Mooring) {
         // `resolve_terminal_plan` already gated `owns_tty` on the lease;
         // re-borrowing it here is the proof `try_acquire` demands.

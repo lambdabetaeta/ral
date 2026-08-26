@@ -5,7 +5,7 @@
 //! gates — so a leaked pipe end is a borrow error.
 
 use super::super::command;
-use super::collect::RunningPipeline;
+use super::collect::Running;
 use super::group::PipelineGroup;
 use super::protocol::DeferredFrame;
 use super::resolve::{ExternalStage, PipelinePlan, StageLaunch, StageSpec};
@@ -244,7 +244,7 @@ fn spawn_stage(
 struct PipelineResources {
     deferred_jobs: Vec<DeferredFrame>,
     routes: VecDeque<StageRoute>,
-    running: RunningPipeline,
+    running: Running,
     group: PipelineGroup,
 }
 
@@ -253,24 +253,14 @@ impl PipelineResources {
         Self {
             deferred_jobs: Vec::new(),
             routes,
-            running: RunningPipeline::new(),
+            running: Running::new(),
             group,
         }
     }
 
-    #[cfg(unix)]
     fn signal_group(&self) {
-        if let Some(pgid) = self.group.leader_pgid() {
-            pgid.signal_group(crate::process::Signal::new(libc::SIGTERM));
-        }
+        self.group.terminate();
     }
-
-    #[cfg(not(unix))]
-    #[allow(
-        clippy::unused_self,
-        reason = "the signature is the Unix arm's, which reads the group's leader pgid off `self`; off Unix there is no process group to signal"
-    )]
-    fn signal_group(&self) {}
 }
 
 /// Linear accumulator: one [`PipelineBuild::step`] per stage, then
@@ -336,7 +326,7 @@ impl PipelineBuild {
         self,
         shell: &Shell,
         mooring: &Mooring,
-    ) -> Result<(PipelineGroup, RunningPipeline), Break> {
+    ) -> Result<(PipelineGroup, Running), Break> {
         let Self { mut resources, .. } = self;
         // Foreground before releasing the gates, so the kernel's foreground
         // decision is settled when stages start running user code.
@@ -422,7 +412,7 @@ pub(super) fn launch_pipeline(
     env: &Env,
     mooring: &Mooring,
     shell: &mut Shell,
-) -> Result<(PipelineGroup, RunningPipeline), Break> {
+) -> Result<(PipelineGroup, Running), Break> {
     let routes = open_stage_routes(plan)?.into();
     let mut build = PipelineBuild::new(plan, routes, shell)?;
     match spawn_all_stages(&mut build, stages, plan, env, mooring, shell) {

@@ -1,7 +1,7 @@
 //! One wire shape and one child runner for the re-exec'd pipeline stage.
 //!
 //! A process-staged stage (`runtime/pipeline/`) packs a [`Comp`] body plus a
-//! [`WireMobile`] snapshot, re-execs, and gets one response back: outcome,
+//! [`WireShell`] snapshot, re-execs, and gets one response back: outcome,
 //! `last_status`, audit.  Strictly one frame each way — the child drains its
 //! audit fragment after eval rather than streaming it live, so no per-node
 //! frame loop exists.
@@ -13,7 +13,7 @@ use crate::serial::{
     InternCtx, ScopeTable, SerialEnvSnapshot, SerialValue, WireDecoder, is_handle, scrub,
 };
 use crate::source::{FileId, SourceDb, Span};
-use crate::subprocess::{WireMobile, bare_child_shell, install_shell_mobile};
+use crate::subprocess::{WireShell, bare_child_shell, install_shell_mobile};
 use crate::types::{
     Break, CapturePolicy, Closure, Env, Error, Escape, Mooring, Observation, Settled, Shell,
     Status, Value,
@@ -52,7 +52,7 @@ pub(crate) struct ChildEvalRequest {
     /// inside `mobile` and `captured`.
     pub scope_table: ScopeTable,
     pub body: Arc<Comp>,
-    pub mobile: WireMobile,
+    pub mobile: WireShell,
     /// Stage closure env: the child runs `body` as a closed machine over it
     /// (`evaluator::machine::evaluate`).
     pub captured: Option<SerialEnvSnapshot>,
@@ -80,7 +80,7 @@ pub(crate) struct ChildEvalRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EngineSeed {
     pub scope_table: ScopeTable,
-    pub mobile: WireMobile,
+    pub mobile: WireShell,
     pub captured: SerialEnvSnapshot,
     /// The spawn's validated base tag, meet-narrowed against the receiving
     /// engine's own ceiling once hydrated.
@@ -98,7 +98,7 @@ pub(crate) struct EngineSeed {
 pub(crate) fn pack_seed(shell: &Shell, grant: String) -> Settled<EngineSeed> {
     let mut ctx = InternCtx::new();
     let captured = SerialEnvSnapshot::from_runtime(&shell.env, &mut ctx);
-    let mobile = WireMobile::from_runtime(
+    let mobile = WireShell::from_runtime(
         &shell.env,
         shell.last_status,
         shell.session.stack_limit,
@@ -235,7 +235,7 @@ pub(crate) fn pack_request(
 ) -> Settled<ChildEvalRequest> {
     let mut ctx = InternCtx::new();
     let captured = captured.map(|env| SerialEnvSnapshot::from_runtime(env, &mut ctx));
-    let mobile = WireMobile::from_runtime(
+    let mobile = WireShell::from_runtime(
         &shell.env,
         shell.last_status,
         shell.session.stack_limit,
@@ -626,7 +626,7 @@ mod tests {
         assert!(parent.has_alias("ll"), "parent installs a removable alias");
 
         let mut ctx = InternCtx::new();
-        let wire = WireMobile::from_runtime(
+        let wire = WireShell::from_runtime(
             &parent.env,
             parent.last_status,
             parent.session.stack_limit,

@@ -164,7 +164,7 @@ pub(super) struct PipelineCollector {
     break_: Option<PipelineBreak>,
     final_value: Option<Value>,
     /// Set when a stage's stop wins launch-order precedence; the physical
-    /// park happened eagerly in `RunningPipeline::collect`.
+    /// park happened eagerly in `Running::collect`.
     #[cfg(unix)]
     stopped_pgid: Option<crate::process::Pgid>,
 }
@@ -267,11 +267,11 @@ impl PipelineCollector {
     }
 }
 
-pub(super) struct RunningPipeline {
+pub(super) struct Running {
     handles: Vec<StageHandle>,
 }
 
-impl RunningPipeline {
+impl Running {
     pub(super) fn new() -> Self {
         Self {
             handles: Vec::new(),
