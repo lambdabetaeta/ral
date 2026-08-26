@@ -127,8 +127,12 @@ fn read_body<R: Read + ?Sized>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
 }
 
 /// A failed decode dumps the raw body and names the dump in the error.
+/// A frame nests as deep as the IR it carries — a block is a right-nested
+/// binder chain — so the decoder takes no depth cap of its own.
 fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
-    match serde_json::from_slice(body) {
+    let mut de = serde_json::Deserializer::from_slice(body);
+    de.disable_recursion_limit();
+    match T::deserialize(&mut de).and_then(|value| de.end().map(|()| value)) {
         Ok(value) => Ok(value),
         Err(e) => {
             let path = std::env::temp_dir().join(format!(

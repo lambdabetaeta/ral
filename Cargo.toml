@@ -31,7 +31,7 @@ license = "MIT OR Apache-2.0"
 # surface, ral the console, exarch the console plus browser handoff).
 [workspace.dependencies]
 serde      = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["unbounded_depth"] }
 csv        = "1"
 libc       = "0.2"
 # Unix-only syscall wrappers.  Pinned to 0.31 — the version the rest of the
