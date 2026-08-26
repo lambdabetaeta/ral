@@ -134,7 +134,7 @@ pub(crate) struct Cli {
     #[arg(long = "dump-ast")]
     dump_ast: bool,
 
-    /// Maximum function-call recursion depth (default 1024; overrides rc `recursion_limit`:)
+    /// Maximum machine-frame recursion depth (default 100000; overrides rc `recursion_limit`:)
     #[arg(long = "recursion-limit", value_name = "N",
           value_parser = clap::value_parser!(u64).range(1..))]
     recursion_limit: Option<u64>,

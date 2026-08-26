@@ -330,21 +330,23 @@ fn chain_non_final_arm_failure_is_catchable() {
 /// grant) or breaks tail recursion (under-grant).  This recurses deep
 /// through *every* remaining tail-bearing eliminator: the bare lambda body,
 /// the selected `if` branch, the final chain arm, the `case` selected arm, and
-/// a bind continuation.  Each must trampoline in O(1) host frames; a
-/// missing grant would overflow the host stack (or trip the default
-/// 1024-deep recursion cap) instead of returning the base case.
+/// a bind continuation.  Each must keep the machine's stack flat — no frame
+/// pushed per iteration, so `session.stack_limit` (S4's default, 100 000)
+/// never enters into it at all; a frame pushed per iteration would either
+/// trip that cap or overflow the host stack, well short of the base case.
 ///
-/// Depth is 100 000 for the cheap variants.  The chain variant fails its
-/// non-final arm on every iteration (the only way to reach the final,
-/// tail-recursive arm), and allocating that many `Error`s in a debug
-/// build is slow, so it runs at 20 000 — still 20× the 1024 cap and far
-/// past any host-stack ceiling, which is all the trampoline claim needs.
+/// Depth is a million for the cheap variants — 10× `DEFAULT_STACK_LIMIT`,
+/// past anything a per-iteration frame could survive in either the cap or
+/// the host stack.  The chain variant fails its non-final arm on every
+/// iteration (the only way to reach the final, tail-recursive arm), and
+/// allocating that many `Error`s in a debug build is slow, so it runs at
+/// 200 000 — still 2× the cap, which is all the flat-stack claim needs.
 #[test]
-fn deep_tail_recursion_trampolines_through_every_eliminator() {
-    let deep = 100_000;
-    // 20× the recursion cap and far past the ~few-thousand-frame host
+fn deep_tail_recursion_keeps_the_stack_flat() {
+    let deep = 1_000_000;
+    // 200× the recursion cap and far past the ~few-thousand-frame host
     // stack ceiling; cheaper than `deep` for the error-allocating chain.
-    let past_cap = 20_000;
+    let past_cap = 200_000;
 
     // (a) bare lambda body in tail position.
     let mut shell = fresh_shell();

@@ -248,7 +248,7 @@ impl Machine {
             return Err(Break::Error(
                 Error::new(
                     format!(
-                        "recursion limit exceeded ({})",
+                        "recursion limit exceeded ({} frames)",
                         shell.session.stack_limit
                     ),
                     1,

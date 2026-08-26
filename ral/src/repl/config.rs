@@ -54,7 +54,7 @@ return [
     # edit_mode:        vi,          # emacs (default) or vi
     # bell:             false,       # audible bell on readline error (default false)
     # surface:          readline,    # readline (default), minimal, or structural
-    # recursion_limit:  1024,        # maximum function-call recursion depth
+    # recursion_limit:  100000,      # maximum machine-frame recursion depth
 
     # prompt: {
     #     return \"$CWD $ \"

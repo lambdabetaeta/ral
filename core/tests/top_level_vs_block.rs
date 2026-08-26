@@ -407,15 +407,16 @@ fn block_audit_does_not_leak_let_binding() {
     );
 }
 
-// ── (6) Block cwd non-leakage ───────────────────────────────────────────
+// ── (6) Block cwd persistence ────────────────────────────────────────────
 
-/// A `cd` inside a block-shaped scope must not be visible afterwards.
-/// We use `grant` (not `within [dir: ...]`) so the test isn't masked
-/// by `within`'s own dir-override mechanism — `grant`'s body is a plain
-/// forced thunk and any `cd` inside lands in the body's discarded
-/// mobile.  The post-block cwd must equal the pre-block cwd.
+/// A `cd` inside a `grant`-scoped block PERSISTS after the call (S10), the
+/// same as a forced block or a lambda body: `grant`'s body runs on the
+/// machine's own stack, in place — `cwd` lives on `Shell`, outside the
+/// attenuated cap frame `Frame::Grant` pops.  We use `grant` (not
+/// `within [dir: ...]`) so the test isn't masked by `within`'s own
+/// dir-override mechanism.
 #[test]
-fn block_grant_does_not_leak_cd() {
+fn block_grant_cd_persists() {
     let mut shell = fresh_shell();
     let before = shell.cwd();
     let tmp = std::env::temp_dir().display().to_string();
@@ -423,9 +424,9 @@ fn block_grant_does_not_leak_cd() {
     let _ = top_level(&mut shell, &format!("grant [exec: [:]] {{ cd '{tmp}' }}"))
         .expect("grant body should succeed");
     let after = shell.cwd();
-    assert_eq!(
+    assert_ne!(
         before, after,
-        "block `cd` must not leak into the parent's logical cwd"
+        "a `cd` inside a `grant`-scoped block must persist"
     );
 }
 
@@ -480,6 +481,32 @@ fn bare_forced_block_does_not_leak_let_binding() {
         shell.scope_lookup("leak_bare").is_none(),
         "`let` inside a bare forced block must not leak into the parent env"
     );
+}
+
+/// A `let`'s extent is the rest of its own block, never a sibling's: two
+/// blocks in sequence each see their own binding for every statement after
+/// it, but neither sees the other's — the machine's `Env` thread for one
+/// block's body is never handed to the next.
+#[test]
+fn let_extent_is_the_rest_of_its_block() {
+    let mut shell = fresh_shell();
+    let within = top_level(
+        &mut shell,
+        "!{ let extent_x = 41; return $[$extent_x + 1] }",
+    )
+    .expect("a let is visible to the rest of its own block");
+    assert_eq!(within, Value::Int(42));
+
+    let err = top_level(&mut shell, "!{ let extent_y = 1; return $extent_y }\n!{ return $extent_y }")
+        .expect_err("a second block must not see the first block's let");
+    match err {
+        Break::Error(e) => assert!(
+            e.message.contains("undefined variable"),
+            "expected an undefined-variable error, got {:?}",
+            e.message
+        ),
+        Break::Escape(e) => panic!("expected an undefined-variable error, got an escape: {e:?}"),
+    }
 }
 
 /// `a; b`'s one routing rule (S11): a non-final step's bytes are effect and
@@ -867,13 +894,26 @@ fn forced_block_folds_back_body_status() {
     );
 }
 
-/// A `cd` inside a lambda body PERSISTS after the call: `cwd` is part of
-/// the lambda fold-back set.  Checked against the same canonicalisation a
-/// plain top-level `cd` produces.
+/// A `cd` inside a forced block or a lambda body PERSISTS after the call
+/// (S10): a block runs on the machine's own stack, in place, with no scope
+/// frame of its own to discard — `cwd` is part of `Shell`, not the machine's
+/// threaded `Env`, so nothing rescopes it either way.  Checked against the
+/// same canonicalisation a plain top-level `cd` produces.
 #[test]
-fn lambda_cd_persists() {
+fn forced_block_cd_persists() {
     let tmp = std::env::temp_dir();
     let tmp_disp = display_no_trailing_sep(&tmp);
+    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
+
+    let mut shell = fresh_shell();
+    let before = shell.cwd();
+    top_level(&mut shell, &format!("!{{ cd '{tmp_disp}' }}")).expect("forced block cd");
+    let after = shell.cwd();
+    assert_ne!(before, after, "a `cd` inside a forced block must persist");
+    assert!(
+        after == tmp_disp || after == canon,
+        "forced-block `cd` must land in the temp dir: expected {tmp_disp:?} or {canon:?}, got {after:?}"
+    );
 
     let mut shell = fresh_shell();
     let before = shell.cwd();
@@ -883,30 +923,10 @@ fn lambda_cd_persists() {
     )
     .expect("lambda body cd");
     let after = shell.cwd();
-
     assert_ne!(before, after, "a `cd` inside a lambda body must persist");
-    let canon = display_no_trailing_sep(&tmp.canonicalize().unwrap_or_else(|_| tmp.clone()));
     assert!(
         after == tmp_disp || after == canon,
         "lambda `cd` must land in the temp dir: expected {tmp_disp:?} or {canon:?}, got {after:?}"
-    );
-}
-
-/// A `cd` inside a forced block is DISCARDED — the block's mobile (cwd and
-/// all) dies on exit; only `$?` folds back.  The direct-force analogue of
-/// `block_grant_does_not_leak_cd`.
-#[test]
-fn forced_block_discards_cd() {
-    let tmp = std::env::temp_dir();
-    let tmp_disp = display_no_trailing_sep(&tmp);
-
-    let mut shell = fresh_shell();
-    let before = shell.cwd();
-    top_level(&mut shell, &format!("!{{ cd '{tmp_disp}' }}")).expect("forced block cd");
-    assert_eq!(
-        before,
-        shell.cwd(),
-        "a `cd` inside a forced block must not persist"
     );
 }
 

@@ -323,6 +323,43 @@ mod tests {
         );
     }
 
+    /// A panic mid-run rolls back to the checkpoint `Shell::enter` takes at
+    /// the top of the run: `env`, `context` (cwd included), and
+    /// `last_status` all read exactly as they did before the run started,
+    /// even though the panicking phrase's own `let` and `cd` ran first.
+    /// Only a panic restores this way — an ordinary error leaves whatever
+    /// `let`s landed before it (S12).
+    #[test]
+    fn panic_mid_run_restores_the_pre_run_checkpoint() {
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.install_builtins(PANIC_BUILTINS);
+        shell.set_last_status(5);
+        let before_cwd = shell.cwd();
+        let tmp = std::env::temp_dir().display().to_string();
+
+        match run_source(
+            &mut shell,
+            &format!("let checkpoint_leak = 1\ncd '{tmp}'\ncore-panic-now"),
+        ) {
+            RunReport::Static { .. } => {}
+            RunReport::Ran { .. } => panic!("a panicking body must report Static"),
+        }
+
+        assert!(
+            shell.env.get("checkpoint_leak").is_none(),
+            "a panic must roll back a let bound before it"
+        );
+        assert_eq!(
+            shell.cwd(),
+            before_cwd,
+            "a panic must roll back a cd made before it"
+        );
+        assert_eq!(
+            shell.last_status, 5,
+            "a panic must roll back last_status"
+        );
+    }
+
     /// Nested delimiters see the flat merge: an outer `audit` around a
     /// `try` still finds the `try`'s own children in its tree, because
     /// `try`'s `close` only reads a suffix and leaves the outer trail
