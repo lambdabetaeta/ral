@@ -63,8 +63,9 @@ pub type SurfaceBuffer = Arc<Mutex<Vec<crate::serial::FOValue>>>;
 #[derive(Debug, Clone)]
 #[allow(clippy::type_complexity)]
 pub struct HandleInner {
-    /// Result channel.  The worker's trampoline absorbs any terminal tail
-    /// call first: `Tail` cannot cross a thread boundary.
+    /// Result channel.  The worker's body is its own closed machine run
+    /// (`machine::evaluate`), already settled before it reaches the
+    /// channel — nothing to absorb crossing the thread boundary.
     pub result: Arc<Mutex<Option<std::sync::mpsc::Receiver<super::flow::Settled<Value>>>>>,
     /// Filled once, when the block completes and the buffers drain into it;
     /// every later observation reads it instead of the channel.

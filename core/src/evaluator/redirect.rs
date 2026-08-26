@@ -32,9 +32,10 @@ struct WriteIntent {
 
 /// The installed redirect state, owned — no borrow of `Shell` or
 /// `Mooring` survives `enter`. Undone by `tear_down`, called explicitly:
-/// on the normal path by every caller below, on a panic by `abandon`
-/// (the machine's unwind walk calls it once W2f lands; the transitional
-/// wrappers here call it themselves via `catch_unwind`).
+/// on the normal path by every caller below, on a panic by `abandon` — the
+/// machine's own unwind walk calls it for a `Frame::Redirect` on its stack;
+/// [`with_redirects`] calls it itself via `catch_unwind`, for a base-frame
+/// native's call, which pushes no frame of its own.
 pub(crate) struct RedirectState {
     stdin_guard: Option<command::StdinRedirectGuard>,
     fd_guard: Option<command::RedirectGuard>,

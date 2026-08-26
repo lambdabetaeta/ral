@@ -625,8 +625,9 @@ fn sandbox_parity_top_level_partial_effects() {
 /// A bare `spawn { ... }` without any active fs/net projection must run
 /// the body locally and produce a value through the normal `await`
 /// record.  Locks in that the worker thread evaluates the body via
-/// `with_scope(eval_comp(body))` directly — no top-level/block boundary
-/// ceremony, no confined transport, just a thread running a block.
+/// `machine::evaluate` directly, over its own fresh `Shell` — no
+/// top-level/block boundary ceremony, no confined transport, just a thread
+/// running a block.
 #[test]
 fn spawn_without_projection_still_runs() {
     let mut shell = fresh_shell();

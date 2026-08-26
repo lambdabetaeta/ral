@@ -137,9 +137,8 @@ pub(crate) fn set_status(v: &Value, shell: &mut Shell) {
 }
 
 /// Stamp an unspanned error's span with `span`, the innermost node or frame
-/// that raised it — `eval_comp`'s current stamping (`comp.rs:115–120`),
-/// applied at each raising point instead of once at the end of a bigger
-/// function.
+/// that raised it — applied at each raising point instead of once at the end
+/// of a bigger function.
 fn stamp(b: Break, span: Option<Span>) -> Break {
     match (b, span) {
         (Break::Error(e), Some(span)) if e.span.is_none() => Break::Error(e.at_span(span)),

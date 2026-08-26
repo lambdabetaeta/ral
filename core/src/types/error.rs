@@ -11,7 +11,8 @@ use std::fmt;
 pub struct Error {
     pub message: String,
     pub status: Status,
-    /// `None` until `eval_comp` stamps the innermost enclosing node's span.
+    /// `None` until `evaluator::machine`'s `stamp` sets the innermost
+    /// enclosing node's span.
     pub span: Option<Span>,
     pub hint: Option<String>,
 }

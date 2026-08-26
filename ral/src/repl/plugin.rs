@@ -295,9 +295,9 @@ impl HookHealth {
 
 /// Foreground wall for a single buffer-change hook run: a hook that runs this
 /// long on one keystroke has overrun its keystroke budget and trips the
-/// breaker. The wall is cooperative — the trampoline polls cancellation at
-/// every reduction step, so any handler doing ordinary work (iteration,
-/// command spawns, recursion) is preempted at the next step.
+/// breaker. The wall is cooperative — the machine polls cancellation at
+/// every step, so any handler doing ordinary work (iteration, command
+/// spawns, recursion) is preempted at the next step.
 const BUFFER_CHANGE_BUDGET: Duration = Duration::from_millis(100);
 
 /// Consecutive buffer-change faults that trip the breaker.

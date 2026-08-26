@@ -77,8 +77,6 @@ impl WireHandlerFrame {
 /// Wire mirror of the two registers that ride beside the environment and the
 /// context: `$?` and the stack cap.  The cap rides so the child continues the
 /// parent's rc / CLI-configured ceiling rather than the compile-time default.
-/// Tail-ness does not: the child absorbs its body's terminal tail call
-/// locally.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct WireControl {
     pub last_status: i32,
