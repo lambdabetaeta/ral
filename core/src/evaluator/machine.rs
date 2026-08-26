@@ -381,7 +381,7 @@ impl Machine {
     }
 
     /// `force V` on a closed value: `force(thunk M) = M`, nothing pushed (S10).
-    fn force(&self, v: Value, env: &Env, mooring: &Mooring, shell: &mut Shell) -> Focus {
+    fn force(v: Value, env: &Env, mooring: &Mooring, shell: &mut Shell) -> Focus {
         match v {
             Value::Thunk(c) => Focus::Eval(c),
             Value::Native { entry, applied } if entry.fixed_arity() == 0 => {
@@ -406,7 +406,7 @@ impl Machine {
     /// the `Redirect` frame (§2.2, last paragraph before §2.3).
     fn push_redirect(
         &mut self,
-        redirs: Vec<EvalRedirectV>,
+        redirs: &[EvalRedirectV],
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Result<(), Break> {
@@ -414,7 +414,7 @@ impl Machine {
             return Ok(());
         }
         self.reserve(shell)?;
-        let state = RedirectState::enter(&redirs, mooring, shell)?;
+        let state = RedirectState::enter(redirs, mooring, shell)?;
         self.push(Frame::Redirect(Box::new(state)));
         Ok(())
     }
@@ -469,7 +469,7 @@ impl Machine {
             },
 
             CompKind::Force(val) => match close(val, &env) {
-                Ok(v) => self.force(v, &env, mooring, shell),
+                Ok(v) => Self::force(v, &env, mooring, shell),
                 Err(e) => Focus::Halt(Break::Error(e)),
             },
 
@@ -535,7 +535,7 @@ impl Machine {
                 if let Err(b) = self.reserve(shell) {
                     break 'arm Focus::Halt(b);
                 }
-                let prev = shell.io.to_ambient();
+                let prev = shell.io.swap_ambient_stdout();
                 self.push(Frame::To {
                     bind: Arc::clone(&comp),
                     env: env.clone(),
@@ -590,7 +590,7 @@ impl Machine {
                 Err(e) => Focus::Halt(Break::Error(e)),
             },
 
-            CompKind::Case { scrutinee, arms } => self.step_case(scrutinee, arms, &env, mooring, shell),
+            CompKind::Case { scrutinee, arms } => Self::step_case(scrutinee, arms, &env, mooring, shell),
 
             CompKind::App { head, args } => 'arm: {
                 if let Err(b) = crate::process::check(mooring) {
@@ -681,7 +681,7 @@ impl Machine {
                     Ok(r) => r,
                     Err(e) => break 'arm Focus::Halt(Break::Error(e)),
                 };
-                if let Err(b) = self.push_redirect(redirs, mooring, shell) {
+                if let Err(b) = self.push_redirect(&redirs, mooring, shell) {
                     break 'arm Focus::Halt(b);
                 }
                 Focus::Eval(Closure {
@@ -712,7 +712,7 @@ impl Machine {
                 }
                 let undo = scope.enter(shell);
                 self.push(Frame::Within(undo));
-                self.force(b, &env, mooring, shell)
+                Self::force(b, &env, mooring, shell)
             }
 
             CompKind::Grant { caps, body } => 'arm: {
@@ -740,7 +740,7 @@ impl Machine {
                 shell.context.grants.push(caps);
                 shell.audit_deputy_prefixes();
                 self.push(Frame::Grant);
-                self.force(b, &env, mooring, shell)
+                Self::force(b, &env, mooring, shell)
             }
 
             CompKind::Try { body, handler } => 'arm: {
@@ -762,7 +762,7 @@ impl Machine {
                     .set_capture(super::audit::merge_capture(saved, CapturePolicy::Off));
                 let scope = shell.local.audit.open();
                 self.push(Frame::Try { handler: h, env: Box::new(env.clone()), scope, saved });
-                self.force(b, &env, mooring, shell)
+                Self::force(b, &env, mooring, shell)
             }
 
             CompKind::Guard { body, cleanup } => 'arm: {
@@ -778,7 +778,7 @@ impl Machine {
                     break 'arm Focus::Halt(err);
                 }
                 self.push(Frame::Guard { cleanup: c, env: Box::new(env.clone()) });
-                self.force(b, &env, mooring, shell)
+                Self::force(b, &env, mooring, shell)
             }
 
             CompKind::Audit { body } => 'arm: {
@@ -796,14 +796,13 @@ impl Machine {
                     .set_capture(super::audit::merge_capture(saved, CapturePolicy::Bytes));
                 let scope = shell.local.audit.open();
                 self.push(Frame::Audit { scope, saved });
-                self.force(b, &env, mooring, shell)
+                Self::force(b, &env, mooring, shell)
             }
         };
         stamp_focus(focus, comp.span)
     }
 
     fn step_case(
-        &mut self,
         scrutinee: &crate::source::Spanned<Val>,
         arms: &[CaseArm],
         env: &Env,
@@ -875,17 +874,17 @@ impl Machine {
         };
         match resolution {
             Resolution::Env(v) => {
-                if let Err(b) = self.push_redirect(redirs, mooring, shell) {
+                if let Err(b) = self.push_redirect(&redirs, mooring, shell) {
                     return Focus::Halt(b);
                 }
                 if argv.is_empty() {
-                    self.force(v, env, mooring, shell)
+                    Self::force(v, env, mooring, shell)
                 } else {
                     self.apply_rule(v, argv, env.clone(), span, mooring, shell)
                 }
             }
             Resolution::Handler { entry, depth } => {
-                if let Err(b) = self.push_redirect(redirs, mooring, shell) {
+                if let Err(b) = self.push_redirect(&redirs, mooring, shell) {
                     return Focus::Halt(b);
                 }
                 if let Err(b) = self.reserve(shell) {
@@ -1074,7 +1073,7 @@ impl Machine {
                     return Focus::Halt(b);
                 }
                 self.push(Frame::Cleanup { outcome: Ok(v) });
-                self.force(cleanup, &env, mooring, shell)
+                Self::force(cleanup, &env, mooring, shell)
             }
 
             Frame::Cleanup { outcome } => match outcome {
@@ -1148,8 +1147,6 @@ impl Machine {
                 Break::Escape(esc) => Focus::Halt(Break::Escape(esc)),
             },
 
-            Frame::Apply { .. } => Focus::Halt(s),
-
             Frame::Capture { prev, buf, .. } => {
                 shell.io.stdout = prev;
                 let bytes = io::take_buffer(&buf);
@@ -1161,9 +1158,9 @@ impl Machine {
                 Focus::Halt(s)
             }
 
-            Frame::Decode { .. } => Focus::Halt(s),
-
-            Frame::Source { .. } => Focus::Halt(s),
+            Frame::Apply { .. } | Frame::Decode { .. } | Frame::Source { .. } | Frame::Cleanup { .. } => {
+                Focus::Halt(s)
+            }
 
             Frame::Redirect(state) => {
                 let mut state = *state;
@@ -1200,10 +1197,8 @@ impl Machine {
                     return Focus::Halt(b);
                 }
                 self.push(Frame::Cleanup { outcome: Err(s) });
-                self.force(cleanup, &env, mooring, shell)
+                Self::force(cleanup, &env, mooring, shell)
             }
-
-            Frame::Cleanup { .. } => Focus::Halt(s),
 
             Frame::Within(undo) => {
                 undo.apply(shell);
@@ -1246,25 +1241,25 @@ impl Frame {
     /// `Cleanup` do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
-            Frame::To { prev_stdout, .. } | Frame::Capture { prev: prev_stdout, .. } => {
+            Self::To { prev_stdout, .. } | Self::Capture { prev: prev_stdout, .. } => {
                 shell.io.stdout = prev_stdout;
             }
-            Frame::Redirect(state) => state.abandon(shell),
-            Frame::Unmask { frame } => shell.context.handlers.restore_matched(*frame),
-            Frame::Try { scope, saved, .. } | Frame::Audit { scope, saved } => {
+            Self::Redirect(state) => state.abandon(shell),
+            Self::Unmask { frame } => shell.context.handlers.restore_matched(*frame),
+            Self::Try { scope, saved, .. } | Self::Audit { scope, saved } => {
                 let _children = shell.local.audit.close(scope);
                 shell.local.audit.set_capture(saved);
             }
-            Frame::Within(undo) => undo.apply(shell),
-            Frame::Grant => {
+            Self::Within(undo) => undo.apply(shell),
+            Self::Grant => {
                 shell.context.grants.pop();
             }
-            Frame::Chain { .. }
-            | Frame::Apply { .. }
-            | Frame::Decode { .. }
-            | Frame::Source { .. }
-            | Frame::Guard { .. }
-            | Frame::Cleanup { .. } => {}
+            Self::Chain { .. }
+            | Self::Apply { .. }
+            | Self::Decode { .. }
+            | Self::Source { .. }
+            | Self::Guard { .. }
+            | Self::Cleanup { .. } => {}
         }
     }
 }

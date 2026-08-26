@@ -60,13 +60,13 @@ where
 /// whose value is discarded: `echo b` in `{ echo b ; echo c }` writes where it
 /// is seen, at the moment it writes.
 ///
-/// A thin bracket over [`crate::io::Io::to_ambient`]: the swap it performs is
+/// A thin bracket over [`crate::io::Io::swap_ambient_stdout`]: the swap it performs is
 /// the primitive; this restores it on the way out, panic included.
 pub(crate) fn with_ambient_stdout<R, F>(shell: &mut Shell, f: F) -> R
 where
     F: FnOnce(&mut Shell) -> R,
 {
-    let saved = shell.io.to_ambient();
+    let saved = shell.io.swap_ambient_stdout();
     let scope = StdoutScope {
         shell,
         saved: Some(saved),
@@ -121,15 +121,12 @@ impl Drop for AuditCaptureScope<'_> {
 /// standalone external; direct-spawn pipeline stages never reach here, since
 /// their stdout is a kernel pipe to the next stage and `pipeline::collect`
 /// synthesises their node with no bytes.
-pub(crate) fn with_audit_capture<R, F>(
-    shell: &mut Shell,
-    f: F,
-) -> std::io::Result<(R, Vec<u8>, Vec<u8>)>
+pub(crate) fn with_audit_capture<R, F>(shell: &mut Shell, f: F) -> (R, Vec<u8>, Vec<u8>)
 where
     F: FnOnce(&mut Shell) -> R,
 {
     if !shell.local.audit.captures_bytes() {
-        return Ok((f(shell), Vec::new(), Vec::new()));
+        return (f(shell), Vec::new(), Vec::new());
     }
     let out_base = shell.io.stdout.clone();
     let amb_base = shell.io.ambient.clone();
@@ -140,5 +137,5 @@ where
     let scope = AuditCaptureScope::enter(shell, out_sink, amb_sink, err_sink);
     let result = f(scope.shell);
     drop(scope);
-    Ok((result, take_buffer(&out_buf), take_buffer(&err_buf)))
+    (result, take_buffer(&out_buf), take_buffer(&err_buf))
 }

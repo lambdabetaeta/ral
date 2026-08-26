@@ -519,8 +519,10 @@ mod tests {
     #[test]
     fn final_status_not_recorded_when_control_preempts() {
         let mut c = PipelineCollector::new();
-        let mut shell = Shell::default();
-        shell.last_status = 0;
+        let mut shell = Shell {
+            last_status: 0,
+            ..Shell::default()
+        };
         c.fold(
             &Mooring::adrift(),
             &mut shell,

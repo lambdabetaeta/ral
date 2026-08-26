@@ -155,10 +155,8 @@ where
     F: FnOnce(&mut Shell, &Frame) -> Settled<Value>,
 {
     let start = start(shell, mooring);
-    let (result, stdout, stderr) = super::with_audit_capture(shell, |shell| {
-        body(shell, &Frame(()))
-    })
-    .map_err(|e| Break::Error(shell.err(format!("audit capture: {e}"), 1)))?;
+    let (result, stdout, stderr) =
+        super::with_audit_capture(shell, |shell| body(shell, &Frame(())));
     finish_command(
         shell, mooring, start, cmd, origin, args, &result, stdout, stderr,
     );

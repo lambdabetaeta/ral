@@ -76,7 +76,9 @@ pub enum FOValue<X = NoExt> {
 pub enum NoExt {}
 
 /// What the re-exec'd child IPC adds to [`FOValue`]: closures over interned
-/// scopes. One wire shape for the one runtime thunk value (S10): `Comp::arrow`
+/// scopes.
+///
+/// One wire shape for the one runtime thunk value (S10): `Comp::arrow`
 /// on the decoded `comp` tells `Lambda` from `Block` back apart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SerialClosure {
@@ -105,8 +107,10 @@ pub struct SerialNative {
 
 /// An [`Env`] in wire form: the [`ScopeTable`] row holding its session
 /// tier, resolved against the table carried on the enclosing
-/// request/response envelope.  The natives and prelude tiers never ride the
-/// wire, so they need no row of their own.
+/// request/response envelope.
+///
+/// The natives and prelude tiers never ride the wire, so they need no row
+/// of their own.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerialEnvSnapshot {
     pub bindings: u32,
@@ -182,7 +186,7 @@ impl InternCtx {
     pub fn finish(mut self) -> Result<ScopeTable, Error> {
         while let Some((id, bindings)) = self.pending.pop() {
             let mut entries = Vec::with_capacity(bindings.len());
-            for (k, b) in bindings.iter() {
+            for (k, b) in &bindings {
                 // A binding reaching a `Handle` cannot cross a process boundary.
                 // Drop it rather than fail the snapshot: an unrelated handle must
                 // not poison a stage that never names it, and one that does name
@@ -236,10 +240,12 @@ fn value_carries_handle(value: &Value) -> bool {
 /// built).
 type EnvRows = Vec<Option<imbl::HashMap<String, Binding>>>;
 
-/// Decode capability for one wire envelope: the rebuilt environment rows,
-/// the receiver's own natives and prelude tiers every row is seated under,
-/// and the [`BuiltinTable`] a captured [`Value::Native`] re-links its name
-/// against.
+/// Decode capability for one wire envelope: the rebuilt environment rows
+/// and the tiers a captured value re-links against.
+///
+/// The rows sit beside the receiver's own natives and prelude tiers every
+/// row is seated under, and the [`BuiltinTable`] a captured
+/// [`Value::Native`] re-links its name against.
 ///
 /// Constructible only from the [`Shell`] that will run the decoded values,
 /// so no call site can pick a manifest — or a prelude — of its own.

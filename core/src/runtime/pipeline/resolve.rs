@@ -159,7 +159,7 @@ fn resolve_launch(
     stage: &Comp,
     terminal: TerminalPlan,
     env: &Env,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Settled<StageLaunch> {
     Ok(match classify_stage(stage, env, shell) {
         StageKind::Ral => StageLaunch::HelperEval,
@@ -177,7 +177,7 @@ fn analyze_stage(
     stage: &Comp,
     terminal: TerminalPlan,
     env: &Env,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Settled<StageSpec> {
     let launch = resolve_launch(stage, terminal, env, shell)?;
     Ok(StageSpec {
@@ -230,7 +230,7 @@ pub(super) fn resolve_pipeline(
     yields: crate::ir::PipeYield,
     env: &Env,
     mooring: &Mooring,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Settled<PipelinePlan> {
     // Every stage's launch decision depends on it, so the terminal plan is frozen
     // first; it reads only boot/capture state, which argv evaluation cannot touch.

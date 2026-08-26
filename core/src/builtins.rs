@@ -500,6 +500,11 @@ pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 /// (§6.2, `bake_prelude`), so the run is a fold of closing values, and the
 /// resulting session tier, frozen, is the one map every shell in this
 /// process starts from.
+///
+/// # Panics
+///
+/// Panics if `env.session_names()` names a binding `session_binding` cannot
+/// find, which would mean the two disagree about the session tier's keys.
 pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
     static PRELUDE: OnceLock<Arc<HashMap<String, Binding>>> = OnceLock::new();
 

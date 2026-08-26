@@ -72,7 +72,7 @@ pub(crate) fn run_phrases(
                 pattern,
                 comp,
                 schemes,
-            } => run_phrase_define(pattern, comp, schemes, mode, &mut env, mooring, shell, &mut defined),
+            } => run_phrase_define((pattern, comp, schemes), mode, &mut env, mooring, shell, &mut defined),
             Phrase::Source { path } => {
                 run_phrase_source(path, phrase.span, mode, &mut env, mooring, shell, &mut defined)
             }
@@ -120,9 +120,11 @@ fn run_phrase_run(m: &Arc<Comp>, env: &Env, non_final: bool, mooring: &Mooring, 
 /// [`pattern::bind_pattern`] stages it.  A `Define`'s own value is `Unit` —
 /// like a block ending in `let`, it is a value boundary by being one.
 fn run_phrase_define(
-    pattern: &crate::ir::IrPattern,
-    comp: &Arc<Comp>,
-    schemes: &[(String, crate::typecheck::Scheme)],
+    (pattern, comp, schemes): (
+        &crate::ir::IrPattern,
+        &Arc<Comp>,
+        &[(String, crate::typecheck::Scheme)],
+    ),
     mode: Mode,
     env: &mut Env,
     mooring: &Mooring,

@@ -180,7 +180,7 @@ impl Env {
     fn fold_union<T>(&self, project: impl Fn(&Binding) -> T) -> Vec<(String, T)> {
         let mut seen = std::collections::HashSet::new();
         let mut result = Vec::with_capacity(self.bindings.len() + self.prelude.len());
-        for (k, b) in self.bindings.iter() {
+        for (k, b) in &self.bindings {
             seen.insert(k.as_str());
             result.push((k.clone(), project(b)));
         }

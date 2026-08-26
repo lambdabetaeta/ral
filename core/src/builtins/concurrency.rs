@@ -1945,7 +1945,7 @@ mod tests {
             })
         );
 
-        let err = run(|_, _child| Err(sig("boom").into()));
+        let err = run(|_, _child| Err(sig("boom")));
         assert_eq!(done_outcome_label(&err[0]), "err");
 
         let panicked = run(|_, _child| panic!("worker exploded"));

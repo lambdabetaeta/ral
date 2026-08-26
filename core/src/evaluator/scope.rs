@@ -177,7 +177,9 @@ impl WithinScope {
             shell.context.extend_env(overrides);
             saved
         });
-        let saved_dir = cwd.map(|path| shell.swap_cwd_override(path));
+        let saved_dir = cwd.map_or(SavedDir::Unset, |path| {
+            SavedDir::Prior(shell.swap_cwd_override(path))
+        });
         let handlers = handlers
             .map(|(entries, catch_all)| shell.context.handlers.push(entries, catch_all));
         WithinUndo {
@@ -188,12 +190,20 @@ impl WithinScope {
     }
 }
 
+/// A `within [dir: …]` override, distinguishing "this scope left `dir`
+/// alone" from "this scope installed `dir`, displacing `PathBuf` (or no
+/// prior override)".
+enum SavedDir {
+    Unset,
+    Prior(Option<PathBuf>),
+}
+
 /// The undo token `WithinScope::enter` returns: what to put back, and in
 /// what order, once `within`'s body has run.  Frames hold this, never a
 /// `Context` clone.
 pub(crate) struct WithinUndo {
     saved_env: Option<EnvVars>,
-    saved_dir: Option<Option<PathBuf>>,
+    saved_dir: SavedDir,
     handlers: Option<FrameHandle>,
 }
 
@@ -203,7 +213,7 @@ impl WithinUndo {
         if let Some(handle) = self.handlers {
             shell.context.handlers.remove_by_handle(handle);
         }
-        if let Some(saved) = self.saved_dir {
+        if let SavedDir::Prior(saved) = self.saved_dir {
             shell.restore_cwd_override(saved);
         }
         if let Some(saved) = self.saved_env {

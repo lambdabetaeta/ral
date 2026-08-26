@@ -72,11 +72,11 @@ impl ChildStdioPlan {
 
     /// Route `sink` without inheriting: the kernel pipes the child's fd and the
     /// caller pumps it into `sink`.
-    fn for_sink(sink: &Sink) -> io::Result<Self> {
-        Ok(Self {
+    fn for_sink(sink: &Sink) -> Self {
+        Self {
             stdio: crate::process::StdioSpec::piped(),
             pump: Some(sink.clone()),
-        })
+        }
     }
 }
 
@@ -88,7 +88,7 @@ pub enum Sink {
     /// The inherited fd 2, and the default `Io::stderr`.
     Stderr,
     /// Redirect target, opened by `evaluator::redirect`. `Arc` so a nested
-    /// `to_ambient` under a redirect clones the sink rather than `dup`ing
+    /// `swap_ambient_stdout` under a redirect clones the sink rather than `dup`ing
     /// the fd — a `dup` shares the file offset anyway, so nothing about
     /// where bytes land changes.
     File(Arc<std::fs::File>),
@@ -152,7 +152,7 @@ impl Sink {
         {
             return Ok(ChildStdioPlan::inherit());
         }
-        ChildStdioPlan::for_sink(self)
+        Ok(ChildStdioPlan::for_sink(self))
     }
 
     /// Plan a child's stderr into this sink: `Stderr` inherits fd 2, everything
@@ -164,7 +164,7 @@ impl Sink {
         if matches!(self, Self::Stderr) {
             return Ok(ChildStdioPlan::inherit());
         }
-        ChildStdioPlan::for_sink(self)
+        Ok(ChildStdioPlan::for_sink(self))
     }
 
     /// Spawn a thread draining `reader` into this sink, flushing its tail at

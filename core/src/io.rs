@@ -93,7 +93,7 @@ impl Io {
     /// binder's RHS is the other caller — the RHS's bytes are effect, so
     /// they go where a discarded statement's do, and the frame that pushed
     /// this swap restores it from the value handed back.
-    pub(crate) fn to_ambient(&mut self) -> Sink {
+    pub(crate) fn swap_ambient_stdout(&mut self) -> Sink {
         std::mem::replace(&mut self.stdout, self.ambient.clone())
     }
 }
