@@ -206,14 +206,14 @@ fn failed_statement_installs_no_scheme() {
     );
 }
 
-// ─── (6) pattern binds carry no scheme ───────────────────────────────────────
+// ─── (6) pattern binds generalise their own scheme ───────────────────────────
 
 /// `let [a, b] = [1, 2]` then `$a + 1`: cross-run use of a pattern-bound
-/// name neither errors spuriously nor sees a scheme — the destructuring
-/// components are monomorphic and cannot be closed, so they carry no
-/// scheme and elaborate as a bare variable at a fresh type.
+/// name neither errors spuriously nor loses its scheme — each destructured
+/// component generalises from the component type the pattern reaches, one
+/// scheme per bound name (§3.5), just as a plain `let` binding does.
 #[test]
-fn pattern_binds_carry_no_scheme() {
+fn pattern_binds_generalise_their_own_scheme() {
     let mut sh = shell();
     run(&mut sh, "let [a, bb] = [1, 2]").unwrap();
     assert!(
@@ -225,8 +225,8 @@ fn pattern_binds_carry_no_scheme() {
             .collect::<Vec<_>>()
     );
     assert!(
-        scheme_of(&sh, "a").is_none(),
-        "a pattern-bound name must carry no scheme"
+        scheme_of(&sh, "a").is_some(),
+        "a pattern-bound name must generalise its own scheme"
     );
     // A plain `let` binding does carry a scheme.
     run(&mut sh, "let cnt = 3").unwrap();

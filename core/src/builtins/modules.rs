@@ -9,12 +9,15 @@
 //! Every runtime source load funnels through here: the plugin loader and
 //! [`crate::capability::load_capabilities_from_str`] call
 //! [`evaluate_source`]; the REPL's rc loader, which renders type errors
-//! itself, calls [`evaluate_checked`] with an already-checked `Comp`.
+//! itself, calls [`evaluate_checked`] with an already-checked `Toplevel`.
+//! `source`/`use` themselves (§3.3) are [`builtin_source`]/[`builtin_use`],
+//! below — `source` is a binder form now (S2), so [`evaluate_checked`] and
+//! friends serve every *other* loader (rc, plugin, capability) alone.
 
 use std::path::Path;
 
 use crate::evaluator::{Mode, Ran};
-use crate::ir::{Comp, Toplevel};
+use crate::ir::Toplevel;
 use crate::source::Span;
 use crate::types::{Break, CommandOrigin, Control, Env, Mooring, Settled, Shell, Value, sig};
 
@@ -22,8 +25,9 @@ use super::util::arg0_str;
 
 const MAX_SOURCE_DEPTH: usize = 100;
 
-/// Evaluate an already-checked `comp` under the cycle-detection stack and
-/// depth guard, registering `source` under `virtual_path`.
+/// Evaluate an already-checked `top` under the cycle-detection stack and
+/// depth guard, registering `source` under `virtual_path`, in the caller's
+/// own scope.
 ///
 /// Errors come back raw; each caller prefixes its own surface name
 /// (`source:`, `use:`, `capability file <path>:`).
@@ -31,11 +35,11 @@ const MAX_SOURCE_DEPTH: usize = 100;
 /// # Errors
 /// Returns `Err` if `virtual_path` is already on the module stack (a
 /// circular dependency), if the depth limit is exceeded, or if evaluating
-/// `comp` fails.
+/// `top` fails.
 pub fn evaluate_checked(
     mooring: &Mooring,
     shell: &mut Shell,
-    comp: &std::sync::Arc<Comp>,
+    top: &std::sync::Arc<Toplevel>,
     source: &str,
     virtual_path: &str,
 ) -> Settled<Value> {
@@ -61,7 +65,14 @@ pub fn evaluate_checked(
     }
     shell.install_script_context(&key, source);
     shell.mobile.context.modules.stack.push(key);
-    let result = crate::evaluate(comp, mooring, shell);
+    let result = crate::evaluator::run_phrases(
+        &top.phrases,
+        shell.mobile.scope.clone(),
+        Mode::Local,
+        mooring,
+        shell,
+    )
+    .outcome;
     shell.mobile.context.modules.stack.pop();
     result
 }
@@ -80,22 +91,11 @@ pub fn evaluate_source(
     source: &str,
     virtual_path: &str,
 ) -> Settled<Value> {
-    let comp = check_source(source, virtual_path, shell)?;
-    evaluate_checked(mooring, shell, &comp, source, virtual_path)
+    let top = check_source(source, virtual_path, shell)?;
+    evaluate_checked(mooring, shell, &top, source, virtual_path)
 }
 
 // ── Phrases (§3.3) ──────────────────────────────────────────────────────
-//
-// The `Toplevel`-based door `Phrase::Source`/`CompKind::Source` and (once
-// W1e's cutover flips them) `source`/`use` call through. Additive for now:
-// `builtin_source`/`builtin_use` stay on [`evaluate_source`] — the run door
-// still resolves a program through `elaborate`/`typecheck`, not
-// `elaborate_toplevel`/`typecheck_toplevel` (`lib.rs`'s `compile`/
-// `compile_and_typecheck`, W1e's to cut over) — and `CompKind::Source`'s
-// caller in `evaluator/comp.rs` is itself unreachable until W1e wires
-// `stmts_nested` into `elab_expr`.  [`source`] and [`source_phrases`] are
-// otherwise complete: `compile_toplevel` below calls the real
-// `elaborate_toplevel`/`typecheck_toplevel`.
 
 /// Load `path`'s text, compile it to a [`Toplevel`], and run its phrases
 /// under `mode` — the `source` half of §3.3, mirroring [`evaluate_source`]'s
@@ -122,16 +122,25 @@ pub(crate) fn source(
         );
     let text = read_and_normalize(&resolved, &abs_path, "source", shell)?;
     let top = compile_toplevel(&text, &abs_path, shell).map_err(|e| tag_loader_error("source", e))?;
-    source_phrases(&top, env, mode, &abs_path, &text, span, mooring, shell)
+    let ran = source_phrases(&top, env, mode, &abs_path, &text, span, mooring, shell)
+        .map_err(|e| tag_loader_error("source", e))?;
+    Ok(Ran {
+        outcome: ran.outcome.map_err(|e| tag_loader_error("source", e)),
+        ..ran
+    })
 }
 
 /// Elaborate and typecheck `source_text` into a [`Toplevel`], seeded from
-/// the live session's schemes exactly as [`check_source`] seeds the
-/// single-`Comp` path.  The `FileId` is peeked, not minted, on the same
-/// promise `check_source` relies on: [`source_phrases`]'s
+/// the live session's schemes.  The `FileId` is peeked, not minted, on the
+/// same promise [`check_source`] relies on: [`source_phrases`]'s
 /// `install_script_context` call, a moment later, is the one registration
-/// in between.
-fn compile_toplevel(source_text: &str, virtual_path: &str, shell: &Shell) -> Settled<Toplevel> {
+/// in between.  Also the binding-lease harvest seam, mirroring
+/// [`check_source`]: every name the file references counts as a real use.
+fn compile_toplevel(
+    source_text: &str,
+    virtual_path: &str,
+    shell: &mut Shell,
+) -> Settled<Toplevel> {
     let file = shell.session.sources.next_id();
     let ast = crate::syntax::parser::parse_with(source_text, file).map_err(|e| sig(e.to_string()))?;
     let bindings = shell
@@ -140,20 +149,24 @@ fn compile_toplevel(source_text: &str, virtual_path: &str, shell: &Shell) -> Set
         .iter()
         .map(|(n, _)| n.clone())
         .collect();
-    let top = crate::elaborator::elaborate_toplevel(&ast, bindings, virtual_path)
+    let top = crate::elaborator::elaborate(&ast, bindings, virtual_path)
         .map_err(|e| sig(e.to_string()))?;
-    crate::typecheck::typecheck_toplevel(&top, shell.session_schemes()).map_err(|errs| {
+    let top = crate::typecheck::typecheck(&top, shell.session_schemes()).map_err(|errs| {
         sig(errs
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n"))
-    })
+    })?;
+    if shell.local.bindings.armed() {
+        shell.local.bindings.renew(top.referenced_names());
+    }
+    Ok(top)
 }
 
 /// Run `top`'s phrases under `mode`, guarded by the same cycle/depth checks
-/// and module-stack bookkeeping [`evaluate_checked`] applies to a bare
-/// `Comp`; the call is recorded in the audit trail as a native's is
+/// and module-stack bookkeeping [`evaluate_checked`] applies; the call is
+/// recorded in the audit trail as a native's is
 /// ([`crate::evaluator::audit::frame_call`]), `span` standing in for the
 /// call site a form has no argument list to carry.
 ///
@@ -249,19 +262,16 @@ fn check_source(
     source: &str,
     virtual_path: &str,
     shell: &mut Shell,
-) -> Settled<std::sync::Arc<Comp>> {
+) -> Settled<std::sync::Arc<Toplevel>> {
     let file = shell.session.sources.next_id();
-    let comp = crate::compile_and_typecheck(source, shell.session_schemes(), file, virtual_path)
+    let top = crate::compile_and_typecheck(source, shell.session_schemes(), file, virtual_path)
         .into_comp_or_message()
         .map(std::sync::Arc::new)
         .map_err(sig)?;
     if shell.local.bindings.armed() {
-        shell
-            .local
-            .bindings
-            .renew(crate::ir::referenced_names(&comp));
+        shell.local.bindings.renew(top.referenced_names());
     }
-    Ok(comp)
+    Ok(top)
 }
 
 /// Read and normalise a module's text.  `check_fs_read` and the errors key
@@ -304,24 +314,26 @@ fn tag_loader_error(who: &str, e: Break) -> Break {
     }
 }
 
+/// `source` is a form, elaborated straight to `Phrase::Source`/`CompKind::Source`
+/// from a bare unbound `source path` — one argument, no redirects (S2).  Any
+/// other call shape reaches this table entry instead, which stays only for
+/// `help` and typing: a native has no lexical environment to extend, so it
+/// cannot itself define anything.
 pub(super) fn builtin_source(
-    args: &[Value],
-    mooring: &Mooring,
-    shell: &mut Shell,
+    _args: &[Value],
+    _mooring: &Mooring,
+    _shell: &mut Shell,
 ) -> Settled<Value> {
-    let path = arg0_str(args);
-    let resolved = resolve_relative_to_current_script(&path, shell);
-    let abs_path = shell
-        .resolve(&resolved.to_string_lossy())
-        .canonicalise_strict()
-        .map_or_else(
-            |_| resolved.to_string_lossy().into_owned(),
-            |p| p.to_string_lossy().into_owned(),
-        );
-    let source = read_and_normalize(&resolved, &abs_path, "source", shell)?;
-    evaluate_source(mooring, shell, &source, &abs_path).map_err(|e| tag_loader_error("source", e))
+    Err(sig(
+        "`source` is a form, not a function: write `source path` as its own statement",
+    ))
 }
 
+/// `use` stays a native (§3.3, S7): it returns a map and binds nothing, so
+/// it needs only *an* environment to run the module's phrases under, isolated
+/// from the caller's — today's isolation bracket, a scope pushed and popped
+/// around the run.  The map it returns is `ran.defined` filtered by the `_`
+/// rule, each name read from `ran.env`.
 pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let path = arg0_str(args);
     let resolved = resolve_relative_to_current_script(&path, shell);
@@ -334,23 +346,26 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         .map_or_else(|| path.clone(), |p| p.to_string_lossy().into_owned());
 
     let source = read_and_normalize(abs_path.as_ref(), &abs_path, "use", shell)?;
+    let top = compile_toplevel(&source, &abs_path, shell).map_err(|e| tag_loader_error("use", e))?;
 
     shell.mobile.scope.push_scope();
-    let evaluated = evaluate_source(mooring, shell, &source, &abs_path);
-    let result = evaluated.map(|_| {
-        let bindings: Vec<(String, Value)> = shell
-            .mobile
-            .scope
-            .top_scope()
-            .iter()
-            // A leading underscore marks a name the module keeps private.
-            .filter(|(k, _)| !k.starts_with('_'))
-            .map(|(k, b)| (k.clone(), b.value.clone()))
-            .collect();
-        Value::map(bindings)
-    });
+    let env = shell.mobile.scope.clone();
+    let ran = source_phrases(&top, env, Mode::Module, &abs_path, &source, None, mooring, shell);
     shell.mobile.scope.pop_scope();
-    result.map_err(|e| tag_loader_error("use", e))
+
+    let ran = ran.map_err(|e| tag_loader_error("use", e))?;
+    ran.outcome
+        .map(|_| {
+            let bindings: Vec<(String, Value)> = ran
+                .defined
+                .iter()
+                // A leading underscore marks a name the module keeps private.
+                .filter(|name| !name.starts_with('_'))
+                .filter_map(|name| ran.env.get(name).map(|v| (name.clone(), v.clone())))
+                .collect();
+            Value::map(bindings)
+        })
+        .map_err(|e| tag_loader_error("use", e))
 }
 
 /// Resolve `path` against the directory of the innermost load in flight —
@@ -384,9 +399,7 @@ mod tests {
     }
 
     /// [`source`] end to end: `compile_toplevel` through the real
-    /// `elaborate_toplevel`/`typecheck_toplevel`, `run_phrases` over the
-    /// result.  Not reachable through the run door yet (W1e), but every
-    /// piece it calls is real.
+    /// `elaborate`/`typecheck`, `run_phrases` over the result.
     #[test]
     fn source_runs_a_files_defines_and_reports_unit() {
         let path = write_temp("ral_w1d_source_ok.ral", "let sourced_ok = 5");

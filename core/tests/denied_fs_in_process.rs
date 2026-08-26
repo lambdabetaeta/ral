@@ -29,41 +29,38 @@
 mod common;
 
 use ral_core::builtins;
-use ral_core::types::Mooring;
-use ral_core::{
-    Break, Error, Shell, Value, elaborator::elaborate, evaluator::evaluate, syntax::parser::parse,
-    typecheck,
-};
+use ral_core::transport::{Program, Run};
+use ral_core::types::{Break, Capabilities, Shell, Value};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
-/// Evaluate a ral script through the public API, exactly as `eval_fuzz.rs`
-/// does: parse, elaborate, typecheck against the prelude schemes (so the
-/// evaluator's mode wires are written), then evaluate in a fresh shell.
+/// Evaluate a ral script through the public run door — parse, elaborate,
+/// typecheck against the prelude schemes, run the phrases in a fresh shell —
+/// exactly as `eval_fuzz.rs` does.
 fn eval(input: &str) -> ral_core::types::Settled<Value> {
-    let ast = parse(input).map_err(|e: ral_core::syntax::parser::ParseError| {
-        Break::Error(Error::new(e.to_string(), 2))
-    })?;
-    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
-        .map_err(|e| Break::Error(Error::new(e.to_string(), 2)))?;
-    let comp = match typecheck(
-        &comp,
-        ral_core::SessionSchemes::from_schemes(
-            common::prelude_schemes(),
-            ral_core::HostSurface::default().builtin_table(),
-        ),
-    ) {
-        Ok(annotated) => std::sync::Arc::new(annotated),
-        Err(errors) => {
-            let msg = errors
-                .iter()
-                .map(|e| e.kind.render_message())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(Break::Error(Error::new(format!("type error: {msg}"), 2)));
-        }
-    };
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     builtins::register(&mut shell, common::prelude_comp());
-    evaluate(&comp, &Mooring::adrift(), &mut shell)
+    match shell.run(RunRequest {
+        run: Run {
+            program: Program::Source(input.into()),
+            script_name: "<test>".into(),
+            caps: Capabilities::root(),
+            wall: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: RunIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: RunStdin::Inherit,
+            trail: None,
+        },
+        surface: None,
+        deferred: None,
+        desk: None,
+        fork: None,
+        lifecycle: Box::new(()),
+    }) {
+        RunReport::Ran { ending, .. } => ending.into_result(),
+        RunReport::Static { .. } => panic!("well-formed source must run: {input:?}"),
+    }
 }
 
 fn must_succeed(input: &str) -> Value {

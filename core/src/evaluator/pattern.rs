@@ -1,6 +1,8 @@
 //! Destructuring bind: match a runtime `Value` against a compiled
-//! `IrPattern` and install the names it binds.  Only a whole-value `Name`
-//! pattern carries the bind's scheme; destructured components bind scheme-less.
+//! `IrPattern` and install the names it binds.  A nested `Bind` never
+//! generalises a scheme — [`assign_pattern`] always binds scheme-less;
+//! [`bind_pattern`] is `Phrase::Define`'s own door, carrying one scheme per
+//! bound name.
 
 use super::comp::eval_comp;
 use crate::ir::IrPattern;
@@ -63,12 +65,11 @@ pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Raw<()> {
 pub(crate) fn assign_pattern(
     pattern: &IrPattern,
     value: &Value,
-    scheme: Option<&Scheme>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<()> {
     let mut staged = Vec::new();
-    stage_pattern(pattern, value, scheme, mooring, shell, &mut staged)?;
+    stage_pattern(pattern, value, mooring, shell, &mut staged)?;
     for (name, binding) in staged {
         shell.install_scope_binding(name, binding);
     }
@@ -221,7 +222,6 @@ fn stage_pattern_named(
 fn stage_pattern(
     pattern: &IrPattern,
     value: &Value,
-    scheme: Option<&Scheme>,
     mooring: &Mooring,
     shell: &mut Shell,
     staged: &mut Vec<(String, Binding)>,
@@ -237,7 +237,7 @@ fn stage_pattern(
                 name.clone(),
                 Binding {
                     value: value.clone(),
-                    scheme: scheme.cloned(),
+                    scheme: None,
                 },
             ));
             Ok(())
@@ -279,7 +279,7 @@ fn stage_pattern(
                     .into());
             }
             for (i, pat) in elems.iter().enumerate() {
-                stage_pattern(pat, &items[i], None, mooring, shell, staged)?;
+                stage_pattern(pat, &items[i], mooring, shell, staged)?;
             }
             if let Some(name) = rest {
                 // `imbl::Vector` splits in O(log n) by sharing structure: no element clones.
@@ -325,7 +325,7 @@ fn stage_pattern(
                             .into());
                     }
                 };
-                stage_pattern(&entry.pattern, &val, None, mooring, shell, staged)?;
+                stage_pattern(&entry.pattern, &val, mooring, shell, staged)?;
             }
             Ok(())
         }
@@ -353,7 +353,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], Some("rest"));
         let value = Value::list(vec![Value::String("x".into())]);
-        let result = assign_pattern(&pat, &value, None, &Mooring::adrift(), &mut shell);
+        let result = assign_pattern(&pat, &value, &Mooring::adrift(), &mut shell);
         match result {
             Err(Control::Break(Break::Error(e))) => {
                 assert!(
@@ -377,7 +377,7 @@ mod tests {
             Value::String("y".into()),
             Value::String("z".into()),
         ]);
-        let result = assign_pattern(&pat, &value, None, &Mooring::adrift(), &mut shell);
+        let result = assign_pattern(&pat, &value, &Mooring::adrift(), &mut shell);
         match result {
             Err(Control::Break(Break::Error(e))) => {
                 assert!(
@@ -401,7 +401,7 @@ mod tests {
             Value::String("y".into()),
             Value::String("z".into()),
         ]);
-        assign_pattern(&pat, &value, None, &Mooring::adrift(), &mut shell).expect("binds");
+        assign_pattern(&pat, &value, &Mooring::adrift(), &mut shell).expect("binds");
         assert_eq!(
             shell.mobile.scope.get("a"),
             Some(&Value::String("x".into()))

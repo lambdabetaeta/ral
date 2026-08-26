@@ -707,11 +707,17 @@ mod tests {
     fn annotated_lambda_body() -> Arc<Comp> {
         let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::parse(src).expect("parse");
-        let comp = crate::elaborate(&ast, HashSet::default(), "").expect("elaborate");
+        let top = crate::elaborate(&ast, HashSet::default(), "").expect("elaborate");
         let annotated =
-            crate::typecheck(&comp, crate::SessionSchemes::default()).expect("typecheck");
+            crate::typecheck(&top, crate::SessionSchemes::default()).expect("typecheck");
+        let [phrase] = annotated.phrases.as_slice() else {
+            panic!("expected one phrase, got {:?}", annotated.phrases);
+        };
+        let crate::ir::Phrase::Define { comp, .. } = &phrase.item else {
+            panic!("expected a Define phrase, got {:?}", phrase.item);
+        };
         let mut body = None;
-        walk_comp(&annotated, &mut |c| {
+        walk_comp(comp, &mut |c| {
             if let CompKind::Lam { body: b, .. } = &c.item {
                 body = Some(Arc::clone(b));
             }
@@ -725,7 +731,7 @@ mod tests {
         visit(comp);
         let mut sub = |c: &Arc<Comp>| walk_comp(c, visit);
         match &comp.item {
-            CompKind::Seq(parts) | CompKind::Chain(parts) => parts.iter().for_each(&mut sub),
+            CompKind::Chain(parts) => parts.iter().for_each(&mut sub),
             CompKind::Pipeline { stages, .. } => stages.iter().for_each(&mut sub),
             CompKind::Lam { body, .. } => sub(body),
             CompKind::Bind {

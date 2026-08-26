@@ -227,27 +227,37 @@ impl Comp {
     }
 }
 
-/// True if this computation is a single external/builtin command call —
-/// a fact about the input's shape, which hosts read to tailor what they say
-/// about a failure.
-pub fn is_single_command(comp: &Comp) -> bool {
-    match &comp.item {
-        CompKind::Exec(_) => true,
-        CompKind::Seq(stmts) => {
-            let mut commands = stmts.iter();
-            matches!(commands.next().map(|c| &c.item), Some(CompKind::Exec(_)))
-                && commands.next().is_none()
-        }
-        _ => false,
+/// True if `top` is a single external/builtin command call — a fact about
+/// the input's shape, which hosts read to tailor what they say about a
+/// failure: exactly one phrase, `Run(c)`, with `c` an `Exec` under its
+/// hoisted temporaries and the checker's byte-to-value coercion — the tail
+/// `Run`'s value is reported now, so a byte-routed external gets wrapped in
+/// `Decode(Capture(_))`.
+pub fn is_single_command(top: &Toplevel) -> bool {
+    let [phrase] = top.phrases.as_slice() else {
+        return false;
+    };
+    let Phrase::Run(comp) = &phrase.item else {
+        return false;
+    };
+    let mut c = comp.as_ref();
+    loop {
+        c = match &c.item {
+            CompKind::Hoisted { body } | CompKind::Decode(body) | CompKind::Capture(body) => body,
+            _ => break,
+        };
     }
+    matches!(c.item, CompKind::Exec(_))
 }
 
-/// Every name `comp` can reference, for the binding-lease ledger in
-/// `core/src/types/shell/bindings.rs` to renew.  No wildcard arm anywhere
-/// in the walk, so a new `CompKind` or `Val` variant is a compile error
-/// here rather than a silently unharvested reference.  Over-approximate by
-/// design: a name in an untaken branch renews too, and a lease only ever
-/// lengthens.
+/// Every name `comp` can reference: `walk_comp`'s entry point, exercised by
+/// the exhaustive-coverage test below — [`Toplevel::referenced_names`] is
+/// the walk's production door, over a whole program's phrases.  No wildcard
+/// arm anywhere in the walk, so a new `CompKind` or `Val` variant is a
+/// compile error here rather than a silently unharvested reference.
+/// Over-approximate by design: a name in an untaken branch renews too, and a
+/// lease only ever lengthens.
+#[cfg(test)]
 pub(crate) fn referenced_names(comp: &Comp) -> Vec<&str> {
     let mut out = Vec::new();
     walk_comp(comp, &mut out);
@@ -264,7 +274,6 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             comp,
             pattern,
             rest,
-            scheme: _,
         } => {
             walk_comp(comp, out);
             walk_pattern_defaults(pattern, out);
@@ -301,7 +310,7 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
                 walk_val(&key.item, out);
             }
         }
-        CompKind::Chain(comps) | CompKind::Seq(comps) => {
+        CompKind::Chain(comps) => {
             for c in comps {
                 walk_comp(c, out);
             }
@@ -464,16 +473,12 @@ pub enum CompKind {
     Lam { param: Param, body: Arc<Comp> },
     /// return V — produce a value.
     Return(Val),
-    /// M to x. N — run `comp`, bind its result, continue with `rest`.
+    /// M to x. N — run `comp`, bind its result, continue with `rest`.  `a; b`
+    /// is `a to _. b`, on `Wildcard`.
     Bind {
         comp: Arc<Comp>,
         pattern: Arc<IrPattern>,
         rest: Arc<Comp>,
-        /// Written by the annotation pass for a top-level `Bind` over a
-        /// `Name` pattern, and installed beside the value so the next run's
-        /// check starts from the live binding.  Closed — every variable
-        /// ground or quantified — so it survives across per-run unifiers.
-        scheme: Option<Box<crate::typecheck::Scheme>>,
     },
     /// `M : A → B, V : A ⊢ M V : B` — the elimination form taken when the
     /// head resolves to a bound value (`$f x`, `(|x| body) x`).  It carries
@@ -518,8 +523,6 @@ pub enum CompKind {
     Chain(Vec<Arc<Comp>>),
     /// String interpolation, effectful because a lookup can fail.
     Interpolation(Vec<Val>),
-    /// Sequence; the last value is the result.
-    Seq(Vec<Arc<Comp>>),
     /// The `index`-th member of a recursive group: `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, and the
     /// node has type `C_index`. A group of one is Levy's `rec x. M`.
     Rec {
@@ -739,7 +742,6 @@ mod tests {
             comp: ret("r_bind_comp"),
             pattern: Arc::new(bind_pattern),
             rest: ret("r_bind_rest"),
-            scheme: None,
         });
 
         let app = Spanned::synthetic(CompKind::App {
@@ -798,7 +800,6 @@ mod tests {
             var("r_interp_a"),
             var("r_interp_b"),
         ]));
-        let seq_inner = Spanned::synthetic(CompKind::Seq(vec![ret("r_seq_inner")]));
         let rec_group: Arc<[(String, Arc<Comp>)]> = Arc::from(vec![(
             "rec_name_bound".to_string(),
             ret("r_rec_member"),
@@ -893,7 +894,7 @@ mod tests {
         let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
         let decode = Spanned::synthetic(CompKind::Decode(ret("r_decode_body")));
 
-        let whole = Spanned::synthetic(CompKind::Seq(vec![
+        let whole = Spanned::synthetic(CompKind::Chain(vec![
             Arc::new(Spanned::synthetic(CompKind::Force(var("r_force")))),
             Arc::new(Spanned::synthetic(CompKind::Return(var("r_return")))),
             Arc::new(lam),
@@ -907,7 +908,6 @@ mod tests {
             Arc::new(index),
             Arc::new(chain),
             Arc::new(interpolation),
-            Arc::new(seq_inner),
             Arc::new(rec),
             Arc::new(source),
             Arc::new(observe),
@@ -957,7 +957,6 @@ mod tests {
             "r_chain_b",
             "r_interp_a",
             "r_interp_b",
-            "r_seq_inner",
             "r_rec_member",
             "r_source_path",
             "r_source_rest",

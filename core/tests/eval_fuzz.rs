@@ -6,47 +6,63 @@
 mod common;
 
 use ral_core::builtins;
-use ral_core::types::Mooring;
+use ral_core::transport::{Program, Run};
 #[cfg(unix)]
-use ral_core::types::{Capabilities, ExecMap, ExecPolicy};
-use ral_core::{
-    Break, Error, Shell, Value, elaborator::elaborate, evaluator::evaluate, syntax::parser::parse,
-    typecheck,
-};
+use ral_core::types::{ExecMap, ExecPolicy};
+use ral_core::types::{Break, Capabilities, Shell, Value};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 #[cfg(unix)]
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-fn eval_on_path(input: &str, path: &str) -> ral_core::types::Settled<Value> {
-    let ast = parse(input).map_err(|e: ral_core::syntax::parser::ParseError| {
-        Break::Error(Error::new(e.to_string(), 2))
-    })?;
-    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
-        .map_err(|e| Break::Error(Error::new(e.to_string(), 2)))?;
-    // The evaluator reads its mode wires off the annotated comp, so it
-    // must run the checked IR, not the bare elaboration whose wires are
-    // still the elaborator's placeholder.
-    let comp = match typecheck(
-        &comp,
-        ral_core::SessionSchemes::from_schemes(
-            common::prelude_schemes(),
-            ral_core::HostSurface::default().builtin_table(),
-        ),
-    ) {
-        Ok(annotated) => std::sync::Arc::new(annotated),
-        Err(errors) => {
-            let msg = errors
-                .iter()
-                .map(|e| e.kind.render_message())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(Break::Error(Error::new(format!("type error: {msg}"), 2)));
+/// Evaluate `input` through the public run door on an already-configured
+/// `shell` — parse, elaborate, typecheck against the prelude schemes, run
+/// the phrases.
+fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
+    match shell.run(RunRequest {
+        run: Run {
+            program: Program::Source(input.into()),
+            script_name: "<test>".into(),
+            caps: Capabilities::root(),
+            wall: None,
+            deferred_lease: None,
+            worker_cap: None,
+            io: RunIo::Inherit,
+            terminal: RequestedTerminalAccess::Leased,
+            stdin: RunStdin::Inherit,
+            trail: None,
+        },
+        surface: None,
+        deferred: None,
+        desk: None,
+        fork: None,
+        lifecycle: Box::new(()),
+    }) {
+        RunReport::Ran { ending, .. } => ending.into_result(),
+        // A parse or type failure is a static diagnostic, not a run
+        // outcome — `must_fail` reads it the same as a runtime error, since
+        // both mean "this program never produced a value."
+        RunReport::Static { diagnostics } => {
+            let msg = match diagnostics {
+                ral_core::StaticDiagnostics::Parse(e) => e.to_string(),
+                ral_core::StaticDiagnostics::Types(errs) => errs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                ral_core::StaticDiagnostics::Host(e) => e.to_string(),
+            };
+            Err(Break::Error(ral_core::types::Error::new(msg, 2)))
         }
-    };
+    }
+}
+
+/// [`run_on`] against a fresh shell seeded with `path` on `PATH`.
+fn eval_on_path(input: &str, path: &str) -> ral_core::types::Settled<Value> {
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     shell.set_env_var("PATH", path);
     builtins::register(&mut shell, common::prelude_comp());
-    evaluate(&comp, &Mooring::adrift(), &mut shell)
+    run_on(&mut shell, input)
 }
 
 /// Evaluate independently of whichever tools happen to be installed on the
@@ -1292,19 +1308,7 @@ fn script_args_are_not_polluted_by_runner_argv() {
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     shell.set_args(vec!["alpha".into(), "beta".into()]);
     builtins::register(&mut shell, common::prelude_comp());
-    let result = evaluate(
-        &std::sync::Arc::new(
-            elaborate(
-                &parse("return $ARGS").unwrap(),
-                std::collections::HashSet::default(),
-                "",
-            )
-            .expect("elaborate"),
-        ),
-        &Mooring::adrift(),
-        &mut shell,
-    )
-    .expect("evaluate $ARGS");
+    let result = run_on(&mut shell, "return $ARGS").expect("evaluate $ARGS");
     assert_eq!(
         result,
         Value::list(vec![
@@ -1319,19 +1323,7 @@ fn env_overrides_shadow_process_env_in_dollar_env() {
     let mut shell = Shell::new(ral_core::io::TerminalState::default());
     shell.set_env_var("RAL_TEST_ENV", "override");
     builtins::register(&mut shell, common::prelude_comp());
-    let result = evaluate(
-        &std::sync::Arc::new(
-            elaborate(
-                &parse("return $ENV[RAL_TEST_ENV]").unwrap(),
-                std::collections::HashSet::default(),
-                "",
-            )
-            .expect("elaborate"),
-        ),
-        &Mooring::adrift(),
-        &mut shell,
-    )
-    .expect("evaluate $ENV");
+    let result = run_on(&mut shell, "return $ENV[RAL_TEST_ENV]").expect("evaluate $ENV");
     assert_eq!(result, Value::String("override".into()));
 }
 
@@ -3024,7 +3016,6 @@ fn expr_non_bool_operand_to_and_is_error() {
 #[test]
 fn elaborator_never_wraps_exec_in_redirect() {
     use ral_core::ir::CompKind;
-    use std::sync::Arc;
 
     // Each source uses an `Exec` head (bare external name, `^name`,
     // `./path`, `~/path`) with trailing redirects of every flavour
@@ -3064,11 +3055,6 @@ fn elaborator_never_wraps_exec_in_redirect() {
                     walk(a, saw_exec_with_redirects);
                 }
             }
-            CompKind::Seq(stmts) => {
-                for s in stmts {
-                    walk(s, saw_exec_with_redirects);
-                }
-            }
             CompKind::If { then, else_, .. } => {
                 walk(then, saw_exec_with_redirects);
                 walk(else_, saw_exec_with_redirects);
@@ -3080,12 +3066,16 @@ fn elaborator_never_wraps_exec_in_redirect() {
     for src in sources {
         let ast =
             ral_core::syntax::parser::parse(src).unwrap_or_else(|e| panic!("parse {src:?}: {e}"));
-        let comp = Arc::new(
-            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-                .expect("elaborate"),
-        );
+        let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+            .expect("elaborate");
         let mut saw = false;
-        walk(&comp, &mut saw);
+        for phrase in &top.phrases {
+            let comp: &ral_core::ir::Comp = match &phrase.item {
+                ral_core::ir::Phrase::Define { comp, .. } | ral_core::ir::Phrase::Run(comp) => comp,
+                ral_core::ir::Phrase::Source { path } => path,
+            };
+            walk(comp, &mut saw);
+        }
         assert!(
             saw,
             "test bug: {src:?} elaborated without producing an `Exec` \

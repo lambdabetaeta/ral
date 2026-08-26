@@ -30,7 +30,7 @@ pub use self::ty::{CompTy, CompTyVar, Row, RowVar, Ty, TyVar};
 pub use self::unify::Unifier;
 
 use self::generalize::generalize;
-use crate::ir::{Comp, CompKind, IrPattern, Phrase, Toplevel};
+use crate::ir::{Comp, Phrase, Toplevel};
 
 /// The seed of a run's check, read off the live session by
 /// `Shell::session_schemes`.
@@ -103,43 +103,18 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
     }
 }
 
-/// Type-check `comp`, seeding from the live session.
-///
-/// The verdict rides back on the returned comp: `annotate` writes each
-/// top-level bind's generalised scheme onto its `Bind` node.  Only closed
-/// schemes leave — a run's unifier dies with the run and its variable ids
-/// restart at zero, so an open scheme from run *N* would alias run *N+1*'s
-/// fresh variables.
+/// Type-check `top` (§3.5), seeding from the live session: infer each
+/// phrase in order, extending `TyEnv` at each `Define`, then write back the
+/// verdict — each `Define`'s generalised per-name schemes land on its own
+/// `Phrase::Define`, not on a shared spine.  Only closed schemes leave — a
+/// run's unifier dies with the run and its variable ids restart at zero, so
+/// an open scheme from run *N* would alias run *N+1*'s fresh variables.
 ///
 /// # Errors
 /// Every diagnostic inference collected, whenever that list is non-empty.
 /// Inference alone judges; the write-back pass runs only on a program it
 /// accepted, and places the coercions that verdict implies.
-pub fn typecheck(comp: &Comp, schemes: SessionSchemes) -> Result<Comp, Vec<TypeError>> {
-    let mut ctx = InferCtx::new();
-    let mut env = TyEnv::new();
-    seed_env(&mut env, schemes, &mut ctx.unifier);
-
-    infer::infer_comp(&mut ctx, &mut env, comp);
-    ctx.solve_and_finalize();
-    if !ctx.errors.is_empty() {
-        return Err(ctx.errors);
-    }
-
-    Ok(annotate::annotate(comp, &mut ctx, true))
-}
-
-/// [`typecheck`], for a [`Toplevel`] (§3.5): infer each phrase in order,
-/// extending `TyEnv` at each `Define`, then write back the same verdict —
-/// each `Define`'s generalised per-name schemes land on its own
-/// `Phrase::Define`, not on a shared spine.
-///
-/// # Errors
-/// Every diagnostic inference collected, whenever that list is non-empty.
-pub fn typecheck_toplevel(
-    top: &Toplevel,
-    schemes: SessionSchemes,
-) -> Result<Toplevel, Vec<TypeError>> {
+pub fn typecheck(top: &Toplevel, schemes: SessionSchemes) -> Result<Toplevel, Vec<TypeError>> {
     let mut ctx = InferCtx::new();
     let mut env = TyEnv::new();
     seed_env(&mut env, schemes, &mut ctx.unifier);
@@ -153,65 +128,10 @@ pub fn typecheck_toplevel(
     Ok(annotate::annotate_toplevel(top, &mut ctx, phrase_schemes))
 }
 
-/// The (name, scheme) pairs on an *annotated* comp's top-level `Bind` nodes.
-fn harvest_schemes(comp: &Comp) -> Vec<(String, Scheme)> {
-    let mut out = Vec::new();
-    harvest_into(comp, &mut out);
-    out
-}
-
-fn harvest_into(comp: &Comp, out: &mut Vec<(String, Scheme)>) {
-    match &comp.item {
-        CompKind::Seq(parts) => {
-            for part in parts {
-                harvest_into(part, out);
-            }
-        }
-        CompKind::Bind {
-            pattern,
-            rest,
-            scheme: Some(scheme),
-            ..
-        } => {
-            if let IrPattern::Name(name) = pattern.as_ref() {
-                out.push((name.clone(), (**scheme).clone()));
-            }
-            harvest_into(rest, out);
-        }
-        CompKind::Bind { rest, .. } => harvest_into(rest, out),
-        _ => {}
-    }
-}
-
-/// Type-check the prelude IR, returning the annotated comp and the schemes
-/// on its top-level `Bind` nodes.
-///
-/// Callers — `boot::bake_prelude_to_out_dir`, from each host's build script
-/// — serialise the *annotated* prelude, so the comp blob and the scheme
-/// blob come out of one checked pass and evaluating the prelude installs
-/// each binding's scheme beside its value.  A prelude binding named after a
-/// native seeds and shadows like any other.
-///
-/// # Panics
-/// If the prelude fails to type-check, reporting the errors.
-pub fn bake_prelude(comp: &Comp) -> (Comp, Vec<(String, Scheme)>) {
-    let seed = SessionSchemes::default();
-    let annotated = match typecheck(comp, seed) {
-        Ok(a) => a,
-        Err(errs) => {
-            let msgs: Vec<String> = errs.iter().map(ToString::to_string).collect();
-            panic!("prelude type errors:\n{}", msgs.join("\n"));
-        }
-    };
-    let schemes = harvest_schemes(&annotated);
-    (annotated, schemes)
-}
-
 /// The (name, scheme) pairs on an *annotated* [`Toplevel`]'s `Phrase::Define`s,
-/// in phrase order — `Define.schemes` needs no tree walk, unlike
-/// [`harvest_schemes`]'s spine search, since every phrase already carries
-/// its own.
-fn harvest_schemes_toplevel(top: &Toplevel) -> Vec<(String, Scheme)> {
+/// in phrase order — `Define.schemes` needs no tree walk, since every phrase
+/// already carries its own.
+fn harvest_schemes(top: &Toplevel) -> Vec<(String, Scheme)> {
     top.phrases
         .iter()
         .flat_map(|phrase| match &phrase.item {
@@ -221,20 +141,27 @@ fn harvest_schemes_toplevel(top: &Toplevel) -> Vec<(String, Scheme)> {
         .collect()
 }
 
-/// [`bake_prelude`], for a [`Toplevel`] prelude.
+/// Type-check the prelude IR, returning the annotated [`Toplevel`] and the
+/// schemes on its `Phrase::Define`s.
+///
+/// Callers — `boot::bake_prelude_to_out_dir`, from each host's build script
+/// — serialise the *annotated* prelude, so the phrase blob and the scheme
+/// blob come out of one checked pass and running the prelude installs each
+/// binding's scheme beside its value.  A prelude binding named after a
+/// native seeds and shadows like any other.
 ///
 /// # Panics
 /// If the prelude fails to type-check, reporting the errors.
-pub fn bake_prelude_toplevel(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>) {
+pub fn bake_prelude(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>) {
     let seed = SessionSchemes::default();
-    let annotated = match typecheck_toplevel(top, seed) {
+    let annotated = match typecheck(top, seed) {
         Ok(a) => a,
         Err(errs) => {
             let msgs: Vec<String> = errs.iter().map(ToString::to_string).collect();
             panic!("prelude type errors:\n{}", msgs.join("\n"));
         }
     };
-    let schemes = harvest_schemes_toplevel(&annotated);
+    let schemes = harvest_schemes(&annotated);
     (annotated, schemes)
 }
 

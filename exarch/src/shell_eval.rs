@@ -4,7 +4,7 @@
 //! stdout and stderr captured into buffers rather than streamed: the model
 //! reads them back from history, the user sees only what the rail renders.
 //! There is no source-level `grant { … }` around the model's body — the
-//! boundary is `eval_top_level` plus the pushed frame, not surface syntax the
+//! boundary is the run door plus the pushed frame, not surface syntax the
 //! model could evade.
 
 pub mod builtins;
@@ -486,7 +486,7 @@ mod tests {
     //!
     //! They hold one `Shell` across two `run_shell` calls — the harness shape
     //! exarch uses between consecutive tool calls — to pin what routing through
-    //! `eval_top_level` buys: `let` bindings persist, effects before a failing
+    //! `run_phrases` buys: `let` bindings persist, effects before a failing
     //! line persist while those after it never ran, and `cd` persists.  The
     //! contract itself is covered in `core/tests/top_level_vs_block.rs`; these
     //! pin that `run_shell`'s wrapping does not perturb it.
@@ -731,7 +731,7 @@ mod tests {
     }
 
     /// The second call must see the first's binding: exarch's per-call
-    /// `eval_top_level` install survives the tool-call boundary.
+    /// `run_phrases` install survives the tool-call boundary.
     #[test]
     fn tool_call_let_persists_across_calls() {
         let mut shell = fresh_shell();

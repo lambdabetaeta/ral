@@ -339,10 +339,8 @@ impl Shell {
     /// name cannot come back through a panic rollback either, since
     /// [`Shell::run`] checkpoints at run entry, after any earlier prune.
     ///
-    /// Depth-gated rather than `Mode`-gated (contrast `install_scope_binding`
-    /// and `note_define`, `types/shell/scope.rs`) because `run_phrases` does
-    /// not call this: it is the ready boundary's own door, reached only
-    /// between runs, and `Mode` is a property of a run in progress.
+    /// `run_phrases` never calls this: it is the ready boundary's own door,
+    /// reached only between runs, on the session scope by construction.
     ///
     /// One pass in sorted order: a name absent from scope had its install
     /// rolled back, so the orphan drops silently; a value that structurally
@@ -351,7 +349,7 @@ impl Shell {
     /// adoption sweep afterwards runs even on a pass that prunes nothing, so a
     /// name a missed install path left untracked is leased late, not immortal.
     pub(crate) fn prune_idle_bindings(&mut self) -> Vec<BindingPruneNotice> {
-        if !self.local.bindings.armed() || !self.mobile.scope.at_session_scope() {
+        if !self.local.bindings.armed() {
             return Vec::new();
         }
         let mut notices = Vec::new();

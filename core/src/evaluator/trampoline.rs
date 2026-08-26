@@ -28,7 +28,7 @@ fn apply_lambda_frame(
 ) -> Raw<Value> {
     shell.with_thunk_body(ThunkBody::Lambda, captured, |shell, mobile| {
         shell.run_with_mobile(mobile, |shell| {
-            assign_pattern(pat, arg, None, mooring, shell)?;
+            assign_pattern(pat, arg, mooring, shell)?;
             body(shell)
         })
     })

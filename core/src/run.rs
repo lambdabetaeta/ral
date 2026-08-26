@@ -337,7 +337,7 @@ impl Shell {
                 let foreground = self.durable_root().foreground(under);
                 let wall = req.run.wall.map(|d| arm_wall(d, &foreground));
 
-                let (comp, single_command, root) =
+                let (top, single_command, root) =
                     match compile_run(self, src, &req.run.script_name) {
                         Ok(parts) => parts,
                         Err(diagnostics) => return RunReport::Static { diagnostics },
@@ -346,13 +346,18 @@ impl Shell {
                 // Reaching evaluation is what renews a lease. Gated so an
                 // unarmed host skips the walk over referenced names.
                 if self.local.bindings.armed() {
-                    self.local
-                        .bindings
-                        .renew(crate::ir::referenced_names(&comp));
+                    self.local.bindings.renew(top.referenced_names());
                 }
 
                 self.run_built(req, foreground, wall, single_command, root, |m, s| {
-                    crate::evaluator::eval_top_level(&comp, m, s)
+                    crate::evaluator::run_phrases(
+                        &top.phrases,
+                        s.mobile.scope.clone(),
+                        crate::evaluator::Mode::Session,
+                        m,
+                        s,
+                    )
+                    .outcome
                 })
             }
             Program::Hook { ref name, ref args } => {
@@ -390,7 +395,7 @@ impl Shell {
     }
 
     /// The framed scaffold both program arms share, `body` being the resolved
-    /// program — `eval_top_level` for source, `builtins::apply` for a hook.
+    /// program — `run_phrases` for source, `builtins::apply` for a hook.
     ///
     /// The [`Mooring`] is an owned local on *this* stack frame and is only ever
     /// lent onward, so an outer run's is restored by the unwinding rather than
@@ -617,7 +622,7 @@ pub(crate) fn compile_run(
     shell: &Shell,
     src: &str,
     name: &str,
-) -> Result<(Arc<crate::ir::Comp>, bool, FileId), StaticDiagnostics> {
+) -> Result<(Arc<crate::ir::Toplevel>, bool, FileId), StaticDiagnostics> {
     crate::process::clear();
     let file = shell.session.sources.next_id();
 
@@ -641,14 +646,14 @@ pub(crate) fn compile_run(
         src.len(),
         t_tc.elapsed()
     );
-    let comp = match outcome {
-        CompileOutcome::Compiled(c) => Arc::new(c),
+    let top = match outcome {
+        CompileOutcome::Compiled(t) => Arc::new(t),
         CompileOutcome::Parse(e) => return Err(StaticDiagnostics::Parse(e)),
         CompileOutcome::Types(errs) => return Err(StaticDiagnostics::Types(errs)),
     };
 
-    let single_command = crate::ir::is_single_command(&comp);
-    Ok((comp, single_command, file))
+    let single_command = crate::ir::is_single_command(&top);
+    Ok((top, single_command, file))
 }
 
 /// Install the built run state, fire the lifecycle hooks around `body` under
@@ -993,7 +998,7 @@ mod tests {
         shell.face_signals();
         match shell.run(RunRequest {
             lifecycle: Box::new(CancelInPreExec),
-            ..capture_req("let x = 42\nreturn $x")
+            ..capture_req("let rpv = 42\nreturn $rpv")
         }) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(
@@ -1073,7 +1078,7 @@ mod tests {
         let inner = Arc::new(Mutex::new(None));
         match shell.run(RunRequest {
             lifecycle: Box::new(NestARun(inner.clone())),
-            ..capture_req("let x = 42\nreturn $x")
+            ..capture_req("let rpv = 42\nreturn $rpv")
         }) {
             RunReport::Ran { ending, .. } => assert_eq!(
                 ending.status(),
@@ -1116,7 +1121,7 @@ mod tests {
         let hook_status = Arc::new(Mutex::new(None));
         match shell.run(RunRequest {
             lifecycle: Box::new(RunAnAside(aside, hook_status.clone())),
-            ..capture_req("let x = 42\nreturn $x")
+            ..capture_req("let rpv = 42\nreturn $rpv")
         }) {
             RunReport::Ran { ending, .. } => assert_eq!(
                 ending.status(),
@@ -1212,7 +1217,7 @@ mod tests {
         let mut forked = trunk.fork_session();
         match forked.run(RunRequest {
             lifecycle: Box::new(CancelInPreExec),
-            ..capture_req("let x = 42\nreturn $x")
+            ..capture_req("let rpv = 42\nreturn $rpv")
         }) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(
@@ -1238,7 +1243,7 @@ mod tests {
         let handle = forked.cancel_handle();
         match forked.run(RunRequest {
             lifecycle: Box::new(CancelHandleInPreExec(handle)),
-            ..capture_req("let x = 42\nreturn $x")
+            ..capture_req("let rpv = 42\nreturn $rpv")
         }) {
             RunReport::Ran { ending, .. } => {
                 assert_eq!(ending.status(), 130, "a cancelled handle unwinds the run");
@@ -1269,7 +1274,7 @@ mod tests {
         shell.face_signals();
         let report = shell.run(RunRequest {
             lifecycle: Box::new(AbortInPreExec),
-            ..capture_req("let x = 42\nreturn $x")
+            ..capture_req("let rpv = 42\nreturn $rpv")
         });
         // One-way in production, so nothing clears it: without this, every
         // later session in the test binary would inherit the abort.
@@ -1305,7 +1310,7 @@ mod tests {
 
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.face_signals();
-        let req = capture_req("let x = 42\nreturn $x");
+        let req = capture_req("let rpv = 42\nreturn $rpv");
         match shell.run(RunRequest {
             run: Run {
                 wall: Some(std::time::Duration::from_secs(30)),

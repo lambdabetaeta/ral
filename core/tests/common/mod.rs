@@ -12,7 +12,7 @@
 #![allow(dead_code)] // not every test file uses every helper
 
 use ral_core::boot::BakedPrelude;
-use ral_core::{Scheme, ir::Comp};
+use ral_core::{Scheme, ir::Comp, ir::Toplevel};
 use std::sync::{Arc, OnceLock};
 
 #[ctor::ctor(unsafe)]
@@ -29,10 +29,10 @@ pub fn prelude() -> &'static BakedPrelude {
     B.get_or_init(BakedPrelude::bake_runtime)
 }
 
-/// The annotated prelude comp — its `Bind` nodes carry the checker's
-/// schemes, so `builtins::register` installs each prelude binding's scheme
-/// next to its value.
-pub fn prelude_comp() -> &'static Arc<Comp> {
+/// The annotated prelude toplevel — its `Phrase::Define`s carry the
+/// checker's schemes, so `builtins::register` installs each prelude
+/// binding's scheme next to its value.
+pub fn prelude_comp() -> &'static Arc<Toplevel> {
     prelude().comp()
 }
 
@@ -50,7 +50,7 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
     visit(comp);
     let mut sub = |c: &Arc<Comp>| walk_comp(c, visit);
     match &comp.item {
-        CompKind::Seq(parts) | CompKind::Chain(parts) => parts.iter().for_each(&mut sub),
+        CompKind::Chain(parts) => parts.iter().for_each(&mut sub),
         CompKind::Pipeline { stages, .. } => stages.iter().for_each(&mut sub),
         CompKind::Lam { body, .. } => sub(body),
         CompKind::Bind {

@@ -1,59 +1,52 @@
 //! Regression test for the prelude bake.
 //!
-//! The prelude elaborates to a top-level `Seq`, and ordinary inference
-//! of a `Seq` runs inside a fresh `TyEnv` frame so that lets inside a
-//! `{…}` block don't leak past it.  `bake_prelude` checks the prelude's
-//! parts in the root scope instead, so its top-level lets survive into
-//! the harvested scheme list.  A path through the generic `infer_comp`
-//! would *pop* every prelude binding before the harvest could collect
-//! them — the returned `Vec` was empty, and exarch's system prompt
-//! rendered the `# Prelude reference (authoritative)` header with no
-//! body.  This test pins the post-fix behaviour.
+//! The prelude elaborates to a [`ral_core::ir::Toplevel`], one `Phrase` per
+//! top-level statement; `bake_prelude` checks the phrases in order and
+//! harvests each `Phrase::Define`'s generalised schemes straight off it — no
+//! separate `TyEnv` walk.  This test pins that the harvest actually reaches
+//! every top-level `let`, and that the checked pass's interior annotations
+//! (`Capture`, a pipeline's yield) land on the baked tree.
 
 mod common;
 
-use ral_core::ir::{CompKind, IrPattern};
+use ral_core::ir::{CompKind, Phrase, Toplevel};
 use ral_core::typecheck::fmt_scheme;
 
 /// Re-bake the prelude from source so the test owns both the annotated
-/// comp and the schemes harvested off its `Bind` nodes.
-fn rebake() -> (ral_core::ir::Comp, Vec<(String, ral_core::Scheme)>) {
+/// toplevel and the schemes harvested off its `Phrase::Define`s.
+fn rebake() -> (Toplevel, Vec<(String, ral_core::Scheme)>) {
     let src = include_str!("../src/prelude.ral");
     let ast = ral_core::syntax::parser::parse(src).expect("prelude parse");
-    let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+    let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
         .expect("elaborate");
-    ral_core::bake_prelude(&comp)
+    ral_core::bake_prelude(&top)
 }
 
-/// Read the (name, scheme) pairs off an annotated comp's top-level `Bind`
-/// nodes — the spine the harvest walks (a `Seq`'s parts and a `Bind`'s
-/// `rest`).  No filter, matching `harvest_into`.
-fn schemes_on_binds(comp: &ral_core::ir::Comp) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    fn walk(comp: &ral_core::ir::Comp, out: &mut Vec<(String, String)>) {
-        match &comp.item {
-            CompKind::Seq(parts) => {
-                for part in parts {
-                    walk(part, out);
-                }
-            }
-            CompKind::Bind {
-                pattern,
-                rest,
-                scheme: Some(scheme),
-                ..
-            } => {
-                if let IrPattern::Name(name) = pattern.as_ref() {
-                    out.push((name.clone(), fmt_scheme(scheme)));
-                }
-                walk(rest, out);
-            }
-            CompKind::Bind { rest, .. } => walk(rest, out),
-            _ => {}
+/// Visit every `Comp` reachable from an annotated toplevel's phrases —
+/// [`common::walk_comp`] from each phrase's own root.
+fn walk_toplevel(top: &Toplevel, visit: &mut impl FnMut(&ral_core::ir::Comp)) {
+    for phrase in &top.phrases {
+        match &phrase.item {
+            Phrase::Define { comp, .. } => common::walk_comp(comp, visit),
+            Phrase::Source { path } => common::walk_comp(path, visit),
+            Phrase::Run(comp) => common::walk_comp(comp, visit),
         }
     }
-    walk(comp, &mut out);
-    out
+}
+
+/// Read the (name, scheme) pairs off an annotated toplevel's
+/// `Phrase::Define`s, in phrase order — the harvest `bake_prelude` performs.
+fn schemes_on_defines(top: &Toplevel) -> Vec<(String, String)> {
+    top.phrases
+        .iter()
+        .flat_map(|phrase| match &phrase.item {
+            Phrase::Define { schemes, .. } => schemes
+                .iter()
+                .map(|(name, scheme)| (name.clone(), fmt_scheme(scheme)))
+                .collect(),
+            Phrase::Source { .. } | Phrase::Run(_) => Vec::new(),
+        })
+        .collect()
 }
 
 #[test]
@@ -79,9 +72,9 @@ fn bake_returns_top_level_let_bindings() {
 fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
     let ast =
         ral_core::syntax::parser::parse("let upper = { |x| return $x }").expect("fixture parse");
-    let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+    let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
         .expect("elaborate");
-    let (_, schemes) = ral_core::bake_prelude(&comp);
+    let (_, schemes) = ral_core::bake_prelude(&top);
     assert!(
         schemes.iter().any(|(name, _)| name == "upper"),
         "a prelude binding named after a native must survive the harvest, got {schemes:?}"
@@ -89,11 +82,11 @@ fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
 }
 
 /// The bake runs one checked pass — parse, elaborate, annotate — so the
-/// comp blob the build embeds already carries the checker's ground
-/// verdicts on interior nodes, not just the top-level spine.  The
-/// elaborator never emits a `Capture` node, so one below the spine is proof
-/// the checked pass descended and inserted it — were the bake to embed the
-/// bare elaborated comp, none would exist anywhere in the tree.
+/// toplevel blob the build embeds already carries the checker's ground
+/// verdicts on interior nodes, not just each phrase's own root.  The
+/// elaborator never emits a `Capture` node, so one below a phrase's root is
+/// proof the checked pass descended and inserted it — were the bake to embed
+/// the bare elaborated toplevel, none would exist anywhere in the tree.
 ///
 /// The streaming reducers (`map-lines` / `filter-lines` / `each-line`) wrap
 /// an `echo`-per-line body, whose byte-payload bind RHS the bake wraps in
@@ -102,7 +95,7 @@ fn a_prelude_binding_colliding_with_a_native_survives_the_harvest() {
 fn baked_prelude_carries_interior_captures() {
     let (annotated, _) = rebake();
     let mut capture = false;
-    common::walk_comp(&annotated, &mut |c| {
+    walk_toplevel(&annotated, &mut |c| {
         if let CompKind::Capture(_) = &c.item {
             capture = true;
         }
@@ -122,11 +115,11 @@ fn bake_annotates_a_pipelines_yield() {
     use ral_core::ir::PipeYield;
     let ast =
         ral_core::syntax::parser::parse("let tag = { cat -n | head -n 1 }").expect("fixture parse");
-    let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
+    let top = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
         .expect("elaborate");
-    let (annotated, _) = ral_core::bake_prelude(&comp);
+    let (annotated, _) = ral_core::bake_prelude(&top);
     let mut yields = Vec::new();
-    common::walk_comp(&annotated, &mut |c| {
+    walk_toplevel(&annotated, &mut |c| {
         if let CompKind::Pipeline { yields: y, .. } = &c.item {
             yields.push(*y);
         }
@@ -139,21 +132,21 @@ fn bake_annotates_a_pipelines_yield() {
 }
 
 /// The schemes `bake_prelude` returns are the ones written onto the
-/// annotated comp's `Bind` nodes — one `Bind`-node harvest, not a
-/// separate `TyEnv` walk.  Comparing the comp's binds to the returned
-/// list within a *single* bake renders each scheme identically; an
-/// independent second bake would alpha-rename the quantified variables,
-/// so the comparison must stay inside one unifier run.
+/// annotated toplevel's `Phrase::Define`s — one harvest, not a separate
+/// `TyEnv` walk.  Comparing the toplevel's defines to the returned list
+/// within a *single* bake renders each scheme identically; an independent
+/// second bake would alpha-rename the quantified variables, so the
+/// comparison must stay inside one unifier run.
 #[test]
 fn annotated_binds_carry_the_harvested_schemes() {
     let (annotated, schemes) = rebake();
-    let on_binds = schemes_on_binds(&annotated);
+    let on_defines = schemes_on_defines(&annotated);
     let returned: Vec<(String, String)> = schemes
         .iter()
         .map(|(n, s)| (n.clone(), fmt_scheme(s)))
         .collect();
     assert_eq!(
-        on_binds, returned,
-        "the returned schemes must be exactly the ones on the annotated comp's Bind nodes"
+        on_defines, returned,
+        "the returned schemes must be exactly the ones on the annotated toplevel's Phrase::Define"
     );
 }

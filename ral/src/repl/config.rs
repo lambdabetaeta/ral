@@ -430,12 +430,28 @@ mod tests {
     fn apply_rc_inner(rc_src: &str) -> (Shell, RcSettings, Arc<Mutex<PluginRuntime>>) {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
-        let ast = ral_core::syntax::parser::parse(rc_src).unwrap();
-        let comp = std::sync::Arc::new(
-            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-                .expect("elaborate"),
-        );
-        let config = ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), &mut shell).unwrap();
+        let config = match shell.run(ral_core::RunRequest {
+            run: ral_core::transport::Run {
+                program: ral_core::transport::Program::Source(rc_src.to_string()),
+                script_name: "<rc>".to_string(),
+                caps: ral_core::types::Capabilities::root(),
+                wall: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: ral_core::RunIo::Inherit,
+                terminal: ral_core::RequestedTerminalAccess::Leased,
+                stdin: ral_core::RunStdin::Inherit,
+                trail: None,
+            },
+            surface: None,
+            deferred: None,
+            desk: None,
+            fork: None,
+            lifecycle: Box::new(()),
+        }) {
+            ral_core::RunReport::Ran { ending, .. } => ending.into_result().expect("rc must run"),
+            ral_core::RunReport::Static { .. } => panic!("rc source must run: {rc_src:?}"),
+        };
         let Value::Map(pairs) = config else {
             panic!(
                 "test rc source must return a map; got {}",

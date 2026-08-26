@@ -81,14 +81,19 @@ fn explain_prints_local_bindings_generalised_scheme() {
     );
 }
 
-/// A local owns the name it shadows even carrying no scheme — a pattern-bound
-/// name — so neither the shadowed doc nor the shadowed type may answer under
-/// it, which is what a registry sweep below the local would have them do.
+/// A local owns the name it shadows even where its own scheme has nothing
+/// to do with the shadowed entry's — a destructured pattern component
+/// generalises its own scheme now (§3.5), so neither the shadowed doc nor
+/// the shadowed type may answer under it, which is what a registry sweep
+/// below the local would have them do.
 #[test]
 fn explain_scheme_less_local_inherits_nothing_from_the_shadowed_entry() {
     let mut sh = shell();
     run(&mut sh, "let [lines, rest] = [1, 2]").unwrap();
-    assert!(!has_scheme(&sh, "lines"), "pattern binds carry no scheme");
+    assert!(
+        has_scheme(&sh, "lines"),
+        "a destructured pattern component generalises its own scheme"
+    );
 
     let (result, out) = run_capture(&mut sh, "explain lines");
     result.unwrap();

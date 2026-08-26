@@ -8,7 +8,6 @@
 
 use crate::ir::{Comp, CompKind, IrPattern, PipeYield, Val};
 use crate::source::Spanned;
-use crate::typecheck::Scheme;
 use crate::types::{Binding, Break, Control, Error, Mooring, Raw, Shell, Tail, Value};
 use std::sync::Arc;
 
@@ -65,8 +64,7 @@ pub(crate) fn eval_comp(
             comp: m,
             pattern,
             rest,
-            scheme,
-        } => eval_bind(m, pattern, rest, scheme.as_deref(), tail, mooring, shell),
+        } => eval_bind(m, pattern, rest, tail, mooring, shell),
 
         CompKind::Capture(body) => eval_capture(body, mooring, shell),
 
@@ -109,12 +107,7 @@ pub(crate) fn eval_comp(
             with_scope(shell, |shell| eval_comp(body, mooring, shell, tail))
         }
 
-        // `stmts_nested`'s `Source` lowering (S2) is not wired into
-        // `elab_expr`'s `Block`/`Lambda` arms until W1e's cutover, so this
-        // node is unreachable from any live compile path today.
         CompKind::Source { path, rest } => eval_source(path, rest, comp.span, tail, mooring, shell),
-
-        CompKind::Seq(comps) => eval_seq(comps, tail, mooring, shell),
     };
 
     match (result, comp.span) {
@@ -332,37 +325,29 @@ fn eval_decode(body: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Raw<Va
 ///
 /// `M` runs under the ambient sink (S11): its own bytes are effect, not the
 /// bound value, exactly as a discarded statement's are — `a; b` is `a to _.
-/// b`, so this is sequencing's one routing rule.
+/// b`, so this is sequencing's one routing rule; a failure names the
+/// abandonment of `rest`, as a `Seq`'s non-final part once did.
 ///
-/// The PATH-shadow check belongs to `run_phrases`'s `Define` arm now, under
-/// `Mode::Session` alone (a nested `Bind`'s pattern is never a command
-/// name) — but the run door does not build `Phrase`s yet (W1e), so a
-/// top-level `let` still reaches this node, and this still guards it at
-/// session scope; the W1e cutover that retires the guard here is the same
-/// one that gives `run_phrases`'s copy a caller.
-///
-/// The checker's `scheme` for the node installs together with the value, so
-/// the next run's check is seeded from the live binding.
+/// The PATH-shadow check is `run_phrases`'s `Define` arm's alone, under
+/// `Mode::Session`: a nested `Bind`'s pattern is a local lexical name, never
+/// a command name, so it binds unchecked here.  A nested `Bind` never
+/// generalises a scheme either — that lives on `Phrase::Define` alone.
 fn eval_bind(
     m: &Arc<Comp>,
     pattern: &IrPattern,
     rest: &Arc<Comp>,
-    scheme: Option<&Scheme>,
     tail: Tail,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
     crate::process::check(mooring)?;
-    if shell.mobile.scope.at_session_scope() {
-        super::pattern::check_pattern_shadow(pattern, shell)?;
-    }
     let step = super::capture::with_ambient_stdout(shell, |shell| {
         eval_comp(m, mooring, shell, Tail::No)
     })
     .map_err(|e| shell.err(format!("statement sink: {e}"), 1))?;
-    let val = step?;
+    let val = step.map_err(note_abandoned_steps)?;
     set_status_from_value(&val, shell);
-    assign_pattern(pattern, &val, scheme, mooring, shell)?;
+    assign_pattern(pattern, &val, mooring, shell)?;
     eval_comp(rest, mooring, shell, tail)
 }
 
@@ -467,29 +452,6 @@ fn eval_if(
     shell.set_status_from_bool(b);
     let branch = if b { then } else { else_ };
     with_scope(shell, |shell| eval_comp(branch, mooring, shell, tail))
-}
-
-/// Sequence of computations — the last value is the result, and only it
-/// inherits the sequence's tail position.  A non-final part's value is
-/// discarded, so its bytes are effect and it runs against the ambient sink:
-/// the destination is fixed by the writer's position in its own block, before
-/// a byte is written, and never revised.
-fn eval_seq(comps: &[Arc<Comp>], tail: Tail, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
-    let mut result = Value::Unit;
-    let len = comps.len();
-    for (i, c) in comps.iter().enumerate() {
-        crate::process::check(mooring)?;
-        result = if i + 1 == len {
-            eval_comp(c, mooring, shell, tail)?
-        } else {
-            let step = super::capture::with_ambient_stdout(shell, |shell| {
-                eval_comp(c, mooring, shell, Tail::No)
-            })
-            .map_err(|e| shell.err(format!("statement sink: {e}"), 1))?;
-            step.map_err(note_abandoned_steps)?
-        };
-    }
-    Ok(result)
 }
 
 /// A failing part abandons the parts after it, and nothing downstream can tell

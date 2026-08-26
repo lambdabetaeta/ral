@@ -347,21 +347,18 @@ fn sourced_module_runtime_error_points_into_module() {
     std::fs::remove_file(&path).ok();
 }
 
-// ── W1d: `Phrase::Source`/`Ran` semantics ────────────────────────────────
+// ── `Phrase::Source`/`Ran` semantics ─────────────────────────────────────
 //
-// `run_phrases`, `Ran`, and `Mode` (`evaluator.rs`) are additive this
-// parcel — the run door above still resolves `source`/`use` through
-// `evaluate_source`, the single-`Comp` path the rest of this file pins.
-// These two need `Phrase::Source`/`Phrase::Define` actually reaching the
-// door, which is W1e's cutover (the elaborator's `elaborate_toplevel` is
-// real already, but `compile`/`compile_and_typecheck` do not call it yet).
+// `run_phrases`, `Ran`, and `Mode` (`evaluator.rs`) are the run door's own
+// route for `source`/`use` now; `evaluate_source`, the single-`Comp` path
+// the rest of this file pins, still serves every other loader (rc, plugin,
+// capability).
 
 /// A `source`d file that fails partway keeps the `Define`s it made before
 /// the failure — `Ran::env` threads them even though `Ran::outcome` is the
 /// file's own error (S12: `source` is not transactional) — and that halt
 /// halts the run that sourced it, with the same status.
 #[test]
-#[ignore = "W1e wires elaborate_toplevel"]
 fn a_sourced_failure_keeps_the_defines_before_it() {
     let path = write_module(
         "ral_source_partial_defines.ral",
@@ -393,7 +390,7 @@ fn a_sourced_failure_keeps_the_defines_before_it() {
 /// returns exactly the names the module's own `Define`s bound, minus the
 /// `_`-prefixed ones (S7).
 #[test]
-#[ignore = "W1e wires elaborate_toplevel"]
+#[ignore = "W2a: use runs under the session environment"]
 fn use_sees_earlier_session_defines_and_returns_only_defined_names() {
     let path = write_module(
         "ral_use_defines.ral",

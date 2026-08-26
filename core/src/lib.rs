@@ -72,8 +72,7 @@ pub use types::{
 // raw parse / elaborate / evaluate names the owning module, which reads as
 // stepping past the run-door seam rather than as part of it.
 pub(crate) use elaborator::elaborate;
-pub(crate) use evaluator::evaluate;
-pub(crate) use ir::Comp;
+pub(crate) use ir::Toplevel;
 pub(crate) use syntax::parser::{ParseError, parse, parse_with};
 
 /// Parse and elaborate: the two ahead-of-time phases every entry point runs
@@ -82,29 +81,29 @@ pub(crate) use syntax::parser::{ParseError, parse, parse_with};
 /// # Errors
 /// Parse failure, or any `$SCRIPT` in `source` — this caller passes no name,
 /// so there is no script identity to bake the reference against.
-pub fn compile(source: &str) -> Result<Comp, ParseError> {
+pub fn compile(source: &str) -> Result<Toplevel, ParseError> {
     parse(source).and_then(|ast| elaborate(&ast, std::collections::HashSet::default(), ""))
 }
 
 /// Outcome of [`compile_and_typecheck`], carrying the errors structured so
 /// the rendering choice stays at the call site.
 pub enum CompileOutcome {
-    /// The comp carries the checker's annotations.
-    Compiled(Comp),
+    /// The toplevel carries the checker's annotations.
+    Compiled(Toplevel),
     Parse(ParseError),
     Types(Vec<TypeError>),
 }
 
 impl CompileOutcome {
-    /// Collapse to the comp or one rendered message — the shape the
+    /// Collapse to the toplevel or one rendered message — the shape the
     /// `source` / `use` / plugin loaders want, reporting a failed load as a
     /// single fatal error rather than per-error ariadne output.
     ///
     /// # Errors
     /// The rendered parse error, or the newline-joined type errors.
-    pub fn into_comp_or_message(self) -> Result<Comp, String> {
+    pub fn into_comp_or_message(self) -> Result<Toplevel, String> {
         match self {
-            Self::Compiled(comp) => Ok(comp),
+            Self::Compiled(top) => Ok(top),
             Self::Parse(e) => Err(e.to_string()),
             Self::Types(errors) => Err(errors
                 .iter()

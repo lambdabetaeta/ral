@@ -191,15 +191,22 @@ pub(super) fn builtin_fold_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     /// Force a lambda literal to a `Value` so a combinator can be driven
     /// directly.  The bodies below are bare values, so applying one reaches
     /// no statement-level poll point: the only cancellation checkpoint left
     /// is the combinator's own, which is what these tests pin.
     fn lambda(mooring: &Mooring, shell: &mut Shell, src: &str) -> Value {
-        let comp = Arc::new(crate::compile(src).expect("compile lambda"));
-        crate::evaluator::eval_top_level(&comp, mooring, shell).expect("lambda value")
+        let top = crate::compile(src).expect("compile lambda");
+        crate::evaluator::run_phrases(
+            &top.phrases,
+            shell.mobile.scope.clone(),
+            crate::evaluator::Mode::Session,
+            mooring,
+            shell,
+        )
+        .outcome
+        .expect("lambda value")
     }
 
     fn ints(n: i64) -> Value {

@@ -966,27 +966,6 @@ mod chokepoint_tests {
         );
     }
 
-    /// A caller not at session scope — a lifecycle hook, say — is refused
-    /// outright rather than served a partial prune from a transient frame.
-    #[test]
-    fn prune_refused_mid_frame() {
-        let mut shell = armed_shell(2);
-        top_level(&mut shell, "let midframe_x = 1").expect("define");
-        idle_spin(&mut shell, 2);
-
-        shell.mobile.scope.push_scope();
-        assert!(
-            shell.prune_idle_bindings().is_empty(),
-            "a mid-frame caller must be refused, not partially served"
-        );
-        shell.mobile.scope.pop_scope();
-
-        assert!(
-            !shell.prune_idle_bindings().is_empty(),
-            "back at session scope, the same idle name prunes normally"
-        );
-    }
-
     #[test]
     fn nothing_expired_prunes_nothing() {
         let mut shell = armed_shell(64);

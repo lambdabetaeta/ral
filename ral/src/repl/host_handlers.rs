@@ -396,12 +396,28 @@ mod tests {
             Arc::new(Mutex::new(PluginRuntime::default())),
         ));
 
-        let ast = ral_core::syntax::parser::parse("{ |args| return 1 }").unwrap();
-        let comp = std::sync::Arc::new(
-            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-                .expect("elaborate"),
-        );
-        let thunk = ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), &mut shell).unwrap();
+        let thunk = match shell.run(ral_core::RunRequest {
+            run: ral_core::transport::Run {
+                program: ral_core::transport::Program::Source("{ |args| return 1 }".to_string()),
+                script_name: "<test>".to_string(),
+                caps: ral_core::types::Capabilities::root(),
+                wall: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: ral_core::RunIo::Inherit,
+                terminal: ral_core::RequestedTerminalAccess::Leased,
+                stdin: ral_core::RunStdin::Inherit,
+                trail: None,
+            },
+            surface: None,
+            deferred: None,
+            desk: None,
+            fork: None,
+            lifecycle: Box::new(()),
+        }) {
+            ral_core::RunReport::Ran { ending, .. } => ending.into_result().unwrap(),
+            ral_core::RunReport::Static { .. } => panic!("well-formed source must run"),
+        };
 
         shell
             .install_alias("jobs".to_string(), thunk)

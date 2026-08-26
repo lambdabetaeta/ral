@@ -72,31 +72,6 @@ pub fn evaluate(comp: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Settl
 // scope, not a process boundary, so OS confinement happens per child in
 // `build_command` (`runtime::command::process`), never at body entry.
 
-/// Run `comp` as a top-level run, installing the post-run
-/// [`Mobile`](crate::types::Mobile) for every outcome — Ok, Error, Exit —
-/// so a `let` before a failing command still binds for the next run.
-///
-/// The program is the run's sole computation, hence [`Tail::Yes`]; its value
-/// goes straight back to the [`Shell::run`](crate::Shell::run) door.  The
-/// run's mobile is swapped in for the duration, so a terminal tail call is
-/// absorbed under it.
-pub(crate) fn eval_top_level(
-    comp: &Arc<Comp>,
-    mooring: &Mooring,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    let mobile = shell.mobile();
-    let (post, outcome) = shell.run_with_mobile(mobile, |shell| {
-        absorb_tail(
-            comp::eval_comp(comp, mooring, shell, Tail::Yes),
-            mooring,
-            shell,
-        )
-    });
-    shell.install_mobile(post);
-    outcome
-}
-
 /// Run a thunk body as a block: scope-isolated, mobile discarded on exit, so
 /// `let`, `cd`, module loads, plugin registrations, and env-var changes do
 /// not propagate.  Only `last_status` and observations, which the body posts
@@ -145,7 +120,6 @@ pub(crate) struct Ran {
 /// `Define`s are already visible to every later phrase without a separate
 /// write-back.)
 #[derive(Clone, Copy)]
-#[allow(dead_code, reason = "Session/Module/Prelude callers land at W1e's cutover")]
 pub(crate) enum Mode {
     Session,
     Local,
@@ -174,7 +148,7 @@ pub(crate) fn run_phrases(
     let mut outcome = Ok(Value::Unit);
     for (i, phrase) in phrases.iter().enumerate() {
         let non_final = i != last;
-        let result = match &phrase.item {
+        let result = crate::process::check(mooring).and_then(|()| match &phrase.item {
             Phrase::Run(m) => run_phrase_run(m, non_final, mooring, shell),
             Phrase::Define {
                 pattern,
@@ -184,7 +158,7 @@ pub(crate) fn run_phrases(
             Phrase::Source { path } => {
                 run_phrase_source(path, phrase.span, mode, mooring, shell, &mut defined)
             }
-        };
+        });
         match result {
             Ok(v) => outcome = Ok(v),
             Err(Break::Error(e)) if non_final && e.hint.is_none() => {
@@ -292,17 +266,14 @@ fn run_phrase_source(
 mod tests {
     use super::*;
 
-    /// Compile `source` through the real, already-landed `elaborate_toplevel`
-    /// + `typecheck_toplevel` pair — the run door does not call them yet
-    /// (W1e), so `run_phrases` has no other route to a checked `Toplevel`
-    /// until then.  Not hand-built IR: real source text through the real
-    /// front end, just not the one door wires wraps around it yet.
+    /// Compile `source` through the real front end: real source text, never
+    /// hand-built IR.
     fn toplevel(source: &str) -> Phrases {
         let ast = crate::syntax::parser::parse_with(source, crate::source::FileId::DUMMY)
             .expect("parse");
-        let top = crate::elaborator::elaborate_toplevel(&ast, Default::default(), "<test>")
+        let top = crate::elaborator::elaborate(&ast, Default::default(), "<test>")
             .expect("elaborate");
-        crate::typecheck::typecheck_toplevel(&top, crate::typecheck::SessionSchemes::default())
+        crate::typecheck::typecheck(&top, crate::typecheck::SessionSchemes::default())
             .expect("typecheck")
             .phrases
     }
@@ -370,23 +341,39 @@ mod tests {
 
     #[test]
     fn top_level_persists_let_on_error() {
-        let source = "let persist_top = 41; exit 7";
-        let comp = Arc::new(crate::compile(source).expect("compile"));
+        let phrases = toplevel("let persist_top = 41\nexit 7");
         let mut shell = Shell::default();
-        let _ = eval_top_level(&comp, &Mooring::adrift(), &mut shell);
+        let _ = run_phrases(
+            &phrases,
+            shell.mobile.scope.clone(),
+            Mode::Session,
+            &Mooring::adrift(),
+            &mut shell,
+        );
         assert!(
             shell.mobile.scope.get("persist_top").is_some(),
-            "top-level mobile must persist `let` bindings even on Exit"
+            "the run door must persist `let` bindings even on Exit"
         );
     }
 
     #[test]
     fn block_discards_let() {
-        let source = "let leak_block = 1";
-        let body = Arc::new(crate::compile(source).expect("compile"));
+        // A bare `{ … }` statement elaborates to `Run(Return(Thunk(body)))`;
+        // unwrap it to reach the block's own body — real source text, never
+        // hand-built IR.
+        let phrases = toplevel("{ let leak_block = 1 }");
+        let [phrase] = phrases.as_slice() else {
+            panic!("expected one phrase, got {phrases:?}");
+        };
+        let Phrase::Run(comp) = &phrase.item else {
+            panic!("expected a Run phrase, got {:?}", phrase.item);
+        };
+        let crate::ir::CompKind::Return(crate::ir::Val::Thunk(body)) = &comp.item else {
+            panic!("expected a thunked block, got {:?}", comp.item);
+        };
         let mut shell = Shell::default();
         let captured = shell.snapshot();
-        let _ = eval_block(&body, &captured, Tail::No, &Mooring::adrift(), &mut shell);
+        let _ = eval_block(body, &captured, Tail::No, &Mooring::adrift(), &mut shell);
         assert!(
             shell.mobile.scope.get("leak_block").is_none(),
             "block boundary must discard `let` bindings"

@@ -9,8 +9,7 @@
 //! [`captured_string`]; the demand follows the same path the payload rides at
 //! run time, so the wrap lands at the leaf that actually owns the bytes.
 
-use super::env::{InferCtx, TyEnv};
-use super::generalize::generalize;
+use super::env::InferCtx;
 use super::scheme::Scheme;
 use super::ty::GroundRoute;
 use crate::ir::{
@@ -103,43 +102,20 @@ fn captured_string(body: Comp) -> CompKind {
     )))
 }
 
-/// A `Bind`'s scheme (spine only) and its RHS, always walked at `Value`
-/// demand — a bind's whole point is to observe its RHS.
-fn annotate_bind(
-    comp: &Comp,
-    rhs: &Arc<Comp>,
-    ctx: &mut InferCtx,
-    spine: bool,
-    eta: bool,
-) -> (Arc<Comp>, Option<Box<Scheme>>) {
-    let scheme = spine
-        .then(|| ctx.bind_tys.get(&comp_key(comp)).cloned())
-        .flatten()
-        .map(|ty| {
-            let scheme = generalize(&mut ctx.unifier, &TyEnv::new(), &ty);
-            super::generalize::debug_assert_scheme_closed(
-                &mut ctx.unifier,
-                &scheme,
-                "top-level Bind scheme must leave no variable free",
-            );
-            Box::new(scheme)
-        });
-    (annotate_value_rhs(rhs, ctx, eta), scheme)
-}
-
-/// Rebuild `comp` under `demand`; `spine` marks the `Bind`s that install into
-/// the persistent session scope, so only those carry a generalised scheme
-/// (closed against an empty environment, since the unifier dies with the run).
-pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx, spine: bool) -> Comp {
-    annotate_demand(comp, ctx, spine, false, Demand::Discard)
+/// Rebuild `comp` under `Demand::Discard` — the general recursive walk a
+/// thunked value or a pattern default gets, never a `Bind`/`Define` RHS.
+pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx) -> Comp {
+    annotate_demand(comp, ctx, false, Demand::Discard)
 }
 
 /// `annotate_demand`, but for a position that reads its child's *value* —
-/// a `Bind`/`Define` RHS, or the toplevel's own tail `Run` — so that S3's
-/// η-expansion (`eta_expand_arrow`) can apply after the ordinary rebuild,
-/// keyed by the *original* `rhs`'s address in `ctx.rhs_arrow_arity`.
-fn annotate_value_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool) -> Arc<Comp> {
-    let annotated = annotate_demand(rhs, ctx, false, eta, Demand::Value);
+/// a `Bind`/`Define`/`Source` RHS, or the toplevel's own tail `Run` — under
+/// `demand`, so that S3's η-expansion (`eta_expand_arrow`) can apply after
+/// the ordinary rebuild, keyed by the *original* `rhs`'s address in
+/// `ctx.rhs_arrow_arity`.  `Bind` never generalises a scheme — that lives on
+/// `Phrase::Define` alone, one per bound name.
+fn annotate_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Arc<Comp> {
+    let annotated = annotate_demand(rhs, ctx, eta, demand);
     let arity = if eta {
         ctx.rhs_arrow_arity.get(&comp_key(rhs)).copied()
     } else {
@@ -149,6 +125,12 @@ fn annotate_value_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool) -> Arc<Com
         Some(arity) => Arc::new(eta_expand_arrow(annotated, ctx, arity)),
         None => Arc::new(annotated),
     }
+}
+
+/// [`annotate_rhs`] at `Demand::Value` — a `Bind`/`Define`/`Source` RHS
+/// bound to a name, or the toplevel's own tail `Run`.
+fn annotate_value_rhs(rhs: &Arc<Comp>, ctx: &mut InferCtx, eta: bool) -> Arc<Comp> {
+    annotate_rhs(rhs, ctx, eta, Demand::Value)
 }
 
 /// S3: rebuild an arrow-typed RHS of curried arity `arity` as
@@ -182,47 +164,39 @@ fn eta_expand_arrow(rhs: Comp, ctx: &mut InferCtx, arity: usize) -> Comp {
     Spanned::with_span(span, CompKind::Return(Val::Thunk(Arc::new(body))))
 }
 
-fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, spine: bool, eta: bool, demand: Demand) -> Comp {
+fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {
     match &comp.item {
-        CompKind::Seq(parts) => {
-            let item = match parts.split_last() {
-                None => CompKind::Seq(Vec::new()),
-                Some((last, init)) => {
-                    let mut rebuilt: Vec<Arc<Comp>> = init
-                        .iter()
-                        .map(|p| Arc::new(annotate_demand(p, ctx, spine, eta, Demand::Discard)))
-                        .collect();
-                    rebuilt.push(Arc::new(annotate_demand(last, ctx, spine, eta, demand)));
-                    CompKind::Seq(rebuilt)
-                }
-            };
-            return Spanned::with_span(comp.span, item);
-        }
+        // A `Wildcard` RHS is a discarded statement, `Demand::Discard`, but
+        // still eta-expanded if it resolved to `Fun` (S3) — `annotate_rhs`
+        // carries both.  Any other pattern's RHS is read at `Demand::Value`.
+        // `Bind` never generalises a scheme, on either arm.
         CompKind::Bind {
             comp: rhs,
             pattern,
             rest,
-            ..
         } => {
-            let (rhs, scheme) = annotate_bind(comp, rhs, ctx, spine, eta);
+            let rhs_demand = if matches!(pattern.as_ref(), IrPattern::Wildcard) {
+                Demand::Discard
+            } else {
+                Demand::Value
+            };
             let item = CompKind::Bind {
-                comp: rhs,
+                comp: annotate_rhs(rhs, ctx, eta, rhs_demand),
                 pattern: Arc::new(annotate_pattern(pattern, ctx)),
-                rest: Arc::new(annotate_demand(rest, ctx, spine, eta, demand)),
-                scheme,
+                rest: Arc::new(annotate_demand(rest, ctx, eta, demand)),
             };
             return Spanned::with_span(comp.span, item);
         }
         CompKind::Source { path, rest } => {
             let item = CompKind::Source {
-                path: Arc::new(annotate_demand(path, ctx, false, eta, Demand::Value)),
-                rest: Arc::new(annotate_demand(rest, ctx, spine, eta, demand)),
+                path: annotate_rhs(path, ctx, eta, Demand::Value),
+                rest: Arc::new(annotate_demand(rest, ctx, eta, demand)),
             };
             return Spanned::with_span(comp.span, item);
         }
         CompKind::Force(Val::Thunk(inner)) => {
             let item = CompKind::Force(Val::Thunk(Arc::new(annotate_demand(
-                inner, ctx, false, eta, demand,
+                inner, ctx, eta, demand,
             ))));
             return Spanned::with_span(comp.span, item);
         }
@@ -316,7 +290,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
             CompKind::Pipeline {
                 stages: stages
                     .iter()
-                    .map(|stage| Arc::new(annotate_demand(stage, ctx, false, eta, Demand::Discard)))
+                    .map(|stage| Arc::new(annotate_demand(stage, ctx, eta, Demand::Discard)))
                     .collect(),
                 stage_types,
                 yields,
@@ -324,10 +298,10 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
         }
         CompKind::Lam { param, body } => CompKind::Lam {
             param: annotate_pattern(param, ctx),
-            body: Arc::new(annotate_demand(body, ctx, false, eta, Demand::Discard)),
+            body: Arc::new(annotate_demand(body, ctx, eta, Demand::Discard)),
         },
         CompKind::App { head, args } => CompKind::App {
-            head: Arc::new(annotate_demand(head, ctx, false, eta, Demand::Discard)),
+            head: Arc::new(annotate_demand(head, ctx, eta, Demand::Discard)),
             args: annotate_args(args, ctx),
         },
         CompKind::Force(value) => CompKind::Force(annotate_val(value, ctx)),
@@ -360,7 +334,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
                     .map(|(name, m)| {
                         (
                             name.clone(),
-                            Arc::new(annotate_demand(m, ctx, false, eta, Demand::Discard)),
+                            Arc::new(annotate_demand(m, ctx, eta, Demand::Discard)),
                         )
                     })
                     .collect::<Vec<_>>(),
@@ -373,7 +347,6 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
         // here.
         CompKind::Capture(_)
         | CompKind::Decode(_)
-        | CompKind::Seq(_)
         | CompKind::Bind { .. }
         | CompKind::Source { .. }
         | CompKind::If { .. }
@@ -395,14 +368,14 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
 fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {
     if byte_side_join(join, ctx, demand) {
         if bytes_result(ctx, comp_key(arm)) {
-            return annotate_demand(arm, ctx, false, eta, Demand::Value);
+            return annotate_demand(arm, ctx, eta, Demand::Value);
         }
         return Spanned::with_span(
             arm.span,
-            captured_string(annotate_demand(arm, ctx, false, eta, Demand::Discard)),
+            captured_string(annotate_demand(arm, ctx, eta, Demand::Discard)),
         );
     }
-    annotate_demand(arm, ctx, false, eta, demand)
+    annotate_demand(arm, ctx, eta, demand)
 }
 
 /// A scope arm/body `Val`, dispatched the way [`annotate_join_arm`]
@@ -445,10 +418,10 @@ fn annotate_scope_val(
 /// or [`ArmWalk::Wrap`] (wrap the whole body at `Discard`).
 fn arm_body(body: &Arc<Comp>, ctx: &mut InferCtx, walk: ArmWalk) -> Arc<Comp> {
     match walk {
-        ArmWalk::Descend => Arc::new(annotate_demand(body, ctx, false, false, Demand::Value)),
+        ArmWalk::Descend => Arc::new(annotate_demand(body, ctx, false, Demand::Value)),
         ArmWalk::Wrap => Arc::new(Spanned::with_span(
             body.span,
-            captured_string(annotate_demand(body, ctx, false, false, Demand::Discard)),
+            captured_string(annotate_demand(body, ctx, false, Demand::Discard)),
         )),
         ArmWalk::Plain => unreachable!("arm_body is only called under Descend/Wrap"),
     }
@@ -479,7 +452,7 @@ fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
 
 fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
     match val {
-        Val::Thunk(comp) => Val::Thunk(Arc::new(annotate(comp, ctx, false))),
+        Val::Thunk(comp) => Val::Thunk(Arc::new(annotate(comp, ctx))),
         Val::List(elems) => Val::List(elems.iter().map(|e| annotate_list_elem(e, ctx)).collect()),
         Val::Map(entries) => Val::Map(
             entries
@@ -555,10 +528,10 @@ fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) ->
             body: annotate_val(body, ctx),
         },
         CompKind::Hoisted { body } => CompKind::Hoisted {
-            body: Arc::new(annotate_demand(body, ctx, false, eta, demand)),
+            body: Arc::new(annotate_demand(body, ctx, eta, demand)),
         },
         CompKind::Redirect { body, redirects } => CompKind::Redirect {
-            body: Arc::new(annotate_demand(body, ctx, false, eta, demand)),
+            body: Arc::new(annotate_demand(body, ctx, eta, demand)),
             redirects: redirects
                 .iter()
                 .map(|r| annotate_redirect(r, ctx))
@@ -586,7 +559,7 @@ fn annotate_pattern(pattern: &IrPattern, ctx: &mut InferCtx) -> IrPattern {
                     default: entry
                         .default
                         .as_ref()
-                        .map(|d| Arc::new(annotate(d, ctx, false))),
+                        .map(|d| Arc::new(annotate(d, ctx))),
                 })
                 .collect(),
         ),
@@ -594,12 +567,14 @@ fn annotate_pattern(pattern: &IrPattern, ctx: &mut InferCtx) -> IrPattern {
 }
 
 /// Rebuild a checked [`Toplevel`]: every phrase's RHS is walked at `eta =
-/// true`, so S3's η-expansion applies throughout — a `Define`'s RHS, a
-/// `Source`'s path, and the toplevel's own tail `Run` are read at `Value`
-/// demand, every other `Run` discarded.  `schemes`, parallel to
-/// `top.phrases`, is [`infer::infer_toplevel`](super::infer::infer_toplevel)'s
-/// per-`Define` harvest, written straight onto the rebuilt `Phrase::Define` —
-/// `Bind` never carries one on this path, `spine` staying `false` throughout.
+/// true`, so S3's η-expansion applies throughout — a `Define`'s RHS and a
+/// `Source`'s path are read at `Value` demand; every `Run`, tail included,
+/// is `Demand::Discard` — a `Run`'s bytes are never captured into its own
+/// reported value, only its arrow arity read for η-expansion.  `schemes`,
+/// parallel to `top.phrases`, is
+/// [`infer::infer_toplevel`](super::infer::infer_toplevel)'s per-`Define`
+/// harvest, written straight onto the rebuilt `Phrase::Define` — `Bind`
+/// never carries a scheme, on any path.
 pub(super) fn annotate_toplevel(
     top: &Toplevel,
     ctx: &mut InferCtx,
@@ -621,16 +596,16 @@ pub(super) fn annotate_toplevel(
                 Phrase::Source { path } => Phrase::Source {
                     path: annotate_value_rhs(path, ctx, true),
                 },
+                // The tail's value is reported (η-expanded if it resolved
+                // to `Fun`), but never byte-captured: nothing downstream
+                // decodes the run's own report as text, so `Demand::Discard`
+                // throughout — matching `infer_phrase`'s `force_discarded_shape`.
                 Phrase::Run(comp) if index == tail_index => {
-                    Phrase::Run(annotate_value_rhs(comp, ctx, true))
+                    Phrase::Run(annotate_rhs(comp, ctx, true, Demand::Discard))
                 }
-                Phrase::Run(comp) => Phrase::Run(Arc::new(annotate_demand(
-                    comp,
-                    ctx,
-                    false,
-                    true,
-                    Demand::Discard,
-                ))),
+                Phrase::Run(comp) => {
+                    Phrase::Run(Arc::new(annotate_demand(comp, ctx, true, Demand::Discard)))
+                }
             };
             Spanned::with_span(phrase.span, item)
         })

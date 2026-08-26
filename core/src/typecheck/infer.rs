@@ -83,7 +83,9 @@ fn stage_root_stdin_feed(stage: &Comp) -> Option<StdinFeed> {
         CompKind::Exec(exec) => &exec.redirects,
         CompKind::Redirect { redirects, .. } => redirects,
         CompKind::Hoisted { body } => return stage_root_stdin_feed(body),
-        CompKind::Bind { rest, .. } => return stage_root_stdin_feed(rest),
+        CompKind::Bind { rest, .. } | CompKind::Source { rest, .. } => {
+            return stage_root_stdin_feed(rest);
+        }
         _ => return None,
     };
     redirects.iter().find_map(|r| match (r.fd, r.mode) {
@@ -140,24 +142,14 @@ fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
     Ok(Some(name.as_str()))
 }
 
-/// Type-check a whole program.  Its value is discarded — a program's only
-/// surviving trace is its status — so it is held to the same shape a
-/// pipeline stage is: [`Inferencer::force_discarded_shape`].
-pub fn infer_comp(ctx: &mut InferCtx, env: &mut TyEnv, comp: &Comp) -> CompTy {
-    let mut inferencer = Inferencer { ctx, env };
-    let cty = inferencer.infer_comp(comp);
-    inferencer.force_discarded_shape(comp, &cty);
-    cty
-}
-
 /// Type-check a whole [`Toplevel`]: infer each phrase in order, extending
 /// `TyEnv` at each `Define` — a `Source` binds nothing statically — and
 /// binding/unbinding an `alias`/`unalias` `Run` phrase's handler scheme for
-/// the phrases after it, as [`Inferencer::infer_seq_with_alias_bindings`]
-/// does for `Seq` parts today (§3.5).  Returns each `Define` phrase's
-/// generalised per-name schemes, parallel to `top.phrases` and empty for
-/// every other phrase — `annotate::annotate_toplevel` writes it straight
-/// onto the rebuilt `Phrase::Define`.
+/// the phrases after it, as `Bind` on `Wildcard` does for a nested discarded
+/// statement (§3.5).  Returns each `Define` phrase's generalised per-name
+/// schemes, parallel to `top.phrases` and empty for every other phrase —
+/// `annotate::annotate_toplevel` writes it straight onto the rebuilt
+/// `Phrase::Define`.
 pub fn infer_toplevel(
     ctx: &mut InferCtx,
     env: &mut TyEnv,
@@ -325,9 +317,7 @@ impl Inferencer<'_> {
     }
 
     /// Record `rhs`'s curried arity for `annotate`'s η-expansion (S3), keyed
-    /// by `rhs`'s own address — absent means "not `Fun`-shaped".  A pure
-    /// side table: harmless where nothing reads it, which is every call site
-    /// on the old, un-phrased path.
+    /// by `rhs`'s own address — absent means "not `Fun`-shaped".
     fn record_arrow_arity(&mut self, rhs: &Arc<Comp>, cty: &CompTy) {
         let arity = self.fun_arity(cty);
         if arity > 0 {
@@ -390,17 +380,15 @@ impl Inferencer<'_> {
     }
 
     /// The statement whose type `comp`'s own type actually is: a `Bind`'s
-    /// type is its `rest`'s, a hoist frame's is its body's, and a `Seq`'s is
-    /// its last part's, all the way down, so `let a = 1; let b = 2; cd`'s
-    /// discarded value is `cd`'s, not the outermost node's.
+    /// type is its `rest`'s, a `Source`'s is its `rest`'s, and a hoist
+    /// frame's is its body's, all the way down, so `let a = 1; let b = 2;
+    /// cd`'s discarded value is `cd`'s, not the outermost node's.
     fn discard_tail(comp: &Comp) -> &Comp {
         match &comp.item {
-            CompKind::Bind { rest, .. } => Self::discard_tail(rest),
+            CompKind::Bind { rest, .. } | CompKind::Source { rest, .. } => {
+                Self::discard_tail(rest)
+            }
             CompKind::Hoisted { body } => Self::discard_tail(body),
-            CompKind::Seq(parts) => match parts.last() {
-                Some(last) => Self::discard_tail(last),
-                None => comp,
-            },
             _ => comp,
         }
     }
@@ -1025,67 +1013,6 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Walk a `Seq`, binding each `alias` definition into the current `TyEnv`
-    /// scope as it is met so later statements resolve against it.  The caller's
-    /// `with_scope` frame is what stops those bindings outliving the `Seq`.
-    ///
-    /// An alias whose thunk is not a literal lambda is still bound, typed as a
-    /// nullary arm, so `g x` is a static arity mismatch rather than a silently
-    /// discarded `x`.  Runtime install refuses a bare-block alias outright; the
-    /// static layer stays lenient, a thunk's runtime value being unknown here.
-    pub(super) fn infer_seq_with_alias_bindings(
-        &mut self,
-        parts: &[Arc<Comp>],
-        empty: Ty,
-    ) -> CompTy {
-        let mut last = CompTy::pure(empty);
-        let tail_index = parts.len().saturating_sub(1);
-        for (index, part) in parts.iter().enumerate() {
-            let mut alias_already_typed = false;
-            match alias_statement_shape(part) {
-                Ok(Some((name, thunk))) => {
-                    let scheme = self.handler_comp_scheme(name, thunk);
-                    self.env.bind_handler(name.to_string(), scheme, true);
-                    alias_already_typed = true;
-                }
-                Err(msg) => {
-                    self.ctx
-                        .diagnose(TypeErrorKind::MalformedAlias { detail: msg });
-                }
-                Ok(None) => {}
-            }
-            match unalias_statement_shape(part) {
-                Ok(Some(name)) => {
-                    self.env.unbind_removable_handler(name);
-                }
-                Err(msg) => {
-                    self.ctx
-                        .diagnose(TypeErrorKind::MalformedUnalias { detail: msg });
-                }
-                Ok(None) => {}
-            }
-            // `handler_comp_scheme` above is the sole authority for the arm's
-            // type and has already spoken.  Falling through would re-dispatch
-            // the same `Exec("alias", …)` through the `ALIAS` builtin sig and
-            // duplicate every diagnostic inside the thunk, so synthesize that
-            // sig's fixed pure-`Unit` result instead.
-            last = if alias_already_typed {
-                super::builtins::pure(Ty::Unit)
-            } else {
-                self.infer_comp(part)
-            };
-            // A sequence *is* its tail: a discarded statement ran for its
-            // effect and left nothing behind for a later boundary to
-            // observe.  Forcing the tail to `Return` here would pin a
-            // still-unknown tail out of ever becoming a function — every
-            // other part, though, is discarded and must already be one.
-            if index != tail_index {
-                self.force_discarded_shape(part, &last);
-            }
-        }
-        last
-    }
-
     /// [`infer_toplevel`]'s walk: one phrase at a time, each under its own
     /// span, threading the extended `TyEnv` from one phrase to the next.
     fn infer_phrases(&mut self, phrases: &[Spanned<Phrase>]) -> Vec<Vec<(String, Scheme)>> {
@@ -1102,10 +1029,10 @@ impl Inferencer<'_> {
     }
 
     /// One phrase of §3.5.  `is_tail` marks the toplevel's own last phrase:
-    /// a non-tail `Run`'s value is discarded, exactly as a `Seq` part's is
-    /// ([`Self::infer_seq_with_alias_bindings`]); the tail `Run`'s is the
-    /// run's own value, reported rather than forced — S3's η-expansion may
-    /// still rebuild it if it resolved to `Fun`.
+    /// every `Run`'s value is held to the discarded shape, tail included —
+    /// its bytes are never captured into its own report — but the tail's
+    /// arrow arity is additionally read, so S3's η-expansion can rebuild it
+    /// if it resolved to `Fun`.
     fn infer_phrase(&mut self, phrase: &Phrase, is_tail: bool) -> Vec<(String, Scheme)> {
         match phrase {
             Phrase::Define { pattern, comp, .. } => {
@@ -1167,10 +1094,16 @@ impl Inferencer<'_> {
                     self.infer_comp(comp)
                 };
                 if is_tail {
+                    // The run's value is reported (S3's η-expansion may
+                    // rebuild a Fun-typed tail into a thunked λ), but a
+                    // byte-routed tail — an external command's own stdout —
+                    // is still held to the discarded shape: nothing decodes
+                    // the run's own report as text, so its bytes must reach
+                    // the visible stream rather than a checker-inserted
+                    // `Capture`.
                     self.record_arrow_arity(comp, &cty);
-                } else {
-                    self.force_discarded_shape(comp, &cty);
                 }
+                self.force_discarded_shape(comp, &cty);
                 Vec::new()
             }
         }
@@ -1680,6 +1613,49 @@ impl Inferencer<'_> {
                 );
                 cty
             }
+            // `Bind` on `Wildcard` is `Seq`'s old per-part duty: the RHS is a
+            // discarded statement, so an `alias`/`unalias` shape binds or
+            // unbinds its handler scheme over `rest` and anything else is
+            // held to `force_discarded_shape` — never generalised, and
+            // `rest` inherits whatever scope those bindings opened.
+            CompKind::Bind {
+                comp: inner,
+                pattern,
+                rest,
+                ..
+            } if matches!(pattern.as_ref(), IrPattern::Wildcard) => {
+                let mut alias_already_typed = false;
+                match alias_statement_shape(inner) {
+                    Ok(Some((name, thunk))) => {
+                        let scheme = self.handler_comp_scheme(name, thunk);
+                        self.env.bind_handler(name.to_string(), scheme, true);
+                        alias_already_typed = true;
+                    }
+                    Err(msg) => {
+                        self.ctx
+                            .diagnose(TypeErrorKind::MalformedAlias { detail: msg });
+                    }
+                    Ok(None) => {}
+                }
+                match unalias_statement_shape(inner) {
+                    Ok(Some(name)) => {
+                        self.env.unbind_removable_handler(name);
+                    }
+                    Err(msg) => {
+                        self.ctx
+                            .diagnose(TypeErrorKind::MalformedUnalias { detail: msg });
+                    }
+                    Ok(None) => {}
+                }
+                let inner_ty = if alias_already_typed {
+                    super::builtins::pure(Ty::Unit)
+                } else {
+                    self.infer_comp(inner)
+                };
+                self.record_arrow_arity(inner, &inner_ty);
+                self.force_discarded_shape(inner, &inner_ty);
+                self.infer_comp(rest)
+            }
             CompKind::Bind {
                 comp: inner,
                 pattern,
@@ -1753,11 +1729,6 @@ impl Inferencer<'_> {
                 CompTy::pure(Ty::String)
             }
             CompKind::Index { target, keys } => self.infer_index(target, keys),
-            CompKind::Seq(comps) => {
-                // The frame `infer_seq_with_alias_bindings` requires, so its
-                // alias bindings die with the `Seq`.
-                self.with_scope(|this| this.infer_seq_with_alias_bindings(comps, Ty::Unit))
-            }
             CompKind::Rec { group, index } => self.infer_rec(group, *index),
             CompKind::Source { rest, .. } => self.infer_comp(rest),
             CompKind::Observe(reg) => CompTy::pure(match reg {

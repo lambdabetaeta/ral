@@ -11,18 +11,18 @@
 //! binary takes [`BakedPrelude::bake_runtime`] instead.
 
 use crate::io::TerminalState;
-use crate::ir::Comp;
+use crate::ir::Toplevel;
 use crate::typecheck::Scheme;
 use crate::types::{BuiltinEntry, BuiltinTable, Shell};
 use std::sync::{Arc, OnceLock};
 
-/// A prelude baked ahead of time: the annotated [`Comp`] and the top-level
-/// [`Scheme`] list, harvested in one checked pass, as postcard blobs that
-/// decode and memoise on first access.
+/// A prelude baked ahead of time: the annotated [`Toplevel`] and the
+/// top-level [`Scheme`] list, harvested in one checked pass, as postcard
+/// blobs that decode and memoise on first access.
 pub struct BakedPrelude {
     ir: &'static [u8],
     scheme_bytes: &'static [u8],
-    comp: OnceLock<Arc<Comp>>,
+    comp: OnceLock<Arc<Toplevel>>,
     schemes: OnceLock<Vec<(String, Scheme)>>,
 }
 
@@ -39,11 +39,11 @@ impl BakedPrelude {
         }
     }
 
-    /// The annotated prelude comp.
+    /// The annotated prelude toplevel.
     ///
     /// # Panics
     /// Panics if the embedded IR blob fails to deserialize.
-    pub fn comp(&self) -> &Arc<Comp> {
+    pub fn comp(&self) -> &Arc<Toplevel> {
         self.comp.get_or_init(|| {
             Arc::new(postcard::from_bytes(self.ir).expect("prelude IR deserialization failed"))
         })
@@ -69,9 +69,9 @@ impl BakedPrelude {
     pub fn bake_runtime() -> Self {
         let src = include_str!("prelude.ral");
         let ast = crate::parse(src).expect("prelude parse");
-        let comp = crate::elaborate(&ast, std::collections::HashSet::default(), "")
+        let top = crate::elaborate(&ast, std::collections::HashSet::default(), "")
             .expect("prelude elaborate");
-        let (annotated, schemes) = crate::bake_prelude(&comp);
+        let (annotated, schemes) = crate::bake_prelude(&top);
         let this = Self::from_blobs(&[], &[]);
         let _ = this.comp.set(Arc::new(annotated));
         let _ = this.schemes.set(schemes);
@@ -200,13 +200,13 @@ pub fn bake_prelude_to_out_dir() {
         eprintln!("build: prelude parse error: {e}");
         std::process::exit(1);
     });
-    let comp =
+    let top =
         crate::elaborate(&ast, std::collections::HashSet::default(), "").unwrap_or_else(|e| {
             eprintln!("build: prelude elaborate error: {e}");
             std::process::exit(1);
         });
 
-    let (annotated, schemes) = crate::bake_prelude(&comp);
+    let (annotated, schemes) = crate::bake_prelude(&top);
     let ir_bytes = postcard::to_allocvec(&annotated).expect("prelude IR serialization failed");
     let scheme_bytes =
         postcard::to_allocvec(&schemes).expect("prelude schemes serialization failed");

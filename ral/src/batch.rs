@@ -92,13 +92,12 @@ pub(crate) fn run_batch(
         captured: Vec::new(),
     };
     let check_table = host_surface.builtin_table();
-    let run_check =
-        |comp: &ral_core::ir::Comp| -> Result<ral_core::ir::Comp, Vec<ral_core::TypeError>> {
-            ral_core::typecheck(
-                comp,
-                ral_core::SessionSchemes::from_schemes(PRELUDE.schemes(), check_table.clone()),
-            )
-        };
+    let run_check = |top: &ral_core::ir::Toplevel| -> Result<ral_core::ir::Toplevel, Vec<ral_core::TypeError>> {
+        ral_core::typecheck(
+            top,
+            ral_core::SessionSchemes::from_schemes(PRELUDE.schemes(), check_table.clone()),
+        )
+    };
 
     let ast = match parse(source) {
         Ok(ast) => ast,

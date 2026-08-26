@@ -220,7 +220,7 @@ fn external_write_outside_grant_denied_in_block_body() {
 
 /// When the confined external fails, the top-level run installs the
 /// child's failing status into the parent's mobile, not the previous
-/// run's value. Pins `eval_top_level`'s `install_mobile` step: the
+/// run's value. Pins `run_phrases`' direct mutation of `shell.mobile`: the
 /// parent's `$?` reports the confined failure.
 #[test]
 fn denied_external_installs_failing_status_into_mobile() {

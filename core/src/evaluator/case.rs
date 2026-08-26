@@ -64,7 +64,7 @@ pub(crate) fn eval_case(
 
     let payload = payload.map_or(Value::Unit, |p| *p);
     with_scope(shell, |shell| {
-        assign_pattern(&arm.pattern, &payload, None, mooring, shell)?;
+        assign_pattern(&arm.pattern, &payload, mooring, shell)?;
         eval_comp(arm.body.comp(), mooring, shell, tail)
     })
 }

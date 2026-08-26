@@ -429,16 +429,11 @@ fn block_grant_does_not_leak_cd() {
     );
 }
 
-// ── (6b) W1d: run phrases, ambient routing, block-local `source` ────────
+// ── (6b) run phrases, ambient routing, block-local `source` ─────────────
 //
-// The Toplevel/Phrase/`Mode` machinery `run_phrases` (`evaluator.rs`) adds
-// this parcel is not yet wired into the run door above — that is W1e's
-// cutover, once the elaborator's `stmts_nested`/`elaborate_toplevel` land
-// in `compile`/`compile_and_typecheck`.  Tests below that need the new
-// `Source` shapes are `#[ignore]`d until then; the two that pin
-// already-true invariants (S11's ambient-routing rule, and revision 3's
-// kept `let _` rule) run today, unaffected by which elaborator produced
-// the IR.
+// The Toplevel/Phrase/`Mode` machinery `run_phrases` (`evaluator.rs`) is
+// the run door's own route now — `compile`/`compile_and_typecheck` produce
+// a `Toplevel` and `stmts_nested` is wired into every block/lambda body.
 
 /// Like [`top_level`], but with stdout captured instead of inherited, so a
 /// test can tell what a run *printed* apart from what it *bound*.
@@ -525,10 +520,8 @@ fn let_wildcard_discards_the_rhs_and_prints_only_what_follows() {
 
 /// `source` inside a block scopes its `Define`s over the rest of the
 /// block — today's install-into-ambient-scope made structural, kept by
-/// `CompKind::Source`'s frame (§3.3).  Needs `stmts_nested` wired into
-/// `elab_expr`, which is W1e's cutover.
+/// `CompKind::Source`'s frame (§3.3).
 #[test]
-#[ignore = "W1e wires elaborate_toplevel"]
 fn source_in_a_block_scopes_over_the_rest_of_the_block() {
     let mut shell = fresh_shell();
     let path = module_loader_fixture(
@@ -544,10 +537,8 @@ fn source_in_a_block_scopes_over_the_rest_of_the_block() {
 }
 
 /// A block-local `source` leases nothing (Mode::Local): the run's own
-/// `Define`s are session leases, a nested `source`'s are not.  Needs
-/// `Phrase::Source`/`CompKind::Source` wired into the run door.
+/// `Define`s are session leases, a nested `source`'s are not.
 #[test]
-#[ignore = "W1e wires elaborate_toplevel"]
 fn block_local_source_leases_nothing() {
     let mut shell = fresh_shell();
     let before = shell.leased_binding_count();
@@ -567,18 +558,17 @@ fn block_local_source_leases_nothing() {
 /// `source` is a definition form: its own value is `()`, like a block
 /// ending in `let` (S12).
 #[test]
-#[ignore = "W1e wires elaborate_toplevel"]
 fn source_is_unit() {
     let mut shell = fresh_shell();
-    let path = module_loader_fixture("top_level_vs_block_source_unit.ral", "let x = 1");
+    let path = module_loader_fixture("top_level_vs_block_source_unit.ral", "let sourced_n = 1");
     let result = top_level(&mut shell, &format!("source '{}'", path.display()));
     let _ = std::fs::remove_file(&path);
     assert_eq!(result.expect("source must succeed"), Value::Unit);
 }
 
 /// Write `contents` to a fresh temp `.ral` file under `name` and return its
-/// path — the `#[ignore]`d `source`-form tests' fixture, mirroring
-/// `module_loader.rs`'s `write_module`.
+/// path — the `source`-form tests' fixture, mirroring `module_loader.rs`'s
+/// `write_module`.
 fn module_loader_fixture(name: &str, contents: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(name);
     std::fs::write(&path, contents).expect("write temp module");

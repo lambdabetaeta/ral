@@ -469,20 +469,14 @@ fn audit_record_value_field_is_body_raw_value_not_invented() {
 /// stdout; they are simply not what `v` binds.
 #[test]
 fn pipeline_ending_in_audit_binds_the_audit_record() {
-    let comp = annotated("let v = echo a | audit { cat }; return ()");
-    let mut bound = None;
-    common::walk_comp(&comp, &mut |c| {
-        if let CompKind::Bind {
-            pattern,
-            scheme: Some(scheme),
-            ..
-        } = &c.item
-            && let IrPattern::Name(name) = pattern.as_ref()
-            && name == "v"
-        {
-            bound = Some(scheme.ty.clone());
-        }
-    });
+    let top = annotated("let v = echo a | audit { cat }; return ()");
+    let Phrase::Define { schemes, .. } = &top.phrases[0].item else {
+        panic!("expected a Define phrase, got {:?}", top.phrases[0].item);
+    };
+    let bound = schemes
+        .iter()
+        .find(|(name, _)| name == "v")
+        .map(|(_, scheme)| scheme.ty.clone());
     let Some(Ty::Record(row)) = bound else {
         panic!("`v` must bind `audit`'s record, got: {bound:?}");
     };
@@ -1465,15 +1459,15 @@ fn fail_message_must_be_text() {
 // top-level spine only; the yields and the captures go everywhere, at any
 // depth.
 
-use ral_core::ir::{Comp, CompKind, IrPattern, PipeYield};
+use ral_core::ir::{Comp, CompKind, IrPattern, Phrase, PipeYield, Toplevel, Val};
 
-/// Compile `src` to an annotated comp, asserting it type-checks.
-fn annotated(src: &str) -> Comp {
+/// Compile `src` to an annotated toplevel, asserting it type-checks.
+fn annotated(src: &str) -> Toplevel {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
+    let top = elaborate(&ast, std::collections::HashSet::default(), "")
         .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
     typecheck(
-        &comp,
+        &top,
         ral_core::SessionSchemes::from_schemes(
             common::prelude_schemes(),
             ral_core::HostSurface::default().builtin_table(),
@@ -1482,10 +1476,22 @@ fn annotated(src: &str) -> Comp {
     .unwrap_or_else(|errs| panic!("expected no errors in {src:?}, got: {errs:?}"))
 }
 
+/// Visit every `Comp` reachable from an annotated toplevel's phrases —
+/// [`common::walk_comp`] from each phrase's own root.
+fn walk_toplevel(top: &Toplevel, visit: &mut impl FnMut(&Comp)) {
+    for phrase in &top.phrases {
+        match &phrase.item {
+            Phrase::Define { comp, .. } => common::walk_comp(comp, visit),
+            Phrase::Source { path } => common::walk_comp(path, visit),
+            Phrase::Run(comp) => common::walk_comp(comp, visit),
+        }
+    }
+}
+
 /// Every `Pipeline` node's stage count and yield, anywhere in the tree.
-fn all_pipeline_yields(comp: &Comp) -> Vec<(usize, PipeYield)> {
+fn all_pipeline_yields(top: &Toplevel) -> Vec<(usize, PipeYield)> {
     let mut out = Vec::new();
-    common::walk_comp(comp, &mut |c| {
+    walk_toplevel(top, &mut |c| {
         if let CompKind::Pipeline { stages, yields, .. } = &c.item {
             out.push((stages.len(), *yields));
         }
@@ -1494,9 +1500,9 @@ fn all_pipeline_yields(comp: &Comp) -> Vec<(usize, PipeYield)> {
 }
 
 /// Every `Pipeline` node's `stage_types` slot, reachable anywhere.
-fn all_pipeline_stage_types(comp: &Comp) -> Vec<(usize, Vec<Ty>)> {
+fn all_pipeline_stage_types(top: &Toplevel) -> Vec<(usize, Vec<Ty>)> {
     let mut out = Vec::new();
-    common::walk_comp(comp, &mut |c| {
+    walk_toplevel(top, &mut |c| {
         if let CompKind::Pipeline {
             stages,
             stage_types,
@@ -1556,21 +1562,17 @@ fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
     // kernel node for the exact bytes, wrapped in a `Decode` node for the
     // text; a value-routed one (`return 42`) is left alone.  This is the whole
     // observable content of the route at a value boundary.
-    let comp = annotated(r"let x = echo hi; let y = return 42; return ()");
+    let top = annotated(r"let x = echo hi; let y = return 42; return ()");
     let mut binds = Vec::new();
-    common::walk_comp(&comp, &mut |c| {
-        if let CompKind::Bind {
-            comp: rhs,
-            pattern,
-            ..
-        } = &c.item
+    for phrase in &top.phrases {
+        if let Phrase::Define { pattern, comp, .. } = &phrase.item
             && let IrPattern::Name(name) = pattern.as_ref()
         {
-            let coerced = matches!(&rhs.item, CompKind::Decode(inner)
+            let coerced = matches!(&comp.item, CompKind::Decode(inner)
                 if matches!(inner.item, CompKind::Capture(_)));
             binds.push((name.clone(), coerced));
         }
-    });
+    }
     assert_eq!(
         binds,
         vec![("x".to_string(), true), ("y".to_string(), false)]
@@ -1580,9 +1582,33 @@ fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
 /// Whether the `x` bind of `src` had its RHS captured — the whole observable
 /// content of a `Bytes` route at a value boundary.
 fn bind_x_is_captured(src: &str) -> bool {
-    let comp = annotated(src);
+    let top = annotated(src);
+
+    // A join's byte-side arms are captured individually (per-arm, not at
+    // the join's own node), so the verdict is "any Capture in the RHS
+    // subtree", not "the RHS itself is one".
+    fn has_capture(rhs: &Comp) -> bool {
+        let mut found = false;
+        common::walk_comp(rhs, &mut |c| {
+            if let CompKind::Capture(_) = &c.item {
+                found = true;
+            }
+        });
+        found
+    }
+
     let mut found = None;
-    common::walk_comp(&comp, &mut |c| {
+    // `x` bound at the top level is a `Phrase::Define`; nested under a
+    // block it is a `CompKind::Bind`, reached by `walk_toplevel`.
+    for phrase in &top.phrases {
+        if let Phrase::Define { pattern, comp, .. } = &phrase.item
+            && let IrPattern::Name(name) = pattern.as_ref()
+            && name == "x"
+        {
+            found = Some(has_capture(comp));
+        }
+    }
+    walk_toplevel(&top, &mut |c| {
         if let CompKind::Bind {
             comp: rhs,
             pattern,
@@ -1591,16 +1617,7 @@ fn bind_x_is_captured(src: &str) -> bool {
             && let IrPattern::Name(name) = pattern.as_ref()
             && name == "x"
         {
-            // A join's byte-side arms are captured individually (per-arm, not
-            // at the join's own node), so the verdict is "any Capture in the
-            // RHS subtree", not "the RHS itself is one".
-            let mut has_capture = false;
-            common::walk_comp(rhs, &mut |c| {
-                if let CompKind::Capture(_) = &c.item {
-                    has_capture = true;
-                }
-            });
-            found = Some(has_capture);
+            found = Some(has_capture(rhs));
         }
     });
     found.expect("a bind named `x`")
@@ -1678,7 +1695,7 @@ fn a_bind_reads_its_rhs_route_through_the_store() {
 /// arm rather than at its own node.
 fn case_arms_captured(src: &str) -> Vec<(String, bool)> {
     let mut out = Vec::new();
-    common::walk_comp(&annotated(src), &mut |c| {
+    walk_toplevel(&annotated(src), &mut |c| {
         let CompKind::Case { arms, .. } = &c.item else {
             return;
         };
@@ -1964,29 +1981,26 @@ fn a_route_polymorphic_join_still_carries_wf2_to_its_byte_uses() {
 
 #[test]
 fn nested_binds_carry_no_scheme_while_spine_does() {
-    // The spine `let g` carries a scheme; a `let inner` under the lambda
-    // body evaluates in a block scope and never installs, so it stays
-    // `scheme: None`.
-    let comp = annotated(r"let g = { |x| let inner = return $x; return $inner }; return ()");
-    let mut spine_named = None;
-    let mut nested_named = None;
-    common::walk_comp(&comp, &mut |c| {
-        if let CompKind::Bind {
-            pattern,
-            scheme,
-            ..
-        } = &c.item
-            && let IrPattern::Name(name) = pattern.as_ref()
+    // The spine `let g` generalises onto its `Phrase::Define`; a `let inner`
+    // under the lambda body is a nested `Bind`, which has no scheme field
+    // to carry one in at all (§3.5).
+    let top = annotated(r"let g = { |x| let inner = return $x; return $inner }; return ()");
+    let Phrase::Define { schemes, .. } = &top.phrases[0].item else {
+        panic!("expected a Define phrase, got {:?}", top.phrases[0].item);
+    };
+    assert!(
+        schemes.iter().any(|(name, _)| name == "g"),
+        "spine bind must generalise a scheme, got {schemes:?}"
+    );
+    let mut nested_named = false;
+    walk_toplevel(&top, &mut |c| {
+        if let CompKind::Bind { pattern, .. } = &c.item
+            && matches!(pattern.as_ref(), IrPattern::Name(n) if n == "inner")
         {
-            match name.as_str() {
-                "g" => spine_named = Some(scheme.is_some()),
-                "inner" => nested_named = Some(scheme.is_some()),
-                _ => {}
-            }
+            nested_named = true;
         }
     });
-    assert_eq!(spine_named, Some(true), "spine bind carries a scheme");
-    assert_eq!(nested_named, Some(false), "nested bind carries no scheme");
+    assert!(nested_named, "expected a nested Bind named `inner`");
 }
 
 // ─── Nullary codec decoders ──────────────────────────────────────────────────
@@ -2537,49 +2551,16 @@ fn duplicate_case_arm_is_refused() {
     );
 }
 
-// ─── Toplevel phrase typechecking (W1c) ───────────────────────────────────────
-//
-// `typecheck_toplevel` infers a `Toplevel`'s phrases in order (§3.5).  W1b's
-// `elaborate_toplevel` lands concurrently with this parcel, so these tests
-// build a `Toplevel` by hand from `elaborate`d source: elaborating a group of
-// statements together — so a mutually-recursive `let` sees its siblings —
-// yields a bare top-level `Bind` (one statement) or a `Seq` of them
-// (several); splitting that shallow, already-flat structure into phrases is
-// exactly the depth-0 half of what `elaborate_toplevel` will do.
-
-use ral_core::ir::{Phrase, Toplevel, Val};
-use ral_core::source::Spanned;
-use ral_core::typecheck::typecheck_toplevel;
-use std::sync::Arc;
-
-fn one_phrase(comp: &Arc<ral_core::ir::Comp>) -> Spanned<Phrase> {
-    let item = match &comp.item {
-        CompKind::Bind {
-            comp: rhs, pattern, ..
-        } => Phrase::Define {
-            pattern: pattern.clone(),
-            comp: rhs.clone(),
-            schemes: Vec::new(),
-        },
-        _ => Phrase::Run(comp.clone()),
-    };
-    Spanned::with_span(comp.span, item)
-}
+// ─── Toplevel phrase typechecking (§3.5) ──────────────────────────────────
 
 fn toplevel(src: &str) -> Toplevel {
     let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
-    let comp = elaborate(&ast, std::collections::HashSet::default(), "")
-        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
-    let span = comp.span;
-    let phrases = match comp.item {
-        CompKind::Seq(parts) => parts.iter().map(one_phrase).collect(),
-        other => vec![one_phrase(&Arc::new(Spanned::with_span(span, other)))],
-    };
-    Toplevel { phrases }
+    elaborate(&ast, std::collections::HashSet::default(), "")
+        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"))
 }
 
 fn toplevel_errors(src: &str) -> Vec<TypeError> {
-    typecheck_toplevel(
+    typecheck(
         &toplevel(src),
         ral_core::SessionSchemes::from_schemes(
             common::prelude_schemes(),
@@ -2591,7 +2572,7 @@ fn toplevel_errors(src: &str) -> Vec<TypeError> {
 }
 
 fn toplevel_ok(src: &str) -> Toplevel {
-    typecheck_toplevel(
+    typecheck(
         &toplevel(src),
         ral_core::SessionSchemes::from_schemes(
             common::prelude_schemes(),
@@ -2644,9 +2625,10 @@ fn toplevel_define_destructuring_generalises_each_name() {
     }
 }
 
-/// A nested `let` (a `Bind` inside a `!{ … }` block on a `Define`'s
-/// RHS) never carries a written-back scheme, unlike the `Define` around it —
-/// `annotate_toplevel` walks with `spine` always `false`.
+/// A nested `let` inside a `!{ … }` block right-nests into a `Bind` chain
+/// (`stmts_nested`) — never a flat `Seq`, which no longer exists — and,
+/// unlike the `Define` around it, `Bind` carries no scheme field at all: it
+/// never generalises (§3.5).
 #[test]
 fn toplevel_nested_bind_never_generalises() {
     let top = toplevel_ok("let result = !{ let y = 1; return $y }");
@@ -2656,16 +2638,14 @@ fn toplevel_nested_bind_never_generalises() {
     let CompKind::Force(Val::Thunk(inner)) = &comp.item else {
         panic!("expected a forced thunk, got {:?}", comp.item);
     };
-    let CompKind::Seq(parts) = &inner.item else {
-        panic!("expected a Seq body, got {:?}", inner.item);
+    let CompKind::Bind { pattern, rest, .. } = &inner.item else {
+        panic!(
+            "expected the block body right-nested into a Bind, got {:?}",
+            inner.item
+        );
     };
-    let CompKind::Bind { scheme, .. } = &parts[0].item else {
-        panic!("expected the nested `let` as a Bind, got {:?}", parts[0].item);
-    };
-    assert!(
-        scheme.is_none(),
-        "a nested Bind must never carry a written-back scheme"
-    );
+    assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n == "y"));
+    assert!(matches!(rest.item, CompKind::Return(Val::Variable(_))));
 }
 
 /// A self-recursive `let` types the group of one polymorphically at the top

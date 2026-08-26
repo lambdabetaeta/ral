@@ -25,7 +25,7 @@
 //! frontend renders a dependency tree, and nothing re-evaluates.
 
 use ral_core::Shell;
-use ral_core::ir::{Comp, CompKind};
+use ral_core::ir::{CompKind, Phrase, Toplevel};
 use ral_core::syntax::ast::{Ast, Pattern};
 
 use std::collections::HashSet;
@@ -92,7 +92,7 @@ impl Worksheet {
             ral_core::source::FileId::DUMMY,
             "",
         ) {
-            ral_core::CompileOutcome::Compiled(comp) => bind_effects(&comp),
+            ral_core::CompileOutcome::Compiled(top) => bind_effects(&top),
             _ => return,
         };
 
@@ -138,7 +138,7 @@ fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
         .map(|(name, value)| (name, value.item.as_ref()))
 }
 
-/// Walk an annotated comp's top-level `Bind` nodes into `(name, effectful)`
+/// Walk an annotated toplevel's `Phrase::Define`s into `(name, effectful)`
 /// pairs, reading the checker's verdict off the IR.  A binding is effectful
 /// when its RHS compiles to a [`CompKind::Exec`] or one of the effect-frame
 /// forms (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`, `Hoisted`), or
@@ -146,47 +146,33 @@ fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
 /// [`CompKind::Decode`] over a capture, which is the annotation pass's own
 /// verdict that the RHS is a byte-payload computation.
 ///
-/// Walks `Seq` siblings and `Bind` `rest` chains, the two shapes a sequence
-/// of top-level lets elaborates to; it does not descend into nested
+/// Reads each phrase's own `Define`; it does not descend into nested
 /// computations (lambda bodies, branches), whose binds are not top-level.
-fn bind_effects(comp: &Comp) -> Vec<(String, bool)> {
-    let mut out = Vec::new();
-    collect_bind_effects(comp, &mut out);
-    out
-}
-
-fn collect_bind_effects(comp: &Comp, out: &mut Vec<(String, bool)>) {
-    match &comp.item {
-        CompKind::Seq(parts) => {
-            for part in parts {
-                collect_bind_effects(part, out);
-            }
-        }
-        CompKind::Bind {
-            comp: rhs,
-            pattern,
-            rest,
-            ..
-        } => {
-            if let Pattern::Name(name) = pattern.as_ref() {
-                let effectful = matches!(
-                    rhs.item,
-                    CompKind::Exec(_)
-                        | CompKind::Try { .. }
-                        | CompKind::Guard { .. }
-                        | CompKind::Audit { .. }
-                        | CompKind::Within { .. }
-                        | CompKind::Grant { .. }
-                        | CompKind::Redirect { .. }
-                        | CompKind::Hoisted { .. }
-                        | CompKind::Decode(_)
-                );
-                out.push((name.clone(), effectful));
-            }
-            collect_bind_effects(rest, out);
-        }
-        _ => {}
-    }
+fn bind_effects(top: &Toplevel) -> Vec<(String, bool)> {
+    top.phrases
+        .iter()
+        .filter_map(|phrase| {
+            let Phrase::Define { pattern, comp, .. } = &phrase.item else {
+                return None;
+            };
+            let Pattern::Name(name) = pattern.as_ref() else {
+                return None;
+            };
+            let effectful = matches!(
+                comp.item,
+                CompKind::Exec(_)
+                    | CompKind::Try { .. }
+                    | CompKind::Guard { .. }
+                    | CompKind::Audit { .. }
+                    | CompKind::Within { .. }
+                    | CompKind::Grant { .. }
+                    | CompKind::Redirect { .. }
+                    | CompKind::Hoisted { .. }
+                    | CompKind::Decode(_)
+            );
+            Some((name.clone(), effectful))
+        })
+        .collect()
 }
 
 #[cfg(test)]

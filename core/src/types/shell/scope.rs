@@ -180,22 +180,12 @@ impl Shell {
         self.mobile.scope.set(name, value);
     }
 
-    /// The evaluator's single install point for a scope entry.
-    ///
-    /// Still runs [`Self::note_define`] itself, gated on
-    /// [`Env::at_session_scope`] — the run door does not build `Phrase`s yet
-    /// (W1e), so a top-level `let` reaches this through `eval_bind`, not
-    /// `run_phrases`, and this depth-based gate is today's only way to know
-    /// it is a session write.  `run_phrases`'s `Define` arm calls
-    /// `note_define` itself too, by `Mode` rather than depth (§1.3's actual
-    /// design — depth cannot tell a `use` body cloning the session scope for
-    /// isolation from a real session write, which is exactly why `Mode`
-    /// exists); until W1e retires this gate, a `Phrase::Define` note_defines
-    /// twice, which only `run_phrases`'s own inert tests can observe today.
+    /// The evaluator's single install point for a scope entry.  Lease
+    /// bookkeeping lives in [`Self::note_define`] alone, called from
+    /// `run_phrases`'s `Define` arm under `Mode::Session` — a nested
+    /// `Bind`'s pattern is a local lexical name, never a session write, so
+    /// it installs unleased here.
     pub(crate) fn install_scope_binding(&mut self, name: String, binding: Binding) {
-        if self.mobile.scope.at_session_scope() {
-            self.note_define(&name, &binding);
-        }
         self.mobile.scope.set_binding(name, binding);
     }
 
@@ -203,9 +193,8 @@ impl Shell {
     /// fresh non-baseline name's lease and renews an existing one — writing
     /// a name is itself interest in it — and, when the lease is armed and
     /// [`Value::shallow_size`] meets `large_binding_bytes`, queues a
-    /// residency notice.  Called from [`Self::install_scope_binding`]'s own
-    /// depth gate today, and from `run_phrases`'s `Define` arm under
-    /// `Mode::Session`  — see that method's doc for why both exist for now.
+    /// residency notice.  Called from `run_phrases`'s `Define` arm alone,
+    /// under `Mode::Session`.
     pub(crate) fn note_define(&mut self, name: &str, binding: &Binding) {
         self.local.bindings.note_install(name);
         if let Some(lease) = self.local.bindings.lease() {

@@ -18,7 +18,7 @@ use crate::types::{
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 mod codecs;
 mod collections;
@@ -479,13 +479,20 @@ pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 ///
 /// The prelude — a ral script baked into the binary — is evaluated once per
 /// process; every later shell gets a copy of what that run left behind.
-pub fn register(shell: &mut Shell, prelude_comp: &Arc<crate::ir::Comp>) {
+pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
     static PRELUDE_BINDINGS: OnceLock<HashMap<String, Binding>> = OnceLock::new();
 
     let bindings = PRELUDE_BINDINGS.get_or_init(|| {
         let mut prelude_env = Shell::new(crate::io::TerminalState::default());
 
-        if let Err(e) = crate::evaluate(prelude_comp, &Mooring::adrift(), &mut prelude_env) {
+        let ran = crate::evaluator::run_phrases(
+            &prelude_top.phrases,
+            prelude_env.mobile.scope.clone(),
+            crate::evaluator::Mode::Prelude,
+            &Mooring::adrift(),
+            &mut prelude_env,
+        );
+        if let Err(e) = ran.outcome {
             let msg = match &e {
                 Break::Error(err) => err.to_string(),
                 Break::Escape(Escape::Exit(code)) => format!("exit {code}"),

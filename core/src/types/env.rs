@@ -96,12 +96,6 @@ impl Env {
             .find_map(|scope| scope.get(name))
     }
 
-    /// True with no block/lambda/`if`/`letrec` frame above the user scope: a
-    /// binding installed here survives the run, anything deeper is popped first.
-    pub fn at_session_scope(&self) -> bool {
-        self.scopes.len() == 2
-    }
-
     pub fn get_prelude(&self, name: &str) -> Option<&Value> {
         self.get_prelude_binding(name).map(|b| &b.value)
     }

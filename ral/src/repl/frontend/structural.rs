@@ -22,7 +22,7 @@
 //! runtime state and never mutates it.
 
 use ral_core::Shell;
-use ral_core::ir::{Comp, CompKind};
+use ral_core::ir::{Comp, CompKind, Phrase, Toplevel};
 use ral_core::typecheck::{Scheme, fmt_scheme, fmt_ty};
 use ral_core::types::HandleState;
 use ral_core::{CompileOutcome, Value};
@@ -635,7 +635,7 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
         ral_core::source::FileId::DUMMY,
         "",
     ) {
-        CompileOutcome::Compiled(comp) => match pipeline_stage_rows(&comp, src) {
+        CompileOutcome::Compiled(top) => match pipeline_stage_rows(&top, src) {
             Some(rows) => Spine::Stages(rows),
             None => Spine::Empty,
         },
@@ -663,25 +663,32 @@ fn build_spine(src: &str, shell: &Shell) -> Spine {
     }
 }
 
-/// The first top-level pipeline in `comp`, if any — the line being composed
-/// elaborates to a bare `Pipeline`, or one under a `let` bind, a sequence, or
-/// the frame holding whatever the line hoisted.
-fn find_pipeline(comp: &Comp) -> Option<&Comp> {
+/// The first pipeline in `top`, if any — the phrase being composed
+/// elaborates to a bare `Pipeline`, or one under a `let` bind, a `source`
+/// path, or the frame holding whatever the phrase hoisted.
+fn find_pipeline(top: &Toplevel) -> Option<&Comp> {
+    top.phrases.iter().find_map(|phrase| match &phrase.item {
+        Phrase::Define { comp, .. } | Phrase::Run(comp) => find_pipeline_in(comp),
+        Phrase::Source { path } => find_pipeline_in(path),
+    })
+}
+
+fn find_pipeline_in(comp: &Comp) -> Option<&Comp> {
     match &comp.item {
         CompKind::Pipeline { .. } => Some(comp),
-        CompKind::Seq(parts) => parts.iter().find_map(|p| find_pipeline(p)),
         CompKind::Bind {
             comp: bound, rest, ..
-        } => find_pipeline(bound).or_else(|| find_pipeline(rest)),
-        CompKind::Hoisted { body } => find_pipeline(body),
+        } => find_pipeline_in(bound).or_else(|| find_pipeline_in(rest)),
+        CompKind::Source { path, rest } => find_pipeline_in(path).or_else(|| find_pipeline_in(rest)),
+        CompKind::Hoisted { body } => find_pipeline_in(body),
         _ => None,
     }
 }
 
-/// Per-stage rows for the first pipeline in `comp`, each pairing the stage's
+/// Per-stage rows for the first pipeline in `top`, each pairing the stage's
 /// source slice with its retained value type.
-fn pipeline_stage_rows(comp: &Comp, src: &str) -> Option<Vec<SpineRow>> {
-    let pipe = find_pipeline(comp)?;
+fn pipeline_stage_rows(top: &Toplevel, src: &str) -> Option<Vec<SpineRow>> {
+    let pipe = find_pipeline(top)?;
     let CompKind::Pipeline {
         stages,
         stage_types,

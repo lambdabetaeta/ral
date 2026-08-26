@@ -241,7 +241,7 @@ mod tests {
     use ral_core::source::Span;
     use ral_core::typecheck::builtins::{fun, mk_scheme, pure, thunk};
     use ral_core::typecheck::{Scheme, Ty, Unifier};
-    use ral_core::types::{BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig, Mooring};
+    use ral_core::types::{BuiltinBody, BuiltinEntry, DefaultPolicy, HookName, HookSig};
     use std::borrow::Cow;
 
     /// The sink's type: an argv in, `Unit` out — the base-frame convention,
@@ -265,14 +265,31 @@ mod tests {
         )
     }
 
-    /// Parse, elaborate, and evaluate `src` into a handler value.
+    /// Parse, elaborate, typecheck, and run `src` through the run door into
+    /// a handler value.
     fn handler(shell: &mut Shell, src: &str) -> Value {
-        let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = std::sync::Arc::new(
-            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-                .expect("elaborate"),
-        );
-        ral_core::evaluator::evaluate(&comp, &Mooring::adrift(), shell).expect("evaluate")
+        match shell.run(ral_core::RunRequest {
+            run: ral_core::transport::Run {
+                program: ral_core::transport::Program::Source(src.to_string()),
+                script_name: "<test>".to_string(),
+                caps: ral_core::types::Capabilities::root(),
+                wall: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: ral_core::RunIo::Inherit,
+                terminal: ral_core::RequestedTerminalAccess::Leased,
+                stdin: ral_core::RunStdin::Inherit,
+                trail: None,
+            },
+            surface: None,
+            deferred: None,
+            desk: None,
+            fork: None,
+            lifecycle: Box::new(()),
+        }) {
+            ral_core::RunReport::Ran { ending, .. } => ending.into_result().expect("evaluate"),
+            ral_core::RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
+        }
     }
 
     /// A dressed shell, the plugin runtime holding `p`, and the sink its

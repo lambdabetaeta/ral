@@ -513,11 +513,19 @@ pub(crate) fn decode_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Shell, elaborate, evaluate, parse};
+    use crate::evaluator::evaluate;
+    use crate::{Shell, elaborate, parse};
 
     fn compile_one(source: &str) -> Arc<Comp> {
         let ast = parse(source).expect("parse");
-        Arc::new(elaborate(&ast, std::collections::HashSet::default(), "").expect("elaborate"))
+        let top = elaborate(&ast, std::collections::HashSet::default(), "").expect("elaborate");
+        let [phrase] = top.phrases.as_slice() else {
+            panic!("expected one phrase, got {:?}", top.phrases);
+        };
+        let crate::ir::Phrase::Run(comp) = &phrase.item else {
+            panic!("expected a Run phrase, got {:?}", phrase.item);
+        };
+        comp.clone()
     }
 
     fn eval_value(source: &str, shell: &mut Shell) -> Value {

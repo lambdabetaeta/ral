@@ -229,14 +229,28 @@ mod tests {
     fn evaluate_prompt_src(src: &str) -> (Shell, Value) {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
-        let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = std::sync::Arc::new(
-            ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-                .expect("elaborate"),
-        );
-        let prompt =
-            ral_core::evaluator::evaluate(&comp, &ral_core::types::Mooring::adrift(), &mut shell)
-                .unwrap();
+        let prompt = match shell.run(ral_core::RunRequest {
+            run: ral_core::transport::Run {
+                program: ral_core::transport::Program::Source(src.to_string()),
+                script_name: "<test>".to_string(),
+                caps: ral_core::types::Capabilities::root(),
+                wall: None,
+                deferred_lease: None,
+                worker_cap: None,
+                io: ral_core::RunIo::Inherit,
+                terminal: ral_core::RequestedTerminalAccess::Leased,
+                stdin: ral_core::RunStdin::Inherit,
+                trail: None,
+            },
+            surface: None,
+            deferred: None,
+            desk: None,
+            fork: None,
+            lifecycle: Box::new(()),
+        }) {
+            ral_core::RunReport::Ran { ending, .. } => ending.into_result().unwrap(),
+            ral_core::RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
+        };
         assert!(
             matches!(prompt, Value::Lambda { .. } | Value::Block { .. }),
             "expected thunk"
