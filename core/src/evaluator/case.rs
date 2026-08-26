@@ -5,8 +5,8 @@
 //! selects a branch and runs it, exactly as `if` picks one of two.
 
 use super::comp::{eval_comp, with_scope};
-use super::pattern::assign_pattern;
-use super::val::eval_val;
+use super::pattern;
+use super::val::close;
 use crate::ir::{CaseArm, Val};
 use crate::syntax::tag::tag_row_label;
 use crate::types::{Mooring, Raw, Shell, Tail, Value};
@@ -28,7 +28,7 @@ pub(crate) fn eval_case(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let (label, payload) = match eval_val(scrutinee, shell)? {
+    let (label, payload) = match close(scrutinee, &shell.mobile.scope)? {
         Value::Variant { label, payload } => (label, payload),
         other => {
             return Err(shell
@@ -64,7 +64,15 @@ pub(crate) fn eval_case(
 
     let payload = payload.map_or(Value::Unit, |p| *p);
     with_scope(shell, |shell| {
-        assign_pattern(&arm.pattern, &payload, mooring, shell)?;
+        let env = pattern::bind_pattern(
+            &arm.pattern,
+            &payload,
+            &[],
+            shell.mobile.scope.clone(),
+            mooring,
+            shell,
+        )?;
+        shell.mobile.scope = env;
         eval_comp(arm.body.comp(), mooring, shell, tail)
     })
 }

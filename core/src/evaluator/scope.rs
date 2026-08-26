@@ -11,7 +11,7 @@ use crate::types::{
     Observed, Raw, Settled, Shell, Value, as_map, sig, tree_value, validate_handler_arity,
 };
 
-use crate::evaluator::val::eval_val;
+use crate::evaluator::val::close;
 use crate::evaluator::{apply, audit};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -213,10 +213,10 @@ pub(crate) fn eval_within(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let opts_val = eval_val(opts, shell)?;
+    let opts_val = close(opts, &shell.mobile.scope)?;
     let opts_map = as_map(&opts_val, "within")?;
     let scope = WithinScope::parse(&opts_map, shell)?;
-    let body = eval_val(body, shell)?;
+    let body = close(body, &shell.mobile.scope)?;
     scope
         .enter(shell, |shell| apply(body, vec![], mooring, shell))
         .map_err(Into::into)
@@ -228,7 +228,7 @@ pub(crate) fn eval_grant(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let caps_val = eval_val(caps, shell)?;
+    let caps_val = close(caps, &shell.mobile.scope)?;
     let home = shell.mobile.context.home();
     let cwd = shell.cwd();
     let ctx = crate::path::sigil::FreezeCtx {
@@ -237,7 +237,7 @@ pub(crate) fn eval_grant(
     };
     let caps =
         crate::capability::decode_capability_map(&caps_val, "grant", &ctx).map_err(Break::from)?;
-    let body = eval_val(body, shell)?;
+    let body = close(body, &shell.mobile.scope)?;
     shell
         .with_capabilities(caps, |shell| apply(body, vec![], mooring, shell))
         .map_err(Into::into)
@@ -252,8 +252,8 @@ pub(crate) fn eval_try(
     // Pure control flow: bytes keep flowing through fd 1/2, hence
     // `CapturePolicy::Off`.  Children are still forced so the error record can
     // name the failing command; `Exit`/`Stopped` leave via `?` before `classify`.
-    let body_val = eval_val(body, shell)?;
-    let handler_val = eval_val(handler, shell)?;
+    let body_val = close(body, &shell.mobile.scope)?;
+    let handler_val = close(handler, &shell.mobile.scope)?;
     let (body_result, children) = audit::delimited(shell, CapturePolicy::Off, |s| {
         apply(body_val, vec![], mooring, s)
     })
@@ -285,8 +285,8 @@ pub(crate) fn eval_guard(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let body_val = eval_val(body, shell)?;
-    let cleanup_val = eval_val(cleanup, shell)?;
+    let body_val = close(body, &shell.mobile.scope)?;
+    let cleanup_val = close(cleanup, &shell.mobile.scope)?;
     let body_result = apply(body_val, vec![], mooring, shell);
     // One rule for both signals: any halt of the cleanup pre-empts the body's
     // outcome, error exactly as escape.  A cleanup that cannot fail the
@@ -298,7 +298,7 @@ pub(crate) fn eval_guard(
 }
 
 pub(crate) fn eval_audit(body: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
-    let body_val = eval_val(body, shell)?;
+    let body_val = close(body, &shell.mobile.scope)?;
     let (body_result, children) = audit::delimited(shell, CapturePolicy::Bytes, |s| {
         apply(body_val, vec![], mooring, s)
     })

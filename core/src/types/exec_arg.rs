@@ -39,7 +39,7 @@ impl RefusedArg {
         match value {
             Value::List(_) => Some(Self::List),
             Value::Map(_) => Some(Self::Map),
-            Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. } => Some(Self::Block),
+            Value::Thunk(_) | Value::Native { .. } => Some(Self::Block),
             Value::Handle(_) => Some(Self::Handle),
             Value::Bytes(_) => Some(Self::Bytes),
             Value::Unit

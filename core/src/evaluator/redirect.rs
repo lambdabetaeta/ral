@@ -6,7 +6,7 @@
 
 use super::absorb_tail;
 use super::audit::observe;
-use super::val::eval_val;
+use super::val::close;
 use crate::io::Sink;
 use crate::ir::{RedirectV, ValRedirectTarget};
 use crate::runtime::command::{self, EvalRedirect, EvalRedirectV};
@@ -30,7 +30,7 @@ pub(crate) fn eval_redirects(
                 mode: r.mode,
                 target: match &r.target {
                     ValRedirectTarget::File(v) => {
-                        EvalRedirect::File(eval_val(v, shell)?.to_string())
+                        EvalRedirect::File(close(v, &shell.mobile.scope)?.to_string())
                     }
                     ValRedirectTarget::Fd(n) => EvalRedirect::Fd(*n),
                 },

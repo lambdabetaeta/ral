@@ -1762,7 +1762,7 @@ fn lexical_non_head_name_is_literal_without_deref() {
 fn lexical_non_head_name_uses_deref_to_get_value() {
     let v = must_succeed("let f = { |x| return $x }\nreturn $f");
     assert!(
-        matches!(v, Value::Lambda { .. } | Value::Block { .. }),
+        matches!(v, Value::Thunk(_)),
         "expected thunk, got {v:?}"
     );
 }
@@ -1794,7 +1794,7 @@ fn list_position_deref_gives_thunk() {
     match v {
         Value::List(items) => {
             assert!(
-                matches!(items[0], Value::Lambda { .. } | Value::Block { .. }),
+                matches!(items[0], Value::Thunk(_)),
                 "expected thunk, got {:?}",
                 items[0]
             );
@@ -1810,10 +1810,7 @@ fn map_position_bare_name_stays_literal() {
         Value::Map(m) => {
             assert_eq!(m.get("label"), Some(&Value::String("upper".into())));
             assert!(
-                matches!(
-                    m.get("fn"),
-                    Some(Value::Lambda { .. } | Value::Block { .. })
-                ),
+                matches!(m.get("fn"), Some(Value::Thunk(_))),
                 "expected thunk under 'fn', got {:?}",
                 m.get("fn")
             );

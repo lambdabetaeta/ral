@@ -153,7 +153,7 @@ fn parse_hooks(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
                 KNOWN_HOOKS.join(", ")
             )));
         }
-        if !matches!(value, Value::Lambda { .. } | Value::Block { .. }) {
+        if !matches!(value, Value::Thunk(_)) {
             return Err(load_err(format!(
                 "hook '{event}': expected a block, got {}",
                 value.type_name()
@@ -197,7 +197,7 @@ where
             )));
         }
         let handler = match map.get("handler") {
-            Some(h @ (Value::Lambda { .. } | Value::Block { .. })) => h.clone(),
+            Some(h @ Value::Thunk(_)) => h.clone(),
             Some(other) => {
                 return Err(load_err(format!(
                     "keybinding '{key}': handler: expected a block, got {}",
@@ -236,7 +236,7 @@ where
 fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
     let mut out = Vec::with_capacity(entries.len());
     for (name, value) in entries {
-        if !matches!(value, Value::Lambda { .. } | Value::Block { .. }) {
+        if !matches!(value, Value::Thunk(_)) {
             return Err(load_err(format!(
                 "alias '{name}': expected a block, got {}",
                 value.type_name()
@@ -250,6 +250,7 @@ fn parse_aliases(entries: &Map) -> Result<Vec<(String, Value)>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ral_core::types::Closure;
 
     /// A `capabilities:` key is rejected with an error that names the key and
     /// points at `grant` (the authority rationale lives on the struct doc).
@@ -278,14 +279,15 @@ mod tests {
         assert!(handlers.aliases.is_empty());
     }
 
-    /// A trivial `Value::Block` handler for well-formed keybinding entries.
+    /// A trivial block-shaped `Value::Thunk` handler for well-formed
+    /// keybinding entries.
     fn dummy_block() -> Value {
-        Value::Block {
-            body: std::sync::Arc::new(ral_core::source::Spanned::synthetic(
+        Value::Thunk(Closure {
+            comp: std::sync::Arc::new(ral_core::source::Spanned::synthetic(
                 ral_core::ir::CompKind::Return(ral_core::ir::Val::Unit),
             )),
-            captured: std::sync::Arc::new(ral_core::types::Env::default()),
-        }
+            env: ral_core::types::Env::default(),
+        })
     }
 
     fn keybinding_entry(key: &str, guard: Option<&str>) -> Value {

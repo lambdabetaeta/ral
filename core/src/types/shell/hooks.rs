@@ -2,8 +2,9 @@
 //! (rc file, plugin loader) registers and the engine dispatches at lifecycle
 //! moments — prompt render, startup, plugin events, keybindings.
 //!
-//! A hook is a [`Value::Block`] or [`Value::Lambda`] the host already holds
-//! compiled; running one is a `Program::Hook` dispatch through [`Shell::run`],
+//! A hook is a block- or lambda-shaped [`Value::Thunk`] the host already
+//! holds compiled; running one is a `Program::Hook` dispatch through
+//! [`Shell::run`],
 //! which looks it up here and applies it. The table is a namespace apart from
 //! the lexical scope and the handler stack: a hook is never resolved by
 //! `$name` and never consulted at command position.
@@ -161,8 +162,8 @@ impl Hook {
     pub fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
         let expected = self.sig.expected_arity();
         let actual = match &self.binding.value {
-            Value::Block { .. } => 0,
-            Value::Lambda { .. } => self.binding.value.lambda_arity().unwrap_or(0),
+            Value::Thunk(c) if c.comp.arrow().is_none() => 0,
+            Value::Thunk(_) => self.binding.value.lambda_arity().unwrap_or(0),
             other => {
                 return Err(RegisterError::NotFunction {
                     name: name.clone(),
@@ -269,8 +270,10 @@ impl Shell {
         // The same scheme inference an ordinary session `let` uses.  A
         // non-thunk gets no scheme; `validate` below is the gate that rejects it.
         let arm = match &value {
-            Value::Lambda { param, body, .. } => Some((Some(param), body)),
-            Value::Block { body, .. } => Some((None, body)),
+            Value::Thunk(closure) => match closure.comp.arrow() {
+                Some((param, body)) => Some((Some(param), body)),
+                None => Some((None, &closure.comp)),
+            },
             _ => None,
         };
         let scheme = arm.map(|(param, body)| {

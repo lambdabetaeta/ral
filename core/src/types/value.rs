@@ -2,8 +2,10 @@
 //! what a builtin returns.
 
 use super::builtin::BuiltinEntry;
+use super::closure::Closure;
 #[cfg(test)]
 use super::env::Binding;
+#[cfg(test)]
 use super::env::Env;
 use super::handle::HandleInner;
 use super::list::List;
@@ -14,12 +16,11 @@ use std::sync::Arc;
 
 /// The runtime representation of every ral value.
 ///
-/// `Lambda` (`{ |params| body }`) and `Block` (`{ body }`) are distinct
-/// variants so the calling discipline is visible in the type rather than read
-/// off a comp body shape: `apply` dispatches on the variant, and `step_force`
-/// in `evaluator/comp.rs` runs a `Block` but hands back a `Lambda` unchanged.
-/// Both capture their scope as `Arc<Env>`, so cloning a closure is a refcount
-/// bump, not a copy of the scope chain.
+/// There is one thunk value, `Thunk(Closure)`: a computation closed over the
+/// environment it was captured against. `{ |params| body }` and `{ body }`
+/// are told apart only by the closure's own comp shape —
+/// `Comp::arrow` answers `Some` for a `Lam`, so `apply` and `step_force` read
+/// the shape rather than a separate variant (S10, the CEK plan §1.1).
 #[derive(Debug, Clone)]
 pub enum Value {
     Unit,
@@ -35,17 +36,7 @@ pub enum Value {
         label: std::string::String,
         payload: Option<Box<Self>>,
     },
-    /// One parameter deep: a curried lambda has `CompKind::Lam` again at
-    /// `body.item`, which is what `lambda_arity` and `fmt_lambda` walk.
-    Lambda {
-        param: crate::ir::IrPattern,
-        body: std::sync::Arc<crate::ir::Comp>,
-        captured: Arc<Env>,
-    },
-    Block {
-        body: std::sync::Arc<crate::ir::Comp>,
-        captured: Arc<Env>,
-    },
+    Thunk(Closure),
     /// A builtin, curried through `applied`: applying appends arguments until
     /// `entry.fixed_arity()` is reached, then the host body runs with the
     /// full slice. Under-application yields the partial `Native` back;
@@ -133,26 +124,27 @@ impl Value {
             Self::List(_) => "List",
             Self::Map(_) => "Map",
             Self::Variant { .. } => "Variant",
-            Self::Lambda { .. } => "Lambda",
-            Self::Block { .. } => "Block",
+            Self::Thunk(c) if c.comp.arrow().is_some() => "Lambda",
+            Self::Thunk(_) => "Block",
             Self::Native { .. } => "Native",
             Self::Handle(_) => "Handle",
         }
     }
 
     /// How many arguments `apply` consumes before reaching the body: the outer
-    /// `Lambda` counts one, each nested `Lam` another. Being the operational
+    /// `Lam` counts one, each nested `Lam` another. Being the operational
     /// arity, it is what `validate_handler_arity` in `types/handler.rs` checks
-    /// a handler against at its install site.
+    /// a handler against at its install site. `None` for a `Thunk` whose
+    /// `comp.arrow()` is `None` — a block, not a lambda.
     pub fn lambda_arity(&self) -> Option<usize> {
-        let Self::Lambda { body, .. } = self else {
+        let Self::Thunk(c) = self else {
             return None;
         };
+        let (_, mut body) = c.comp.arrow()?;
         let mut arity = 1;
-        let mut comp = body;
-        while let crate::ir::CompKind::Lam { body, .. } = &comp.item {
+        while let crate::ir::CompKind::Lam { body: inner, .. } = &body.item {
             arity += 1;
-            comp = body;
+            body = inner;
         }
         Some(arity)
     }
@@ -187,7 +179,7 @@ impl Value {
             Self::Native { applied, .. } => {
                 OPAQUE_CONSTANT + applied.iter().map(Self::shallow_size).sum::<usize>()
             }
-            Self::Lambda { .. } | Self::Block { .. } | Self::Handle(_) => OPAQUE_CONSTANT,
+            Self::Thunk(_) | Self::Handle(_) => OPAQUE_CONSTANT,
         }
     }
 }
@@ -270,8 +262,10 @@ impl fmt::Display for Value {
                 None => write!(f, "{TAG_PREFIX}{label}"),
                 Some(p) => write!(f, "{TAG_PREFIX}{label} {p}"),
             },
-            Self::Lambda { param, body, .. } => write!(f, "{}", fmt_lambda(param, body)),
-            Self::Block { .. } => write!(f, "<block>"),
+            Self::Thunk(c) => match c.comp.arrow() {
+                Some((param, body)) => write!(f, "{}", fmt_lambda(param, body)),
+                None => write!(f, "<block>"),
+            },
             Self::Native { entry, applied } => write!(f, "{}", fmt_native(&entry.name, applied)),
             Self::Handle(h) => write!(f, "<handle:{}>", h.cmd),
         }
@@ -361,10 +355,10 @@ pub(crate) fn deep_block_chain(n: usize) -> Value {
                 scheme: None,
             },
         );
-        v = Value::Block {
-            body: Arc::clone(&body),
-            captured: Arc::new(env),
-        };
+        v = Value::Thunk(Closure {
+            comp: Arc::clone(&body),
+            env,
+        });
     }
     v
 }
@@ -419,13 +413,13 @@ mod tests {
     /// Captures are invisible by construction, not merely usually small.
     #[test]
     fn shallow_size_never_descends_into_closure_captures() {
-        let empty_capture = std::sync::Arc::new(crate::types::Env::new());
-        let block = Value::Block {
-            body: std::sync::Arc::new(crate::source::Spanned::synthetic(
+        let empty_env = crate::types::Env::new();
+        let block = Value::Thunk(Closure {
+            comp: std::sync::Arc::new(crate::source::Spanned::synthetic(
                 crate::ir::CompKind::Return(crate::ir::Val::Unit),
             )),
-            captured: empty_capture,
-        };
+            env: empty_env,
+        });
         let block_size = block.shallow_size();
         assert!(block_size > 0, "a closure is a small nonzero constant");
 
@@ -437,12 +431,12 @@ mod tests {
                 scheme: None,
             },
         );
-        let heavy_block = Value::Block {
-            body: std::sync::Arc::new(crate::source::Spanned::synthetic(
+        let heavy_block = Value::Thunk(Closure {
+            comp: std::sync::Arc::new(crate::source::Spanned::synthetic(
                 crate::ir::CompKind::Return(crate::ir::Val::Unit),
             )),
-            captured: std::sync::Arc::new(heavy_env),
-        };
+            env: heavy_env,
+        });
         assert_eq!(
             heavy_block.shallow_size(),
             block_size,

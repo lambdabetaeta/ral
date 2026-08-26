@@ -21,6 +21,9 @@ mod value;
 pub(crate) use value::deep_block_chain;
 pub use value::{Value, fmt_float, fmt_lambda, fmt_native};
 
+mod closure;
+pub use closure::Closure;
+
 // What the exec boundary refuses, declared once for the two sides that read it:
 // the checker before the spawn, `runtime::command::vet` at it.
 mod exec_arg;

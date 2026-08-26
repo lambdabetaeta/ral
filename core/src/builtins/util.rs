@@ -55,7 +55,11 @@ pub(crate) fn expect_handle<'a>(val: &'a Value, cmd: &str) -> Settled<&'a Handle
 
 pub(crate) fn expect_thunk(val: &Value, cmd: &str) -> Settled<(Arc<crate::ir::Comp>, Arc<Env>)> {
     match val {
-        Value::Block { body, captured } => Ok((Arc::clone(body), Arc::clone(captured))),
+        // A spawn body takes no parameters: `comp.arrow()` is `None` for a
+        // block-shaped thunk.
+        Value::Thunk(closure) if closure.comp.arrow().is_none() => {
+            Ok((Arc::clone(&closure.comp), Arc::new(closure.env.clone())))
+        }
         other => Err(Break::Error(
             Error::new(
                 format!("{cmd} expects a Block, got {} '{other}'", other.type_name()),
@@ -224,8 +228,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> Settled<bool> {
                 pairwise.into_iter().all(|eq| eq)
             }
         }
-        (Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_), _)
-        | (_, Value::Lambda { .. } | Value::Block { .. } | Value::Handle(_)) => {
+        (Value::Thunk(_) | Value::Handle(_), _) | (_, Value::Thunk(_) | Value::Handle(_)) => {
             return Err(uncomparable(a, b, "equal"));
         }
         _ => false,
@@ -360,10 +363,10 @@ pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
                 .map(|(k, v)| (k.clone(), value_to_json_lossy_bytes(v)))
                 .collect(),
         ),
-        Value::Lambda { param, .. } => {
-            serde_json::json!({"type": "Lambda", "param": format!("{param:?}")})
-        }
-        Value::Block { .. } => serde_json::json!({"type": "Block"}),
+        Value::Thunk(c) => match c.comp.arrow() {
+            Some((param, _)) => serde_json::json!({"type": "Lambda", "param": format!("{param:?}")}),
+            None => serde_json::json!({"type": "Block"}),
+        },
         Value::Native { entry, applied } => {
             serde_json::json!({"type": "Native", "name": entry.name.as_ref(), "applied": applied.len()})
         }

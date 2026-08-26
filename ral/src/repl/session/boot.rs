@@ -11,7 +11,7 @@
 
 use ral_core::source::Span;
 use ral_core::transport::Program;
-use ral_core::types::{Break, DefaultPolicy, Escape, HookName, HookSig, Map, Value};
+use ral_core::types::{Break, Closure, DefaultPolicy, Escape, HookName, HookSig, Map, Value};
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, diagnostic};
 use std::sync::{Arc, Mutex};
 
@@ -225,14 +225,14 @@ pub(super) fn install_default_prompt(shell: &mut Shell) {
     // `DEFAULT_PROMPT` into ral source and compiling it: the prompt value is
     // then decoupled from what the constant's bytes happen to be, so no
     // boot-time `.expect` can panic on its contents.
-    let block = ral_core::types::Value::Block {
-        body: Arc::new(ral_core::source::Spanned::synthetic(
+    let block = Value::Thunk(Closure {
+        comp: Arc::new(ral_core::source::Spanned::synthetic(
             ral_core::ir::CompKind::Return(ral_core::ir::Val::String(
                 super::super::prompt::DEFAULT_PROMPT.into(),
             )),
         )),
-        captured: Arc::new(ral_core::types::Env::default()),
-    };
+        env: ral_core::types::Env::default(),
+    });
     let origin = ral_core::source::Span::synthetic();
     let _ = shell.register_hook(
         hook_name,

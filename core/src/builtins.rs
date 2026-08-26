@@ -539,7 +539,7 @@ pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 /// If `val` is not a function value, or the applied body fails.
 pub fn apply(val: &Value, args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     match val {
-        Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. } => {
+        Value::Thunk(_) | Value::Native { .. } => {
             crate::evaluator::apply(val.clone(), args.to_vec(), mooring, shell)
         }
         _ => Err(Break::Error(

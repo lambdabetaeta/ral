@@ -77,9 +77,10 @@ pub fn evaluate(comp: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Settl
 /// not propagate.  Only `last_status` and observations, which the body posts
 /// straight to the shared trail, cross the boundary.
 ///
-/// `captured` is the lexical environment a `Value::Block` carries;
-/// [`Shell::with_thunk_body`] rescopes the body's mobile to it plus a fresh
-/// frame and, as a [`ThunkBody::Block`], folds only `last_status` back.
+/// `captured` is the environment a block-shaped `Value::Thunk`'s `Closure`
+/// carries; [`Shell::with_thunk_body`] rescopes the body's mobile to it plus
+/// a fresh frame and, as a [`ThunkBody::Block`], folds only `last_status`
+/// back.
 ///
 /// `tail` is the block's own tail position, granted [`Tail::Yes`] only by the
 /// trampoline's final argument.  The body's mobile is installed for the
@@ -88,7 +89,7 @@ pub fn evaluate(comp: &Arc<Comp>, mooring: &Mooring, shell: &mut Shell) -> Settl
 /// Outside the crate the block contract is reached through [`apply`].
 pub(crate) fn eval_block(
     body: &Arc<Comp>,
-    captured: &Arc<Env>,
+    captured: &Env,
     tail: Tail,
     mooring: &Mooring,
     shell: &mut Shell,
@@ -221,12 +222,22 @@ fn run_phrase_define(
         Err(io_err) => return Err(shell.err(format!("statement sink: {io_err}"), 1).into()),
     };
     comp::set_status_from_value(&v, shell);
-    let staged = pattern::bind_pattern(pattern, &v, schemes, mooring, shell)?;
-    for (name, binding) in staged {
+    let env = pattern::bind_pattern(pattern, &v, schemes, shell.mobile.scope.clone(), mooring, shell)?;
+    shell.mobile.scope = env;
+    let mut names = Vec::new();
+    pattern::pattern_names(pattern, &mut names);
+    for name in names {
+        // `bind_pattern` just installed every one of these into
+        // `shell.mobile.scope`, so the lookup cannot miss.
+        let binding = shell
+            .mobile
+            .scope
+            .get_binding(&name)
+            .expect("bind_pattern bound every name in `pattern`")
+            .clone();
         if matches!(mode, Mode::Session) {
             shell.note_define(&name, &binding);
         }
-        shell.install_scope_binding(name.clone(), binding);
         defined.push(name);
     }
     Ok(Value::Unit)
@@ -372,7 +383,7 @@ mod tests {
             panic!("expected a thunked block, got {:?}", comp.item);
         };
         let mut shell = Shell::default();
-        let captured = shell.snapshot();
+        let captured = shell.mobile.scope.clone();
         let _ = eval_block(body, &captured, Tail::No, &Mooring::adrift(), &mut shell);
         assert!(
             shell.mobile.scope.get("leak_block").is_none(),

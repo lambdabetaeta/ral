@@ -8,11 +8,11 @@
 
 use crate::ir::{Comp, CompKind, IrPattern, PipeYield, Val};
 use crate::source::Spanned;
-use crate::types::{Binding, Break, Control, Error, Mooring, Raw, Shell, Tail, Value};
+use crate::types::{Binding, Break, Closure, Control, Error, Mooring, Raw, Shell, Tail, Value};
 use std::sync::Arc;
 
-use super::pattern::assign_pattern;
-use super::val::{close_lam, eval_val, interpolate_piece};
+use super::pattern;
+use super::val::{close, interpolate_piece};
 use super::{call, case, expr, scope};
 use crate::runtime::pipeline;
 
@@ -35,8 +35,8 @@ pub(crate) fn eval_comp(
 
         // A bare `Lam` is stuck: no step applies until it heads an
         // application. Well-typed code never lands here — closures are born
-        // as `Val::Thunk(Lam)`, and a curried inner `Lam` is closed by
-        // `close_lam` in the trampoline rather than routed through this arm.
+        // as `Val::Thunk(Lam)`, and a curried inner `Lam` is closed directly
+        // in the trampoline rather than routed through this arm.
         CompKind::Lam { .. } => Err(shell
             .err_hint(
                 "tried to evaluate a bare lambda in computation position — a function value must be \
@@ -54,9 +54,11 @@ pub(crate) fn eval_comp(
 
         CompKind::Interpolation(parts) => eval_interpolation(parts, shell),
 
-        CompKind::Binary(op, lhs, rhs) => expr::eval_binary(*op, lhs, rhs, shell).map_err(Into::into),
-        CompKind::Negate(val) => expr::eval_negate(val, shell).map_err(Into::into),
-        CompKind::Not(val) => expr::eval_not(val, shell).map_err(Into::into),
+        CompKind::Binary(op, lhs, rhs) => {
+            expr::eval_binary(*op, lhs, rhs, &shell.mobile.scope).map_err(Into::into)
+        }
+        CompKind::Negate(val) => expr::eval_negate(val, &shell.mobile.scope).map_err(Into::into),
+        CompKind::Not(val) => expr::eval_not(val, &shell.mobile.scope).map_err(Into::into),
 
         CompKind::Index { target, keys, .. } => eval_index(target, keys, shell),
 
@@ -120,7 +122,7 @@ pub(crate) fn eval_comp(
 // ── Per-rule helpers ─────────────────────────────────────────────────────
 
 fn eval_return(val: &Val, shell: &mut Shell) -> Raw<Value> {
-    let v = eval_val(val, shell)?;
+    let v = close(val, &shell.mobile.scope)?;
     set_status_from_value(&v, shell);
     Ok(v)
 }
@@ -156,39 +158,50 @@ fn eval_rec(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let snap = shell.snapshot();
+    let snap = shell.mobile.scope.clone();
     with_scope(shell, |shell| -> Raw<Value> {
         for (j, (name, _)) in group.iter().enumerate() {
             shell.install_scope_binding(
                 name.clone(),
                 Binding {
-                    value: Value::Block {
-                        body: rec_node(group, j),
-                        captured: snap.clone(),
-                    },
+                    value: Value::Thunk(Closure {
+                        comp: rec_node(group, j),
+                        env: snap.clone(),
+                    }),
                     scheme: None,
                 },
             );
         }
         let member = &group[index].1;
-        match close_lam(member, shell) {
-            Some(lambda) => Ok(lambda),
-            None => eval_comp(member, mooring, shell, tail),
+        // A literal `Lam` is already a value — closing it here avoids
+        // `eval_comp`'s bare-lambda rejection. Anything else, `Rec` included
+        // (a member is never itself a further `Rec` in practice, but the
+        // test mirrors `close_lam`'s exactly), runs: `Comp::arrow` is not the
+        // right test here — it sees *through* `Rec`, and §2.5 requires every
+        // force of a `Rec` thunk to re-enter this unfold, not skip it.
+        match member.item {
+            crate::ir::CompKind::Lam { .. } => Ok(Value::Thunk(Closure {
+                comp: Arc::clone(member),
+                env: shell.mobile.scope.clone(),
+            })),
+            _ => eval_comp(member, mooring, shell, tail),
         }
     })
 }
 
-/// `force V` — a [`Value::Block`] runs through the evaluator; a
-/// [`Value::Lambda`] is already a value, returned unchanged for the
-/// trampoline to apply once a call site supplies arguments.
+/// `force V` — `force(thunk M) = M`: a `Thunk` whose comp is a literal `Lam`
+/// is already a value, returned unchanged for the trampoline to apply once a
+/// call site supplies arguments; otherwise it runs through the evaluator
+/// (S10). Not `Comp::arrow`: a `Rec` thunk must re-enter `eval_rec` on every
+/// force (§2.5), which `Comp::arrow`'s see-through-`Rec` reading would skip.
 pub(crate) fn step_force(val: &Val, mooring: &Mooring, shell: &mut Shell) -> Raw<Value> {
-    let v = eval_val(val, shell)?;
+    let v = close(val, &shell.mobile.scope)?;
     let result = match v {
         // Not a tail position: the caller threads this value onward.
-        Value::Block { body, captured } => {
-            super::eval_block(&body, &captured, Tail::No, mooring, shell)?
+        Value::Thunk(closure) if !matches!(closure.comp.item, crate::ir::CompKind::Lam { .. }) => {
+            super::eval_block(&closure.comp, &closure.env, Tail::No, mooring, shell)?
         }
-        lam @ Value::Lambda { .. } => lam,
+        lam @ Value::Thunk(_) => lam,
         // An arity-0 native is a thunk, run like a `Block`; any other native
         // returns unchanged, like a `Lambda`.
         Value::Native { entry, applied } if entry.fixed_arity() == 0 => {
@@ -215,7 +228,7 @@ fn eval_interpolation(parts: &[Val], shell: &mut Shell) -> Raw<Value> {
     parts
         .iter()
         .try_fold(String::new(), |mut s, p| {
-            s.push_str(&interpolate_piece(&eval_val(p, shell)?, shell)?);
+            s.push_str(&interpolate_piece(&close(p, &shell.mobile.scope)?)?);
             Ok::<_, Error>(s)
         })
         .map(Value::String)
@@ -225,9 +238,10 @@ fn eval_interpolation(parts: &[Val], shell: &mut Shell) -> Raw<Value> {
 /// `V[k1][k2]…` — computation-typed only because indexing can fail (key
 /// not found, out of bounds); target and keys are pure values.
 fn eval_index(target: &Val, keys: &[Spanned<Val>], shell: &mut Shell) -> Raw<Value> {
-    let mut v = eval_val(target, shell)?;
+    let mut v = close(target, &shell.mobile.scope)?;
     for key in keys {
-        v = expr::index_value(&v, &eval_val(&key.item, shell)?, shell)?;
+        let k = close(&key.item, &shell.mobile.scope)?;
+        v = expr::index_value(&v, &k)?;
     }
     Ok(v)
 }
@@ -346,7 +360,8 @@ fn eval_bind(
     .map_err(|e| shell.err(format!("statement sink: {e}"), 1))?;
     let val = step.map_err(note_abandoned_steps)?;
     set_status_from_value(&val, shell);
-    assign_pattern(pattern, &val, mooring, shell)?;
+    let env = pattern::bind_pattern(pattern, &val, &[], shell.mobile.scope.clone(), mooring, shell)?;
+    shell.mobile.scope = env;
     eval_comp(rest, mooring, shell, tail)
 }
 
@@ -436,7 +451,7 @@ fn eval_if(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Raw<Value> {
-    let cond_val = eval_val(cond, shell)?;
+    let cond_val = close(cond, &shell.mobile.scope)?;
     let b = match cond_val {
         Value::Bool(b) => b,
         other => {

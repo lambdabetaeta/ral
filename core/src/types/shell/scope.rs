@@ -158,8 +158,10 @@ impl Shell {
     /// carry no scheme.
     pub fn bind_value(&mut self, name: String, value: Value) {
         let arm = match &value {
-            Value::Lambda { param, body, .. } => Some((Some(param), body)),
-            Value::Block { body, .. } => Some((None, body)),
+            Value::Thunk(closure) => match closure.comp.arrow() {
+                Some((param, body)) => Some((Some(param), body)),
+                None => Some((None, &closure.comp)),
+            },
             _ => None,
         };
         let scheme = arm.map(|(param, body)| {

@@ -386,7 +386,7 @@ fn decode_exec_grant(value: &Value, err_prefix: &str) -> Result<RawExecMap, Poli
                 }
                 ExecPolicy::Subcommands(subs)
             }
-            Value::Lambda { .. } | Value::Block { .. } => {
+            Value::Thunk(_) => {
                 return Err(PolicyError::new(format!(
                     "{err_prefix}: block form for '{cmd}' is not a valid exec policy; use within [handlers: [{cmd}: ...]] instead"
                 )));

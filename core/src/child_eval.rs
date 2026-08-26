@@ -774,7 +774,7 @@ mod tests {
             panic!("expected a command")
         };
         assert!(
-            matches!(value, Value::Lambda { .. }),
+            matches!(&value, Value::Thunk(c) if c.comp.arrow().is_some()),
             "the closure must decode back live, got {value:?}"
         );
     }
@@ -861,7 +861,7 @@ mod tests {
 
         let response = ChildEvalResponse {
             scope_table: ScopeTable::default(),
-            outcome: WireOutcome::Ok(Some(SerialValue::Ext(crate::serial::Closure::Native(
+            outcome: WireOutcome::Ok(Some(SerialValue::Ext(crate::serial::SerialClosure::Native(
                 crate::serial::SerialNative {
                     name: "test-captured-native".to_string(),
                     applied: Vec::new(),

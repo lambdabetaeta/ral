@@ -11,7 +11,9 @@
 use crate::ir::{CompKind, Val};
 use crate::source::Spanned;
 use crate::stream::{DONE_LABEL, HEAD_FIELD, MORE_LABEL, TAIL_FIELD};
-use crate::types::{Binding, Env, Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint};
+use crate::types::{
+    Binding, Closure, Env, Settled, Shell, Value, as_list, as_map_ref, sig, sig_hint,
+};
 use std::sync::Arc;
 
 use super::util::{arg0_str, as_byte_list, as_bytes, decode_utf8_strict};
@@ -82,10 +84,10 @@ fn stream_cons(head: String, tail: Value) -> Value {
             (HEAD_FIELD.into(), Value::String(head)),
             (
                 TAIL_FIELD.into(),
-                Value::Block {
-                    body,
-                    captured: Arc::new(captured),
-                },
+                Value::Thunk(Closure {
+                    comp: body,
+                    env: captured,
+                }),
             ),
         ]))),
     }
@@ -301,7 +303,7 @@ pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
                 .collect::<Settled<_>>()?;
             serde_json::Value::Object(obj)
         }
-        Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. } | Value::Handle(_) => {
+        Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => {
             return Err(sig(format!(
                 "to-json: {} has no JSON representation",
                 v.type_name()

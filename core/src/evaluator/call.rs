@@ -7,7 +7,7 @@ use crate::types::{Error, Mooring, Raw, Shell, Tail, TailCall, Value};
 use std::sync::Arc;
 
 use super::comp::eval_comp;
-use super::val::{eval_val, spread_type_err};
+use super::val::{close, spread_type_err};
 use super::{apply, redirect};
 use crate::runtime::command::EvalRedirectV;
 use crate::runtime::command_call;
@@ -63,7 +63,7 @@ fn eval_app(
         "App with empty args reached the evaluator"
     );
     match name {
-        Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. } if tail == Tail::Yes => {
+        Value::Thunk(_) | Value::Native { .. } if tail == Tail::Yes => {
             Err(TailCall { callee: name, args }.into())
         }
         _ => apply(name, args, mooring, shell).map_err(Into::into),
@@ -87,11 +87,11 @@ fn eval_call_args(args: &Args, shell: &mut Shell) -> Result<Vec<Value>, Error> {
     let mut out = Vec::with_capacity(args.len());
     for elem in args {
         match &elem.item {
-            ValListElem::Single(v) => out.push(eval_val(v, shell)?),
+            ValListElem::Single(v) => out.push(close(v, &shell.mobile.scope)?),
             ValListElem::Spread(v) => {
-                let spread = eval_val(v, shell)?;
+                let spread = close(v, &shell.mobile.scope)?;
                 let Value::List(list) = spread else {
-                    return Err(spread_type_err(shell, &spread));
+                    return Err(spread_type_err(&spread));
                 };
                 out.extend(list);
             }

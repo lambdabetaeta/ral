@@ -191,7 +191,7 @@ fn apply_rc_key(
             // value falls through to a plain scope binding so the key
             // still lands somewhere usable.
             for (name, value) in m {
-                if matches!(value, Value::Lambda { .. } | Value::Block { .. }) {
+                if matches!(value, Value::Thunk(_)) {
                     if let Err(err) = shell.install_alias(name, value) {
                         match err {
                             ral_core::types::Break::Error(e) => {

@@ -24,8 +24,7 @@ pub(crate) fn pins_running_work(v: &Value) -> bool {
         | Value::Float(_)
         | Value::String(_)
         | Value::Bytes(_)
-        | Value::Lambda { .. }
-        | Value::Block { .. } => false,
+        | Value::Thunk(_) => false,
     }
 }
 

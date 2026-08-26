@@ -4,10 +4,11 @@
 //! and only a `Settled<Value>` leaves.
 
 use super::comp::eval_comp;
-use super::pattern::assign_pattern;
+use super::pattern;
 use crate::ir::IrPattern;
 use crate::types::{
-    Break, Control, Env, Error, Mooring, Raw, Settled, Shell, Tail, TailCall, ThunkBody, Value,
+    Break, Closure, Control, Env, Error, Mooring, Raw, Settled, Shell, Tail, TailCall, ThunkBody,
+    Value,
 };
 
 /// One β-step, run in place on the caller's shell: [`Shell::with_thunk_body`]
@@ -28,7 +29,8 @@ fn apply_lambda_frame(
 ) -> Raw<Value> {
     shell.with_thunk_body(ThunkBody::Lambda, captured, |shell, mobile| {
         shell.run_with_mobile(mobile, |shell| {
-            assign_pattern(pat, arg, mooring, shell)?;
+            let env = pattern::bind_pattern(pat, arg, &[], shell.mobile.scope.clone(), mooring, shell)?;
+            shell.mobile.scope = env;
             body(shell)
         })
     })
@@ -75,17 +77,22 @@ fn apply_inner(
 ) -> Settled<Value> {
     loop {
         match &callee {
-            Value::Lambda {
-                param,
-                body,
-                captured,
-            } => {
+            // Not `Comp::arrow`: it sees *through* a `Rec` to the member it
+            // projects, but a `Rec` thunk must re-enter `eval_rec` on every
+            // application (§2.5) — the literal shape is the test, exactly as
+            // `close_lam` tested it.
+            Value::Thunk(closure) if matches!(closure.comp.item, crate::ir::CompKind::Lam { .. }) => {
                 if args.is_empty() {
                     return Ok(callee);
                 }
-                let param = param.clone();
-                let body = body.clone();
-                let captured = captured.clone();
+                // `arrow()` re-borrows `comp` past the match on `&callee`, so
+                // clone the pieces it names before `callee` is reassigned below.
+                let (param, body) = closure
+                    .comp
+                    .arrow()
+                    .map(|(p, b)| (p.clone(), b.clone()))
+                    .expect("guarded above: comp is a literal Lam");
+                let env = closure.env.clone();
                 let arg = args.remove(0);
                 let is_last = args.is_empty();
                 // Only the final argument's body is in tail position: the
@@ -95,10 +102,13 @@ fn apply_inner(
                 // curried inner lambda, so `body` may itself be a `Lam`.
                 // Closing it here avoids `eval_comp`'s `Lam` arm, which
                 // rejects a bare lambda in computation position.
-                let result = apply_lambda_frame(&captured, &param, &arg, mooring, shell, |child| {
-                    match super::val::close_lam(&body, child) {
-                        Some(lam) => Ok(lam),
-                        None => eval_comp(&body, mooring, child, body_tail),
+                let result = apply_lambda_frame(&env, &param, &arg, mooring, shell, |child| {
+                    match body.item {
+                        crate::ir::CompKind::Lam { .. } => Ok(Value::Thunk(Closure {
+                            comp: body.clone(),
+                            env: child.mobile.scope.clone(),
+                        })),
+                        _ => eval_comp(&body, mooring, child, body_tail),
                     }
                 });
                 if let Some(done) = step(result, &mut callee, &mut args, mooring) {
@@ -108,10 +118,11 @@ fn apply_inner(
             // Applying a block eliminates it through `eval_block`, so it
             // obeys the same scope-isolated, mobile-discarding contract as
             // `force`.
-            Value::Block { body, captured } => {
+            Value::Thunk(closure) => {
                 let block_tail = if args.is_empty() { Tail::Yes } else { Tail::No };
-                let body = body.clone();
-                let result = super::eval_block(&body, captured, block_tail, mooring, shell)
+                let comp = closure.comp.clone();
+                let env = closure.env.clone();
+                let result = super::eval_block(&comp, &env, block_tail, mooring, shell)
                     .map_err(Control::from);
                 if let Some(done) = step(result, &mut callee, &mut args, mooring) {
                     return done;

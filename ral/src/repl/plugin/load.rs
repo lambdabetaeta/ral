@@ -238,7 +238,7 @@ fn instantiate(
 ) -> Settled<Value> {
     let empty = Value::Map(ral_core::Map::new());
     match val {
-        val @ (Value::Lambda { .. } | Value::Block { .. }) => {
+        val @ Value::Thunk(_) => {
             let factory_name = HookName::plugin(name.to_string(), "factory");
             let origin = Span::synthetic();
             if let Err(e) = shell.register_hook(
@@ -295,11 +295,11 @@ fn instantiate(
 /// returned a block instead of a map.
 fn check_is_manifest(val: &Value, name: &str) -> Result<(), Error> {
     match val {
-        Value::Lambda { .. } => Err(load_err(format!(
+        Value::Thunk(c) if c.comp.arrow().is_some() => Err(load_err(format!(
             "plugin '{name}' expects its options map but none was applied; \
              this is an internal error in load-plugin"
         ))),
-        Value::Block { .. } => Err(load_err(format!(
+        Value::Thunk(_) => Err(load_err(format!(
             "plugin '{name}' returned a Block as its manifest; \
              expected a Map (e.g. [name: '...', hooks: [...], keybindings: [...]])"
         ))),

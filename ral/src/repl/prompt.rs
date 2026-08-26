@@ -113,9 +113,12 @@ fn prompt_text_from(result: Result<Value, Break>, captured: Option<Captured>) ->
 /// through the same [`prompt_run`] / [`prompt_text_from`] path as [`render`].
 #[cfg(test)]
 pub(super) fn eval_prompt(prompt: &Value, shell: &mut Shell) -> String {
-    let Value::Block { .. } = prompt else {
+    let Value::Thunk(closure) = prompt else {
         return prompt.to_string();
     };
+    if closure.comp.arrow().is_some() {
+        return prompt.to_string();
+    }
 
     let _ = shell.register_hook(
         HookName::session("__eval_prompt_test__"),
@@ -252,7 +255,7 @@ mod tests {
             ral_core::RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
         };
         assert!(
-            matches!(prompt, Value::Lambda { .. } | Value::Block { .. }),
+            matches!(prompt, Value::Thunk(_)),
             "expected thunk"
         );
         (shell, prompt)

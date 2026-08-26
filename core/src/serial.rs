@@ -76,29 +76,22 @@ pub enum FOValue<X = NoExt> {
 pub enum NoExt {}
 
 /// What the re-exec'd child IPC adds to [`FOValue`]: closures over interned
-/// scopes.
+/// scopes. One wire shape for the one runtime thunk value (S10): `Comp::arrow`
+/// on the decoded `comp` tells `Lambda` from `Block` back apart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Closure {
-    Lambda(SerialLambda),
-    Block(SerialThunk),
+pub enum SerialClosure {
+    Thunk(SerialThunk),
     Native(SerialNative),
 }
 
 /// [`FOValue`] with closures, for the re-exec'd child IPC.  A `Handle` has no
 /// wire form; encoding one is an error.
-pub type SerialValue = FOValue<Closure>;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SerialLambda {
-    pub param: crate::ir::IrPattern,
-    pub body: Arc<Comp>,
-    pub captured: SerialEnvSnapshot,
-}
+pub type SerialValue = FOValue<SerialClosure>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SerialThunk {
-    pub body: Arc<Comp>,
-    pub captured: SerialEnvSnapshot,
+    pub comp: Arc<Comp>,
+    pub env: SerialEnvSnapshot,
 }
 
 /// Wire mirror of a [`Value::Native`]: the body
@@ -230,10 +223,7 @@ fn value_carries_handle(value: &Value) -> bool {
             payload: Some(p), ..
         } => value_carries_handle(p),
         Value::Native { applied, .. } => applied.iter().any(value_carries_handle),
-        Value::Variant { payload: None, .. }
-        | Value::Lambda { .. }
-        | Value::Block { .. }
-        | Value::Unit
+        Value::Variant { payload: None, .. } | Value::Thunk(_) | Value::Unit
         | Value::Bool(_)
         | Value::Int(_)
         | Value::Float(_)
@@ -334,13 +324,10 @@ impl WireDecoder {
 /// silently missing from [`WireDecoder::for_shell`].
 fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
     match value {
-        SerialValue::Ext(Closure::Lambda(l)) => {
-            out.insert(l.captured.bindings);
+        SerialValue::Ext(SerialClosure::Thunk(t)) => {
+            out.insert(t.env.bindings);
         }
-        SerialValue::Ext(Closure::Block(t)) => {
-            out.insert(t.captured.bindings);
-        }
-        SerialValue::Ext(Closure::Native(n)) => {
+        SerialValue::Ext(SerialClosure::Native(n)) => {
             for v in &n.applied {
                 collect_scope_deps(v, out);
             }
@@ -417,7 +404,7 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 
 // ── Value conversions ─────────────────────────────────────────────────────
 
-impl FOValue<Closure> {
+impl FOValue<SerialClosure> {
     /// Encode a runtime [`Value`], interning captured closure environments
     /// through `ctx`.
     ///
@@ -450,20 +437,11 @@ impl FOValue<Closure> {
                     None => None,
                 },
             },
-            Value::Lambda {
-                param,
-                body,
-                captured,
-            } => Self::Ext(Closure::Lambda(SerialLambda {
-                param: param.clone(),
-                body: Arc::clone(body),
-                captured: SerialEnvSnapshot::from_runtime(captured, ctx),
+            Value::Thunk(closure) => Self::Ext(SerialClosure::Thunk(SerialThunk {
+                comp: Arc::clone(&closure.comp),
+                env: SerialEnvSnapshot::from_runtime(&closure.env, ctx),
             })),
-            Value::Block { body, captured } => Self::Ext(Closure::Block(SerialThunk {
-                body: Arc::clone(body),
-                captured: SerialEnvSnapshot::from_runtime(captured, ctx),
-            })),
-            Value::Native { entry, applied } => Self::Ext(Closure::Native(SerialNative {
+            Value::Native { entry, applied } => Self::Ext(SerialClosure::Native(SerialNative {
                 name: entry.name.as_ref().to_string(),
                 applied: applied
                     .iter()
@@ -515,16 +493,11 @@ impl FOValue<Closure> {
                     None => None,
                 },
             },
-            Self::Ext(Closure::Lambda(lam)) => Value::Lambda {
-                param: lam.param,
-                body: lam.body,
-                captured: Arc::new(lam.captured.into_runtime(dec)?),
-            },
-            Self::Ext(Closure::Block(thunk)) => Value::Block {
-                body: thunk.body,
-                captured: Arc::new(thunk.captured.into_runtime(dec)?),
-            },
-            Self::Ext(Closure::Native(n)) => {
+            Self::Ext(SerialClosure::Thunk(thunk)) => Value::Thunk(crate::types::Closure {
+                comp: thunk.comp,
+                env: thunk.env.into_runtime(dec)?,
+            }),
+            Self::Ext(SerialClosure::Native(n)) => {
                 // The value half only: no `Value::Native` was ever built from
                 // a base frame, so a wire name that reaches one is not a
                 // native we could rebuild.
@@ -576,10 +549,7 @@ impl TryFrom<&Value> for FOValue {
                     None => None,
                 },
             },
-            Value::Lambda { .. }
-            | Value::Block { .. }
-            | Value::Native { .. }
-            | Value::Handle(_) => {
+            Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => {
                 return Err(Error::new(
                     "value is not first-order: the host seam carries only data, \
                      not closures or handles",
@@ -596,10 +566,7 @@ pub const OPAQUE_TAG: &str = "opaque";
 
 /// The leaves [`FOValue::try_from`] rejects.
 pub fn no_wire_form(v: &Value) -> bool {
-    matches!(
-        v,
-        Value::Handle(_) | Value::Lambda { .. } | Value::Block { .. } | Value::Native { .. }
-    )
+    matches!(v, Value::Handle(_) | Value::Thunk(_) | Value::Native { .. })
 }
 
 /// Just the leaf a `Handle` has no wire form at all: unlike [`no_wire_form`],
@@ -705,14 +672,14 @@ impl SerialEnvSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{CompKind, IrPattern};
+    use crate::ir::CompKind;
 
     /// The child reads the checker's verdicts off the node rather than
-    /// re-inferring, so a lambda body must carry its interior annotations
+    /// re-inferring, so a lambda's comp must carry its interior annotations
     /// across the wire — a pipeline's yield marker, and the `Capture` node a
     /// byte-payload `Bind` RHS elaborates to. There is no thunk-root
     /// annotation, so those interior slots are the whole of it.
-    fn annotated_lambda_body() -> Arc<Comp> {
+    fn annotated_lambda_node() -> Arc<Comp> {
         let src = r"let f = { |x| let y = /bin/echo $x; /bin/cat | /bin/cat }";
         let ast = crate::parse(src).expect("parse");
         let top = crate::elaborate(&ast, HashSet::default(), "").expect("elaborate");
@@ -724,13 +691,32 @@ mod tests {
         let crate::ir::Phrase::Define { comp, .. } = &phrase.item else {
             panic!("expected a Define phrase, got {:?}", phrase.item);
         };
-        let mut body = None;
-        walk_comp(comp, &mut |c| {
-            if let CompKind::Lam { body: b, .. } = &c.item {
-                body = Some(Arc::clone(b));
+        find_lam_node(comp).expect("lambda in annotated comp")
+    }
+
+    /// Depth-first search for the first `Lam` node, cloning its `Arc` rather
+    /// than a caller-picked field — a `SerialThunk` wraps the whole comp
+    /// `close` would have, not just its body.
+    fn find_lam_node(comp: &Arc<Comp>) -> Option<Arc<Comp>> {
+        if matches!(comp.item, CompKind::Lam { .. }) {
+            return Some(Arc::clone(comp));
+        }
+        match &comp.item {
+            CompKind::Chain(parts) => parts.iter().find_map(find_lam_node),
+            CompKind::Pipeline { stages, .. } => stages.iter().find_map(find_lam_node),
+            CompKind::Bind {
+                comp: rhs, rest, ..
+            } => find_lam_node(rhs).or_else(|| find_lam_node(rest)),
+            CompKind::App { head, .. } => find_lam_node(head),
+            CompKind::If { then, else_, .. } => {
+                find_lam_node(then).or_else(|| find_lam_node(else_))
             }
-        });
-        body.expect("lambda body in annotated comp")
+            CompKind::Force(crate::ir::Val::Thunk(c))
+            | CompKind::Return(crate::ir::Val::Thunk(c))
+            | CompKind::Capture(c)
+            | CompKind::Decode(c) => find_lam_node(c),
+            _ => None,
+        }
     }
 
     /// Visit every `Comp` in the tree, descending into thunk bodies so a
@@ -780,8 +766,8 @@ mod tests {
 
     #[test]
     fn lambda_body_round_trips_with_interior_annotations() {
-        let body = annotated_lambda_body();
-        let (unit_yield, capture) = interior_annotations(&body);
+        let node = annotated_lambda_node();
+        let (unit_yield, capture) = interior_annotations(&node);
         assert!(
             unit_yield,
             "body's pipeline yields unit, not its last value"
@@ -791,24 +777,23 @@ mod tests {
             "body's byte-payload bind RHS carries a Capture node"
         );
 
-        let lambda = SerialValue::Ext(Closure::Lambda(SerialLambda {
-            param: IrPattern::Name("x".to_string()),
-            body: Arc::clone(&body),
-            captured: SerialEnvSnapshot { bindings: 0 },
+        let lambda = SerialValue::Ext(SerialClosure::Thunk(SerialThunk {
+            comp: Arc::clone(&node),
+            env: SerialEnvSnapshot { bindings: 0 },
         }));
 
         // The same `serde_json` codec `subprocess_codec` frames with.
         let json = serde_json::to_vec(&lambda).expect("serialise lambda");
         let back: SerialValue = serde_json::from_slice(&json).expect("deserialise lambda");
 
-        let SerialValue::Ext(Closure::Lambda(back)) = back else {
+        let SerialValue::Ext(SerialClosure::Thunk(back)) = back else {
             panic!("round-trip changed the value variant");
         };
         assert_eq!(
-            *back.body, *body,
-            "the deserialised body must equal the original, annotations and all"
+            *back.comp, *node,
+            "the deserialised comp must equal the original, annotations and all"
         );
-        let (unit_yield, capture) = interior_annotations(&back.body);
+        let (unit_yield, capture) = interior_annotations(&back.comp);
         assert!(unit_yield, "the pipeline's yield survives the round-trip");
         assert!(capture, "the Capture node survives the round-trip");
     }
@@ -819,10 +804,9 @@ mod tests {
     fn out_of_range_scope_ref_is_not_reported_as_cyclic() {
         use crate::ir::Val;
         use crate::source::Spanned;
-        let lambda = SerialValue::Ext(Closure::Lambda(SerialLambda {
-            param: IrPattern::Name("x".to_string()),
-            body: Arc::new(Spanned::synthetic(CompKind::Return(Val::Unit))),
-            captured: SerialEnvSnapshot { bindings: 5 },
+        let lambda = SerialValue::Ext(SerialClosure::Thunk(SerialThunk {
+            comp: Arc::new(Spanned::synthetic(CompKind::Return(Val::Unit))),
+            env: SerialEnvSnapshot { bindings: 5 },
         }));
         let table: ScopeTable = vec![vec![(
             "f".to_string(),
@@ -890,9 +874,9 @@ mod tests {
         let back = ipc.into_runtime(&dec).expect("decode");
         let mut depth = 0;
         let mut cur = &back;
-        while let Value::Block { captured, .. } = cur {
+        while let Value::Thunk(closure) = cur {
             depth += 1;
-            cur = captured.get("tail").expect("each link binds the next");
+            cur = closure.env.get("tail").expect("each link binds the next");
         }
         assert_eq!(depth, 500, "every link survives the round-trip");
     }
