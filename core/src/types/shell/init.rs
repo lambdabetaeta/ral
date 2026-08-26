@@ -39,6 +39,7 @@ impl Shell {
                     terminal.startup_foreground,
                 ),
                 guest_jail: None,
+                stack_limit: super::DEFAULT_STACK_LIMIT,
             },
             local: LocalState::default(),
         };

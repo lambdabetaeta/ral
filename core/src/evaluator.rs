@@ -10,6 +10,9 @@ pub(crate) mod capture;
 pub(crate) mod case;
 pub(crate) mod comp;
 pub mod expr;
+// W2g routes the doors through it and deletes `comp`/`trampoline`/`call`/`case`.
+#[cfg_attr(not(test), allow(dead_code, reason = "routed by W2g"))]
+pub(crate) mod machine;
 pub(crate) mod observe;
 pub(crate) mod pattern;
 pub(crate) mod redirect;

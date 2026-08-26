@@ -59,6 +59,10 @@ use std::sync::Arc;
 /// trampoline loop and do not count.
 pub const DEFAULT_RECURSION_LIMIT: usize = 1024;
 
+/// Default cap on the machine's stack (§2.1, §6.3 of the CEK plan): frames,
+/// not host stack frames, so it can sit far above the old host-frame count.
+pub const DEFAULT_STACK_LIMIT: usize = 100_000;
+
 /// The Send+Clone dynamic context every child computation carries — a thunk
 /// body, a spawned thread (`spawn`, `par`, pipeline stage), a REPL aside.
 ///
@@ -152,6 +156,11 @@ pub struct SessionState {
     /// Shared by `Arc` across every fork and spawned worker, so concurrent
     /// spawns from sibling Shells mint distinct uids and cgroups off one counter.
     pub(crate) guest_jail: Option<std::sync::Arc<crate::process::jail::GuestJail>>,
+    /// The machine's stack cap (§2.1 of the CEK plan): `Machine::reserve`
+    /// refuses a push at `stack.len() >= stack_limit`.  Default
+    /// [`DEFAULT_RECURSION_LIMIT`]'s successor for the machine — frames, not
+    /// host stack frames — until W2g retires `ControlState::recursion_limit`.
+    pub(crate) stack_limit: usize,
 }
 
 /// Host-local scratch whose members each carry their own flow rule — not a
@@ -184,6 +193,11 @@ pub struct LocalState {
     /// *parent's* registry by `Arc` clone: a worker's own shell dropping must
     /// not cancel its parent's whole roster.  Read by the [`Drop`] below.
     pub(crate) workers_owned: bool,
+    /// Nested `machine::evaluate`/`machine::apply` re-entries live on this
+    /// host stack frame (§2.1 of the CEK plan): a native such as `map`
+    /// applying a user function, guarded by an RAII depth token so a panic
+    /// unwinding out never leaves it raised.
+    pub(crate) machine_depth: usize,
 }
 
 impl Default for LocalState {
@@ -195,6 +209,7 @@ impl Default for LocalState {
             bindings: BindingLedger::default(),
             detach: None,
             workers_owned: true,
+            machine_depth: 0,
         }
     }
 }

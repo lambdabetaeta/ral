@@ -92,7 +92,9 @@ pub(crate) use shell::ThunkBody;
 pub use shell::hooks::{
     DefaultPolicy, Hook, HookName, HookSig, Namespace, RegisterError, TerminalPolicy,
 };
-pub use shell::{Context, DEFAULT_RECURSION_LIMIT, LocalState, Mobile, SessionState, Shell};
+pub use shell::{
+    Context, DEFAULT_RECURSION_LIMIT, DEFAULT_STACK_LIMIT, LocalState, Mobile, SessionState, Shell,
+};
 
 pub(crate) use shell::workers::{CapReached, WorkerRegistry};
 pub use shell::workers::{LeaseClass, ReapCause, ReapNotice, WorkerEntry, WorkerId, WorkerLease};

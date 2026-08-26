@@ -41,7 +41,7 @@ impl Shell {
     /// [`crate::capability::deputy_prefixes`] demands the fold and only
     /// reports, never denies; this is its one call site.  No-op unless audit
     /// is live and some layer opted into capability auditing.
-    fn audit_deputy_prefixes(&mut self) {
+    pub(crate) fn audit_deputy_prefixes(&mut self) {
         if !self
             .mobile
             .context

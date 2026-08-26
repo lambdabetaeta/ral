@@ -278,7 +278,7 @@ fn run_host_thunk(
 /// parked in `shell.io.stdin` for the spawn to collect.  `env` is unused —
 /// an external command reads no lexical scope — but carried for the same
 /// shape as [`run_base_frame`], since the `Exec` rule reaches both arms alike.
-fn run_external(
+pub(crate) fn run_external(
     id: CommandIdentity,
     args: &[Value],
     redirects: &[EvalRedirectV],
