@@ -7,6 +7,7 @@
 
 use crate::typecheck::Scheme;
 use crate::types::Value;
+use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,6 +20,13 @@ pub struct Binding {
     pub scheme: Option<Scheme>,
 }
 
+/// Every key hashed below is a program identifier, never attacker-controlled
+/// input, so the three tiers use a fast non-cryptographic hasher.
+pub(crate) type NativeMap = HashMap<String, Value, FxBuildHasher>;
+pub(crate) type PreludeMap = HashMap<String, Binding, FxBuildHasher>;
+pub(crate) type BindingMap =
+    imbl::GenericHashMap<String, Binding, FxBuildHasher, imbl::shared_ptr::DefaultSharedPtr>;
+
 /// Lexical environment: three tiers, checked in order.
 ///
 /// `natives` are language constants — seeded once at boot
@@ -29,39 +37,36 @@ pub struct Binding {
 /// clone every closure capture and every save/restore bracket takes.
 #[derive(Debug, Clone)]
 pub struct Env {
-    natives: Arc<HashMap<String, Value>>,
-    prelude: Arc<HashMap<String, Binding>>,
-    bindings: imbl::HashMap<String, Binding>,
+    natives: Arc<NativeMap>,
+    prelude: Arc<PreludeMap>,
+    bindings: BindingMap,
 }
 
 impl Env {
     /// The empty three-tier map: no natives, no prelude, nothing bound.
     pub fn new() -> Self {
         Self {
-            natives: Arc::new(HashMap::new()),
-            prelude: Arc::new(HashMap::new()),
-            bindings: imbl::HashMap::new(),
+            natives: Arc::new(NativeMap::default()),
+            prelude: Arc::new(PreludeMap::default()),
+            bindings: BindingMap::default(),
         }
     }
 
     /// `natives` alone, no prelude — what a prelude bake itself runs under.
-    pub(crate) fn with_natives(natives: Arc<HashMap<String, Value>>) -> Self {
+    pub(crate) fn with_natives(natives: Arc<NativeMap>) -> Self {
         Self {
             natives,
-            prelude: Arc::new(HashMap::new()),
-            bindings: imbl::HashMap::new(),
+            prelude: Arc::new(PreludeMap::default()),
+            bindings: BindingMap::default(),
         }
     }
 
     /// Seat a shell: `natives` and the baked `prelude`, nothing bound yet.
-    pub(crate) fn with_prelude(
-        natives: Arc<HashMap<String, Value>>,
-        prelude: Arc<HashMap<String, Binding>>,
-    ) -> Self {
+    pub(crate) fn with_prelude(natives: Arc<NativeMap>, prelude: Arc<PreludeMap>) -> Self {
         Self {
             natives,
             prelude,
-            bindings: imbl::HashMap::new(),
+            bindings: BindingMap::default(),
         }
     }
 
@@ -69,9 +74,9 @@ impl Env {
     /// side, which decodes only `bindings` and seats it under the receiver's
     /// own `natives`/`prelude`.
     pub(crate) fn from_parts(
-        natives: Arc<HashMap<String, Value>>,
-        prelude: Arc<HashMap<String, Binding>>,
-        bindings: imbl::HashMap<String, Binding>,
+        natives: Arc<NativeMap>,
+        prelude: Arc<PreludeMap>,
+        bindings: BindingMap,
     ) -> Self {
         Self {
             natives,
@@ -222,22 +227,22 @@ impl Env {
     }
 
     /// The session tier's persistent map root — `crate::serial` interns
-    /// environments by this root's identity, and needs the `imbl::HashMap`
-    /// itself, not its contents, to compare by [`imbl::HashMap::ptr_eq`].
-    pub(crate) fn bindings_root(&self) -> &imbl::HashMap<String, Binding> {
+    /// environments by this root's identity, and needs the map itself, not
+    /// its contents, to compare by [`imbl::GenericHashMap::ptr_eq`].
+    pub(crate) fn bindings_root(&self) -> &BindingMap {
         &self.bindings
     }
 
     /// This environment's native tier, for a decoder seating a hydrated
     /// environment under the receiver's own — natives never ride the wire.
-    pub(crate) fn natives_arc(&self) -> Arc<HashMap<String, Value>> {
+    pub(crate) fn natives_arc(&self) -> Arc<NativeMap> {
         Arc::clone(&self.natives)
     }
 
     /// This environment's prelude tier, for a decoder seating a hydrated
     /// environment under the receiver's own — the prelude never rides the
     /// wire either.
-    pub(crate) fn prelude_arc(&self) -> Arc<HashMap<String, Binding>> {
+    pub(crate) fn prelude_arc(&self) -> Arc<PreludeMap> {
         Arc::clone(&self.prelude)
     }
 }
@@ -423,7 +428,7 @@ mod tests {
     /// flat map with no scope to pop.
     #[test]
     fn shadowed_prelude_name_round_trips_then_unset_reveals_it() {
-        let mut prelude = HashMap::new();
+        let mut prelude = PreludeMap::default();
         prelude.insert(
             "map".to_string(),
             Binding {
@@ -431,7 +436,7 @@ mod tests {
                 scheme: None,
             },
         );
-        let mut env = Env::with_prelude(Arc::new(HashMap::new()), Arc::new(prelude));
+        let mut env = Env::with_prelude(Arc::new(NativeMap::default()), Arc::new(prelude));
         assert_eq!(env.get("map"), Some(&Value::String("prelude-map".into())));
 
         env.bind(

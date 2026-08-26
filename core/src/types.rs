@@ -5,6 +5,7 @@
 
 mod env;
 pub use env::{Binding, Env, EnvVars, EnvVarsIter};
+pub(crate) use env::{BindingMap, NativeMap, PreludeMap};
 
 pub use shell::repl::ReplScratch;
 

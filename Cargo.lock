@@ -5692,6 +5692,7 @@ dependencies = [
  "postcard",
  "ral-ripgrep-core",
  "regex",
+ "rustc-hash",
  "rustix",
  "ryu",
  "same-file",

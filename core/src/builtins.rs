@@ -14,10 +14,9 @@
 use crate::diagnostic;
 use crate::typecheck::builtins::{BuiltinDiagnostic, scheme};
 use crate::types::{
-    Binding, Break, BuiltinBody, BuiltinEntry, Error, Escape, Mooring, Settled, Shell, Value,
+    Break, BuiltinBody, BuiltinEntry, Error, Escape, Mooring, Settled, Shell, Value,
 };
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 mod codecs;
@@ -506,7 +505,7 @@ pub static DETACH_BUILTIN: &[BuiltinEntry] = &DETACH_BUILTIN_ARR;
 /// Panics if `env.session_names()` names a binding `session_binding` cannot
 /// find, which would mean the two disagree about the session tier's keys.
 pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
-    static PRELUDE: OnceLock<Arc<HashMap<String, Binding>>> = OnceLock::new();
+    static PRELUDE: OnceLock<Arc<crate::types::PreludeMap>> = OnceLock::new();
 
     let natives = shell.env.natives_arc();
     let prelude = PRELUDE.get_or_init(|| {

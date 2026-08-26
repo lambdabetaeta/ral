@@ -5,7 +5,7 @@
 //! fills the slot with [`Closure`] so the re-exec'd child IPC (`child_eval`,
 //! `subprocess`, the pipeline stage helper) can ship a captured environment
 //! as JSON.  `serial.rs` interns *environments*, not scopes: one row per
-//! distinct session-tier root, by [`imbl::HashMap::ptr_eq`] identity
+//! distinct session-tier root, by [`imbl::GenericHashMap::ptr_eq`] identity
 //! ([`InternCtx`]), rebuilt topologically ([`WireDecoder::for_shell`]) and
 //! seated under the receiver's own natives and prelude — those two constant
 //! tiers never cross.  `into_runtime`, given a [`WireDecoder`], is the sole
@@ -14,7 +14,7 @@
 use crate::ir::Comp;
 use crate::types::{Binding, BuiltinTable, Env, Error, Shell, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Floats cross as their IEEE-754 bits.  JSON has no number for NaN or ±∞:
@@ -138,15 +138,15 @@ pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 pub struct InternCtx {
     scope_table: ScopeTable,
     /// Every root interned in this message so far, scanned linearly by
-    /// [`imbl::HashMap::ptr_eq`] — a message holds a handful, so the scan
+    /// [`imbl::GenericHashMap::ptr_eq`] — a message holds a handful, so the scan
     /// costs nothing a hash lookup would save.
-    roots: Vec<(imbl::HashMap<std::string::String, Binding>, u32)>,
+    roots: Vec<(crate::types::BindingMap, u32)>,
     /// Rows with an id but no encoding yet.  A stream is a chain of closures —
     /// block → captured env → binding → block — so encoding an environment's
     /// bindings inside `intern_env` would recurse once per link and bound
     /// stream length by the stack.  Interning only *reserves*; [`Self::finish`]
     /// encodes from this queue, a worklist in place of that recursion.
-    pending: Vec<(u32, imbl::HashMap<std::string::String, Binding>)>,
+    pending: Vec<(u32, crate::types::BindingMap)>,
 }
 
 impl InternCtx {
@@ -160,7 +160,7 @@ impl InternCtx {
 
     /// Intern `bindings` — an [`Env`]'s session tier — by its persistent
     /// root's identity, reserving a row for [`Self::finish`] to encode.
-    fn intern_env(&mut self, bindings: &imbl::HashMap<std::string::String, Binding>) -> u32 {
+    fn intern_env(&mut self, bindings: &crate::types::BindingMap) -> u32 {
         if let Some(&(_, id)) = self.roots.iter().find(|(root, _)| root.ptr_eq(bindings)) {
             return id;
         }
@@ -238,7 +238,7 @@ fn value_carries_handle(value: &Value) -> bool {
 
 /// One reconstructed session-tier map per scope table row (`None` until
 /// built).
-type EnvRows = Vec<Option<imbl::HashMap<String, Binding>>>;
+type EnvRows = Vec<Option<crate::types::BindingMap>>;
 
 /// Decode capability for one wire envelope: the rebuilt environment rows
 /// and the tiers a captured value re-links against.
@@ -253,8 +253,8 @@ type EnvRows = Vec<Option<imbl::HashMap<String, Binding>>>;
 pub struct WireDecoder {
     rows: EnvRows,
     manifest: BuiltinTable,
-    natives: Arc<HashMap<String, Value>>,
-    prelude: Arc<HashMap<String, Binding>>,
+    natives: Arc<crate::types::NativeMap>,
+    prelude: Arc<crate::types::PreludeMap>,
 }
 
 impl WireDecoder {
@@ -304,7 +304,7 @@ impl WireDecoder {
                 if !deps[id].iter().all(|&d| dec.rows[d as usize].is_some()) {
                     continue;
                 }
-                let mut entries = imbl::HashMap::new();
+                let mut entries = crate::types::BindingMap::default();
                 for (k, b) in &scope_table[id] {
                     entries.insert(
                         k.clone(),

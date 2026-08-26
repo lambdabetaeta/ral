@@ -43,6 +43,7 @@ rustix     = "1"
 clap       = { version = "4", features = ["derive"] }
 base64     = "0.22"
 nucleo-matcher = "0.3"
+rustc-hash = "2"
 shlex      = "2.0"
 windows-sys = "0.61"
 
