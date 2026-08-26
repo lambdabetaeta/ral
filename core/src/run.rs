@@ -590,17 +590,20 @@ impl Drop for IoLoan<'_> {
 /// `Source::Terminal`; terminal authority is not here at all, but on the
 /// [`Mooring`] the caller builds separately.
 pub(crate) fn build_run(shell: &Shell, capture: Option<(Sink, Sink)>, stdin: Source) -> Io {
-    let mut run_io = shell.io.try_clone().unwrap_or_else(|_| Io {
-        terminal: shell.io.terminal,
+    let mut run_io = Io {
+        stdin: Source::Terminal,
+        stdout: shell.io.stdout.clone(),
+        ambient: shell.io.ambient.clone(),
+        stderr: shell.io.stderr.clone(),
         interactive: shell.io.interactive,
+        terminal: shell.io.terminal,
         launch_role: shell.io.launch_role,
-        ..Io::default()
-    });
+    };
     run_io.stdin = stdin;
     if let Some((stdout, stderr)) = capture {
         // The run's buffer is the whole of what the world sees of it, so it is
         // the visible stream as well as the payload sink.
-        run_io.ambient = stdout.try_clone().unwrap_or(Sink::Terminal);
+        run_io.ambient = stdout.clone();
         run_io.stdout = stdout;
         run_io.stderr = stderr;
     }

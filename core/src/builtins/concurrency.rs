@@ -180,21 +180,15 @@ where
     let (stdout, stderr, flush_pending) = match io_mode {
         ChildIoMode::Buffered => (stdout_sink, stderr_sink, false),
         ChildIoMode::Watch { label } => {
-            let clone_parent = || {
-                shell
-                    .io
-                    .stdout
-                    .try_clone()
-                    .map_err(|e| sig(format!("watch: cannot clone parent stdout: {e}")))
-            };
+            let clone_parent = || shell.io.stdout.clone();
             let framed = |inner, prefix| Sink::LineFramed {
                 inner: Box::new(inner),
                 prefix,
                 pending: Vec::new(),
             };
             (
-                framed(clone_parent()?, format!("[{label}] ")),
-                framed(clone_parent()?, format!("[{label}:err] ")),
+                framed(clone_parent(), format!("[{label}] ")),
+                framed(clone_parent(), format!("[{label}:err] ")),
                 true,
             )
         }
@@ -216,7 +210,7 @@ where
             // A worker's visible stream *is* its handle buffer: nobody is
             // watching it until `await` drains one, so both conduits land
             // there and a discarded statement is held rather than interleaved.
-            child_env.io.ambient = stdout.try_clone().unwrap_or(crate::io::Sink::Terminal);
+            child_env.io.ambient = stdout.clone();
             child_env.io.stdout = stdout;
             child_env.io.stderr = stderr;
             // `spawn_thread` builds the worker from a defaulted `Io`, whose stdin

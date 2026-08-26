@@ -190,10 +190,7 @@ fn run_phrase_run(m: &Arc<Comp>, non_final: bool, mooring: &Mooring, shell: &mut
     if !non_final {
         return evaluate(m, mooring, shell);
     }
-    match capture::with_ambient_stdout(shell, |shell| evaluate(m, mooring, shell)) {
-        Ok(settled) => settled,
-        Err(io_err) => Err(shell.err(format!("statement sink: {io_err}"), 1).into()),
-    }
+    capture::with_ambient_stdout(shell, |shell| evaluate(m, mooring, shell))
 }
 
 /// `Define { pattern, comp, schemes }`: the RHS runs under the ambient sink
@@ -217,10 +214,7 @@ fn run_phrase_define(
             Control::Tail(_) => unreachable!("a pattern-shadow check never applies a tail call"),
         })?;
     }
-    let v = match capture::with_ambient_stdout(shell, |shell| evaluate(comp, mooring, shell)) {
-        Ok(settled) => settled?,
-        Err(io_err) => return Err(shell.err(format!("statement sink: {io_err}"), 1).into()),
-    };
+    let v = capture::with_ambient_stdout(shell, |shell| evaluate(comp, mooring, shell))?;
     comp::set_status_from_value(&v, shell);
     let env = pattern::bind_pattern(pattern, &v, schemes, shell.mobile.scope.clone(), mooring, shell)?;
     shell.mobile.scope = env;
