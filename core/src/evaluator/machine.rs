@@ -489,15 +489,24 @@ impl Machine {
             }
 
             CompKind::Binary(op, lhs, rhs) => match expr::eval_binary(*op, lhs, rhs, &env) {
-                Ok(v) => Focus::Return(Terminal::Value(v)),
+                Ok(v) => {
+                    set_status(&v, shell);
+                    Focus::Return(Terminal::Value(v))
+                }
                 Err(b) => Focus::Halt(b),
             },
             CompKind::Negate(v) => match expr::eval_negate(v, &env) {
-                Ok(val) => Focus::Return(Terminal::Value(val)),
+                Ok(val) => {
+                    set_status(&val, shell);
+                    Focus::Return(Terminal::Value(val))
+                }
                 Err(e) => Focus::Halt(Break::Error(e)),
             },
             CompKind::Not(v) => match expr::eval_not(v, &env) {
-                Ok(val) => Focus::Return(Terminal::Value(val)),
+                Ok(val) => {
+                    set_status(&val, shell);
+                    Focus::Return(Terminal::Value(val))
+                }
                 Err(e) => Focus::Halt(Break::Error(e)),
             },
 
