@@ -29,7 +29,7 @@ within [dir: $where] {
     }
 
     for $hits { |h|
-        echo "!{styled $ansi-cyan "==> $h[file]:$h[line]"}"
+        echo "!{styled cyan "==> $h[file]:$h[line]"}"
         view-text-around $h[file] $h[line] 2
         echo ''
     }

@@ -80,7 +80,7 @@ if $[!{has '-h' $ARGS} || !{has '--help' $ARGS}] {
 }
 
 for $ARGS { |a|
-    if $[not !{has $a $known}] { warn "!{styled $ansi-red "unknown argument: $a"}"; fail [status: 2, message: "unknown argument: $a"] }
+    if $[not !{has $a $known}] { warn "!{styled red "unknown argument: $a"}"; fail [status: 2, message: "unknown argument: $a"] }
 }
 
 let dry_run      = has '--dry-run'      $ARGS
@@ -125,7 +125,7 @@ let all   = ['--features', 'coreutils,diffutils,grep,ripgrep']
 # package name (`-p`); the binary in `target/release/` shares the name.
 let host_build = { |target pkg name feats sign|
     echo ''
-    echo "!{styled $ansi-cyan '==>'} !{styled $ansi-yellow $name} !{styled $ansi-dim '(host cargo)'}"
+    echo "!{styled cyan '==>'} !{styled yellow $name} !{styled dim '(host cargo)'}"
     within [env: [CARGO_TARGET_DIR: $target]] {
         cargo build --release -p $pkg ...$feats
     }
@@ -153,14 +153,14 @@ let main = {
     if $want_clean_builds {
         for [$artifact_dir, $cache_dir] { |d|
             if !{exists $d} {
-                echo "!{styled $ansi-dim "  removing $d"}"
+                echo "!{styled dim "  removing $d"}"
                 rm -rf $d
             }
         }
     }
     if $want_clean_images {
         for $pull_images { |img|
-            echo "!{styled $ansi-dim '  removing docker image'} !{styled $ansi-magenta $img}"
+            echo "!{styled dim '  removing docker image'} !{styled magenta $img}"
             attempt { docker rmi $img }
         }
         attempt { docker image prune -f }
@@ -179,7 +179,7 @@ let main = {
         host_variants_ral    "$cache_dir/target-host" !{norm_os !{uname -s}} !{norm_arch !{uname -m}} false
         host_variants_exarch "$cache_dir/target-host" !{norm_os !{uname -s}} !{norm_arch !{uname -m}} false
         echo ''
-        echo "!{styled $ansi-green '  Local build done.'}  Artifacts in !{styled $ansi-yellow $artifact_dir}"
+        echo "!{styled green '  Local build done.'}  Artifacts in !{styled yellow $artifact_dir}"
         exit 0
     }
 
@@ -208,7 +208,7 @@ let main = {
     # is involved.
     if $build_linux {
         echo ''
-        echo "!{styled $ansi-cyan '==>'} preparing cross-compile images"
+        echo "!{styled cyan '==>'} preparing cross-compile images"
         let pulls = map { |img|
             return !{watch $img { docker pull $img }}
         } $pull_images
@@ -218,7 +218,7 @@ let main = {
     for $matrix { |t|
         if $t[include] {
             echo ''
-            echo "!{styled $ansi-cyan '==>'} !{styled $ansi-yellow $t[out]} !{styled $ansi-dim "($t[triple])"}"
+            echo "!{styled cyan '==>'} !{styled yellow $t[out]} !{styled dim "($t[triple])"}"
             let td  = "$cache_dir/$t[triple]"
             let out = "$artifact_dir/$t[out]"
             let run_args = [
@@ -246,14 +246,14 @@ let main = {
             # Only warn when the user explicitly asked for macOS; otherwise
             # (--all / bare default on a non-Darwin host) silently skip.
             if $want_macos {
-                warn "!{styled $ansi-red "  --macos requested but host is $kernel; skipping"}"
+                warn "!{styled red "  --macos requested but host is $kernel; skipping"}"
             }
         }
     }
 
     # Checksums.
     echo ''
-    echo "!{styled $ansi-cyan '==>'} sha256 checksums"
+    echo "!{styled cyan '==>'} sha256 checksums"
     for !{list-dir $artifact_dir} { |e|
         if $[not !{re-match '\.sha256$' $e[name]}] {
             let path = "$artifact_dir/$e[name]"
@@ -272,13 +272,13 @@ let main = {
     # Publish.  git and gh both need cwd inside the repo.
     if $skip_publish {
         echo ''
-        echo "!{styled $ansi-dim '  Skipping publish.'}  Artifacts in !{styled $ansi-yellow $artifact_dir}"
+        echo "!{styled dim '  Skipping publish.'}  Artifacts in !{styled yellow $artifact_dir}"
         exit 0
     }
 
     within [dir: $repo_root] {
         echo ''
-        echo "!{styled $ansi-cyan '==>'} publishing !{styled $ansi-bold "'latest'"} on lambdabetaeta/ral"
+        echo "!{styled cyan '==>'} publishing !{styled bold "'latest'"} on lambdabetaeta/ral"
         let notes = "Built locally !{date -u +%Y-%m-%dT%H:%M:%SZ} from !{git rev-parse --short HEAD}"
         let files = map { |e| return "$artifact_dir/$e[name]" } !{list-dir $artifact_dir}
         # Wipe and recreate.  --cleanup-tag drops the latest tag too,
@@ -291,11 +291,11 @@ let main = {
     }
 
     echo ''
-    echo "!{styled $ansi-green '  Done.'}  https://github.com/lambdabetaeta/ral/releases/tag/latest"
+    echo "!{styled green '  Done.'}  https://github.com/lambdabetaeta/ral/releases/tag/latest"
 }
 
 # --dry-run: install a catch-all handler that prints every command instead
 # of executing it.  Otherwise just run the script.
 if $dry_run {
-    within [handler: { |name args| echo "!{styled $ansi-dim "+ $name"}" ...$ARGS }] $main
+    within [handler: { |name args| echo "!{styled dim "+ $name"}" ...$ARGS }] $main
 } else { !$main }

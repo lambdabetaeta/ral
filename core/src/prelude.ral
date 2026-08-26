@@ -481,28 +481,31 @@ let each-line = { |f|
     fold-lines { |_ line| !{$f $line}; return () } ()
 }
 
-# ANSI styling — every constant is the empty string when colour is not
-# supported, so `styled` and interpolated uses are automatically no-ops.
-## ANSI reset escape; empty when colour is unsupported.
-let ansi-reset   = if !{_ansi-ok} { return "\e[0m"    } else { return '' }
-## ANSI bold escape; empty when colour is unsupported.
-let ansi-bold    = if !{_ansi-ok} { return "\e[1m"    } else { return '' }
-## ANSI dim escape; empty when colour is unsupported.
-let ansi-dim     = if !{_ansi-ok} { return "\e[2m"    } else { return '' }
-## ANSI red escape; empty when colour is unsupported.
-let ansi-red     = if !{_ansi-ok} { return "\e[0;31m" } else { return '' }
-## ANSI green escape; empty when colour is unsupported.
-let ansi-green   = if !{_ansi-ok} { return "\e[0;32m" } else { return '' }
-## ANSI yellow escape; empty when colour is unsupported.
-let ansi-yellow  = if !{_ansi-ok} { return "\e[0;33m" } else { return '' }
-## ANSI blue escape; empty when colour is unsupported.
-let ansi-blue    = if !{_ansi-ok} { return "\e[0;34m" } else { return '' }
-## ANSI magenta escape; empty when colour is unsupported.
-let ansi-magenta = if !{_ansi-ok} { return "\e[0;35m" } else { return '' }
-## ANSI cyan escape; empty when colour is unsupported.
-let ansi-cyan    = if !{_ansi-ok} { return "\e[0;36m" } else { return '' }
-## Wrap text in an ANSI style code, resetting after.
-let styled = { |code text| "$code$text$ansi-reset" }
+# ANSI styling — `styled` looks up its code and asks `_ansi-ok` when it
+# writes, so the wrap is a no-op wherever colour is unsupported; no prelude
+# constant closes over that fact, since a prelude binding can only be a
+# value or a thunk (§6.2) and "is stdout a colour terminal" is neither.
+## Wrap `text` in an ANSI style code, resetting after: `style` is `reset`,
+## `bold`, `dim`, or one of `red green yellow blue magenta cyan`. Plain text
+## when colour is unsupported.
+let styled = { |style text|
+    if !{_ansi-ok} {
+        let code =
+            if    !{equal $style 'reset'}   { '\e[0m'    }
+            elsif !{equal $style 'bold'}    { '\e[1m'    }
+            elsif !{equal $style 'dim'}     { '\e[2m'    }
+            elsif !{equal $style 'red'}     { '\e[0;31m' }
+            elsif !{equal $style 'green'}   { '\e[0;32m' }
+            elsif !{equal $style 'yellow'}  { '\e[0;33m' }
+            elsif !{equal $style 'blue'}    { '\e[0;34m' }
+            elsif !{equal $style 'magenta'} { '\e[0;35m' }
+            elsif !{equal $style 'cyan'}    { '\e[0;36m' }
+            else { fail [status: 2, message: "styled: unknown style '$style'"] }
+        return "$code$text\e[0m"
+    } else {
+        return $text
+    }
+}
 
 # Editor state — all _ed-* operations are host builtins registered by
 # the ral crate (see ral/src/repl/plugin/ed_builtins.rs).  The underscore

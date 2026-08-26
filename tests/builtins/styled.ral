@@ -1,0 +1,17 @@
+# Test: `styled` is plain text when stdout is not a colour terminal — this
+# harness always captures stdout as a pipe, so `_ansi-ok` reads false and
+# every style name is a no-op (S14).
+
+let assert_eq = { |name expected actual|
+    if $[not !{equal $expected $actual}] {
+        warn "FAIL: $name"
+        fail [status: 1]
+    }
+}
+
+assert_eq 'reset is plain' 'x' !{styled reset 'x'}
+assert_eq 'bold is plain' 'x' !{styled bold 'x'}
+assert_eq 'red is plain' 'hello' !{styled red 'hello'}
+assert_eq 'cyan is plain' '==>' !{styled cyan '==>'}
+
+echo 'styled tests done'

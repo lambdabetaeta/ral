@@ -3342,14 +3342,14 @@ be re-lexed automatically.
 `floor`, `ceil`, and `trunc` accept a finite, in-range `Float` and return an
 `Int`; an `Int` is already integral and is rejected at the type level.
 
-The prelude adds `lines`, `words`, and `indent`. It also supplies `ansi-reset`,
-`ansi-bold`, `ansi-dim`, `ansi-red`, `ansi-green`, `ansi-yellow`, `ansi-blue`,
-`ansi-magenta`, `ansi-cyan`, and `styled`. These are the complete public ANSI
-constant set; black, white, underline, reverse, and bold-colour variants are
-not prelude names. Every exported constant is an empty string when `NO_COLOR`
-is active, stdout is not a terminal, the selected interactive mode is minimal,
-or stdout does not support ANSI colour. `styled code text` concatenates the
-code, text, and `ansi-reset`, so it becomes plain text under the same gate.
+The prelude adds `lines`, `words`, and `indent`. It also supplies `styled`,
+ral's whole public ANSI surface: `styled style text` wraps `text` in the
+escape code named by `style` — `reset`, `bold`, `dim`, or one of `red green
+yellow blue magenta cyan` — and resets after; black, white, underline,
+reverse, and bold-colour variants are not supported styles. `styled` returns
+`text` unchanged when `NO_COLOR` is active, stdout is not a terminal, the
+selected interactive mode is minimal, or stdout does not support ANSI
+colour.
 
 Regex names remain present in builds without regex support so source-level name
 resolution stays stable, but calling one then fails with a clear feature error.

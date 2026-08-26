@@ -30,5 +30,5 @@ let bad = filter { |r| return $[not $r[ok]] } $results
 echo "fetched: !{length $ok} ok, !{length $bad} failed"
 
 for $bad { |r|
-    warn "!{styled $ansi-red '  fail'} status=$r[status]  $r[url]"
+    warn "!{styled red '  fail'} status=$r[status]  $r[url]"
 }
