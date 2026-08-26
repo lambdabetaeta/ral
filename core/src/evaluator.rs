@@ -271,7 +271,7 @@ mod tests {
     fn toplevel(source: &str) -> Phrases {
         let ast = crate::syntax::parser::parse_with(source, crate::source::FileId::DUMMY)
             .expect("parse");
-        let top = crate::elaborator::elaborate(&ast, Default::default(), "<test>")
+        let top = crate::elaborator::elaborate(&ast, std::collections::HashSet::default(), "<test>")
             .expect("elaborate");
         crate::typecheck::typecheck(&top, crate::typecheck::SessionSchemes::default())
             .expect("typecheck")

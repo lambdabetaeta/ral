@@ -536,7 +536,7 @@ fn source_in_a_block_scopes_over_the_rest_of_the_block() {
     assert_eq!(result.expect("sourced name must be visible to the rest of the block"), Value::Int(99));
 }
 
-/// A block-local `source` leases nothing (Mode::Local): the run's own
+/// A block-local `source` leases nothing (`Mode::Local`): the run's own
 /// `Define`s are session leases, a nested `source`'s are not.
 #[test]
 fn block_local_source_leases_nothing() {

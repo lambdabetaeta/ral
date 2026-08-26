@@ -218,7 +218,7 @@ impl Comp {
     /// `Lam` (§1.1 of the CEK plan): the checker's η-expansion (S3)
     /// guarantees the body of every function-typed thunk *is* a `Lam`, so
     /// reading the shape here is reading the type.
-    pub fn arrow(&self) -> Option<(&IrPattern, &Arc<Comp>)> {
+    pub fn arrow(&self) -> Option<(&IrPattern, &Arc<Self>)> {
         match &self.item {
             CompKind::Lam { param, body } => Some((param, body)),
             CompKind::Rec { group, index } => group[*index].1.arrow(),
@@ -227,12 +227,13 @@ impl Comp {
     }
 }
 
-/// True if `top` is a single external/builtin command call — a fact about
-/// the input's shape, which hosts read to tailor what they say about a
-/// failure: exactly one phrase, `Run(c)`, with `c` an `Exec` under its
-/// hoisted temporaries and the checker's byte-to-value coercion — the tail
-/// `Run`'s value is reported now, so a byte-routed external gets wrapped in
-/// `Decode(Capture(_))`.
+/// True if `top` is a single external/builtin command call.
+///
+/// A fact about the input's shape, which hosts read to tailor what they say
+/// about a failure: exactly one phrase, `Run(c)`, with `c` an `Exec` under
+/// its hoisted temporaries and the checker's byte-to-value coercion — the
+/// tail `Run`'s value is reported now, so a byte-routed external gets
+/// wrapped in `Decode(Capture(_))`.
 pub fn is_single_command(top: &Toplevel) -> bool {
     let [phrase] = top.phrases.as_slice() else {
         return false;
@@ -363,12 +364,13 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             walk_val(body, out);
         }
         CompKind::Audit { body } => walk_val(body, out),
-        CompKind::Hoisted { body } => walk_comp(body, out),
         CompKind::Redirect { body, redirects } => {
             walk_comp(body, out);
             walk_redirects(redirects, out);
         }
-        CompKind::Capture(body) | CompKind::Decode(body) => walk_comp(body, out),
+        CompKind::Hoisted { body } | CompKind::Capture(body) | CompKind::Decode(body) => {
+            walk_comp(body, out);
+        }
     }
 }
 
@@ -672,7 +674,7 @@ impl CommandWord {
 /// A read of the shell's store, in computation position: what `$CWD`,
 /// `$ENV`, and a `~`-path are. Never a value — reading the store is an
 /// effect, so it names a register rather than being spelled as one.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Register {
     Env,
     Args,

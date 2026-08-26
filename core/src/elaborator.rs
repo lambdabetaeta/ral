@@ -374,9 +374,9 @@ impl Elaborator {
     /// i}))`, sharing one `group` `Arc`.
     fn toplevel_rec_group(
         &mut self,
-        bindings: Vec<(String, Box<Ast>, Option<Span>)>,
+        bindings: &[(String, Box<Ast>, Option<Span>)],
     ) -> Vec<Spanned<Phrase>> {
-        let group = self.build_rec_group(&bindings);
+        let group = self.build_rec_group(bindings);
         bindings
             .iter()
             .enumerate()
@@ -414,7 +414,7 @@ impl Elaborator {
         for group in group_stmts(stmts) {
             match group {
                 StmtGroup::Single(stmt) => units.push(self.nested_single(stmt)),
-                StmtGroup::LetRec(bindings) => units.extend(self.nested_rec_group(bindings)),
+                StmtGroup::LetRec(bindings) => units.extend(self.nested_rec_group(&bindings)),
             }
         }
         let mut rev = units.into_iter().rev();
@@ -464,9 +464,9 @@ impl Elaborator {
     /// Rec{group, i}))`, sharing one `group` `Arc`, in source order.
     fn nested_rec_group(
         &mut self,
-        bindings: Vec<(String, Box<Ast>, Option<Span>)>,
+        bindings: &[(String, Box<Ast>, Option<Span>)],
     ) -> Vec<(Option<Span>, NestedUnit)> {
-        let group = self.build_rec_group(&bindings);
+        let group = self.build_rec_group(bindings);
         bindings
             .iter()
             .enumerate()
@@ -1230,8 +1230,9 @@ fn prelude_scope() -> Arc<HashSet<String>> {
         .clone()
 }
 
-/// Elaborate a top-level statement sequence into a [`Toplevel`] (§3.4):
-/// each `let` becomes a `Define`, a `let`-knot becomes one `Define` per
+/// Elaborate a top-level statement sequence into a [`Toplevel`] (§3.4).
+///
+/// Each `let` becomes a `Define`, a `let`-knot becomes one `Define` per
 /// member sharing a `Rec` group, an unbound bare `source path` becomes a
 /// `Source`, and everything else a `Run`.
 ///
@@ -1253,7 +1254,7 @@ pub fn elaborate(ast: &[Stmt], bindings: HashSet<String>, name: &str) -> Result<
     for group in group_stmts(ast) {
         match group {
             StmtGroup::Single(stmt) => phrases.push(elaborator.toplevel_phrase(stmt)),
-            StmtGroup::LetRec(rec) => phrases.extend(elaborator.toplevel_rec_group(rec)),
+            StmtGroup::LetRec(rec) => phrases.extend(elaborator.toplevel_rec_group(&rec)),
         }
     }
     if let Some(e) = elaborator.error {

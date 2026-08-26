@@ -122,8 +122,13 @@ pub(crate) fn source(
         );
     let text = read_and_normalize(&resolved, &abs_path, "source", shell)?;
     let top = compile_toplevel(&text, &abs_path, shell).map_err(|e| tag_loader_error("source", e))?;
-    let ran = source_phrases(&top, env, mode, &abs_path, &text, span, mooring, shell)
-        .map_err(|e| tag_loader_error("source", e))?;
+    let load = ModuleLoad {
+        top: &top,
+        virtual_path: &abs_path,
+        source_text: &text,
+        span,
+    };
+    let ran = source_phrases(load, env, mode, mooring, shell).map_err(|e| tag_loader_error("source", e))?;
     Ok(Ran {
         outcome: ran.outcome.map_err(|e| tag_loader_error("source", e)),
         ..ran
@@ -175,16 +180,27 @@ fn compile_toplevel(
 /// A phrase that halts is `Ran::outcome`, not this `Err`: `source` is not
 /// transactional (S12), so every caller threads `Ran::env` before it
 /// propagates `Ran::outcome`.
+#[derive(Clone, Copy)]
+pub(crate) struct ModuleLoad<'a> {
+    pub top: &'a Toplevel,
+    pub virtual_path: &'a str,
+    pub source_text: &'a str,
+    pub span: Option<Span>,
+}
+
 pub(crate) fn source_phrases(
-    top: &Toplevel,
+    load: ModuleLoad<'_>,
     env: Env,
     mode: Mode,
-    virtual_path: &str,
-    source_text: &str,
-    span: Option<Span>,
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Ran> {
+    let ModuleLoad {
+        top,
+        virtual_path,
+        source_text,
+        span,
+    } = load;
     let key = virtual_path.to_string();
     if shell.mobile.context.modules.stack.contains(&key) {
         let cycle: Vec<&str> = shell
@@ -350,7 +366,13 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
 
     shell.mobile.scope.push_scope();
     let env = shell.mobile.scope.clone();
-    let ran = source_phrases(&top, env, Mode::Module, &abs_path, &source, None, mooring, shell);
+    let load = ModuleLoad {
+        top: &top,
+        virtual_path: &abs_path,
+        source_text: &source,
+        span: None,
+    };
+    let ran = source_phrases(load, env, Mode::Module, mooring, shell);
     shell.mobile.scope.pop_scope();
 
     let ran = ran.map_err(|e| tag_loader_error("use", e))?;
@@ -386,6 +408,10 @@ fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::P
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
 

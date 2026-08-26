@@ -70,10 +70,6 @@ pub(crate) fn eval_comp(
 
         CompKind::Decode(body) => eval_decode(body, mooring, shell),
 
-        // `invoke` is the ordinary call evaluator, for pipeline stages and
-        // bare calls alike.
-        CompKind::App { .. } | CompKind::Exec(_) => call::invoke(comp, tail, mooring, shell),
-
         CompKind::Pipeline { stages, yields, .. } => {
             eval_pipeline(stages, *yields, tail, mooring, shell)
         }
@@ -88,10 +84,13 @@ pub(crate) fn eval_comp(
             case::eval_case(&scrutinee.item, arms, tail, mooring, shell)
         }
 
-        // `invoke` runs the body inside the fd frame and absorbs its
-        // tail call there: a tail callee that escaped would land after
-        // restoration, writing to the parent instead of the target.
-        CompKind::Redirect { .. } => call::invoke(comp, tail, mooring, shell),
+        // `invoke` is the ordinary call evaluator, for pipeline stages, bare
+        // calls, and redirects alike: it runs the body inside the fd frame
+        // and absorbs its tail call there, so an escaped tail callee would
+        // land after restoration, writing to the parent instead of the target.
+        CompKind::App { .. } | CompKind::Exec(_) | CompKind::Redirect { .. } => {
+            call::invoke(comp, tail, mooring, shell)
+        }
         // These brackets apply their body thunk through the trampoline,
         // which absorbs the body's tail call inside the frame, so they
         // have no tail position to grant.

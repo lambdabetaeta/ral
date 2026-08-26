@@ -103,12 +103,14 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
     }
 }
 
-/// Type-check `top` (§3.5), seeding from the live session: infer each
-/// phrase in order, extending `TyEnv` at each `Define`, then write back the
-/// verdict — each `Define`'s generalised per-name schemes land on its own
-/// `Phrase::Define`, not on a shared spine.  Only closed schemes leave — a
-/// run's unifier dies with the run and its variable ids restart at zero, so
-/// an open scheme from run *N* would alias run *N+1*'s fresh variables.
+/// Type-check `top` (§3.5), seeding from the live session.
+///
+/// Infer each phrase in order, extending `TyEnv` at each `Define`, then
+/// write back the verdict — each `Define`'s generalised per-name schemes
+/// land on its own `Phrase::Define`, not on a shared spine.  Only closed
+/// schemes leave — a run's unifier dies with the run and its variable ids
+/// restart at zero, so an open scheme from run *N* would alias run
+/// *N+1*'s fresh variables.
 ///
 /// # Errors
 /// Every diagnostic inference collected, whenever that list is non-empty.
