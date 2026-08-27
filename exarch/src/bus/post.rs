@@ -29,13 +29,15 @@ pub(super) enum Boundary {
     Barrier,
 }
 
-/// How an async agent settled, reduced to what the parent's synthetic item
-/// needs to say; the provider-message detail stays in the child's own log.
+/// How an async agent ended the exchange, as the one line the parent reads.
+///
+/// No payload rides here: a reply is deposited on the child's registry entry
+/// and fetched from there, and provider detail stays in the child's own log.
 #[derive(Clone, Debug)]
 pub enum AgentOutcome {
-    /// Finished with a final answer, carried in [`AgentResult::text`].
-    Complete,
-    Empty,
+    /// Called `reply`: the value stands on the child's registry entry, and the
+    /// child is parked waiting to be messaged.  Not a settlement.
+    Replied,
     /// Stopped for a non-routine reason (content filter, step cap, …).
     Stopped(String),
     /// By `` agents `cancel ``, `/clear`, or the worker ceiling.
@@ -48,21 +50,23 @@ impl AgentOutcome {
     /// The `(body, error)` a `↘` subagent breadcrumb shows.  Every consumer
     /// of `record::Display::SubagentDone` — transcript, headless stderr, the
     /// TUI — reduces through here, so the three render alike.
-    pub(crate) fn breadcrumb(&self, text: &str) -> (String, Option<String>) {
+    pub(crate) fn breadcrumb(&self) -> (String, Option<String>) {
         match self {
-            Self::Complete => (text.to_string(), None),
-            Self::Empty => (String::new(), None),
+            Self::Replied => (String::new(), None),
             Self::Stopped(r) => (String::new(), Some(r.clone())),
             Self::Cancelled => (String::new(), Some("cancelled".into())),
             Self::Failed(e) => (String::new(), Some(e.clone())),
         }
     }
 
-    /// The marked text the model sees when a settled agent drains.
-    pub(crate) fn marked_item(&self, name: &str, text: &str) -> String {
+    /// The marked text the model sees when a child's line drains.  The reply
+    /// notice quotes the very command that fetches the value, with the child's
+    /// own name already in it, so the model has nothing left to assemble.
+    pub(crate) fn marked_item(&self, name: &str) -> String {
         match self {
-            Self::Complete => format!("[agent '{name}' finished]\n{text}"),
-            Self::Empty => format!("[agent '{name}' finished with no output]"),
+            Self::Replied => {
+                format!("[agent '{name}' replied — run agents `read '{name}' to read it]")
+            }
             Self::Stopped(r) => format!("[agent '{name}' stopped: {r}]"),
             Self::Cancelled => format!("[agent '{name}' was cancelled]"),
             Self::Failed(e) => format!("[agent '{name}' failed: {e}]"),
@@ -70,22 +74,21 @@ impl AgentOutcome {
     }
 }
 
-/// The settle record an async agent posts to its parent's inbox, turned to
-/// prose only at the model boundary.
+/// The one line a child posts to its parent's inbox — a reply notice, or a
+/// non-reply finish — turned to prose only at the model boundary.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentResult {
     pub name: String,
     pub outcome: AgentOutcome,
-    pub text: String,
     pub elapsed: Duration,
-    /// The parent's, read at the worker's birth; `admits` refuses a result
-    /// that arrives into a context rebuilt by a `/clear` since.
+    /// The parent's, read at the child's birth; `admits` refuses a line that
+    /// arrives into a context rebuilt by a `/clear` since.
     pub generation: u64,
 }
 
 impl AgentResult {
     pub(super) fn render(&self) -> String {
-        self.outcome.marked_item(&self.name, &self.text)
+        self.outcome.marked_item(&self.name)
     }
 }
 

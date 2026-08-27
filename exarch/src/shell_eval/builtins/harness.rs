@@ -1,6 +1,7 @@
-//! The harness builtins — `agents`, `schedules`, `reply`, `pin-read`,
-//! `pin-list`, `context`, `context-read`, `context-drop`, `context-fold` —
-//! with the type schemes that gate them.
+//! The harness builtins — `agents`, `schedules`, `pin-read`, `pin-list`,
+//! `context`, `context-read`, `context-drop`, `context-fold` — with the type
+//! schemes that gate them. A returning agent's reply is a tag of `agents`
+//! (`` `reply ``), not a builtin of its own — the fleet is one family.
 //!
 //! Each body validates at the door before it enquires, so a malformed call
 //! never reaches the host. `agents`'s `` `start `` tag forks this shell and
@@ -140,7 +141,9 @@ fn verbatim(spec: &Value, verb: &str) -> Settled<FOValue> {
     })
 }
 
-/// The `agents` family's answer: `` `roster [rows] ``, whichever tag was sent.
+/// The `agents` family's answer: `` `roster [rows] ``, whichever tag was
+/// sent. Every tag but `` `read `` answers this way — `` `read `` answers the
+/// fetched record instead, so [`builtin_agents`] never routes it here.
 fn roster(answer: FOValue) -> Settled<Value> {
     let FOValue::Variant {
         label,
@@ -381,15 +384,64 @@ fn message_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOVa
     )?)
 }
 
-/// `agents <tag>` — one enquiry, whose answer is the registry itself: every
-/// tag answers with the roster, never a receipt of its own.
+/// `` `reply ``'s payload: the value crosses to whoever spawned this agent as
+/// plain data, so it is checked first-order at this door exactly as the old
+/// standalone `reply` builtin checked it — the desk's `!returns` refusal is
+/// the only other reason this tag can fail.
+fn reply_agent(value: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValue> {
+    let payload = FOValue::try_from(value).map_err(|_| {
+        sig(
+            "agents: `reply`'s value must be first-order data — no closures, handles, or \
+             environments — since it crosses to whoever spawned you as plain data",
+        )
+    })?;
+    Ok(shell.enquire(
+        mooring,
+        request(
+            "agents",
+            "reply",
+            Some(FOValue::List {
+                items: vec![payload],
+            }),
+        ),
+    )?)
+}
+
+/// `` `read ``'s payload: a descendant's name; the answer is the record it
+/// fetches, not the roster.
+fn read_agent(target: &Value, mooring: &Mooring, shell: &Shell) -> Settled<Value> {
+    let Value::String(name) = target else {
+        return Err(sig(format!(
+            "agents: `read`'s payload must be a Str naming the descendant, got {}",
+            target.type_name()
+        )));
+    };
+    let answer = shell.enquire(
+        mooring,
+        request(
+            "agents",
+            "read",
+            Some(FOValue::String {
+                value: name.clone(),
+            }),
+        ),
+    )?;
+    Ok(Value::from(answer))
+}
+
+/// `agents <tag>` — one enquiry per tag. Every tag but `` `read `` answers
+/// with the roster; `` `read `` answers the fetched record instead, so it
+/// returns directly rather than falling through to [`roster`].
 fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Variant { label, payload } = &args[0] else {
         return Err(sig(format!(
-            "agents: expected a `list, `start, `message, or `cancel tag, got {}",
+            "agents: expected a `list, `start, `message, `cancel, `reply, or `read tag, got {}",
             args[0].type_name()
         )));
     };
+    if let ("read", Some(target)) = (label.as_str(), payload) {
+        return read_agent(target, mooring, shell);
+    }
     let answer = match (label.as_str(), payload) {
         ("list", None) => shell.enquire(mooring, request("agents", "list", None))?,
         ("start", Some(spec)) => start_agent(spec, mooring, shell)?,
@@ -412,9 +464,11 @@ fn builtin_agents(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settl
                 ),
             )?
         }
+        ("reply", Some(value)) => reply_agent(value, mooring, shell)?,
         _ => {
             return Err(sig(format!(
-                "agents: tag must be one of `list, `start, `message, `cancel — got {label}"
+                "agents: tag must be one of `list, `start, `message, `cancel, `reply, `read — got \
+                 {label}"
             )));
         }
     };
@@ -703,28 +757,6 @@ fn builtin_context_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell) ->
     edit_receipt(answer, "context-fold")
 }
 
-/// `reply <value>` — `FOValue::try_from` runs before any enquiry crosses,
-/// so a non-first-order value fails this call alone and leaves the session
-/// running; the refusal for a non-returning agent is the desk's.
-fn builtin_reply(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let payload = FOValue::try_from(&args[0]).map_err(|_| {
-        sig(
-            "reply: the value must be first-order data — no closures, handles, or \
-             environments — since it crosses to whoever spawned you as plain data",
-        )
-    })?;
-    shell.enquire(
-        mooring,
-        FOValue::Variant {
-            label: "reply".to_string(),
-            payload: Some(Box::new(FOValue::List {
-                items: vec![payload],
-            })),
-        },
-    )?;
-    Ok(Value::Unit)
-}
-
 /// A variant over a row of tags with stated payloads, left open on `tail` so
 /// an unknown tag reaches the runtime door that enumerates the legal ones
 /// rather than dying as a row-unification mismatch.
@@ -737,21 +769,19 @@ fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
     Ty::Variant(row)
 }
 
-fn agent_row_ty() -> Ty {
-    closed_record(&[
-        ("name", Ty::String),
-        ("elapsed-s", Ty::Int),
-        ("log-dir", Ty::String),
-    ])
-}
-
-/// `agents :: ∀ρ1 ρ2 ρ3. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool] | message [to: Str, text: Str] | cancel Str | ρ3> → F [[name: Str, elapsed-s: Int, log-dir: Str]]`
+/// `agents :: ∀α β ρ1 ρ2 ρ3. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ3> → F α`
 ///
 /// The outer tag row is open (`ρ3`) so an unrecognised tag reaches the
-/// runtime door that names the four legal ones, rather than dying as a
-/// row-unification mismatch. Every tag answers with the roster, so no part of
-/// the result type depends on which one was sent — which is what lets four
-/// verbs of unrelated return type become one at all.
+/// runtime door that names the six legal ones, rather than dying as a
+/// row-unification mismatch.
+///
+/// The answer is no longer one fixed shape: every tag but `` `read `` still
+/// answers the roster `[[name, state, idle-s, elapsed-s, log-dir]]`, but
+/// `` `read `` answers the value a descendant handed up, whose shape this
+/// call cannot know — so `α` is left free rather than fixed to the roster's
+/// list type. This is the `pin-read`/`from-json` move
+/// ([`scheme_pin_read`]): trusted, not checked, since only [`roster`]'s
+/// runtime door can tell the two apart.
 ///
 /// `start`'s and `message`'s record rows are closed because a record
 /// literal with literal keys infers an exact one (`infer_map_val` builds on
@@ -761,13 +791,16 @@ fn agent_row_ty() -> Ty {
 /// a bare row-mismatch diagnostic that never reaches
 /// [`agent_type_label`]/[`permission_label`], which enumerate the legal
 /// labels. `search` is two-state rather than an enumeration, so `Ty::Bool`
-/// closes it outright.
+/// closes it outright. `reply`'s `β` is likewise trusted first-order data,
+/// checked at [`reply_agent`]'s door rather than by the row.
 fn scheme_agents(u: &mut Unifier) -> Scheme {
     let type_row = u.fresh_row_var();
     let grant_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
+    let reply_ty = u.fresh_tyvar();
+    let answer_ty = u.fresh_tyvar();
     scheme(
-        &[],
+        &[reply_ty, answer_ty],
         &[],
         &[type_row, grant_row, tag_row],
         thunk(fun(
@@ -789,10 +822,12 @@ fn scheme_agents(u: &mut Unifier) -> Scheme {
                         closed_record(&[("to", Ty::String), ("text", Ty::String)]),
                     ),
                     ("cancel", Ty::String),
+                    ("reply", Ty::Var(reply_ty)),
+                    ("read", Ty::String),
                 ],
                 tag_row,
             ),
-            pure(Ty::List(Box::new(agent_row_ty()))),
+            pure(Ty::Var(answer_ty)),
         )),
     )
 }
@@ -840,13 +875,6 @@ fn scheme_schedules(u: &mut Unifier) -> Scheme {
             pure(Ty::List(Box::new(schedule_row_ty()))),
         )),
     )
-}
-
-/// `reply :: ∀α. α → F Unit` — first-orderness is [`builtin_reply`]'s
-/// runtime door, not a static constraint on `α`.
-fn scheme_reply(u: &mut Unifier) -> Scheme {
-    let av = u.fresh_tyvar();
-    scheme(&[av], &[], &[], thunk(fun(Ty::Var(av), pure(Ty::Unit))))
 }
 
 /// `pin-read :: ∀α. String → F α` — the `from-json` precedent
@@ -927,11 +955,11 @@ fn scheme_context_fold(_u: &mut Unifier) -> Scheme {
 
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static HARNESS_BUILTINS_ARR: [BuiltinEntry; 9] = [
+static HARNESS_BUILTINS_ARR: [BuiltinEntry; 8] = [
     BuiltinEntry::new(
         Cow::Borrowed("agents"),
         scheme_agents,
-        "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one. Every tag answers with the roster afterwards, [[name: Str, elapsed-s: Int, log-dir: Str]], so what you read back is always what is live now rather than a receipt for what you just did.\n\nagents `list  — your live descendants at any depth, oldest first. Settled agents are not listed: their replies arrive on their own, as marked items in your inbox. This is how you recover names after a context compaction.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as its own marked item in your inbox. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation and reuses your provider selection for cache locality. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live descendant named `to`; it lands at that child's next exchange boundary, not as human input. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. A cancel is a request, not a transaction: the child is still running when this answers, so its row is still in the roster you get back. A name you still see listed is NOT a failed cancel — do not fire it again; read `list later and find it gone.\n\nEach tag is one exchange with the host, and the roster it answers is the registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one, `reply to hand your own value up, `read one back off a descendant. Every tag but `read answers with the roster afterwards, [[name: Str, state: `busy|`waiting-on-agents|`replied|`waiting, idle-s: Int, elapsed-s: Int, log-dir: Str]], so what you read back is always what is live now rather than a receipt for what you just did.\n\nagents `list  — your live descendants at any depth, oldest first. `state` is `busy while working, `waiting-on-agents while held only by a busy child of its own, `replied once it has called `reply and parked, `waiting once a human has engaged it and it parked with no reply. `idle-s` is seconds since it parked — zero while `busy` or `waiting-on-agents. A settled agent (cancelled, failed, or reaped past its hour) is not listed. This is how you recover names after a context compaction.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as a one-line notice in your inbox, and you fetch the value with `read. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation and reuses your provider selection for cache locality. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live descendant named `to`; it lands at that child's next exchange boundary, not as human input, and wakes a `replied or `waiting child into a fresh exchange. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. A cancel is a request, not a transaction: the child is still running when this answers, so its row is still in the roster you get back. A name you still see listed is NOT a failed cancel — do not fire it again; read `list later and find it gone.\n\nagents `reply <value>  — hand `value` back to whoever spawned you. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call `reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. It does not end your run: you park (`state `replied) rather than settle, and may be `message`d for a follow-up — answer that with another `reply. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this.\n\nagents `read <name>  — fetch the value the live descendant named `name` last handed to `reply, as [name: Str, reply: <value>]. The one tag that does not answer the roster. Only a descendant of yours may be read — never a sibling, an ancestor, or yourself; refused otherwise, as is a name that never replied. Idempotent: reading again before the child replies afresh answers the same value.\n\nEach tag is one exchange with the host, and — for every tag but `read — the roster it answers is the registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agents),
     ),
     BuiltinEntry::new(
@@ -939,12 +967,6 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 9] = [
         scheme_schedules,
         "schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nschedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after a context compaction.\n\nschedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nschedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag is one exchange with the host, and the table it answers is the schedule registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_schedules),
-    ),
-    BuiltinEntry::new(
-        Cow::Borrowed("reply"),
-        scheme_reply,
-        "reply <value>  — hand `value` back to whoever spawned you: the sole return path for a returning agent. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. The run does not end at this call: it ends once the enclosing ral call's whole batch of statements finishes draining, so write reply last and let earlier statements in the same script run to completion first. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this. Answered only on the run that calls it: inside spawn { … } this errors.",
-        BuiltinBody::Static(builtin_reply),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("pin-read"),
@@ -1198,14 +1220,14 @@ mod tests {
     /// `Arc<Provider>`, so one script consumed by both a driven parent
     /// exchange and its child races over which gets which stage.
     #[test]
-    fn agent_full_stack_round_trip_answers_the_roster_and_settles_into_inbox() {
+    fn agent_full_stack_round_trip_answers_the_roster_and_parks_a_reply() {
         let mut session = crate::agent::Agent::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "reply-1",
-                    "reply 'say hi'",
+                    r"agents `reply 'say hi'",
                 )]),
             ),
         ));
@@ -1229,10 +1251,10 @@ mod tests {
         loop {
             match session.next_item_for_test() {
                 Some(crate::bus::Item::Agent(r)) => {
+                    let notice = r.outcome.marked_item(&r.name);
                     assert!(
-                        r.text.contains("say hi"),
-                        "the child's reply must settle into the parent's inbox, got: {}",
-                        r.text
+                        notice.contains("agents `read 'helper'"),
+                        "the reply notice must name the fetch command, got: {notice}"
                     );
                     break;
                 }
@@ -1246,6 +1268,19 @@ mod tests {
                 }
             }
         }
+
+        let read = session.run_shell("call-2".to_string(), r"agents `read 'helper'", 5, &emit);
+        assert!(
+            read.content.contains("say hi"),
+            "agents `read` must answer the child's deposited reply, got: {}",
+            read.content
+        );
+        let roster = session.run_shell("call-3".to_string(), r"agents `list", 5, &emit);
+        assert!(
+            roster.content.contains("replied"),
+            "the replied child must stay on the roster as `replied, got: {}",
+            roster.content
+        );
     }
 
     /// A cancel is a request, not a transaction: `AgentRegistry::cancel` only
@@ -1612,7 +1647,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"let found = ["a.rs", "b.rs"]; reply [files: $found]"#,
+                    r#"let found = ["a.rs", "b.rs"]; agents `reply [files: $found]"#,
                 )]),
             ),
         ));
@@ -1635,16 +1670,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match session.next_item_for_test() {
-                Some(crate::bus::Item::Agent(r)) => {
-                    assert!(
-                        r.text.contains("files:")
-                            && r.text.contains("a.rs")
-                            && r.text.contains("b.rs"),
-                        "the structured record must reach the parent inbox, got: {}",
-                        r.text
-                    );
-                    break;
-                }
+                Some(crate::bus::Item::Agent(_)) => break,
                 Some(_other) => panic!("expected an Agent result item"),
                 None => {
                     assert!(
@@ -1655,24 +1681,34 @@ mod tests {
                 }
             }
         }
+
+        let read = session.run_shell("call-2".to_string(), r"agents `read 'finder'", 5, &emit);
+        assert!(
+            read.content.contains("files:")
+                && read.content.contains("a.rs")
+                && read.content.contains("b.rs"),
+            "the structured record must reach the parent through `agents `read`, got: {}",
+            read.content
+        );
     }
 
     /// The refusal is an ordinary call error, not a termination: a later,
-    /// well-formed `reply` still succeeds.
+    /// well-formed `` agents `reply `` still succeeds.
     #[test]
     fn reply_refuses_a_non_first_order_value_and_does_not_terminate() {
         let mut session = crate::agent::Agent::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.id);
 
-        let result = session.run_shell("call-1".to_string(), "reply { echo hi }", 5, &emit);
+        let result =
+            session.run_shell("call-1".to_string(), r"agents `reply { echo hi }", 5, &emit);
         assert!(
             result.content.contains("first-order"),
             "must name the first-order rule, got: {}",
             result.content
         );
 
-        let ok = session.run_shell("call-2".to_string(), "reply 42", 5, &emit);
+        let ok = session.run_shell("call-2".to_string(), r"agents `reply 42", 5, &emit);
         assert!(
             ok.content.contains("EXIT: 0"),
             "the session must still be usable after a refused reply, got: {}",
@@ -1688,7 +1724,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"reply "first"; reply "second""#,
+                    r#"agents `reply "first"; agents `reply "second""#,
                 )]),
             ),
         ));
@@ -1732,7 +1768,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"surface `pin [key: "note", body: `card ["hi there"]]; reply !{pin-read "note"}"#,
+                    r#"surface `pin [key: "note", body: `card ["hi there"]]; agents `reply !{pin-read "note"}"#,
                 )]),
             ),
         ));
@@ -1756,15 +1792,10 @@ mod tests {
         loop {
             match session.next_item_for_test() {
                 Some(crate::bus::Item::Agent(r)) => {
-                    // The pretty-printer elides past its depth cap, so the
-                    // span text itself does not survive to this rendering;
-                    // what proves the round trip *canonical* — a lifted
-                    // `` `text `` mark, not the bare-string sugar it was
-                    // authored with — does.
                     assert!(
-                        r.text.contains("`card") && r.text.contains("`text [spans:"),
-                        "the canonical card must reach the parent, got: {}",
-                        r.text
+                        matches!(r.outcome, crate::bus::AgentOutcome::Replied),
+                        "the child must have replied, got: {:?}",
+                        r.outcome
                     );
                     break;
                 }
@@ -1778,6 +1809,17 @@ mod tests {
                 }
             }
         }
+
+        // The pretty-printer elides past its depth cap, so the span text
+        // itself does not survive to this rendering; what proves the round
+        // trip *canonical* — a lifted `` `text `` mark, not the bare-string
+        // sugar it was authored with — does.
+        let read = session.run_shell("call-2".to_string(), r"agents `read 'pinner'", 5, &emit);
+        assert!(
+            read.content.contains("`card") && read.content.contains("`text [spans:"),
+            "the canonical card must reach the parent, got: {}",
+            read.content
+        );
     }
 
     /// An absent key answers `Unit`, which crosses to the parent as `reply`'s
@@ -1790,7 +1832,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"reply !{pin-read "nope"}"#,
+                    r#"agents `reply !{pin-read "nope"}"#,
                 )]),
             ),
         ));
@@ -1814,11 +1856,10 @@ mod tests {
         loop {
             match session.next_item_for_test() {
                 Some(crate::bus::Item::Agent(r)) => {
-                    assert_eq!(
-                        r.text.trim(),
-                        "",
-                        "an absent key must reply unit, got: {}",
-                        r.text
+                    assert!(
+                        matches!(r.outcome, crate::bus::AgentOutcome::Replied),
+                        "the child must have replied, got: {:?}",
+                        r.outcome
                     );
                     break;
                 }
@@ -1832,6 +1873,13 @@ mod tests {
                 }
             }
         }
+
+        let read = session.run_shell("call-2".to_string(), r"agents `read 'reader'", 5, &emit);
+        assert!(
+            read.content.contains("reply: ()"),
+            "an absent key must reply unit, got: {}",
+            read.content
+        );
     }
 
     // ── the task kit as a pure prelude over the pin family ─────────────────
@@ -1963,7 +2011,7 @@ mod tests {
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"add-task "child task"; reply "done""#,
+                    r#"add-task "child task"; agents `reply "done""#,
                 )]),
             ),
         ));

@@ -8,7 +8,6 @@
 
 use crate::agent::{
     Agent, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL,
-    render_reply,
 };
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentOutcome, Emitter};
@@ -131,15 +130,15 @@ fn root(interactive: bool, chat: bool) -> Agent {
     .expect("root trunk")
 }
 
-/// Drive a forked peer to quiescence, returning the `(outcome, text)` the spawn
-/// site in `shell_eval/tools/agent.rs` would deliver to its parent.
-pub(crate) fn drive_peer(child: &mut Agent, provider: Arc<Provider>) -> (AgentOutcome, String) {
+/// Drive a forked peer to quiescence, returning what its `attend` settles.
+pub(crate) fn drive_peer(
+    child: &mut Agent,
+    provider: Arc<Provider>,
+) -> (AgentOutcome, Option<FOValue>) {
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.id);
     child.provider = ProviderHandle::new(provider);
-    let (outcome, payload) = child.attend(&mut NoControl, &emit);
-    let text = payload.as_ref().map(render_reply).unwrap_or_default();
-    (outcome, text)
+    child.attend(&mut NoControl, &emit)
 }
 
 // ── worker registry: `/clear` cascade, lease-reap drain ───────────────

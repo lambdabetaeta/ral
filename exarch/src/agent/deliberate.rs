@@ -27,10 +27,10 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub enum Outcome {
     Complete(String),
-    /// A returning agent called `reply`.  The payload stays a value so each
-    /// consumer renders it at its own edge, and stays distinct from
-    /// [`Self::Complete`] so the nudge layer never re-nudges an agent that
-    /// already returned.  Terminal.
+    /// A returning agent called `reply`.  The payload stays a value — a child
+    /// deposits it on its registry entry, a headless root hands it to its
+    /// sink — and stays distinct from [`Self::Complete`] so the nudge layer
+    /// never re-nudges an agent that already answered.
     Replied(FOValue),
     Empty,
     Stopped {
@@ -411,7 +411,9 @@ impl Agent {
     /// The batch carried a `reply`.  The round-trip never asked for a final
     /// assistant message, so the session sits in
     /// `AwaitingAssistantAfterToolResults` and is wound back with its own
-    /// breadcrumb; live descendants are cancelled and reaped, and `attend` stops.
+    /// breadcrumb; live descendants are cancelled and reaped.  A child then
+    /// parks, deposit and all — only a parentless agent's `attend` loop stops
+    /// here.
     fn replied(&self, payload: FOValue) -> Outcome {
         self.agents.cancel_descendants(self.id);
         self.log.lock().quiesce(QuiesceReason::Replied);
@@ -548,16 +550,20 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "reply #'# Report\nline one\nline two'#",
+                "agents `reply #'# Report\nline one\nline two'#",
             )])),
         );
-        let (outcome, text) = drive_peer(&mut child, provider);
+        let (outcome, payload) = drive_peer(&mut child, provider);
         assert!(
-            matches!(outcome, AgentOutcome::Complete),
-            "a reply settles Complete, got {outcome:?}"
+            matches!(outcome, AgentOutcome::Replied),
+            "a reply settles Replied, got {outcome:?}"
         );
         assert_eq!(
-            text, "# Report\nline one\nline two",
+            payload.and_then(|v| match v {
+                FOValue::String { value } => Some(value),
+                _ => None,
+            }),
+            Some("# Report\nline one\nline two".into()),
             "the markdown payload passes through raw, newlines intact"
         );
         assert!(
@@ -626,7 +632,7 @@ mod tests {
             mailbox: Inbox::new().mailbox(),
             provider: child.provider.clone(),
         });
-        let sibling_generation = child
+        child
             .agents
             .register(Registration {
                 id: sibling,
@@ -646,13 +652,39 @@ mod tests {
 
         let provider = scripted(
             "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'done'")])),
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "agents `reply 'done'",
+            )])),
         );
-        let (outcome, text) = drive_peer(&mut child, provider);
+        // A replied child parks for a follow-up; the reap must already have
+        // happened by the time the deposit is visible, so read it there and
+        // only then end the park.
+        let release = {
+            let registry = child.agents.clone();
+            let id = child.id;
+            std::thread::spawn(move || {
+                while !registry.has_reply(id) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let reaped_before_release = direct_token.is_cancelled();
+                registry.cancel(id);
+                reaped_before_release
+            })
+        };
+        let (outcome, payload) = drive_peer(&mut child, provider);
 
-        assert!(matches!(outcome, AgentOutcome::Complete));
-        assert_eq!(text, "done");
-        assert!(direct_token.is_cancelled(), "direct child is cancelled");
+        assert!(matches!(outcome, AgentOutcome::Replied));
+        assert_eq!(
+            payload,
+            Some(FOValue::String {
+                value: "done".into()
+            })
+        );
+        assert!(
+            release.join().expect("release thread"),
+            "direct child is cancelled by the reply itself"
+        );
         assert!(
             direct_root.as_scope().is_cancelled(),
             "the reap cancels the abandoned child's eval layer too"
@@ -670,7 +702,7 @@ mod tests {
             "a sibling outside the replying subtree is untouched"
         );
         assert!(
-            child.agents.settle(sibling, sibling_generation),
+            child.agents.settle(sibling),
             "reply must not bump the global generation and poison siblings"
         );
     }
@@ -924,8 +956,7 @@ mod tests {
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
                 name: "late".into(),
-                outcome: AgentOutcome::Complete,
-                text: "settled across the clear".into(),
+                outcome: AgentOutcome::Stopped("done".into()),
                 elapsed: std::time::Duration::ZERO,
                 generation: stale,
             }))
@@ -935,7 +966,7 @@ mod tests {
         let emit = Emitter::new(tx, session.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
-            matches!(outcome, AgentOutcome::Empty),
+            matches!(outcome, AgentOutcome::Failed(_)),
             "a stale result must be dropped, not attended to; got {outcome:?}"
         );
         assert!(payload.is_none());
@@ -951,8 +982,7 @@ mod tests {
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
                 name: "worker".into(),
-                outcome: AgentOutcome::Complete,
-                text: "found it".into(),
+                outcome: AgentOutcome::Stopped("found it".into()),
                 elapsed: std::time::Duration::ZERO,
                 generation: session.agents.generation(session.id),
             }))
@@ -961,14 +991,14 @@ mod tests {
         session.provider = ProviderHandle::new(scripted(
             "test-model",
             Script::new()
-                .then(Reply::tool_calls(vec![ral_call("r1", "reply 'done'")]))
-                .then(Reply::tool_calls(vec![ral_call("r2", "reply 'done'")])),
+                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'done'")]))
+                .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'done'")])),
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
-            matches!(outcome, AgentOutcome::Complete),
+            matches!(outcome, AgentOutcome::Replied),
             "a live-generation result must be delivered; got {outcome:?}"
         );
         assert_eq!(
@@ -999,7 +1029,7 @@ mod tests {
         let emit = Emitter::new(tx, session.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
-            matches!(outcome, AgentOutcome::Empty),
+            matches!(outcome, AgentOutcome::Failed(_)),
             "a stale surface batch must be dropped, not attended to; got {outcome:?}"
         );
         assert!(payload.is_none());
@@ -1023,14 +1053,14 @@ mod tests {
         session.provider = ProviderHandle::new(scripted(
             "test-model",
             Script::new()
-                .then(Reply::tool_calls(vec![ral_call("r1", "reply 'done'")]))
-                .then(Reply::tool_calls(vec![ral_call("r2", "reply 'done'")])),
+                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'done'")]))
+                .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'done'")])),
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
-            matches!(outcome, AgentOutcome::Complete),
+            matches!(outcome, AgentOutcome::Replied),
             "a live-generation surface batch must be delivered; got {outcome:?}"
         );
         assert_eq!(

@@ -20,11 +20,6 @@ const STDERR_CAP: usize = 10_000;
 /// section caps: a diagnostic past a few KB is noise.
 pub const OPAQUE_CAP: usize = 3000;
 
-/// Cap for the payload a child agent returns through `reply` — a curated
-/// report, not a scraped tail, so it gets room to arrive whole and elision
-/// stays a backstop.
-pub const AGENT_REPLY_CAP: usize = 16_000;
-
 /// Fallback compaction trigger, in serialised model-view bytes, for
 /// `Agent::compact` — used only when the model's context window is unknown
 /// (a native provider with no fetched catalog).

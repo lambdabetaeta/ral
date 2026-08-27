@@ -692,7 +692,6 @@ impl ExarchDesk {
         match label.as_str() {
             "agents" => self.agents(payload),
             "schedules" => self.schedules(payload),
-            "reply" => self.reply(payload),
             "pin-read" => self.pin_read(payload),
             "pin-list" => Ok(self.pin_list()),
             "context" => Ok(self.context()),
@@ -716,6 +715,8 @@ impl ExarchDesk {
             "start" => self.agent_start(payload),
             "message" => self.message(payload),
             "cancel" => self.agent_cancel(payload),
+            "reply" => self.agent_reply(payload),
+            "read" => self.agent_read(payload),
             other => Err(unknown_tag("agents", other)),
         }
     }
@@ -1084,9 +1085,18 @@ impl ExarchDesk {
                 .into_iter()
                 .map(|a| {
                     let elapsed_s = secs_to_i64(a.elapsed);
+                    let idle_s = secs_to_i64(a.idle);
                     FOValue::Map {
                         entries: vec![
                             ("name".to_string(), FOValue::String { value: a.name }),
+                            (
+                                "state".to_string(),
+                                FOValue::Variant {
+                                    label: a.state.tag().to_string(),
+                                    payload: None,
+                                },
+                            ),
+                            ("idle-s".to_string(), FOValue::Int { value: idle_s }),
                             ("elapsed-s".to_string(), FOValue::Int { value: elapsed_s }),
                             (
                                 "log-dir".to_string(),
@@ -1331,20 +1341,22 @@ impl ExarchDesk {
     }
 
     /// `` `reply `` — stage the payload into the cell [`Agent::deliberate`] lifts
-    /// into an `Outcome::Replied` terminal once the batch drains. Refused on
-    /// every non-returning agent, keyed on `returns` and never on trunk-ness.
-    fn reply(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+    /// into a deposit on this agent's own registry entry once the batch drains:
+    /// it parks the agent and hands the value to the parent's `` agents `read ``,
+    /// rather than ending the run. Refused on every non-returning agent, keyed
+    /// on `returns` and never on trunk-ness.
+    fn agent_reply(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
         if !s.returns {
             return Err(Error::new(
-                "reply refused: you converse with the user; you do not return. `reply` \
-                 terminates a returning agent's run and hands its value to a parent — the \
-                 interactive trunk and every /branch child instead keep talking, turn after \
+                "agents `reply` refused: you converse with the user; you do not return. \
+                 `reply` parks you and hands your value to your parent's agents `read — \
+                 the interactive trunk and every /branch child instead keep talking, turn after \
                  turn, and hold no `reply` to call.",
                 1,
             ));
         }
-        let [value] = payload_list(payload, "reply", "[value]")?;
+        let [value] = payload_list(payload, "agents `reply", "[value]")?;
         let display =
             shell_eval::ral_value_to_text(&RalValue::from(value.clone())).unwrap_or_default();
         let payload = if display.is_empty() {
@@ -1355,7 +1367,54 @@ impl ExarchDesk {
         // No subject: the parent is the only recipient a returning agent has.
         s.commit_act(DeskAct::Reply, None, payload, false);
         s.reply.set(value);
-        Ok(FOValue::Unit)
+        Ok(self.roster())
+    }
+
+    /// `` `read `` — fetch the value the live descendant named by the payload
+    /// last handed to `` `reply ``, scoped as [`AgentRegistry::message`] is. The
+    /// one tag that does not answer the roster: it answers the fetched record
+    /// instead, since that is the whole point of the call. A read is an
+    /// observation, not an act, so nothing is committed to [`DeskAct`] — it
+    /// changes nothing, exactly like `` `list ``.
+    fn agent_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        const CLASS: &str = "agents `read";
+        let s = &self.services;
+        let name = payload_value(payload, CLASS, "naming the descendant to read")?;
+        let name = payload_string(name, CLASS, "name")?;
+
+        let content = match s.registry.resolve_name(&name) {
+            None => Err(format!(
+                "no live agent named '{name}'; did it finish, or was it never started?"
+            )),
+            Some(to) => match s.registry.reply_of(s.parent, to) {
+                Err(NotADescendant(_)) => Err(format!(
+                    "agent '{name}' is not an agent you started; `agents `read` may only reach \
+                     a descendant of yours"
+                )),
+                Ok(None) => Err(format!(
+                    "agent '{name}' has not replied yet — it is still working; wait for its \
+                     notice instead of polling"
+                )),
+                Ok(Some(reply)) => Ok(reply),
+            },
+        };
+        match content {
+            Ok(reply) => {
+                s.record_forensic(crate::record::Forensic::HarnessResult {
+                    text: format!("read agent '{name}''s reply"),
+                });
+                Ok(FOValue::Map {
+                    entries: vec![
+                        ("name".to_string(), FOValue::String { value: name }),
+                        ("reply".to_string(), reply),
+                    ],
+                })
+            }
+            Err(text) => {
+                s.record_forensic(crate::record::Forensic::HarnessResult { text: text.clone() });
+                Err(Error::new(text, 1))
+            }
+        }
     }
 
     /// `` `pin-read `` — the card stored under `key` on this agent's own
@@ -2851,16 +2910,16 @@ mod tests {
         );
     }
 
-    /// The receipt names the child, and its reply lands in the parent's inbox
-    /// once it settles.
+    /// The receipt names the child, and its reply notice lands in the parent's
+    /// inbox once it settles — the value itself is fetched with `` `read ``.
     #[test]
     fn agent_start_spawns_and_delivers_result_to_parent_inbox() {
-        let (desk, _registry, parent_inbox) = spawnable_desk(3);
+        let (desk, registry, parent_inbox) = spawnable_desk(3);
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "reply 'hi from child'",
+                "agents `reply 'hi from child'",
             )])),
         ));
         desk.services.provider.swap(provider);
@@ -2884,13 +2943,64 @@ mod tests {
         match wait_for_settle(&parent_inbox) {
             crate::bus::Item::Agent(result) => {
                 assert!(
-                    result.text.contains("hi from child"),
-                    "the child's reply must reach the parent's inbox, got: {}",
-                    result.text
+                    matches!(result.outcome, crate::bus::AgentOutcome::Replied),
+                    "the child's reply notice must reach the parent's inbox, got: {:?}",
+                    result.outcome
                 );
             }
             other => panic!("expected an Agent result item, got {other:?}"),
         }
+        assert_eq!(
+            registry.reply_of(
+                desk.services.parent,
+                registry.resolve_name("helper").unwrap()
+            ),
+            Ok(Some(FOValue::String {
+                value: "hi from child".into()
+            })),
+            "the deposited reply must be fetchable off the child's entry"
+        );
+    }
+
+    /// `` `read `` is the one tag that answers a record rather than the
+    /// roster: after a scripted child replies, the parent fetches exactly
+    /// what it deposited.
+    #[test]
+    fn agent_read_answers_the_childs_deposited_reply() {
+        let (desk, _registry, parent_inbox) = spawnable_desk(3);
+        let provider = Arc::new(Provider::scripted(
+            "test-model",
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "agents `reply 'read me'",
+            )])),
+        ));
+        desk.services.provider.swap(provider);
+
+        let root = root_shell();
+        let shell = forkable_child_shell(&root);
+        let session = desk.services.nursery.park(shell);
+        desk.handle(start_req(session, "say hi", "helper", "confined", true))
+            .expect("a valid `start must succeed");
+        let _ = wait_for_settle(&parent_inbox);
+
+        let answer = desk
+            .handle(family_req("agents", "read", Some(text("helper"))))
+            .expect("a descendant that has replied must answer its reply");
+        assert_eq!(str_field(&answer, "name").as_deref(), Some("helper"));
+        let FOValue::Map { entries } = &answer else {
+            panic!("expected a record")
+        };
+        let reply = entries
+            .iter()
+            .find_map(|(k, v)| (k == "reply").then(|| v.clone()));
+        assert_eq!(
+            reply,
+            Some(FOValue::String {
+                value: "read me".into()
+            }),
+            "`` `read `` must answer the very value the child handed to `reply"
+        );
     }
 
     /// The state *is* the answer, not a receipt about the child just started:
@@ -2901,7 +3011,7 @@ mod tests {
         let (desk, registry, parent_inbox) = spawnable_desk(3);
         desk.services.provider.swap(Arc::new(Provider::scripted(
             "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'a'")])),
+            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")])),
         )));
         // Registered without a worker, so it never settles out from under the
         // assertion below.
@@ -2985,7 +3095,10 @@ mod tests {
         desk.services.search = false;
         let provider = Arc::new(Provider::scripted(
             "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'done'")])),
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "agents `reply 'done'",
+            )])),
         ));
         desk.services.provider.swap(provider);
 
@@ -3032,7 +3145,7 @@ mod tests {
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
                 "r1",
-                "reply 'hi from child'",
+                "agents `reply 'hi from child'",
             )])),
         ));
         desk.services.provider.swap(provider);
@@ -3107,7 +3220,7 @@ mod tests {
         let (desk, registry, _parent_inbox) = spawnable_desk(3);
         let provider = Arc::new(Provider::scripted(
             "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "reply 'a'")])),
+            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")])),
         ));
         desk.services.provider.swap(provider);
 
@@ -3177,9 +3290,9 @@ mod tests {
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new()
-                .then(Reply::tool_calls(vec![ral_call("r1", "reply 'a'")]))
-                .then(Reply::tool_calls(vec![ral_call("r2", "reply 'b'")]))
-                .then(Reply::tool_calls(vec![ral_call("r3", "reply 'c'")])),
+                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")]))
+                .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'b'")]))
+                .then(Reply::tool_calls(vec![ral_call("r3", "agents `reply 'c'")])),
         ));
         desk.services.provider.swap(provider);
 
@@ -3195,18 +3308,15 @@ mod tests {
             );
         }
 
-        let mut texts = Vec::new();
         for _ in 0..3 {
             match wait_for_settle(&parent_inbox) {
-                crate::bus::Item::Agent(result) => texts.push(result.text),
+                crate::bus::Item::Agent(result) => assert!(
+                    matches!(result.outcome, crate::bus::AgentOutcome::Replied),
+                    "every sibling must settle by replying, got: {:?}",
+                    result.outcome
+                ),
                 other => panic!("expected an Agent result item, got {other:?}"),
             }
-        }
-        for want in ["a", "b", "c"] {
-            assert!(
-                texts.iter().any(|t| t.contains(want)),
-                "all three siblings must settle, got: {texts:?}"
-            );
         }
     }
 
@@ -3525,12 +3635,13 @@ mod tests {
         d.services.emit = emit;
         d.services.returns = false;
         let err = d
-            .handle(FOValue::Variant {
-                label: "reply".into(),
-                payload: Some(Box::new(FOValue::List {
+            .handle(family_req(
+                "agents",
+                "reply",
+                Some(FOValue::List {
                     items: vec![FOValue::Int { value: 1 }],
-                })),
-            })
+                }),
+            ))
             .expect_err("a non-returning agent's reply must be refused");
         assert!(
             err.message
@@ -3557,12 +3668,13 @@ mod tests {
         d.services.emit = Emitter::new(tx, 0);
 
         for text in ["first", "second"] {
-            d.handle(FOValue::Variant {
-                label: "reply".into(),
-                payload: Some(Box::new(FOValue::List {
+            d.handle(family_req(
+                "agents",
+                "reply",
+                Some(FOValue::List {
                     items: vec![FOValue::String { value: text.into() }],
-                })),
-            })
+                }),
+            ))
             .expect("a returning agent's reply must succeed");
         }
 
@@ -3606,14 +3718,15 @@ mod tests {
             .expect("a valid schedule must succeed");
         desk.handle(family_req("schedules", "remove", Some(text("nightly"))))
             .expect("unscheduling the label just armed must remove it");
-        desk.handle(FOValue::Variant {
-            label: "reply".into(),
-            payload: Some(Box::new(FOValue::List {
+        desk.handle(family_req(
+            "agents",
+            "reply",
+            Some(FOValue::List {
                 items: vec![FOValue::String {
                     value: "done".into(),
                 }],
-            })),
-        })
+            }),
+        ))
         .expect("a returning agent's reply must succeed");
 
         assert_eq!(
@@ -3711,7 +3824,8 @@ mod tests {
     }
 
     /// Attend `child` to completion on a detached thread, in `spawn_async`'s own
-    /// worker-epilogue order: deliver to `parent_mailbox`, then settle.
+    /// worker-epilogue order: a `` `reply ``'s notice already rode `attend`'s own
+    /// deposit, so only a non-reply outcome is delivered here before the settle.
     fn attend_and_deliver(
         mut child: Agent,
         name: &str,
@@ -3724,19 +3838,17 @@ mod tests {
         std::thread::spawn(move || {
             let (tx, _rx) = crate::bus::channel();
             let emit = Emitter::new(tx, id);
-            let (outcome, payload) = child.attend(&mut crate::agent::NoControl, &emit);
-            let text = payload
-                .as_ref()
-                .map(crate::agent::render_reply)
-                .unwrap_or_default();
-            let _ = parent_mailbox.push(crate::bus::Post::AgentResult(crate::bus::AgentResult {
-                name,
-                outcome,
-                text,
-                elapsed: Duration::default(),
-                generation,
-            }));
-            registry.settle(id, generation);
+            let (outcome, _payload) = child.attend(&mut crate::agent::NoControl, &emit);
+            if !matches!(outcome, crate::bus::AgentOutcome::Replied) {
+                let _ =
+                    parent_mailbox.push(crate::bus::Post::AgentResult(crate::bus::AgentResult {
+                        name,
+                        outcome,
+                        elapsed: Duration::default(),
+                        generation,
+                    }));
+            }
+            registry.settle(id);
         })
     }
 
@@ -3790,7 +3902,7 @@ mod tests {
                 .then(Reply::text("first response, no reply yet"))
                 .then(Reply::tool_calls(vec![ral_call(
                     "r1",
-                    "reply 'second response arrived'",
+                    "agents `reply 'second response arrived'",
                 )])),
         )));
         child.seed("say hi".into());
@@ -3807,7 +3919,7 @@ mod tests {
             "the freshly registered, parked child accepts a steer"
         );
         assert!(
-            registry.engaged(child_id),
+            registry.messageable(child_id),
             "steer renews the exchange clock"
         );
         assert!(
@@ -3826,13 +3938,22 @@ mod tests {
         match wait_for_settle(&parent.inbox()) {
             crate::bus::Item::Agent(result) => {
                 assert!(
-                    result.text.contains("second response arrived"),
-                    "the second steer's response must reach the parent, got: {}",
-                    result.text
+                    matches!(result.outcome, crate::bus::AgentOutcome::Replied),
+                    "the second steer's reply must notify the parent, got: {:?}",
+                    result.outcome
                 );
             }
             other => panic!("expected an Agent result item, got {other:?}"),
         }
+        assert_eq!(
+            registry.reply_of(parent.id, child_id),
+            Ok(Some(FOValue::String {
+                value: "second response arrived".into()
+            })),
+            "the reply the second steer produced must be the one deposited"
+        );
+        // A replied child parks for a follow-up; only a terminate ends it.
+        registry.cancel(child_id);
         handle.join().expect("worker thread must not panic");
     }
 
@@ -4183,14 +4304,14 @@ mod wire_tests {
         // bit-for-bit, not as an arithmetic value.
         let token = 0xF0DE_BA5E_1234_5678;
         let dial = FakeDial::new(Guest::Hatches);
-        let (desk, _registry, parent_inbox) = wire_spawnable_desk(3, dial.clone());
+        let (desk, registry, parent_inbox) = wire_spawnable_desk(3, dial.clone());
 
         // The assembled child seeds its own provider from the desk's captured
         // handle, so swap it before `` `start `` assembles.
         desk.services
             .provider
             .swap(scripted_provider(Script::new().then(Reply::tool_calls(
-                vec![ral_call("r1", "reply 'hi from wire'")],
+                vec![ral_call("r1", "agents `reply 'hi from wire'")],
             ))));
 
         let answer = desk
@@ -4215,13 +4336,23 @@ mod wire_tests {
         match wait_for_settle(&parent_inbox) {
             crate::bus::Item::Agent(result) => {
                 assert!(
-                    result.text.contains("hi from wire"),
-                    "the hatched child's reply must reach the parent's inbox, got: {}",
-                    result.text
+                    matches!(result.outcome, crate::bus::AgentOutcome::Replied),
+                    "the hatched child's reply notice must reach the parent's inbox, got: {:?}",
+                    result.outcome
                 );
             }
             other => panic!("expected an Agent result item, got {other:?}"),
         }
+        assert_eq!(
+            registry.reply_of(
+                desk.services.parent,
+                registry.resolve_name("helper").unwrap()
+            ),
+            Ok(Some(FOValue::String {
+                value: "hi from wire".into()
+            })),
+            "the hatched child's deposited reply must be fetchable off its entry"
+        );
 
         dial.reap();
     }

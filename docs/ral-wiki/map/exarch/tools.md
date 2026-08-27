@@ -8,7 +8,7 @@ covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 
 **`ral` is exarch's one tool.** Every other harness affordance the model once
 reached as a provider-advertised `Tool` — spawning, messaging, cancelling,
-scheduling, and `reply` — is now a ral builtin reached by writing ral inside
+scheduling, replying, and reading a reply — is now a ral builtin reached by writing ral inside
 `ral` itself, per the
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
 migration; see [[map/exarch/builtins|builtins]] for the verbs and
@@ -52,7 +52,9 @@ an observation run
 additionally derive a child tab) — while listings stay silent since
 their value *is* the returned record. There is no `Gate`/`tools_for` axis any
 more — a fresh model never even sees a verb the desk would certainly refuse:
-`reply` is dropped from the per-agent builtin index when `!returns`, and the
+`agents` is dropped from the per-agent builtin index when the agent neither
+spawns nor returns (its `` `reply `` needs only `returns`, so a fuelless
+returning leaf keeps the verb), and the
 self-wakeup family when the agent lacks the schedule grant (`prompt.rs`'s
 `BuiltinIndex`, resolved once against the boot shell), while authority
 itself is still enforced only at the desk, never by omission.

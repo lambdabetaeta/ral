@@ -1,7 +1,7 @@
 //! The fork-detach-register spine behind `/branch` and the desk's
 //! `` agents `start ``.  Every spawn is launch-only: the child runs the same
-//! [`Agent::attend`] loop on a detached thread, and its single result reaches
-//! the parent's inbox later, at quiescence.
+//! [`Agent::attend`] loop on a detached thread; a reply notice reaches the
+//! parent's inbox when the child replies, a non-reply end when it quiesces.
 
 use crate::agent::Agent;
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, Mailbox, Post};
@@ -174,54 +174,48 @@ pub(crate) fn spawn_async(
                 name: born_name,
                 parent: spawner,
             });
-            let (outcome, payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                child.attend(&mut crate::agent::NoControl, &child_emit)
-            }))
-            .unwrap_or_else(|_| {
-                if let Err(error) = recorder.emit(crate::record::Forensic::Error {
-                    text: "sub-agent panicked".into(),
-                }) {
-                    recorder.report_fault(&error);
-                }
-                (AgentOutcome::Failed("sub-agent panicked".into()), None)
-            });
+            let (outcome, _payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    child.attend(&mut crate::agent::NoControl, &child_emit)
+                }))
+                .unwrap_or_else(|_| {
+                    if let Err(error) = recorder.emit(crate::record::Forensic::Error {
+                        text: "sub-agent panicked".into(),
+                    }) {
+                        recorder.report_fault(&error);
+                    }
+                    (AgentOutcome::Failed("sub-agent panicked".into()), None)
+                });
             child.recorder().transient(Transient::Died);
             // A branch pushes nothing and leaves its entry to outlive this
             // worker; holding no parent edge, only `/close` on its own tab
             // ever drops it.
-            if delivers {
-                // The parent reads this as prose in its own context, so the
-                // faithful payload is rendered to text at this edge.
-                let text = payload
-                    .as_ref()
-                    .map(crate::agent::render_reply)
-                    .unwrap_or_default();
-                // Deliver, then retire.  The parent's park verdict reads child
-                // liveness (the registry) and delivery (its inbox) under two
-                // different locks, and pops its queue only after the verdict,
-                // so the push must come first: a parent that observes this
-                // entry gone is then guaranteed to find the result already
-                // queued, and cannot quiesce between the two facts and drop it.
-                // Staleness — this worker settling across a `/clear` — is
-                // decided at the consuming edge instead, by the attend loop's
-                // admission of the birth `generation` stamped here.
-                let rejected = parent_mailbox.push(Post::AgentResult(AgentResult {
+            if !delivers {
+                return;
+            }
+            // A replied child's parent was notified at deposit time; any other
+            // end is delivered, then retired.  The parent's park verdict reads
+            // child liveness (the registry) and delivery (its inbox) under
+            // two different locks, and pops its queue only after the verdict,
+            // so the push must come first: a parent that observes this entry
+            // gone then always finds the result already queued.  Staleness
+            // across a `/clear` is decided at the consuming edge, by the
+            // attend loop's admission of the birth `generation` stamped here.
+            if !matches!(outcome, AgentOutcome::Replied) {
+                let result = AgentResult {
                     name: worker_name,
                     outcome,
-                    text,
                     elapsed: started.elapsed(),
                     generation,
-                }));
-                // The spawn's tool result already returned a "started" receipt,
-                // so there is no synchronous caller left to hand this to.
-                if let Err(reject) = rejected {
+                };
+                if let Err(reject) = parent_mailbox.push(Post::AgentResult(result)) {
                     let text = format!("the parent's inbox rejected this result: {reject}");
                     if let Err(error) = recorder.emit(crate::record::Forensic::Error { text }) {
                         recorder.report_fault(&error);
                     }
                 }
-                worker_registry.settle(agent_id, generation);
             }
+            worker_registry.settle(agent_id);
         });
     match worker {
         Ok(_) => Ok(SpawnedChild { id: agent_id, name }),
@@ -230,7 +224,7 @@ pub(crate) fn spawn_async(
             // race a conversing child's first `park_mode` read of `is_live`
             // against this call.  So the entry exists and must be unwound, and
             // with no worker to ever `settle`, this is the one place that can.
-            registry.settle(agent_id, generation);
+            registry.settle(agent_id);
             let msg = format!("could not spawn a worker thread for agent {agent_id}: {e}");
             if let Err(error) =
                 spawn_recorder.emit(crate::record::Forensic::Error { text: msg.clone() })

@@ -2,8 +2,9 @@
 //! [`AgentId`].
 //!
 //! Each entry names its parent, so this map is the spawn *tree*, and the
-//! fleet is alive exactly while it is non-empty.  Entries are ephemeral: a
-//! child's result goes to its parent's inbox, never collected here.
+//! fleet is alive exactly while it is non-empty.  A returning child's `reply`
+//! is *deposited* on its own entry and fetched from here by the parent
+//! (`` agents `read ``); only a one-line notice goes to the parent's inbox.
 //!
 //! Two cancel motions run over that tree and must not be confused.  *Terminate*
 //! ends an agent and cascades to its subtree, tripping both the cooperative
@@ -23,9 +24,10 @@
 
 use crate::agent::ProviderHandle;
 use crate::agent::cancel::Token;
-use crate::bus::{AgentId, AgentMessage, InboxReject, Mailbox, Post};
+use crate::bus::{AgentId, AgentMessage, AgentOutcome, AgentResult, InboxReject, Mailbox, Post};
 use crate::sync::LockExt;
 use ral_core::process::{self, CancelCause, DurableRoot, ForegroundScope};
+use ral_core::serial::FOValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -134,11 +136,41 @@ pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
 /// against but takes no action of its own at the mark.
 pub const AGENT_DEMOTE_IDLE: Duration = Duration::from_mins(5);
 
+/// What a listed agent is doing, as a roster row states it.  Derived at
+/// [`AgentRegistry::list`] time from an entry's rest and deposit and from its
+/// own children; nothing stores it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RosterState {
+    /// Working: not parked for a message.
+    Busy,
+    /// Working only in the sense of holding for a busy child of its own.
+    WaitingOnAgents,
+    /// Parked holding a reply the parent has yet to fetch.
+    Replied,
+    /// Parked with no reply — a child a human is talking to.
+    Waiting,
+}
+
+impl RosterState {
+    /// The variant label the roster row carries.
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::WaitingOnAgents => "waiting-on-agents",
+            Self::Replied => "replied",
+            Self::Waiting => "waiting",
+        }
+    }
+}
+
 /// One live agent, for the `agents` listing.
 pub struct AgentInfo {
     pub name: String,
     pub log_dir: PathBuf,
     pub elapsed: Duration,
+    pub state: RosterState,
+    /// How long it has been parked; zero while busy.
+    pub idle: Duration,
 }
 
 /// The tab-bar contract every agent name must meet.
@@ -220,6 +252,10 @@ struct Entry {
     /// stamped with the value current at its birth, so a `/clear` here
     /// invalidates it — and a `/clear` anywhere else leaves it alone.
     generation: u64,
+    /// The *parent's* generation as this entry was born: the fence every result
+    /// addressed upward must survive, since the parent is who reads it.  0 for a
+    /// parentless entry, which reports to nobody.
+    consumer: u64,
     name: String,
     log_dir: PathBuf,
     started: Instant,
@@ -236,13 +272,22 @@ struct Entry {
     /// re-reads it by id rather than closing over a copy, so a removed entry
     /// ends the chain simply by not being found.
     lease: Option<Duration>,
-    /// The last human exchange, or `None` before the first one — `started` is
-    /// the epoch until then.  [`AgentRegistry::renew`] is the only writer.
+    /// The last exchange — human or parent message — or `None` before the first
+    /// one, `started` being the epoch until then.  [`renew_entry`] is the only
+    /// writer.
     last_exchange: Option<Instant>,
+    /// The value this agent last passed to `reply`, held here for its parent's
+    /// `` agents `read `` to fetch.  Kept apart from [`Self::rest`] because it
+    /// must survive a wake: a messaged agent is busy again with its reply still
+    /// standing, until it replies afresh.
+    reply: Option<FOValue>,
+    /// When this agent parked waiting for a message, or `None` while it is
+    /// working.  The roster's `idle-s`, and the whole of "not busy".
+    rest: Option<Instant>,
 }
 
 impl Entry {
-    /// Time since the last human exchange, or since birth if never engaged.
+    /// Time since the last exchange, or since birth if never engaged.
     fn idle(&self) -> Duration {
         self.last_exchange.unwrap_or(self.started).elapsed()
     }
@@ -274,14 +319,16 @@ impl AgentRegistry {
         self.lock().entries.is_empty()
     }
 
-    /// The park signal for a node that launched async agents: a child delivers
-    /// only to its own parent's inbox, so a live direct child is exactly what
-    /// keeps this mailbox from being permanently empty.
-    pub fn has_children(&self, parent: AgentId) -> bool {
+    /// The park signal for a node that launched async agents: a direct child
+    /// still *working* is what may yet deliver to this mailbox.  A resting one
+    /// has already said what it had to say — it holds its reply here and waits
+    /// to be messaged — so it must not hold its parent open for the hour its
+    /// lease allows.
+    pub fn has_busy_children(&self, parent: AgentId) -> bool {
         self.lock()
             .entries
             .values()
-            .any(|e| e.parent == Some(parent))
+            .any(|e| e.parent == Some(parent) && e.rest.is_none())
     }
 
     /// A conversing agent reads this at each park: once its entry is reaped
@@ -370,6 +417,7 @@ impl AgentRegistry {
             Entry {
                 parent,
                 generation,
+                consumer,
                 name,
                 log_dir,
                 started: Instant::now(),
@@ -379,6 +427,8 @@ impl AgentRegistry {
                 provider,
                 lease,
                 last_exchange: None,
+                reply: None,
+                rest: None,
             },
         );
         // Armed only after the entry exists: `lease_fire` re-reads the entry by
@@ -439,18 +489,97 @@ impl AgentRegistry {
     }
 
     /// Stamp `id`'s exchange clock, without a mailbox delivery.  Neither
-    /// focusing, nor [`Self::message`], nor a `/resources` probe renews:
-    /// attention alone must never immortalise a child.
+    /// focusing nor a `/resources` probe renews: attention alone must never
+    /// immortalise a child.  An exchange does — so [`Self::steer`] and
+    /// [`Self::message`], which each deliver one, renew through [`renew_entry`]
+    /// as part of the delivery.
     pub fn renew(&self, id: AgentId) -> bool {
         self.lock().entries.get_mut(&id).map(renew_entry).is_some()
     }
 
-    /// `false` for an entry never renewed, and for one already gone.
-    pub fn engaged(&self, id: AgentId) -> bool {
+    /// Whether `id` may still be talked to: something has already spoken to it,
+    /// or it holds a reply someone may want to follow up on.  This is what makes
+    /// a returning child park for messages rather than quiesce.  `false` for an
+    /// entry already gone.
+    pub fn messageable(&self, id: AgentId) -> bool {
         self.lock()
             .entries
             .get(&id)
-            .is_some_and(|e| e.last_exchange.is_some())
+            .is_some_and(|e| e.last_exchange.is_some() || e.reply.is_some())
+    }
+
+    /// Mark `id` parked for a message, or working again.  Setting it twice
+    /// running keeps the first stamp, so the roster's `idle-s` measures from
+    /// when the agent parked and not from the attend loop's latest pass.
+    pub(crate) fn set_resting(&self, id: AgentId, resting: bool) {
+        if let Some(e) = self.lock().entries.get_mut(&id) {
+            if resting {
+                e.rest.get_or_insert_with(Instant::now);
+            } else {
+                e.rest = None;
+            }
+        }
+    }
+
+    /// Deposit `id`'s `reply` on its own entry and notify its parent with the
+    /// one-line [`AgentOutcome::Replied`] notice — deposit first, so a parent
+    /// woken by the notice always finds the value already there.  A parentless
+    /// agent (the trunk, a `/branch` child) has nobody to notify and deposits
+    /// nothing: its reply goes to whoever drives its loop.
+    ///
+    /// # Errors
+    /// The parent's inbox was at quota, so the notice was refused; the deposit
+    /// stands either way and `` agents `read `` would still find it.
+    pub(crate) fn deposit_reply(&self, id: AgentId, reply: FOValue) -> Result<(), InboxReject> {
+        let notice = {
+            let mut g = self.lock();
+            let Some(e) = g.entries.get_mut(&id) else {
+                return Ok(());
+            };
+            e.reply = Some(reply);
+            let result = AgentResult {
+                name: e.name.clone(),
+                outcome: AgentOutcome::Replied,
+                elapsed: e.started.elapsed(),
+                generation: e.consumer,
+            };
+            let parent = e.parent;
+            let mailbox = parent.and_then(|p| g.entries.get(&p).map(|pe| pe.mailbox.clone()));
+            drop(g);
+            mailbox.map(|mailbox| (mailbox, result))
+        };
+        // After the guard drops: the process-wide lock order is inbox → registry.
+        match notice {
+            Some((mailbox, result)) => mailbox.push(Post::AgentResult(result)),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether `id` holds a standing reply — the cheap test, where
+    /// [`Self::reply_of`] would clone the whole value.
+    pub(crate) fn has_reply(&self, id: AgentId) -> bool {
+        self.lock()
+            .entries
+            .get(&id)
+            .is_some_and(|e| e.reply.is_some())
+    }
+
+    /// The reply `to` deposited, for `` agents `read `` — scoped to a proper
+    /// descendant of `from`, exactly as [`Self::message`] is.  The deposit is
+    /// left in place, so the fetch is idempotent until `to` replies again.
+    ///
+    /// # Errors
+    /// [`NotADescendant`] when `to` is live but out of `from`'s scope.
+    pub(crate) fn reply_of(
+        &self,
+        from: AgentId,
+        to: AgentId,
+    ) -> Result<Option<FOValue>, NotADescendant> {
+        let g = self.lock();
+        if !is_descendant_of(&g.entries, from, to) {
+            return Err(NotADescendant(to));
+        }
+        Ok(g.entries.get(&to).and_then(|e| e.reply.clone()))
     }
 
     /// Time since `id`'s last human exchange, or since birth if never engaged.
@@ -484,31 +613,39 @@ impl AgentRegistry {
     }
 
     /// Send a marked model-visible message to a proper descendant of `from` —
-    /// the same scoping [`Self::cancel_scoped`] enforces.  The mailbox is
-    /// cloned under the registry lock and posted after it drops, because a park
-    /// verdict reads this registry under the consumer's inbox mutex and the
-    /// process-wide order is inbox → registry.
+    /// the same scoping [`Self::cancel_scoped`] enforces.  Renews the
+    /// recipient's lease like [`Self::steer`] does, and for the same reason: a
+    /// message is an exchange, and one that woke a resting child must not leave
+    /// it to be reaped mid-answer.  The mailbox is cloned under the registry
+    /// lock and posted after it drops, because a park verdict reads this
+    /// registry under the consumer's inbox mutex and the process-wide order is
+    /// inbox → registry.
     ///
     /// # Errors
     /// A dead sender or recipient, a scope violation, or a recipient at quota.
     pub fn message(&self, from: AgentId, to: AgentId, text: String) -> Result<(), MessageError> {
         let (mailbox, from_name) = {
-            let g = self.lock();
+            let mut g = self.lock();
             let from_name = g
                 .entries
                 .get(&from)
                 .ok_or(MessageError::UnknownSender(from))?
                 .name
                 .clone();
-            let mailbox = g
-                .entries
-                .get(&to)
-                .ok_or(MessageError::UnknownRecipient(to))?
-                .mailbox
-                .clone();
+            if !g.entries.contains_key(&to) {
+                return Err(MessageError::UnknownRecipient(to));
+            }
             if !is_descendant_of(&g.entries, from, to) {
                 return Err(MessageError::NotADescendant(to));
             }
+            let mailbox = g
+                .entries
+                .get_mut(&to)
+                .map(|e| {
+                    renew_entry(e);
+                    e.mailbox.clone()
+                })
+                .ok_or(MessageError::UnknownRecipient(to))?;
             drop(g);
             (mailbox, from_name)
         };
@@ -527,18 +664,18 @@ impl AgentRegistry {
         g.entries.get(&id).map(|e| e.provider.clone())
     }
 
-    /// Settle a worker born under `generation`.  The entry is reaped either way
-    /// — a worker is authoritative over its *own* lifetime, so a stale one can
-    /// never leave a zombie behind — while the return admits the result only
-    /// when `generation` still matches the parent this worker reports to.
-    pub fn settle(&self, id: AgentId, generation: u64) -> bool {
+    /// Retire `id`.  The entry is reaped either way — a worker is authoritative
+    /// over its *own* lifetime, so a stale one can never leave a zombie behind —
+    /// while the return admits its result only where the parent's generation
+    /// still matches the one this entry was born under.
+    pub fn settle(&self, id: AgentId) -> bool {
         let mut g = self.lock();
         let Some(entry) = g.entries.remove(&id) else {
             return false;
         };
         let current = entry.parent.map_or(0, |p| g.generation(p));
         drop(g);
-        current == generation
+        current == entry.consumer
     }
 
     /// The trunk's self-removal at the end of its attend; a child leaves
@@ -608,16 +745,29 @@ impl AgentRegistry {
     pub fn list(&self, ancestor: AgentId) -> Vec<AgentInfo> {
         let mut rows: Vec<(AgentId, AgentInfo)> = {
             let g = self.lock();
+            let busy_child_of = |id| {
+                g.entries
+                    .values()
+                    .any(|e| e.parent == Some(id) && e.rest.is_none())
+            };
             descendants(&g.entries, ancestor, false)
                 .into_iter()
                 .filter_map(|id| {
                     g.entries.get(&id).map(|e| {
+                        let state = match (e.rest, e.reply.is_some()) {
+                            (None, _) if busy_child_of(id) => RosterState::WaitingOnAgents,
+                            (None, _) => RosterState::Busy,
+                            (Some(_), true) => RosterState::Replied,
+                            (Some(_), false) => RosterState::Waiting,
+                        };
                         (
                             id,
                             AgentInfo {
                                 name: e.name.clone(),
                                 log_dir: e.log_dir.clone(),
                                 elapsed: e.started.elapsed(),
+                                state,
+                                idle: e.rest.map_or(Duration::ZERO, |at| at.elapsed()),
                             },
                         )
                     })
@@ -766,8 +916,9 @@ fn lease_fire(reg: &AgentRegistry, id: AgentId) {
     }
 }
 
-/// The one write [`AgentRegistry::renew`] and [`AgentRegistry::steer`] share,
-/// each under its own lock scope, shaped by what else it does there.
+/// The one write [`AgentRegistry::renew`], [`AgentRegistry::steer`] and
+/// [`AgentRegistry::message`] share, each under its own lock scope, shaped by
+/// what else it does there.
 fn renew_entry(e: &mut Entry) {
     e.last_exchange = Some(Instant::now());
 }
@@ -826,9 +977,9 @@ mod tests {
     #[test]
     fn settle_delivers_for_current_generation() {
         let reg = AgentRegistry::new();
-        let g = entry(&reg, 1, None);
-        assert!(reg.settle(1, g), "a current-generation worker delivers");
-        assert!(!reg.settle(1, g), "a settled entry is gone");
+        entry(&reg, 1, None);
+        assert!(reg.settle(1), "a current-generation worker delivers");
+        assert!(!reg.settle(1), "a settled entry is gone");
     }
 
     /// A lease is an explicit knob, not a consequence of being parented.
@@ -890,7 +1041,7 @@ mod tests {
         let g = entry(&reg, 1, Some(0)); // its child
         reg.clear_subtree(0);
         assert!(
-            !reg.settle(1, g),
+            !reg.settle(1),
             "a result from before /clear is rejected by generation"
         );
         assert!(reg.mailbox(1).is_none(), "the cleared child is reaped");
@@ -906,10 +1057,10 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         entry(&reg, 1, None); // a branch, rooted beside it
-        let g = entry(&reg, 2, Some(0)); // the trunk's child, still working
+        entry(&reg, 2, Some(0)); // the trunk's child, still working
         reg.clear_subtree(1);
         assert!(
-            reg.settle(2, g),
+            reg.settle(2),
             "the branch's /clear must not poison the trunk's outstanding result"
         );
     }
@@ -1335,13 +1486,13 @@ mod tests {
     #[test]
     fn mailbox_resolves_only_while_an_agent_is_live() {
         let reg = AgentRegistry::new();
-        let g = entry(&reg, 1, None);
+        entry(&reg, 1, None);
         assert!(
             reg.mailbox(1).is_some(),
             "a live entry hands out its sender"
         );
         assert!(reg.mailbox(99).is_none(), "an unknown id has no sender");
-        assert!(reg.settle(1, g));
+        assert!(reg.settle(1));
         assert!(reg.mailbox(1).is_none(), "a settled entry hands out none");
     }
 
@@ -1705,16 +1856,13 @@ mod tests {
     fn settle_always_reaps_its_entry_even_across_a_bare_generation_bump() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the parent that would read the result
-        let g = entry(&reg, 1, Some(0));
+        entry(&reg, 1, Some(0));
         reg.lock()
             .entries
             .get_mut(&0)
             .expect("the parent is registered")
             .generation += 1;
-        assert!(
-            !reg.settle(1, g),
-            "a stale-generation result is not delivered"
-        );
+        assert!(!reg.settle(1), "a stale-generation result is not delivered");
         assert!(
             !reg.is_live(1),
             "but its entry is reaped regardless, never left dangling"
@@ -1765,24 +1913,23 @@ mod tests {
         entry(&reg, 0, None); // the trunk
         let ttl = Duration::from_millis(80);
         let token = Token::new();
-        let g = reg
-            .register(Registration {
-                id: 1,
-                parent: Some(0),
-                lease: Some(ttl),
-                name: "child".into(),
-                log_dir: PathBuf::from("/tmp/child"),
-                cancel: token.clone(),
-                reach: EvalReach::Identity {
-                    eval_root: Some(DurableRoot::default()),
-                    interrupt_target: InterruptTarget::default(),
-                },
-                mailbox: mb(),
-                provider: provider(),
-            })
-            .expect("registers");
+        reg.register(Registration {
+            id: 1,
+            parent: Some(0),
+            lease: Some(ttl),
+            name: "child".into(),
+            log_dir: PathBuf::from("/tmp/child"),
+            cancel: token.clone(),
+            reach: EvalReach::Identity {
+                eval_root: Some(DurableRoot::default()),
+                interrupt_target: InterruptTarget::default(),
+            },
+            mailbox: mb(),
+            provider: provider(),
+        })
+        .expect("registers");
 
-        assert!(reg.settle(1, g), "settles well before the lease would fire");
+        assert!(reg.settle(1), "settles well before the lease would fire");
 
         std::thread::sleep(ttl * 4);
         assert!(
@@ -1850,17 +1997,17 @@ mod tests {
             provider: provider(),
         });
 
-        assert!(!reg.engaged(1), "a fresh entry has never been engaged");
+        assert!(!reg.messageable(1), "a fresh entry has never been engaged");
         assert!(
             reg.idle(1).is_some(),
             "idle reads off birth before any exchange"
         );
 
         inbox.push(Post::UserSteering("hello".into())).unwrap();
-        assert!(!reg.engaged(1), "a raw mailbox push is not an exchange");
+        assert!(!reg.messageable(1), "a raw mailbox push is not an exchange");
 
         assert!(reg.renew(1), "renew stamps a live entry");
-        assert!(reg.engaged(1), "renewed at least once");
+        assert!(reg.messageable(1), "renewed at least once");
         let idle_after_renew = reg.idle(1).expect("still live");
         assert!(
             idle_after_renew < Duration::from_secs(1),
@@ -1888,12 +2035,12 @@ mod tests {
             provider: provider(),
         });
 
-        assert!(!reg.engaged(1), "not yet engaged");
+        assert!(!reg.messageable(1), "not yet engaged");
         assert!(
             reg.steer(1, "hello".into()),
             "a live entry accepts steering"
         );
-        assert!(reg.engaged(1), "steer renews the exchange clock");
+        assert!(reg.messageable(1), "steer renews the exchange clock");
         assert!(
             reg.idle(1).expect("still live") < Duration::from_secs(1),
             "idle resets to (near) zero right after a steer"
@@ -1926,7 +2073,7 @@ mod tests {
         let generation = entry(&reg, 2, Some(1));
         let inbox = Inbox::new();
         let park = || {
-            if reg.has_children(1) {
+            if reg.has_busy_children(1) {
                 ParkMode::HeldByChildren
             } else {
                 ParkMode::Quiesce
@@ -1943,13 +2090,12 @@ mod tests {
             .mailbox()
             .push(Post::AgentResult(AgentResult {
                 name: "a2".into(),
-                outcome: AgentOutcome::Complete,
-                text: "done".into(),
+                outcome: AgentOutcome::Stopped("done".into()),
                 elapsed: Duration::ZERO,
                 generation,
             }))
             .expect("a fresh inbox admits one result");
-        reg.settle(2, generation);
+        reg.settle(2);
         assert_eq!(
             park(),
             ParkMode::Quiesce,

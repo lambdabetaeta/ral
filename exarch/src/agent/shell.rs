@@ -476,7 +476,7 @@ mod tests {
 
         let result = session.run_shell(
             "c0".into(),
-            "reply 'the work stands'\n/bin/sh -c 'exit 3'",
+            "agents `reply 'the work stands'\n/bin/sh -c 'exit 3'",
             10,
             &emit,
         );

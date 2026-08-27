@@ -72,6 +72,13 @@ law, and the persona's to discourage.
   gesture is a product question for after the first real transcripts, not
   machinery to presuppose here.
 
+## Amendment — "live" reads "busy"
+
+Since [[decisions/260826_reply-parks|reply-parks]] a child that has replied
+stays registered, parked under its idle lease. Clause 2 therefore reads "no
+*busy* children remain": the exchange ends once every child has replied or
+died, and the repliers linger, fetchable by `` agents `reply ``.
+
 ## See also
 
 [[decisions/260722_session-is-a-process|session-is-a-process]] (the rendezvous

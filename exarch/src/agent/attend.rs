@@ -2,20 +2,20 @@
 //! take it up, do the ready-boundary housekeeping, and turn a nudge-worthy
 //! outcome into a self-posted nudge.  Stepping the model to quiescence over
 //! one item is [`super::deliberate`]'s job; nothing here special-cases a
-//! node's position, since a child's result is delivered up its parent's
-//! mailbox by the spawn site rather than by this loop.
+//! node's position, since a child's reply is deposited on its registry entry
+//! and a non-reply end is delivered up its parent's mailbox by the spawn site.
 
 use crate::agent::cancel;
 use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
-use crate::agent::{Agent, deliberate, panic_msg, render_reply};
+use crate::agent::{Agent, deliberate, panic_msg};
 use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
 use crate::provider::{Provider, ProviderError};
 use crate::shell_eval;
 use ral_core::serial::FOValue;
 
-/// What the surrounding loop does next: `Stop` on `/quit` or a terminal `reply`.
+/// What the surrounding loop does next: `Stop` on `/quit` or a headless root's `reply`.
 enum Flow {
     Continue,
     Stop,
@@ -88,7 +88,7 @@ impl Agent {
         // Only the trunk publishes to the OS-signal slot; a sub-agent's token
         // is reached through the registry cascade instead.
         let _slot = self.parent.is_none().then(|| cancel::publish(&self.cancel));
-        let mut final_outcome = (AgentOutcome::Empty, None);
+        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         loop {
             // Every pass is a settled ready boundary.  A lease-chain reap is
             // deliberately not drained here: core pushes its `` `notice `` on
@@ -101,14 +101,13 @@ impl Agent {
             // hand the agent is not idle for any observable moment, and the
             // deliberation's own transitions are the truth.
             if self.inbox.is_empty() {
+                let mode = policy(self, self.park_mode());
+                self.agents.set_resting(self.id, mode == ParkMode::Engaged);
                 self.recorder()
-                    .transient(crate::record::Transient::State(idle_state(policy(
-                        self,
-                        self.park_mode(),
-                    ))));
+                    .transient(crate::record::Transient::State(idle_state(mode)));
             }
-            // `next_or_idle` recomputes the park verdict on every wake.  An
-            // un-engaged idle returning agent breaks here, yet its outcome
+            // `next_or_idle` recomputes the park verdict on every wake.  A
+            // returning agent that quiesces breaks here, and its outcome
             // reaches its parent through the worker epilogue, not this break.
             let Some(item) = self
                 .inbox
@@ -116,6 +115,7 @@ impl Agent {
             else {
                 break;
             };
+            self.agents.set_resting(self.id, false);
             if matches!(
                 self.take_up(&item, control, emit, &mut final_outcome),
                 Flow::Stop
@@ -151,7 +151,7 @@ impl Agent {
     pub(crate) fn attend_backlog(&mut self, emit: &Emitter) -> (AgentOutcome, Option<FOValue>) {
         self.couple(emit);
         let mut control = NoControl;
-        let mut final_outcome = (AgentOutcome::Empty, None);
+        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         loop {
             self.reconcile_service_pins();
             self.check_disk_warn();
@@ -236,6 +236,12 @@ impl Agent {
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
+        if let Ok(deliberate::Outcome::Replied(v)) = &outcome
+            && self.parent.is_some()
+            && let Err(reject) = self.agents.deposit_reply(self.id, v.clone())
+        {
+            self.note_error(format!("the parent's inbox rejected this reply: {reject}"));
+        }
         *final_outcome = agent_outcome(&outcome);
         // Before any nudge decision, and whether or not one follows: a chat
         // trunk keeps no registry, and its failures must still reach the human.
@@ -244,21 +250,22 @@ impl Agent {
         {
             eprintln!("exarch: a provider error was not recorded: {error}");
         }
-        let waiting_on_children = self.has_live_children();
         // `last_input` is fresh off `deliberate`, so the gauge reads this
         // completion's own pressure, not the one it was called with.
         let pressure = self.context_pressure(&active);
+        // Nudged only when nothing else is already carrying this agent
+        // forward: no reply standing for a parent to fetch, no detached shell
+        // work, no busy children.
+        let quiet = !self.agents.has_reply(self.id)
+            && self.probe_workers().is_empty()
+            && !self.has_busy_children();
         let ctx = nudge::NudgeCtx {
-            // Exempt while children are live: an un-replied finish there is a
-            // legitimate wait on the fleet, not a dropped return, and nagging
-            // would push the agent to return before its agents land.
-            must_reply: self.returns() && !waiting_on_children,
+            must_reply: self.returns(),
             pinned: self.pinned_digest(),
-            waiting_on_children,
             is_headless_root: self.parent.is_none() && !self.interactive,
             pressure,
+            quiet,
         };
-        let replied = matches!(outcome, Ok(deliberate::Outcome::Replied(_)));
         let nudge_msg = match &mut self.nudges {
             Some(nudges) => nudges.react(&outcome, &ctx, &mut self.log.lock()),
             None => None,
@@ -283,10 +290,13 @@ impl Agent {
         {
             self.context_warn_latched = true;
         }
-        // `reply` hard-terminates, engagement and armed schedules
-        // notwithstanding — unless the nudge layer just turned this very one
-        // back for self-verification, which the loop must stay alive to carry.
-        if replied && nudge_msg.is_none() {
+        // Only the headless root ends on `reply` — a child parks on its
+        // deposit — and not when the nudge layer just turned it back for
+        // self-verification.
+        if self.parent.is_none()
+            && nudge_msg.is_none()
+            && matches!(outcome, Ok(deliberate::Outcome::Replied(_)))
+        {
             Flow::Stop
         } else {
             Flow::Continue
@@ -337,10 +347,10 @@ impl Agent {
         // a parented agent terminate-stamps its token first
         // (`cancel_and_remove`), and `next_or_idle` checks `terminated()` on
         // every wake.
-        if self.parent.is_some() && self.returns() && self.agents.engaged(self.id) {
+        if self.parent.is_some() && self.returns() && self.agents.messageable(self.id) {
             return ParkMode::Engaged;
         }
-        if self.has_live_children() {
+        if self.has_busy_children() {
             return ParkMode::HeldByChildren;
         }
         if self.schedules.armed() {
@@ -349,10 +359,10 @@ impl Agent {
         ParkMode::Quiesce
     }
 
-    /// Whether an async child launched from here has yet to settle its result
-    /// up this inbox.
-    fn has_live_children(&self) -> bool {
-        self.agents.has_children(self.id)
+    /// Whether an async child launched from here is still working, rather
+    /// than parked on its own deposited reply.
+    fn has_busy_children(&self) -> bool {
+        self.agents.has_busy_children(self.id)
     }
 
     /// Re-pin the host-owned `services` card against the shell's live worker
@@ -480,7 +490,7 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
         Item::Agent(r) => {
             // The record carries the breadcrumb-reduced pair the scrollback
             // block is built from, not the raw outcome enum.
-            let (text, error) = r.outcome.breadcrumb(&r.text);
+            let (text, error) = r.outcome.breadcrumb();
             record_commit(
                 recorder,
                 crate::record::Display::SubagentDone {
@@ -533,7 +543,7 @@ fn record_commit(recorder: &crate::record::Emitter, commit: crate::record::Displ
 /// armed schedule `converse_settled` already refused at construction.
 pub(crate) fn quiesce_when_childless(agent: &Agent, mode: ParkMode) -> ParkMode {
     match mode {
-        ParkMode::Held if agent.has_live_children() => ParkMode::HeldByChildren,
+        ParkMode::Held if agent.has_busy_children() => ParkMode::HeldByChildren,
         ParkMode::Held => ParkMode::Quiesce,
         other => other,
     }
@@ -556,21 +566,20 @@ fn idle_state(mode: ParkMode) -> AgentState {
 /// result carries.  Only `reply` carries a value up, as the faithful
 /// [`FOValue`] the model passed; there is no scrape, so a finish without one
 /// did not complete the contract and settles [`AgentOutcome::Failed`].
+const NO_REPLY_REASON: &str = "ended without calling `reply`";
+
 fn agent_outcome(
     r: &Result<deliberate::Outcome, ProviderError>,
 ) -> (AgentOutcome, Option<FOValue>) {
     match r {
-        // A unit or empty-string reply renders to nothing: a deliberate empty
-        // return rather than a missing one.
-        Ok(deliberate::Outcome::Replied(v)) if !render_reply(v).is_empty() => {
-            (AgentOutcome::Complete, Some(v.clone()))
-        }
-        Ok(deliberate::Outcome::Replied(_)) => (AgentOutcome::Empty, None),
+        // The headless root's own `reply` reaches the epilogue directly — a
+        // child's is deposited on its registry entry instead, and never
+        // drives `take_up`'s call here.
+        Ok(deliberate::Outcome::Replied(v)) => (AgentOutcome::Replied, Some(v.clone())),
         // Re-nudged within budget by `nudge` before it ever reaches here.
-        Ok(deliberate::Outcome::Complete(_) | deliberate::Outcome::Empty) => (
-            AgentOutcome::Failed("ended without calling `reply`".into()),
-            None,
-        ),
+        Ok(deliberate::Outcome::Complete(_) | deliberate::Outcome::Empty) => {
+            (AgentOutcome::Failed(NO_REPLY_REASON.into()), None)
+        }
         Ok(deliberate::Outcome::Stopped { reason }) => {
             (AgentOutcome::Stopped(reason.clone()), None)
         }
@@ -614,7 +623,6 @@ mod tests {
             &Item::Agent(AgentResult {
                 name: "helper".into(),
                 outcome: AgentOutcome::Failed("boom".into()),
-                text: String::new(),
                 elapsed: std::time::Duration::from_millis(1500),
                 generation: 0,
             }),
@@ -690,7 +698,7 @@ mod tests {
         let mut root = trunk(true);
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, root.id);
-        let root_result = root.run_shell("c1".into(), "reply 1", 5, &emit);
+        let root_result = root.run_shell("c1".into(), "agents `reply 1", 5, &emit);
         let refusal = "you converse with the user; you do not return";
         assert!(
             root_result.content.contains(refusal),
@@ -702,7 +710,7 @@ mod tests {
         // A distinct name: `root` already holds `TRUNK_NAME` in this same
         // shared registry, and names are unique among live entries.
         branch.register_self_named("branch");
-        let branch_result = branch.run_shell("c2".into(), "reply 1", 5, &emit);
+        let branch_result = branch.run_shell("c2".into(), "agents `reply 1", 5, &emit);
         assert!(
             branch_result.content.contains(refusal),
             "a /branch child must be refused with the same text, got: {}",
@@ -728,16 +736,65 @@ mod tests {
         for _ in 0..8 {
             script = script.then(Reply::text("here is prose, but no reply"));
         }
-        let (outcome, text) = drive_peer(&mut child, scripted("test-model", script));
+        let (outcome, payload) = drive_peer(&mut child, scripted("test-model", script));
         assert!(
             matches!(outcome, AgentOutcome::Failed(_)),
             "an un-replied finish settles Failed, got {outcome:?}"
         );
         assert!(
-            text.is_empty(),
-            "the final prose must not be scraped: {text:?}"
+            payload.is_none(),
+            "the final prose must not be scraped: {payload:?}"
         );
         assert!(child.is_ready());
+    }
+
+    /// A standing deposited reply gates every nudge kind at once — the single
+    /// `quiet` test, not three separate flags.  A registered child holding a
+    /// reply from an earlier turn draws no empty-turn nudge on this one.
+    #[test]
+    fn deposited_reply_suppresses_every_nudge() {
+        let dir = tmp("deposited-reply-quiet");
+        let parent = Agent::for_test("system").unwrap();
+        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
+        child
+            .agents
+            .register(Registration {
+                id: child.id,
+                parent: Some(parent.id),
+                lease: Some(AGENT_LEASE_IDLE),
+                name: "child".into(),
+                log_dir: dir.path().join("child"),
+                cancel: child.cancel_token().clone(),
+                reach: child.seat.eval_reach(),
+                mailbox: child.mailbox(),
+                provider: child.provider_handle(),
+            })
+            .expect("child registration must succeed: its parent is live");
+        child
+            .agents
+            .deposit_reply(
+                child.id,
+                FOValue::String {
+                    value: "already replied".into(),
+                },
+            )
+            .expect("deposit onto a live entry never rejects on an empty parent inbox");
+
+        child.provider =
+            ProviderHandle::new(scripted("test-model", Script::new().then(Reply::empty())));
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, child.id);
+        child.couple(&emit);
+        child.seed("do more".into());
+        let item = child.inbox.next_item().expect("the seeded item");
+        let mut control = NoControl;
+        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
+        child.take_up(&item, &mut control, &emit, &mut final_outcome);
+
+        assert!(
+            child.inbox.next_item().is_none(),
+            "a standing reply must suppress even the empty-turn nudge, budget-free rules included"
+        );
     }
 
     /// A host-side unwind — transport, decode, render — is recorded, fails the
@@ -1034,8 +1091,8 @@ mod tests {
             "test-model",
             Script::new()
                 .then(Reply::text("done"))
-                .then(Reply::tool_calls(vec![ral_call("r1", "reply 'x'")]))
-                .then(Reply::tool_calls(vec![ral_call("r2", "reply 'x'")])),
+                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'x'")]))
+                .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'x'")])),
         ));
         session.seed("get on with it".into());
         session.attend(&mut NoControl, &emit);

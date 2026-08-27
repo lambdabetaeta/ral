@@ -179,7 +179,7 @@ error with no room for a didactic message.
 `` `agents `` and `` `schedules `` each carry a tag naming what to do
 (`family_tag`), and an unrecognised tag is as loud one level down as an
 unrecognised class is at the top (`unknown_tag`) — never a silent default.
-The seven singletons — `` `reply ``, `` `pin-read ``, `` `pin-list ``,
+The six singletons — `` `pin-read ``, `` `pin-list ``,
 `` `context ``, `` `context-read ``, `` `context-drop ``, `` `context-fold ``
 — are the only ones still read positionally (`payload_list` and the scalar
 accessors); a family tag's own record crosses **by field name**, through
@@ -216,19 +216,26 @@ queryable store.
   digest but cannot cross the live exchange; folding is curation, not a promise
   of compression, so the byte delta may be negative.
 
-- **`agents <tag>`** →
-  `F [[name: Str, elapsed-s: Int, log-dir: Str]]`. One verb for the fleet, over
-  an **open** row of four tags — `` `list ``, `` `start ``, `` `message ``,
-  `` `cancel `` — each taking one argument, and every one of them answering
-  with the roster *afterwards* rather than a receipt of its own. The outer row
-  is open so an unknown tag reaches a door that enumerates the four; each known
+- **`agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
+  of six tags — `` `list ``, `` `start ``, `` `message ``, `` `cancel ``,
+  `` `reply <value> ``, `` `read <name> `` — each taking one argument. Every
+  tag but `` `read `` answers with the roster *afterwards*,
+  `[[name: Str, state: <busy|waiting-on-agents|replied|waiting>, idle-s: Int, elapsed-s: Int, log-dir: Str]]`,
+  rather than a receipt of its own; `` `read `` answers `[name: Str, reply: α]`,
+  the value a replied child deposited, which is why the family's answer type is
+  a bare `α` (the `pin-read` precedent) rather than the roster it once was
+  ([[decisions/260826_reply-parks|reply-parks]]). `` `reply `` is the sole
+  return path of a returning agent — first-orderness checked at the door,
+  refused on every non-returning agent with the desk's own didactic text, last
+  write wins within a run, deposited once the enclosing `ral` batch drains. The
+  outer row is open so an unknown tag reaches a door that enumerates the six; each known
   tag's payload keeps its exact type, so the closed record inside `` `start ``
   still makes a missing or misspelled field a static error naming it, while the
   `type`/`grant` rows *inside* that record stay open for the same reason one
   level down.
   `` `start [prompt: …, name: …, type: …, grant: …, search: …] `` is the one
-  spawn: launch-only and always asynchronous, the reply arriving later through
-  the inbox, and the child's row in the answer carrying the `name` and
+  spawn: launch-only and always asynchronous, a one-line notice arriving
+  through the inbox when the child replies, and the child's row in the answer carrying the `name` and
   `log-dir` the old receipt did. `name` is the child's identity — the tab-bar
   contract (`check_name`, in `fleet/registry.rs` beside the rule it belongs
   with), unique among live agents or the call is refused; this door refuses a
@@ -280,13 +287,6 @@ queryable store.
 - **`pin-list`** → `F [String]`. Silent; the keys currently occupied on the
   caller's register, in `BTreeMap` order — a key names a slot for
   `pin-read`, not its content.
-- **`reply <value>`** — `∀α. α → F Unit`, first-orderness checked at the
-  door. The sole return path for a returning agent; last write wins within a
-  run. Refused on every non-returning agent — the interactive trunk and
-  each `/branch` child alike, keyed on a `returns` bit fixed at
-  construction — with the desk's own didactic text. The run ends only once
-  the enclosing `ral` call's whole batch of statements drains, not at this
-  call.
 
 Receipts and listings are ral records the model can bind, filter, and fan out
 over, rather than stringly-typed JSON it re-parses — the composability the

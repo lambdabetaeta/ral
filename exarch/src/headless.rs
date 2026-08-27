@@ -584,8 +584,7 @@ pub fn run(
         Ok(Some((agent_outcome, payload))) => {
             headless.reply = payload;
             match agent_outcome {
-                // A deliberate empty reply still honours the contract.
-                AgentOutcome::Complete | AgentOutcome::Empty => Ok(()),
+                AgentOutcome::Replied => Ok(()),
                 AgentOutcome::Stopped(s) => Err(s),
                 AgentOutcome::Cancelled => Err("cancelled".to_string()),
                 AgentOutcome::Failed(e) => Err(e),
@@ -700,7 +699,7 @@ pub fn converse_sink<S: Sink>(
 
 /// One exchange that ends only at fleet quiescence.
 ///
-/// The trunk parked, no live children, and their results drained and
+/// The trunk parked, no busy children, and their results drained and
 /// announced — the driver `synod` (and any embedder wanting the same
 /// guarantee) runs instead of [`converse_sink`].
 ///
@@ -829,7 +828,7 @@ mod tests {
     }
 
     /// The conversing trunk parks rather than returning: no payload rises, and
-    /// the digest never wears `Complete`, the tag only a deliberate `reply` earns.
+    /// the digest never wears `Replied`, the tag only a deliberate `reply` earns.
     #[test]
     fn the_interactive_trunk_parks_rather_than_replying() {
         let mut session = converse_trunk("parks", Script::new().then(Reply::text("hi there")));
@@ -842,7 +841,7 @@ mod tests {
             "a conversing trunk carries no reply payload"
         );
         assert!(
-            !matches!(outcome, AgentOutcome::Complete),
+            !matches!(outcome, AgentOutcome::Replied),
             "a conversing trunk never completes by returning a value: {outcome:?}"
         );
     }
@@ -1258,8 +1257,7 @@ mod tests {
                 .expect("the exchange must park on the child within the timeout");
             let rejected = parent_mailbox.push(Post::AgentResult(AgentResult {
                 name: "helper".into(),
-                outcome: AgentOutcome::Complete,
-                text: "helper done".into(),
+                outcome: AgentOutcome::Stopped("done".into()),
                 elapsed: std::time::Duration::from_millis(1),
                 generation,
             }));
@@ -1268,7 +1266,7 @@ mod tests {
                 "the parent's inbox must accept the result"
             );
             assert!(
-                registry.settle(child_id, generation),
+                registry.settle(child_id),
                 "settling a still-live registration must succeed"
             );
         });
@@ -1292,10 +1290,10 @@ mod tests {
         assert!(
             sink.inner.facts.iter().any(|f| matches!(
                 f,
-                Record::Display(Display::SubagentDone { name, text, .. })
-                    if name == "helper" && text == "helper done"
+                Record::Display(Display::SubagentDone { name, error, .. })
+                    if name == "helper" && error.as_deref() == Some("done")
             )),
-            "the settled child's reply must reach the exchange's own sink"
+            "the settled child's end must reach the exchange's own sink"
         );
     }
 

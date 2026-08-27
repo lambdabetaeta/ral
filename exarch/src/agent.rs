@@ -37,13 +37,11 @@ pub use dial::Dial;
 pub(crate) use probe::ProbedWorker;
 pub(crate) use shell::{LogCell, ReplyCell};
 
-use crate::agent::digest::{AGENT_REPLY_CAP, clip};
 use crate::agent::seat::Seat;
 use crate::bus::{AgentId, Inbox, Mailbox};
 use crate::fleet::registry::AgentRegistry;
 use crate::provider::Provider;
 use crate::shell_eval;
-use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
 use std::sync::{Arc, Mutex};
 
@@ -317,15 +315,6 @@ impl Agent {
     pub(crate) fn next_item_for_test(&self) -> Option<crate::bus::Item> {
         self.inbox.next_item()
     }
-}
-
-/// The text a model parent reads, clipped to the reply cap.  The headless edge
-/// instead projects the value faithfully through [`shell_eval::user_json`].
-pub(crate) fn render_reply(v: &FOValue) -> String {
-    clip(
-        &shell_eval::ral_value_to_text(&RalValue::from(v.clone())).unwrap_or_default(),
-        AGENT_REPLY_CAP,
-    )
 }
 
 /// The message of a recovered panic payload, for either string shape.

@@ -65,8 +65,8 @@ never an `is_root` branch:
   conversing(a) =  a.interactive ∧ ¬returns(a)
   park_mode(a)  =  Quiesce        if conversing(a) ∧ ¬registry.is_live(a)   // /close reaped it
                    Held           if conversing(a)                          // immune to cancellation
-                   Engaged        if a.parent ∧ returns(a) ∧ registry.engaged(a)  // parks, but a terminate cause still ends it
-                   HeldByChildren if a has live descendants
+                   Engaged        if a.parent ∧ returns(a) ∧ registry.messageable(a)  // talked to, or holding a reply; a terminate cause still ends it
+                   HeldByChildren if a has busy children
                    UntilCancelled if a.schedules.armed()
                    Quiesce        otherwise
 ```
@@ -82,14 +82,13 @@ vocabulary cannot disagree
 `park_mode` (`agent/attend.rs`, returning a `ParkMode` of `Held` / `Engaged` /
 `HeldByChildren` / `UntilCancelled` / `Quiesce`, `bus/inbox.rs`) is the `should_park`
 verdict: a conversing node parks `Held`, immune to cancellation; a returning,
-parented agent the registry has recorded a human exchange with parks
-`Engaged`, the same wait except a terminate-class cause still ends it, since
-an exchange is not a conversation — unless the registry no longer lists it,
-since an unlisted conversing node is unreachable and parking it would be a
-zombie; live descendants hold it
-until their results drain; a live self-schedule holds it until cancelled;
-otherwise it terminates at quiescence — the one-shot contract a headless trunk
-and a settled sub-agent both satisfy. `--chat` builds the trunk with no system
+parented agent that is *messageable* — someone has messaged it, or it holds a
+deposited reply — parks `Engaged`, the same wait except a terminate-class
+cause still ends it, since an exchange is not a conversation — unless the
+registry no longer lists it, since an unlisted conversing node is unreachable
+and parking it would be a zombie; busy children hold it until they reply or
+die; a live self-schedule holds it until cancelled; otherwise it terminates at
+quiescence — the one-shot contract a headless trunk satisfies. `--chat` builds the trunk with no system
 prompt, no tool at all (`tool_enabled: false`), and no nudge registry — a bare
 conversation, the same attend loop.
 
@@ -111,9 +110,10 @@ Three nested loops, the same for trunk and child alike:
   `deliberate` call itself, and the nudge reaction. A genuine
   exchange boundary resets the nudge latches and clears the sticky cancel token
   (`cancel::Token::reset`), so a prior exchange's Esc cannot bleed into the next; a
-  self-nudge is the same exchange continuing and resets neither. `reply` hard-
-  terminates the loop regardless of focus or a self-armed schedule — the agent
-  returns its value and is gone. At the single exit the loop winds a stranded
+  self-nudge is the same exchange continuing and resets neither. A child's
+  `reply` deposits its value on its registry entry (`deposit_reply`, which
+  also posts the one-line notice) and the loop parks `Engaged`; only the
+  headless root's `reply` ends its loop. At the single exit the loop winds a stranded
   prompt back through `quiesce` so the next `append_user` is always admissible
   ([[invariants/turn-ends-ready|exchange-ends-ready]]); the trunk then deregisters
   itself (a child is removed by its spawn site through `settle`), so the fleet
@@ -293,25 +293,26 @@ disagree about what is shared.
 
 - **The fleet is alive while the registry is non-empty** — the literal "dies
   when no active agents
-  remain". An agent removes itself at termination (`reply`, quiescence, cancel);
-  a conversing node stays until `/quit` (or `/close`) because it parks; a
-  headless trunk leaves at quiescence; a sub-agent leaves on settle. There is no
-  human-less daemon: nothing lingers without a present human, running work, or a
-  bounded self-schedule.
+  remain". An agent removes itself at termination (quiescence, cancel, a
+  non-reply finish); a conversing node stays until `/quit` (or `/close`)
+  because it parks; a headless trunk leaves at quiescence; a replied sub-agent
+  parks under its idle lease and leaves when it is reaped. There is no
+  human-less daemon: nothing lingers without a present human, running work, a
+  bounded lease, or a bounded self-schedule.
 - **The idle lease is dynamic; focus is not.** A leased child
   (`Registration::lease`, armed only for a returning sub-agent) is reaped once
-  its idle span — measured off the registry's last-human-exchange clock,
-  seeded at birth — exceeds its bound: the reaper (`fleet/registry.rs`'s
-  `lease_fire`) re-arms itself for the remaining margin on every fire that
-  finds the entry still live and under bound, and cascades the subtree with
+  its idle span — measured off the registry's last-exchange clock, seeded at
+  birth — exceeds its bound: the reaper (`fleet/registry.rs`'s `lease_fire`)
+  re-arms itself for the remaining margin on every fire that finds the entry
+  still live and under bound, and cascades the subtree with
   `CancelCause::Deadline` once it is not. The one thing that renews the clock
-  is a delivered human message (`AgentRegistry::steer`); nothing else does —
-  not the TUI's `TAB` cursor, a plain, presentation-only `AgentId` local to
-  the frontend (`tui::tabs::Tabs::focus`) that neither the registry nor
-  `park_mode` ever reads, not the model-facing `` agents `message `` tag, not a
-  `/resources` probe. A returning agent's `reply` cancels its proper
-  descendants and ends it even mid-conversation, regardless of which tab the
-  human's cursor sits on.
+  is a delivered message — a human's (`AgentRegistry::steer`) or the parent's
+  (`AgentRegistry::message`); nothing else does — not the TUI's `TAB` cursor,
+  a plain, presentation-only `AgentId` local to the frontend
+  (`tui::tabs::Tabs::focus`) that neither the registry nor `park_mode` ever
+  reads, not a `/resources` probe. A returning agent's `reply` cancels its
+  proper descendants and
+  parks it, regardless of which tab the human's cursor sits on.
 
 ## Cancellation cascades the subtree, across both layers
 
@@ -594,8 +595,9 @@ silently severed at this call site.
 `digest.rs` holds `clip` and the fixed per-section byte caps for what the
 *model* sees in history: each tool-result section has its own cap
 (`VALUE_CAP` 20 KiB, `STDOUT_CAP`/`STDERR_CAP` 10 KiB), alongside separate caps
-for opaque error blobs (`OPAQUE_CAP`), agent replies (`AGENT_REPLY_CAP`), and
-the history-compaction threshold. An oversize section keeps a head+tail digest
+for opaque error blobs (`OPAQUE_CAP`) and the history-compaction threshold; a
+child's reply is not clipped, since it reaches the parent as a value through
+`` agents `read `` rather than as text. An oversize section keeps a head+tail digest
 and elides the middle, with a banner nudging the model to scope the query at
 its source and re-read in slices — the same rendering the transcript records,
 so the user never sees more of a result than the model does. A structured

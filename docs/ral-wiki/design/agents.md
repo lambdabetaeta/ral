@@ -112,9 +112,11 @@ One call:
   over. The child runs off the parent's critical path — the one shape
   in-exchange concurrency cannot express, the parent exchange ending before
   the child does;
-- **delivers the child's single reply later** as a marked `Item` through the
-  parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names —
-  rendered to prose at the consuming edge.
+- **wakes the parent when the child replies** with a one-line notice through
+  the parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names.
+  The value itself stays on the child's registry entry until the parent
+  fetches it with `` agents `read <name> ``
+  ([[decisions/260826_reply-parks|reply-parks]]).
 
 The spawn's **`type`** field chooses the child's **model memory**, not its shell
 isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
@@ -209,8 +211,9 @@ standing defence, and the token stands behind it).
 **The child exists before the roster names it.** The listener acks only after
 `spawn()` has returned, and the desk registers the child only after reading the
 ack. There is no window in which a registered agent has no engine behind it —
-which is why the roster every tag answers carries no state column, and why
-`` agents `list `` reads as a fact rather than as an intent.
+which is why the roster's `state` column is derived from registry facts at
+listing time, and why `` agents `list `` reads as a fact rather than as an
+intent.
 
 A spawn that fails leaves nothing to reconcile. A desk that refuses never
 dials, so the builtin wakes its own listener thread rather than leave it in its
@@ -249,25 +252,27 @@ other's transport.
 
 ## Returning: the deliberate `reply`
 
-A returning agent hands back the argument of an explicit, hard-terminating
-**`reply`** call ([[map/exarch/builtins|builtins]]) — never a scrape of
-whatever prose ended the run
-([[decisions/260622_agent-reply-tool|agent-reply-tool]]). `reply` is the *sole*
-return path: a returning agent that finishes without it is re-nudged within
-budget, then **fails honestly** rather than handing up a trailing fragment that
-masquerades as the answer. `reply` hard-terminates the agent **regardless of
-focus** — the conversation ends out from under a human who had `TAB`bed to it,
-and focus falls back to its parent — though the run ends only once the
-enclosing `ral` call's batch finishes draining, never mid-batch. The payload is
-the faithful first-order ral value the model passed (`FOValue`), rendered at
-each consuming edge ([[map/exarch/shell-eval|shell-eval]]) — ral surface syntax
-for a model parent, ordinary JSON for the headless harness through the
-`user_json` projection
-([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]).
-Before the returning node disappears, `reply` cancels and reaps its proper
-descendants: a parent may choose to abandon unfinished children, but it cannot
-leave live agents registered beneath a settled node. This is not a `/clear`;
-unrelated siblings keep their generation and may still settle normally.
+A returning agent hands back the argument of an explicit **`` agents `reply ``**
+call ([[map/exarch/builtins|builtins]]) — never a scrape of whatever prose ended
+the run ([[decisions/260622_agent-reply-tool|agent-reply-tool]]). It is the
+*sole* return path: a returning agent that finishes without it is re-nudged
+within budget, then **fails honestly** rather than handing up a trailing
+fragment that masquerades as the answer. The payload is the faithful
+first-order ral value the model passed (`FOValue`): a headless trunk's goes to
+the harness as JSON through the `user_json` projection
+([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]);
+a child's is **deposited on its registry entry** and answered, as a value, to
+the parent's `` agents `read <name> ``
+([[decisions/260826_reply-parks|reply-parks]]). The parent learns of the
+reply from a one-line inbox notice, never the payload.
+
+A child's `reply` does not end it. Once the enclosing `ral` call's batch
+drains, the child cancels and reaps its proper descendants — a parent may
+abandon unfinished children, but never leave live agents registered beneath a
+node that has answered — and **parks**, waiting for a message under its idle
+lease. `` agents `message `` wakes it into a new exchange; a later `reply`
+overwrites the deposit and notifies again. Only a non-reply finish — failure,
+step cap, cancellation — settles the entry at once, with its one-line tag.
 
 ## Focus is presentation; the idle lease is lifecycle
 
@@ -277,13 +282,13 @@ tab lets it receive the human's typed lines and own `Esc`, but looking at a
 tab keeps nothing alive. What keeps a non-conversing returning child alive
 past quiescence is a renewable **idle lease** the registry arms at birth
 (`Registration::lease`, one hour), not the human's attention: the one thing
-that renews it is a delivered human message (`AgentRegistry::steer`), so a
-child a human is actually steering parks `Engaged` and keeps its lease fresh,
-while a lease that is never renewed fires at exactly its birth-seeded hour. A
-`/branch` child and the trunk carry no lease at all and so never idle-reap.
-Neither `TAB`, nor the model-facing `` agents `message `` tag, nor a
-`/resources` probe renews anything — enumeration and attention alone can
-never immortalise a child.
+that renews it is a delivered *message* — a human's typed line
+(`AgentRegistry::steer`) or the parent's `` agents `message `` — so a child
+that is being talked to, and a child parked on a deposited reply, keep their
+lease fresh, while a lease that is never renewed fires at exactly its
+birth-seeded hour. A `/branch` child and the trunk carry no lease at all and
+so never idle-reap. Neither `TAB` nor a `/resources` probe renews anything —
+enumeration and attention alone can never immortalise a child.
 
 A leased child that is parked waiting for input and has sat idle for five
 minutes demotes out of the `TAB` cycle and the tab bar into a compact matrix
@@ -316,9 +321,9 @@ per-agent idle-lease reaper, and `/clear`. They share one registry cascade — t
 registry is the spawn *tree* (`AgentRegistry::Entry` carries the `parent` link), so
 terminating a mid-tree agent reaps everything below it; `/clear` additionally bumps
 the generation, dropping a late result or deferred surface batch from a cleared
-generation. A settling `reply` still cancels only the returning node's proper
-descendants — a parent may abandon unfinished children, but never leave live agents
-registered beneath a settled node. This refines
+generation. A `reply` still cancels only the replier's proper descendants — a
+parent may abandon unfinished children, but never leave live agents registered
+beneath a node that has answered. This refines
 [[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]: the per-focus cancel
 token now interrupts one exchange in place, while the subtree cascade is the
 terminators' alone.

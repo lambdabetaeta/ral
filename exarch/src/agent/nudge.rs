@@ -37,13 +37,11 @@ fn wrap_reminder(body: &str) -> String {
 /// Assembled by `take_up` in `agent/attend.rs`.
 pub(crate) struct NudgeCtx {
     /// True for an agent that returns through `reply` — a peer or a headless
-    /// root, never the interactive root, and suppressed while children are live.
+    /// root, never the interactive root.  Only shapes what the reply reminder
+    /// says; `quiet` alone decides whether it fires at all.
     pub must_reply: bool,
     /// One-line digest of the whole pin register, `None` when nothing is pinned.
     pub pinned: Option<String>,
-    /// True while live descendants may still deliver the next actionable fact:
-    /// the pin register stays live, but its reminders wait for them to settle.
-    pub waiting_on_children: bool,
     /// True for the headless root (`parent.is_none() && !interactive`), whose
     /// `reply` reaches an external caller with no parent left to push back on it.
     pub is_headless_root: bool,
@@ -52,6 +50,11 @@ pub(crate) struct NudgeCtx {
     /// one excursion draws one reminder.  The attend loop owns the latch;
     /// this module only ever reports what it was handed.
     pub pressure: Option<String>,
+    /// Nothing else is already carrying this agent forward: no reply standing
+    /// for a parent to fetch, no detached shell work, no busy children.  The
+    /// one gate every nudge kind shares — `false` and `react` returns `None`
+    /// unspent, budget untouched.
+    pub quiet: bool,
 }
 
 /// Per-session nudge state; [`Self::react`] is the only post-attempt entry point.
@@ -105,6 +108,9 @@ impl Registry {
             }
             return None;
         }
+        if !ctx.quiet {
+            return None;
+        }
         let Some((cause, message)) = RULES.iter().find_map(|&r| r(attempt)) else {
             // Only a clean completion reaches the nudges below; anything else that
             // no rule claimed — an unclassified provider error, a `Cancelled` or
@@ -135,24 +141,19 @@ impl Registry {
             }
             // Anything pinned keeps the agent restless on every clean completion,
             // budget-free; an empty register gets a throttled suggestion instead.
-            if !ctx.waiting_on_children {
-                if let Some(pinned) = ctx.pinned.as_deref() {
-                    record_nudge(log, self.used, "pinned-state reminder".into());
-                    parts.push(format!("There is pinned state: {pinned}"));
-                } else if self.exchanges_since_no_pins_reminder >= REMIND_EVERY {
-                    self.exchanges_since_no_pins_reminder = 0;
-                    record_nudge(log, self.used, "no-pins reminder".into());
-                    parts.push(
-                        "Nothing is pinned — consider calling `set-goal` to remember what you are \
-                         working on, or tracking some tasks with `add-task`."
-                            .to_string(),
-                    );
-                }
+            if let Some(pinned) = ctx.pinned.as_deref() {
+                record_nudge(log, self.used, "pinned-state reminder".into());
+                parts.push(format!("There is pinned state: {pinned}"));
+            } else if self.exchanges_since_no_pins_reminder >= REMIND_EVERY {
+                self.exchanges_since_no_pins_reminder = 0;
+                record_nudge(log, self.used, "no-pins reminder".into());
+                parts.push(
+                    "Nothing is pinned — consider calling `set-goal` to remember what you are \
+                     working on, or tracking some tasks with `add-task`."
+                        .to_string(),
+                );
             }
-            // Context pressure is about this agent's own history, not the
-            // fleet, so it composes whether or not children are still live —
-            // unlike the pin reminders above, it is never gated on
-            // `waiting_on_children`.
+            // Context pressure is about this agent's own history alone.
             if let Some(detail) = &ctx.pressure {
                 record_nudge(log, self.used, "context pressure".into());
                 parts.push(format!("Context pressure: {detail}. {PRESSURE_MESSAGE}"));
@@ -271,7 +272,7 @@ mod tests {
             must_reply: false,
             is_headless_root: false,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         assert!(
@@ -298,7 +299,7 @@ mod tests {
             must_reply: false,
             is_headless_root: false,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         for _ in 0..=BUDGET {
@@ -320,7 +321,7 @@ mod tests {
                 must_reply: false,
                 is_headless_root: false,
                 pinned: None,
-                waiting_on_children: false,
+                quiet: true,
                 pressure: None,
             },
             &mut log,
@@ -343,7 +344,7 @@ mod tests {
                         must_reply: false,
                         is_headless_root: false,
                         pinned: None,
-                        waiting_on_children: false,
+                        quiet: true,
                         pressure: None,
                     },
                     &mut log,
@@ -358,7 +359,7 @@ mod tests {
                     must_reply: false,
                     is_headless_root: false,
                     pinned: None,
-                    waiting_on_children: false,
+                    quiet: true,
                     pressure: None,
                 },
                 &mut log,
@@ -378,7 +379,7 @@ mod tests {
             must_reply: true,
             is_headless_root: false,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         for _ in 0..BUDGET {
@@ -422,7 +423,7 @@ mod tests {
                     must_reply: false,
                     is_headless_root: false,
                     pinned: None,
-                    waiting_on_children: false,
+                    quiet: true,
                     pressure: None,
                 },
                 &mut log,
@@ -440,7 +441,7 @@ mod tests {
             must_reply: true,
             is_headless_root: true,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         let msg = reg
@@ -466,7 +467,7 @@ mod tests {
             must_reply: true,
             is_headless_root: true,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         assert!(
@@ -508,7 +509,7 @@ mod tests {
                     must_reply: true,
                     is_headless_root: false,
                     pinned: None,
-                    waiting_on_children: false,
+                    quiet: true,
                     pressure: None,
                 },
                 &mut log,
@@ -528,7 +529,7 @@ mod tests {
             must_reply: false,
             is_headless_root: false,
             pinned: Some("tasks 3/8".into()),
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         for _ in 0..3 {
@@ -544,8 +545,8 @@ mod tests {
         assert_eq!(reg.used, 0, "pinned-state nudges are budget-free");
     }
 
-    /// A live child *is* the next action, so the pin stays live but its reminder
-    /// waits for the child to settle.
+    /// A live child *is* the next action, so every nudge — the pin reminder
+    /// included — waits for it to settle rather than pile on.
     #[test]
     fn pinned_state_waits_while_children_live() {
         let mut reg = Registry::new();
@@ -559,7 +560,7 @@ mod tests {
                     must_reply: false,
                     is_headless_root: false,
                     pinned: Some("tasks 3/8".into()),
-                    waiting_on_children: true,
+                    quiet: false,
                     pressure: None,
                 },
                 &mut log,
@@ -580,7 +581,7 @@ mod tests {
             must_reply: true,
             is_headless_root: false,
             pinned: Some("tasks 3/8".into()),
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         let msg = reg
@@ -611,7 +612,7 @@ mod tests {
             must_reply: false,
             is_headless_root: false,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: Some("400 of 500 tokens".into()),
         };
         let msg = reg
@@ -641,7 +642,7 @@ mod tests {
             must_reply: true,
             is_headless_root: false,
             pinned: Some("tasks 3/8".into()),
-            waiting_on_children: false,
+            quiet: true,
             pressure: Some("400 of 500 tokens".into()),
         };
         let msg = reg
@@ -657,32 +658,29 @@ mod tests {
         assert_eq!(reg.used, 1, "only the reply half spends budget");
     }
 
-    /// A live child suppresses the pin reminder but not the pressure gauge:
-    /// this agent's own context is not the fleet's business to wait on.
+    /// `quiet` is the one gate every nudge kind shares: a live child suppresses
+    /// the pressure gauge exactly as it suppresses the pin reminder.
     #[test]
-    fn pressure_fires_even_while_waiting_on_children() {
+    fn pressure_waits_while_children_live_too() {
         let mut reg = Registry::new();
         let mut log = fresh_log();
         let ctx = NudgeCtx {
             must_reply: false,
             is_headless_root: false,
             pinned: Some("tasks 3/8".into()),
-            waiting_on_children: true,
+            quiet: false,
             pressure: Some("400 of 500 tokens".into()),
         };
-        let msg = reg
-            .react(
+        assert!(
+            reg.react(
                 &Ok(deliberate::Outcome::Complete(
                     "waiting on a descendant".into(),
                 )),
                 &ctx,
                 &mut log,
             )
-            .expect("pressure must nudge even while children are live");
-        assert!(msg.contains("400 of 500 tokens"), "{msg}");
-        assert!(
-            !msg.contains("There is pinned state"),
-            "the pin reminder itself still waits for the children: {msg}"
+            .is_none(),
+            "not quiet: nothing nudges, pressure included"
         );
     }
 
@@ -696,7 +694,7 @@ mod tests {
             must_reply: false,
             is_headless_root: false,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: Some("400 of 500 tokens".into()),
         };
         assert!(
@@ -720,7 +718,7 @@ mod tests {
             must_reply: false,
             is_headless_root: false,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx(), &mut log);
@@ -737,7 +735,7 @@ mod tests {
             must_reply: false,
             is_headless_root: false,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         let _ = reg.react(&Ok(deliberate::Outcome::Empty), &ctx, &mut log);
@@ -762,7 +760,7 @@ mod tests {
             must_reply: false,
             is_headless_root: false,
             pinned: None,
-            waiting_on_children: false,
+            quiet: true,
             pressure: None,
         };
         let mut fires = 0;

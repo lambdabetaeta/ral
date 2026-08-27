@@ -94,18 +94,25 @@ pub(crate) struct Grants {
 /// prompt-only; the desk remains the runtime authority, this spares the model
 /// a step finding out. The schedule family is still taught by the persona;
 /// moving that prose here is one `Some`.
+///
+/// `agents` is one builtin covering two grants that do not coincide: `start`
+/// needs spawn fuel, but `reply`/`read` need only `returns` — a leaf agent
+/// with no fuel left still holds `reply`. So the verb name is withheld only
+/// when *neither* grant holds, while the two prompt sections that teach it
+/// each gate on their own grant alone.
 type Section = Option<(&'static str, &'static str)>;
-fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 3] {
+fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 4] {
     [
         (g.allow_schedule, &["schedules"], None),
+        (g.spawns || g.returns, &["agents"], None),
         (
             g.spawns,
-            &["agents"],
+            &[],
             Some(("Agents", include_str!("../data/agents.md"))),
         ),
         (
             g.returns,
-            &["reply"],
+            &[],
             Some(("Reply", include_str!("../data/reply.md"))),
         ),
     ]
@@ -425,28 +432,46 @@ mod tests {
     }
 
     #[test]
-    fn builtin_index_lists_reply_and_schedule_family_when_both_bits_hold() {
+    fn builtin_index_lists_agents_and_schedule_family_when_both_bits_hold() {
         let index = index_for(&Grants {
             returns: true,
             allow_schedule: true,
             spawns: true,
         });
         let n = names(&index);
-        assert!(n.contains("reply"));
+        assert!(n.contains("agents"));
         assert!(n.contains("schedules"));
     }
 
-    /// Non-returning: the interactive trunk and every `/branch` child.
+    /// Zero spawn fuel narrows what `agents `start` can do, never whether the
+    /// name is offered at all: a fuelless returning agent still needs `agents
+    /// `reply` to hand back its value.
     #[test]
-    fn builtin_index_omits_reply_for_a_non_returning_agent() {
+    fn builtin_index_holds_agents_verb_for_a_fuelless_returning_agent() {
         let index = index_for(&Grants {
-            returns: false,
+            returns: true,
             allow_schedule: true,
-            spawns: true,
+            spawns: false,
         });
         let n = names(&index);
         assert!(
-            !n.contains("reply"),
+            n.contains("agents"),
+            "a returning agent still holds `agents `reply` with no spawn fuel left"
+        );
+    }
+
+    /// Non-returning, no fuel: the interactive trunk and every `/branch`
+    /// child, once run to zero depth.
+    #[test]
+    fn builtin_index_omits_agents_verb_when_neither_spawns_nor_returns() {
+        let index = index_for(&Grants {
+            returns: false,
+            allow_schedule: true,
+            spawns: false,
+        });
+        let n = names(&index);
+        assert!(
+            !n.contains("agents"),
             "must not advertise a verb the desk always refuses"
         );
         assert!(
@@ -464,18 +489,29 @@ mod tests {
         });
         let n = names(&index);
         assert!(!n.contains("schedules"));
-        assert!(n.contains("reply"), "a returning agent still holds `reply`");
+        assert!(
+            n.contains("agents"),
+            "a returning agent still holds `agents`"
+        );
     }
 
+    /// The two family sections gate independently: `Agents` on spawn fuel,
+    /// `Reply` on `returns` — a fuelless returning agent gets the latter and
+    /// not the former.
     #[test]
-    fn builtin_index_omits_spawn_family_for_a_fuelless_agent() {
-        let index = index_for(&Grants {
-            returns: true,
-            allow_schedule: true,
-            spawns: false,
-        });
-        let n = names(&index);
-        assert!(!n.contains("agents"));
+    fn builtin_index_apply_gates_agents_and_reply_sections_independently() {
+        let shell = crate::bootstrap::boot_shell();
+        let index = BuiltinIndex::resolve(&shell);
+        let resolved = index.apply(
+            BUILTIN_INDEX_PLACEHOLDER,
+            &Grants {
+                returns: true,
+                allow_schedule: false,
+                spawns: false,
+            },
+        );
+        assert!(!resolved.contains("# Agents"));
+        assert!(resolved.contains("# Reply"));
     }
 
     #[test]
