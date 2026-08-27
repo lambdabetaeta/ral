@@ -2,14 +2,14 @@
 //! the session's live shell, synchronously on the dispatching thread.  Input
 //! that does not parse never reaches the session; it becomes an error block.
 
-use crate::agent::Agent;
+use crate::agent::Avatar;
 use crate::agent::event::ToolResult as SessionToolResult;
 use crate::bus::Emitter;
 use crate::record::{BlockId, Display};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
-/// The name on the wire; `Agent::invoke` recognises no other.
+/// The name on the wire; `Avatar::invoke` recognises no other.
 pub(crate) const NAME: &str = "ral";
 
 const DESC: &str = "Run a ral shell command in the sandboxed working directory.";
@@ -120,7 +120,7 @@ pub(crate) fn wire_tool() -> genai::chat::Tool {
 pub(crate) const INVALID_INPUT: &str = "<invalid input>";
 
 /// Rail header and error block for a malformed call, and the result to commit.
-fn invalid_input(id: String, reason: &str, session: &Agent) -> SessionToolResult {
+fn invalid_input(id: String, reason: &str, session: &Avatar) -> SessionToolResult {
     let call = record_call(session, INVALID_INPUT.to_string(), None);
     let msg = format!("tool input error: {reason}\nexpected an object matching the tool's schema");
     record_result(session, &msg, call);
@@ -131,7 +131,7 @@ fn invalid_input(id: String, reason: &str, session: &Agent) -> SessionToolResult
 /// [`BlockId`] so the paired result can address it directly — the mechanism
 /// that retires the view's tail-walk.  A failed append surfaces as an error
 /// row; the paired result is then simply not recorded, having no target.
-fn record_call(session: &Agent, cmd: String, summary: Option<String>) -> Option<BlockId> {
+fn record_call(session: &Avatar, cmd: String, summary: Option<String>) -> Option<BlockId> {
     match session.recorder().emit(Display::ToolCall {
         tool: NAME.to_string(),
         cmd,
@@ -147,7 +147,7 @@ fn record_call(session: &Agent, cmd: String, summary: Option<String>) -> Option<
 
 /// The paired half: the byte-identical result string, addressed at the call
 /// commit it answers.
-fn record_result(session: &Agent, content: &str, call: Option<BlockId>) {
+fn record_result(session: &Avatar, content: &str, call: Option<BlockId>) {
     let Some(call) = call else { return };
     if let Err(error) = session.recorder().emit(Display::Result {
         text: content.to_string(),
@@ -162,7 +162,7 @@ fn record_result(session: &Agent, content: &str, call: Option<BlockId>) {
 pub(crate) fn dispatch(
     id: String,
     input: &Value,
-    session: &mut Agent,
+    session: &mut Avatar,
     emit: &Emitter,
 ) -> SessionToolResult {
     let args = match parse_args(input) {

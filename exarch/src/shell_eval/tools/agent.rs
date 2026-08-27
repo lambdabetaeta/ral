@@ -1,9 +1,9 @@
 //! The fork-detach-register spine behind `/branch` and the desk's
 //! `` agents `start ``.  Every spawn is launch-only: the child runs the same
-//! [`Agent::attend`] loop on a detached thread; a reply notice reaches the
+//! [`Avatar::attend`] loop on a detached thread; a reply notice reaches the
 //! parent's inbox when the child replies, a non-reply end when it quiesces.
 
-use crate::agent::Agent;
+use crate::agent::Avatar;
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, Mailbox, Post};
 use crate::fleet::registry::{AgentRegistry, RegisterError, Registration};
 use crate::record::Transient;
@@ -22,7 +22,7 @@ static DISPATCH_SEQ: AtomicU64 = AtomicU64::new(1);
 /// than seeding a first exchange — the fork *is* the whole of the command, and
 /// what to say next is said to the new tab.
 pub(crate) fn spawn_branch(
-    session: &Agent,
+    session: &Avatar,
     name: Option<&str>,
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
@@ -44,7 +44,7 @@ pub(crate) fn spawn_branch(
     let spec = AsyncSpawn { name, prompt: None };
     spawn_async(
         &session.agents,
-        session.id,
+        session.agent.id,
         session.mailbox(),
         child,
         spec,
@@ -86,13 +86,13 @@ pub(crate) fn spawn_async(
     registry: &AgentRegistry,
     parent: AgentId,
     parent_mailbox: Mailbox,
-    mut child: Agent,
+    mut child: Avatar,
     spec: AsyncSpawn,
     emit: &Emitter,
 ) -> Result<SpawnedChild, String> {
     let AsyncSpawn { name, prompt } = spec;
     // Everything below is taken off `child` before it moves into the worker.
-    let agent_id = child.id;
+    let agent_id = child.agent.id;
     let log_dir = child.log_dir();
     let cancel = child.cancel_token().clone();
     // Registered so a terminate-class cancel can unwind a `ral` eval already in

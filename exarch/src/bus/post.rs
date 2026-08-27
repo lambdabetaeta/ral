@@ -250,7 +250,7 @@ pub(crate) enum Item {
     /// `agent::attend::announce` decodes `values` into the *root* viewport
     /// exactly as a live tool run would; [`Self::text`] wakes the model.
     Surface {
-        /// The stamped session id.  `Agent::admits` asserts it matches the
+        /// The stamped session id.  `Avatar::admits` asserts it matches the
         /// draining session's, so a misrouted batch trips there rather than
         /// rendering silently into the wrong viewport.
         id: AgentId,

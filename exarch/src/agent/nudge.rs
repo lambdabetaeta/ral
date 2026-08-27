@@ -5,7 +5,7 @@
 //! the outcome is the attend loop's own step, taken before this one.
 //!
 //! The registry is per-session because the attend loop runs one
-//! `Agent::deliberate` per inbox item, not one per exchange, so this state must
+//! `Avatar::deliberate` per inbox item, not one per exchange, so this state must
 //! outlive a single deliberation.  `Registry::reset` clears it at a genuine
 //! exchange boundary, never on a self-nudge.
 

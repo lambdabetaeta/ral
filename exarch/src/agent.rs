@@ -10,6 +10,12 @@
 //! `interactive`.  A child's result is posted up its parent's mailbox by the
 //! spawn site, not by the loop, so the loop is identical for all.
 //!
+//! Two types, split along who may touch what.  [`Agent`] is the public half —
+//! identity and immutable config — held behind an `Arc` so the fleet can share
+//! it.  [`Avatar`] is the private half — the log, the seat, the inbox, and
+//! every other field only the attend thread touches — plus the `Arc<Agent>`
+//! it embodies; every method that runs the agent takes `&mut Avatar`.
+//!
 //! This file holds the state; the machinery lives in [`build`], [`attend`],
 //! [`deliberate`], [`shell`], and [`probe`], which reach these private fields
 //! directly rather than through accessors.
@@ -45,9 +51,14 @@ use crate::shell_eval;
 use ral_core::serial::FOValue;
 use std::sync::{Arc, Mutex};
 
+/// What the fleet knows an agent as.
+///
+/// Identity and the config fixed at construction, never touched again.  Held
+/// by its [`Avatar`] behind an `Arc`, and — still, in this step — copied into
+/// the fleet's [`Registration`](crate::fleet::registry::Registration) by id.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, search, disk_warn_latched, context_warn_latched); not a candidate for a combined enum"
+    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, search); not a candidate for a combined enum"
 )]
 pub struct Agent {
     pub id: AgentId,
@@ -60,14 +71,6 @@ pub struct Agent {
     /// The fleet-shared builtin index, resolved once at the trunk, so a fork
     /// resolving its own prompt never needs a live [`Shell`](ral_core::Shell).
     index: Arc<crate::prompt::BuiltinIndex>,
-    /// Under its own lock so a per-call desk can capture it off `&mut Agent`.
-    /// [`LogCell::lock`] panics on contention rather than blocking — the desk
-    /// runs only while the attend thread is parked in `run_shell`.
-    log: LogCell,
-    _run_lock: Option<crate::bootstrap::RunLock>,
-    resume_summary: Option<(u64, u64)>,
-    /// Every engine-side reach goes through this seat's methods.
-    pub(crate) seat: Seat,
     caps: ral_core::types::Capabilities,
     /// `None` for the trunk.  Read with `interactive` wherever position
     /// matters, in place of an `is_root` branch.
@@ -82,21 +85,13 @@ pub struct Agent {
     /// Whether a human is attached (the TUI).  With no parent it makes the
     /// trunk converse rather than run one-shot and headless.  Inherited.
     interactive: bool,
-    /// Self-nudges and armed wakeups land here; a child's result lands in its
-    /// *parent's*, never reaching across into a sibling's.
-    inbox: Inbox,
-    /// Its latches reset on a genuine exchange-boundary item, never on a
-    /// self-nudge, so a nudge sequence runs to completion within one exchange.
-    /// `None` for a toolless (`--chat`) trunk: every nudge steers an agent
-    /// toward a tool it does not hold, so such a turn is only ever reported.
-    nudges: Option<nudge::Registry>,
     /// One sticky token for this agent's life, registered in the fleet so the
     /// subtree cascade reaches the live exchange.  The attend loop
     /// [`reset`](cancel::Token::reset)s it at each exchange boundary so an Esc
     /// never bleeds into the next; the trunk also [`publish`](cancel::publish)es
     /// it for OS signals.
     cancel: cancel::Token,
-    /// `provider.complete` (advertisement) and [`Self::invoke`] (dispatch)
+    /// `provider.complete` (advertisement) and [`Avatar::invoke`] (dispatch)
     /// read this one bit, so they cannot disagree about whether the `ral` call
     /// they are handling was ever invited.
     tool_enabled: bool,
@@ -108,9 +103,50 @@ pub struct Agent {
     /// prompt's builtin index read this same bit.
     returns: bool,
     /// Whether this agent holds the self-wakeup family.  `pub(crate)` so the
-    /// schedule harness test can grant it on a [`Self::for_test`] trunk, which
-    /// hardcodes it `false`.
+    /// schedule harness test can grant it on a [`Avatar::for_test`] trunk,
+    /// which hardcodes it `false`.
     pub(crate) allow_schedule: bool,
+    /// The operator's ceiling, shared verbatim by every fork — a host setting.
+    /// `None` means [`Avatar::check_disk_warn`] never walks the dirs at all.
+    disk_warn_bytes: Option<u64>,
+    /// The IT-set network policy and its audit ledger — shared verbatim by
+    /// every fork, like [`Self::disk_warn_bytes`].
+    egress: crate::egress::Egress,
+    /// The dial-side capability a wire trunk's `` agents `start `` reaches its
+    /// helpers through; `None` on every identity trunk. Shared verbatim by
+    /// every fork, so a wire child's own `agent` call dials through the same
+    /// seam its parent did.
+    dial: Option<Arc<dyn Dial>>,
+}
+
+/// An agent's embodiment in this process: the thread that thinks and acts
+/// for it, owning everything only it touches, so every method is plain
+/// `&mut self`.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool gates an independent, orthogonal axis (disk_warn_latched, context_warn_latched); not a candidate for a combined enum"
+)]
+pub struct Avatar {
+    /// The public half this avatar embodies — readable crate-wide, so a
+    /// caller outside the `agent` module reaches identity and config at
+    /// `.agent.…` rather than through a delegator for every field.
+    pub(crate) agent: Arc<Agent>,
+    /// Under its own lock so a per-call desk can capture it off `&mut Avatar`.
+    /// [`LogCell::lock`] panics on contention rather than blocking — the desk
+    /// runs only while the attend thread is parked in `run_shell`.
+    log: LogCell,
+    _run_lock: Option<crate::bootstrap::RunLock>,
+    resume_summary: Option<(u64, u64)>,
+    /// Every engine-side reach goes through this seat's methods.
+    pub(crate) seat: Seat,
+    /// Self-nudges and armed wakeups land here; a child's result lands in its
+    /// *parent's*, never reaching across into a sibling's.
+    inbox: Inbox,
+    /// Its latches reset on a genuine exchange-boundary item, never on a
+    /// self-nudge, so a nudge sequence runs to completion within one exchange.
+    /// `None` for a toolless (`--chat`) trunk: every nudge steers an agent
+    /// toward a tool it does not hold, so such a turn is only ever reported.
+    nudges: Option<nudge::Registry>,
     /// The staged return value, harvested by [`Self::run_shell`] from that
     /// call's [`ReplyCell`] as the desk retires, then lifted into a
     /// [`deliberate::Outcome::Replied`] only once the tool-call batch drains,
@@ -139,9 +175,6 @@ pub struct Agent {
     /// binding-lease ledger, and [`Self::check_disk_warn`] all read it.  Never
     /// rewound, not even by `/clear`.
     ral_epoch: u64,
-    /// The operator's ceiling, shared verbatim by every fork — a host setting.
-    /// `None` means [`Self::check_disk_warn`] never walks the dirs at all.
-    disk_warn_bytes: Option<u64>,
     /// The [`Self::ral_epoch`] at which the next disk walk falls due, so the
     /// walk amortizes over ral calls rather than over ready boundaries.
     disk_check_epoch: u64,
@@ -153,32 +186,6 @@ pub struct Agent {
     /// rather than on every clean completion.  Re-armed in `context_pressure`
     /// after the measure falls back under the line.
     context_warn_latched: bool,
-    /// The IT-set network policy and its audit ledger — shared verbatim by
-    /// every fork, like [`Self::disk_warn_bytes`].
-    egress: crate::egress::Egress,
-    /// The dial-side capability a wire trunk's `` agents `start `` reaches its
-    /// helpers through; `None` on every identity trunk. Shared verbatim by
-    /// every fork, so a wire child's own `agent` call dials through the same
-    /// seam its parent did.
-    dial: Option<Arc<dyn Dial>>,
-}
-
-impl Agent {
-    pub(crate) fn measured_input(&self) -> Option<u64> {
-        let (tokens, measured_at) = self.last_input;
-        (!self.log.lock().token_measure_is_stale(measured_at)).then_some(tokens)
-    }
-
-    pub(crate) fn token_compaction_due(&self, window: u64) -> bool {
-        self.measured_input()
-            .is_some_and(|tokens| crate::agent::digest::compaction_due(tokens, window))
-    }
-
-    pub(crate) fn token_pressure(&self, window: u64) -> Option<String> {
-        self.measured_input()
-            .filter(|tokens| crate::agent::digest::pressure_due(*tokens, window))
-            .map(|tokens| format!("{tokens} of {window} tokens"))
-    }
 }
 
 /// The depth budget exarch's trunks start with.
@@ -231,6 +238,76 @@ impl Agent {
         self.provider.current()
     }
 
+    /// The spawn site registers a peer's in the parent's registry.
+    pub(crate) fn cancel_token(&self) -> &cancel::Token {
+        &self.cancel
+    }
+
+    pub(crate) fn returns(&self) -> bool {
+        self.returns
+    }
+
+    /// Production spawns read the private field directly or narrow the desk's
+    /// captured snapshot ([`crate::policy::narrow`]); this is test-only.
+    #[cfg(test)]
+    pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
+        &self.caps
+    }
+}
+
+impl Avatar {
+    pub(crate) fn measured_input(&self) -> Option<u64> {
+        let (tokens, measured_at) = self.last_input;
+        (!self.log.lock().token_measure_is_stale(measured_at)).then_some(tokens)
+    }
+
+    pub(crate) fn token_compaction_due(&self, window: u64) -> bool {
+        self.measured_input()
+            .is_some_and(|tokens| crate::agent::digest::compaction_due(tokens, window))
+    }
+
+    pub(crate) fn token_pressure(&self, window: u64) -> Option<String> {
+        self.measured_input()
+            .filter(|tokens| crate::agent::digest::pressure_due(*tokens, window))
+            .map(|tokens| format!("{tokens} of {window} tokens"))
+    }
+
+    /// Test-only escape hatch for scenarios that must poke the public half
+    /// directly rather than through `` `model ``/`` `clear ``-style surface —
+    /// the avatar is the sole owner of its `Arc<Agent>` in this step, so the
+    /// unwrap here can never fail.
+    #[cfg(test)]
+    pub(crate) fn agent_mut(&mut self) -> &mut Agent {
+        Arc::get_mut(&mut self.agent).expect("avatar holds the only strong reference to its agent")
+    }
+
+    /// This agent's wire identity — the public half's `id`, reachable without
+    /// the `agent` field's crate-only visibility.
+    pub fn id(&self) -> AgentId {
+        self.agent.id
+    }
+
+    pub(crate) fn provider_handle(&self) -> ProviderHandle {
+        self.agent.provider_handle()
+    }
+
+    pub(crate) fn current_provider(&self) -> Arc<Provider> {
+        self.agent.current_provider()
+    }
+
+    pub(crate) fn cancel_token(&self) -> &cancel::Token {
+        self.agent.cancel_token()
+    }
+
+    pub(crate) fn returns(&self) -> bool {
+        self.agent.returns()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
+        self.agent.caps()
+    }
+
     /// Where this agent's own session log is written — `record.jsonl` and its
     /// siblings sit directly inside.
     pub fn log_dir(&self) -> std::path::PathBuf {
@@ -257,11 +334,6 @@ impl Agent {
         self.inbox.clone()
     }
 
-    /// The spawn site registers a peer's in the parent's [`Self::agents`].
-    pub(crate) fn cancel_token(&self) -> &cancel::Token {
-        &self.cancel
-    }
-
     /// Every deliberation must hand the session back at a ready boundary.
     ///
     /// # Panics
@@ -286,10 +358,6 @@ impl Agent {
         self.log.lock().history_bytes()
     }
 
-    pub(crate) fn returns(&self) -> bool {
-        self.returns
-    }
-
     /// The *live* directory, probed so a prior `cd` shows — not the seat's own
     /// `cwd`, which only reseeds the shell on `/clear`.  [`Self::host_services`]
     /// wants the live one so a desk-spawned child starts where the model is.
@@ -301,13 +369,6 @@ impl Agent {
             Ok(FOValue::String { value }) => std::path::PathBuf::from(value),
             other => unreachable!("`cwd probe always answers a String, got {other:?}"),
         }
-    }
-
-    /// Production spawns read the private field directly or narrow the desk's
-    /// captured snapshot ([`crate::policy::narrow`]); this is test-only.
-    #[cfg(test)]
-    pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
-        &self.caps
     }
 
     /// For a test polling an async spawn's settle without a full deliberation.

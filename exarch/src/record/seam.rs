@@ -91,7 +91,7 @@ impl Emitter {
     /// today's one caller — as a [`Transient::Fault`] instead of the record
     /// it could not become: the log itself is what just failed, so the
     /// failure cannot go through it.  Also prints to stderr, mirroring
-    /// `Agent::note_error`'s own last-resort fallback, so an unwritable log
+    /// `Avatar::note_error`'s own last-resort fallback, so an unwritable log
     /// never loses the diagnostic outright even before a printer draws the
     /// chrome lane it lands in.
     pub fn report_fault(&self, error: &io::Error) {

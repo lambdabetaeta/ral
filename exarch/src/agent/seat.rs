@@ -24,7 +24,7 @@ pub(crate) enum Seat {
         interrupt_target: InterruptTarget,
     },
     /// Out-of-process, one engine per session, holding nothing per call: a
-    /// wire run's desk and applier ride `Agent::run_shell`'s arguments into
+    /// wire run's desk and applier ride `Avatar::run_shell`'s arguments into
     /// the drain loop's enquiry arm, the real scratch lives in the guest,
     /// and forks are refused at the desk for fuel 0, so no fork door either.
     Wire {
@@ -40,7 +40,7 @@ pub(crate) struct RunInstall {
     pub(crate) fork: ral_core::types::Fork,
 }
 
-/// Retires the install on *every* exit, including a panic `Agent::attend`
+/// Retires the install on *every* exit, including a panic `Avatar::attend`
 /// recovers from — straight-line teardown would leave the desk's whole
 /// capture installed for the rest of the session.
 pub(crate) struct RunGuard<'s>(&'s Seat);
@@ -113,7 +113,7 @@ impl Seat {
     }
 
     /// Identity-only: the test suite's state-inspection door and
-    /// `Agent::fork_with`'s [`Shell::fork_session`] reach.
+    /// `Avatar::fork_with`'s [`Shell::fork_session`] reach.
     pub(crate) fn shell_mut(&self) -> std::sync::MutexGuard<'_, ral_core::transport::EngineInner> {
         match self {
             Self::Identity { transport, .. } => transport.shell_mut(),
@@ -343,7 +343,7 @@ mod tests {
         (Seat::wire(transport, dir.clone(), dir), child)
     }
 
-    /// The wire seat's own shape as `Agent::host_services` builds it:
+    /// The wire seat's own shape as `Avatar::host_services` builds it:
     /// fresh registry, no scratch.
     fn wire_host_services(emit: &Emitter, registry: &AgentRegistry) -> HostServices {
         HostServices {
@@ -419,7 +419,7 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// The binding is production's exactly: `Agent::run_shell` hands its
+    /// The binding is production's exactly: `Avatar::run_shell` hands its
     /// desk straight to `shell_eval::run_shell`'s closure, not to the seat.
     #[test]
     fn wire_seat_enquiry_is_answered_through_the_drain_loop() {

@@ -260,7 +260,7 @@ pub struct AgentLog {
     model_memo: Memo,
     /// The one seam: every fact this log authors crosses here as a `Record` —
     /// appended to `sessions/<n>/record.jsonl` and published on whatever bus
-    /// `Agent::couple` has attached, in that order, under one lock.
+    /// `Avatar::couple` has attached, in that order, under one lock.
     seam: crate::record::Emitter,
 }
 
@@ -542,7 +542,7 @@ impl AgentLog {
     }
 
     /// Approximate context size in serialised model-view bytes.  The fallback
-    /// compaction trigger in [`crate::agent::Agent::compact`] when the model's
+    /// compaction trigger in [`crate::agent::Avatar::compact`] when the model's
     /// context window is unknown; otherwise that tracks token pressure instead.
     pub fn history_bytes(&self) -> usize {
         self.model_memo.history_bytes()

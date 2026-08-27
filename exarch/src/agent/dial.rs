@@ -1,6 +1,6 @@
 //! The desk's dial-side capability: [`crate::agent::RootConfig::dial`] plumbs
 //! one in, `None` for every identity trunk. A wire trunk with spawn fuel and
-//! no dialler is refused at [`crate::agent::Agent::root`] with a sentence —
+//! no dialler is refused at [`crate::agent::Avatar::root`] with a sentence —
 //! never a runtime surprise reached only once a model calls `agent`.
 //!
 //! The desk cannot depend on `vm_manager` — this trait is the seam instead:

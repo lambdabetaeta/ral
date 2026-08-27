@@ -1,14 +1,14 @@
 //! The exarch enquiry desk: the host half of `shell.enquire(class)`.
 //!
-//! [`HostServices`] is all `&Agent` can lend a handler without lending
-//! `&mut Agent`/`&mut Shell`, since the reentrancy law bars a handler from
+//! [`HostServices`] is all `&Avatar` can lend a handler without lending
+//! `&mut Avatar`/`&mut Shell`, since the reentrancy law bars a handler from
 //! taking the session lock. [`ExarchDesk`] answers one enquiry against that
 //! capture, paired with its [`SurfaceApplier`] in one [`HostSeam`];
 //! [`DeskBinding`] wraps the seam for the identity transport, where a
 //! handler's chrome would otherwise outrun the run's earlier surface output.
 
 use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
-use crate::agent::{Agent, Build, LogCell, ProviderHandle, ReplyCell};
+use crate::agent::{Avatar, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Mailbox};
 use crate::egress;
 use crate::fleet::registry::{AgentRegistry, MessageError, NotADescendant, check_name};
@@ -200,8 +200,8 @@ impl ActFragment {
     }
 }
 
-/// Everything a desk handler may read off `&Agent`, snapshotted fresh at every
-/// [`crate::agent::Agent::run_shell`] install so no capture goes stale mid-call.
+/// Everything a desk handler may read off `&Avatar`, snapshotted fresh at every
+/// [`crate::agent::Avatar::run_shell`] install so no capture goes stale mid-call.
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each bool is an independent axis captured off the agent (interactive, returns, allow_schedule, search); not a candidate for a combined enum"
@@ -228,7 +228,7 @@ pub(crate) struct HostServices {
     pub allow_schedule: bool,
     /// A ceiling like `caps`: a spawn may narrow this bit, never widen it.
     pub search: bool,
-    /// Where the `reply` handler stages its value, holding no `&mut Agent` to
+    /// Where the `reply` handler stages its value, holding no `&mut Avatar` to
     /// write it any other way.
     pub reply: ReplyCell,
     pub schedules: ScheduleRegistry,
@@ -812,7 +812,7 @@ impl ExarchDesk {
 
         let (child_caps, child_log, system_prompt) = self.fork_child(&spec)?;
 
-        // Mirrors `Agent::fork_with`'s `Build` literal, with the adopted shell
+        // Mirrors `Avatar::fork_with`'s `Build` literal, with the adopted shell
         // and forked log standing in for `fork_session`'s fresh ones.
         let fuel = s.fuel - 1;
         // Unreachable: an identity seat always carries its own scratch.
@@ -826,7 +826,7 @@ impl ExarchDesk {
         // No detach: the shell was forked, not booted, so it carries no policy.
         let seat =
             crate::agent::seat::Seat::identity(shell, scratch, s.cwd.clone(), false, &child_log);
-        let child = Agent::assemble(Build {
+        let child = Avatar::assemble(Build {
             system: s.system_template.clone(),
             system_prompt,
             index: s.index.clone(),
@@ -867,7 +867,7 @@ impl ExarchDesk {
         let child_caps = crate::policy::narrow(&s.caps, spec.grant, &cwd)
             .map_err(|reason| Error::new(reason, 1))?;
 
-        // On the raw `AgentLog`, not through `Agent::inherit_context`, which
+        // On the raw `AgentLog`, not through `Avatar::inherit_context`, which
         // needs a `&Self` the child is not yet. The index resolves here, off the
         // same bits the `Build` below fixes, so the opening bookend records the
         // child's real system length rather than the template's.
@@ -919,7 +919,7 @@ impl ExarchDesk {
             return Err(Error::new(
                 "`agents `start` refused: this wire session has no dialler installed to reach a \
                  helper engine's listener — a construction bug, since a fuelled wire trunk is \
-                 refused at Agent::root without one",
+                 refused at Avatar::root without one",
                 1,
             ));
         };
@@ -958,7 +958,7 @@ impl ExarchDesk {
         );
 
         let fuel = s.fuel - 1;
-        let child = Agent::assemble(Build {
+        let child = Avatar::assemble(Build {
             system: s.system_template.clone(),
             system_prompt,
             index: s.index.clone(),
@@ -986,7 +986,7 @@ impl ExarchDesk {
 
     /// Hand `child` to `spawn_async` and answer the roster it now appears in —
     /// the state, not a receipt, and the same answer from either arm.
-    fn spawn_child(&self, child: Agent, name: String, prompt: String) -> Result<FOValue, Error> {
+    fn spawn_child(&self, child: Avatar, name: String, prompt: String) -> Result<FOValue, Error> {
         let s = &self.services;
         // Held past the move, so the commitment arm can still name the act.
         let acted_name = name.clone();
@@ -1340,7 +1340,7 @@ impl ExarchDesk {
         Ok(self.schedule_table())
     }
 
-    /// `` `reply `` — stage the payload into the cell [`Agent::deliberate`] lifts
+    /// `` `reply `` — stage the payload into the cell [`Avatar::deliberate`] lifts
     /// into a deposit on this agent's own registry entry once the batch drains:
     /// it parks the agent and hands the value to the parent's `` agents `read ``,
     /// rather than ending the run. Refused on every non-returning agent, keyed
@@ -3428,9 +3428,9 @@ mod tests {
     /// through a real spawn rather than a stub class.
     #[test]
     fn surface_then_spawn_observes_the_surface_first() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, rx) = channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         let _ = session.run_shell(
             "call-1".to_string(),
             r#"surface `unpin [key: "test-marker"]; agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true]"#,
@@ -3796,11 +3796,11 @@ mod tests {
     // ── engaged-child lifecycle ────────────────────────────────────────────
 
     /// The registration half of `spawn_async`.
-    fn register_child(parent_id: AgentId, name: &str, child: &Agent) -> u64 {
+    fn register_child(parent_id: AgentId, name: &str, child: &Avatar) -> u64 {
         child
             .agents
             .register(Registration {
-                id: child.id,
+                id: child.agent.id,
                 parent: Some(parent_id),
                 name: name.to_string(),
                 log_dir: child.log_dir(),
@@ -3816,12 +3816,12 @@ mod tests {
     /// worker-epilogue order: a `` `reply ``'s notice already rode `attend`'s own
     /// deposit, so only a non-reply outcome is delivered here before the settle.
     fn attend_and_deliver(
-        mut child: Agent,
+        mut child: Avatar,
         name: &str,
         generation: u64,
         parent_mailbox: Mailbox,
     ) -> std::thread::JoinHandle<()> {
-        let id = child.id;
+        let id = child.agent.id;
         let registry = child.agents.clone();
         let name = name.to_string();
         std::thread::spawn(move || {
@@ -3888,7 +3888,7 @@ mod tests {
     #[test]
     fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
         let dir = tmp("engaged-second-steer");
-        let parent = Agent::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         child.provider_handle().swap(Arc::new(Provider::scripted(
             "test-model",
@@ -3901,10 +3901,10 @@ mod tests {
         )));
         child.seed("say hi".into());
         let log_dir = child.log_dir();
-        let child_id = child.id;
+        let child_id = child.agent.id;
         let registry = child.agents.clone();
 
-        let generation = register_child(parent.id, "helper", &child);
+        let generation = register_child(parent.agent.id, "helper", &child);
         register_keepalive(&registry, child_id, &dir.path().join("keepalive"));
         let handle = attend_and_deliver(child, "helper", generation, parent.mailbox());
 
@@ -3940,7 +3940,7 @@ mod tests {
             other => panic!("expected an Agent result item, got {other:?}"),
         }
         assert_eq!(
-            registry.reply_of(parent.id, child_id),
+            registry.reply_of(parent.agent.id, child_id),
             Ok(Some(FOValue::String {
                 value: "second response arrived".into()
             })),
@@ -3956,7 +3956,7 @@ mod tests {
     #[test]
     fn ms_lease_child_never_renewed_is_cancelled_but_a_renewed_one_survives() {
         let dir = tmp("ms-lease-integration");
-        let parent = Agent::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         // Child A's ttl must expire well inside the round-trip loop's own
         // `MAX_STEPS` cap, so the lease and not the step cap ends its exchange.
         // Child B's is generous instead: its renewal is paced by `thread::sleep`
@@ -3973,10 +3973,10 @@ mod tests {
             .provider_handle()
             .swap(Arc::new(Provider::scripted("test-model", long_script)));
         child_a.seed("go".into());
-        let id_a = child_a.id;
+        let id_a = child_a.agent.id;
         let registry = child_a.agents.clone();
         registry.set_lease(ttl_a);
-        let gen_a = register_child(parent.id, "child-a", &child_a);
+        let gen_a = register_child(parent.agent.id, "child-a", &child_a);
         let handle_a = attend_and_deliver(child_a, "child-a", gen_a, parent.mailbox());
 
         match wait_for_settle(&parent.inbox()) {
@@ -3995,9 +3995,9 @@ mod tests {
         // Child B is parked by a keepalive grandchild and given no script to
         // race, so `renew` alone must be what defers its reap.
         let child_b = parent.fork(parent.caps().clone()).expect("fork child b");
-        let id_b = child_b.id;
+        let id_b = child_b.agent.id;
         registry.set_lease(ttl_b);
-        let gen_b = register_child(parent.id, "child-b", &child_b);
+        let gen_b = register_child(parent.agent.id, "child-b", &child_b);
         let keepalive_b = register_keepalive(&registry, id_b, &dir.path().join("keepalive-b"));
         let handle_b = attend_and_deliver(child_b, "child-b", gen_b, parent.mailbox());
 

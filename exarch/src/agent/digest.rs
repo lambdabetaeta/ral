@@ -21,7 +21,7 @@ const STDERR_CAP: usize = 10_000;
 pub const OPAQUE_CAP: usize = 3000;
 
 /// Fallback compaction trigger, in serialised model-view bytes, for
-/// `Agent::compact` — used only when the model's context window is unknown
+/// `Avatar::compact` — used only when the model's context window is unknown
 /// (a native provider with no fetched catalog).
 ///
 /// A known window goes through [`compaction_due`] instead.

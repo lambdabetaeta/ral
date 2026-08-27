@@ -2,13 +2,13 @@
 //! accumulator — name, size, cap, pressure policy — rendered as one card.
 //!
 //! The fold has two halves, split by who may legally read what: the agent
-//! assembles its own rows on its attend thread ([`Agent::resource_rows`]),
+//! assembles its own rows on its attend thread ([`Avatar::resource_rows`]),
 //! and the TUI's `Transient::Resources` arm appends the rows for the accumulators
 //! *it* owns ([`frontend_rows`]). Neither half reaches across a thread for
 //! the other's figures. Probing mutates nothing and renews no lease, so
 //! `/resources` cannot immortalise the zombies it exists to reveal.
 
-use crate::agent::Agent;
+use crate::agent::Avatar;
 use crate::agent::digest::{COMPACT_THRESHOLD, compaction_trigger};
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE};
@@ -275,11 +275,11 @@ pub fn dir_size(root: &Path) -> u64 {
         .sum()
 }
 
-/// The compaction-pressure rows, mirroring `Agent::compact`'s own trigger so
+/// The compaction-pressure rows, mirroring `Avatar::compact`'s own trigger so
 /// the pressure shown is the pressure that fires: a known window compacts on
 /// tokens against that window, and only the unknown-window fallback still
 /// runs on serialised bytes. `measured` is `None` when the token count is
-/// stale ([`Agent::measured_input`]) — a stale read must report unknown,
+/// stale ([`Avatar::measured_input`]) — a stale read must report unknown,
 /// never a number that could sit at or over the trigger, so the
 /// `context.tokens` row is omitted rather than shown with a fabricated figure.
 fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>) -> Vec<ProbeRow> {
@@ -322,7 +322,7 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
     }
 }
 
-impl Agent {
+impl Avatar {
     /// Assemble this agent's half of the fold — one [`ProbeRow`] per
     /// accumulator this attend thread may legally read: the shell's worker
     /// registry and bindings, the inbox, the event log, the log-dir and
@@ -686,7 +686,7 @@ mod tests {
     fn context_survey_records_a_display_commit() {
         use crate::record::{Display, Record};
 
-        let session = Agent::for_test("system").unwrap();
+        let session = Avatar::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
             log.append_user("one".into(), None).unwrap();
@@ -695,7 +695,7 @@ mod tests {
         }
         let (tx, rx) = crate::bus::channel();
         session.recorder().attach(crate::record::FleetSink {
-            id: session.id,
+            id: session.agent.id,
             tx: tx.downgrade(),
             meter: crate::bus::UsageMeter::default(),
         });
@@ -718,14 +718,14 @@ mod tests {
     /// fallback when nothing has forked.
     #[test]
     fn resource_rows_survey_the_agents_accumulators() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
         session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
         session.run_shell("c2".into(), "spawn { return 7 }", 30, &emit);
@@ -832,14 +832,14 @@ mod tests {
     /// `last_observed` cell without touching it.
     #[test]
     fn resource_rows_renew_no_lease() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
 
         let entry = session
@@ -868,7 +868,7 @@ mod tests {
     /// alone carries the cap, and no `context.tokens` row appears.
     #[test]
     fn resource_rows_unknown_window_falls_back_to_capped_log_bytes() {
-        let session = Agent::for_test("system").unwrap();
+        let session = Avatar::for_test("system").unwrap();
         let rows = session.resource_rows();
         let bytes = row(&rows, "log.bytes");
         assert_eq!(
@@ -883,7 +883,7 @@ mod tests {
         );
     }
 
-    /// A known window is the pressure `Agent::compact` actually fires on, so
+    /// A known window is the pressure `Avatar::compact` actually fires on, so
     /// that is what the fold must show: `context.tokens` capped at
     /// `compaction_trigger(w)`, and `log.bytes` demoted to an uncapped
     /// fallback gauge rather than faking a second, unenforced ceiling.
@@ -895,7 +895,7 @@ mod tests {
         assert_eq!(
             tokens.cap,
             Some(compaction_trigger(200_000)),
-            "the same trigger `Agent::compact` fires auto-compaction on"
+            "the same trigger `Avatar::compact` fires auto-compaction on"
         );
         assert_eq!(tokens.policy, "evict");
         assert!(

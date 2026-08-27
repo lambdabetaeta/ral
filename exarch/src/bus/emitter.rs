@@ -90,7 +90,7 @@ impl Emitter {
     }
 
     /// Where a session's record log publishes: this emitter's channel and run
-    /// meter, tagged with its agent id — what `Agent::couple` attaches to the
+    /// meter, tagged with its agent id — what `Avatar::couple` attaches to the
     /// seam at every point a session meets a live bus.
     pub(crate) fn fleet_sink(&self) -> crate::record::FleetSink {
         crate::record::FleetSink {

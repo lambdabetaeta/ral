@@ -46,7 +46,7 @@ pub(crate) const LIVE_WORKER_CAP: usize = 64;
 pub const DETACH_BIRTH_BUDGET: u64 = 16;
 
 /// Retention bound, in ral calls, on a settled worker's unclaimed result,
-/// counted from the per-call epoch sweep in `Agent::run_shell` that first
+/// counted from the per-call epoch sweep in `Avatar::run_shell` that first
 /// observes it settled.
 pub(crate) const SETTLED_WORKER_RETENTION: u64 = 256;
 
@@ -115,7 +115,7 @@ impl PinDigest {
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
 /// Reserved register key for the durable-service ledger — one card listing
-/// every live service, authored only by `Agent::reconcile_service_pins` against
+/// every live service, authored only by `Avatar::reconcile_service_pins` against
 /// the live worker registry.  A model may read it, never write or clear it.
 pub(crate) const SERVICES_PIN_KEY: &str = "services";
 
@@ -210,7 +210,7 @@ fn reject_protected_pin(surface: &Surface, recorder: &crate::record::Emitter) ->
 /// composing the batch and pushing it are two steps a `/clear` can fall
 /// between; so the sink stamps every batch with the root session's
 /// [`AgentRegistry`] generation as captured at construction and always pushes,
-/// leaving `Agent::admits` to reject a stale one at the consuming edge.
+/// leaving `Avatar::admits` to reject a stale one at the consuming edge.
 struct InboxDeferred {
     mailbox: Mailbox,
     /// The **root** session's id: a spawn worker registers no tab of its own,
@@ -1291,7 +1291,7 @@ keep-bottom
 
     /// The sink always posts, stamped with the root id and its birth
     /// generation — even after a `/clear` advanced the registry past it.
-    /// Staleness is `Agent::admits`'s call at the consuming edge, so the sink
+    /// Staleness is `Avatar::admits`'s call at the consuming edge, so the sink
     /// itself neither checks nor withholds.
     #[test]
     fn inbox_deferred_always_pushes_stamped_with_its_birth_generation() {

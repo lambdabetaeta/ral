@@ -9,7 +9,7 @@ use crate::agent::cancel;
 use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
-use crate::agent::{Agent, deliberate, panic_msg};
+use crate::agent::{Avatar, deliberate, panic_msg};
 use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
 use crate::provider::{Provider, ProviderError};
 use crate::shell_eval;
@@ -25,7 +25,7 @@ enum Flow {
 /// session log dir and scratch, too costly to pay at every ready boundary.
 const DISK_WARN_CHECK_INTERVAL: u64 = 32;
 
-/// What [`Agent::attend`] does once [`Control`] has run a slash command.
+/// What [`Avatar::attend`] does once [`Control`] has run a slash command.
 pub enum Verdict {
     Continue,
     Quit,
@@ -40,7 +40,7 @@ pub enum Verdict {
 /// [`ProviderHandle`](crate::agent::ProviderHandle)) stay on the UI thread.
 pub trait Control {
     /// Run the slash-command line `raw` against the agent the loop owns.
-    fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> Verdict;
+    fn command(&mut self, raw: &str, session: &mut Avatar, emit: &Emitter) -> Verdict;
 }
 
 /// The control for drivers with no slash commands (headless, peers, tests),
@@ -48,12 +48,12 @@ pub trait Control {
 pub struct NoControl;
 
 impl Control for NoControl {
-    fn command(&mut self, _raw: &str, _session: &mut Agent, _emit: &Emitter) -> Verdict {
+    fn command(&mut self, _raw: &str, _session: &mut Avatar, _emit: &Emitter) -> Verdict {
         Verdict::Continue
     }
 }
 
-impl Agent {
+impl Avatar {
     /// The one attend loop, identical for every node: pull the next inbox
     /// item, take it up, and repeat until an empty inbox meets a
     /// [`Self::park_mode`] that does not park, or a cancel ends one that does.
@@ -87,7 +87,11 @@ impl Agent {
         self.couple(emit);
         // Only the trunk publishes to the OS-signal slot; a sub-agent's token
         // is reached through the registry cascade instead.
-        let _slot = self.parent.is_none().then(|| cancel::publish(&self.cancel));
+        let _slot = self
+            .agent
+            .parent
+            .is_none()
+            .then(|| cancel::publish(&self.agent.cancel));
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         loop {
             // Every pass is a settled ready boundary.  A lease-chain reap is
@@ -102,7 +106,8 @@ impl Agent {
             // deliberation's own transitions are the truth.
             if self.inbox.is_empty() {
                 let mode = policy(self, self.park_mode());
-                self.agents.set_resting(self.id, mode == ParkMode::Engaged);
+                self.agents
+                    .set_resting(self.agent.id, mode == ParkMode::Engaged);
                 self.recorder()
                     .transient(crate::record::Transient::State(idle_state(mode)));
             }
@@ -111,11 +116,11 @@ impl Agent {
             // reaches its parent through the worker epilogue, not this break.
             let Some(item) = self
                 .inbox
-                .next_or_idle(|| policy(self, self.park_mode()), &self.cancel)
+                .next_or_idle(|| policy(self, self.park_mode()), &self.agent.cancel)
             else {
                 break;
             };
-            self.agents.set_resting(self.id, false);
+            self.agents.set_resting(self.agent.id, false);
             if matches!(
                 self.take_up(&item, control, emit, &mut final_outcome),
                 Flow::Stop
@@ -134,8 +139,8 @@ impl Agent {
         );
         // A child is removed by its spawn site through `settle`; the trunk has
         // nobody to do it, so it removes itself and the fleet empties.
-        if self.parent.is_none() {
-            self.agents.deregister(self.id);
+        if self.agent.parent.is_none() {
+            self.agents.deregister(self.agent.id);
         }
         final_outcome
     }
@@ -193,7 +198,7 @@ impl Agent {
             if let Some(nudges) = &mut self.nudges {
                 nudges.reset();
             }
-            self.cancel.reset();
+            self.agent.cancel.reset();
         }
         if let Item::Command(raw) = item {
             return match control.command(raw, self, emit) {
@@ -204,8 +209,8 @@ impl Agent {
         announce(item, &self.recorder());
         // Read once, so a `/model` swap on the UI thread lands on the next
         // item rather than mid-item.
-        let active = self.provider.current();
-        let token = self.cancel.clone();
+        let active = self.agent.provider.current();
+        let token = self.agent.cancel.clone();
         let prompt = Some(item.text());
         let continues = item.continues();
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -237,8 +242,8 @@ impl Agent {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
         if let Ok(deliberate::Outcome::Replied(v)) = &outcome
-            && self.parent.is_some()
-            && let Err(reject) = self.agents.deposit_reply(self.id, v.clone())
+            && self.agent.parent.is_some()
+            && let Err(reject) = self.agents.deposit_reply(self.agent.id, v.clone())
         {
             self.note_error(format!("the parent's inbox rejected this reply: {reject}"));
         }
@@ -256,13 +261,13 @@ impl Agent {
         // Nudged only when nothing else is already carrying this agent
         // forward: no reply standing for a parent to fetch, no detached shell
         // work, no busy children.
-        let quiet = !self.agents.has_reply(self.id)
+        let quiet = !self.agents.has_reply(self.agent.id)
             && self.probe_workers().is_empty()
             && !self.has_busy_children();
         let ctx = nudge::NudgeCtx {
             must_reply: self.returns(),
             pinned: self.pinned_digest(),
-            is_headless_root: self.parent.is_none() && !self.interactive,
+            is_headless_root: self.agent.parent.is_none() && !self.agent.interactive,
             pressure,
             quiet,
         };
@@ -293,7 +298,7 @@ impl Agent {
         // Only the headless root ends on `reply` — a child parks on its
         // deposit — and not when the nudge layer just turned it back for
         // self-verification.
-        if self.parent.is_none()
+        if self.agent.parent.is_none()
             && nudge_msg.is_none()
             && matches!(outcome, Ok(deliberate::Outcome::Replied(_)))
         {
@@ -316,13 +321,13 @@ impl Agent {
     /// that drains it, so a mismatch could only be a routing bug.
     pub(super) fn admits(&self, item: &Item) -> bool {
         match item {
-            Item::Agent(r) => r.generation == self.agents.generation(self.id),
+            Item::Agent(r) => r.generation == self.agents.generation(self.agent.id),
             Item::Surface { id, generation, .. } => {
                 debug_assert_eq!(
-                    *id, self.id,
+                    *id, self.agent.id,
                     "a spawn's surface batch always drains in the session it was stamped with"
                 );
-                *generation == self.agents.generation(self.id)
+                *generation == self.agents.generation(self.agent.id)
             }
             _ => true,
         }
@@ -334,11 +339,11 @@ impl Agent {
     /// — the same wait, but a terminate-cause cancel still ends it, and the
     /// registry's idle lease rather than this predicate bounds it.
     fn park_mode(&self) -> ParkMode {
-        let conversing = self.interactive && !self.returns();
+        let conversing = self.agent.interactive && !self.returns();
         if conversing {
             // `/clear` reaps the entry, and an unlisted agent is unreachable —
             // its mailbox resolves to None — so Held would be a zombie.
-            if !self.agents.is_live(self.id) {
+            if !self.agents.is_live(self.agent.id) {
                 return ParkMode::Quiesce;
             }
             return ParkMode::Held;
@@ -347,7 +352,8 @@ impl Agent {
         // a parented agent terminate-stamps its token first
         // (`cancel_and_remove`), and `next_or_idle` checks `terminated()` on
         // every wake.
-        if self.parent.is_some() && self.returns() && self.agents.messageable(self.id) {
+        if self.agent.parent.is_some() && self.returns() && self.agents.messageable(self.agent.id)
+        {
             return ParkMode::Engaged;
         }
         if self.has_busy_children() {
@@ -362,7 +368,7 @@ impl Agent {
     /// Whether an async child launched from here is still working, rather
     /// than parked on its own deposited reply.
     fn has_busy_children(&self) -> bool {
-        self.agents.has_busy_children(self.id)
+        self.agents.has_busy_children(self.agent.id)
     }
 
     /// Re-pin the host-owned `services` card against the shell's live worker
@@ -444,7 +450,7 @@ impl Agent {
     /// all; otherwise it walks on the [`Self::ral_epoch`] cadence of
     /// [`DISK_WARN_CHECK_INTERVAL`].
     fn check_disk_warn(&mut self) {
-        let Some(ceiling) = self.disk_warn_bytes else {
+        let Some(ceiling) = self.agent.disk_warn_bytes else {
             return;
         };
         if self.ral_epoch < self.disk_check_epoch {
@@ -532,7 +538,7 @@ fn record_commit(recorder: &crate::record::Emitter, commit: crate::record::Displ
     }
 }
 
-/// [`Agent::attend_with`]'s park policy for
+/// [`Avatar::attend_with`]'s park policy for
 /// [`crate::headless::converse_settled`]: a conversing trunk's `park_mode`
 /// always answers [`ParkMode::Held`], blind to its fleet, since a chat trunk
 /// never used to have one worth waiting on. This reshapes exactly that
@@ -541,9 +547,9 @@ fn record_commit(recorder: &crate::record::Emitter, commit: crate::record::Displ
 /// there to type. Every other verdict passes through unchanged: `Engaged`
 /// requires a `steer` synod never offers, and `UntilCancelled` requires an
 /// armed schedule `converse_settled` already refused at construction.
-pub(crate) fn quiesce_when_childless(agent: &Agent, mode: ParkMode) -> ParkMode {
+pub(crate) fn quiesce_when_childless(avatar: &Avatar, mode: ParkMode) -> ParkMode {
     match mode {
-        ParkMode::Held if agent.has_busy_children() => ParkMode::HeldByChildren,
+        ParkMode::Held if avatar.has_busy_children() => ParkMode::HeldByChildren,
         ParkMode::Held => ParkMode::Quiesce,
         other => other,
     }
@@ -596,9 +602,8 @@ fn agent_outcome(
 )]
 mod tests {
     use super::*;
-    use crate::agent::ProviderHandle;
     use crate::agent::testkit::*;
-    use crate::fleet::registry::{Registration};
+    use crate::fleet::registry::Registration;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Forensic, Record};
     use ral_core::Value;
@@ -661,13 +666,13 @@ mod tests {
         let held = trunk(true);
         assert_eq!(held.park_mode(), ParkMode::Held);
 
-        let parent = Agent::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         child
             .agents
             .register(Registration {
-                id: child.id,
-                parent: Some(parent.id),
+                id: child.agent.id,
+                parent: Some(parent.agent.id),
                 name: "child".into(),
                 log_dir: dir.path().join("child"),
                 cancel: child.cancel_token().clone(),
@@ -682,7 +687,7 @@ mod tests {
             "un-engaged, no live children, no schedule: idle quiesce delivers the outcome"
         );
 
-        child.agents.renew(child.id);
+        child.agents.renew(child.agent.id);
         assert_eq!(
             child.park_mode(),
             ParkMode::Engaged,
@@ -696,7 +701,7 @@ mod tests {
     fn reply_refused_identically_for_trunk_and_branch_conversing_agents() {
         let mut root = trunk(true);
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, root.id);
+        let emit = Emitter::new(tx, root.agent.id);
         let root_result = root.run_shell("c1".into(), "agents `reply 1", 5, &emit);
         let refusal = "you converse with the user; you do not return";
         assert!(
@@ -726,7 +731,7 @@ mod tests {
     /// — the final prose is never scraped as the answer.
     #[test]
     fn sub_agent_without_reply_is_re_nudged_then_fails() {
-        let parent = Agent::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("do the thing".into());
         // More prose-only replies than the budget will consume, so the test
@@ -753,13 +758,13 @@ mod tests {
     #[test]
     fn deposited_reply_suppresses_every_nudge() {
         let dir = tmp("deposited-reply-quiet");
-        let parent = Agent::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child
             .agents
             .register(Registration {
-                id: child.id,
-                parent: Some(parent.id),
+                id: child.agent.id,
+                parent: Some(parent.agent.id),
                 name: "child".into(),
                 log_dir: dir.path().join("child"),
                 cancel: child.cancel_token().clone(),
@@ -771,17 +776,19 @@ mod tests {
         child
             .agents
             .deposit_reply(
-                child.id,
+                child.agent.id,
                 FOValue::String {
                     value: "already replied".into(),
                 },
             )
             .expect("deposit onto a live entry never rejects on an empty parent inbox");
 
-        child.provider =
-            ProviderHandle::new(scripted("test-model", Script::new().then(Reply::empty())));
+        child
+            .agent
+            .provider
+            .swap(scripted("test-model", Script::new().then(Reply::empty())));
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, child.id);
+        let emit = Emitter::new(tx, child.agent.id);
         child.couple(&emit);
         child.seed("do more".into());
         let item = child.inbox.next_item().expect("the seeded item");
@@ -801,17 +808,17 @@ mod tests {
     /// `Shell::run` rolls those back long before the loop sees them.
     #[test]
     fn host_panic_is_recorded_and_the_next_prompt_still_deliberates() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         // The first prompt unwinds; the rest answer the second and the no-reply
         // nudges it draws.
         let mut script = Script::new().then(Reply::panicking());
         for _ in 0..8 {
             script = script.then(Reply::text("recovered"));
         }
-        session.provider = ProviderHandle::new(scripted("test-model", script));
+        session.agent.provider.swap(scripted("test-model", script));
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         session.seed("crash on this one".into());
         let (panicked, _) = session.attend(&mut NoControl, &emit);
         assert!(
@@ -863,7 +870,7 @@ mod tests {
     /// Run `cmd` as one dispatched run under a millisecond-scale
     /// `deferred_lease`, so a reap test need not wait out `run_shell`'s real
     /// 1 h/24 h policy.
-    fn dispatch_with_lease(session: &Agent, cmd: &str, lease: ral_core::types::WorkerLease) {
+    fn dispatch_with_lease(session: &Avatar, cmd: &str, lease: ral_core::types::WorkerLease) {
         use ral_core::transport::{DispatchId, Program, Run};
         use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
         session.seat.transport().dispatch(
@@ -888,7 +895,7 @@ mod tests {
     /// surfaces at the next run, and exactly once.
     #[test]
     fn ready_boundary_reap_notice_surfaces_at_the_next_run() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -915,7 +922,7 @@ mod tests {
         }
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
         session.run_shell("c0".into(), "return 1", 5, &emit);
 
@@ -951,7 +958,7 @@ mod tests {
     /// retired the moment no durable service remains.
     #[test]
     fn reconcile_service_pins_births_and_retires_the_services_pin() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -959,7 +966,7 @@ mod tests {
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.run_shell(
             "c1".into(),
             r#"service "watch the thing" { test-clear-block-forever }"#,
@@ -1041,9 +1048,9 @@ mod tests {
     /// write direction is covered at `shell_eval::reject_protected_pin`.
     #[test]
     fn program_cannot_write_the_services_pin() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
         session.run_shell("c1".into(), r#"surface `unpin [key: "services"]"#, 5, &emit);
 
@@ -1069,9 +1076,9 @@ mod tests {
     /// live register.
     #[test]
     fn pinned_state_reminder_reads_the_live_register_and_becomes_the_next_prompt() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.run_shell(
             "c0".into(),
             r#"surface `pin [key: "goal", body: `text [spans: [[text: "ship the reminder"]]]]"#,
@@ -1085,7 +1092,7 @@ mod tests {
 
         // A finish with nothing returned draws the reminder; the two `reply`
         // turns then satisfy the headless root's verification and end the loop.
-        session.provider = ProviderHandle::new(scripted(
+        session.agent.provider.swap(scripted(
             "test-model",
             Script::new()
                 .then(Reply::text("done"))
@@ -1117,9 +1124,11 @@ mod tests {
     fn chat_trunk_never_nudges() {
         let mut session = chat_trunk();
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
-        session.provider =
-            ProviderHandle::new(scripted("test-model", Script::new().then(Reply::empty())));
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+        session
+            .agent
+            .provider
+            .swap(scripted("test-model", Script::new().then(Reply::empty())));
         session.seed("hello".into());
         session.attend_backlog(&emit);
 
@@ -1145,7 +1154,7 @@ mod tests {
     /// nothing is left idle.  The tiny re-armed bound is for speed only.
     #[test]
     fn boundary_prune_notice_rides_the_runs_own_stream() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -1156,7 +1165,7 @@ mod tests {
             });
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         session.run_shell("c0".into(), "let reap_me = 1", 5, &emit);
         session.run_shell("c1".into(), "$[0]", 5, &emit);
         session.run_shell("c2".into(), "$[0]", 5, &emit);
@@ -1198,12 +1207,12 @@ mod tests {
     /// no emission, no cost.
     #[test]
     fn check_disk_warn_unconfigured_never_walks_or_warns() {
-        let mut session = Agent::for_test("system").unwrap();
-        assert!(session.disk_warn_bytes.is_none());
+        let mut session = Avatar::for_test("system").unwrap();
+        assert!(session.agent.disk_warn_bytes.is_none());
 
         let (tx, rx) = crate::bus::channel();
         session.recorder().attach(crate::record::FleetSink {
-            id: session.id,
+            id: session.agent.id,
             tx: tx.downgrade(),
             meter: crate::bus::UsageMeter::default(),
         });
@@ -1222,14 +1231,14 @@ mod tests {
     /// The latch suppresses a repeat until the figure falls back under.
     #[test]
     fn check_disk_warn_still_above_does_not_repeat() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let baseline = crate::agent::resources::dir_size(&session.log_dir());
         std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 4096]).unwrap();
-        session.disk_warn_bytes = Some(baseline + 100);
+        session.agent_mut().disk_warn_bytes = Some(baseline + 100);
 
         let (tx, rx) = crate::bus::channel();
         session.recorder().attach(crate::record::FleetSink {
-            id: session.id,
+            id: session.agent.id,
             tx: tx.downgrade(),
             meter: crate::bus::UsageMeter::default(),
         });
@@ -1251,18 +1260,18 @@ mod tests {
     /// Falling back under clears the latch, so a re-crossing warns again.
     #[test]
     fn check_disk_warn_falling_below_rearms_the_latch() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         // The ceiling sits comfortably above the session's own baseline plus
         // one durable warning note's own footprint, so the big file alone —
         // not the warning's own record — decides whether it is crossed.
         let baseline = crate::agent::resources::dir_size(&session.log_dir());
         let big = session.log_dir().join("big.txt");
         std::fs::write(&big, vec![0u8; 4096]).unwrap();
-        session.disk_warn_bytes = Some(baseline + 2000);
+        session.agent_mut().disk_warn_bytes = Some(baseline + 2000);
 
         let (tx, rx) = crate::bus::channel();
         session.recorder().attach(crate::record::FleetSink {
-            id: session.id,
+            id: session.agent.id,
             tx: tx.downgrade(),
             meter: crate::bus::UsageMeter::default(),
         });
@@ -1300,7 +1309,7 @@ mod tests {
     /// model-view `record.jsonl`.
     #[test]
     fn prune_does_not_add_model_events() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -1311,7 +1320,7 @@ mod tests {
             });
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         session.run_shell("c0".into(), "let events_json_x = 1", 5, &emit);
         let after_bind = session.log.lock().event_count();
 

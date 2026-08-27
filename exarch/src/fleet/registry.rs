@@ -17,7 +17,7 @@
 //!
 //! Each entry carries a generation counter, bumped by its own `/clear`, and
 //! that is the fleet's late-settle fence: an async agent's result
-//! (`Agent::admits`) and a detached worker's deferred batch (`InboxDeferred`)
+//! (`Avatar::admits`) and a detached worker's deferred batch (`InboxDeferred`)
 //! both admit against the generation of the session that will *consume* them.
 //! Per session, not per fleet — a `/clear` in one tab must not drop work
 //! another tab is still waiting on.
@@ -407,7 +407,7 @@ impl AgentRegistry {
                 }
             },
         };
-        // Excludes `id`'s own current entry: `Agent::register_self` re-registers
+        // Excludes `id`'s own current entry: `Avatar::register_self` re-registers
         // under the same id and must overwrite in place, not be refused for
         // colliding with the very entry it is about to replace.
         if g.entries
@@ -417,7 +417,7 @@ impl AgentRegistry {
             drop(g);
             return Err(RegisterError::NameTaken(name));
         }
-        // `Agent::register_self` re-registers in place under the same id, so
+        // `Avatar::register_self` re-registers in place under the same id, so
         // the count of this session's own clears must survive the overwrite.
         let generation = g.generation(id);
         g.entries.insert(
@@ -1055,7 +1055,7 @@ mod tests {
 
     /// The fence is per session, so a `/clear` on one root must leave another
     /// root's in-flight result alone.  `/clear` in a `/branch` tab reaches this
-    /// through `Agent::admits`, which reads the *consuming* session's counter.
+    /// through `Avatar::admits`, which reads the *consuming* session's counter.
     #[test]
     fn a_clear_on_one_root_does_not_reject_another_roots_late_result() {
         let reg = AgentRegistry::new();

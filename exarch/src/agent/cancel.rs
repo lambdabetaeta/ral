@@ -356,7 +356,7 @@ mod tests {
     //! make `SetConsoleCtrlHandler` invoke.
 
     use super::*;
-    use crate::agent::Agent;
+    use crate::agent::Avatar;
     use std::sync::Mutex;
 
     /// These tests touch process-global state (the escalation ladder, the
@@ -463,7 +463,7 @@ mod tests {
         let _g = SERIAL.lock().unwrap();
         ral_core::process::clear();
 
-        let mut session = Agent::for_test("system").expect("test session");
+        let mut session = Avatar::for_test("system").expect("test session");
 
         // Seed the ladder exactly as a delivered SIGTERM would.  No run is
         // running, so the published cancel slots are null and the delivery is

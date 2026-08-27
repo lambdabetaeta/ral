@@ -3,7 +3,7 @@
 //! Process-boundary resume coverage: a scripted child leaves a mid-exchange
 //! ledger, the parent terminates it, and a fresh root continues the session.
 
-use exarch::agent::{Agent, RecordedAccount, RootConfig, RootSeat, deliberate};
+use exarch::agent::{Avatar, RecordedAccount, RootConfig, RootSeat, deliberate};
 use exarch::bootstrap::{EXARCH, Scratch};
 use exarch::bus::{Emitter, channel};
 use exarch::provider::Provider;
@@ -28,9 +28,9 @@ fn envelope_line(record: &record::Record) -> String {
     serde_json::json!({ "at_unix_ms": 0, "record": record }).to_string()
 }
 
-fn drive(session: &mut Agent, provider: &Arc<Provider>, prompt: &str) {
+fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
     let (tx, _rx) = channel();
-    let emit = Emitter::new(tx, session.id);
+    let emit = Emitter::new(tx, session.id());
     let token = exarch::agent::cancel::Token::new();
     let outcome = session.deliberate(provider, Some(prompt.to_string()), None, &token, &emit);
     assert!(matches!(outcome, Ok(deliberate::Outcome::Complete(_))));
@@ -93,7 +93,7 @@ fn scripted_run_kill_resume_and_continue() {
     child.kill().expect("terminate scripted child");
     let _ = child.wait();
 
-    let mut resumed = Agent::root(
+    let mut resumed = Avatar::root(
         root_config(&child_dir, true),
         identity_seat("resume-parent"),
         scripted("test-model", Script::new()),
@@ -256,7 +256,7 @@ fn a_pre_change_record_log_still_resumes() {
     .to_string();
     std::fs::write(&path, format!("{line}\n")).expect("write pre-change record.jsonl");
 
-    let resumed = Agent::root(
+    let resumed = Avatar::root(
         root_config(&run_dir, true),
         identity_seat("pre-change-resume"),
         scripted("test-model", Script::new()),
@@ -275,7 +275,7 @@ fn resume_child() {
     // resumes from that ledger after the kill, so it cannot live in a scratch
     // of this child's own.  A real launch finds its run dir already made.
     std::fs::create_dir_all(&dir).expect("child run dir");
-    let mut session = Agent::root(
+    let mut session = Avatar::root(
         root_config(&dir, false),
         identity_seat("resume-child"),
         scripted("test-model", Script::new()),

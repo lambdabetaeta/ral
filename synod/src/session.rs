@@ -27,7 +27,7 @@
 
 use crate::grant::Grant;
 use crate::workspace;
-use exarch::agent::{Agent, RecordedAccount};
+use exarch::agent::{Avatar, RecordedAccount};
 use exarch::bootstrap;
 use exarch::provider::{
     self, Engine, Provider,
@@ -422,10 +422,10 @@ pub struct Conversation {
     grant: Grant,
     /// The machine, held in trust by the dialler: [`Conversation::end`]
     /// recovers it via [`crate::machine_dial::MachineDial::into_machine`],
-    /// the only other owner being the [`Agent`] this conversation also
+    /// the only other owner being the [`Avatar`] this conversation also
     /// holds, which drops first.
     dial: Arc<crate::machine_dial::MachineDial>,
-    agent: Agent,
+    agent: Avatar,
     engine: Arc<Engine>,
     baseline: Baseline,
     /// The guest's whole network, running on its own threads since before
@@ -570,7 +570,7 @@ fn as_gb(bytes: u64) -> String {
 /// caller.
 struct Booted {
     dial: Arc<crate::machine_dial::MachineDial>,
-    agent: Agent,
+    agent: Avatar,
     engine: Arc<Engine>,
     net: guest_net::Session<NetWire>,
 }
@@ -713,7 +713,7 @@ impl Conversation {
                 tuning,
                 None,
             ));
-            let agent = Agent::root(
+            let agent = Avatar::root(
                 exarch::agent::RootConfig {
                     system,
                     caps,

@@ -5,7 +5,7 @@
 //! Probe only at a run boundary — mid-dispatch answers engine-busy, which
 //! panics here.
 
-use crate::agent::Agent;
+use crate::agent::Avatar;
 use ral_core::serial::FOValue;
 
 /// A `` `workers `` probe row, decoded.  `pub(crate)` so
@@ -20,7 +20,7 @@ pub(crate) struct ProbedWorker {
     pub(crate) settled_epoch: Option<u64>,
 }
 
-impl Agent {
+impl Avatar {
     pub(super) fn probe_workers(&self) -> Vec<ProbedWorker> {
         let items = match self.seat.transport().probe(FOValue::Variant {
             label: "workers".into(),

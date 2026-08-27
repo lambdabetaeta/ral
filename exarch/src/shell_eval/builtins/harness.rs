@@ -1086,9 +1086,9 @@ mod tests {
     /// `fork_into_nursery`/`enquire` ever run, so no child is registered.
     #[test]
     fn unknown_grant_label_errors_before_any_enquiry_crosses() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             r"agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grant: `bogus, search: true]",
@@ -1103,16 +1103,16 @@ mod tests {
             );
         }
         assert!(
-            session.agents.list(session.id).is_empty(),
+            session.agents.list(session.agent.id).is_empty(),
             "an unknown grant label must never register a child"
         );
     }
 
     #[test]
     fn unknown_type_tag_errors_before_any_enquiry_crosses() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             r"agents `start [prompt: #'hi'#, name: 't', type: `bogus, grant: `confined, search: true]",
@@ -1126,16 +1126,16 @@ mod tests {
         );
         assert!(result.content.contains("mnemon"), "got: {}", result.content);
         assert!(
-            session.agents.list(session.id).is_empty(),
+            session.agents.list(session.agent.id).is_empty(),
             "an unknown type tag must never register a child"
         );
     }
 
     #[test]
     fn invalid_name_errors_before_any_enquiry_crosses() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             r#"agents `start [prompt: #'hi'#, name: "has space", type: `amnemon, grant: `confined, search: true]"#,
@@ -1144,7 +1144,7 @@ mod tests {
         );
         assert!(result.content.contains("name"), "got: {}", result.content);
         assert!(
-            session.agents.list(session.id).is_empty(),
+            session.agents.list(session.agent.id).is_empty(),
             "an invalid name must never register a child"
         );
     }
@@ -1153,9 +1153,9 @@ mod tests {
     /// must reach `builtin_agents`'s door rather than die as a row mismatch.
     #[test]
     fn unknown_outer_tag_reaches_the_door_naming_every_legal_label() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell("call-1".to_string(), "agents `stop 'x'", 5, &emit);
         for tag in ["list", "start", "message", "cancel"] {
             assert!(
@@ -1170,9 +1170,9 @@ mod tests {
     /// row reports which label is absent.
     #[test]
     fn missing_agent_field_errors_statically_naming_the_field() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             r"agents `start [prompt: #'hi'#, name: 't', type: `amnemon, search: true]",
@@ -1185,7 +1185,7 @@ mod tests {
             result.content
         );
         assert!(
-            session.agents.list(session.id).is_empty(),
+            session.agents.list(session.agent.id).is_empty(),
             "a missing spec field must never register a child"
         );
     }
@@ -1195,9 +1195,9 @@ mod tests {
     /// must still name a field rather than shrug at the whole record.
     #[test]
     fn misspelled_start_field_errors_statically_naming_the_field() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             r"agents `start [prompt: #'hi'#, name: 't', type: `amnemon, grnat: `confined, search: true]",
@@ -1210,18 +1210,18 @@ mod tests {
             result.content
         );
         assert!(
-            session.agents.list(session.id).is_empty(),
+            session.agents.list(session.agent.id).is_empty(),
             "a misspelled spec field must never register a child"
         );
     }
 
-    /// Drives `run_shell` rather than `Agent::deliberate`'s provider loop:
+    /// Drives `run_shell` rather than `Avatar::deliberate`'s provider loop:
     /// the spawn seeds the child's handle from the parent's *own*
     /// `Arc<Provider>`, so one script consumed by both a driven parent
     /// exchange and its child races over which gets which stage.
     #[test]
     fn agent_full_stack_round_trip_answers_the_roster_and_parks_a_reply() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::scripted::Script::new().then(
@@ -1233,7 +1233,7 @@ mod tests {
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
@@ -1294,13 +1294,13 @@ mod tests {
     /// be racing CPU-bound work with no reliable window in between.
     #[test]
     fn agents_cancel_answer_still_lists_the_cancelled_row() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
-        let target = session.id + 1;
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let target = session.agent.id + 1;
         session
             .agents
             .register(crate::fleet::registry::Registration {
                 id: target,
-                parent: Some(session.id),
+                parent: Some(session.agent.id),
                 name: "doomed".to_string(),
                 log_dir: std::path::PathBuf::from("/tmp"),
                 cancel: crate::agent::cancel::Token::new(),
@@ -1319,7 +1319,7 @@ mod tests {
             .unwrap();
 
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell("call-1".to_string(), "agents `cancel 'doomed'", 5, &emit);
         assert!(
             result.content.contains("EXIT: 0"),
@@ -1344,9 +1344,9 @@ mod tests {
 
     #[test]
     fn bad_cron_expr_errors_before_any_enquiry_crosses() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             "schedules `add [trigger: `cron '* * * *', label: 'nightly', prompt: #'wake'#]",
@@ -1366,9 +1366,9 @@ mod tests {
 
     #[test]
     fn bad_duration_errors_before_any_enquiry_crosses() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             "schedules `add [trigger: `after 'nope', label: 'nightly', prompt: #'wake'#]",
@@ -1388,9 +1388,9 @@ mod tests {
 
     #[test]
     fn trigger_neither_cron_nor_after_errors_before_any_enquiry_crosses() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             "schedules `add [trigger: `bogus 'x', label: 'nightly', prompt: #'wake'#]",
@@ -1409,9 +1409,9 @@ mod tests {
     /// record row reports which label is absent.
     #[test]
     fn missing_spec_field_errors_statically_naming_the_field() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             "schedules `add [trigger: `after '1s', label: 'nightly']",
@@ -1433,9 +1433,9 @@ mod tests {
     /// trigger/label/prompt.
     #[test]
     fn unknown_extra_spec_field_errors_statically_naming_the_field() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell(
             "call-1".to_string(),
             "schedules `add [trigger: `after '1s', label: 'nightly', prompt: #'wake'#, extra: 1]",
@@ -1455,10 +1455,10 @@ mod tests {
 
     #[test]
     fn schedule_add_answer_carries_the_new_row() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
-        session.allow_schedule = true;
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        session.agent_mut().allow_schedule = true;
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
@@ -1477,10 +1477,10 @@ mod tests {
     /// away: `parse_duration`'s smallest unit is whole seconds.
     #[test]
     fn schedule_full_stack_round_trip_answers_the_table_and_fires_into_inbox() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
-        session.allow_schedule = true;
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        session.agent_mut().allow_schedule = true;
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
@@ -1535,10 +1535,10 @@ mod tests {
     /// way as a hit, and that is not itself proof of a mistake.
     #[test]
     fn schedule_remove_full_stack_disarms_by_label() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
-        session.allow_schedule = true;
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        session.agent_mut().allow_schedule = true;
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
@@ -1595,10 +1595,10 @@ mod tests {
     /// from "the table is empty" — two distinguishable labels can.
     #[test]
     fn schedule_remove_answer_omits_the_removed_row_but_keeps_the_other() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
-        session.allow_schedule = true;
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        session.agent_mut().allow_schedule = true;
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         session.run_shell(
             "call-1".to_string(),
@@ -1640,7 +1640,7 @@ mod tests {
     /// gives.
     #[test]
     fn reply_full_stack_round_trip_delivers_structured_record_to_parent_inbox() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::scripted::Script::new().then(
@@ -1652,7 +1652,7 @@ mod tests {
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
@@ -1695,9 +1695,9 @@ mod tests {
     /// well-formed `` agents `reply `` still succeeds.
     #[test]
     fn reply_refuses_a_non_first_order_value_and_does_not_terminate() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result =
             session.run_shell("call-1".to_string(), r"agents `reply { echo hi }", 5, &emit);
@@ -1717,7 +1717,7 @@ mod tests {
 
     #[test]
     fn double_reply_in_one_exchange_is_last_wins() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::scripted::Script::new().then(
@@ -1729,7 +1729,7 @@ mod tests {
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let provider_handle = session.current_provider();
         let outcome = session.deliberate(
             &provider_handle,
@@ -1761,7 +1761,7 @@ mod tests {
     /// canonical card to its parent.
     #[test]
     fn pin_read_full_stack_round_trip_returns_canonical_card_to_parent() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::scripted::Script::new().then(
@@ -1773,7 +1773,7 @@ mod tests {
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
@@ -1825,7 +1825,7 @@ mod tests {
     /// empty rendering.
     #[test]
     fn pin_read_full_stack_absent_key_replies_unit() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::scripted::Script::new().then(
@@ -1837,7 +1837,7 @@ mod tests {
         ));
         session.provider_handle().swap(provider);
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
@@ -1895,9 +1895,9 @@ mod tests {
         // field, not as a slow machine.
         const BUDGET: u64 = 60;
 
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         session.run_shell(
             "call-1".to_string(),
@@ -1976,9 +1976,9 @@ mod tests {
     /// run still sees it.
     #[test]
     fn add_task_inside_a_function_body_survives_the_block_and_the_call() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         session.run_shell(
             "call-1".to_string(),
@@ -1999,9 +1999,9 @@ mod tests {
     /// reach the parent's "tasks" pin.
     #[test]
     fn sub_agent_pinning_tasks_leaves_the_parents_register_untouched() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         session.run_shell("call-1".to_string(), r#"add-task "parent task""#, 5, &emit);
 
@@ -2061,9 +2061,9 @@ mod tests {
     /// `pin-read "services"` still answers (reads are not writes).
     #[test]
     fn services_pin_refuses_writes_but_pin_read_still_answers() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         session.run_shell(
             "call-1".to_string(),
@@ -2089,9 +2089,9 @@ mod tests {
     /// finds no register and restarts id allocation at 1.
     #[test]
     fn transitioning_the_last_open_task_to_done_clears_the_pin_and_restarts_ids() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         session.run_shell("call-1".to_string(), r#"add-task "only task""#, 5, &emit);
         session.run_shell("call-2".to_string(), "transition 1 `done", 5, &emit);
@@ -2118,9 +2118,9 @@ mod tests {
     /// silently discarding it.
     #[test]
     fn a_foreign_card_under_tasks_fails_the_kit_didactically() {
-        let mut session = crate::agent::Agent::for_test("system").unwrap();
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         session.run_shell(
             "call-1".to_string(),

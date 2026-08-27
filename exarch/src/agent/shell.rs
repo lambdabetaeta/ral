@@ -1,12 +1,12 @@
-//! One `ral` call — [`Agent::run_shell`] — and the two `Arc`-shared cells a
+//! One `ral` call — [`Avatar::run_shell`] — and the two `Arc`-shared cells a
 //! desk handler writes the agent through: a handler answers mid-dispatch, on
 //! the attend thread's own stack inside [`shell_eval::run_shell`], so it can
-//! never take `&mut Agent` and reaches [`ReplyCell`] and [`LogCell`] through
+//! never take `&mut Avatar` and reaches [`ReplyCell`] and [`LogCell`] through
 //! the [`desk::HostServices`] capture instead.  One thread means a failed
 //! `try_lock` is reentrancy, not contention, so both cells panic where a
 //! `lock` would deadlock.
 
-use crate::agent::Agent;
+use crate::agent::Avatar;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
 use crate::agent::event::{AgentLog, ToolResult as SessionToolResult};
 use crate::agent::seat::{RunInstall, Seat};
@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 /// One `ral` call's reply slot, minted fresh per call so a reply staged and
 /// then abandoned cannot resurface in a later one.  The desk's `reply` handler
-/// is its only writer; [`Agent::run_shell`] harvests it into [`Agent::reply`].
+/// is its only writer; [`Avatar::run_shell`] harvests it into [`Avatar::reply`].
 #[derive(Clone, Default)]
 pub(crate) struct ReplyCell(Arc<Mutex<Option<FOValue>>>);
 
@@ -45,9 +45,9 @@ impl ReplyCell {
     }
 }
 
-/// [`Agent::log`] behind its own lock, so a desk handler can be handed the log
-/// off `&Agent` — the spawn spine forks a child's log through it — instead of
-/// reaching back through `&mut Agent`.
+/// [`Avatar::log`] behind its own lock, so a desk handler can be handed the log
+/// off `&Avatar` — the spawn spine forks a child's log through it — instead of
+/// reaching back through `&mut Avatar`.
 #[derive(Clone)]
 pub(crate) struct LogCell(Arc<Mutex<AgentLog>>);
 
@@ -71,7 +71,7 @@ impl LogCell {
     }
 }
 
-impl Agent {
+impl Avatar {
     /// Point this session's record seam at the bus `emit` rides, so every
     /// fact the log authors is published live as it lands on disk.  Called
     /// at each entry where a session meets a bus — `attend`, `deliberate`,
@@ -112,8 +112,8 @@ impl Agent {
         }
     }
 
-    /// Everything a desk handler may read off `&Agent`, since the reentrancy
-    /// law bars it from reaching back through `&mut Agent`/`&mut Shell`.  Built
+    /// Everything a desk handler may read off `&Avatar`, since the reentrancy
+    /// law bars it from reaching back through `&mut Avatar`/`&mut Shell`.  Built
     /// fresh at each [`Self::run_shell`] install, so no capture goes stale.
     pub(crate) fn host_services(
         &self,
@@ -134,35 +134,35 @@ impl Agent {
         desk::HostServices {
             registry: self.agents.clone(),
             scratch,
-            parent: self.id,
+            parent: self.agent.id,
             mailbox: self.mailbox(),
             emit: emit.clone(),
-            provider: self.provider.clone(),
-            caps: self.caps.clone(),
+            provider: self.agent.provider.clone(),
+            caps: self.agent.caps.clone(),
             cwd: self.cwd(),
-            fuel: self.fuel,
-            returns: self.returns,
-            allow_schedule: self.allow_schedule,
-            search: self.search,
+            fuel: self.agent.fuel,
+            returns: self.agent.returns,
+            allow_schedule: self.agent.allow_schedule,
+            search: self.agent.search,
             reply,
             schedules: self.schedules.clone(),
             log: self.log.clone(),
             // The unresolved template, not this agent's own `system`: a
             // desk-spawned child always returns, so it refilters its own index.
-            system_template: self.system_base.clone(),
-            index: self.index.clone(),
-            interactive: self.interactive,
+            system_template: self.agent.system_base.clone(),
+            index: self.agent.index.clone(),
+            interactive: self.agent.interactive,
             nursery,
-            generation: self.agents.generation(self.id),
-            disk_warn_bytes: self.disk_warn_bytes,
-            egress: self.egress.clone(),
+            generation: self.agents.generation(self.agent.id),
+            disk_warn_bytes: self.agent.disk_warn_bytes,
+            egress: self.agent.egress.clone(),
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
             principal: ral_core::host::user(),
             pins: Some(self.pins.clone()),
             wire_seat,
-            dial: self.dial.clone(),
+            dial: self.agent.dial.clone(),
         }
     }
 
@@ -190,7 +190,7 @@ impl Agent {
             },
             apply: desk::SurfaceApplier {
                 pins: Some(self.pins.clone()),
-                id: self.id,
+                id: self.agent.id,
                 recorder: self.recorder(),
                 surface: Mutex::new(crate::record::commit::SurfaceBuffer::new()),
             },
@@ -200,14 +200,19 @@ impl Agent {
                 seam: seam.clone(),
                 // Stamped with the registry generation read now, so a batch
                 // from a worker that settles after a `/clear` is dropped.
-                deferred: shell_eval::deferred_sink(emit, self.id, &self.agents, self.recorder()),
+                deferred: shell_eval::deferred_sink(
+                    emit,
+                    self.agent.id,
+                    &self.agents,
+                    self.recorder(),
+                ),
                 fork: ral_core::types::Fork::Park(nursery),
             });
             self.recorder()
                 .transient(crate::record::Transient::State(AgentState::Evaluating));
             shell_eval::run_shell(
                 self.seat.transport(),
-                &self.caps,
+                &self.agent.caps,
                 cmd,
                 timeout_secs,
                 Some(&seam),
@@ -286,7 +291,7 @@ mod tests {
     use super::*;
     use crate::agent::cancel;
     use crate::agent::testkit::*;
-    use crate::agent::{NoControl, ProviderHandle, deliberate};
+    use crate::agent::{NoControl, deliberate};
     use crate::provider::scripted::{Reply, Script};
     use ral_core::Shell;
     use ral_core::Value;
@@ -318,7 +323,7 @@ mod tests {
 
     #[test]
     fn let_bound_context_read_does_not_echo_the_transcript() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
             log.append_user("material that must stay bound".into(), None)
@@ -331,7 +336,7 @@ mod tests {
             .unwrap();
         }
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "context-read-no-echo".into(),
@@ -365,7 +370,7 @@ mod tests {
     /// recovery under test is the engine's own run door catching the unwind.
     #[test]
     fn worker_panic_preserves_completed_bindings_and_clean_context() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -382,10 +387,10 @@ mod tests {
                 .then(Reply::tool_calls(vec![ral_call("c2", "a4-panic-now")]))
                 .then(Reply::text("recovered")),
         );
-        session.provider = ProviderHandle::new(provider);
+        session.agent.provider.swap(provider);
         session.seed("compute then crash".into());
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         let _ = session.attend(&mut NoControl, &emit);
 
         // No grant frame leaked out of the panicking call's
@@ -409,7 +414,7 @@ mod tests {
 
         let provider2 = scripted("test-model", Script::new().then(Reply::text("ok")));
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         let token = cancel::Token::new();
         let _slot = cancel::publish(&token);
         match session.deliberate(&provider2, Some("continue".into()), None, &token, &emit) {
@@ -424,7 +429,7 @@ mod tests {
     /// armed out of reach, so only the size axis is in play.
     #[test]
     fn large_binding_install_warns_on_its_own_run_stderr() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -435,7 +440,7 @@ mod tests {
             });
 
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         let result = session.run_shell(
             "c0".into(),
             "let large_binding_x = 'well over eight bytes long'",
@@ -455,7 +460,7 @@ mod tests {
 
         // `return` binds nothing, so no install meets the threshold again.
         let (tx2, _rx2) = crate::bus::channel();
-        let emit2 = Emitter::with_mailbox(tx2, session.id, session.inbox.mailbox());
+        let emit2 = Emitter::with_mailbox(tx2, session.agent.id, session.inbox.mailbox());
         let result2 = session.run_shell("c1".into(), "return 1", 5, &emit2);
         assert!(
             !result2.content.contains("large binding"),
@@ -470,9 +475,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_non_zero_exit_carries_the_audit_of_what_already_stands() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
         let result = session.run_shell(
             "c0".into(),
@@ -513,9 +518,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_wall_names_the_workers_that_survived_it() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
         let result = session.run_shell(
             "c0".into(),
@@ -547,9 +552,9 @@ mod tests {
     /// worker is nobody's orphan, so nothing is said about it.
     #[test]
     fn a_call_that_returns_says_nothing_about_its_workers() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
         let result = session.run_shell("c0".into(), "let ok = defer { return 1 }", 10, &emit);
 
@@ -566,9 +571,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
         let result = session.run_shell(
             "c0".into(),
@@ -596,7 +601,7 @@ mod tests {
     /// the prune is already part of the state being checkpointed.
     #[test]
     fn panic_after_prune_does_not_resurrect_binding() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -612,7 +617,7 @@ mod tests {
             });
 
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         session.run_shell("c0".into(), "let panic_prune_x = 1", 5, &emit);
         session.run_shell("c1".into(), "let _spin1 = 0", 5, &emit);
         session.run_shell("c2".into(), "let _spin2 = 0", 5, &emit);
@@ -634,7 +639,7 @@ mod tests {
                 .then(Reply::tool_calls(vec![ral_call("c4", "a4-panic-now")]))
                 .then(Reply::text("recovered")),
         );
-        session.provider = ProviderHandle::new(provider);
+        session.agent.provider.swap(provider);
         session.seed("compute then crash".into());
         let _ = session.attend(&mut NoControl, &emit);
 
@@ -654,9 +659,9 @@ mod tests {
     /// boot-seeded name is baseline and never ages out.
     #[test]
     fn boot_names_survive_past_the_idle_bound() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
 
         let (boot_name, _) = session
             .seat
@@ -681,12 +686,12 @@ mod tests {
     /// notice riding a later run's surface stream back to the bus.
     #[test]
     fn run_shell_epoch_stamps_and_retention_renders_through_the_drain() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         // A tiny bound so the expiry is a couple of calls away; this replaces
         // the production constant the seat's identity ceremony armed.
         session.seat.shell_mut().shell.arm_worker_retention(1);
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
 
         session.run_shell("t1".into(), "spawn { return 1 }", 5, &emit);
         assert_eq!(session.ral_epoch, 1, "one call, one tick");

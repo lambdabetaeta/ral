@@ -1,4 +1,4 @@
-//! Where every [`Agent`] comes from and how it ends: `root` and `for_test`
+//! Where every [`Avatar`] comes from and how it ends: `root` and `for_test`
 //! build a trunk, `fork` and `branch` a child, all four through `assemble`
 //! and its [`Build`] bundle. `clear` rebuilds a node's context in place
 //! rather than ending it; `Drop` is the one exit every life takes.
@@ -7,7 +7,7 @@ use crate::agent::dial::Dial;
 use crate::agent::event::{AgentLog, ContextOp, EditAuthority};
 use crate::agent::seat::{self, Seat};
 use crate::agent::shell::LogCell;
-use crate::agent::{Agent, ProviderHandle, SPAWN_FUEL, cancel, nudge};
+use crate::agent::{Agent, Avatar, ProviderHandle, SPAWN_FUEL, cancel, nudge};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Emitter, Inbox};
 use crate::fleet::registry::{AgentRegistry, Registration};
@@ -44,7 +44,7 @@ fn seed_id_counter(sessions_root: &std::path::Path) -> io::Result<()> {
 /// not itself — but the entry carries its mailbox and provider for the frontend.
 const TRUNK_NAME: &str = "main";
 
-/// What `Agent::assemble` needs.  Fields are `pub(crate)` because a desk
+/// What `Avatar::assemble` needs.  Fields are `pub(crate)` because a desk
 /// handler builds a spawned child's literal from its captured `HostServices`,
 /// the one place lawfully holding the adopted nursery shell; `fork_with` is
 /// the ordinary in-thread path.
@@ -112,7 +112,7 @@ impl RecordedAccount {
     /// A snapshot for tests that only care that *something* is recorded.
     /// Not `#[cfg(test)]`: integration test binaries link the library built
     /// without it, so a fixture they share with the unit tests must be an
-    /// ordinary function, as [`crate::agent::Agent::for_test`] already is.
+    /// ordinary function, as [`crate::agent::Avatar::for_test`] already is.
     #[doc(hidden)]
     pub fn for_test(name: &str) -> Self {
         Self {
@@ -123,7 +123,7 @@ impl RecordedAccount {
     }
 }
 
-/// Everything [`Agent::root`] needs beyond the seat choice and the provider.
+/// Everything [`Avatar::root`] needs beyond the seat choice and the provider.
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each bool sets an independent, orthogonal axis on the trunk (allow_schedule, interactive, chat); not a candidate for a combined enum"
@@ -155,7 +155,7 @@ pub struct RootConfig {
     pub dial: Option<Arc<dyn Dial>>,
 }
 
-/// Where the trunk's engine lives — [`Agent::root`]'s one construction-time
+/// Where the trunk's engine lives — [`Avatar::root`]'s one construction-time
 /// choice.
 pub enum RootSeat {
     /// In-process, over an identity transport. `cwd` is stated rather than
@@ -178,7 +178,7 @@ pub enum RootSeat {
     },
 }
 
-impl Agent {
+impl Avatar {
     pub(crate) fn assemble(b: Build) -> Self {
         let Build {
             system,
@@ -202,39 +202,43 @@ impl Agent {
             egress,
             dial,
         } = b;
-        Self {
+        let nudges = tool_enabled.then(nudge::Registry::new);
+        let agent = Arc::new(Agent {
             id: log.id(),
             system: system_prompt,
             system_base: system,
             index,
-            log: LogCell::new(log),
-            _run_lock: run_lock,
-            resume_summary,
-            seat,
             caps,
             parent,
             fuel,
             provider,
             interactive,
-            inbox: Inbox::new(),
-            nudges: tool_enabled.then(nudge::Registry::new),
             cancel: cancel::Token::new(),
             tool_enabled,
             search,
             returns,
             allow_schedule,
+            disk_warn_bytes,
+            egress,
+            dial,
+        });
+        Self {
+            agent,
+            log: LogCell::new(log),
+            _run_lock: run_lock,
+            resume_summary,
+            seat,
+            inbox: Inbox::new(),
+            nudges,
             reply: None,
             agents,
             schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             last_input: (0, 0),
             pins: Arc::default(),
             ral_epoch: 0,
-            disk_warn_bytes,
             disk_check_epoch: 0,
             disk_warn_latched: false,
             context_warn_latched: false,
-            egress,
-            dial,
         }
     }
 
@@ -251,16 +255,16 @@ impl Agent {
     /// self-registering entry its registry holds.
     pub(super) fn register_self_named(&self, name: &str) {
         let _ = self.agents.register(Registration {
-            id: self.id,
-            parent: self.parent,
+            id: self.agent.id,
+            parent: self.agent.parent,
             name: name.to_string(),
             log_dir: self.log.lock().dir().to_path_buf(),
-            cancel: self.cancel.clone(),
+            cancel: self.agent.cancel.clone(),
             // This seat is rebuilt in place under this standing entry, so a
             // root captured now would go stale — see `interrupt_only`.
             reach: self.seat.eval_reach().interrupt_only(),
             mailbox: self.inbox.mailbox(),
-            provider: self.provider.clone(),
+            provider: self.agent.provider.clone(),
         });
     }
 
@@ -405,7 +409,7 @@ impl Agent {
                 home,
             } => Seat::wire(*transport, cwd, home),
         };
-        let agent = Self::assemble(Build {
+        let avatar = Self::assemble(Build {
             system,
             system_prompt,
             index,
@@ -429,7 +433,7 @@ impl Agent {
             dial,
         });
         if resume.is_some() {
-            agent
+            avatar
                 .log
                 .lock()
                 .import_context(vec![genai::chat::ChatMessage::user(
@@ -437,8 +441,8 @@ impl Agent {
                 )])
                 .map_err(io::Error::other)?;
         }
-        agent.register_self();
-        Ok(agent)
+        avatar.register_self();
+        Ok(avatar)
     }
 
     pub(crate) fn clear(&mut self) -> io::Result<()> {
@@ -449,7 +453,7 @@ impl Agent {
         // and belongs to the new one.  Sweeping it afterwards eats it in
         // silence — the queue holds no record of what it dropped.
         self.inbox.clear();
-        let record = self.log.lock().clear(self.system.len(), at_unix_ms)?;
+        let record = self.log.lock().clear(self.agent.system.len(), at_unix_ms)?;
         let error = record.rotation_error;
         // Rebooting the seat drops the outgoing shell, whose teardown cancels
         // its registered workers — `/clear` outranks every lease.
@@ -462,7 +466,7 @@ impl Agent {
         // the schedules.  A straggler that composed its message before this
         // call carries its own stamp and is rejected at a consuming edge, so
         // neither order is load-bearing.
-        self.agents.clear_subtree(self.id);
+        self.agents.clear_subtree(self.agent.id);
         self.schedules.clear();
         // The frontend wipes its pin register on `/clear`, so the session's
         // mirror must follow.
@@ -503,14 +507,14 @@ impl Agent {
         // here can drift from it.  Per-agent state starts fresh.
         let shell = self.seat.shell_mut().shell.fork_session();
         let child_id = fresh_id();
-        let fuel = self.fuel.saturating_sub(1);
+        let fuel = self.agent.fuel.saturating_sub(1);
         // Against the *child's* grants, never this agent's: a `/branch` child
         // withholds `reply` however its creator's own bit reads.
-        let system_prompt = self.index.apply(
-            &self.system_base,
+        let system_prompt = self.agent.index.apply(
+            &self.agent.system_base,
             &Grants {
                 returns,
-                allow_schedule: self.allow_schedule,
+                allow_schedule: self.agent.allow_schedule,
                 spawns: fuel > 0,
             },
         );
@@ -527,32 +531,32 @@ impl Agent {
             }
         };
         Ok(Self::assemble(Build {
-            system: self.system_base.clone(),
+            system: self.agent.system_base.clone(),
             system_prompt,
-            index: self.index.clone(),
+            index: self.agent.index.clone(),
             caps,
             seat,
             log,
-            parent: Some(self.id),
+            parent: Some(self.agent.id),
             fuel,
             // Seeded from the parent's *current* provider, so a later `/model`
             // on either never disturbs the other.
-            provider: ProviderHandle::new(self.provider.current()),
+            provider: ProviderHandle::new(self.agent.provider.current()),
             // Human-attachment is inherited; engagement is not, being a
             // per-agent registry read from the child's first exchange.
-            interactive: self.interactive,
+            interactive: self.agent.interactive,
             returns,
-            allow_schedule: self.allow_schedule,
+            allow_schedule: self.agent.allow_schedule,
             // `--chat` is trunk-only, so every fork keeps the tool.
             tool_enabled: true,
             // Never a fresh grant: a child's reach is bounded by its parent's.
-            search: self.search,
+            search: self.agent.search,
             agents: self.agents.clone(),
             run_lock: None,
             resume_summary: None,
-            disk_warn_bytes: self.disk_warn_bytes,
-            egress: self.egress.clone(),
-            dial: self.dial.clone(),
+            disk_warn_bytes: self.agent.disk_warn_bytes,
+            egress: self.agent.egress.clone(),
+            dial: self.agent.dial.clone(),
         }))
     }
 
@@ -560,7 +564,7 @@ impl Agent {
     /// verbatim, but `reply` withheld, so it parks for the human instead of
     /// returning a value.
     pub(crate) fn branch(&self) -> io::Result<Self> {
-        let child = self.fork_with(self.caps.clone(), false)?;
+        let child = self.fork_with(self.agent.caps.clone(), false)?;
         self.inherit_context(&child)?;
         Ok(child)
     }
@@ -630,7 +634,7 @@ impl Agent {
         )));
         let cwd = std::env::current_dir().expect("test process has a cwd");
         let seat = Seat::identity(shell, scratch, cwd, false, &log);
-        let agent = Self::assemble(Build {
+        let avatar = Self::assemble(Build {
             system: system.to_string(),
             system_prompt,
             index,
@@ -654,12 +658,12 @@ impl Agent {
             egress: crate::egress::Egress::for_test(),
             dial: None,
         });
-        agent.register_self();
-        Ok(agent)
+        avatar.register_self();
+        Ok(avatar)
     }
 }
 
-impl Drop for Agent {
+impl Drop for Avatar {
     /// The one exit every life takes — a settle, the subtree cascade, or the
     /// trunk's own `deregister` at the end of `attend`.  A cascade cancels
     /// only an agent's *eval root*, leaving its armed schedules for whoever
@@ -692,7 +696,7 @@ mod tests {
     /// just the core set a bare `Shell::new` seeds.
     #[test]
     fn fork_inherits_host_builtins() {
-        let session = Agent::for_test("system").unwrap();
+        let session = Avatar::for_test("system").unwrap();
         assert!(
             session
                 .seat
@@ -718,38 +722,38 @@ mod tests {
     /// wrapping.
     #[test]
     fn fork_fans_out_without_spending_the_parents_fuel() {
-        let parent = Agent::for_test("system").unwrap();
-        assert_eq!(parent.fuel, SPAWN_FUEL);
+        let parent = Avatar::for_test("system").unwrap();
+        assert_eq!(parent.agent.fuel, SPAWN_FUEL);
         for _ in 0..3 {
             let child = parent.fork(parent.caps().clone()).expect("fork child");
             assert_eq!(
-                child.fuel,
+                child.agent.fuel,
                 SPAWN_FUEL - 1,
                 "each child starts one below the parent, regardless of how many siblings it has"
             );
         }
         assert_eq!(
-            parent.fuel, SPAWN_FUEL,
+            parent.agent.fuel, SPAWN_FUEL,
             "fork never touches the parent's own fuel — fan-out is unbounded"
         );
 
-        let mut agent = parent;
+        let mut chain = parent;
         for expected in (0..SPAWN_FUEL).rev() {
-            agent = agent.fork(agent.caps().clone()).expect("fork child");
-            assert_eq!(agent.fuel, expected);
+            chain = chain.fork(chain.caps().clone()).expect("fork child");
+            assert_eq!(chain.agent.fuel, expected);
         }
-        assert_eq!(agent.fuel, 0, "the chain must bottom out at zero, not wrap");
+        assert_eq!(chain.agent.fuel, 0, "the chain must bottom out at zero, not wrap");
     }
 
     /// A fork carries its parent's search reach verbatim, in both directions
     /// — the ceiling the desk's own clamp narrows a spawn against.
     #[test]
     fn fork_inherits_its_parents_search_reach() {
-        let mut parent = Agent::for_test("system").unwrap();
-        assert!(parent.fork(parent.caps().clone()).unwrap().search);
-        parent.search = false;
+        let mut parent = Avatar::for_test("system").unwrap();
+        assert!(parent.fork(parent.caps().clone()).unwrap().agent.search);
+        parent.agent_mut().search = false;
         assert!(
-            !parent.fork(parent.caps().clone()).unwrap().search,
+            !parent.fork(parent.caps().clone()).unwrap().agent.search,
             "a searchless parent can hand out no search of its own"
         );
     }
@@ -758,18 +762,18 @@ mod tests {
     /// the other — what `/model` on the focused agent relies on.
     #[test]
     fn fork_seeds_its_own_provider_handle() {
-        let parent = Agent::for_test("system").unwrap();
-        parent.provider.swap(scripted("p-a", Script::new()));
+        let parent = Avatar::for_test("system").unwrap();
+        parent.agent.provider.swap(scripted("p-a", Script::new()));
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         assert_eq!(
-            child.provider.current().model(),
+            child.agent.provider.current().model(),
             "p-a",
             "the child seeds its handle from the parent's current provider"
         );
-        parent.provider.swap(scripted("p-b", Script::new()));
-        assert_eq!(parent.provider.current().model(), "p-b");
+        parent.agent.provider.swap(scripted("p-b", Script::new()));
+        assert_eq!(parent.agent.provider.current().model(), "p-b");
         assert_eq!(
-            child.provider.current().model(),
+            child.agent.provider.current().model(),
             "p-a",
             "a swap on the parent never disturbs an already-forked child"
         );
@@ -779,7 +783,7 @@ mod tests {
     /// otherwise an ordinary fork: caps verbatim, one less fuel.
     #[test]
     fn branch_imports_context_and_withholds_reply() {
-        let parent = Agent::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         parent
             .log
             .lock()
@@ -815,8 +819,8 @@ mod tests {
             "a branch inherits the creator's capabilities verbatim"
         );
         assert_eq!(
-            child.fuel,
-            parent.fuel - 1,
+            child.agent.fuel,
+            parent.agent.fuel - 1,
             "a branch is a fork: its fuel is one less than the parent's"
         );
     }
@@ -850,7 +854,7 @@ mod tests {
             "persona\n\n# Builtins\n\n{}",
             crate::prompt::BUILTIN_INDEX_PLACEHOLDER
         );
-        let root = Agent::root(
+        let root = Avatar::root(
             RootConfig {
                 system: template,
                 caps: ral_core::types::Capabilities::default(),
@@ -880,28 +884,28 @@ mod tests {
 
         let child = root.fork(root.caps().clone()).expect("fork child");
         assert_ne!(
-            child.system.len(),
-            root.system.len(),
+            child.agent.system.len(),
+            root.agent.system.len(),
             "the fork's bits must actually differ from its parent's for \
              this test to be meaningful"
         );
         assert_eq!(
             recorded_system_prompt_bytes(&child.log_dir()),
-            child.system.len(),
+            child.agent.system.len(),
             "an ordinary fork's bookend must record its own resolved \
              system, not its non-returning parent's"
         );
 
         let grandchild = child.branch().expect("branch grandchild");
         assert_ne!(
-            grandchild.system.len(),
-            child.system.len(),
+            grandchild.agent.system.len(),
+            child.agent.system.len(),
             "the branch's bits must actually differ from its parent's for \
              this test to be meaningful"
         );
         assert_eq!(
             recorded_system_prompt_bytes(&grandchild.log_dir()),
-            grandchild.system.len(),
+            grandchild.agent.system.len(),
             "a /branch child's bookend must record its own resolved \
              system, not its returning parent's"
         );
@@ -910,13 +914,13 @@ mod tests {
     /// `/clear` cancels every registered worker, the durable class included,
     /// and the rebuilt shell starts empty.  A worker settling *after* the
     /// clear still flushes its batch to the inbox, stamped with its birth
-    /// generation, and `Agent::admits` is the edge that rejects it.  The
+    /// generation, and `Avatar::admits` is the edge that rejects it.  The
     /// workers stay deaf until `CLEAR_RELEASE` so they settle past the inbox
     /// drop; settling inside the clear would have `Inbox::clear` eat the
     /// batch instead, leaving this straggler path unexercised.
     #[test]
     fn clear_cancels_registered_workers_and_drops_their_late_surface() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -927,7 +931,7 @@ mod tests {
         // must be this session's own inbox for the late-surface assertion
         // below to mean anything.
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
         let _ = session.run_shell(
             "c1".into(),
             "spawn { test-clear-block-until-released }",
@@ -1006,22 +1010,22 @@ mod tests {
     /// pointed at it, so `Drop` is the only thing that reaches its workers.
     #[test]
     fn agent_drop_cancels_its_own_unclosed_workers() {
-        let mut agent = Agent::for_test("system").unwrap();
-        agent
+        let mut avatar = Avatar::for_test("system").unwrap();
+        avatar
             .seat
             .shell_mut()
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, agent.id, agent.inbox.mailbox());
-        let _ = agent.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
+        let emit = Emitter::with_mailbox(tx, avatar.agent.id, avatar.inbox.mailbox());
+        let _ = avatar.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
 
-        let entries = agent.seat.shell_mut().shell.workers();
+        let entries = avatar.seat.shell_mut().shell.workers();
         assert_eq!(entries.len(), 1, "the agent's own spawn must register");
         assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
 
-        drop(agent);
+        drop(avatar);
 
         assert!(
             entries[0].handle.cancel.is_cancelled(),
@@ -1036,7 +1040,7 @@ mod tests {
     /// clear, a settled agent's cron fires into an inbox nobody drains.
     #[test]
     fn agent_drop_clears_its_own_armed_schedules() {
-        let agent = Agent::for_test("system").unwrap();
+        let agent = Avatar::for_test("system").unwrap();
         let schedules = agent.schedules.clone();
         schedules
             .schedule(
@@ -1062,9 +1066,9 @@ mod tests {
     /// old `Shell`, ledger included.
     #[test]
     fn clear_reseals_baseline_and_forgets_ledger() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         session.run_shell("c0".into(), "let pre_clear_x = 1", 5, &emit);
 
         session.clear().expect("clear must succeed");
@@ -1077,7 +1081,7 @@ mod tests {
 
     #[test]
     fn rewind_validates_the_anchor_drops_the_digest_whole_and_sheds_nudges() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
             for (prompt, answer) in [
@@ -1091,7 +1095,7 @@ mod tests {
             }
         }
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
 
         assert_eq!(
             session.rewind(9, &emit).unwrap_err(),
@@ -1152,9 +1156,9 @@ mod tests {
     /// many idle calls it runs.
     #[test]
     fn fork_child_inherited_scratch_is_baseline() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         session.run_shell("c0".into(), "let parent_scratch = 1", 5, &emit);
 
         let mut child = session
@@ -1177,7 +1181,7 @@ mod tests {
                 large_binding_bytes: u64::MAX,
             });
         let (child_tx, _child_rx) = crate::bus::channel();
-        let child_emit = Emitter::new(child_tx, child.id);
+        let child_emit = Emitter::new(child_tx, child.agent.id);
         for i in 0..3 {
             child.run_shell(format!("child{i}"), "let _child_spin = 0", 5, &child_emit);
         }
@@ -1208,7 +1212,7 @@ mod tests {
 
         let scratch =
             Scratch::for_test(crate::bootstrap::EXARCH, "resume-agent").expect("scratch dir");
-        let agent = Agent::root(
+        let agent = Avatar::root(
             RootConfig {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),
@@ -1271,11 +1275,11 @@ mod tests {
     /// frontend dark for the whole first exchange of the cleared session.
     #[test]
     fn clear_rotates_record_jsonl_and_shared_emitters_follow_the_new_segment() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         let record = session.log_dir().join("record.jsonl");
         fs::write(record.with_file_name("record.jsonl.0"), b"reserved").unwrap();
         let (tx, rx) = crate::bus::channel();
-        session.couple(&Emitter::new(tx, session.id));
+        session.couple(&Emitter::new(tx, session.agent.id));
         let recorder = session.recorder();
 
         session.clear().expect("clear rotation");
@@ -1334,7 +1338,7 @@ mod tests {
         let dir = tmp("no-logs-agent");
         let scratch =
             Scratch::for_test(crate::bootstrap::EXARCH, "no-logs-agent").expect("scratch dir");
-        let agent = Agent::root(
+        let agent = Avatar::root(
             RootConfig {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),
@@ -1391,7 +1395,7 @@ mod tests {
 
         let scratch =
             Scratch::for_test(crate::bootstrap::EXARCH, "resume-id-seed").expect("scratch dir");
-        let root = Agent::root(
+        let root = Avatar::root(
             RootConfig {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),

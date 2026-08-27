@@ -22,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 /// How [`Inbox::next_or_idle`] should treat an empty inbox — the verdict
-/// `Agent::park_mode` recomputes on every wake.
+/// `Avatar::park_mode` recomputes on every wake.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ParkMode {
     /// A live human conversation: park *and ignore cancellation* entirely, for
@@ -1044,7 +1044,7 @@ mod tests {
 
     /// `clear` runs the same drain side effect a real drain would, so an
     /// unconsumed wakeup's `pending` flag is not stranded `true` forever.
-    /// `Agent::clear` disarms the schedule registry alongside, but the TUI's
+    /// `Avatar::clear` disarms the schedule registry alongside, but the TUI's
     /// `App::clear` reaches only the inbox, so this must hold on its own.
     #[test]
     fn inbox_clear_runs_the_drain_side_effect_on_a_stranded_wakeup() {

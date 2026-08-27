@@ -1,12 +1,12 @@
 //! One prompt run to quiescence against the provider.
 //!
-//! [`Agent::deliberate`] steps the provider until it stops calling tools,
+//! [`Avatar::deliberate`] steps the provider until it stops calling tools,
 //! bounded by [`MAX_STEPS`] since a headless run has no Esc to hand.
 //! Auto-compaction is checked once, at entry — the sole boundary guaranteed
 //! `ReadyForUser` — against the policy in [`digest`](crate::agent::digest).
-//! [`Agent::attend`] is the loop around this, one call per inbox item.
+//! [`Avatar::attend`] is the loop around this, one call per inbox item.
 
-use crate::agent::Agent;
+use crate::agent::Avatar;
 use crate::agent::attend::announce;
 use crate::agent::cancel;
 use crate::agent::digest::{
@@ -21,7 +21,7 @@ use crate::record::Transient;
 use ral_core::serial::FOValue;
 use std::sync::Arc;
 
-/// Outcome of one [`Agent::deliberate`]; hard failures travel through
+/// Outcome of one [`Avatar::deliberate`]; hard failures travel through
 /// [`ProviderError`] instead.  [`Self::Empty`] and [`Self::Stopped`] become
 /// nudges, [`Self::Cancelled`] and [`Self::Capped`] do not.
 #[derive(Debug)]
@@ -42,12 +42,12 @@ pub enum Outcome {
     Capped,
 }
 
-/// Hard ceiling on provider round-trips in one [`Agent::deliberate`].  The
+/// Hard ceiling on provider round-trips in one [`Avatar::deliberate`].  The
 /// interactive frontend has Esc to halt a runaway; headless and autonomous runs
 /// have nothing.  Generous enough that no genuine deliberation reaches it.
 const MAX_STEPS: u32 = 250;
 
-impl Agent {
+impl Avatar {
     /// Run one deliberation: optionally commit `prompt`, then step the provider
     /// round-trip loop to quiescence.
     ///
@@ -126,10 +126,10 @@ impl Agent {
                 let stream = &mut stream;
                 let unrecorded = &mut unrecorded;
                 provider.complete(
-                    &self.system,
+                    &self.agent.system,
                     messages,
-                    self.tool_enabled,
-                    self.search,
+                    self.agent.tool_enabled,
+                    self.agent.search,
                     &mut |delta: Delta<'_>| {
                         match delta {
                             Delta::Say(t) => {
@@ -335,7 +335,7 @@ impl Agent {
         };
         self.recorder()
             .transient(Transient::State(AgentState::Compacting));
-        match provider.summarize(&self.system, plan.prefix_messages, summary_cap, token) {
+        match provider.summarize(&self.agent.system, plan.prefix_messages, summary_cap, token) {
             Ok(summary) => {
                 let recorded = self.log.lock().record_usage(summary.usage.into());
                 if let Err(e) = recorded {
@@ -396,7 +396,7 @@ impl Agent {
         // `ral` is the only name this agent recognises, and only when the
         // request advertised it (withheld for a `--chat` trunk).  Every harness
         // verb (`agent`, `reply`, `schedule`, …) is a builtin *inside* it.
-        if self.tool_enabled && call.fn_name == crate::shell_eval::tools::ral::NAME {
+        if self.agent.tool_enabled && call.fn_name == crate::shell_eval::tools::ral::NAME {
             crate::shell_eval::tools::ral::dispatch(call.call_id, &call.fn_arguments, self, emit)
         } else {
             let msg = format!("unknown tool `{}`", call.fn_name);
@@ -415,7 +415,7 @@ impl Agent {
     /// parks, deposit and all — only a parentless agent's `attend` loop stops
     /// here.
     fn replied(&self, payload: FOValue) -> Outcome {
-        self.agents.cancel_descendants(self.id);
+        self.agents.cancel_descendants(self.agent.id);
         self.log.lock().quiesce(QuiesceReason::Replied);
         Outcome::Replied(payload)
     }
@@ -527,7 +527,7 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
-    use crate::agent::{NoControl, ProviderHandle, fresh_id};
+    use crate::agent::{NoControl, fresh_id};
     use crate::bus::{AgentOutcome, Inbox, Post};
     use crate::fleet::registry::{EvalReach, InterruptTarget, Registration};
     use crate::provider::scripted::{Reply, Script};
@@ -543,7 +543,7 @@ mod tests {
     /// it settles `Complete`, and the run ends `ReadyForUser`.
     #[test]
     fn sub_agent_returns_through_reply() {
-        let parent = Agent::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("write a report".into());
         let provider = scripted(
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn reply_cancels_live_descendants() {
         let dir = tmp("reply-cancels-children");
-        let parent = Agent::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("return early".into());
 
@@ -593,8 +593,8 @@ mod tests {
         child
             .agents
             .register(Registration {
-                id: child.id,
-                parent: Some(parent.id),
+                id: child.agent.id,
+                parent: Some(parent.agent.id),
                 name: "child".into(),
                 log_dir: dir.path().join("child"),
                 cancel: child.cancel_token().clone(),
@@ -605,7 +605,7 @@ mod tests {
             .expect("child registration must succeed: its parent is live");
         let _ = child.agents.register(Registration {
             id: direct,
-            parent: Some(child.id),
+            parent: Some(child.agent.id),
             name: "direct".into(),
             log_dir: dir.path().join("direct"),
             cancel: direct_token.clone(),
@@ -614,7 +614,7 @@ mod tests {
                 interrupt_target: InterruptTarget::default(),
             },
             mailbox: Inbox::new().mailbox(),
-            provider: child.provider.clone(),
+            provider: child.agent.provider.clone(),
         });
         let _ = child.agents.register(Registration {
             id: grandchild,
@@ -627,13 +627,13 @@ mod tests {
                 interrupt_target: InterruptTarget::default(),
             },
             mailbox: Inbox::new().mailbox(),
-            provider: child.provider.clone(),
+            provider: child.agent.provider.clone(),
         });
         child
             .agents
             .register(Registration {
                 id: sibling,
-                parent: Some(parent.id),
+                parent: Some(parent.agent.id),
                 name: "sibling".into(),
                 log_dir: dir.path().join("sibling"),
                 cancel: sibling_token.clone(),
@@ -642,7 +642,7 @@ mod tests {
                     interrupt_target: InterruptTarget::default(),
                 },
                 mailbox: Inbox::new().mailbox(),
-                provider: child.provider.clone(),
+                provider: child.agent.provider.clone(),
             })
             .expect("sibling registration must succeed: its parent is live");
 
@@ -658,7 +658,7 @@ mod tests {
         // only then end the park.
         let release = {
             let registry = child.agents.clone();
-            let id = child.id;
+            let id = child.agent.id;
             std::thread::spawn(move || {
                 while !registry.has_reply(id) {
                     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -690,7 +690,7 @@ mod tests {
             "grandchild is cancelled recursively"
         );
         assert!(
-            child.agents.list(child.id).is_empty(),
+            child.agents.list(child.agent.id).is_empty(),
             "reply reaps the abandoned subtree"
         );
         assert!(
@@ -709,7 +709,7 @@ mod tests {
     /// message, blank-line joined.
     #[test]
     fn steering_typed_during_a_tool_batch_is_committed_between_results_and_reply() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .inbox
             .push(Post::UserSteering("actually, stop after this".into()))
@@ -726,7 +726,7 @@ mod tests {
                 .then(Reply::text("ok")),
         );
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         match session.deliberate(
             &provider,
             Some("go".into()),
@@ -773,7 +773,7 @@ mod tests {
     /// quiesce must leave the next prompt admissible.
     #[test]
     fn provider_error_mid_deliberation_does_not_wedge_session() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         // A tool call that completes, then a stream error mid-protocol, then
         // clean replies for the second exchange and its nudges.
         let provider = scripted(
@@ -788,11 +788,11 @@ mod tests {
                 .then(Reply::text("ok"))
                 .then(Reply::text("ok")),
         );
-        session.provider = ProviderHandle::new(provider);
+        session.agent.provider.swap(provider);
         session.seed("first exchange".into());
         session.seed("second exchange after error".into());
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         let (outcome, _) = session.attend(&mut NoControl, &emit);
         assert!(
             session.is_ready(),
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn stale_token_measure_is_unknown_until_the_next_completion() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
             log.append_user("old context".into(), None).unwrap();
@@ -845,7 +845,7 @@ mod tests {
             Script::new().then(Reply::text("fresh completion")),
         );
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         let outcome = session.deliberate(
             &provider,
             Some("new context".into()),
@@ -899,7 +899,7 @@ mod tests {
     /// token `deliberate` watches, landing between `run_batch` and the drain.
     #[test]
     fn cancel_between_run_batch_and_drain_does_not_leak_reply_into_next_deliberation() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .seat
             .shell_mut()
@@ -917,7 +917,7 @@ mod tests {
             ])),
         );
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         match session.deliberate(&provider, Some("go".into()), None, &token, &emit) {
             Ok(Outcome::Cancelled) => {}
             other => panic!("expected the cancel to win before the reply drains, got {other:?}"),
@@ -945,9 +945,9 @@ mod tests {
     /// `/clear` still reaches the inbox and must be dropped here.
     #[test]
     fn stale_agent_result_is_dropped_by_generation_admission() {
-        let mut session = Agent::for_test("system").unwrap();
-        let stale = session.agents.generation(session.id);
-        session.agents.clear_subtree(session.id);
+        let mut session = Avatar::for_test("system").unwrap();
+        let stale = session.agents.generation(session.agent.id);
+        session.agents.clear_subtree(session.agent.id);
         session
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
@@ -957,9 +957,9 @@ mod tests {
                 generation: stale,
             }))
             .unwrap();
-        session.provider = ProviderHandle::new(scripted("test-model", Script::new()));
+        session.agent.provider.swap(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Failed(_)),
@@ -973,25 +973,25 @@ mod tests {
     /// provider.
     #[test]
     fn current_generation_agent_result_is_delivered() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
                 name: "worker".into(),
                 outcome: AgentOutcome::Stopped("found it".into()),
                 elapsed: std::time::Duration::ZERO,
-                generation: session.agents.generation(session.id),
+                generation: session.agents.generation(session.agent.id),
             }))
             .unwrap();
         // A headless root's first `reply` is turned back for self-verification.
-        session.provider = ProviderHandle::new(scripted(
+        session.agent.provider.swap(scripted(
             "test-model",
             Script::new()
                 .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'done'")]))
                 .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'done'")])),
         ));
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Replied),
@@ -1009,20 +1009,20 @@ mod tests {
     /// attend thread, so the producer cannot judge its own staleness.
     #[test]
     fn stale_surface_batch_is_dropped_by_generation_admission() {
-        let mut session = Agent::for_test("system").unwrap();
-        let stale = session.agents.generation(session.id);
-        session.agents.clear_subtree(session.id);
+        let mut session = Avatar::for_test("system").unwrap();
+        let stale = session.agents.generation(session.agent.id);
+        session.agents.clear_subtree(session.agent.id);
         session
             .inbox
             .push(Post::Surface {
-                id: session.id,
+                id: session.agent.id,
                 values: Vec::new(),
                 generation: stale,
             })
             .unwrap();
-        session.provider = ProviderHandle::new(scripted("test-model", Script::new()));
+        session.agent.provider.swap(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Failed(_)),
@@ -1036,24 +1036,24 @@ mod tests {
     /// drives the provider.
     #[test]
     fn current_generation_surface_batch_is_delivered() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .inbox
             .push(Post::Surface {
-                id: session.id,
+                id: session.agent.id,
                 values: Vec::new(),
-                generation: session.agents.generation(session.id),
+                generation: session.agents.generation(session.agent.id),
             })
             .unwrap();
         // Same self-verification turn-back as the agent-result twin above.
-        session.provider = ProviderHandle::new(scripted(
+        session.agent.provider.swap(scripted(
             "test-model",
             Script::new()
                 .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'done'")]))
                 .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'done'")])),
         ));
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::new(tx, session.id);
+        let emit = Emitter::new(tx, session.agent.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Replied),
@@ -1073,7 +1073,7 @@ mod tests {
     /// Pinned because it must keep holding with no wiring of its own.
     #[test]
     fn cancel_cascade_reaches_a_cancelled_sub_agents_workers() {
-        let parent = Agent::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child
             .seat
@@ -1082,8 +1082,8 @@ mod tests {
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
         let _ = parent.agents.register(Registration {
-            id: child.id,
-            parent: Some(parent.id),
+            id: child.agent.id,
+            parent: Some(parent.agent.id),
             name: "child".into(),
             log_dir: child.log_dir(),
             cancel: child.cancel_token().clone(),
@@ -1093,7 +1093,7 @@ mod tests {
         });
 
         let (tx, _rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, child.id, child.inbox.mailbox());
+        let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());
         let _ = child.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
 
         let entries = child.seat.shell_mut().shell.workers();
@@ -1101,7 +1101,7 @@ mod tests {
         assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
 
         assert!(
-            parent.agents.cancel(child.id),
+            parent.agents.cancel(child.agent.id),
             "the child must still be live"
         );
 

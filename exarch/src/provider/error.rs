@@ -53,7 +53,7 @@ pub enum ProviderError {
     },
     /// The turn was cut off short of the model finishing — output cap or
     /// mid-stream stall ([`crate::provider::CutShort`]).  Raised by
-    /// [`crate::agent::Agent::deliberate`] *after* it appends the partial
+    /// [`crate::agent::Avatar::deliberate`] *after* it appends the partial
     /// assistant message, so a re-prompt keeps that work as context.
     Truncated {
         /// The provider's normalised stop reason (`"max_tokens"`) for a cap,

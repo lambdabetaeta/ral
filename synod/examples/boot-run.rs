@@ -41,7 +41,7 @@
 //!
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
-use exarch::agent::{Agent, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
+use exarch::agent::{Avatar, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
 use exarch::bus::{AgentId, Sink};
 use exarch::egress::Egress;
 use exarch::headless::converse_settled;
@@ -152,7 +152,7 @@ fn main() {
 
     let engine = Engine::new();
     let provider = Arc::new(Provider::scripted("test-model", script));
-    // Made here, not by `Agent::root`: it takes the directory as given so that
+    // Made here, not by `Avatar::root`: it takes the directory as given so that
     // a `--resume` naming one that does not exist fails instead of quietly
     // starting an empty session.
     let run_dir = std::env::temp_dir().join(format!("boot-run-{}", std::process::id()));
@@ -161,7 +161,7 @@ fn main() {
         reason = "[io-door:silent:boot-run-run-dir] Scratch setup before the trunk exists, in an example that is its own only caller — not model I/O."
     )]
     std::fs::create_dir_all(&run_dir).expect("make the run directory");
-    let mut agent = Agent::root(
+    let mut agent = Avatar::root(
         RootConfig {
             system: "you are a helpful office assistant".to_string(),
             caps: Capabilities::root(),

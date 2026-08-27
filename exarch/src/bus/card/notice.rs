@@ -130,7 +130,7 @@ fn bindings_pruned_card(names: &[String], idle_calls: &[u64]) -> Card {
 // ── `services`: the host-owned durable-service ledger ────────────────────
 
 /// Every live durable service as one [`Mark::Fields`] row, labelled by the id
-/// `service-handle` takes.  `Agent::reconcile_service_pins` is the sole
+/// `service-handle` takes.  `Avatar::reconcile_service_pins` is the sole
 /// writer; `shell_eval::reject_protected_pin` refuses the key to the model.
 pub(crate) fn services_pin_card(services: &[crate::agent::ProbedWorker]) -> Card {
     let rows = services

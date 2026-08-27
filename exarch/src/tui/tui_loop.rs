@@ -17,7 +17,7 @@ use crossterm::event::{
 };
 
 use crate::{
-    agent::{Agent, Control, Verdict, cancel},
+    agent::{Avatar, Control, Verdict, cancel},
     bus::{AgentId, BusReceiver, Emitter, FleetBus, Inbox, Pass, Post, Signal},
     fleet::{Fleet, registry::AgentRegistry},
     provider::{
@@ -60,7 +60,7 @@ impl Tui {
     }
 }
 
-/// The session-mutating slash commands, run by [`Agent::attend`] at the
+/// The session-mutating slash commands, run by [`Avatar::attend`] at the
 /// exchange boundary where the attend thread owns the agent; every other
 /// command is served UI-side and never arrives here.  Only the trunk attends
 /// with this `Control` — sub-agents run under
@@ -69,13 +69,13 @@ impl Tui {
 pub struct ReplControl;
 
 impl Control for ReplControl {
-    fn command(&mut self, raw: &str, session: &mut Agent, emit: &Emitter) -> Verdict {
+    fn command(&mut self, raw: &str, session: &mut Avatar, emit: &Emitter) -> Verdict {
         let trimmed = raw.trim();
         let (head, rest) = commands::split_head(trimmed);
         if head == "/branch" {
             let name = (!rest.is_empty()).then_some(rest);
             match crate::shell_eval::tools::spawn_branch(session, name, emit) {
-                Ok(child) => Agent::note(
+                Ok(child) => Avatar::note(
                     format!("branch {} started (agent {})", child.name, child.id),
                     session,
                 ),
@@ -152,7 +152,7 @@ impl Control for ReplControl {
 /// Panics if the OS refuses to spawn the agent worker thread.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    session: &mut Agent,
+    session: &mut Avatar,
     provider: &Arc<Provider>,
     info: &banner::SessionInfo<'_>,
     store: &mut CredentialStore,
@@ -164,7 +164,7 @@ pub fn run(
 ) -> Result<(), String> {
     let stderr_log = run_dir.join("stderr.log");
     let mut tui = Tui::new(
-        session.id,
+        session.agent.id,
         &session.log_dir(),
         &stderr_log,
         vi,
@@ -196,7 +196,7 @@ pub fn run(
     // The worker crosses the thread boundary with an emitter, not the bus:
     // `FleetBus` holds a single-consumer `Receiver` and so is not `Sync`, while
     // an `Emitter` is `Send` and is all the worker needs.
-    let worker_emit = fleet.bus.emitter(session.id);
+    let worker_emit = fleet.bus.emitter(session.agent.id);
     // The UI thread's own door onto the record seam — reachable here, before
     // the worker spawns, where `LogCell`'s no-wait rule is trivially
     // satisfied.  A cheap `Arc<Log>` clone, so a `/model` switch or a login
@@ -219,13 +219,13 @@ pub fn run(
         // fresh session's opening frame.
         tui.app.total_usage.input = blocks.input_tokens();
         tui.app.total_usage.output = blocks.output_tokens();
-        if let Some(vp) = tui.app.tabs.viewport_mut(session.id) {
+        if let Some(vp) = tui.app.tabs.viewport_mut(session.agent.id) {
             vp.seed(&blocks);
         }
         // The boundary itself is chrome, never recorded: a second resume must
         // not replay a prior resume's note as if it were history.
         tui.app.push_chrome(
-            session.id,
+            session.agent.id,
             RailShape::Plain,
             line::note(&format!(
                 "resumed: {exchanges} exchanges, {} KB",
@@ -336,7 +336,7 @@ fn drain_signals(
 }
 
 /// The merged render + input loop, on the UI thread beside the worker's
-/// [`Agent::attend`].  Returns once the worker is done, after one last frame
+/// [`Avatar::attend`].  Returns once the worker is done, after one last frame
 /// that includes everything it emitted.
 fn ui_loop(
     tui: &mut Tui,
@@ -565,14 +565,14 @@ mod tests {
     /// round-trip.
     #[test]
     fn resources_command_routes_through_attend_and_emits_once() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .mailbox()
             .push(Post::Command("/resources".into()))
             .unwrap();
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
         let mut control = ReplControl;
         let _ = session.attend(&mut control, &emit);
 
@@ -613,14 +613,14 @@ mod tests {
 
     #[test]
     fn rewind_command_with_argument_reaches_attend_control() {
-        let mut session = Agent::for_test("system").unwrap();
+        let mut session = Avatar::for_test("system").unwrap();
         session
             .mailbox()
             .push(Post::Barrier("/rewind 7".into()))
             .unwrap();
 
         let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.id, session.mailbox());
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
         let mut control = ReplControl;
         let _ = session.attend(&mut control, &emit);
 

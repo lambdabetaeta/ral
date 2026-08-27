@@ -1,7 +1,7 @@
 //! Exarch — a delegate driving ral in process under a user-chosen grant policy.
 //!
 //! The whole agent is here: the CLI, capability composition, the
-//! [`agent::Agent`] exchange driver, the [`provider::Provider`] transport, and
+//! [`agent::Avatar`] exchange driver, the [`provider::Provider`] transport, and
 //! the two frontends ([`tui::run`] / [`headless::run`]).  The `exarch` binary is
 //! a thin shell over [`run`]; integration tests link this library directly.
 #![allow(
@@ -25,7 +25,7 @@ pub mod shell_eval;
 pub(crate) mod sync;
 pub mod tui;
 
-use agent::Agent;
+use agent::Avatar;
 use clap::Parser;
 use provider::{Engine, Provider};
 use std::sync::Arc;
@@ -86,7 +86,7 @@ pre_main_ctor!();
 /// The binary's entry point, lifted into the library so integration tests can
 /// link the whole crate.
 ///
-/// It parses the CLI, composes the capability lattice, builds an [`Agent`] +
+/// It parses the CLI, composes the capability lattice, builds an [`Avatar`] +
 /// [`Provider`], and hands off to a frontend.
 ///
 /// # Errors
@@ -248,7 +248,7 @@ pub fn run() -> Result<(), String> {
         tuning,
         route,
     ));
-    let mut session = Agent::root(
+    let mut session = Avatar::root(
         agent::RootConfig {
             system,
             caps,

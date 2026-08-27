@@ -52,7 +52,7 @@ pub(crate) struct App {
     pub(super) tabs: Tabs,
     pub(super) prompt_state: PromptState,
     /// Shared with the editor and the worker, which drains a non-slash prefix
-    /// mid-turn (`Agent::run_batch`) and the rest at the exchange boundary
+    /// mid-turn (`Avatar::run_batch`) and the rest at the exchange boundary
     /// (`Inbox::next_or_idle`).
     pub(super) inbox: Inbox,
     /// A clone of the handle the worker and every fork mutate, so steerability
@@ -406,7 +406,7 @@ impl App {
         self.push_chrome(id, RailShape::Plain, line::note(text));
     }
 
-    /// The UI-thread twin of `Agent::note_error`, for view commands that
+    /// The UI-thread twin of `Avatar::note_error`, for view commands that
     /// surface their own failures. Drawn, not recorded.
     pub(super) fn push_error(&mut self, id: AgentId, message: &str) {
         self.push_chrome(id, RailShape::Error, line::error(message));

@@ -9,7 +9,7 @@
 //! Recording is not this module's concern: every session writes its own
 //! record at the seam, through [`crate::agent::event`].
 
-use crate::agent::Agent;
+use crate::agent::Avatar;
 use crate::agent::event::{ContextOp, EditAuthority};
 use crate::bus::card::{
     self, Card, Mark, Row, execs_card, greps_card, observation_card, observation_from_wire,
@@ -534,7 +534,7 @@ impl Headless<'_> {
 /// panics, if the sink's drive fails, or if the run ends without a `reply`
 /// (stopped, cancelled, or failed).
 pub fn run(
-    session: &mut Agent,
+    session: &mut Avatar,
     info: &SessionInfo<'_>,
     p: &Provider,
     seed: Option<String>,
@@ -558,7 +558,7 @@ pub fn run(
         OutputFormat::Text => Projection::HeadlessText,
         OutputFormat::Json => Projection::HeadlessJson,
     };
-    let mut headless = Headless::new(projection, session.id, &mut stdout, &mut stderr);
+    let mut headless = Headless::new(projection, session.agent.id, &mut stdout, &mut stderr);
     // A per-exchange bus over the trunk's *own* inbox, so the attend worker and
     // any in-exchange producer share one queue.  It closes when the worker
     // finishes, muting async children on the display — never in the trace.
@@ -573,7 +573,7 @@ pub fn run(
     // No slash commands here, so `Control` is a no-op; declared out here so its
     // `&mut` borrow outlives the closure `pump` runs on its scoped thread.
     let mut control = crate::agent::NoControl;
-    let root_id = session.id;
+    let root_id = session.agent.id;
     let recorder = session.recorder();
     let outcome = pump(&mut headless, &fleet.bus, root_id, &recorder, |emit| {
         session.attend(&mut control, emit)
@@ -627,7 +627,7 @@ pub fn run(
 ///
 /// # Errors
 /// Returns `Err` if the attend worker panics or the sink's drive fails.
-pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Result<(), String> {
+pub fn converse(session: &mut Avatar, message: String, engine: Arc<Engine>) -> Result<(), String> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
     converse_on(session, message, engine, &mut stdout, &mut stderr)
@@ -649,13 +649,13 @@ pub fn converse(session: &mut Agent, message: String, engine: Arc<Engine>) -> Re
 /// # Errors
 /// Returns `Err` if the attend worker panics or the sink's drive fails.
 pub fn converse_on(
-    session: &mut Agent,
+    session: &mut Avatar,
     message: String,
     engine: Arc<Engine>,
     out: &mut (dyn Write + Send),
     err: &mut (dyn Write + Send),
 ) -> Result<(), String> {
-    let mut sink = Headless::new(Projection::Conversation, session.id, out, err);
+    let mut sink = Headless::new(Projection::Conversation, session.agent.id, out, err);
     let outcome = converse_sink(session, message, engine, &mut sink);
     if outcome.is_ok() && !sink.ended_with_newline {
         let _ = writeln!(sink.out);
@@ -672,7 +672,7 @@ pub fn converse_on(
 /// # Errors
 /// Returns `Err` if the attend worker panics or the sink's drive fails.
 pub fn converse_sink<S: Sink>(
-    session: &mut Agent,
+    session: &mut Avatar,
     message: String,
     engine: Arc<Engine>,
     sink: &mut S,
@@ -685,7 +685,7 @@ pub fn converse_sink<S: Sink>(
         engine,
     };
     session.seed(message);
-    let root_id = session.id;
+    let root_id = session.agent.id;
     let recorder = session.recorder();
     let outcome = pump(sink, &fleet.bus, root_id, &recorder, |emit| {
         session.attend_backlog(emit)
@@ -707,7 +707,7 @@ pub fn converse_sink<S: Sink>(
 /// live emitter rather than a muted one
 /// ([`FleetBus::per_exchange_live`](crate::bus::FleetBus::per_exchange_live));
 /// the loop runs under [`crate::agent::quiesce_when_childless`] rather than
-/// the identity policy [`Agent::attend`](crate::agent::Agent::attend) uses, so
+/// the identity policy [`Avatar::attend`](crate::agent::Avatar::attend) uses, so
 /// a conversing trunk holds on a live fleet instead of parking blind to it;
 /// and it runs the blocking `attend` loop, not `attend_backlog`, since Law B
 /// means the exchange itself must wait out whatever the fleet is still doing.
@@ -720,12 +720,12 @@ pub fn converse_sink<S: Sink>(
 /// policy does not cover and Law B forbids waiting out regardless. Otherwise
 /// returns `Err` if the attend worker panics or the sink's drive fails.
 pub fn converse_settled<S: Sink>(
-    session: &mut Agent,
+    session: &mut Avatar,
     message: String,
     engine: Arc<Engine>,
     sink: &mut S,
 ) -> Result<(), String> {
-    if session.allow_schedule {
+    if session.agent.allow_schedule {
         return Err(
             "converse_settled ends an exchange only once the fleet quiesces, and an armed \
              self-schedule may fire again with nothing to wait it out — refused rather than \
@@ -739,7 +739,7 @@ pub fn converse_settled<S: Sink>(
         engine,
     };
     session.seed(message);
-    let root_id = session.id;
+    let root_id = session.agent.id;
     let recorder = session.recorder();
     let outcome = pump(sink, &fleet.bus, root_id, &recorder, |emit| {
         session.attend_with(
@@ -764,20 +764,20 @@ mod tests {
     use super::*;
     use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
     use crate::bus::{AgentResult, AgentState, Post};
-    use crate::fleet::registry::{Registration};
+    use crate::fleet::registry::Registration;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Record};
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
 
     /// A fresh conversing trunk over a scripted provider, in a throwaway run
     /// dir beside its scratch — both go when the trunk does.
-    fn converse_trunk(tag: &str, script: Script) -> Agent {
+    fn converse_trunk(tag: &str, script: Script) -> Avatar {
         let scratch = Arc::new(
             crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, tag)
                 .expect("scratch dir"),
         );
         let dir = scratch.test_sibling("run").expect("temp run dir");
-        Agent::root(
+        Avatar::root(
             RootConfig {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),
@@ -834,7 +834,7 @@ mod tests {
         let mut session = converse_trunk("parks", Script::new().then(Reply::text("hi there")));
         session.seed("hello".into());
         let (tx, _rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.id);
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let (outcome, payload) = session.attend_backlog(&emit);
         assert!(
             payload.is_none(),
@@ -1135,13 +1135,13 @@ mod tests {
     /// A conversing trunk with real spawn fuel, so a test may register a
     /// genuine live child under it — [`converse_trunk`]'s `fuel: 0` exists
     /// precisely to refuse that.
-    fn settled_trunk(tag: &str, script: Script, allow_schedule: bool) -> Agent {
+    fn settled_trunk(tag: &str, script: Script, allow_schedule: bool) -> Avatar {
         let scratch = Arc::new(
             crate::bootstrap::Scratch::for_test(crate::bootstrap::EXARCH, tag)
                 .expect("scratch dir"),
         );
         let dir = scratch.test_sibling("run").expect("temp run dir");
-        Agent::root(
+        Avatar::root(
             RootConfig {
                 system: "system".into(),
                 caps: ral_core::types::Capabilities::default(),
@@ -1170,18 +1170,18 @@ mod tests {
     }
 
     /// Register a live child of `parent` in the shared registry — the one
-    /// fact [`Agent::has_live_children`] reads — without running any attend
+    /// fact [`Avatar::has_live_children`] reads — without running any attend
     /// loop of its own. The caller settles it (or not) on its own clock, so a
     /// test can hold `parent` on it for exactly as long as it chooses,
     /// deterministically, rather than racing a real child's own thread
     /// against a sleep.
-    fn register_live_child(parent: &Agent, name: &str) -> (crate::bus::AgentId, u64) {
+    fn register_live_child(parent: &Avatar, name: &str) -> (crate::bus::AgentId, u64) {
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         let generation = parent
             .agents
             .register(Registration {
-                id: child.id,
-                parent: Some(parent.id),
+                id: child.agent.id,
+                parent: Some(parent.agent.id),
                 name: name.to_string(),
                 log_dir: child.log_dir(),
                 cancel: child.cancel_token().clone(),
@@ -1190,7 +1190,7 @@ mod tests {
                 provider: child.provider_handle(),
             })
             .expect("registration must succeed: its parent is live");
-        (child.id, generation)
+        (child.agent.id, generation)
     }
 
     /// Every signal a caller's own `Sink` can receive, folded into one place —
@@ -1316,16 +1316,16 @@ mod tests {
         for _ in 0..8 {
             no_reply = no_reply.then(Reply::text("prose, but never a reply"));
         }
-        let mut child = session.fork(session.caps().clone()).expect("fork child");
+        let child = session.fork(session.caps().clone()).expect("fork child");
         crate::agent::testkit::set_provider(
-            &mut child,
+            &child,
             crate::agent::testkit::scripted("test-model", no_reply),
         );
         child.seed("go".into());
         let (spawn_emit, _rx) = crate::bus::dummy_emitter();
         spawn_async(
             &session.agents,
-            session.id,
+            session.agent.id,
             session.mailbox(),
             child,
             AsyncSpawn {

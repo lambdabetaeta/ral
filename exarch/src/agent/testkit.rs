@@ -6,9 +6,7 @@
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 
-use crate::agent::{
-    Agent, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL,
-};
+use crate::agent::{Avatar, NoControl, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentOutcome, Emitter};
 use crate::provider::scripted::Script;
@@ -27,7 +25,7 @@ pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
 }
 
 /// A boundary read — unlike `scope_has` it ticks no epoch and no ledger.
-pub(crate) fn probe_int(session: &Agent, class: &str) -> i64 {
+pub(crate) fn probe_int(session: &Avatar, class: &str) -> i64 {
     match session.seat.transport().probe(FOValue::Variant {
         label: class.into(),
         payload: None,
@@ -39,9 +37,9 @@ pub(crate) fn probe_int(session: &Agent, class: &str) -> i64 {
 
 /// Whether `name` resolves, asked through a real eval — which ticks the ral
 /// epoch and the binding-lease ledger, so an idle-arithmetic test must count it.
-pub(crate) fn scope_has(session: &mut Agent, name: &str) -> bool {
+pub(crate) fn scope_has(session: &mut Avatar, name: &str) -> bool {
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, session.id);
+    let emit = Emitter::new(tx, session.agent.id);
     let content = session
         .run_shell(format!("probe-{name}"), &format!("${name}"), 5, &emit)
         .content;
@@ -70,8 +68,8 @@ pub(crate) fn tmp(tag: &str) -> tempfile::TempDir {
 /// `/model` mutates in production, so a forked child can run its own
 /// independent script rather than share its spawner's, the way a real
 /// `` agents `start `` does.
-pub(crate) fn set_provider(session: &mut Agent, provider: Arc<Provider>) {
-    session.provider = ProviderHandle::new(provider);
+pub(crate) fn set_provider(session: &Avatar, provider: Arc<Provider>) {
+    session.agent.provider.swap(provider);
 }
 
 pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
@@ -86,23 +84,23 @@ pub(crate) fn ral_call(id: &str, cmd: &str) -> ToolCall {
     }
 }
 
-/// A trunk through the real `Agent::root` path; `interactive` makes it converse.
-pub(crate) fn trunk(interactive: bool) -> Agent {
+/// A trunk through the real `Avatar::root` path; `interactive` makes it converse.
+pub(crate) fn trunk(interactive: bool) -> Avatar {
     root(interactive, false)
 }
 
 /// The toolless `--chat` trunk, conversing by construction: the flag is
 /// interactive-only.
-pub(crate) fn chat_trunk() -> Agent {
+pub(crate) fn chat_trunk() -> Avatar {
     root(true, true)
 }
 
-fn root(interactive: bool, chat: bool) -> Agent {
+fn root(interactive: bool, chat: bool) -> Avatar {
     // The run dir sits beside the scratch, which the seat below owns, so the
     // trunk's whole footprint goes when the trunk does.
     let scratch = Scratch::for_test(crate::bootstrap::EXARCH, "trunk").expect("scratch dir");
     let run_dir = scratch.test_sibling("run").expect("run dir");
-    Agent::root(
+    Avatar::root(
         RootConfig {
             system: "system".into(),
             caps: ral_core::types::Capabilities::default(),
@@ -132,12 +130,12 @@ fn root(interactive: bool, chat: bool) -> Agent {
 
 /// Drive a forked peer to quiescence, returning what its `attend` settles.
 pub(crate) fn drive_peer(
-    child: &mut Agent,
+    child: &mut Avatar,
     provider: Arc<Provider>,
 ) -> (AgentOutcome, Option<FOValue>) {
     let (tx, _rx) = crate::bus::channel();
-    let emit = Emitter::new(tx, child.id);
-    child.provider = ProviderHandle::new(provider);
+    let emit = Emitter::new(tx, child.agent.id);
+    child.agent.provider.swap(provider);
     child.attend(&mut NoControl, &emit)
 }
 
