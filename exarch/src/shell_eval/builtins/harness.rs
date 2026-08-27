@@ -1341,7 +1341,7 @@ mod tests {
             result.content
         );
         assert!(
-            session.schedules.list().is_empty(),
+            session.agent.schedules.list().is_empty(),
             "a bad cron expression must never register a schedule"
         );
     }
@@ -1363,7 +1363,7 @@ mod tests {
             result.content
         );
         assert!(
-            session.schedules.list().is_empty(),
+            session.agent.schedules.list().is_empty(),
             "a bad duration must never register a schedule"
         );
     }
@@ -1382,7 +1382,7 @@ mod tests {
         assert!(result.content.contains("cron"), "got: {}", result.content);
         assert!(result.content.contains("after"), "got: {}", result.content);
         assert!(
-            session.schedules.list().is_empty(),
+            session.agent.schedules.list().is_empty(),
             "an unrecognised trigger tag must never register a schedule"
         );
     }
@@ -1406,7 +1406,7 @@ mod tests {
             result.content
         );
         assert!(
-            session.schedules.list().is_empty(),
+            session.agent.schedules.list().is_empty(),
             "a missing spec field must never register a schedule"
         );
     }
@@ -1430,7 +1430,7 @@ mod tests {
             result.content
         );
         assert!(
-            session.schedules.list().is_empty(),
+            session.agent.schedules.list().is_empty(),
             "an unknown extra spec field must never register a schedule"
         );
     }
@@ -1489,7 +1489,7 @@ mod tests {
             "the table answered afterwards must carry the new row, got: {}",
             result.content
         );
-        let live = session.schedules.list();
+        let live = session.agent.schedules.list();
         assert_eq!(live.len(), 1, "the schedule must be registered");
         assert_eq!(live[0].label, "nightly", "must take the given label");
         assert!(
@@ -1543,7 +1543,7 @@ mod tests {
             result.content
         );
         assert_eq!(
-            session.schedules.list().len(),
+            session.agent.schedules.list().len(),
             1,
             "the schedule must be registered"
         );
@@ -1565,7 +1565,7 @@ mod tests {
             result.content
         );
         assert!(
-            session.schedules.list().is_empty(),
+            session.agent.schedules.list().is_empty(),
             "schedules `remove by label must remove the schedule"
         );
 

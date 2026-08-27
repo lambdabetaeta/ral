@@ -82,29 +82,23 @@ pub struct Fleet {
     /// The trunk and every `/branch` — a root reports to nobody, so this is
     /// where a walk over the whole run starts.
     roots: Mutex<Vec<Weak<Agent>>>,
-    /// [`AGENT_LEASE_IDLE`] outside tests; each fire re-reads it, so nothing
-    /// caches a copy.
-    lease: Mutex<Duration>,
+    /// [`AGENT_LEASE_IDLE`] outside tests.
+    lease: Duration,
 }
 
 impl Fleet {
     pub fn new() -> Arc<Self> {
+        Self::with_lease(AGENT_LEASE_IDLE)
+    }
+
+    /// A fleet whose idle bound is `lease` from birth, so a test can watch a
+    /// reap instead of waiting out [`AGENT_LEASE_IDLE`].
+    pub fn with_lease(lease: Duration) -> Arc<Self> {
         Arc::new(Self {
             names: Mutex::new(HashMap::new()),
             roots: Mutex::new(Vec::new()),
-            lease: Mutex::new(AGENT_LEASE_IDLE),
+            lease,
         })
-    }
-
-    /// Shorten the idle bound so a test can watch a reap instead of waiting out
-    /// [`AGENT_LEASE_IDLE`].
-    #[cfg(test)]
-    pub fn set_lease(&self, bound: Duration) {
-        *self.lease.lock_ignore_poison() = bound;
-    }
-
-    fn lease(&self) -> Duration {
-        *self.lease.lock_ignore_poison()
     }
 
     /// Drop what has settled from `names`, so a name is free the moment its
@@ -152,7 +146,7 @@ impl Fleet {
         match agent.parent() {
             Some(parent) => {
                 parent.adopt(agent);
-                arm_lease(self, agent, self.lease());
+                arm_lease(self, agent, self.lease);
             }
             None => self.roots.lock_ignore_poison().push(Arc::downgrade(agent)),
         }
@@ -206,7 +200,7 @@ impl Fleet {
     /// The nearest time-to-reap across the leased agents, `None` when none is
     /// leased.  A pure survey for `/resources`: it renews nothing.
     pub fn nearest_reap(&self) -> Option<Duration> {
-        let lease = self.lease();
+        let lease = self.lease;
         self.roots()
             .iter()
             .flat_map(|root| root.walk())
@@ -257,7 +251,7 @@ fn lease_fire(fleet: &Arc<Fleet>, agent: &Weak<Agent>) {
     let Some(agent) = agent.upgrade() else {
         return;
     };
-    let ttl = fleet.lease();
+    let ttl = fleet.lease;
     let idle = agent.idle();
     match ttl.checked_sub(idle) {
         Some(margin) if !margin.is_zero() => arm_lease(fleet, &agent, margin),
@@ -318,8 +312,7 @@ mod tests {
     /// reap only stamps the cancel layers.
     #[test]
     fn a_lease_is_armed_only_for_a_reporting_child() {
-        let fleet = Fleet::new();
-        fleet.set_lease(Duration::from_millis(50));
+        let fleet = Fleet::with_lease(Duration::from_millis(50));
         let trunk = agent(&fleet, "trunk", None);
         let branch = agent(&fleet, "branch", None);
         let worker_root = DurableRoot::default();
@@ -766,9 +759,8 @@ mod tests {
     /// delivers too.
     #[test]
     fn a_steer_defers_the_fire() {
-        let fleet = Fleet::new();
         let ttl = Duration::from_millis(300);
-        fleet.set_lease(ttl);
+        let fleet = Fleet::with_lease(ttl);
         let trunk = agent(&fleet, "trunk", None);
         let eval_root = DurableRoot::default();
         let mut child = spec("child", Some(&trunk));
@@ -793,9 +785,8 @@ mod tests {
 
     #[test]
     fn settling_before_the_fire_ends_the_chain_silently() {
-        let fleet = Fleet::new();
         let ttl = Duration::from_millis(80);
-        fleet.set_lease(ttl);
+        let fleet = Fleet::with_lease(ttl);
         let trunk = agent(&fleet, "trunk", None);
         let token = Token::new();
         let mut child = spec("child", Some(&trunk));
@@ -813,9 +804,8 @@ mod tests {
 
     #[test]
     fn a_clear_outranks_the_lease() {
-        let fleet = Fleet::new();
         let ttl = Duration::from_millis(80);
-        fleet.set_lease(ttl);
+        let fleet = Fleet::with_lease(ttl);
         let trunk = agent(&fleet, "trunk", None);
         let eval_root = DurableRoot::default();
         let mut child = spec("child", Some(&trunk));

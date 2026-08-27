@@ -26,7 +26,11 @@
 //! Two per-agent mutexes, [`Agent::status`] and [`Agent::children`].  Rule:
 //! hold at most one at a time.  `children` is locked to push or to snapshot,
 //! never across a walk; `status` is a single-writer register, and nothing is
-//! computed under it.
+//! computed under it.  [`Agent::schedules`] and [`Agent::pins`] are two more
+//! cells of public agent state, each already self-locked by its own type;
+//! the same rule extends to them, and neither is ever held while pushing
+//! into an inbox — a fired schedule drops its registry lock before posting
+//! the wakeup.
 //!
 //! This file holds the state; the machinery lives in [`build`], [`attend`],
 //! [`deliberate`], [`shell`], and [`probe`], which reach these private fields
@@ -161,6 +165,15 @@ pub struct Agent {
     /// The sender end of this agent's own inbox; the [`Inbox`] itself stays on
     /// [`Avatar`], reachable only by the attend thread.
     mailbox: Mailbox,
+    /// Live wakeups (cron / after), posted into this agent's own inbox; the
+    /// builtins that arm them gate on `allow_schedule`. Public agent state:
+    /// the desk writes it and other threads read it, so it lives here rather
+    /// than on [`Avatar`].
+    pub(crate) schedules: crate::fleet::schedule::ScheduleRegistry,
+    /// Pins flow straight past the session to the frontend; the periodic
+    /// [`nudge`] reminder reads this mirror to name what the model has
+    /// pinned. Public agent state, for the same reason as [`Self::schedules`].
+    pub(crate) pins: shell_eval::PinDigests,
     /// A process publishing its status: written by the avatar alone
     /// ([`Self::set_resting`], [`Self::deposit_reply`], [`Self::clear_subtree`]'s
     /// generation bump), read by everyone else.  A reader takes one snapshot
@@ -230,15 +243,9 @@ pub struct Avatar {
     /// spawn claims and the by-id door a frontend command arrives through.
     /// Not the tree — that is [`Agent::parent`] and [`Agent::children`].
     pub(crate) fleet: Arc<Fleet>,
-    /// Live wakeups (cron / after), posted into this agent's own inbox; the
-    /// builtins that arm them gate on `allow_schedule`.
-    pub(crate) schedules: crate::fleet::schedule::ScheduleRegistry,
     /// Input tokens and the event-log position at which that measurement
     /// landed — the numerator for the compaction trigger and pressure nudge.
     last_input: (u64, usize),
-    /// Pins flow straight past the session to the frontend; the periodic
-    /// [`nudge`] reminder reads this mirror to name what the model has pinned.
-    pins: shell_eval::PinDigests,
     /// The ral-call clock, bumped at the top of every [`Self::run_shell`] — a
     /// failed eval is still a call.  The settled-worker sweep, the
     /// binding-lease ledger, and [`Self::check_disk_warn`] all read it.  Never

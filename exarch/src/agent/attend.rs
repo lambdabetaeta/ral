@@ -346,7 +346,7 @@ impl Avatar {
         if self.agent.has_busy_children() {
             return ParkMode::HeldByChildren;
         }
-        if self.schedules.armed() {
+        if self.agent.schedules.armed() {
             return ParkMode::UntilCancelled;
         }
         ParkMode::Quiesce
@@ -366,6 +366,7 @@ impl Avatar {
 
         if live.is_empty() {
             let had_one = self
+                .agent
                 .pins
                 .lock()
                 .expect("pin register poisoned")
@@ -381,7 +382,7 @@ impl Avatar {
         }
 
         let card = crate::bus::card::services_pin_card(&live);
-        self.pins.lock().expect("pin register poisoned").insert(
+        self.agent.pins.lock().expect("pin register poisoned").insert(
             shell_eval::SERVICES_PIN_KEY.to_string(),
             shell_eval::PinDigest::new(card.clone()),
         );
@@ -925,6 +926,7 @@ mod tests {
         session.reconcile_service_pins();
         {
             let pin = session
+                .agent
                 .pins
                 .lock()
                 .unwrap()
@@ -974,6 +976,7 @@ mod tests {
         session.reconcile_service_pins();
         assert!(
             session
+                .agent
                 .pins
                 .lock()
                 .unwrap()

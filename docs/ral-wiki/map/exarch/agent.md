@@ -348,8 +348,8 @@ is the attend loop's own step.
 ## The Fleet
 
 `fleet.rs`'s `Fleet` is `{ names: Mutex<HashMap<String, Weak<Agent>>>, roots:
-Mutex<Vec<Weak<Agent>>>, lease: Mutex<Duration> }` — two `Weak` doors and the
-idle-lease bound they share, nothing else. It is not the tree: the tree is
+Mutex<Vec<Weak<Agent>>>, lease: Duration }` — two `Weak` doors and the
+idle-lease bound they share, fixed at construction, nothing else. It is not the tree: the tree is
 `Agent::parent`/`Agent::children`, and every walk — the roster, the cancel
 cascade, the scope check — runs there. `names` is the by-name door a spawn
 claims identity at and `` agents `message ``/`` `cancel ``/`` `read ``
@@ -608,9 +608,10 @@ late sections, so a child never inherits an already-appended `Agent` section.
 
 **Both seats spawn in one exchange of the same `` agents `start ``
 vocabulary; they differ only in where the fork waits.** The arm is chosen on a
-stated fact — `HostServices::wire_seat`, read off the seat when the desk's
-capture is built, once per `ral` call (`agent/shell.rs`) — never inferred from
-the incidental absence of host-side scratch. What varies is the `fork` tag the
+stated fact — `HostServices::kind`, a `SeatKind::{Identity { scratch }, Wire}`
+read off the seat when the desk's capture is built, once per `ral` call
+(`agent/shell.rs`) — one encoding, so an identity seat without a scratch is
+unrepresentable. What varies is the `fork` tag the
 *engine* mints beside the model's own spec record, since the reentrancy law
 bars a desk handler from holding the `&mut Shell` a fork needs:
 

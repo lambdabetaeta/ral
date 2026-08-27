@@ -98,7 +98,8 @@ walk — the roster, the cancel cascade, the scope check — runs there. A
 
 `HostServices` (`fleet/desk.rs`) is `Arc<Agent>` plus what is per *call*:
 `nursery`, `reply: ReplyCell`, `emit`, `acts`, `principal`, `generation`,
-`scratch`, `wire_seat`. `generation` and `cwd` stay snapshots on purpose —
+`cwd`, `kind: SeatKind`, plus the avatar's `LogCell`.  `schedules` and `pins`
+are public agent state and live on `Agent`. `generation` and `cwd` stay snapshots on purpose —
 a desk older than its own `/clear` must refuse to spawn, and the model
 starts a spawned child where it was, not where a live `cd` has since moved
 to.

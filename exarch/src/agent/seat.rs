@@ -11,6 +11,16 @@ use ral_core::Shell;
 use ral_core::transport::{IdentityTransport, Transport};
 use std::sync::{Arc, Mutex};
 
+/// What kind of seat a `ral` call is running against, and the one thing
+/// that differs by kind: an identity call forks its own scratch; a wire
+/// call's real scratch lives in the guest its host dials, so there is none
+/// to carry.  `` `start `` chooses its identity or wire arm on this fact
+/// alone — derived here from the seat, never stated independently.
+pub(crate) enum SeatKind {
+    Identity { scratch: Arc<Scratch> },
+    Wire,
+}
+
 /// One agent's engine-side attachment; what differs per call already lives
 /// off the [`Transport`] trait, so this stays a closed enum.
 pub(crate) enum Seat {
@@ -109,6 +119,15 @@ impl Seat {
         match self {
             Self::Identity { transport, .. } => &**transport,
             Self::Wire { transport, .. } => &**transport,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> SeatKind {
+        match self {
+            Self::Identity { scratch, .. } => SeatKind::Identity {
+                scratch: scratch.clone(),
+            },
+            Self::Wire { .. } => SeatKind::Wire,
         }
     }
 
@@ -356,19 +375,16 @@ mod tests {
     fn wire_host_services(emit: &Emitter, parent: &Arc<crate::agent::Agent>) -> HostServices {
         HostServices {
             fleet: Fleet::new(),
-            scratch: None,
+            kind: SeatKind::Wire,
             generation: parent.generation(),
             agent: parent.clone(),
             emit: emit.clone(),
             cwd: std::env::temp_dir(),
             reply: crate::agent::ReplyCell::default(),
-            schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             log: crate::agent::LogCell::new(test_log()),
             nursery: Nursery::default(),
             acts: crate::fleet::desk::ActFragment::default(),
             principal: ral_core::host::user(),
-            pins: None,
-            wire_seat: true,
         }
     }
 

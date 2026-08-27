@@ -8,9 +8,10 @@
 //! handler's chrome would otherwise outrun the run's earlier surface output.
 
 use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
+use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter};
-use crate::fleet::schedule::{CronSchedule, ScheduleRegistry, Trigger, parse_duration};
+use crate::fleet::schedule::{CronSchedule, Trigger, parse_duration};
 use crate::fleet::{Fleet, check_name, roster::listing};
 use crate::record::commit::SurfaceBuffer;
 use crate::shell_eval::{self, PinDigests, Surface};
@@ -211,15 +212,15 @@ pub(crate) struct HostServices {
     /// immutable-config read (`caps`, `fuel`, `returns`, …) is taken from.
     pub agent: Arc<Agent>,
     pub fleet: Arc<Fleet>,
-    /// `None` on a wire seat, whose real scratch lives in the guest it dials.
-    pub scratch: Option<Arc<crate::bootstrap::Scratch>>,
+    /// Which seat this call is running against, and the identity arm's own
+    /// scratch: `` `start `` chooses its identity or wire arm on this fact.
+    pub kind: SeatKind,
     pub emit: Emitter,
     /// Frozen at install: the path root `narrow` and every handler resolves from.
     pub cwd: PathBuf,
     /// Where the `reply` handler stages its value, holding no `&mut Avatar` to
     /// write it any other way.
     pub reply: ReplyCell,
-    pub schedules: ScheduleRegistry,
     /// A `mnemon` spawn forks its inherited context off this.
     pub log: LogCell,
     /// The adoption end of the body's own [`ral_core::Shell::fork_into_nursery`];
@@ -237,13 +238,6 @@ pub(crate) struct HostServices {
     /// `None` where the host names nobody, the same fact `Context::principal`
     /// reports for an unbound `$USER` in the same record.
     pub principal: Option<String>,
-    /// The agent's own pin register, shared verbatim so `pin-read`/`pin-list`
-    /// answer from the same mirror the nudge already reads. `None` on a seat
-    /// with no mirror of its own — the wire test seat above all.
-    pub pins: Option<PinDigests>,
-    /// Stated, never inferred from `scratch`'s incidental absence:
-    /// `` `start `` chooses its identity or wire arm on this one fact.
-    pub wire_seat: bool,
 }
 
 impl HostServices {
@@ -766,9 +760,10 @@ impl ExarchDesk {
             ));
         }
 
-        if s.wire_seat {
-            return self.launch_wire(spec);
-        }
+        let scratch = match &s.kind {
+            SeatKind::Wire => return self.launch_wire(spec),
+            SeatKind::Identity { scratch } => scratch.clone(),
+        };
 
         let ForkClaim::Parked(session) = spec.fork else {
             return Err(Error::new(
@@ -791,14 +786,6 @@ impl ExarchDesk {
         // Mirrors `Avatar::fork_with`'s `Build` literal, with the adopted shell
         // and forked log standing in for `fork_session`'s fresh ones.
         let fuel = s.agent.fuel() - 1;
-        // Unreachable: an identity seat always carries its own scratch.
-        let Some(scratch) = s.scratch.clone() else {
-            return Err(Error::new(
-                "`agents `start` refused: this session has no host-side scratch to fork an \
-                 in-process child into",
-                1,
-            ));
-        };
         // No detach: the shell was forked, not booted, so it carries no policy.
         let seat =
             crate::agent::seat::Seat::identity(shell, scratch, s.cwd.clone(), false, &child_log);
@@ -1217,7 +1204,8 @@ impl ExarchDesk {
         ))
     }
 
-    /// `` `add `` — arm a self-wakeup through [`ScheduleRegistry::schedule`].
+    /// `` `add `` — arm a self-wakeup through
+    /// [`ScheduleRegistry::schedule`](crate::fleet::schedule::ScheduleRegistry::schedule).
     /// The answer is the table it now appears in; its `next-s` column already
     /// says everything a receipt could.
     fn schedule(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
@@ -1241,6 +1229,7 @@ impl ExarchDesk {
         // of reading as one that landed.
         let described = trigger.describe();
         let result = s
+            .agent
             .schedules
             .schedule(trigger, prompt, label.clone(), s.agent.mailbox());
         let (payload, content) = match &result {
@@ -1271,6 +1260,7 @@ impl ExarchDesk {
         let s = &self.services;
         FOValue::List {
             items: s
+                .agent
                 .schedules
                 .list()
                 .into_iter()
@@ -1309,7 +1299,7 @@ impl ExarchDesk {
 
         // The rail's payload column spells out the miss the table only implies,
         // since the verb has no argument of its own to show there.
-        let removed = s.schedules.unschedule(&label);
+        let removed = s.agent.schedules.unschedule(&label);
         let (payload, content) = if removed {
             (String::new(), format!("unscheduled '{label}'"))
         } else {
@@ -1404,16 +1394,13 @@ impl ExarchDesk {
     }
 
     /// `` `pin-read `` — the card stored under `key` on this agent's own
-    /// register, canonically re-encoded, or `()` on a miss or an absent
-    /// mirror. Read-after-write within one run is sound because
-    /// [`DeskBinding::enquire`] drains queued surface frames before handling.
+    /// register, canonically re-encoded, or `()` on a miss. Read-after-write
+    /// within one run is sound because [`DeskBinding::enquire`] drains queued
+    /// surface frames before handling.
     fn pin_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let [key] = payload_list(payload, "pin-read", "[key]")?;
         let key = payload_string(key, "pin-read", "key")?;
-        let Some(pins) = &self.services.pins else {
-            return Ok(FOValue::Unit);
-        };
-        let m = pins.lock().expect("pin register poisoned");
+        let m = self.services.agent.pins.lock().expect("pin register poisoned");
         match m.get(&key) {
             // A card value is always first-order, so this conversion never fails.
             Some(digest) => FOValue::try_from(&crate::bus::card::encode_card(&digest.card)),
@@ -1422,16 +1409,18 @@ impl ExarchDesk {
     }
 
     /// `` `pin-list `` — the keys currently occupied on this agent's own
-    /// register, in `BTreeMap` order; an absent mirror answers empty.
+    /// register, in `BTreeMap` order.
     fn pin_list(&self) -> FOValue {
         FOValue::List {
-            items: self.services.pins.as_ref().map_or_else(Vec::new, |pins| {
-                pins.lock()
-                    .expect("pin register poisoned")
-                    .keys()
-                    .map(|key| FOValue::String { value: key.clone() })
-                    .collect()
-            }),
+            items: self
+                .services
+                .agent
+                .pins
+                .lock()
+                .expect("pin register poisoned")
+                .keys()
+                .map(|key| FOValue::String { value: key.clone() })
+                .collect(),
         }
     }
 
@@ -1889,25 +1878,24 @@ mod tests {
         let (emit, _rx) = crate::bus::dummy_emitter();
         let services = HostServices {
             fleet: fleet.clone(),
-            scratch: Some(Arc::new(
-                crate::bootstrap::Scratch::for_test(
-                    crate::bootstrap::EXARCH,
-                    &format!("desk-{}", crate::agent::fresh_id()),
-                )
-                .expect("scratch dir"),
-            )),
+            kind: SeatKind::Identity {
+                scratch: Arc::new(
+                    crate::bootstrap::Scratch::for_test(
+                        crate::bootstrap::EXARCH,
+                        &format!("desk-{}", crate::agent::fresh_id()),
+                    )
+                    .expect("scratch dir"),
+                ),
+            },
             generation: agent.generation(),
             agent,
             emit,
             cwd: PathBuf::from("/"),
             reply: ReplyCell::default(),
-            schedules: ScheduleRegistry::new(),
             log: LogCell::new(fresh_log()),
             nursery: Nursery::default(),
             acts: ActFragment::default(),
             principal: ral_core::host::user(),
-            pins: None,
-            wire_seat: false,
         };
         (services, fleet, parent_inbox)
     }
@@ -2540,10 +2528,6 @@ mod tests {
         );
     }
 
-    fn fresh_mirror() -> PinDigests {
-        Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()))
-    }
-
     /// A `` `pin [key, body] `` surface value carrying a one-span text card —
     /// the minimal shape [`SurfaceApplier::live`] folds into the mirror.
     fn pin_value(key: &str, text: &str) -> FOValue {
@@ -2599,21 +2583,15 @@ mod tests {
     /// agree on shape, which is the whole point of a readable register.
     #[test]
     fn pin_read_returns_the_canonical_card() {
-        let mirror = fresh_mirror();
+        let d = desk();
         SurfaceApplier {
-            pins: Some(mirror.clone()),
+            pins: Some(d.services.agent.pins.clone()),
             id: 0,
             recorder: crate::record::Emitter::none(),
             surface: Mutex::new(SurfaceBuffer::new()),
         }
         .live(pin_value("tasks", "hi"));
 
-        let d = ExarchDesk {
-            services: HostServices {
-                pins: Some(mirror),
-                ..base_services()
-            },
-        };
         let answer = d
             .handle(pin_read_req("tasks"))
             .expect("a hit must answer Ok");
@@ -2633,18 +2611,12 @@ mod tests {
     /// `()` — a miss and a clear are the same absence to `pin-read`.
     #[test]
     fn pin_read_answers_unit_on_miss_and_after_unpin() {
-        let mirror = fresh_mirror();
+        let d = desk();
         let applier = SurfaceApplier {
-            pins: Some(mirror.clone()),
+            pins: Some(d.services.agent.pins.clone()),
             id: 0,
             recorder: crate::record::Emitter::none(),
             surface: Mutex::new(SurfaceBuffer::new()),
-        };
-        let d = ExarchDesk {
-            services: HostServices {
-                pins: Some(mirror),
-                ..base_services()
-            },
         };
 
         assert!(
@@ -2664,18 +2636,12 @@ mod tests {
     /// tracks a set/clear pair.
     #[test]
     fn pin_list_tracks_set_and_clear() {
-        let mirror = fresh_mirror();
+        let d = desk();
         let applier = SurfaceApplier {
-            pins: Some(mirror.clone()),
+            pins: Some(d.services.agent.pins.clone()),
             id: 0,
             recorder: crate::record::Emitter::none(),
             surface: Mutex::new(SurfaceBuffer::new()),
-        };
-        let d = ExarchDesk {
-            services: HostServices {
-                pins: Some(mirror),
-                ..base_services()
-            },
         };
         let keys = |d: &ExarchDesk| match d
             .handle(FOValue::Variant {
@@ -2836,24 +2802,23 @@ mod tests {
     /// slot exactly like any other key.
     #[test]
     fn pin_read_of_services_answers() {
-        let mirror = fresh_mirror();
-        mirror.lock().expect("pin register poisoned").insert(
-            "services".to_string(),
-            shell_eval::PinDigest::new(crate::bus::card::Card(vec![
-                crate::bus::card::Mark::Text {
-                    spans: vec![crate::bus::card::Span {
-                        role: None,
-                        text: "svc".into(),
-                    }],
-                },
-            ])),
-        );
-        let d = ExarchDesk {
-            services: HostServices {
-                pins: Some(mirror),
-                ..base_services()
-            },
-        };
+        let d = desk();
+        d.services
+            .agent
+            .pins
+            .lock()
+            .expect("pin register poisoned")
+            .insert(
+                "services".to_string(),
+                shell_eval::PinDigest::new(crate::bus::card::Card(vec![
+                    crate::bus::card::Mark::Text {
+                        spans: vec![crate::bus::card::Span {
+                            role: None,
+                            text: "svc".into(),
+                        }],
+                    },
+                ])),
+            );
         assert!(
             d.handle(pin_read_req("services")).is_ok(),
             "reads are not writes: the protected-pin guard must not reach `pin-read`"
@@ -3454,7 +3419,7 @@ mod tests {
             err.message
         );
         assert!(
-            desk.services.schedules.list().is_empty(),
+            desk.services.agent.schedules.list().is_empty(),
             "the refused attempt registers nothing"
         );
     }
@@ -3504,7 +3469,7 @@ mod tests {
             .expect_err("a duplicate label must be refused");
         assert!(err.message.contains("nightly"), "got: {}", err.message);
         assert_eq!(
-            desk.services.schedules.list().len(),
+            desk.services.agent.schedules.list().len(),
             1,
             "the duplicate registers nothing"
         );
@@ -3849,30 +3814,29 @@ mod tests {
     /// The reaped child delivers exactly one
     /// [`crate::bus::AgentOutcome::Cancelled`] to the parent inbox.
     #[test]
-    fn ms_lease_child_never_renewed_is_cancelled_but_a_renewed_one_survives() {
-        let parent = Avatar::for_test("system").unwrap();
+    fn ms_lease_child_never_renewed_is_cancelled() {
+        // The ttl must expire well inside the round-trip loop's own
+        // `MAX_STEPS` cap, so the lease and not the step cap ends the exchange.
+        let ttl = Duration::from_millis(25);
+        let parent = Avatar::for_test_with(crate::agent::TestTrunk {
+            lease: ttl,
+            ..crate::agent::TestTrunk::new("system")
+        })
+        .unwrap();
         let fleet = parent.fleet.clone();
-        // Child A's ttl must expire well inside the round-trip loop's own
-        // `MAX_STEPS` cap, so the lease and not the step cap ends its exchange.
-        // Child B's is generous instead: its renewal is paced by `thread::sleep`
-        // on the test thread, where jitter stretches a short sleep past nominal.
-        let ttl_a = Duration::from_millis(25);
-        let ttl_b = Duration::from_secs(1);
-
-        fleet.set_lease(ttl_a);
-        let child_a = parent
+        let child = parent
             .fork_named(parent.caps().clone(), "child-a")
             .expect("fork child a");
         let mut long_script = Script::new();
         for i in 0..2_000u32 {
             long_script = long_script.then(Reply::tool_calls(vec![ral_call(&i.to_string(), "1")]));
         }
-        child_a
+        child
             .provider_handle()
             .swap(Arc::new(Provider::scripted("test-model", long_script)));
-        child_a.seed("go".into());
-        let id_a = child_a.agent.id;
-        let handle_a = attend_and_deliver(child_a, "child-a", parent.mailbox());
+        child.seed("go".into());
+        let id = child.agent.id;
+        let handle = attend_and_deliver(child, "child-a", parent.mailbox());
 
         match wait_for_settle(&parent.inbox()) {
             crate::bus::Item::Agent(result) => {
@@ -3884,36 +3848,47 @@ mod tests {
             }
             other => panic!("expected an Agent result item, got {other:?}"),
         }
-        handle_a.join().expect("worker thread must not panic");
-        assert!(fleet.by_id(id_a).is_none(), "the reaped child settles");
+        handle.join().expect("worker thread must not panic");
+        assert!(fleet.by_id(id).is_none(), "the reaped child settles");
+    }
 
-        // Child B is parked by a keepalive grandchild and given no script to
-        // race, so the renewal alone must be what defers its reap.
-        fleet.set_lease(ttl_b);
-        let child_b = parent
+    #[test]
+    fn ms_lease_child_renewed_at_half_the_ttl_survives_the_bound() {
+        // Generous, because the renewal is paced by `thread::sleep` on the test
+        // thread, where jitter stretches a short sleep past nominal.
+        let ttl = Duration::from_secs(1);
+        let parent = Avatar::for_test_with(crate::agent::TestTrunk {
+            lease: ttl,
+            ..crate::agent::TestTrunk::new("system")
+        })
+        .unwrap();
+        let fleet = parent.fleet.clone();
+        // Parked by a keepalive grandchild and given no script to race, so the
+        // renewal alone must be what defers its reap.
+        let child = parent
             .fork_named(parent.caps().clone(), "child-b")
             .expect("fork child b");
-        let agent_b = child_b.agent.clone();
-        let keepalive_b = keepalive(&fleet, &agent_b);
-        let handle_b = attend_and_deliver(child_b, "child-b", parent.mailbox());
+        let agent = child.agent.clone();
+        let keepalive = keepalive(&fleet, &agent);
+        let handle = attend_and_deliver(child, "child-b", parent.mailbox());
 
-        std::thread::sleep(ttl_b / 2);
-        // A bare stamp, not a steer: child B's script is empty, so an actual
-        // delivery would give its attend loop work it cannot answer.
-        agent_b.mailbox().stamp_exchange();
-        keepalive_b.mailbox().stamp_exchange();
+        std::thread::sleep(ttl / 2);
+        // A bare stamp, not a steer: the script is empty, so an actual
+        // delivery would give the attend loop work it cannot answer.
+        agent.mailbox().stamp_exchange();
+        keepalive.mailbox().stamp_exchange();
 
-        std::thread::sleep(ttl_b / 2 + Duration::from_millis(150));
+        std::thread::sleep(ttl / 2 + Duration::from_millis(150));
         assert!(
-            !agent_b.cancel_token().is_cancelled(),
+            !agent.cancel_token().is_cancelled(),
             "renewed at half the ttl, still alive past the original bound"
         );
 
-        // Wind child B down rather than leave its thread parked forever: per
+        // Wind the child down rather than leave its thread parked forever: per
         // `ParkMode`, a terminate-cause cancel ends an unengaged park at once.
-        agent_b.cancel_tree(ral_core::process::CancelCause::Explicit);
+        agent.cancel_tree(ral_core::process::CancelCause::Explicit);
         let _ = wait_for_settle(&parent.inbox());
-        handle_b.join().expect("worker thread must not panic");
+        handle.join().expect("worker thread must not panic");
     }
 }
 
@@ -4107,7 +4082,7 @@ mod wire_tests {
 
     /// A wire-seat desk fixture whose parent holds the very inbox this
     /// returns, exactly [`super::tests::spawnable_desk`]'s identity shape with
-    /// `wire_seat: true` and a dialler installed.
+    /// `kind: SeatKind::Wire` and a dialler installed.
     fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, Arc<Fleet>, Inbox) {
         let parent_inbox = Inbox::new();
         let fleet = Fleet::new();
@@ -4125,19 +4100,16 @@ mod wire_tests {
         let desk = ExarchDesk {
             services: HostServices {
                 fleet: fleet.clone(),
-                scratch: None,
+                kind: SeatKind::Wire,
                 generation: agent.generation(),
                 agent,
                 emit,
                 cwd: PathBuf::from("/work"),
                 reply: ReplyCell::default(),
-                schedules: ScheduleRegistry::new(),
                 log: LogCell::new(fresh_log()),
                 nursery: Nursery::default(),
                 acts: ActFragment::default(),
                 principal: ral_core::host::user(),
-                pins: None,
-                wire_seat: true,
             },
         };
         (desk, fleet, parent_inbox)
@@ -4337,19 +4309,18 @@ mod wire_tests {
         let desk = ExarchDesk {
             services: HostServices {
                 fleet,
-                scratch: None,
+                // Neither peer's transport matters to `message`, which
+                // touches only the tree and a mailbox.
+                kind: SeatKind::Wire,
                 generation: parent.generation(),
                 agent: parent,
                 emit,
                 cwd: PathBuf::from("/"),
                 reply: ReplyCell::default(),
-                schedules: ScheduleRegistry::new(),
                 log: LogCell::new(fresh_log()),
                 nursery: Nursery::default(),
                 acts: ActFragment::default(),
                 principal: ral_core::host::user(),
-                pins: None,
-                wire_seat: false,
             },
         };
 

@@ -132,6 +132,8 @@ pub(crate) fn test_agent(
         cancel,
         reach,
         mailbox,
+        schedules: crate::fleet::schedule::ScheduleRegistry::new(),
+        pins: Arc::default(),
         status: Mutex::new(crate::agent::Status {
             generation: 0,
             rest: None,

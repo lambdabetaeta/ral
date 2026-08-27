@@ -9,7 +9,7 @@
 use crate::agent::Avatar;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
 use crate::agent::event::{AgentLog, ToolResult as SessionToolResult};
-use crate::agent::seat::{RunInstall, Seat};
+use crate::agent::seat::RunInstall;
 use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
 use crate::shell_eval;
@@ -121,24 +121,13 @@ impl Avatar {
         nursery: ral_core::types::Nursery,
         reply: ReplyCell,
     ) -> desk::HostServices {
-        // A wire seat owns no host-side scratch — the session's real one lives
-        // in the guest the transport dials — and `` agents `start ``, the one
-        // consumer, has already refused on fuel 0 by the time it would look.
-        let scratch = match &self.seat {
-            Seat::Identity { scratch, .. } => Some(scratch.clone()),
-            Seat::Wire { .. } => None,
-        };
-        // Stated, not inferred from `scratch`'s incidental absence:
-        // `` agents `start `` chooses its arm on this one fact.
-        let wire_seat = matches!(self.seat, Seat::Wire { .. });
         desk::HostServices {
             fleet: self.fleet.clone(),
-            scratch,
+            kind: self.seat.kind(),
             agent: self.agent.clone(),
             emit: emit.clone(),
             cwd: self.cwd(),
             reply,
-            schedules: self.schedules.clone(),
             log: self.log.clone(),
             nursery,
             generation: self.agent.generation(),
@@ -146,8 +135,6 @@ impl Avatar {
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
             principal: ral_core::host::user(),
-            pins: Some(self.pins.clone()),
-            wire_seat,
         }
     }
 
@@ -174,7 +161,7 @@ impl Avatar {
                 services: self.host_services(emit, nursery.clone(), reply_cell.clone()),
             },
             apply: desk::SurfaceApplier {
-                pins: Some(self.pins.clone()),
+                pins: Some(self.agent.pins.clone()),
                 id: self.agent.id,
                 recorder: self.recorder(),
                 surface: Mutex::new(crate::record::commit::SurfaceBuffer::new()),
@@ -244,7 +231,7 @@ impl Avatar {
     /// nudge reminder; `None` when nothing is pinned.  Rendered through the
     /// rail's own `summary_line`, so the reminder reads as the user sees it.
     pub(super) fn pinned_digest(&self) -> Option<String> {
-        let m = self.pins.lock().expect("pin register poisoned");
+        let m = self.agent.pins.lock().expect("pin register poisoned");
         if m.is_empty() {
             return None;
         }

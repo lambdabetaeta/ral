@@ -278,6 +278,8 @@ impl Avatar {
             cancel: cancel::Token::new(),
             reach,
             mailbox,
+            schedules: crate::fleet::schedule::ScheduleRegistry::new(),
+            pins: Arc::default(),
             status: Mutex::new(super::Status {
                 generation: 0,
                 rest: None,
@@ -296,9 +298,7 @@ impl Avatar {
             nudges,
             reply: None,
             fleet,
-            schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             last_input: (0, 0),
-            pins: Arc::default(),
             ral_epoch: 0,
             disk_check_epoch: 0,
             disk_warn_latched: false,
@@ -511,10 +511,10 @@ impl Avatar {
         // carries its own stamp and is rejected at a consuming edge, so
         // neither order is load-bearing.
         self.agent.clear_subtree();
-        self.schedules.clear();
+        self.agent.schedules.clear();
         // The frontend wipes its pin register on `/clear`, so the session's
         // mirror must follow.
-        self.pins.lock().expect("pin register poisoned").clear();
+        self.agent.pins.lock().expect("pin register poisoned").clear();
         error.map_or(Ok(()), Err)
     }
 
@@ -688,6 +688,7 @@ impl Avatar {
             allow_schedule,
             egress,
             disk_warn_bytes,
+            lease,
         } = cfg;
         let system = system.as_str();
         // Derived from the policy, exactly as `root` derives it, so a fixture
@@ -748,7 +749,7 @@ impl Avatar {
             allow_schedule,
             tool_enabled: true,
             search,
-            fleet: Fleet::new(),
+            fleet: Fleet::with_lease(lease),
             run_lock: None,
             resume_summary: None,
             disk_warn_bytes,
@@ -767,6 +768,8 @@ pub(crate) struct TestTrunk {
     /// The IT policy the trunk's `search` reach is derived from.
     pub(crate) egress: crate::egress::Egress,
     pub(crate) disk_warn_bytes: Option<u64>,
+    /// The idle bound of the fleet this trunk is born into.
+    pub(crate) lease: std::time::Duration,
 }
 
 impl TestTrunk {
@@ -776,6 +779,7 @@ impl TestTrunk {
             allow_schedule: false,
             egress: crate::egress::Egress::for_test(),
             disk_warn_bytes: None,
+            lease: crate::fleet::AGENT_LEASE_IDLE,
         }
     }
 }
@@ -789,7 +793,7 @@ impl Drop for Avatar {
     /// the seat below: a settled-but-never-cancelled agent leaks neither.
     /// `/clear` never reaches this — it rebuilds in place, clearing its own.
     fn drop(&mut self) {
-        self.schedules.clear();
+        self.agent.schedules.clear();
         let recorded = self.log.lock().record_session_ended();
         if let Err(error) = recorded {
             eprintln!("exarch: the session's tail bookend was not recorded: {error}");
@@ -1159,7 +1163,7 @@ mod tests {
     #[test]
     fn agent_drop_clears_its_own_armed_schedules() {
         let agent = Avatar::for_test("system").unwrap();
-        let schedules = agent.schedules.clone();
+        let schedules = agent.agent.schedules.clone();
         schedules
             .schedule(
                 crate::fleet::schedule::Trigger::After(std::time::Duration::from_hours(1)),
