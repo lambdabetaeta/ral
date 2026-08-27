@@ -826,7 +826,13 @@ impl ExarchDesk {
         // No detach: the shell was forked, not booted, so it carries no policy.
         let seat =
             crate::agent::seat::Seat::identity(shell, scratch, s.cwd.clone(), false, &child_log);
+        // Registered so a terminate-class cancel can unwind a `ral` eval
+        // already in flight, and a per-tab interrupt can unwind just the
+        // in-flight exchange without touching the root a later exchange
+        // would inherit.
+        let reach = seat.eval_reach();
         let child = Avatar::assemble(Build {
+            name: spec.name.clone(),
             system: s.system_template.clone(),
             system_prompt,
             index: s.index.clone(),
@@ -848,6 +854,11 @@ impl ExarchDesk {
             disk_warn_bytes: s.disk_warn_bytes,
             egress: s.egress.clone(),
             dial: s.dial.clone(),
+            reach,
+            // `s.generation` was just re-verified fresh against the live
+            // registry above, on this same parent's own attend thread — the
+            // only thread that could ever bump it.
+            consumer: s.generation,
         });
 
         self.spawn_child(child, spec.name, spec.prompt)
@@ -958,7 +969,9 @@ impl ExarchDesk {
         );
 
         let fuel = s.fuel - 1;
+        let reach = seat.eval_reach();
         let child = Avatar::assemble(Build {
+            name: spec.name.clone(),
             system: s.system_template.clone(),
             system_prompt,
             index: s.index.clone(),
@@ -979,6 +992,10 @@ impl ExarchDesk {
             disk_warn_bytes: s.disk_warn_bytes,
             egress: s.egress.clone(),
             dial: Some(dial),
+            reach,
+            // Re-verified fresh against the live registry in `launch`, before
+            // this wire arm was ever reached — see its own comment.
+            consumer: s.generation,
         });
 
         self.spawn_child(child, spec.name, spec.prompt)
@@ -1866,7 +1883,7 @@ mod tests {
     use crate::agent::testkit::ral_call;
     use crate::bus::{Inbox, Signal, channel};
     use crate::egress::Egress;
-    use crate::fleet::registry::{EvalReach, InterruptTarget, Registration};
+    use crate::fleet::registry::{EvalReach, InterruptTarget};
     use crate::provider::{
         Provider,
         scripted::{Reply, Script},
@@ -2181,9 +2198,8 @@ mod tests {
         // spawns — overwriting the parent's entry, and hanging rather than
         // failing.
         let parent_id = crate::agent::fresh_id();
-        let _ = registry.register(Registration {
+        let parent_agent = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
             id: parent_id,
-            parent: None,
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: crate::agent::cancel::Token::new(),
@@ -2193,7 +2209,9 @@ mod tests {
             },
             mailbox: parent_inbox.mailbox(),
             provider: ProviderHandle::new(scripted_provider()),
+            consumer: 0,
         });
+        let _ = registry.register(None, parent_agent);
         let desk = ExarchDesk {
             services: HostServices {
                 registry: registry.clone(),
@@ -3014,19 +3032,21 @@ mod tests {
         )));
         // Registered without a worker, so it never settles out from under the
         // assertion below.
-        let _ = registry.register(Registration {
-            id: crate::agent::fresh_id(),
-            parent: Some(desk.services.parent),
-            name: "already-there".into(),
-            log_dir: PathBuf::from("/tmp/already-there"),
-            cancel: crate::agent::cancel::Token::new(),
-            reach: EvalReach::Identity {
-                eval_root: Some(ral_core::process::DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: Inbox::new().mailbox(),
-            provider: ProviderHandle::new(scripted_provider()),
-        });
+        let already_there =
+            crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
+                id: crate::agent::fresh_id(),
+                name: "already-there".into(),
+                log_dir: PathBuf::from("/tmp/already-there"),
+                cancel: crate::agent::cancel::Token::new(),
+                reach: EvalReach::Identity {
+                    eval_root: Some(ral_core::process::DurableRoot::default()),
+                    interrupt_target: InterruptTarget::default(),
+                },
+                mailbox: Inbox::new().mailbox(),
+                provider: ProviderHandle::new(scripted_provider()),
+                consumer: registry.generation(desk.services.parent),
+            });
+        let _ = registry.register(Some(desk.services.parent), already_there);
 
         let root = root_shell();
         let session = desk.services.nursery.park(forkable_child_shell(&root));
@@ -3377,9 +3397,8 @@ mod tests {
             (sibling, root_id, "sibling"),
             (grandchild, mid, "grandchild"),
         ] {
-            let _ = registry.register(Registration {
+            let agent = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
                 id,
-                parent: Some(parent),
                 name: name.to_string(),
                 log_dir: PathBuf::from(format!("/tmp/{id}")),
                 cancel: crate::agent::cancel::Token::new(),
@@ -3389,7 +3408,9 @@ mod tests {
                 },
                 mailbox: Inbox::new().mailbox(),
                 provider: ProviderHandle::new(scripted_provider()),
+                consumer: registry.generation(parent),
             });
+            let _ = registry.register(Some(parent), agent);
         }
 
         let mut desk1 = desk_root;
@@ -3795,21 +3816,17 @@ mod tests {
 
     // ── engaged-child lifecycle ────────────────────────────────────────────
 
-    /// The registration half of `spawn_async`.
-    fn register_child(parent_id: AgentId, name: &str, child: &Avatar) -> u64 {
+    /// The registration half of `spawn_async`: a real spawn bakes `name` into
+    /// `child`'s own construction, which a plain [`Avatar::fork`] does not,
+    /// so this stamps it on directly first — the test-only escape hatch
+    /// [`Agent::set_name`] exists for.
+    fn register_child(parent_id: AgentId, name: &str, child: &mut Avatar) -> u64 {
+        child.agent_mut().set_name(name);
         child
             .agents
-            .register(Registration {
-                id: child.agent.id,
-                parent: Some(parent_id),
-                name: name.to_string(),
-                log_dir: child.log_dir(),
-                cancel: child.cancel_token().clone(),
-                reach: child.seat.eval_reach(),
-                mailbox: child.mailbox(),
-                provider: child.provider_handle(),
-            })
-            .expect("a fresh child of a live parent always registers")
+            .register(Some(parent_id), child.agent.clone())
+            .expect("a fresh child of a live parent always registers");
+        child.agent.consumer()
     }
 
     /// Attend `child` to completion on a detached thread, in `spawn_async`'s own
@@ -3850,9 +3867,8 @@ mod tests {
         log_dir: &std::path::Path,
     ) -> AgentId {
         let id = crate::agent::fresh_id();
-        let _ = registry.register(Registration {
+        let agent = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
             id,
-            parent: Some(parent_id),
             name: format!("keepalive-{parent_id}"),
             log_dir: log_dir.to_path_buf(),
             cancel: crate::agent::cancel::Token::new(),
@@ -3862,7 +3878,9 @@ mod tests {
             },
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: ProviderHandle::new(scripted_provider()),
+            consumer: registry.generation(parent_id),
         });
+        let _ = registry.register(Some(parent_id), agent);
         id
     }
 
@@ -3889,7 +3907,7 @@ mod tests {
     fn engaged_child_answers_a_second_steer_with_no_focus_involved() {
         let dir = tmp("engaged-second-steer");
         let parent = Avatar::for_test("system").unwrap();
-        let child = parent.fork(parent.caps().clone()).expect("fork child");
+        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.provider_handle().swap(Arc::new(Provider::scripted(
             "test-model",
             Script::new()
@@ -3904,7 +3922,7 @@ mod tests {
         let child_id = child.agent.id;
         let registry = child.agents.clone();
 
-        let generation = register_child(parent.agent.id, "helper", &child);
+        let generation = register_child(parent.agent.id, "helper", &mut child);
         register_keepalive(&registry, child_id, &dir.path().join("keepalive"));
         let handle = attend_and_deliver(child, "helper", generation, parent.mailbox());
 
@@ -3964,7 +3982,7 @@ mod tests {
         let ttl_a = Duration::from_millis(25);
         let ttl_b = Duration::from_millis(300);
 
-        let child_a = parent.fork(parent.caps().clone()).expect("fork child a");
+        let mut child_a = parent.fork(parent.caps().clone()).expect("fork child a");
         let mut long_script = Script::new();
         for i in 0..2_000u32 {
             long_script = long_script.then(Reply::tool_calls(vec![ral_call(&i.to_string(), "1")]));
@@ -3976,7 +3994,7 @@ mod tests {
         let id_a = child_a.agent.id;
         let registry = child_a.agents.clone();
         registry.set_lease(ttl_a);
-        let gen_a = register_child(parent.agent.id, "child-a", &child_a);
+        let gen_a = register_child(parent.agent.id, "child-a", &mut child_a);
         let handle_a = attend_and_deliver(child_a, "child-a", gen_a, parent.mailbox());
 
         match wait_for_settle(&parent.inbox()) {
@@ -3994,16 +4012,24 @@ mod tests {
 
         // Child B is parked by a keepalive grandchild and given no script to
         // race, so `renew` alone must be what defers its reap.
-        let child_b = parent.fork(parent.caps().clone()).expect("fork child b");
+        let mut child_b = parent.fork(parent.caps().clone()).expect("fork child b");
         let id_b = child_b.agent.id;
         registry.set_lease(ttl_b);
-        let gen_b = register_child(parent.agent.id, "child-b", &child_b);
+        let gen_b = register_child(parent.agent.id, "child-b", &mut child_b);
         let keepalive_b = register_keepalive(&registry, id_b, &dir.path().join("keepalive-b"));
         let handle_b = attend_and_deliver(child_b, "child-b", gen_b, parent.mailbox());
 
         std::thread::sleep(ttl_b / 2);
-        assert!(registry.renew(id_b), "a live entry renews");
-        assert!(registry.renew(keepalive_b), "so does its keepalive");
+        // A bare stamp, not `steer`: child B's script is empty, so an actual
+        // delivery would give its attend loop work it cannot answer.
+        registry
+            .mailbox(id_b)
+            .expect("a live entry renews")
+            .stamp_exchange();
+        registry
+            .mailbox(keepalive_b)
+            .expect("so does its keepalive")
+            .stamp_exchange();
 
         std::thread::sleep(ttl_b / 2 + Duration::from_millis(150));
         assert!(
@@ -4036,7 +4062,7 @@ mod wire_tests {
     use crate::agent::testkit::ral_call;
     use crate::bus::Inbox;
     use crate::egress::Egress;
-    use crate::fleet::registry::{EvalReach, InterruptTarget, Registration};
+    use crate::fleet::registry::{EvalReach, InterruptTarget};
     use crate::provider::{
         Provider,
         scripted::{Reply, Script},
@@ -4215,16 +4241,17 @@ mod wire_tests {
         let parent_inbox = Inbox::new();
         let registry = AgentRegistry::new();
         let parent_id = crate::agent::fresh_id();
-        let _ = registry.register(Registration {
+        let parent_agent = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
             id: parent_id,
-            parent: None,
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/wire-parent"),
             cancel: crate::agent::cancel::Token::new(),
             reach: fake_wire_reach(),
             mailbox: parent_inbox.mailbox(),
             provider: ProviderHandle::new(scripted_provider(Script::new())),
+            consumer: 0,
         });
+        let _ = registry.register(None, parent_agent);
         let (emit, _rx) = crate::bus::dummy_emitter();
         let desk = ExarchDesk {
             services: HostServices {
@@ -4429,9 +4456,8 @@ mod wire_tests {
     fn identity_and_wire_peers_exchange_messages_through_one_desk() {
         let registry = AgentRegistry::new();
         let parent_id = crate::agent::fresh_id();
-        let _ = registry.register(Registration {
+        let parent_agent = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
             id: parent_id,
-            parent: None,
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/peer-parent"),
             cancel: crate::agent::cancel::Token::new(),
@@ -4441,36 +4467,41 @@ mod wire_tests {
             },
             mailbox: Inbox::new().mailbox(),
             provider: ProviderHandle::new(scripted_provider(Script::new())),
+            consumer: 0,
         });
+        let _ = registry.register(None, parent_agent);
 
         let identity_inbox = Inbox::new();
         let identity_id = crate::agent::fresh_id();
-        let _ = registry.register(Registration {
-            id: identity_id,
-            parent: Some(parent_id),
-            name: "identity-peer".into(),
-            log_dir: PathBuf::from("/tmp/peer-identity"),
-            cancel: crate::agent::cancel::Token::new(),
-            reach: EvalReach::Identity {
-                eval_root: Some(ral_core::process::DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: identity_inbox.mailbox(),
-            provider: ProviderHandle::new(scripted_provider(Script::new())),
-        });
+        let identity_agent =
+            crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
+                id: identity_id,
+                name: "identity-peer".into(),
+                log_dir: PathBuf::from("/tmp/peer-identity"),
+                cancel: crate::agent::cancel::Token::new(),
+                reach: EvalReach::Identity {
+                    eval_root: Some(ral_core::process::DurableRoot::default()),
+                    interrupt_target: InterruptTarget::default(),
+                },
+                mailbox: identity_inbox.mailbox(),
+                provider: ProviderHandle::new(scripted_provider(Script::new())),
+                consumer: registry.generation(parent_id),
+            });
+        let _ = registry.register(Some(parent_id), identity_agent);
 
         let wire_inbox = Inbox::new();
         let wire_id = crate::agent::fresh_id();
-        let _ = registry.register(Registration {
+        let wire_agent = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
             id: wire_id,
-            parent: Some(parent_id),
             name: "wire-peer".into(),
             log_dir: PathBuf::from("/tmp/peer-wire"),
             cancel: crate::agent::cancel::Token::new(),
             reach: fake_wire_reach(),
             mailbox: wire_inbox.mailbox(),
             provider: ProviderHandle::new(scripted_provider(Script::new())),
+            consumer: registry.generation(parent_id),
         });
+        let _ = registry.register(Some(parent_id), wire_agent);
 
         let (emit, _rx) = crate::bus::dummy_emitter();
         let desk = ExarchDesk {

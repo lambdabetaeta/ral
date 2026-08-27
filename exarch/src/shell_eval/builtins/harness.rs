@@ -1296,26 +1296,27 @@ mod tests {
     fn agents_cancel_answer_still_lists_the_cancelled_row() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let target = session.agent.id + 1;
+        let doomed = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
+            id: target,
+            name: "doomed".to_string(),
+            log_dir: std::path::PathBuf::from("/tmp"),
+            cancel: crate::agent::cancel::Token::new(),
+            reach: crate::fleet::registry::EvalReach::Identity {
+                eval_root: Some(ral_core::process::DurableRoot::default()),
+                interrupt_target: crate::fleet::registry::InterruptTarget::default(),
+            },
+            mailbox: crate::bus::Inbox::new().mailbox(),
+            provider: crate::agent::ProviderHandle::new(std::sync::Arc::new(
+                crate::provider::Provider::scripted(
+                    "test",
+                    crate::provider::scripted::Script::new(),
+                ),
+            )),
+            consumer: session.agent.generation(),
+        });
         session
             .agents
-            .register(crate::fleet::registry::Registration {
-                id: target,
-                parent: Some(session.agent.id),
-                name: "doomed".to_string(),
-                log_dir: std::path::PathBuf::from("/tmp"),
-                cancel: crate::agent::cancel::Token::new(),
-                reach: crate::fleet::registry::EvalReach::Identity {
-                    eval_root: Some(ral_core::process::DurableRoot::default()),
-                    interrupt_target: crate::fleet::registry::InterruptTarget::default(),
-                },
-                mailbox: crate::bus::Inbox::new().mailbox(),
-                provider: crate::agent::ProviderHandle::new(std::sync::Arc::new(
-                    crate::provider::Provider::scripted(
-                        "test",
-                        crate::provider::scripted::Script::new(),
-                    ),
-                )),
-            })
+            .register(Some(session.agent.id), doomed)
             .unwrap();
 
         let (tx, _rx) = crate::bus::channel();

@@ -5,7 +5,7 @@
 
 use crate::agent::Avatar;
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, Mailbox, Post};
-use crate::fleet::registry::{AgentRegistry, RegisterError, Registration};
+use crate::fleet::registry::{AgentRegistry, RegisterError};
 use crate::record::Transient;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -30,7 +30,7 @@ pub(crate) fn spawn_branch(
         || format!("branch-{}", DISPATCH_SEQ.fetch_add(1, Ordering::Relaxed)),
         str::to_string,
     );
-    let child = session.branch().map_err(|e| e.to_string())?;
+    let child = session.branch(name.clone()).map_err(|e| e.to_string())?;
     // The branch row's display commit, authored beside the legacy rail row
     // `spawn_async` emits from the same inputs; a harness spawn's recorded
     // row is the desk's own HarnessCall commit instead.
@@ -94,46 +94,28 @@ pub(crate) fn spawn_async(
     // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.agent.id;
     let log_dir = child.log_dir();
-    let cancel = child.cancel_token().clone();
-    // Registered so a terminate-class cancel can unwind a `ral` eval already in
-    // flight, and a per-tab interrupt can unwind just the in-flight exchange
-    // without touching the root a later exchange would inherit.
-    let reach = child.seat.eval_reach();
-    // Registered so the frontend can steer or wake this tab.
-    let child_mailbox = child.mailbox();
-    // Seeded at `fork` from this agent's current provider and registered apart
-    // from it, so a later `/model` on either never disturbs the other.
-    let child_provider = child.provider_handle();
     // A returning sub-agent holds `reply`; a conversing branch does not.  This
     // one fact gates the parent edge and the settle epilogue.
     let delivers = child.returns();
     let spawner = delivers.then_some(parent);
-    let generation = match registry.register(Registration {
-        id: agent_id,
-        parent: spawner,
-        name: name.clone(),
-        log_dir: log_dir.clone(),
-        cancel,
-        reach,
-        mailbox: child_mailbox,
-        provider: child_provider,
-    }) {
-        Ok(generation) => generation,
-        Err(RegisterError::SessionDead) => {
-            return Err(format!(
-                "could not start agent {agent_id}: this session is no longer live"
-            ));
-        }
-        Err(RegisterError::NameTaken(name)) => {
-            return Err(format!(
+    // `child.agent` already carries its name, reach, mailbox, and — baked in
+    // at construction — the `consumer` generation this spawner's own read
+    // stamped it with, so this is the one place that fact is threaded upward.
+    let generation = child.agent.consumer();
+    if let Err(err) = registry.register(spawner, child.agent.clone()) {
+        return Err(match err {
+            RegisterError::SessionDead => {
+                format!("could not start agent {agent_id}: this session is no longer live")
+            }
+            RegisterError::NameTaken(name) => format!(
                 "could not start agent '{name}': a live agent already bears this name — pick \
                  another, or wait for it to settle"
-            ));
-        }
-        Err(RegisterError::NameMalformed(why)) => {
-            return Err(format!("could not start agent {agent_id}: {why}"));
-        }
-    };
+            ),
+            RegisterError::NameMalformed(why) => {
+                format!("could not start agent {agent_id}: {why}")
+            }
+        });
+    }
     // `registry` itself stays free for the unwind path below.
     let worker_registry = AgentRegistry::clone(registry);
     // Off a bus whose children are muted (headless's per-exchange default)

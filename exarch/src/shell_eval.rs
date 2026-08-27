@@ -1301,9 +1301,8 @@ keep-bottom
         let emit = Emitter::with_mailbox(tx, 7, inbox.mailbox());
         // Registered, so the `/clear` below has an entry whose generation to
         // bump: the counter lives on the session, not on the fleet.
-        let _ = registry.register(crate::fleet::registry::Registration {
+        let agent = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
             id: 7,
-            parent: None,
             name: "root".into(),
             log_dir: std::path::PathBuf::from("/tmp"),
             cancel: crate::agent::cancel::Token::new(),
@@ -1318,7 +1317,9 @@ keep-bottom
                     crate::provider::scripted::Script::new(),
                 ),
             )),
+            consumer: 0,
         });
+        let _ = registry.register(None, agent);
         let deferred = deferred_sink(&emit, 7, &registry, crate::record::Emitter::none());
         let born = registry.generation(7);
 

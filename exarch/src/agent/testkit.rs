@@ -6,9 +6,10 @@
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 
-use crate::agent::{Avatar, NoControl, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
+use crate::agent::{Agent, Avatar, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL, cancel};
 use crate::bootstrap::Scratch;
-use crate::bus::{AgentOutcome, Emitter};
+use crate::bus::{AgentId, AgentOutcome, Emitter, Mailbox};
+use crate::fleet::registry::EvalReach;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
 use ral_core::Shell;
@@ -18,10 +19,76 @@ use ral_core::typecheck::builtins::{mk_scheme, pure, thunk};
 use ral_core::typecheck::{Scheme, Ty, Unifier};
 use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, script))
+}
+
+/// What a registry-focused test needs to build a synthetic `Arc<Agent>` —
+/// no seat, no shell, nothing an attend loop would touch.
+pub(crate) struct TestAgentSpec {
+    pub(crate) id: AgentId,
+    pub(crate) name: String,
+    pub(crate) log_dir: PathBuf,
+    pub(crate) cancel: cancel::Token,
+    pub(crate) reach: EvalReach,
+    pub(crate) mailbox: Mailbox,
+    pub(crate) provider: ProviderHandle,
+    /// The parent's own generation at this birth, exactly as a real
+    /// registration reads it — 0 for a parentless agent, or whatever the
+    /// caller read live off the parent immediately before this call.
+    pub(crate) consumer: u64,
+}
+
+/// Build the `Arc<Agent>` a real fork or root would carry into
+/// [`crate::fleet::registry::AgentRegistry::register`], filling in every
+/// field an attend loop would touch with an inert placeholder: registry
+/// tests exercise the map, never a session behind it.
+pub(crate) fn test_agent(spec: TestAgentSpec) -> Arc<Agent> {
+    let TestAgentSpec {
+        id,
+        name,
+        log_dir,
+        cancel,
+        reach,
+        mailbox,
+        provider,
+        consumer,
+    } = spec;
+    Arc::new(Agent {
+        id,
+        name,
+        log_dir,
+        started: std::time::Instant::now(),
+        system: String::new(),
+        system_base: String::new(),
+        index: crate::prompt::BuiltinIndex::resolve(&Shell::new(
+            ral_core::io::TerminalState::default(),
+        )),
+        caps: ral_core::types::Capabilities::default(),
+        parent: None,
+        fuel: 0,
+        provider,
+        interactive: false,
+        tool_enabled: false,
+        search: false,
+        returns: false,
+        allow_schedule: false,
+        disk_warn_bytes: None,
+        egress: crate::egress::Egress::for_test(),
+        dial: None,
+        cancel,
+        reach,
+        mailbox,
+        status: Mutex::new(crate::agent::Status {
+            generation: 0,
+            rest: None,
+            reply: None,
+        }),
+        consumer,
+    })
 }
 
 /// A boundary read — unlike `scope_has` it ticks no epoch and no ledger.

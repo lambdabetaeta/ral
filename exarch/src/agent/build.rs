@@ -10,12 +10,12 @@ use crate::agent::shell::LogCell;
 use crate::agent::{Agent, Avatar, ProviderHandle, SPAWN_FUEL, cancel, nudge};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Emitter, Inbox};
-use crate::fleet::registry::{AgentRegistry, Registration};
+use crate::fleet::registry::{AgentRegistry, EvalReach};
 use crate::prompt::Grants;
 use crate::provider::Provider;
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub(crate) fn fresh_id() -> AgentId {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
@@ -53,6 +53,9 @@ const TRUNK_NAME: &str = "main";
     reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, tool_enabled, search); not a candidate for a combined enum"
 )]
 pub(crate) struct Build {
+    /// The tab-bar identity — known to every caller before construction, `/branch`'s
+    /// and `` agents `start ``'s own choice reached down to here.
+    pub(crate) name: String,
     /// The still-unresolved template, carrying the builtin-index placeholder
     /// so the constructed agent's own children resolve from it in turn.
     pub(crate) system: String,
@@ -94,6 +97,16 @@ pub(crate) struct Build {
     /// Shared verbatim by every fork — `` agents `start ``'s wire arm reads it off
     /// its own agent, never off a fresh construction.
     pub(crate) dial: Option<Arc<dyn Dial>>,
+    /// This agent's reach into its own running eval, read off `seat` before it
+    /// moves into this bundle — a self-registering root states it pre-weakened
+    /// ([`EvalReach::interrupt_only`]).
+    pub(crate) reach: EvalReach,
+    /// The parent's own generation at this birth — the fence a result
+    /// addressed upward must survive.  0 for an agent with no reporting
+    /// parent: the trunk, or a `/branch` child, which is parentless in the
+    /// registry's own tree even though [`Self::parent`] still names its
+    /// creator.
+    pub(crate) consumer: u64,
 }
 
 /// A session's provider identity, snapshotted for the record.
@@ -181,6 +194,7 @@ pub enum RootSeat {
 impl Avatar {
     pub(crate) fn assemble(b: Build) -> Self {
         let Build {
+            name,
             system,
             system_prompt,
             index,
@@ -201,10 +215,18 @@ impl Avatar {
             disk_warn_bytes,
             egress,
             dial,
+            reach,
+            consumer,
         } = b;
         let nudges = tool_enabled.then(nudge::Registry::new);
+        let log_dir = log.dir().to_path_buf();
+        let inbox = Inbox::new();
+        let mailbox = inbox.mailbox();
         let agent = Arc::new(Agent {
             id: log.id(),
+            name,
+            log_dir,
+            started: std::time::Instant::now(),
             system: system_prompt,
             system_base: system,
             index,
@@ -213,7 +235,6 @@ impl Avatar {
             fuel,
             provider,
             interactive,
-            cancel: cancel::Token::new(),
             tool_enabled,
             search,
             returns,
@@ -221,6 +242,15 @@ impl Avatar {
             disk_warn_bytes,
             egress,
             dial,
+            cancel: cancel::Token::new(),
+            reach,
+            mailbox,
+            status: Mutex::new(super::Status {
+                generation: 0,
+                rest: None,
+                reply: None,
+            }),
+            consumer,
         });
         Self {
             agent,
@@ -228,7 +258,7 @@ impl Avatar {
             _run_lock: run_lock,
             resume_summary,
             seat,
-            inbox: Inbox::new(),
+            inbox,
             nudges,
             reply: None,
             agents,
@@ -242,30 +272,12 @@ impl Avatar {
         }
     }
 
-    /// Register this agent under its `parent` (`None` for the trunk).  Only a
-    /// root does this for itself, at construction; a child is registered by
-    /// its spawn site, which also arms the ceiling.
-    fn register_self(&self) {
-        self.register_self_named(TRUNK_NAME);
-    }
-
-    /// `register_self` under a chosen name — a second self-registration
-    /// sharing one registry needs one, since names are unique among live
-    /// entries. The refusal is dropped: a root never collides, being the only
-    /// self-registering entry its registry holds.
-    pub(super) fn register_self_named(&self, name: &str) {
-        let _ = self.agents.register(Registration {
-            id: self.agent.id,
-            parent: self.agent.parent,
-            name: name.to_string(),
-            log_dir: self.log.lock().dir().to_path_buf(),
-            cancel: self.agent.cancel.clone(),
-            // This seat is rebuilt in place under this standing entry, so a
-            // root captured now would go stale — see `interrupt_only`.
-            reach: self.seat.eval_reach().interrupt_only(),
-            mailbox: self.inbox.mailbox(),
-            provider: self.agent.provider.clone(),
-        });
+    /// Register this trunk under its own name (`None` parent): the one
+    /// self-registration every root performs, once, at construction — a
+    /// child is registered by its spawn site instead, which also arms the
+    /// idle lease.
+    fn register(&self) -> Result<(), crate::fleet::registry::RegisterError> {
+        self.agents.register(None, self.agent.clone())
     }
 
     /// The trunk — the parent-less root of a fresh fleet.  Creates the fleet's
@@ -409,7 +421,12 @@ impl Avatar {
                 home,
             } => Seat::wire(*transport, cwd, home),
         };
+        // This seat is rebuilt in place under the standing entry a root
+        // registers as, so a raw reach captured now would go stale — see
+        // `EvalReach::interrupt_only`.
+        let reach = seat.eval_reach().interrupt_only();
         let avatar = Self::assemble(Build {
+            name: TRUNK_NAME.to_string(),
             system,
             system_prompt,
             index,
@@ -431,6 +448,9 @@ impl Avatar {
             disk_warn_bytes,
             egress,
             dial,
+            reach,
+            // A parentless root reports to nobody.
+            consumer: 0,
         });
         if resume.is_some() {
             avatar
@@ -441,7 +461,9 @@ impl Avatar {
                 )])
                 .map_err(io::Error::other)?;
         }
-        avatar.register_self();
+        // A brand-new registry, so this can never collide or find its
+        // parentless self dead.
+        let _ = avatar.register();
         Ok(avatar)
     }
 
@@ -490,18 +512,26 @@ impl Avatar {
         Ok(())
     }
 
-    /// A plain returning fork.  Tests only: a production spawn assembles its
-    /// own `Build` through the desk's spawn spine (`ExarchDesk::launch`), and
-    /// `/branch` calls `fork_with` directly.
+    /// A plain returning fork, under a placeholder name.  Tests only: a
+    /// production spawn assembles its own `Build` through the desk's spawn
+    /// spine (`ExarchDesk::launch`), and `/branch` calls `fork_with` directly
+    /// with the name it already chose.  A test that goes on to register this
+    /// child under a chosen name uses [`Agent::set_name`] first — construction
+    /// is still the only place a *registered* agent's name is fixed.
     #[cfg(test)]
     pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> io::Result<Self> {
-        self.fork_with(caps, true)
+        self.fork_with(caps, true, "fork".to_string())
     }
 
     /// An independent child of this agent capped at `caps`; `returns` decides
     /// whether it holds `reply` — both the prompt's advertised builtin index
     /// and the desk's refusal read that one bit, so they cannot disagree.
-    fn fork_with(&self, caps: ral_core::types::Capabilities, returns: bool) -> io::Result<Self> {
+    fn fork_with(
+        &self,
+        caps: ral_core::types::Capabilities,
+        returns: bool,
+        name: String,
+    ) -> io::Result<Self> {
         // Scope, dynamic context, and installed builtin table cross in this
         // one step, because core owns the flow matrix — no hand-copied field
         // here can drift from it.  Per-agent state starts fresh.
@@ -530,7 +560,9 @@ impl Avatar {
                 unreachable!("shell_mut already panicked above for a wire seat")
             }
         };
+        let reach = seat.eval_reach();
         Ok(Self::assemble(Build {
+            name,
             system: self.agent.system_base.clone(),
             system_prompt,
             index: self.agent.index.clone(),
@@ -557,14 +589,19 @@ impl Avatar {
             disk_warn_bytes: self.agent.disk_warn_bytes,
             egress: self.agent.egress.clone(),
             dial: self.agent.dial.clone(),
+            reach,
+            // Both `fork_with`'s callers register with no reporting parent: a
+            // `/branch` child always does (it never delivers), and the other,
+            // `fork` above, is test-only and usually never registered at all.
+            consumer: 0,
         }))
     }
 
-    /// Fork a conversing child: the creator's context and capabilities
-    /// verbatim, but `reply` withheld, so it parks for the human instead of
-    /// returning a value.
-    pub(crate) fn branch(&self) -> io::Result<Self> {
-        let child = self.fork_with(self.agent.caps.clone(), false)?;
+    /// Fork a conversing child under `name`: the creator's context and
+    /// capabilities verbatim, but `reply` withheld, so it parks for the
+    /// human instead of returning a value.
+    pub(crate) fn branch(&self, name: String) -> io::Result<Self> {
+        let child = self.fork_with(self.agent.caps.clone(), false, name)?;
         self.inherit_context(&child)?;
         Ok(child)
     }
@@ -634,7 +671,10 @@ impl Avatar {
         )));
         let cwd = std::env::current_dir().expect("test process has a cwd");
         let seat = Seat::identity(shell, scratch, cwd, false, &log);
+        // Pre-weakened for the same reason a real root's is — see `root`.
+        let reach = seat.eval_reach().interrupt_only();
         let avatar = Self::assemble(Build {
+            name: TRUNK_NAME.to_string(),
             system: system.to_string(),
             system_prompt,
             index,
@@ -657,8 +697,12 @@ impl Avatar {
             disk_warn_bytes: None,
             egress: crate::egress::Egress::for_test(),
             dial: None,
+            reach,
+            consumer: 0,
         });
-        avatar.register_self();
+        // A brand-new registry, so this can never collide or find its
+        // parentless self dead.
+        let _ = avatar.register();
         Ok(avatar)
     }
 }
@@ -799,7 +843,7 @@ mod tests {
             )
             .unwrap();
 
-        let child = parent.branch().expect("branch child");
+        let child = parent.branch("branch".into()).expect("branch child");
 
         let view = serde_json::to_string(&child.log.lock().history_messages()).unwrap();
         assert!(view.contains("what did we learn?"));
@@ -896,7 +940,7 @@ mod tests {
              system, not its non-returning parent's"
         );
 
-        let grandchild = child.branch().expect("branch grandchild");
+        let grandchild = child.branch("grandchild".into()).expect("branch grandchild");
         assert_ne!(
             grandchild.agent.system.len(),
             child.agent.system.len(),

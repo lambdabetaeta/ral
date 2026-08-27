@@ -321,13 +321,13 @@ impl Avatar {
     /// that drains it, so a mismatch could only be a routing bug.
     pub(super) fn admits(&self, item: &Item) -> bool {
         match item {
-            Item::Agent(r) => r.generation == self.agents.generation(self.agent.id),
+            Item::Agent(r) => r.generation == self.agent.generation(),
             Item::Surface { id, generation, .. } => {
                 debug_assert_eq!(
                     *id, self.agent.id,
                     "a spawn's surface batch always drains in the session it was stamped with"
                 );
-                *generation == self.agents.generation(self.agent.id)
+                *generation == self.agent.generation()
             }
             _ => true,
         }
@@ -603,7 +603,6 @@ fn agent_outcome(
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
-    use crate::fleet::registry::Registration;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Forensic, Record};
     use ral_core::Value;
@@ -662,7 +661,6 @@ mod tests {
     /// TUI's focus cursor.
     #[test]
     fn park_mode_reads_engagement_from_the_registry() {
-        let dir = tmp("park-engaged");
         let held = trunk(true);
         assert_eq!(held.park_mode(), ParkMode::Held);
 
@@ -670,16 +668,7 @@ mod tests {
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         child
             .agents
-            .register(Registration {
-                id: child.agent.id,
-                parent: Some(parent.agent.id),
-                name: "child".into(),
-                log_dir: dir.path().join("child"),
-                cancel: child.cancel_token().clone(),
-                reach: child.seat.eval_reach(),
-                mailbox: child.mailbox(),
-                provider: child.provider_handle(),
-            })
+            .register(Some(parent.agent.id), child.agent.clone())
             .expect("child registration must succeed: its parent is live");
         assert_eq!(
             child.park_mode(),
@@ -687,7 +676,7 @@ mod tests {
             "un-engaged, no live children, no schedule: idle quiesce delivers the outcome"
         );
 
-        child.agents.renew(child.agent.id);
+        child.agents.steer(child.agent.id, "hi".into());
         assert_eq!(
             child.park_mode(),
             ParkMode::Engaged,
@@ -710,10 +699,15 @@ mod tests {
             root_result.content
         );
 
-        let mut branch = root.branch().expect("branch a conversing child");
         // A distinct name: `root` already holds `TRUNK_NAME` in this same
         // shared registry, and names are unique among live entries.
-        branch.register_self_named("branch");
+        let mut branch = root.branch("branch".into()).expect("branch a conversing child");
+        // Registered as a real `/branch` would be — parentless in the
+        // registry's own tree, matching `spawn_async`'s `delivers.then_some`.
+        branch
+            .agents
+            .register(None, branch.agent.clone())
+            .expect("a fresh branch name never collides");
         let branch_result = branch.run_shell("c2".into(), "agents `reply 1", 5, &emit);
         assert!(
             branch_result.content.contains(refusal),
@@ -757,21 +751,11 @@ mod tests {
     /// reply from an earlier turn draws no empty-turn nudge on this one.
     #[test]
     fn deposited_reply_suppresses_every_nudge() {
-        let dir = tmp("deposited-reply-quiet");
         let parent = Avatar::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child
             .agents
-            .register(Registration {
-                id: child.agent.id,
-                parent: Some(parent.agent.id),
-                name: "child".into(),
-                log_dir: dir.path().join("child"),
-                cancel: child.cancel_token().clone(),
-                reach: child.seat.eval_reach(),
-                mailbox: child.mailbox(),
-                provider: child.provider_handle(),
-            })
+            .register(Some(parent.agent.id), child.agent.clone())
             .expect("child registration must succeed: its parent is live");
         child
             .agents

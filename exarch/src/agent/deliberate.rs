@@ -529,7 +529,7 @@ mod tests {
     use crate::agent::testkit::*;
     use crate::agent::{NoControl, fresh_id};
     use crate::bus::{AgentOutcome, Inbox, Post};
-    use crate::fleet::registry::{EvalReach, InterruptTarget, Registration};
+    use crate::fleet::registry::{EvalReach, InterruptTarget};
     use crate::provider::scripted::{Reply, Script};
     use genai::chat::ChatRole;
     use ral_core::Shell;
@@ -592,58 +592,58 @@ mod tests {
         // instant, so `child` must be registered before `direct` can be.
         child
             .agents
-            .register(Registration {
-                id: child.agent.id,
-                parent: Some(parent.agent.id),
-                name: "child".into(),
-                log_dir: dir.path().join("child"),
-                cancel: child.cancel_token().clone(),
-                reach: child.seat.eval_reach(),
-                mailbox: child.mailbox(),
-                provider: child.provider_handle(),
-            })
+            .register(Some(parent.agent.id), child.agent.clone())
             .expect("child registration must succeed: its parent is live");
-        let _ = child.agents.register(Registration {
-            id: direct,
-            parent: Some(child.agent.id),
-            name: "direct".into(),
-            log_dir: dir.path().join("direct"),
-            cancel: direct_token.clone(),
-            reach: EvalReach::Identity {
-                eval_root: Some(direct_root.clone()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: Inbox::new().mailbox(),
-            provider: child.agent.provider.clone(),
-        });
-        let _ = child.agents.register(Registration {
-            id: grandchild,
-            parent: Some(direct),
-            name: "grandchild".into(),
-            log_dir: dir.path().join("grandchild"),
-            cancel: grandchild_token.clone(),
-            reach: EvalReach::Identity {
-                eval_root: Some(ral_core::process::DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: Inbox::new().mailbox(),
-            provider: child.agent.provider.clone(),
-        });
-        child
-            .agents
-            .register(Registration {
-                id: sibling,
-                parent: Some(parent.agent.id),
-                name: "sibling".into(),
-                log_dir: dir.path().join("sibling"),
-                cancel: sibling_token.clone(),
+        let _ = child.agents.register(
+            Some(child.agent.id),
+            test_agent(TestAgentSpec {
+                id: direct,
+                name: "direct".into(),
+                log_dir: dir.path().join("direct"),
+                cancel: direct_token.clone(),
+                reach: EvalReach::Identity {
+                    eval_root: Some(direct_root.clone()),
+                    interrupt_target: InterruptTarget::default(),
+                },
+                mailbox: Inbox::new().mailbox(),
+                provider: child.agent.provider.clone(),
+                consumer: child.agents.generation(child.agent.id),
+            }),
+        );
+        let _ = child.agents.register(
+            Some(direct),
+            test_agent(TestAgentSpec {
+                id: grandchild,
+                name: "grandchild".into(),
+                log_dir: dir.path().join("grandchild"),
+                cancel: grandchild_token.clone(),
                 reach: EvalReach::Identity {
                     eval_root: Some(ral_core::process::DurableRoot::default()),
                     interrupt_target: InterruptTarget::default(),
                 },
                 mailbox: Inbox::new().mailbox(),
                 provider: child.agent.provider.clone(),
-            })
+                consumer: child.agents.generation(direct),
+            }),
+        );
+        child
+            .agents
+            .register(
+                Some(parent.agent.id),
+                test_agent(TestAgentSpec {
+                    id: sibling,
+                    name: "sibling".into(),
+                    log_dir: dir.path().join("sibling"),
+                    cancel: sibling_token.clone(),
+                    reach: EvalReach::Identity {
+                        eval_root: Some(ral_core::process::DurableRoot::default()),
+                        interrupt_target: InterruptTarget::default(),
+                    },
+                    mailbox: Inbox::new().mailbox(),
+                    provider: child.agent.provider.clone(),
+                    consumer: child.agents.generation(parent.agent.id),
+                }),
+            )
             .expect("sibling registration must succeed: its parent is live");
 
         let provider = scripted(
@@ -946,7 +946,7 @@ mod tests {
     #[test]
     fn stale_agent_result_is_dropped_by_generation_admission() {
         let mut session = Avatar::for_test("system").unwrap();
-        let stale = session.agents.generation(session.agent.id);
+        let stale = session.agent.generation();
         session.agents.clear_subtree(session.agent.id);
         session
             .inbox
@@ -980,7 +980,7 @@ mod tests {
                 name: "worker".into(),
                 outcome: AgentOutcome::Stopped("found it".into()),
                 elapsed: std::time::Duration::ZERO,
-                generation: session.agents.generation(session.agent.id),
+                generation: session.agent.generation(),
             }))
             .unwrap();
         // A headless root's first `reply` is turned back for self-verification.
@@ -1010,7 +1010,7 @@ mod tests {
     #[test]
     fn stale_surface_batch_is_dropped_by_generation_admission() {
         let mut session = Avatar::for_test("system").unwrap();
-        let stale = session.agents.generation(session.agent.id);
+        let stale = session.agent.generation();
         session.agents.clear_subtree(session.agent.id);
         session
             .inbox
@@ -1042,7 +1042,7 @@ mod tests {
             .push(Post::Surface {
                 id: session.agent.id,
                 values: Vec::new(),
-                generation: session.agents.generation(session.agent.id),
+                generation: session.agent.generation(),
             })
             .unwrap();
         // Same self-verification turn-back as the agent-result twin above.
@@ -1081,16 +1081,9 @@ mod tests {
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
-        let _ = parent.agents.register(Registration {
-            id: child.agent.id,
-            parent: Some(parent.agent.id),
-            name: "child".into(),
-            log_dir: child.log_dir(),
-            cancel: child.cancel_token().clone(),
-            reach: child.seat.eval_reach(),
-            mailbox: child.mailbox(),
-            provider: child.provider_handle(),
-        });
+        let _ = parent
+            .agents
+            .register(Some(parent.agent.id), child.agent.clone());
 
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());

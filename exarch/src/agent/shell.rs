@@ -153,7 +153,7 @@ impl Avatar {
             index: self.agent.index.clone(),
             interactive: self.agent.interactive,
             nursery,
-            generation: self.agents.generation(self.agent.id),
+            generation: self.agent.generation(),
             disk_warn_bytes: self.agent.disk_warn_bytes,
             egress: self.agent.egress.clone(),
             // Minted here, once per `ral` call: this is the one place a call's

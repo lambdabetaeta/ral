@@ -45,23 +45,36 @@ pub(crate) use shell::{LogCell, ReplyCell};
 
 use crate::agent::seat::Seat;
 use crate::bus::{AgentId, Inbox, Mailbox};
-use crate::fleet::registry::AgentRegistry;
+use crate::fleet::registry::{AgentRegistry, EvalReach};
 use crate::provider::Provider;
 use crate::shell_eval;
+use crate::sync::LockExt;
+use ral_core::process::CancelCause;
 use ral_core::serial::FOValue;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// What the fleet knows an agent as.
 ///
-/// Identity and the config fixed at construction, never touched again.  Held
-/// by its [`Avatar`] behind an `Arc`, and — still, in this step — copied into
-/// the fleet's [`Registration`](crate::fleet::registry::Registration) by id.
+/// Identity and immutable config, fixed at construction — except
+/// [`Self::status`], the one register the avatar writes as it runs.  Held by
+/// its [`Avatar`] behind an `Arc`, and by the fleet's
+/// [`AgentRegistry`](crate::fleet::registry::AgentRegistry), keyed by
+/// [`Self::id`].
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, search); not a candidate for a combined enum"
 )]
 pub struct Agent {
     pub id: AgentId,
+    /// The tab-bar identity [`crate::fleet::registry::check_name`] validates —
+    /// unique among live agents, enforced at
+    /// [`AgentRegistry::register`](crate::fleet::registry::AgentRegistry::register).
+    name: String,
+    /// Where this agent's own session log is written.
+    log_dir: PathBuf,
+    started: Instant,
     /// The resolved prompt that reaches the model on every step.
     pub(crate) system: String,
     /// The template [`Self::system`] came from, still carrying
@@ -117,6 +130,44 @@ pub struct Agent {
     /// every fork, so a wire child's own `agent` call dials through the same
     /// seam its parent did.
     dial: Option<Arc<dyn Dial>>,
+    /// The seat's own reach into this agent's running eval, fixed at
+    /// construction — a self-registering root states it pre-weakened
+    /// ([`EvalReach::interrupt_only`]) precisely because its seat rebuilds in
+    /// place on `/clear`, so nothing here ever goes stale enough to need
+    /// updating.
+    reach: EvalReach,
+    /// The sender end of this agent's own inbox; the [`Inbox`] itself stays on
+    /// [`Avatar`], reachable only by the attend thread.
+    mailbox: Mailbox,
+    /// A process publishing its status: written by the avatar alone
+    /// ([`Self::set_resting`], [`Self::deposit_reply`], the generation bump a
+    /// `/clear` gesture applies to the cleared subtree's own root), read by
+    /// everyone else.  A reader takes one snapshot and computes nothing under
+    /// the lock — the mutex buys atomicity, nothing more.
+    status: Mutex<Status>,
+    /// The parent's own generation as this agent was registered: the fence a
+    /// result addressed upward must survive, since the parent is who reads
+    /// it.  0 for a parentless agent, which reports to nobody.
+    consumer: u64,
+}
+
+/// [`Agent`]'s single-writer register — see [`Agent::status`]'s doc for who
+/// writes what.
+struct Status {
+    /// How many times this session has rebuilt its context
+    /// ([`crate::fleet::registry::AgentRegistry::clear_subtree`]).  Work bound
+    /// for this session is stamped with the value current at its birth, so a
+    /// `/clear` here invalidates it — and a `/clear` anywhere else leaves it
+    /// alone.
+    generation: u64,
+    /// When this agent parked waiting for a message, or `None` while it is
+    /// working.  The roster's `idle-s`, and the whole of "not busy".
+    rest: Option<Instant>,
+    /// The value this agent last passed to `reply`, held here for its
+    /// parent's `` agents `read `` to fetch.  Kept apart from [`Self::rest`]
+    /// because it must survive a wake: a messaged agent is busy again with
+    /// its reply still standing, until it replies afresh.
+    reply: Option<FOValue>,
 }
 
 /// An agent's embodiment in this process: the thread that thinks and acts
@@ -253,6 +304,111 @@ impl Agent {
     pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
         &self.caps
     }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// A registry-focused test's escape hatch onto the name a real fork or
+    /// branch was constructed with — set once, here, before registering: the
+    /// caller must hold the only strong reference, exactly as
+    /// [`Avatar::agent_mut`]'s does.
+    #[cfg(test)]
+    pub(crate) fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
+    pub(crate) fn log_dir(&self) -> &Path {
+        &self.log_dir
+    }
+
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// The sender end of this agent's own inbox.
+    pub(crate) fn mailbox(&self) -> &Mailbox {
+        &self.mailbox
+    }
+
+    /// The parent's own generation this agent was registered against — the
+    /// fence a result addressed upward must survive.
+    pub(crate) fn consumer(&self) -> u64 {
+        self.consumer
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.status.lock_ignore_poison().generation
+    }
+
+    pub(crate) fn rest(&self) -> Option<Instant> {
+        self.status.lock_ignore_poison().rest
+    }
+
+    pub(crate) fn reply(&self) -> Option<FOValue> {
+        self.status.lock_ignore_poison().reply.clone()
+    }
+
+    pub(crate) fn has_reply(&self) -> bool {
+        self.status.lock_ignore_poison().reply.is_some()
+    }
+
+    /// Mark this agent parked for a message, or working again.  Setting it
+    /// twice running keeps the first stamp, so the roster's `idle-s` measures
+    /// from when the agent parked and not from the attend loop's latest pass.
+    pub(crate) fn set_resting(&self, resting: bool) {
+        let mut status = self.status.lock_ignore_poison();
+        if resting {
+            status.rest.get_or_insert_with(Instant::now);
+        } else {
+            status.rest = None;
+        }
+    }
+
+    /// Stage `reply` for this agent's parent to fetch.  The notice that wakes
+    /// the parent is a registry concern — [`crate::fleet::registry::AgentRegistry::deposit_reply`]
+    /// wraps this with it.
+    pub(crate) fn deposit_reply(&self, reply: FOValue) {
+        self.status.lock_ignore_poison().reply = Some(reply);
+    }
+
+    /// `/clear`'s fence: bump this agent's own generation so a late result
+    /// addressed to it is rejected.  Written by the avatar's own `/clear`
+    /// gesture, even though that gesture reaches here through the registry —
+    /// see [`crate::fleet::registry::AgentRegistry::clear_subtree`].
+    pub(crate) fn bump_generation(&self) {
+        self.status.lock_ignore_poison().generation += 1;
+    }
+
+    /// Whether this agent may still be talked to: something has already
+    /// spoken to it, or it holds a reply someone may want to follow up on.
+    pub(crate) fn messageable(&self) -> bool {
+        self.mailbox.last_exchange().is_some() || self.has_reply()
+    }
+
+    /// Time since this agent's last human exchange, or since birth if never
+    /// engaged.
+    pub(crate) fn idle(&self) -> Duration {
+        self.mailbox
+            .last_exchange()
+            .unwrap_or(self.started)
+            .elapsed()
+    }
+
+    /// Cancel this agent across both terminate-class layers: the cooperative
+    /// [`cancel::Token`] the attend loop polls and its eval-layer reach — a
+    /// no-op on the eval side for an agent whose reach is interrupt-only.
+    pub(crate) fn cancel(&self, cause: CancelCause) {
+        self.cancel.cancel(cause);
+        self.reach.terminate(cause);
+    }
+
+    /// Unwind this agent's in-flight run without ending it: the Esc/Ctrl-C
+    /// path, and the `` agents `cancel `` scoped verb's per-target primitive.
+    pub(crate) fn interrupt(&self) {
+        self.cancel.cancel(CancelCause::Interrupt);
+        self.reach.interrupt();
+    }
 }
 
 impl Avatar {
@@ -273,12 +429,15 @@ impl Avatar {
     }
 
     /// Test-only escape hatch for scenarios that must poke the public half
-    /// directly rather than through `` `model ``/`` `clear ``-style surface —
-    /// the avatar is the sole owner of its `Arc<Agent>` in this step, so the
-    /// unwrap here can never fail.
+    /// directly rather than through `` `model ``/`` `clear ``-style surface.
+    /// A registered agent's `Arc` is shared with the registry's own map, so
+    /// this deregisters first to reclaim sole ownership — the caller's own
+    /// avatar is what every test call site here still reads afterward, never
+    /// the registry, so its liveness going quiet is never observed.
     #[cfg(test)]
     pub(crate) fn agent_mut(&mut self) -> &mut Agent {
-        Arc::get_mut(&mut self.agent).expect("avatar holds the only strong reference to its agent")
+        self.agents.deregister(self.agent.id);
+        Arc::get_mut(&mut self.agent).expect("no other clone should outlive deregistration")
     }
 
     /// This agent's wire identity — the public half's `id`, reachable without
@@ -287,6 +446,10 @@ impl Avatar {
         self.agent.id
     }
 
+    /// Production reads `self.agent.provider_handle()` directly; this is
+    /// test-only convenience for a driven `Avatar` a test does not otherwise
+    /// have a handle into.
+    #[cfg(test)]
     pub(crate) fn provider_handle(&self) -> ProviderHandle {
         self.agent.provider_handle()
     }
@@ -311,7 +474,7 @@ impl Avatar {
     /// Where this agent's own session log is written — `record.jsonl` and its
     /// siblings sit directly inside.
     pub fn log_dir(&self) -> std::path::PathBuf {
-        self.log.lock().dir().to_path_buf()
+        self.agent.log_dir().to_path_buf()
     }
 
     pub(crate) fn is_resumed(&self) -> bool {
@@ -325,7 +488,7 @@ impl Avatar {
     /// For `schedule` to arm wakeups into its *own* inbox, and for the spawn
     /// site to capture as a child's upward result edge.
     pub(crate) fn mailbox(&self) -> Mailbox {
-        self.inbox.mailbox()
+        self.agent.mailbox().clone()
     }
 
     /// So a frontend's emitters mint mailboxes onto the queue the attend loop

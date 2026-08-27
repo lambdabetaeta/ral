@@ -1,29 +1,33 @@
 //! The fleet's live agents — the trunk and every forked child alike — keyed by
 //! [`AgentId`].
 //!
-//! Each entry names its parent, so this map is the spawn *tree*, and the
-//! fleet is alive exactly while it is non-empty.  A returning child's `reply`
-//! is *deposited* on its own entry and fetched from here by the parent
-//! (`` agents `read ``); only a one-line notice goes to the parent's inbox.
+//! Each entry names its *reporting* parent — distinct from
+//! [`crate::agent::Agent`]'s own lineage `parent`, which a `/branch` child
+//! still carries even though it registers with none here, never delivering —
+//! so this map is the spawn *tree* the model manages, and the fleet is alive
+//! exactly while it is non-empty.  A returning child's `reply` is *deposited*
+//! on its own agent and fetched from here by the parent (`` agents `read ``);
+//! only a one-line notice goes to the parent's inbox.
 //!
 //! Two cancel motions run over that tree and must not be confused.  *Terminate*
-//! ends an agent and cascades to its subtree, tripping both the cooperative
-//! [`Token`] its attend loop polls between steps and its session's durable
-//! root, so an in-flight `ral` eval unwinds at ral's poll points rather than
-//! grinding to its timeout wall — and, a worker's cancel scope being a
-//! descendant of that root, reaching the agent's detached workers with no edge
-//! of its own.  *Interrupt* cancels only the scope of the dispatch in flight,
-//! so the next one, minted fresh from the untouched root, is clean.
+//! ([`Agent::cancel`]) ends an agent and cascades to its subtree, tripping
+//! both the cooperative [`Token`](crate::agent::cancel::Token) its attend loop
+//! polls between steps and its session's durable root, so an in-flight `ral`
+//! eval unwinds at ral's poll
+//! points rather than grinding to its timeout wall — and, a worker's cancel
+//! scope being a descendant of that root, reaching the agent's detached
+//! workers with no edge of its own.  *Interrupt* ([`Agent::interrupt`])
+//! cancels only the scope of the dispatch in flight, so the next one, minted
+//! fresh from the untouched root, is clean.
 //!
-//! Each entry carries a generation counter, bumped by its own `/clear`, and
+//! Each agent carries a generation counter, bumped by its own `/clear`, and
 //! that is the fleet's late-settle fence: an async agent's result
 //! (`Avatar::admits`) and a detached worker's deferred batch (`InboxDeferred`)
 //! both admit against the generation of the session that will *consume* them.
 //! Per session, not per fleet — a `/clear` in one tab must not drop work
 //! another tab is still waiting on.
 
-use crate::agent::ProviderHandle;
-use crate::agent::cancel::Token;
+use crate::agent::{Agent, ProviderHandle};
 use crate::bus::{AgentId, AgentMessage, AgentOutcome, AgentResult, InboxReject, Mailbox, Post};
 use crate::sync::LockExt;
 use ral_core::process::{self, CancelCause, DurableRoot, ForegroundScope};
@@ -31,7 +35,7 @@ use ral_core::serial::FOValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Where an interrupt lands: a live agent's current-dispatch scope, republished
 /// by its transport as each dispatch is minted, into the target the host
@@ -46,8 +50,8 @@ use std::time::{Duration, Instant};
 pub(crate) type InterruptTarget = Arc<Mutex<Option<ForegroundScope>>>;
 
 /// How the registry reaches one agent's running eval, per seat kind — the
-/// eval-layer half of every cancel path, beside the cooperative [`Token`] each
-/// entry also carries.
+/// eval-layer half of every cancel path, beside the cooperative
+/// [`Token`](crate::agent::cancel::Token) [`Agent`] also carries.
 pub(crate) enum EvalReach {
     /// The in-process reach: the agent's own shell's durable root (terminate,
     /// and through the cancel-scope ancestor chain its detached workers too),
@@ -99,14 +103,16 @@ impl EvalReach {
     }
 
     /// Weaken a reach so its terminate side can no longer poison a session:
-    /// a seat rebuilt in place under a standing entry — the trunk's — must
-    /// never carry a `DurableRoot`, for two reasons.  [`terminate_entry`]
-    /// fires on every entry a cascade visits, such a seat's included, and its
-    /// root would turn that into a permanent kill of the whole session rather
-    /// than a subtree reap.  And the rebuild mints a fresh root while the
-    /// entry stands, so a root captured at registration would go stale — the
+    /// a seat rebuilt in place under a standing agent — the trunk's — must
+    /// never carry a `DurableRoot`, for two reasons.  [`Agent::cancel`] fires
+    /// on every agent a cascade visits, such a seat's included, and its root
+    /// would turn that into a permanent kill of the whole session rather than
+    /// a subtree reap.  And the rebuild mints a fresh root while the agent
+    /// stands registered, so a root captured then would go stale — the
     /// interrupt target is host-owned precisely so it survives that rebuild,
-    /// and a root has no such target.
+    /// and a root has no such target.  Because this is stated once, at
+    /// construction, and never touched again, the rebuild needs no
+    /// re-registration to keep the registered reach in step with it.
     ///
     /// A wire reach passes through: its only primitive is `Control::Cancel`
     /// against the in-flight dispatch, which is not permanent, so it carries
@@ -198,26 +204,6 @@ pub fn check_name(name: &str) -> Result<(), String> {
     ))
 }
 
-/// Threaded once at birth into [`AgentRegistry::register`].
-pub struct Registration {
-    pub id: AgentId,
-    /// `None` for a root: the trunk, or a conversing `/branch` child that
-    /// owes no reply and is nobody's to manage.  `Some` is what arms the idle
-    /// lease: a returning child abandoned by its parent must be reaped, while
-    /// a conversation must never lose an exchange at the hour mark.
-    pub parent: Option<AgentId>,
-    pub name: String,
-    pub log_dir: PathBuf,
-    pub cancel: Token,
-    /// The seat's own reach into this agent's running eval, stated plainly:
-    /// `register` stores exactly what it is given.  A seat rebuilt in place
-    /// under a standing entry — the trunk — must state it already weakened;
-    /// see [`EvalReach::interrupt_only`].
-    pub(crate) reach: EvalReach,
-    pub mailbox: Mailbox,
-    pub provider: ProviderHandle,
-}
-
 /// The fleet's live agents.
 ///
 /// Every clone shares the one map, so the trunk, each forked child, and the
@@ -229,7 +215,7 @@ pub struct AgentRegistry {
 }
 
 struct Inner {
-    entries: HashMap<AgentId, Entry>,
+    entries: HashMap<AgentId, RegEntry>,
     /// The idle bound every parented entry is reaped at.  [`AGENT_LEASE_IDLE`]
     /// outside tests; each fire re-reads it, so nothing caches a copy.
     lease: Duration,
@@ -240,60 +226,25 @@ impl Inner {
     /// drains a departed session's inbox, so the value only has to be total,
     /// not meaningful.
     fn generation(&self, id: AgentId) -> u64 {
-        self.entries.get(&id).map_or(0, |e| e.generation)
+        self.entries.get(&id).map_or(0, |e| e.agent.generation())
     }
 }
 
-struct Entry {
-    /// `None` for a root — the trunk, or a conversing branch — the edge that
-    /// makes this map a forest.
+/// One agent's place in the registry's own tree: its [`Agent`] plus the
+/// *reporting* parent edge — `None` for a root, the trunk or a conversing
+/// `/branch` child that owes no reply and is nobody's to manage.  `Some` is
+/// what arms the idle lease: a returning child abandoned by its parent must
+/// be reaped, while a conversation must never lose an exchange at the hour
+/// mark.
+///
+/// This edge is not [`Agent::parent`] — a `/branch` child names its creator
+/// there too, since that lineage still bounds its fuel and capabilities, but
+/// registers with no reporting parent here, since it never delivers.  A later
+/// step folds the two into one Arc-based tree; until then they are read
+/// separately, on purpose.
+struct RegEntry {
     parent: Option<AgentId>,
-    /// How many times *this* session has rebuilt its context
-    /// ([`AgentRegistry::clear_subtree`]).  Work bound for this session is
-    /// stamped with the value current at its birth, so a `/clear` here
-    /// invalidates it — and a `/clear` anywhere else leaves it alone.
-    generation: u64,
-    /// The *parent's* generation as this entry was born: the fence every result
-    /// addressed upward must survive, since the parent is who reads it.  0 for a
-    /// parentless entry, which reports to nobody.
-    consumer: u64,
-    name: String,
-    log_dir: PathBuf,
-    started: Instant,
-    cancel: Token,
-    /// A tripped [`Token`] alone cannot stop an in-flight `ral` tool call —
-    /// `shell_eval`'s `run_shell` blocks until the engine reports — so both
-    /// cancel motions also go through this.  The trunk's is interrupt-only.
-    reach: EvalReach,
-    mailbox: Mailbox,
-    /// Hot-swappable, so a `/model` on the focused agent swaps *its* provider
-    /// and disturbs no other.
-    provider: ProviderHandle,
-    /// The last exchange — human or parent message — or `None` before the first
-    /// one, `started` being the epoch until then.  [`renew_entry`] is the only
-    /// writer.
-    last_exchange: Option<Instant>,
-    /// The value this agent last passed to `reply`, held here for its parent's
-    /// `` agents `read `` to fetch.  Kept apart from [`Self::rest`] because it
-    /// must survive a wake: a messaged agent is busy again with its reply still
-    /// standing, until it replies afresh.
-    reply: Option<FOValue>,
-    /// When this agent parked waiting for a message, or `None` while it is
-    /// working.  The roster's `idle-s`, and the whole of "not busy".
-    rest: Option<Instant>,
-}
-
-impl Entry {
-    /// Time since the last exchange, or since birth if never engaged.
-    fn idle(&self) -> Duration {
-        self.last_exchange.unwrap_or(self.started).elapsed()
-    }
-
-    /// Leased iff parented: a returning child is reaped at the bound, a
-    /// conversing root never.
-    fn leased(&self) -> bool {
-        self.parent.is_some()
-    }
+    agent: Arc<Agent>,
 }
 
 impl Default for AgentRegistry {
@@ -339,7 +290,7 @@ impl AgentRegistry {
         self.lock()
             .entries
             .values()
-            .any(|e| e.parent == Some(parent) && e.rest.is_none())
+            .any(|e| e.parent == Some(parent) && e.agent.rest().is_none())
     }
 
     /// A conversing agent reads this at each park: once its entry is reaped
@@ -348,28 +299,40 @@ impl AgentRegistry {
         self.lock().entries.contains_key(&id)
     }
 
+    /// The live `Arc<Agent>` behind `id`, or `None` once it has settled or
+    /// been reaped — every id-keyed method's one lookup, cloned out and the
+    /// registry lock dropped before any further work, so no caller of this
+    /// ever holds both an agent lock and the registry's.
+    fn lookup(&self, id: AgentId) -> Option<Arc<Agent>> {
+        self.lock().entries.get(&id).map(|e| e.agent.clone())
+    }
+
     /// Cancel and reap `root`'s proper descendants, leaving `root` live — a
     /// settling parent abandoning its children, and `/clear` on the trunk.
     /// Both rebuild in place, so the reap must never stamp the root's own
-    /// [`Token`]: a terminate cause there is permanent ([`Token::reset`] clears
+    /// [`Token`](crate::agent::cancel::Token): a terminate cause there is
+    /// permanent ([`Token::reset`](crate::agent::cancel::Token::reset) clears
     /// only a bare [`CancelCause::Interrupt`]) and every later run would fail.
     pub fn cancel_descendants(&self, root: AgentId) {
         let mut g = self.lock();
         cancel_and_remove(&mut g, root, false);
     }
 
-    /// Register an agent, returning the generation it carries into its result:
-    /// its *parent's*, read at this birth, since the parent is who must still
-    /// be listening when the result lands.  Parented means leased: the idle
-    /// chain is armed here, so no caller can build an unbounded park.
+    /// Register `agent` under `parent` — the registry's own reporting edge,
+    /// not necessarily [`Agent::parent`]; see [`RegEntry`]'s doc.  Parented
+    /// means leased: the idle chain is armed here, so no caller can build an
+    /// unbounded park.  `agent` already carries its own name, reach, mailbox,
+    /// and the `consumer` generation its birth was stamped with — everything
+    /// a caller used to hand this method loose now threaded through
+    /// construction instead.
     ///
     /// # Errors
     /// [`RegisterError::SessionDead`] when `parent` is not, at this instant, a
-    /// live and un-terminated entry — a spawn racing a cancel on its own
+    /// live and un-terminated agent — a spawn racing a cancel on its own
     /// parent.  The check runs under the very lock the cascade holds for its
     /// whole walk, so it never sees a parent mid-teardown.
     ///
-    /// [`RegisterError::NameTaken`] when another live entry bears the name.
+    /// [`RegisterError::NameTaken`] when another live agent bears the name.
     /// Also under that lock, so two same-name spawns racing within one turn
     /// cannot both succeed — the authoritative half of the spawn-uniqueness
     /// rule, [`Self::name_live`] the cheap one.
@@ -377,67 +340,27 @@ impl AgentRegistry {
     /// [`RegisterError::NameMalformed`] when the name breaks [`check_name`].
     /// Checked here and not only at the doors, because a wire peer is not
     /// trusted to have used one.
-    pub fn register(&self, reg: Registration) -> Result<u64, RegisterError> {
-        let Registration {
-            id,
-            parent,
-            name,
-            log_dir,
-            cancel,
-            reach,
-            mailbox,
-            provider,
-        } = reg;
+    pub fn register(&self, parent: Option<AgentId>, agent: Arc<Agent>) -> Result<(), RegisterError> {
         // Before the lock, and before anything else reads the name: this is
         // the one door through which a name becomes identity.
-        if let Err(why) = check_name(&name) {
+        if let Err(why) = check_name(agent.name()) {
             return Err(RegisterError::NameMalformed(why));
         }
         let mut g = self.lock();
-        // One lookup, two answers: the parent must be live, and its generation
-        // is the one the result must survive — the parent is who will read it.
-        // A parentless entry reports to nobody, so nothing awaits it: 0.
-        let consumer = match parent {
-            None => 0,
-            Some(p) => match g.entries.get(&p) {
-                Some(e) if !e.cancel.terminated() => e.generation,
-                _ => {
-                    drop(g);
-                    return Err(RegisterError::SessionDead);
-                }
-            },
-        };
-        // Excludes `id`'s own current entry: `Avatar::register_self` re-registers
-        // under the same id and must overwrite in place, not be refused for
-        // colliding with the very entry it is about to replace.
-        if g.entries
-            .iter()
-            .any(|(&other, e)| other != id && e.name == name)
+        // The parent must be live at this instant, under the very lock the
+        // cascade holds for its whole walk.
+        if let Some(p) = parent
+            && !matches!(g.entries.get(&p), Some(e) if !e.agent.cancel_token().terminated())
         {
             drop(g);
-            return Err(RegisterError::NameTaken(name));
+            return Err(RegisterError::SessionDead);
         }
-        // `Avatar::register_self` re-registers in place under the same id, so
-        // the count of this session's own clears must survive the overwrite.
-        let generation = g.generation(id);
-        g.entries.insert(
-            id,
-            Entry {
-                parent,
-                generation,
-                consumer,
-                name,
-                log_dir,
-                started: Instant::now(),
-                cancel,
-                reach,
-                mailbox,
-                provider,
-                last_exchange: None,
-                reply: None,
-                rest: None,
-            },
-        );
+        if g.entries.values().any(|e| e.agent.name() == agent.name()) {
+            drop(g);
+            return Err(RegisterError::NameTaken(agent.name().to_string()));
+        }
+        let id = agent.id;
+        g.entries.insert(id, RegEntry { parent, agent });
         // Armed only after the entry exists: `lease_fire` re-reads the entry by
         // id, so arming earlier would let the first fire find nothing and end
         // the chain before it started.
@@ -447,62 +370,44 @@ impl AgentRegistry {
             let reg = self.clone();
             process::arm_callback(ttl, move || lease_fire(&reg, id)).keep();
         }
-        Ok(consumer)
+        Ok(())
     }
 
     /// The cheap half of the spawn-uniqueness rule [`Self::register`] enforces
     /// authoritatively: `` agents `start `` reads this before forking a nursery
     /// session, so the ordinary duplicate refuses without a fork to unwind.
     pub fn name_live(&self, name: &str) -> bool {
-        self.lock().entries.values().any(|e| e.name == name)
+        self.lock().entries.values().any(|e| e.agent.name() == name)
     }
 
     /// At most one entry can match, since [`Self::register`] keeps names unique
     /// among the live.  The `` `cancel `` and `` `message `` tags come through
     /// here before reaching the id-scoped primitives.
     pub fn resolve_name(&self, name: &str) -> Option<AgentId> {
-        let g = self.lock();
-        g.entries
-            .iter()
-            .find(|(_, e)| e.name == name)
-            .map(|(id, _)| *id)
+        self.lock()
+            .entries
+            .values()
+            .find(|e| e.agent.name() == name)
+            .map(|e| e.agent.id)
     }
 
     /// The live agent's inbox sender, or `None` once it has settled or been
     /// cleared.  The frontend reads it to decide whether a tab is steerable at
     /// all; [`Self::steer`] is the delivery door.
     pub fn mailbox(&self, id: AgentId) -> Option<Mailbox> {
-        let g = self.lock();
-        g.entries.get(&id).map(|e| e.mailbox.clone())
+        self.lookup(id).map(|a| a.mailbox().clone())
     }
 
-    /// Deliver a human message to `id`: the registry's one steering door.
-    /// Renews before pushing, so the woken agent's park verdict — recomputed
-    /// under its inbox mutex before it pops — already reads `engaged`; and
-    /// pushes after the guard drops, as the inbox → registry lock order
-    /// requires.  `false` once the entry is gone, and the line is dropped.
+    /// Deliver a human message to `id`: the registry's one steering door,
+    /// pushing and stamping the exchange clock in the one call
+    /// [`Mailbox::steer`](crate::bus::Mailbox) makes.  `false` once the entry
+    /// is gone, and the line is dropped.
     pub fn steer(&self, id: AgentId, text: String) -> bool {
-        let mailbox = {
-            let mut g = self.lock();
-            let Some(e) = g.entries.get_mut(&id) else {
-                return false;
-            };
-            renew_entry(e);
-            let mailbox = e.mailbox.clone();
-            drop(g);
-            mailbox
+        let Some(agent) = self.lookup(id) else {
+            return false;
         };
-        mailbox.push_user(text);
+        agent.mailbox().steer(text);
         true
-    }
-
-    /// Stamp `id`'s exchange clock, without a mailbox delivery.  Neither
-    /// focusing nor a `/resources` probe renews: attention alone must never
-    /// immortalise a child.  An exchange does — so [`Self::steer`] and
-    /// [`Self::message`], which each deliver one, renew through [`renew_entry`]
-    /// as part of the delivery.
-    pub fn renew(&self, id: AgentId) -> bool {
-        self.lock().entries.get_mut(&id).map(renew_entry).is_some()
     }
 
     /// Whether `id` may still be talked to: something has already spoken to it,
@@ -510,29 +415,20 @@ impl AgentRegistry {
     /// a returning child park for messages rather than quiesce.  `false` for an
     /// entry already gone.
     pub fn messageable(&self, id: AgentId) -> bool {
-        self.lock()
-            .entries
-            .get(&id)
-            .is_some_and(|e| e.last_exchange.is_some() || e.reply.is_some())
+        self.lookup(id).is_some_and(|a| a.messageable())
     }
 
-    /// Mark `id` parked for a message, or working again.  Setting it twice
-    /// running keeps the first stamp, so the roster's `idle-s` measures from
-    /// when the agent parked and not from the attend loop's latest pass.
+    /// Mark `id` parked for a message, or working again.
     pub(crate) fn set_resting(&self, id: AgentId, resting: bool) {
-        if let Some(e) = self.lock().entries.get_mut(&id) {
-            if resting {
-                e.rest.get_or_insert_with(Instant::now);
-            } else {
-                e.rest = None;
-            }
+        if let Some(agent) = self.lookup(id) {
+            agent.set_resting(resting);
         }
     }
 
-    /// Deposit `id`'s `reply` on its own entry and notify its parent with the
-    /// one-line [`AgentOutcome::Replied`] notice — deposit first, so a parent
-    /// woken by the notice always finds the value already there.  A parentless
-    /// agent (the trunk, a `/branch` child) has nobody to notify and deposits
+    /// Deposit `id`'s `reply` and notify its parent with the one-line
+    /// [`AgentOutcome::Replied`] notice — deposit first, so a parent woken by
+    /// the notice always finds the value already there.  A parentless agent
+    /// (the trunk, a `/branch` child) has nobody to notify and deposits
     /// nothing: its reply goes to whoever drives its loop.
     ///
     /// # Errors
@@ -540,19 +436,21 @@ impl AgentRegistry {
     /// stands either way and `` agents `read `` would still find it.
     pub(crate) fn deposit_reply(&self, id: AgentId, reply: FOValue) -> Result<(), InboxReject> {
         let notice = {
-            let mut g = self.lock();
-            let Some(e) = g.entries.get_mut(&id) else {
+            let g = self.lock();
+            let Some(entry) = g.entries.get(&id) else {
                 return Ok(());
             };
-            e.reply = Some(reply);
+            entry.agent.deposit_reply(reply);
             let result = AgentResult {
-                name: e.name.clone(),
+                name: entry.agent.name().to_string(),
                 outcome: AgentOutcome::Replied,
-                elapsed: e.started.elapsed(),
-                generation: e.consumer,
+                elapsed: entry.agent.elapsed(),
+                generation: entry.agent.consumer(),
             };
-            let parent = e.parent;
-            let mailbox = parent.and_then(|p| g.entries.get(&p).map(|pe| pe.mailbox.clone()));
+            let mailbox = entry
+                .parent
+                .and_then(|p| g.entries.get(&p))
+                .map(|pe| pe.agent.mailbox().clone());
             drop(g);
             mailbox.map(|mailbox| (mailbox, result))
         };
@@ -566,10 +464,7 @@ impl AgentRegistry {
     /// Whether `id` holds a standing reply — the cheap test, where
     /// [`Self::reply_of`] would clone the whole value.
     pub(crate) fn has_reply(&self, id: AgentId) -> bool {
-        self.lock()
-            .entries
-            .get(&id)
-            .is_some_and(|e| e.reply.is_some())
+        self.lookup(id).is_some_and(|a| a.has_reply())
     }
 
     /// The reply `to` deposited, for `` agents `read `` — scoped to a proper
@@ -587,14 +482,13 @@ impl AgentRegistry {
         if !is_descendant_of(&g.entries, from, to) {
             return Err(NotADescendant(to));
         }
-        Ok(g.entries.get(&to).and_then(|e| e.reply.clone()))
+        Ok(g.entries.get(&to).and_then(|e| e.agent.reply()))
     }
 
     /// Time since `id`'s last human exchange, or since birth if never engaged.
     /// `None` once the entry is gone.
     pub fn idle(&self, id: AgentId) -> Option<Duration> {
-        let g = self.lock();
-        g.entries.get(&id).map(Entry::idle)
+        self.lookup(id).map(|a| a.idle())
     }
 
     /// The nearest time-to-reap across the leased entries, `None` when none is
@@ -603,8 +497,8 @@ impl AgentRegistry {
         let g = self.lock();
         g.entries
             .values()
-            .filter(|e| e.leased())
-            .map(|e| g.lease.saturating_sub(e.idle()))
+            .filter(|e| e.parent.is_some())
+            .map(|e| g.lease.saturating_sub(e.agent.idle()))
             .min()
     }
 
@@ -614,30 +508,31 @@ impl AgentRegistry {
         let g = self.lock();
         g.entries
             .get(&id)
-            .filter(|e| e.leased())
-            .map(|e| (e.idle(), g.lease))
+            .filter(|e| e.parent.is_some())
+            .map(|e| (e.agent.idle(), g.lease))
     }
 
     /// Send a marked model-visible message to a proper descendant of `from` —
-    /// the same scoping [`Self::cancel_scoped`] enforces.  Renews the
-    /// recipient's lease like [`Self::steer`] does, and for the same reason: a
-    /// message is an exchange, and one that woke a resting child must not leave
-    /// it to be reaped mid-answer.  The mailbox is cloned under the registry
-    /// lock and posted after it drops, because a park verdict reads this
-    /// registry under the consumer's inbox mutex and the process-wide order is
-    /// inbox → registry.
+    /// the same scoping [`Self::cancel_scoped`] enforces.  Stamps the
+    /// recipient's exchange clock like [`Self::steer`] does, and for the same
+    /// reason: a message is an exchange, and one that woke a resting child
+    /// must not leave it to be reaped mid-answer.  The stamp precedes the
+    /// push, as [`Mailbox::steer`](crate::bus::Mailbox) holds internally, and
+    /// both happen after the registry lock drops, since the process-wide
+    /// order is inbox → registry.
     ///
     /// # Errors
     /// A dead sender or recipient, a scope violation, or a recipient at quota.
     pub fn message(&self, from: AgentId, to: AgentId, text: String) -> Result<(), MessageError> {
         let (mailbox, from_name) = {
-            let mut g = self.lock();
+            let g = self.lock();
             let from_name = g
                 .entries
                 .get(&from)
                 .ok_or(MessageError::UnknownSender(from))?
-                .name
-                .clone();
+                .agent
+                .name()
+                .to_string();
             if !g.entries.contains_key(&to) {
                 return Err(MessageError::UnknownRecipient(to));
             }
@@ -646,15 +541,13 @@ impl AgentRegistry {
             }
             let mailbox = g
                 .entries
-                .get_mut(&to)
-                .map(|e| {
-                    renew_entry(e);
-                    e.mailbox.clone()
-                })
+                .get(&to)
+                .map(|e| e.agent.mailbox().clone())
                 .ok_or(MessageError::UnknownRecipient(to))?;
             drop(g);
             (mailbox, from_name)
         };
+        mailbox.stamp_exchange();
         mailbox
             .push(Post::AgentMessage(AgentMessage {
                 from,
@@ -666,8 +559,7 @@ impl AgentRegistry {
 
     /// For a `/model` swap on the focused agent.  `None` once it has settled.
     pub fn provider(&self, id: AgentId) -> Option<ProviderHandle> {
-        let g = self.lock();
-        g.entries.get(&id).map(|e| e.provider.clone())
+        self.lookup(id).map(|a| a.provider_handle())
     }
 
     /// Retire `id`.  The entry is reaped either way — a worker is authoritative
@@ -681,7 +573,7 @@ impl AgentRegistry {
         };
         let current = entry.parent.map_or(0, |p| g.generation(p));
         drop(g);
-        current == entry.consumer
+        current == entry.agent.consumer()
     }
 
     /// The trunk's self-removal at the end of its attend; a child leaves
@@ -707,7 +599,7 @@ impl AgentRegistry {
         let existed = g.entries.contains_key(&id);
         for d in descendants(&g.entries, id, true) {
             if let Some(e) = g.entries.get(&d) {
-                terminate_entry(e, cause);
+                e.agent.cancel(cause);
             }
         }
         existed
@@ -739,10 +631,8 @@ impl AgentRegistry {
     /// and removing nothing.  The agent drops the run and re-parks; its next
     /// one is clean.
     pub fn interrupt(&self, id: AgentId) {
-        let g = self.lock();
-        if let Some(e) = g.entries.get(&id) {
-            e.cancel.cancel(CancelCause::Interrupt);
-            e.reach.interrupt();
+        if let Some(agent) = self.lookup(id) {
+            agent.interrupt();
         }
     }
 
@@ -754,13 +644,14 @@ impl AgentRegistry {
             let busy_child_of = |id| {
                 g.entries
                     .values()
-                    .any(|e| e.parent == Some(id) && e.rest.is_none())
+                    .any(|e| e.parent == Some(id) && e.agent.rest().is_none())
             };
             descendants(&g.entries, ancestor, false)
                 .into_iter()
                 .filter_map(|id| {
                     g.entries.get(&id).map(|e| {
-                        let state = match (e.rest, e.reply.is_some()) {
+                        let rest = e.agent.rest();
+                        let state = match (rest, e.agent.has_reply()) {
                             (None, _) if busy_child_of(id) => RosterState::WaitingOnAgents,
                             (None, _) => RosterState::Busy,
                             (Some(_), true) => RosterState::Replied,
@@ -769,11 +660,11 @@ impl AgentRegistry {
                         (
                             id,
                             AgentInfo {
-                                name: e.name.clone(),
-                                log_dir: e.log_dir.clone(),
-                                elapsed: e.started.elapsed(),
+                                name: e.agent.name().to_string(),
+                                log_dir: e.agent.log_dir().to_path_buf(),
+                                elapsed: e.agent.elapsed(),
                                 state,
-                                idle: e.rest.map_or(Duration::ZERO, |at| at.elapsed()),
+                                idle: rest.map_or(Duration::ZERO, |at| at.elapsed()),
                             },
                         )
                     })
@@ -787,13 +678,12 @@ impl AgentRegistry {
     /// `/clear` on `root`: reap the subtree the rebuilt context no longer owns,
     /// and bump *`root`'s own* generation so any late result addressed to it is
     /// rejected.  `root` is being rebuilt, not torn down, so it stays
-    /// registered.  Bumping only this entry is what keeps one tab's `/clear`
+    /// registered.  Bumping only this agent is what keeps one tab's `/clear`
     /// from dropping work another tab is still waiting on.
     ///
     /// # Panics
-    /// In debug, if `root` holds no entry: the counter lives on the entry now,
-    /// so a clear on an unregistered session would fence nothing at all, and
-    /// would do it silently.
+    /// In debug, if `root` holds no entry: a clear on an unregistered session
+    /// would fence nothing at all, and would do it silently.
     pub fn clear_subtree(&self, root: AgentId) {
         let mut g = self.lock();
         cancel_and_remove(&mut g, root, false);
@@ -801,8 +691,8 @@ impl AgentRegistry {
             g.entries.contains_key(&root),
             "/clear on an unregistered session cannot bump the generation it needs to fence"
         );
-        if let Some(e) = g.entries.get_mut(&root) {
-            e.generation += 1;
+        if let Some(e) = g.entries.get(&root) {
+            e.agent.bump_generation();
         }
     }
 
@@ -849,7 +739,7 @@ pub struct NotADescendant(pub AgentId);
 /// Walks `id`'s parent chain upward rather than scanning `ancestor`'s subtree,
 /// so a scoping check costs one climb, not a tree-wide search.  Starting at
 /// `id`'s *parent* is what makes nothing a proper descendant of itself.
-fn is_descendant_of(entries: &HashMap<AgentId, Entry>, ancestor: AgentId, id: AgentId) -> bool {
+fn is_descendant_of(entries: &HashMap<AgentId, RegEntry>, ancestor: AgentId, id: AgentId) -> bool {
     let mut cur = id;
     while let Some(parent) = entries.get(&cur).and_then(|e| e.parent) {
         if parent == ancestor {
@@ -864,7 +754,7 @@ fn is_descendant_of(entries: &HashMap<AgentId, Entry>, ancestor: AgentId, id: Ag
 /// itself.  Builds the child adjacency once rather than rescanning the whole
 /// map at every frontier pop.
 fn descendants(
-    entries: &HashMap<AgentId, Entry>,
+    entries: &HashMap<AgentId, RegEntry>,
     ancestor: AgentId,
     inclusive: bool,
 ) -> Vec<AgentId> {
@@ -898,7 +788,7 @@ fn cancel_and_remove(g: &mut Inner, root: AgentId, inclusive: bool) {
     let victims = descendants(&g.entries, root, inclusive);
     for d in &victims {
         if let Some(e) = g.entries.get(d) {
-            terminate_entry(e, CancelCause::Explicit);
+            e.agent.cancel(CancelCause::Explicit);
         }
     }
     for d in victims {
@@ -906,10 +796,11 @@ fn cancel_and_remove(g: &mut Inner, root: AgentId, inclusive: bool) {
     }
 }
 
-/// One firing of an agent's idle lease, on the reaper daemon thread.  A gone or
-/// unleased entry ends the chain silently, and one still short of its bound
-/// re-arms for the remaining margin — [`AgentRegistry::renew`] never touches
-/// the reaper, so this lazy re-arm is the whole mechanism.
+/// One firing of an agent's idle lease, on the reaper daemon thread.  A gone
+/// or unleased entry ends the chain silently, and one still short of its
+/// bound re-arms for the remaining margin — only [`AgentRegistry::steer`] and
+/// [`AgentRegistry::message`] ever touch the exchange clock this reads, and
+/// neither reaches the reaper, so this lazy re-arm is the whole mechanism.
 fn lease_fire(reg: &AgentRegistry, id: AgentId) {
     let Some((idle, ttl)) = reg.lease_state(id) else {
         return;
@@ -922,24 +813,12 @@ fn lease_fire(reg: &AgentRegistry, id: AgentId) {
     }
 }
 
-/// The one write [`AgentRegistry::renew`], [`AgentRegistry::steer`] and
-/// [`AgentRegistry::message`] share, each under its own lock scope, shaped by
-/// what else it does there.
-fn renew_entry(e: &mut Entry) {
-    e.last_exchange = Some(Instant::now());
-}
-
-/// Cancel one entry across both terminate-class layers: the cooperative
-/// [`Token`] the attend loop polls between steps and its eval layer — a no-op
-/// on the eval side for the trunk, whose reach is interrupt-only.
-fn terminate_entry(e: &Entry, cause: CancelCause) {
-    e.cancel.cancel(cause);
-    e.reach.terminate(cause);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::cancel::Token;
+    use crate::agent::testkit::{TestAgentSpec, test_agent};
+    use std::time::Instant;
 
     fn provider() -> ProviderHandle {
         ProviderHandle::new(std::sync::Arc::new(crate::provider::Provider::scripted(
@@ -961,22 +840,56 @@ mod tests {
         false
     }
 
-    /// Register `id` under `parent`, returning the birth generation.
+    fn mb() -> Mailbox {
+        crate::bus::Inbox::new().mailbox()
+    }
+
+    /// Register `id` under `parent` with default (never-inspected) handles,
+    /// returning the birth generation.
     fn entry(reg: &AgentRegistry, id: AgentId, parent: Option<AgentId>) -> u64 {
-        reg.register(Registration {
+        register_custom(
+            reg,
             id,
             parent,
-            name: format!("a{id}"),
-            log_dir: PathBuf::from("/tmp"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+            &format!("a{id}"),
+            PathBuf::from("/tmp"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: crate::bus::Inbox::new().mailbox(),
-            provider: provider(),
-        })
+            crate::bus::Inbox::new().mailbox(),
+        )
         .expect("a fresh trunk, or a child of one, always registers")
+    }
+
+    /// Register `id` with a hand-picked `cancel`/`reach`/`mailbox`, for a test
+    /// that goes on to assert against those handles directly — a `consumer`
+    /// read live off `parent` before construction, exactly as a real
+    /// registration would.
+    #[allow(clippy::too_many_arguments, reason = "one field per test-visible handle")]
+    fn register_custom(
+        reg: &AgentRegistry,
+        id: AgentId,
+        parent: Option<AgentId>,
+        name: &str,
+        log_dir: PathBuf,
+        cancel: Token,
+        reach: EvalReach,
+        mailbox: Mailbox,
+    ) -> Result<u64, RegisterError> {
+        let consumer = parent.map_or(0, |p| reg.generation(p));
+        let agent = test_agent(TestAgentSpec {
+            id,
+            name: name.to_string(),
+            log_dir,
+            cancel,
+            reach,
+            mailbox,
+            provider: provider(),
+            consumer,
+        });
+        reg.register(parent, agent).map(|()| consumer)
     }
 
     #[test]
@@ -997,33 +910,33 @@ mod tests {
         reg.set_lease(Duration::from_millis(50));
         entry(&reg, 0, None); // the trunk: a live parent for 2
         let branch_token = Token::new();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: None,
-            name: "branch".into(),
-            log_dir: PathBuf::from("/tmp"),
-            cancel: branch_token.clone(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            None,
+            "branch",
+            PathBuf::from("/tmp"),
+            branch_token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
         let worker_root = DurableRoot::default();
-        let _ = reg.register(Registration {
-            id: 2,
-            parent: Some(0),
-            name: "worker".into(),
-            log_dir: PathBuf::from("/tmp"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            2,
+            Some(0),
+            "worker",
+            PathBuf::from("/tmp"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(worker_root.clone()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
 
         assert!(
             eventually(Duration::from_secs(2), || worker_root
@@ -1077,19 +990,19 @@ mod tests {
         entry(&reg, 0, None); // the trunk
         let token = Token::new();
         let eval_root = DurableRoot::default();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "worker".into(),
-            log_dir: PathBuf::from("/tmp/worker"),
-            cancel: token.clone(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "worker",
+            PathBuf::from("/tmp/worker"),
+            token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
         reg.clear_subtree(0);
         assert!(token.is_cancelled(), "the reaped worker's token is set");
         assert!(
@@ -1107,33 +1020,33 @@ mod tests {
     fn clear_gesture_reaps_descendants_but_spares_the_trunks_token() {
         let reg = AgentRegistry::new();
         let trunk_token = Token::new();
-        let _ = reg.register(Registration {
-            id: 0,
-            parent: None,
-            name: "trunk".into(),
-            log_dir: PathBuf::from("/tmp/trunk"),
-            cancel: trunk_token.clone(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            0,
+            None,
+            "trunk",
+            PathBuf::from("/tmp/trunk"),
+            trunk_token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
         let child_token = Token::new();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "child".into(),
-            log_dir: PathBuf::from("/tmp/child"),
-            cancel: child_token.clone(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "child",
+            PathBuf::from("/tmp/child"),
+            child_token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
 
         reg.cancel_descendants(0);
 
@@ -1163,27 +1076,27 @@ mod tests {
     /// The other reason the trunk's entry must never carry a `DurableRoot`: a
     /// terminate of the `cancel`/`` agents `cancel `` class landing on it must
     /// not poison the session.  The trunk's registration states its reach
-    /// pre-weakened (`register_self_named` does the same), so a terminate never
-    /// reaches the root that registration captured.
+    /// pre-weakened, so a terminate never reaches the root that construction
+    /// captured.
     #[test]
     fn a_registry_terminate_on_the_trunk_leaves_its_session_root_uncancelled() {
         let reg = AgentRegistry::new();
         let root = DurableRoot::default();
         let trunk_token = Token::new();
-        let _ = reg.register(Registration {
-            id: 0,
-            parent: None,
-            name: "trunk".into(),
-            log_dir: PathBuf::from("/tmp/trunk"),
-            cancel: trunk_token.clone(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            0,
+            None,
+            "trunk",
+            PathBuf::from("/tmp/trunk"),
+            trunk_token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(root.clone()),
                 interrupt_target: InterruptTarget::default(),
             }
             .interrupt_only(),
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
 
         assert!(reg.cancel(0), "the trunk is a live, cancellable entry");
 
@@ -1207,32 +1120,32 @@ mod tests {
         let branch_token = Token::new();
         let branch_root = DurableRoot::default();
         let child_token = Token::new();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "branch".into(),
-            log_dir: PathBuf::from("/tmp/branch"),
-            cancel: branch_token.clone(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "branch",
+            PathBuf::from("/tmp/branch"),
+            branch_token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(branch_root.clone()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
-        let _ = reg.register(Registration {
-            id: 2,
-            parent: Some(1),
-            name: "grandchild".into(),
-            log_dir: PathBuf::from("/tmp/gc"),
-            cancel: child_token.clone(),
-            reach: EvalReach::Identity {
+            mb(),
+        );
+        let _ = register_custom(
+            &reg,
+            2,
+            Some(1),
+            "grandchild",
+            PathBuf::from("/tmp/gc"),
+            child_token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
 
         reg.remove_subtree(1);
 
@@ -1272,32 +1185,32 @@ mod tests {
         let child_interrupt_target: InterruptTarget =
             Arc::new(Mutex::new(Some(child_root.worker().child())));
         let grandchild_token = Token::new();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "child".into(),
-            log_dir: PathBuf::from("/tmp/child"),
-            cancel: child_token.clone(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "child",
+            PathBuf::from("/tmp/child"),
+            child_token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(child_root.clone()),
                 interrupt_target: child_interrupt_target.clone(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
-        let _ = reg.register(Registration {
-            id: 2,
-            parent: Some(1),
-            name: "grandchild".into(),
-            log_dir: PathBuf::from("/tmp/gc"),
-            cancel: grandchild_token.clone(),
-            reach: EvalReach::Identity {
+            mb(),
+        );
+        let _ = register_custom(
+            &reg,
+            2,
+            Some(1),
+            "grandchild",
+            PathBuf::from("/tmp/gc"),
+            grandchild_token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
 
         reg.interrupt(1);
 
@@ -1340,19 +1253,19 @@ mod tests {
         let eval_root = DurableRoot::default();
         let dispatches = eval_root.worker();
         let interrupt_target: InterruptTarget = Arc::new(Mutex::new(Some(dispatches.child())));
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "child".into(),
-            log_dir: PathBuf::from("/tmp/child"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "child",
+            PathBuf::from("/tmp/child"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(eval_root),
                 interrupt_target: interrupt_target.clone(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
 
         reg.interrupt(1);
         assert!(
@@ -1383,19 +1296,19 @@ mod tests {
         entry(&reg, 0, None); // the trunk
         let token = Token::new();
         let eval_root = DurableRoot::default();
-        let _ = reg.register(Registration {
-            id: 7,
-            parent: Some(0),
-            name: "lint".into(),
-            log_dir: PathBuf::from("/log/7"),
-            cancel: token.clone(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            7,
+            Some(0),
+            "lint",
+            PathBuf::from("/log/7"),
+            token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: crate::bus::Inbox::new().mailbox(),
-            provider: provider(),
-        });
+            crate::bus::Inbox::new().mailbox(),
+        );
         assert_eq!(reg.list(0).len(), 1, "the trunk lists its one child");
         assert_eq!(reg.list(0)[0].name, "lint");
         assert!(reg.cancel(7), "an existing agent is cancellable");
@@ -1414,58 +1327,41 @@ mod tests {
         let c = Token::new();
         let g = Token::new();
         let sibling = Token::new();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: None,
-            name: "r".into(),
-            log_dir: "/l".into(),
-            cancel: r.clone(),
-            reach: EvalReach::Identity {
-                eval_root: Some(DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: mb(),
-            provider: provider(),
-        });
-        let _ = reg.register(Registration {
-            id: 2,
-            parent: Some(1),
-            name: "c".into(),
-            log_dir: "/l".into(),
-            cancel: c.clone(),
-            reach: EvalReach::Identity {
-                eval_root: Some(DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: mb(),
-            provider: provider(),
-        });
-        let _ = reg.register(Registration {
-            id: 3,
-            parent: Some(2),
-            name: "g".into(),
-            log_dir: "/l".into(),
-            cancel: g.clone(),
-            reach: EvalReach::Identity {
-                eval_root: Some(DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: mb(),
-            provider: provider(),
-        });
-        let _ = reg.register(Registration {
-            id: 4,
-            parent: Some(1),
-            name: "s".into(),
-            log_dir: "/l".into(),
-            cancel: sibling.clone(),
-            reach: EvalReach::Identity {
-                eval_root: Some(DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: mb(),
-            provider: provider(),
-        });
+        let simple_reach = || EvalReach::Identity {
+            eval_root: Some(DurableRoot::default()),
+            interrupt_target: InterruptTarget::default(),
+        };
+        let _ = register_custom(&reg, 1, None, "r", "/l".into(), r.clone(), simple_reach(), mb());
+        let _ = register_custom(
+            &reg,
+            2,
+            Some(1),
+            "c",
+            "/l".into(),
+            c.clone(),
+            simple_reach(),
+            mb(),
+        );
+        let _ = register_custom(
+            &reg,
+            3,
+            Some(2),
+            "g",
+            "/l".into(),
+            g.clone(),
+            simple_reach(),
+            mb(),
+        );
+        let _ = register_custom(
+            &reg,
+            4,
+            Some(1),
+            "s",
+            "/l".into(),
+            sibling.clone(),
+            simple_reach(),
+            mb(),
+        );
         assert!(reg.cancel(2));
         assert!(c.is_cancelled(), "the cancelled node");
         assert!(g.is_cancelled(), "its descendant cascades");
@@ -1491,19 +1387,19 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 1, None);
         let inbox = crate::bus::Inbox::new();
-        let _ = reg.register(Registration {
-            id: 2,
-            parent: Some(1),
-            name: "worker".into(),
-            log_dir: PathBuf::from("/tmp/worker"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            2,
+            Some(1),
+            "worker",
+            PathBuf::from("/tmp/worker"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: inbox.mailbox(),
-            provider: provider(),
-        });
+            inbox.mailbox(),
+        );
 
         reg.message(1, 2, "check the lexer".into())
             .expect("message to a live agent succeeds");
@@ -1555,19 +1451,19 @@ mod tests {
         );
 
         let inbox = crate::bus::Inbox::new();
-        let _ = reg.register(Registration {
-            id: 3,
-            parent: Some(1),
-            name: "child".into(),
-            log_dir: PathBuf::from("/tmp/3"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            3,
+            Some(1),
+            "child",
+            PathBuf::from("/tmp/3"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: inbox.mailbox(),
-            provider: provider(),
-        });
+            inbox.mailbox(),
+        );
         assert!(
             reg.message(1, 3, "ok".into()).is_ok(),
             "a proper descendant is reachable"
@@ -1578,47 +1474,42 @@ mod tests {
     fn cancel_scoped_reaches_only_a_proper_descendant() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "leaf".into(),
-            log_dir: PathBuf::from("/tmp/1"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
-                eval_root: Some(DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: mb(),
-            provider: provider(),
-        });
+        let simple_reach = || EvalReach::Identity {
+            eval_root: Some(DurableRoot::default()),
+            interrupt_target: InterruptTarget::default(),
+        };
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "leaf",
+            PathBuf::from("/tmp/1"),
+            Token::new(),
+            simple_reach(),
+            mb(),
+        );
         let sibling_token = Token::new();
-        let _ = reg.register(Registration {
-            id: 2,
-            parent: Some(0),
-            name: "sibling".into(),
-            log_dir: PathBuf::from("/tmp/2"),
-            cancel: sibling_token.clone(),
-            reach: EvalReach::Identity {
-                eval_root: Some(DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: mb(),
-            provider: provider(),
-        });
+        let _ = register_custom(
+            &reg,
+            2,
+            Some(0),
+            "sibling",
+            PathBuf::from("/tmp/2"),
+            sibling_token.clone(),
+            simple_reach(),
+            mb(),
+        );
         let grandchild_token = Token::new();
-        let _ = reg.register(Registration {
-            id: 3,
-            parent: Some(1),
-            name: "grandchild".into(),
-            log_dir: PathBuf::from("/tmp/3"),
-            cancel: grandchild_token.clone(),
-            reach: EvalReach::Identity {
-                eval_root: Some(DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: mb(),
-            provider: provider(),
-        });
+        let _ = register_custom(
+            &reg,
+            3,
+            Some(1),
+            "grandchild",
+            PathBuf::from("/tmp/3"),
+            grandchild_token.clone(),
+            simple_reach(),
+            mb(),
+        );
 
         assert_eq!(
             reg.cancel_scoped(1, 0),
@@ -1682,19 +1573,19 @@ mod tests {
     fn register_refuses_when_the_parent_is_gone() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
-        let outcome = reg.register(Registration {
-            id: 1,
-            parent: Some(99), // never registered
-            name: "orphan".into(),
-            log_dir: PathBuf::from("/tmp/orphan"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let outcome = register_custom(
+            &reg,
+            1,
+            Some(99), // never registered
+            "orphan",
+            PathBuf::from("/tmp/orphan"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
         assert_eq!(
             outcome,
             Err(RegisterError::SessionDead),
@@ -1711,35 +1602,35 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let parent_token = Token::new();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "parent".into(),
-            log_dir: PathBuf::from("/tmp/parent"),
-            cancel: parent_token.clone(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "parent",
+            PathBuf::from("/tmp/parent"),
+            parent_token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
         parent_token.cancel(CancelCause::Explicit);
         assert!(reg.is_live(1), "the cancelled parent's entry still lingers");
 
-        let outcome = reg.register(Registration {
-            id: 2,
-            parent: Some(1),
-            name: "late-child".into(),
-            log_dir: PathBuf::from("/tmp/late-child"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let outcome = register_custom(
+            &reg,
+            2,
+            Some(1),
+            "late-child",
+            PathBuf::from("/tmp/late-child"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
         assert_eq!(
             outcome,
             Err(RegisterError::SessionDead),
@@ -1755,34 +1646,32 @@ mod tests {
     fn register_refuses_a_name_already_borne_by_a_live_entry() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "helper".into(),
-            log_dir: PathBuf::from("/tmp/helper"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
-                eval_root: Some(DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: mb(),
-            provider: provider(),
-        });
+        let simple_reach = || EvalReach::Identity {
+            eval_root: Some(DurableRoot::default()),
+            interrupt_target: InterruptTarget::default(),
+        };
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "helper",
+            PathBuf::from("/tmp/helper"),
+            Token::new(),
+            simple_reach(),
+            mb(),
+        );
         assert!(reg.name_live("helper"), "the first spawn's name is live");
 
-        let outcome = reg.register(Registration {
-            id: 2,
-            parent: Some(0),
-            name: "helper".into(),
-            log_dir: PathBuf::from("/tmp/helper-2"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
-                eval_root: Some(DurableRoot::default()),
-                interrupt_target: InterruptTarget::default(),
-            },
-            mailbox: mb(),
-            provider: provider(),
-        });
+        let outcome = register_custom(
+            &reg,
+            2,
+            Some(0),
+            "helper",
+            PathBuf::from("/tmp/helper-2"),
+            Token::new(),
+            simple_reach(),
+            mb(),
+        );
         assert_eq!(
             outcome,
             Err(RegisterError::NameTaken("helper".to_string())),
@@ -1807,19 +1696,19 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let eval_root = DurableRoot::default();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "worker".into(),
-            log_dir: PathBuf::from("/tmp/worker"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "worker",
+            PathBuf::from("/tmp/worker"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
         assert!(reg.cancel_cause(1, CancelCause::Deadline));
         assert_eq!(
             eval_root.as_scope().cause(),
@@ -1838,9 +1727,10 @@ mod tests {
         entry(&reg, 1, Some(0));
         reg.lock()
             .entries
-            .get_mut(&0)
+            .get(&0)
             .expect("the parent is registered")
-            .generation += 1;
+            .agent
+            .bump_generation();
         assert!(!reg.settle(1), "a stale-generation result is not delivered");
         assert!(
             !reg.is_live(1),
@@ -1848,34 +1738,36 @@ mod tests {
         );
     }
 
+    /// `renew` as an isolated primitive is gone: `steer` is now the one door
+    /// that stamps the exchange clock, and it always delivers too.
     #[test]
-    fn renew_defers_the_fire() {
+    fn steer_defers_the_fire() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let ttl = Duration::from_millis(300);
         reg.set_lease(ttl);
         let eval_root = DurableRoot::default();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "child".into(),
-            log_dir: PathBuf::from("/tmp/child"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "child",
+            PathBuf::from("/tmp/child"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
 
         std::thread::sleep(ttl / 2);
-        assert!(reg.renew(1), "a live entry renews");
+        assert!(reg.steer(1, "still there".into()), "a live entry steers");
 
         std::thread::sleep(ttl / 2 + Duration::from_millis(50));
         assert!(
             !eval_root.as_scope().is_cancelled(),
-            "renewed at half the ttl, still alive past the original bound"
+            "steered at half the ttl, still alive past the original bound"
         );
 
         assert!(
@@ -1893,19 +1785,19 @@ mod tests {
         let ttl = Duration::from_millis(80);
         reg.set_lease(ttl);
         let token = Token::new();
-        reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "child".into(),
-            log_dir: PathBuf::from("/tmp/child"),
-            cancel: token.clone(),
-            reach: EvalReach::Identity {
+        register_custom(
+            &reg,
+            1,
+            Some(0),
+            "child",
+            PathBuf::from("/tmp/child"),
+            token.clone(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        })
+            mb(),
+        )
         .expect("registers");
 
         assert!(reg.settle(1), "settles well before the lease would fire");
@@ -1924,19 +1816,19 @@ mod tests {
         let ttl = Duration::from_millis(80);
         reg.set_lease(ttl);
         let eval_root = DurableRoot::default();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "child".into(),
-            log_dir: PathBuf::from("/tmp/child"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "child",
+            PathBuf::from("/tmp/child"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(eval_root.clone()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: mb(),
-            provider: provider(),
-        });
+            mb(),
+        );
 
         reg.clear_subtree(0);
         assert!(!reg.is_live(1), "the reap removes the entry immediately");
@@ -1954,26 +1846,26 @@ mod tests {
         );
     }
 
-    /// Notably, a raw push onto the mailbox, bypassing `renew`, is not an
+    /// Notably, a raw push onto the mailbox, bypassing `steer`, is not an
     /// exchange.
     #[test]
     fn engaged_and_idle_read_the_exchange_clock() {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let inbox = crate::bus::Inbox::new();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "child".into(),
-            log_dir: PathBuf::from("/tmp/child"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "child",
+            PathBuf::from("/tmp/child"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: inbox.mailbox(),
-            provider: provider(),
-        });
+            inbox.mailbox(),
+        );
 
         assert!(!reg.messageable(1), "a fresh entry has never been engaged");
         assert!(
@@ -1984,12 +1876,12 @@ mod tests {
         inbox.push(Post::UserSteering("hello".into())).unwrap();
         assert!(!reg.messageable(1), "a raw mailbox push is not an exchange");
 
-        assert!(reg.renew(1), "renew stamps a live entry");
-        assert!(reg.messageable(1), "renewed at least once");
-        let idle_after_renew = reg.idle(1).expect("still live");
+        assert!(reg.steer(1, "hi".into()), "steer stamps a live entry");
+        assert!(reg.messageable(1), "steered at least once");
+        let idle_after_steer = reg.idle(1).expect("still live");
         assert!(
-            idle_after_renew < Duration::from_secs(1),
-            "idle resets to (near) zero right after a renewal"
+            idle_after_steer < Duration::from_secs(1),
+            "idle resets to (near) zero right after a steer"
         );
     }
 
@@ -1998,19 +1890,19 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let inbox = crate::bus::Inbox::new();
-        let _ = reg.register(Registration {
-            id: 1,
-            parent: Some(0),
-            name: "child".into(),
-            log_dir: PathBuf::from("/tmp/child"),
-            cancel: Token::new(),
-            reach: EvalReach::Identity {
+        let _ = register_custom(
+            &reg,
+            1,
+            Some(0),
+            "child",
+            PathBuf::from("/tmp/child"),
+            Token::new(),
+            EvalReach::Identity {
                 eval_root: Some(DurableRoot::default()),
                 interrupt_target: InterruptTarget::default(),
             },
-            mailbox: inbox.mailbox(),
-            provider: provider(),
-        });
+            inbox.mailbox(),
+        );
 
         assert!(!reg.messageable(1), "not yet engaged");
         assert!(
@@ -2032,10 +1924,6 @@ mod tests {
             !reg.steer(99, "nobody".into()),
             "a dead id is refused, not panicked"
         );
-    }
-
-    fn mb() -> Mailbox {
-        crate::bus::Inbox::new().mailbox()
     }
 
     /// The fleet's ordering law, wired to the real registry: a settling child

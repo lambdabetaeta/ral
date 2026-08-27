@@ -5,12 +5,15 @@
 //! ([`Inbox::next_or_idle`]).
 //!
 //! Two orderings bind every producer.  The park verdict is computed *under the
-//! queue mutex* and reads `fleet::registry` and `fleet::schedule`, so the lock
-//! order is **inbox → registry**: clone a [`Mailbox`] out and drop the registry
+//! queue mutex* and reads [`crate::agent::Agent`]'s own status, so the lock
+//! order is **inbox → agent**: clone a [`Mailbox`] out and drop any agent-side
 //! guard before pushing.  And the verdict is computed *before* the pop, so a
 //! producer that both changes a verdict input and delivers must deliver first —
 //! a settling child posts its result, then retires its registry entry — or the
-//! consumer could quiesce between the two facts.
+//! consumer could quiesce between the two facts.  [`Mailbox::steer`] holds
+//! this same ordering within itself: it stamps the exchange clock before the
+//! push that wakes a parked consumer, so a park verdict recomputed on the
+//! wakeup already reads engaged.
 
 use super::post::{Boundary, is_slash, source_name};
 use super::{Item, Post};
@@ -19,7 +22,7 @@ use crate::sync::LockExt;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How [`Inbox::next_or_idle`] should treat an empty inbox — the verdict
 /// `Avatar::park_mode` recomputes on every wake.
@@ -95,6 +98,13 @@ struct Shared {
     /// the lock `clear` holds: a push landing before the bump is swept with the
     /// queue, one landing after is refused as stale.
     epoch: AtomicU64,
+    /// The last human or parent exchange — [`Mailbox::steer`] or the
+    /// registry's `message` — that reached this inbox; `None` before the
+    /// first.  Stamped ahead of the delivery it accompanies, so a park
+    /// verdict recomputed on the wakeup that delivery causes already reads
+    /// engaged: whichever thread next acquires `queue` observes both, since
+    /// the stamp always precedes that release.
+    last_exchange: Mutex<Option<Instant>>,
 }
 
 impl Shared {
@@ -104,6 +114,7 @@ impl Shared {
             signal: Condvar::new(),
             waiting_for_input: AtomicBool::new(true),
             epoch: AtomicU64::new(0),
+            last_exchange: Mutex::new(None),
         })
     }
 
@@ -213,6 +224,30 @@ impl Mailbox {
     pub(crate) fn push_user(&self, prompt: String) {
         self.push(Post::UserSteering(prompt))
             .expect("UserSteering is idempotent and never rejects");
+    }
+
+    /// The registry's one delivery door for a human message: stamp the
+    /// exchange clock, then push — the order [`Shared::last_exchange`]'s doc
+    /// requires, so a park verdict woken by this push already reads engaged.
+    ///
+    /// # Panics
+    /// Never in practice: `UserSteering` coalesces, so it never rejects.
+    pub(crate) fn steer(&self, text: String) {
+        self.stamp_exchange();
+        self.push_user(text);
+    }
+
+    /// Stamp the exchange clock without a delivery — the registry's `message`
+    /// door, whose delivery is a marked [`Post::AgentMessage`] rather than
+    /// `UserSteering`, so it stamps and pushes as two calls in the same order
+    /// [`Self::steer`] holds internally.
+    pub(crate) fn stamp_exchange(&self) {
+        *self.shared.last_exchange.lock_ignore_poison() = Some(Instant::now());
+    }
+
+    /// The last exchange this inbox witnessed, or `None` before the first.
+    pub(crate) fn last_exchange(&self) -> Option<Instant> {
+        *self.shared.last_exchange.lock_ignore_poison()
     }
 
     /// Whether this queue's consumer is parked at a human-input boundary — the

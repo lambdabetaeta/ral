@@ -764,7 +764,6 @@ mod tests {
     use super::*;
     use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
     use crate::bus::{AgentResult, AgentState, Post};
-    use crate::fleet::registry::Registration;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Record};
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
@@ -1176,19 +1175,12 @@ mod tests {
     /// deterministically, rather than racing a real child's own thread
     /// against a sleep.
     fn register_live_child(parent: &Avatar, name: &str) -> (crate::bus::AgentId, u64) {
-        let child = parent.fork(parent.caps().clone()).expect("fork child");
-        let generation = parent
+        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
+        child.agent_mut().set_name(name);
+        let generation = parent.agent.generation();
+        parent
             .agents
-            .register(Registration {
-                id: child.agent.id,
-                parent: Some(parent.agent.id),
-                name: name.to_string(),
-                log_dir: child.log_dir(),
-                cancel: child.cancel_token().clone(),
-                reach: child.seat.eval_reach(),
-                mailbox: child.mailbox(),
-                provider: child.provider_handle(),
-            })
+            .register(Some(parent.agent.id), child.agent.clone())
             .expect("registration must succeed: its parent is live");
         (child.agent.id, generation)
     }
@@ -1316,7 +1308,8 @@ mod tests {
         for _ in 0..8 {
             no_reply = no_reply.then(Reply::text("prose, but never a reply"));
         }
-        let child = session.fork(session.caps().clone()).expect("fork child");
+        let mut child = session.fork(session.caps().clone()).expect("fork child");
+        child.agent_mut().set_name("flaky");
         crate::agent::testkit::set_provider(
             &child,
             crate::agent::testkit::scripted("test-model", no_reply),
