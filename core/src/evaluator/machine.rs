@@ -19,9 +19,11 @@ use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
 use crate::source::Span;
 use crate::types::{
-    Binding, Break, CapturePolicy, Closure, Env, Error, HandlerArity, HandlerEntry, HandlerFrame,
-    Mooring, Settled, Shell, TrailScope, Value, as_map, tree_value,
+    Binding, Break, CapturePolicy, Closure, Env, Error, HandlerArity, HandlerFrame, Mooring,
+    Settled, Shell, TrailScope, Value, as_map, tree_value,
 };
+#[cfg(unix)]
+use crate::types::HandlerEntry;
 
 use super::pattern;
 use super::redirect::{RedirectState, WriteFate};
@@ -1346,6 +1348,9 @@ pub(crate) fn apply(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut S
 /// extent (`Frame::Unmask`, as the `Exec` rule masks it inline for a call
 /// inside the machine), so a same-name call from inside reaches the next
 /// outer match.
+///
+/// Unix-only with `command::detach`, its sole caller.
+#[cfg(unix)]
 pub(crate) fn apply_handler(
     entry: &HandlerEntry,
     depth: usize,
