@@ -147,27 +147,25 @@ pub(super) fn complete_options(
     options
 }
 
-/// Shape the transcript for prompt caching. `OpenAIResp` carries the system
-/// prompt in the Responses API's bare `instructions` string, which admits no
-/// cache breakpoint, so it bypasses the message path; the rest get a
-/// cache-marked system message prepended.
+/// Shape the transcript for prompt caching. Breakpoints are Anthropic-only:
+/// on `OpenAI` the same `CacheControl` selects the metered explicit cache,
+/// which the `ChatGPT` and Codex endpoints reject outright; elsewhere the
+/// prompt-cache key carries the intent alone.
 ///
-/// The last two messages are marked, so consecutive turns share the largest
-/// possible cached prefix and every request leaves two anchors of different
-/// depths behind. Splitting one range across two breakpoints writes the same
-/// tokens, so the shallower anchor is free; it earns its keep whenever the
-/// next request's tail diverges rather than extends — a retry, a fork, a
-/// compaction — where the deeper anchor alone would force a full rewrite.
+/// Marking the system prompt and the last two messages leaves two anchors of
+/// different depths. Splitting one range writes the same tokens, so the
+/// shallower is free, and it saves the rewrite whenever the next tail diverges
+/// rather than extends — a retry, a fork, a compaction.
 pub(super) fn build_cached_request(
     adapter: AdapterKind,
     system: &str,
     mut messages: Vec<ChatMessage>,
 ) -> ChatRequest {
+    if adapter != AdapterKind::Anthropic {
+        return ChatRequest::new(messages).with_system(system);
+    }
     for message in messages.iter_mut().rev().take(2) {
         message.options = Some(MessageOptions::from(CacheControl::Ephemeral));
-    }
-    if adapter == AdapterKind::OpenAIResp {
-        return ChatRequest::new(messages).with_system(system);
     }
     let mut all = Vec::with_capacity(messages.len() + 1);
     all.push(
@@ -217,34 +215,39 @@ mod tests {
     use genai::chat::{ChatRole, ToolName};
 
     #[test]
-    fn responses_adapter_routes_system_to_instructions() {
+    fn anthropic_marks_the_system_prompt_and_the_last_two_messages() {
+        let request = build_cached_request(
+            AdapterKind::Anthropic,
+            "SYS",
+            vec![
+                ChatMessage::user("one"),
+                ChatMessage::user("two"),
+                ChatMessage::user("three"),
+            ],
+        );
+        assert!(request.system.is_none());
+        assert_eq!(request.messages[0].role, ChatRole::System);
+        let marked = |index: usize| {
+            request.messages[index]
+                .options
+                .as_ref()
+                .and_then(|options| options.cache_control.clone())
+        };
+        assert_eq!(marked(0), Some(CacheControl::Ephemeral));
+        assert_eq!(marked(1), None);
+        assert_eq!(marked(2), Some(CacheControl::Ephemeral));
+        assert_eq!(marked(3), Some(CacheControl::Ephemeral));
+    }
+
+    #[test]
+    fn openai_gets_a_bare_system_prompt_and_no_breakpoints() {
         let request = build_cached_request(
             AdapterKind::OpenAIResp,
             "SYS",
             vec![ChatMessage::user("hi")],
         );
         assert_eq!(request.system.as_deref(), Some("SYS"));
-        assert!(
-            request
-                .messages
-                .iter()
-                .all(|message| message.role != ChatRole::System)
-        );
-    }
-
-    #[test]
-    fn other_adapters_keep_a_cache_marked_system_message() {
-        let request =
-            build_cached_request(AdapterKind::Anthropic, "SYS", vec![ChatMessage::user("hi")]);
-        assert!(request.system.is_none());
-        assert_eq!(request.messages[0].role, ChatRole::System);
-        assert_eq!(
-            request.messages[0]
-                .options
-                .as_ref()
-                .and_then(|options| options.cache_control.clone()),
-            Some(CacheControl::Ephemeral)
-        );
+        assert!(request.messages[0].options.is_none());
     }
 
     #[test]

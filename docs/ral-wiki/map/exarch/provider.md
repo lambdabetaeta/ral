@@ -322,13 +322,16 @@ cannot land mid-character and panic (X8).
   also supplies `ModelCaps` (context window and supported request parameters)
   for startup and picker decisions. Offline starts degrade to `—`.
 
-`provider/request.rs::build_cached_request` sets two `cache_control: ephemeral`
-breakpoints (system + tools, growing transcript) for the message-based adapters,
-and a per-process
-`prompt_cache_key` for OpenAI shard routing. The Responses adapter is the
-exception: its system prompt rides the top-level `instructions` field, since a
-`System` message would leave `instructions` empty and the Codex backend rejects
-that. `tool_defs(adapter, tool_enabled, search)` builds the request's tool array:
+`provider/request.rs::build_cached_request` marks `cache_control: ephemeral`
+breakpoints on the system prompt and the last two messages, for Anthropic
+alone: two anchors of different depths, so a diverging tail (retry, fork,
+compaction) still lands on a cached prefix. On OpenAI the same marks would
+select the metered *explicit* prompt cache, which the ChatGPT and Codex
+Responses endpoints reject outright (rust-genai #273), so every other adapter
+carries its system prompt in the request's own `system` field — where the
+Responses adapter's `instructions` string wants it anyway — and leans on the
+per-process `prompt_cache_key` alone, which genai reads as intent for the free
+implicit cache. `tool_defs(adapter, tool_enabled, search)` builds the request's tool array:
 the `ral` wire tool under `tool_enabled`, plus the provider's own hosted
 web-search tool under `search` — carried only on the three adapters genai maps it
 for (`OpenAIResp`, `Anthropic`, `Gemini`), and `OpenAIResp` alone adds the
