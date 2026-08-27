@@ -92,7 +92,7 @@ differ only in when a resident's grade is decided.
 The chapters keep their own representations, locks, and homes
 ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]):
 the worker registry beside core's handles, the job table in the REPL
-binary, the agent registry and schedules in exarch. What is shared is the
+binary, the agent tree and schedules in exarch. What is shared is the
 small resident signature — identity, population, capability kind, lease
 row, state label, cancel, defined once in
 [[map/core/shell-state|`core/src/types/resident.rs`]] — and the folds
@@ -111,7 +111,7 @@ written against it:
   teardown reaches its own workers through its shell's durable root (a
   worker's cancel scope is a child of that root, so cancelling it walks the
   ancestor chain with no extra edge), and reaches its schedules and
-  children through the registry.
+  children through the tree itself (`Agent::parent`/`Agent::children`).
 - **generation** — every session counts its own clears, and `/clear` bumps
   only that session's count. Anything settling across it is rejected —
   whether by checking the generation directly (an async agent's result, a
@@ -146,14 +146,14 @@ is its `fg`, `cancel` its kill — never a shared verb pretending both
 populations are one.
 
 Not every chapter implements the resident signature, either, and that is
-the same refusal at a smaller scale: exarch's agent registry, schedules,
+the same refusal at a smaller scale: exarch's agent tree, schedules,
 and binding ledger each only ever hand out a bare snapshot type for
 listing, built by cloning fields out from under a lock already dropped by
 the time the snapshot reaches a caller. `cancel` takes `&self` alone, by
 design, and none of those three snapshots carries a live handle back to its
-own registry — adding one would grow a listing snapshot into something that
+own chapter — adding one would grow a listing snapshot into something that
 either holds a lock past the call that built it or duplicates the
-registry's own cancel plumbing. The ledger is precisely what makes refusing
+tree's own cancel methods. The ledger is precisely what makes refusing
 these fusions affordable: unity lives in the signature and the folds, so
 the capabilities — and the chapters that decline to unify further — can
 stay typed and distinct without the system falling into pieces.

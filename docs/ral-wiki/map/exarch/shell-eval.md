@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cbeb5457
-generated_at_date: 2026-08-17
+generated_at_commit: fcf36a94
+generated_at_date: 2026-08-27
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -135,7 +135,7 @@ stderr, in order, and exits 124:
    builtin whose act the desk already committed, and engine-side recording
    alone would then report a standing act as failed. `HostServices::commit_act`
    is the one door every acting handler funnels through — minted in
-   `Agent::host_services`, the one place a call's whole desk capture is
+   `Avatar::host_services`, the one place a call's whole desk capture is
    assembled, so the fragment's extent *is* the call's — and it builds one
    `Observed::Act` per attempt, at the arm where the outcome is known, and fans
    it out itself: the rail's `Display::HarnessCall` row *always*, off the very
@@ -165,7 +165,7 @@ stderr, in order, and exits 124:
    across the seam: the dispatch's own trail carries an `Observed::Worker`
    for every birth its extent gave, and `shell_eval/report.rs`'s `render`
    joins those ids against the `` `workers `` probe, decoded by
-   `Agent::probe_workers` at the run boundary — legal there on a wire seat
+   `Avatar::probe_workers` at the run boundary — legal there on a wire seat
    exactly as on the identity seat, since the registry never crosses. A birth
    still present in the registry, running or settled-unclaimed, is named
    ([[map/core/shell-state|shell-state]]); one already claimed has left the

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fb52275a
-generated_at_date: 2026-08-25
+generated_at_commit: fcf36a94
+generated_at_date: 2026-08-27
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -106,7 +106,7 @@ splits by class instead:
   that bound is structural: the host reconciles a protected `services` pin —
   one row per live service, keyed by id and its birth description, born and
   retired at the attend loop's ready-boundary pass
-  (`Agent::reconcile_service_pins`, `card::services_pin_card`). The pin is
+  (`Avatar::reconcile_service_pins`, `card::services_pin_card`). The pin is
   the one host-owned, write-protected register slot — unwritable by the
   program
   ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
@@ -237,9 +237,9 @@ queryable store.
   spawn: launch-only and always asynchronous, a one-line notice arriving
   through the inbox when the child replies, and the child's row in the answer carrying the `name` and
   `log-dir` the old receipt did. `name` is the child's identity — the tab-bar
-  contract (`check_name`, in `fleet/registry.rs` beside the rule it belongs
+  contract (`check_name`, in `fleet.rs` beside the rule it belongs
   with), unique among live agents or the call is refused; this door refuses a
-  malformed one early and in the model's own words, and `register` refuses it
+  malformed one early and in the model's own words, and `Fleet::enrol` refuses it
   again for peers that never came through a door
   ([[map/exarch/agent|agent]]);
   `type` is `` `amnemon `` (blank context) or `` `mnemon `` (imports the
@@ -253,7 +253,8 @@ queryable store.
   `` `message [to: …, text: …] `` and `` `cancel <name> `` are descendant-only,
   resolved by name and enforced at the desk; a scope violation raises. Where a
   removed schedule is simply gone from its answer, a cancelled agent is not:
-  `AgentRegistry::cancel` only sets the cooperative token, so **a successful
+  `Agent::cancel_tree` only sets the cooperative token (and stamps the eval
+  reach), so **a successful
   cancel answers with a roster that still lists the target** — a request, not a
   transaction, and the one place the rule needs a sentence of its own.
 - **`schedules <tag>`** → `F [[label: Str, trigger: Str, next-s: Int,

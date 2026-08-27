@@ -5,8 +5,9 @@ tree, driven by the single shared `attend` loop; the only thing that distinguish
 one agent from another is its *position* — whether it has a parent.** A sub-agent
 is not a different machine: it is an `Agent` ([[map/exarch/agent|agent]]) forked
 from a value-snapshot of its parent's shell, with a narrowed capability ceiling
-and a `parent: Option<AgentId>` link. The thin `Fleet` holds what every node
-shares — the registry, the one event bus, and the transport engine.
+and a strong `Arc<Agent>` parent edge. The thin `Fleet` holds what every node
+shares — the by-name and by-id doors, the idle lease, the one event bus, and
+the transport engine ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
 ## One predicate, fixed at construction
 
@@ -16,12 +17,12 @@ sub-agent, `false` for a `/branch` child, `!interactive` at the trunk. One bit i
 the single source of truth for every role reader: `returns()`, parking's
 conversing predicate, the desk's `reply` refusal
 ([[map/exarch/builtins|builtins]]), and the per-agent builtin index resolved from
-the same bit at `Agent::assemble` — so reply availability, parking, and the
+the same bit at `Avatar::assemble` — so reply availability, parking, and the
 advertised vocabulary cannot disagree
 ([[decisions/260705_branch-minimal|branch-minimal]]). **Fuel is a separate
 construction-fixed depth budget:** an agent's spawn surface is present exactly
 when `fuel > 0`; it does not decide whether the agent returns. Position still
-does two jobs — it fixes the registry edge (`parent`) and the signal path (only
+does two jobs — it fixes the tree edge (`parent`) and the signal path (only
 the trunk's session is minted facing the ambient causes,
 [[decisions/260726_cancel-is-a-join|cancel-is-a-join]];
 [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]]) — but it does
@@ -46,9 +47,10 @@ not decide who returns.
 "Returns a value" and "does not park for a human" remain the *same fact*, read in
 one place ([[map/exarch/agent|agent]]). Parking is **computed, not stored** — a
 `ParkMode` (`Held` / `Engaged` / `HeldByChildren` / `UntilCancelled` / `Quiesce`)
-derived on every wake: a conversing agent parks `Held` while its registry entry
-lives, a returning agent a human has exchanged a message with parks `Engaged`
-bounded by the registry's idle lease, and everyone else quiesces.
+derived on every wake: a conversing agent parks `Held` while its own cancel
+token is unterminated, a returning agent a human has exchanged a message
+with parks `Engaged` bounded by the fleet's idle lease, and everyone else
+quiesces.
 
 ## Prompt obligations follow construction
 
@@ -73,8 +75,9 @@ Spawning is **available to every agent with fuel left**, so the spawn tree is
 not capped at one level. The effective `spawns` bit is `fuel > 0`; when it is
 false, the prompt index omits `agents` as a dead family, while the desk remains
 the runtime authority. Depth-N works
-structurally — a child registers in the fleet's registry and `fork` snapshots
-the parent's shell by value at any depth — but each `fork` hands the child one
+structurally — a child enrols in the fleet by name and joins its parent's
+`children` and `fork` snapshots the parent's shell by value at any depth —
+but each `fork` hands the child one
 less unit of `fuel` than the parent holds (the parent's own `fuel` is untouched,
 so fan-out itself is unbounded), and a `fuel == 0` agent's spawn call is refused
 at the desk with the exhaustion text: a delegation chain terminates by refusal
@@ -114,9 +117,11 @@ One call:
   the child does;
 - **wakes the parent when the child replies** with a one-line notice through
   the parent's [[map/exarch/frontend|inbox]] — the parent edge `parent` names.
-  The value itself stays on the child's registry entry until the parent
-  fetches it with `` agents `read <name> ``
-  ([[decisions/260826_reply-parks|reply-parks]]).
+  The value itself stays on the child's own `Agent` (`Agent::status.reply`,
+  written by the child's avatar alone) until the parent fetches it with
+  `` agents `read <name> ``
+  ([[decisions/260826_reply-parks|reply-parks]],
+  [[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
 The spawn's **`type`** field chooses the child's **model memory**, not its shell
 isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
@@ -209,11 +214,11 @@ for the port ([[map/core/io-process|the spawn jail]] permits
 standing defence, and the token stands behind it).
 
 **The child exists before the roster names it.** The listener acks only after
-`spawn()` has returned, and the desk registers the child only after reading the
-ack. There is no window in which a registered agent has no engine behind it —
-which is why the roster's `state` column is derived from registry facts at
-listing time, and why `` agents `list `` reads as a fact rather than as an
-intent.
+`spawn()` has returned, and the desk enrols the child in the fleet only after
+reading the ack. There is no window in which an enrolled agent has no engine
+behind it — which is why the roster's `state` column is derived from the
+agent tree at listing time, and why `` agents `list `` reads as a fact rather
+than as an intent.
 
 A spawn that fails leaves nothing to reconcile. A desk that refuses never
 dials, so the builtin wakes its own listener thread rather than leave it in its
@@ -245,7 +250,8 @@ children resolve every name to the same value or the same absence.
 
 Past that one field the seat asymmetry ends and the fleet's uniformity resumes:
 `` agents `message ``, `` agents `cancel ``, and the idle-lease reaper all
-address a descendant by name through the registry, whatever seat it sits on,
+resolve a descendant by name through the fleet, then scope-check it with a
+climb (`Agent::descendant`), whatever seat it sits on,
 and a wire helper's `message` crosses as an enquiry on its own connection
 exactly as an identity peer's does — sender and recipient never learn each
 other's transport.
@@ -261,10 +267,12 @@ fragment that masquerades as the answer. The payload is the faithful
 first-order ral value the model passed (`FOValue`): a headless trunk's goes to
 the harness as JSON through the `user_json` projection
 ([[decisions/260623_reply-terminates-returning-agents|reply-terminates-returning-agents]]);
-a child's is **deposited on its registry entry** and answered, as a value, to
+a child's is **deposited on its own `Agent`** (`Agent::deposit_reply`, the
+one write `Agent::status.reply` ever takes) and answered, as a value, to
 the parent's `` agents `read <name> ``
-([[decisions/260826_reply-parks|reply-parks]]). The parent learns of the
-reply from a one-line inbox notice, never the payload.
+([[decisions/260826_reply-parks|reply-parks]],
+[[decisions/260827_agent-and-avatar|agent-and-avatar]]). The parent learns of
+the reply from a one-line inbox notice, never the payload.
 
 A child's `reply` does not end it. Once the enclosing `ral` call's batch
 drains, the child cancels and reaps its proper descendants — a parent may
@@ -277,23 +285,26 @@ step cap, cancellation — settles the entry at once, with its one-line tag.
 ## Focus is presentation; the idle lease is lifecycle
 
 The human's `TAB` cursor is a plain `AgentId` the TUI moves — purely
-presentational, read by neither the registry nor `park_mode`. `TAB`bing to a
+presentational, read by neither the fleet nor `park_mode`. `TAB`bing to a
 tab lets it receive the human's typed lines and own `Esc`, but looking at a
 tab keeps nothing alive. What keeps a non-conversing returning child alive
-past quiescence is a renewable **idle lease** the registry arms at birth
-for every parented entry (one hour, `AGENT_LEASE_IDLE`, a registry-level
-bound rather than a per-entry field), not the human's attention: the one thing
-that renews it is a delivered *message* — a human's typed line
-(`AgentRegistry::steer`) or the parent's `` agents `message `` — so a child
-that is being talked to, and a child parked on a deposited reply, keep their
-lease fresh, while a lease that is never renewed fires at exactly its
-birth-seeded hour. A `/branch` child and the trunk carry no lease at all and
-so never idle-reap. Neither `TAB` nor a `/resources` probe renews anything —
-enumeration and attention alone can never immortalise a child.
+past quiescence is a renewable **idle lease** the fleet arms at birth for
+every parented agent (`Fleet::enrol`; one hour, `AGENT_LEASE_IDLE`, a
+fleet-level bound rather than a per-agent field), not the human's attention:
+the one thing that renews it is a delivered *message* — a human's typed line
+(`Mailbox::steer`) or the parent's `` agents `message `` (`Agent::message`) —
+both of which stamp the recipient's own inbox exchange clock before the item
+is pushed, so a child that is being talked to, and a child parked on a
+deposited reply, keep their lease fresh (`Agent::idle`, read off that same
+clock), while a lease that is never renewed fires at exactly its birth-seeded
+hour. A `/branch` child and the trunk are roots — `Fleet::enrol` arms no
+lease for either — and so never idle-reap. Neither `TAB` nor a `/resources`
+probe touches the exchange clock — enumeration and attention alone can never
+immortalise a child.
 
 A leased child that is parked waiting for input and has sat idle for five
 minutes demotes out of the `TAB` cycle and the tab bar into a compact matrix
-strip, carrying its idle age — a per-frame projection off the registry's
+strip, carrying its idle age — a per-frame projection off the inbox's own
 exchange clock, never stored state, and root is never a candidate. `/focus
 <name>` reaches a demoted tab directly and re-promotes it into the cycle; the
 gesture is presentation only and never touches the lease. When the lease
@@ -304,8 +315,9 @@ there is no `TAB`-driven reap to begin with.
 ## Descendant messages: marked notes, not shared memory
 
 An agent may send a **marked message** by **name** to a proper descendant
-through `` agents `message ``. The registry resolves the name to the
-recipient's inbox and posts an `AgentMessage`; the recipient sees it at the
+through `` agents `message ``. The fleet resolves the name to the recipient's
+`Agent`; `Agent::message` stamps its exchange clock and posts an
+`AgentMessage`; the recipient sees it at the
 next tool boundary as a marked note naming the sender, not as human input. This is
 coordination, not a return edge: it does not share shell state, does not grant
 authority, and does not wait for an answer. The durable result path remains
@@ -318,11 +330,13 @@ by name the same way.
 tab's current exchange, never a subtree and never an agent
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]). The subtree cascade survives,
 but only behind the **lifecycle terminators**: the `` agents `cancel `` tag, the
-per-agent idle-lease reaper, and `/clear`. They share one registry cascade — the
-registry is the spawn *tree* (`AgentRegistry::Entry` carries the `parent` link), so
-terminating a mid-tree agent reaps everything below it; `/clear` additionally bumps
-the generation, dropping a late result or deferred surface batch from a cleared
-generation. A `reply` still cancels only the replier's proper descendants — a
+per-agent idle-lease reaper, and `/clear`. They share one cascade over the
+agent tree itself (`Agent::parent`/`Agent::children`), so terminating a
+mid-tree agent (`Agent::cancel_tree`) reaps everything below it
+(`Agent::cancel_descendants`, a walk over `children`); `/clear`
+(`Agent::clear_subtree`) additionally bumps the generation, dropping a late
+result or deferred surface batch from a cleared generation. A `reply` still
+cancels only the replier's proper descendants — a
 parent may abandon unfinished children, but never leave live agents registered
 beneath a node that has answered. This refines
 [[decisions/260612_per-root-turn-cancel|per-root-turn-cancel]]: the per-focus cancel
@@ -381,7 +395,7 @@ child below the parent but can **never escalate** it past the parent's reach
 The base is frozen against the child's working directory as it resolves, so the
 meet runs on already-resolved [[design/capability-freeze|capabilities]]. The
 ceiling is non-escalating by construction: the spawn site, not the child, owns
-the authority decision, because [[map/exarch/agent|`Agent::fork_with`]] takes the
+the authority decision, because [[map/exarch/agent|`Avatar::fork_with`]] takes the
 child's `Capabilities` as an argument rather than cloning the parent's.
 
 ## See also
@@ -406,6 +420,8 @@ interrupt, not a subtree cascade),
 listens and the host dials, and what that direction deletes),
 [[decisions/260825_the-wire-carries-the-value|the-wire-carries-the-value]] (one
 enquiry class per registry, every tag answering the registry's state),
+[[decisions/260827_agent-and-avatar|agent-and-avatar]] (`Agent` as the `Arc`,
+`Avatar` as its embodiment, the fleet as `{ names, roots, lease }`),
 [[map/synod|synod]] (the dialler's landed home, and the helper surface built
 over wire-seat children),
 [[decisions/260806_exchange-ends-at-fleet-quiescence|synod's exchange ends at

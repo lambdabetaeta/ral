@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 8bd8b936
-generated_at_date: 2026-08-25
+generated_at_commit: fcf36a94
+generated_at_date: 2026-08-27
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -49,7 +49,7 @@ exit code.
   drops the system prompt and all tools), composes the capability lattice
   (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
   assembles the system prompt (`prompt::assemble`), builds the trunk
-  [[map/exarch/agent|`Agent`]] via `Agent::root(RootConfig, RootSeat, provider)`
+  [[map/exarch/agent|`Avatar`]] via `Avatar::root(RootConfig, RootSeat, provider)`
   — the ral binary seats it on `RootSeat::Identity`; a wire seat drives a
   remote engine instead, and synod reuses the same construction — and hands
   off to one frontend — the inline TUI or, under `--headless`, the

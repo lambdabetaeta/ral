@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cbeb5457
-generated_at_date: 2026-08-17
+generated_at_commit: fcf36a94
+generated_at_date: 2026-08-27
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -400,8 +400,8 @@ Ctrl-C interrupt the *focused tab's* current exchange — never a cascade, never
 subtree kill ([[decisions/260705_cancel-per-tab|cancel-per-tab]]): on the trunk
 they route through `raise_interrupt`, which cancels the trunk's published token
 and asks ral to cancel the current exchange's foreground scope; on any other
-focused tab, `agents.interrupt(id)` unwinds that agent's exchange and eval root
-through the registry. Only the trunk `publish`es its token's flag into the
+focused tab, the fleet resolves the id (`Fleet::by_id`) and `Agent::interrupt`
+unwinds that agent's exchange and eval root. Only the trunk `publish`es its token's flag into the
 lock-free process-global slot for the OS signal handler (a handler must not
 lock), so the provider's mid-stream cancel race observes the same cancellation.
 The TUI key table keeps UI control separate from cancellation: idle Ctrl-C/Ctrl-D

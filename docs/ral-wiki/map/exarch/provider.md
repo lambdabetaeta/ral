@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cbeb5457
-generated_at_date: 2026-08-17
+generated_at_commit: fcf36a94
+generated_at_date: 2026-08-27
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -246,16 +246,17 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
   This lands the first local slice of
   [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
 - `summarize` — one non-streamed call producing a compaction summary; used by
-  [[map/exarch/agent|`Agent::compact`]]. The same idle timeout bounds the
+  [[map/exarch/agent|`Avatar::compact`]]. The same idle timeout bounds the
   whole `exec_chat` request (no incremental events to idle between). A summary
   that itself hit the 1024-token budget is surfaced as `Truncated`, so
   `compact` keeps the un-summarised history rather than committing a half
   summary (X10).
 - `cancel` is the **request-local** cancellation handle: the foreground exchange
-  passes its root token (Esc-linked), an async `agent` passes its registry
-  token, so two concurrent requests no longer share one process-global slot —
+  passes its root token (Esc-linked), an async `agent` passes its own
+  `cancel::Token`, so two concurrent requests no longer share one
+  process-global slot —
   the provider-side seam of [[decisions/260617_async-agent-tool|async-agent-tool]];
-  the registry and inbox belong to [[map/exarch/tools|tools]] and
+  the token and inbox belong to [[map/exarch/tools|tools]] and
   [[map/exarch/agent|agent]].
 
 ## Retry driver

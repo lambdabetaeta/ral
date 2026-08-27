@@ -4,6 +4,11 @@ status: accepted
 
 # Reply parks
 
+> Superseded, in part, by [[decisions/260827_agent-and-avatar|agent-and-avatar]]:
+> there is no registry entry. A reply lives on `Agent::status.reply`,
+> written by the avatar alone and read by anyone still holding the `Arc`.
+> The decision below — deposit and park, never terminate — stands.
+
 **A returned value is a fact the registry holds, not a message the parent
 reads.** A returning agent's `reply` deposits its value on the agent's own
 registry entry and parks the agent; the parent is woken with one line and

@@ -1,34 +1,92 @@
 ---
-generated_at_commit: fb52275a
-generated_at_date: 2026-08-25
-covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/registry.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
+generated_at_commit: fcf36a94
+generated_at_date: 2026-08-27
+covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
 # Map: exarch / agent
 
-`agent.rs` defines the node every fleet member shares. An `Agent` is the
-**uniform node** of the fleet: the canonical
+`agent.rs` splits the node every fleet member is into two types along who
+may touch what ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
+
+**`Agent` is the public half**, held behind an `Arc` the fleet shares:
+identity (`id`, `name`, `log_dir`), the two cancel doors (`cancel::Token`
+and the eval-layer `reach: EvalReach`), the sender half of its own
+`mailbox`, an owned hot-swappable `provider: ProviderHandle`, immutable
+config (`caps`, `fuel`, `returns`, `search`, `interactive`,
+`allow_schedule`, `egress`, `dial`, `index`, the resolved `system` prompt,
+`disk_warn_bytes`), the single-writer `status: Mutex<Status>` — `{
+generation, rest, reply }` — `consumer` (the parent's generation at this
+agent's birth), a strong `parent: Option<Arc<Agent>>`, and a weak
+`children: Mutex<Vec<Weak<Agent>>>`.
+
+**`Avatar` is the private half**: the canonical
 [[internals/session-record|model projection]] (`AgentLog`), a **seat**
-(`agent/seat.rs`) carrying the transport each run drives through —
+(`agent/seat.rs`) carrying the transport this run drives through —
 `Seat::Identity`, the persistent in-process [[map/core/shell-state|`Shell`]]
 behind an `IdentityTransport` (plus the session `Scratch`, the re-seed cwd,
-and the interrupt target the registry interrupts through), or `Seat::Wire`, a
+and the interrupt target `EvalReach` interrupts through), or `Seat::Wire`, a
 `WireTransport` driving a remote engine, one process per session
 ([[decisions/260722_session-is-a-process|session-is-a-process]]) — the
 canonical run and probe vocabulary either way
-([[decisions/260706_enquiry-channel|enquiry-channel]]), the agent
-`Capabilities`, its own inbox, nudger, `cancel::Token`, an owned
-hot-swappable `ProviderHandle`, and the inherited
-`interactive` flag. What every node *shares* — the registry, the one
-[[map/exarch/frontend|`FleetBus`]], and the transport `Engine` — lives on the
-thin [[#The Fleet|`Fleet`]], not on the node. There is no
-`Session`, no `is_root`: every distinction reduces to **position in the tree**,
-read from `parent: Option<AgentId>` together with `interactive` and the
-registry's own engagement state. Output
-caps are fixed `agent/digest.rs` constants, not per-agent state.
+([[decisions/260706_enquiry-channel|enquiry-channel]]) — plus the `inbox`,
+the nudge `Registry`, the schedule `ScheduleRegistry`, and every other field
+only the attend thread touches, beside the `Arc<Agent>` it embodies
+(`.agent`, `pub(crate)` so a caller outside `agent` reaches identity and
+config at `.agent.…` directly). Every method that runs the agent takes
+`&mut Avatar`.
+
+**An agent is live while its `Avatar` holds that `Arc`.** Nothing
+deregisters: `Avatar`'s `Drop` (`agent/build.rs`) clears its own armed
+schedules and records the session-ended bookend, and the last strong
+reference going with it is what a parent's `children` or the fleet's
+`roots`/`names` prune away at their next walk. There is no `Session`, no
+`is_root`: every distinction reduces to **position in the tree**, read from
+`Agent::parent` together with `interactive` and the agent's own exchange
+clock. What every node *shares* for identity resolution and the idle lease
+— the by-name and by-id doors — lives on the thin [[#The Fleet|`Fleet`]],
+not on the node; the one [[map/exarch/frontend|`FleetBus`]] and the
+transport `Engine` are session-level handles the frontend builds and holds
+alongside its own `Arc<Fleet>`, not fields of `Fleet` itself. Output caps
+are fixed `agent/digest.rs` constants, not per-agent state.
+
+## Status, the exchange clock, and the lock rule
+
+Two per-agent mutexes exist, `Agent::status` and `Agent::children`. **Rule:
+hold at most one at a time.** `children` is locked only to push
+(`Agent::adopt`) or to snapshot (`Agent::children`, which prunes as it
+copies); every walk (`Agent::walk`, `descendant`, cascade, roster) runs
+over the snapshot, never under the lock. `status` is a single-writer
+register — the avatar writes one field at a time
+(`Agent::set_resting`, `Agent::deposit_reply`, `Agent::clear_subtree`'s
+generation bump) and a reader takes one snapshot and computes nothing under
+the lock, so the mutex buys atomicity and nothing more. `parent` is a plain
+`Arc`, read lock-free. Inbox → agent stays the one cross-type order: a park
+verdict reads `agent.rest()` under the consumer's own inbox mutex, so no
+`Agent` method may take an inbox lock; nothing needs the reverse order
+either, since `steer` touches only the inbox.
+
+**`last_exchange` lives on the inbox, not on `Agent::status`.** It was never
+agent state — it is "when did a human or a parent last push into this
+mailbox", a fact the `Mailbox` itself witnesses. `Mailbox::steer` (a human
+line, `bus/inbox.rs`) and `Agent::message` (a parent's marked note)
+both stamp it *before* the push, so a park verdict a woken consumer
+computes already reads `Engaged`. `Agent::idle()` reads
+`mailbox.last_exchange().unwrap_or(started).elapsed()` — the roster's
+`idle-s` and the reaper's bound, in one door, with `renew` gone as a
+separate method.
+
+**Up is strong, down is weak.** `Agent::parent` is a strong `Arc`, so
+`deposit_reply` and the scope climb (`Agent::descendant`) never dangle: a
+parent whose own avatar has gone is still a reachable `Agent` with a
+terminated token, not an absence. `Agent::children` holds `Weak`, so there
+is no cycle to reason about and a walk prunes what has settled. **Nothing
+holds an `Arc<Agent>` to a descendant** — every reaper closure
+(`fleet.rs`'s `lease_fire`) and every upward result (`AgentResult`) carries
+a name or a `Weak`, never a strong handle down the tree.
 
 The **trunk** is the parent-less node (`parent = None`), built by
-`Agent::root(RootConfig, RootSeat, provider)`: `RootConfig` carries the
+`Avatar::root(RootConfig, RootSeat, provider)`: `RootConfig` carries the
 prompt, caps, `fuel` (exarch's and synod's launch sites pass `SPAWN_FUEL`),
 the IT-set `Egress` (`exarch/src/egress.rs`), and the optional `dial` a wire
 trunk reaches its children through ([[#Wire-seat spawn|below]]) — each set
@@ -63,9 +121,9 @@ never an `is_root` branch:
 ```
   returns(a)    // fixed at construction: fork true, branch false, trunk ¬interactive
   conversing(a) =  a.interactive ∧ ¬returns(a)
-  park_mode(a)  =  Quiesce        if conversing(a) ∧ ¬registry.is_live(a)   // /close reaped it
+  park_mode(a)  =  Quiesce        if conversing(a) ∧ a.cancel.terminated()   // /close reaped it
                    Held           if conversing(a)                          // immune to cancellation
-                   Engaged        if a.parent ∧ returns(a) ∧ registry.messageable(a)  // talked to, or holding a reply; a terminate cause still ends it
+                   Engaged        if a.parent ∧ returns(a) ∧ a.messageable()  // talked to, or holding a reply; a terminate cause still ends it
                    HeldByChildren if a has busy children
                    UntilCancelled if a.schedules.armed()
                    Quiesce        otherwise
@@ -84,9 +142,11 @@ vocabulary cannot disagree
 verdict: a conversing node parks `Held`, immune to cancellation; a returning,
 parented agent that is *messageable* — someone has messaged it, or it holds a
 deposited reply — parks `Engaged`, the same wait except a terminate-class
-cause still ends it, since an exchange is not a conversation — unless the
-registry no longer lists it, since an unlisted conversing node is unreachable
-and parking it would be a zombie; busy children hold it until they reply or
+cause still ends it, since an exchange is not a conversation — unless its
+own cancel token has been terminated (`self.agent.cancel.terminated()`, the
+one self-check not answered by a `Weak::upgrade`), which is what `/close`
+stamps, since a conversing root has no parent to prune it away and parking
+`Held` past that stamp would be a zombie; busy children hold it until they reply or
 die; a live self-schedule holds it until cancelled; otherwise it terminates at
 quiescence — the one-shot contract a headless trunk satisfies. `--chat` builds the trunk with no system
 prompt, no tool at all (`tool_enabled: false`), and no nudge registry — a bare
@@ -97,9 +157,11 @@ conversation, the same attend loop.
 Three nested loops, the same for trunk and child alike:
 
 - `attend` — the per-agent lifetime. The trunk publishes its sticky cancel token
-  for the OS-signal path (`cancel::publish`, held for the whole attend); a
-  sub-agent publishes nothing, since its token
-  is reached through the registry cascade, not the slot. Each pass pulls the next
+  for the OS-signal path (`cancel::publish`, called at each site that launches
+  a process trunk — `headless::run`, `headless::converse_settled`, and
+  `tui::tui_loop::run` — held for the whole
+  attend); a sub-agent publishes nothing, since its token
+  is reached through the tree cascade (`Agent::cancel_tree`), not the slot. Each pass pulls the next
   item from this agent's [[map/exarch/frontend|inbox]] via
   `next_or_idle(|| self.park_mode(), …)`, which **re-evaluates the park verdict
   on every `Condvar` wake** — so the idle lease's terminate-cause cancel, or the
@@ -111,13 +173,15 @@ Three nested loops, the same for trunk and child alike:
   exchange boundary resets the nudge latches and clears the sticky cancel token
   (`cancel::Token::reset`), so a prior exchange's Esc cannot bleed into the next; a
   self-nudge is the same exchange continuing and resets neither. A child's
-  `reply` deposits its value on its registry entry (`deposit_reply`, which
+  `reply` deposits its value on its own `Agent` (`Agent::deposit_reply`, which
   also posts the one-line notice) and the loop parks `Engaged`; only the
   headless root's `reply` ends its loop. At the single exit the loop winds a stranded
   prompt back through `quiesce` so the next `append_user` is always admissible
-  ([[invariants/turn-ends-ready|exchange-ends-ready]]); the trunk then deregisters
-  itself (a child is removed by its spawn site through `settle`), so the fleet
-  empties when the last agent leaves. A panic `take_up` catches around its
+  ([[invariants/turn-ends-ready|exchange-ends-ready]]); the trunk's `Avatar`
+  then drops (a child's drops when its detached thread returns), pruned from
+  its parent's `children` and the fleet's doors at their next walk — the
+  whole of what deregistration used to require — so the fleet empties as its
+  last agent's avatar goes. A panic `take_up` catches around its
   `deliberate` call is a
   *host-side* fault (provider transport, surface decode, render, digest),
   recorded as `AgentOutcome::Failed`; an eval-side panic never unwinds this far —
@@ -185,7 +249,7 @@ The retention clock itself is core's: the engine ticks the worker registry
 once per source dispatch and sweeps it at each settled run's ready
 boundary ([[map/core/shell-state|shell-state]]), armed with
 [[map/exarch/shell-eval|shell-eval]]'s `SETTLED_WORKER_RETENTION`. The
-agent keeps its own mirror of the same drum — `Agent::ral_epoch`,
+agent keeps its own mirror of the same drum — `Avatar::ral_epoch`,
 incremented once at the top of every `run_shell` call, a failed eval still
 a call — which `/resources` reads to render nearest time-to-reap and
 `check_disk_warn` reads for its amortisation; the two clocks coincide
@@ -212,7 +276,7 @@ panic rollback can never resurrect a name a pass just pruned.
 ([[invariants/probe-convention|probe-convention]]): routed exactly as
 `/clear` — an `Item::Command` drained at the exchange boundary, handled by
 the TUI's `Control` against the agent the attend loop owns —
-`Agent::resource_rows` surveys what this thread may legally read — the worker
+`Avatar::resource_rows` surveys what this thread may legally read — the worker
 registry's running/settled split with the nearest time-to-reap and the
 binding-ledger figures read as *data* through the transport's Enquiry desk
 (`probe_workers` and its sibling probes,
@@ -243,8 +307,8 @@ exchange-boundary classification), and an exact-duplicate `Nudge` is a no-op.
 The other four (`AgentResult`, `AgentMessage`, `Command`, `Surface`) are
 quota-checked against `INBOX_SOURCE_CAP` (64) and the shared
 `INBOX_TOTAL_CAP` (256) and *rejected*, never dropped, once full — every
-producer surfaces the rejection to its own caller: `AgentRegistry::message`
-returns `MessageError::RecipientInboxFull` (`` agents `message `` reports it),
+producer surfaces the rejection to its own caller: `Agent::message`
+returns `InboxReject` (`` agents `message `` reports it),
 a rejected slash command reports through the UI's error line, and a
 rejected `spawn` completion or surfaced batch — which has no synchronous
 caller left to return to — records straight through the record seam as a
@@ -283,34 +347,51 @@ is the attend loop's own step.
 
 ## The Fleet
 
-`fleet.rs` is the thin run-as-a-whole: `{ agents: AgentRegistry, bus: FleetBus,
-engine: Arc<provider::Engine> }`. It owns no execution logic — the trunk
-and each child attend to themselves; the fleet is only where the frontend reads "all
-live agents" and "the bus to drain". The
-frontend ([[map/exarch/frontend|`tui::run`]] / `headless::run`) builds it from
-handles the trunk already minted at construction, so fleet and nodes never
-disagree about what is shared.
+`fleet.rs`'s `Fleet` is `{ names: Mutex<HashMap<String, Weak<Agent>>>, roots:
+Mutex<Vec<Weak<Agent>>>, lease: Mutex<Duration> }` — two `Weak` doors and the
+idle-lease bound they share, nothing else. It is not the tree: the tree is
+`Agent::parent`/`Agent::children`, and every walk — the roster, the cancel
+cascade, the scope check — runs there. `names` is the by-name door a spawn
+claims identity at and `` agents `message ``/`` `cancel ``/`` `read ``
+resolve through (`Fleet::resolve`); `roots` holds the trunk and every
+`/branch` — a root reports to nobody, so a walk from `roots` (`by_id`,
+`nearest_reap`) is how a frontend command or the idle-lease scan reaches
+every live agent in the run. Both are `Weak`, and a lookup prunes what has
+settled as it walks. `FleetBus` and the `Arc<provider::Engine>` are not
+fields of `Fleet` — the frontend builds its own (`FleetBus::session`) over
+the trunk's inbox and holds the engine handle separately; what every node
+shares through `Fleet` is only identity resolution and the lease.
 
-- **The fleet is alive while the registry is non-empty** — the literal "dies
-  when no active agents
-  remain". An agent removes itself at termination (quiescence, cancel, a
-  non-reply finish); a conversing node stays until `/quit` (or `/close`)
-  because it parks; a headless trunk leaves at quiescence; a replied sub-agent
-  parks under its idle lease and leaves when it is reaped. There is no
-  human-less daemon: nothing lingers without a present human, running work, a
-  bounded lease, or a bounded self-schedule.
+- **One door: `Fleet::enrol`.** Construction is the only place an agent
+  joins the fleet, and every refusal (`Unborn::SessionDead` — the parent
+  raced a cancel; `NameTaken`; `NameMalformed`, checked here too since a wire
+  peer is not trusted to have used `check_name`) is decided under the one
+  lock a racing spawn's own claim takes. A refused agent never appears in
+  the fleet, however briefly: the name is claimed, then — only then — the
+  agent is adopted into its parent's `children` or pushed onto `roots`, and
+  a parented birth arms its lease (`arm_lease`).
+- **The fleet is alive while `roots` prunes to empty** — the literal "dies
+  when no active agents remain" (`Fleet::is_empty`). An agent leaves by its
+  avatar dropping (quiescence, cancel, a non-reply finish); a conversing
+  node stays until `/quit` (or `/close`) because it parks; a headless trunk
+  leaves at quiescence; a replied sub-agent parks under its idle lease and
+  leaves when it is reaped. There is no human-less daemon: nothing lingers
+  without a present human, running work, a bounded lease, or a bounded
+  self-schedule.
 - **The idle lease is dynamic; focus is not.** A leased child — every
-  parented entry, i.e. every returning sub-agent; the registry derives the
-  lease from `Registration::parent`, no caller chooses it — is reaped once
-  its idle span — measured off the registry's last-exchange clock, seeded at
-  birth — exceeds its bound: the reaper (`fleet/registry.rs`'s `lease_fire`)
-  re-arms itself for the remaining margin on every fire that finds the entry
-  still live and under bound, and cascades the subtree with
-  `CancelCause::Deadline` once it is not. The one thing that renews the clock
-  is a delivered message — a human's (`AgentRegistry::steer`) or the parent's
-  (`AgentRegistry::message`); nothing else does — not the TUI's `TAB` cursor,
-  a plain, presentation-only `AgentId` local to the frontend
-  (`tui::tabs::Tabs::focus`) that neither the registry nor `park_mode` ever
+  agent `Fleet::enrol` gave a parent, i.e. every returning sub-agent; the
+  lease is a consequence of having a reporting parent and of nothing else,
+  no caller chooses it — is reaped once its idle span (`Agent::idle`,
+  measured off the *inbox's* last-exchange clock, seeded at birth) exceeds
+  the fleet's bound: the reaper (`fleet.rs`'s `lease_fire`, on the process
+  reaper daemon thread) re-arms itself for the remaining margin on every
+  fire that finds the agent's `Weak` still upgrading and under bound, and
+  cancels the subtree with `CancelCause::Deadline`
+  (`Agent::cancel_tree`) once it is not. The one thing that renews the
+  clock is a delivered message — a human's (`Mailbox::steer`) or the
+  parent's (`Agent::message`); nothing else does — not the TUI's `TAB`
+  cursor, a plain, presentation-only `AgentId` local to the frontend
+  (`tui::tabs::Tabs::focus`) that neither the fleet nor `park_mode` ever
   reads, not a `/resources` probe. A returning agent's `reply` cancels its
   proper descendants and
   parks it, regardless of which tab the human's cursor sits on.
@@ -318,27 +399,28 @@ disagree about what is shared.
 ## Cancellation cascades the subtree, across both layers
 
 The single cascade serves the deliberate teardowns — `` agents `cancel ``, a
-returning agent's `reply`, and the `/clear` / `/close` subtree reaps.
-`AgentRegistry` lives in `fleet/registry.rs`; an entry's `name` is its
-identity — well-formed and unique among live entries, both enforced at
-`register` (`RegisterError::NameMalformed`/`NameTaken`; the trunk holds
-`TRUNK_NAME`), which is where a name *becomes* identity and so the one place a
-wire peer cannot go around. The desk refuses both a beat earlier, before it
-forks a log or dials anything, but only `register` is authoritative. A name is
-also the handle `` agents `message ``/`` agents `cancel `` resolve descendants
-by. Each entry
-carries a `parent` link, so the registry is the
-spawn *tree*: `AgentRegistry::cancel(id)` walks descendants and cancels the whole
-subtree, `cancel_descendants(root)` abandons a returning agent's children without
-touching any generation, and `clear_subtree(root)` reaps a subtree and bumps
-`root`'s *own* generation, so a late result or deferred surface batch addressed
-to that root is still dropped. The counter is per entry, not per fleet, and the
-number a worker carries is its *reader's* — a `/clear` in one tab must not throw
-away work another tab is still waiting on. Each cancelled node is stopped **across both
-layers**: its cooperative `Token` (read by `deliberate` between steps and
-raced by the provider's mid-stream cancel) *and* the eval layer through the
-entry's `reach: EvalReach` (`fleet/registry.rs`, minted from the
-seat at registration — every entry carries one, the trunk included) —
+returning agent's `reply`, and the `/clear` / `/close` subtree reaps — and it
+runs over the agent tree itself, not a registry. `Agent::name` is its
+identity — well-formed and unique among live agents, both enforced at
+`Fleet::enrol` (`Unborn::NameMalformed`/`NameTaken`; the trunk holds
+`TRUNK_NAME`, `agent/build.rs`), which is where a name *becomes* identity and
+so the one place a wire peer cannot go around. The desk refuses both a beat
+earlier, before it forks a log or dials anything, but only `enrol` is
+authoritative. A name is also the handle `` agents `message ``/`` `cancel ``
+resolve descendants by, through `Fleet::resolve` and then the scope climb
+(`Agent::descendant`). Every `Agent` carries a strong `parent`, so the tree
+is the spawn tree directly: `Agent::cancel_tree` cancels an agent and its
+whole subtree, `Agent::cancel_descendants` abandons a returning agent's
+children without touching any generation, and `Agent::clear_subtree` reaps
+a subtree and bumps that agent's *own* `status.generation`, so a late
+result or deferred surface batch addressed to it is still dropped. The
+counter is per agent, not per fleet, and the number a worker carries is its
+*reader's* — a `/clear` in one tab must not throw away work another tab is
+still waiting on. Each cancelled node is stopped **across both layers**:
+its cooperative `Token` (read by `deliberate` between steps and raced by
+the provider's mid-stream cancel) *and* the eval layer through its own
+`reach: EvalReach` (fixed at construction — every agent carries one, the
+trunk included) —
 `EvalReach::Identity` holds the session's durable
 root (`Shell::cancel_handle`) for `terminate` and, for `interrupt`, the cell its
 transport publishes each dispatch's scope into as that dispatch is minted —
@@ -350,17 +432,18 @@ host-reachable primitive is
 — and a `ral` eval already in flight
 unwinds at the evaluator's poll points instead of grinding to its
 `timeout_secs` wall. The trunk's reach is *interrupt-only* —
-`EvalReach::interrupt_only` clears its `eval_root` to `None` at registration,
+`EvalReach::interrupt_only` clears its `eval_root` to `None` at construction,
 so a `terminate` there degrades to the `Token` alone: its session outlives any
 cancel, and a captured root would both permanently poison it and go stale at
-the next `/clear`, which rebuilds the trunk's shell in place while an entry is
-registered once, at birth. Esc also reaches the trunk's exchange through the
+the next `/clear`, which rebuilds the trunk's shell in place while an agent's
+reach is fixed once, at birth. Esc also reaches the trunk's exchange through the
 ambient foreground cause, which only the trunk's session is minted facing
 ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]],
 [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]],
 [[internals/cancellation|cancellation]]). `Esc` / Ctrl-C, by contrast, are a
 **per-tab exchange interrupt**, not a cascade: they stop only the *focused* agent's
-current exchange (`AgentRegistry::interrupt(id)`, plus `cancel::raise_interrupt`
+current exchange (`Agent::interrupt`, reached by id through `Fleet::by_id`,
+plus `cancel::raise_interrupt`
 on the trunk), leaving its descendants running
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]); the focused agent's
 sticky token is cleared at each exchange boundary (`Token::reset`).
@@ -368,20 +451,22 @@ sticky token is cleared at each exchange boundary (`Token::reset`).
 Cancelling `eval_root` already reaches a cancelled node's own detached `ral`
 workers with no edge of its own: a worker's cancel scope is a child of its
 shell's durable root, and every `CancelScope::is_cancelled` walks its
-ancestors. What the cascade does *not* reach is a node that ends without
-ever being cancelled — the ordinary `reply`/settle path, or the trunk's own
-end-of-`attend` `deregister` — since neither touches the registry's cascade
-primitive at all. `Agent`'s `Drop` closes that gap in one place: it cancels
-every worker still registered on its own shell and clears its own armed
-schedules unconditionally, the same law `clear` already applies explicitly
-below, so a settled-but-never-cancelled agent leaks neither
+ancestors. What the cascade does *not* reach is a node that ends without ever
+being cancelled — the ordinary `reply`/settle path, or the trunk's own
+end-of-`attend` exit, where the avatar simply drops. `Avatar`'s `Drop`
+(`agent/build.rs`) closes that gap in one place: it clears its own armed
+schedules unconditionally and records the session-ended bookend — the
+underlying seat's own teardown cancels the workers registered on its shell —
+the same law `clear` already applies explicitly below, so a settled-but-never-cancelled
+agent leaks neither
 ([[design/residency|residency]], [[decisions/260705_session-ledger|session-ledger]]).
 
 ## The provider is per-agent and hot-swappable
 
 `ProviderHandle` is owned by the `Agent`, not threaded through `attend`'s
 parameters. `take_up` reads `self.provider.current()` once per item. `/model` swaps
-the **focused** agent's handle directly on the UI thread (via the registry), so a
+the **focused** agent's handle directly on the UI thread (resolved through
+the fleet by id), so a
 swap on one agent never disturbs another. `fork` seeds the child's own handle
 from the parent's current provider (`ProviderHandle::new(self.provider.current())`),
 so the child inherits the model in force at spawn and may diverge afterward.
@@ -458,7 +543,7 @@ with `EditAuthority::Model` rather than `Harness`. The user's own hand is
 `ReplControl::command` serves alongside `/clear`, `/compact`, `/branch`, and
 `/quit`.
 
-`Agent::check_disk_warn` is the disk half of the same ADR ("Disk: report
+`Avatar::check_disk_warn` is the disk half of the same ADR ("Disk: report
 and warn only") — report-and-warn only, never rotation or deletion.
 Unconfigured (`config::disk_warn_bytes` absent, the default) it is a no-op
 by construction: no walk, no cost, ever. Configured, it rides the same
@@ -470,13 +555,15 @@ existing `resources::dir_size`) emits one `Forensic::SystemNote`, latched until
 a later check finds the total back under — one warning per excursion, not
 one per boundary.
 
-A fork builds the child `Agent` for [[design/agents|sub-agent spawning]] through
+A fork builds the child `Avatar` (and, inside it, the child `Agent`) for
+[[design/agents|sub-agent spawning]] through
 `Shell::fork_session` ([[map/core/shell-state|the flow matrix]]) rather than
 hand-copying fields after a bare `Shell::new`. It takes the child's
 `Capabilities` **as an argument**, so the spawn site owns the authority decision
 (the parent's verbatim, or `parent ⊓ base` via [[map/exarch/policy|`policy::narrow`]]).
-The child sets `parent: Some(self.id)` — the tree edge that routes its result and
-drives the subtree cascade — and registers itself in the fleet's shared registry.
+The child sets `parent: Some(self.agent.clone())` — the strong tree edge that
+routes its result and drives the subtree cascade — and enrols itself in the
+fleet (`Fleet::enrol`), joining the shared `Arc<Fleet>` every node holds.
 It snapshots the **serialisable fragment** of the parent's lexical scope
 (prelude, agent library, every accumulated binding that has a wire form —
 `Shell::fork_scrubbed` drops `Value::Handle` bindings, and both spawn arms
@@ -498,13 +585,16 @@ chain bottoms out by refusal a fixed number of generations down. The fork
 mirrors on the bus as `Transient::Born` / `Transient::Died` regardless of
 remaining fuel.
 
-`fork_with(caps, returns)` is the shared fork core — a returning child passes
-`true`; `branch` is `fork_with(self.caps, returns: false)` plus
-`inherit_context`, minting a *conversing* peer tab with the parent's verbatim
-authority ([[decisions/260705_branch-minimal|branch-minimal]]). A builtin
+`Avatar::fork_with(caps, returns, name)` is the shared fork core — a
+returning child passes `true`; `Avatar::branch` is
+`fork_with(self.agent.caps.clone(), false, name)` plus `inherit_context`,
+minting a *conversing* peer tab with the parent's verbatim
+authority ([[decisions/260705_branch-minimal|branch-minimal]]) — `returns:
+false` means `parent` comes back `None`, so a branch is a root exactly as
+the trunk is. A builtin
 spawn takes the decomposed path instead: the `` `start `` tag's body leaves
 the fork where this run's `Fork` door says, and the desk's `` agents `start ``
-arm collects it and calls `Agent::assemble` at one less unit of fuel
+arm collects it and calls `Avatar::assemble` at one less unit of fuel
 ([[map/exarch/builtins|builtins]]).
 
 Prompt resolution is shared across the root, identity-fork, and wire-child
@@ -567,7 +657,7 @@ next hatch and again at engine teardown, reaps whatever has since exited. That
 sweep is `waitpid` and nothing lighter: a hatched child closes its seed channel
 as soon as it has hydrated, so silence there means *started*, never stopped. A wire
 trunk with fuel > 0 and no dialler is a construction error, refused at
-`Agent::root` with a sentence rather than discovered by a model calling
+`Avatar::root` with a sentence rather than discovered by a model calling
 `agent`; off Linux the wire arm refuses in one sentence too.
 The enquiring builtin cannot tell which arm served it — both answer the same
 roster `` agents `` gives every tag. See [[design/agents|agents]] for the
@@ -614,11 +704,13 @@ predicate, the conversing trunk vs returning agents),
 [[map/exarch/tools|tools]] (the one `ral` tool the
 provider sees) and [[map/exarch/builtins|builtins]] (the harness verbs the
 desk answers), [[map/exarch/frontend|frontend]] (the bus, the inbox, the
-registry, and the two frontends), [[map/exarch/provider|provider]],
+fleet doors, and the two frontends), [[map/exarch/provider|provider]],
 [[map/exarch/policy|policy]], [[map/exarch|exarch]],
 [[design/residency|residency]] (the resident ledger this cascade and the
 worker/schedule teardown edge are chapters of),
 [[decisions/260722_session-is-a-process|session-is-a-process]] (why a wire
 seat is one engine process, one connection),
+[[decisions/260827_agent-and-avatar|agent-and-avatar]] (why `Agent` and
+`Avatar` split this way, what the three-copy shape it replaced deleted),
 [[map/synod|synod]] (`MachineDial`, and synod's own helper surface built over
 the wire-seat spawn above).

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 6d48e9af
-verified_at_date: 2026-08-26
+verified_at_commit: fcf36a94
+verified_at_date: 2026-08-27
 anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, RailShape, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
@@ -198,7 +198,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker, latching if idle; the REPL loop observes the sticky root and exits |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_foreground_cancel(Interrupt)` + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)` — foreground and detached workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
-| **Ctrl-C / Esc** | exarch TUI, active exchange | `AgentRegistry::interrupt(focused)`; the trunk also `cancel::raise_interrupt` | cancels the focused entry's `Token` and the scope its interrupt target holds; on the trunk, additionally the published `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
+| **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent (resolved by id through `Fleet::by_id`); the trunk also `cancel::raise_interrupt` | cancels the focused agent's `Token` and the scope its interrupt target holds; on the trunk, additionally the published `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
 | **async SIGINT** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's non-escalating `sigint_relay` |
@@ -241,19 +241,20 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   pointer ral has retired ([[decisions/260726_cancel-is-a-join|cancel-is-a-join]]) —
   and a genuine exchange boundary `Token::reset`s the flag, so a prior
   exchange's Esc never bleeds into the next.
-- **The registry cascade is two-layer.** `AgentRegistry::cancel` (behind
+- **The tree cascade is two-layer.** `Agent::cancel_tree` (behind
   `` agents `cancel ``, the per-agent idle lease, and the
   `/clear`/`reply` reaps) cancels each descendant's `Token` *and* its own
-  session's `DurableRoot` (`Shell::cancel_handle`, held per registry entry). The
+  session's `DurableRoot` (`Shell::cancel_handle`, held on the `Agent` itself
+  as `reach: EvalReach`). The
   token stops the attend loop between steps; the root cancel unwinds a `ral` eval
   already in flight at the evaluator's poll points — without it, a cancelled
   agent would grind to its tool's `timeout_secs` wall before noticing. The
-  trunk's entry carries an *interrupt-only* reach:
-  `EvalReach::interrupt_only` clears its `eval_root` to `None` at registration,
-  so a registry `terminate` there degrades to the `Token` alone and can never
+  trunk's `Agent` carries an *interrupt-only* reach:
+  `EvalReach::interrupt_only` clears its `eval_root` to `None` at construction,
+  so a `terminate` there degrades to the `Token` alone and can never
   poison the one `Shell::face_signals` session the process runs on — a
   captured root would also go stale at the next `/clear`, which rebuilds the
-  trunk's shell in place while a registry entry is set once, at birth. What the
+  trunk's shell in place while an agent's reach is fixed once, at birth. What the
   ambient path still uniquely covers on the trunk: the SIGINT re-created for a
   foreground external child, and the ambient foreground stamp itself, which
   needs no dispatch handle to land and so reaches a foreground run the
@@ -279,7 +280,7 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
 - Raw mode disables `ISIG`, so a TUI keystroke is *not* a kernel signal. The TUI's
   key table (`exarch/src/tui/tui_loop.rs`) separates UI shape from cancellation:
   idle Ctrl-C/Ctrl-D quit, overlays close, and only active-exchange Ctrl-C/Esc
-  route to `AgentRegistry::interrupt(focused)` — every tab, the trunk included.
+  route to the focused agent's own `Agent::interrupt` — every tab, the trunk included.
   The trunk's tab additionally raises `raise_interrupt`, since nothing else
   delivers the foreground external child's SIGINT or stamps the ambient
   foreground cause. `deliver_interrupt` re-creates the SIGINT the kernel would
@@ -295,7 +296,7 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
 A deliberate asymmetry worth stating plainly: **the third-signal `_exit` floor is
 unreachable from an interactive prompt.** Interactive SIGINT goes to the relay,
 which never ticks the ladder; the TUI's active-exchange Ctrl-C goes to
-`AgentRegistry::interrupt` (and, on the trunk, also `raise_interrupt`), neither
+`Agent::interrupt` (and, on the trunk, also `raise_interrupt`), neither
 of which ever touches the ladder. Repeated presses re-write the same cause
 (`fetch_max`), never escalate. The hard
 floor exists for batch scripts (`handler`), for external SIGTERM/SIGHUP, and for
