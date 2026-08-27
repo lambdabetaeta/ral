@@ -566,7 +566,11 @@ mod tests {
         lint.reach = reach_into(&eval_root);
         let lint = born(&fleet, lint).expect("a fresh child of a live trunk");
 
-        assert_eq!(roster::listing(&trunk).len(), 1, "the trunk lists its one child");
+        assert_eq!(
+            roster::listing(&trunk).len(),
+            1,
+            "the trunk lists its one child"
+        );
         assert_eq!(roster::listing(&trunk)[0].name, "lint");
 
         lint.cancel_tree(CancelCause::Explicit);
@@ -596,7 +600,10 @@ mod tests {
             !sibling.cancel_token().is_cancelled(),
             "a sibling is untouched"
         );
-        assert!(!root.cancel_token().is_cancelled(), "the parent is untouched");
+        assert!(
+            !root.cancel_token().is_cancelled(),
+            "the parent is untouched"
+        );
     }
 
     /// Liveness is the avatar: an agent leaves both fleet doors and its
@@ -618,7 +625,10 @@ mod tests {
 
         drop(child);
 
-        assert!(fleet.by_id(id).is_none(), "a settled agent resolves nowhere");
+        assert!(
+            fleet.by_id(id).is_none(),
+            "a settled agent resolves nowhere"
+        );
         assert!(!fleet.name_live("child"), "and frees its name");
         assert!(
             roster::listing(&trunk).is_empty(),
@@ -731,7 +741,11 @@ mod tests {
                 .is_some_and(|found| Arc::ptr_eq(&found, &helper)),
             "the name still resolves to the agent that actually holds it"
         );
-        assert_eq!(trunk.children().len(), 1, "the refused child is not adopted");
+        assert_eq!(
+            trunk.children().len(),
+            1,
+            "the refused child is not adopted"
+        );
     }
 
     /// A reaped agent and a cancelled one share one cascade, distinguished
@@ -844,7 +858,10 @@ mod tests {
         assert!(!child.messageable(), "a fresh agent has never been engaged");
 
         inbox.push(Post::UserSteering("hello".into())).unwrap();
-        assert!(!child.messageable(), "a raw mailbox push is not an exchange");
+        assert!(
+            !child.messageable(),
+            "a raw mailbox push is not an exchange"
+        );
         // Drained, so the steer below lands as its own item rather than
         // coalescing into this one.
         inbox.next_item();

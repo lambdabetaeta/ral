@@ -1308,7 +1308,10 @@ keep-bottom
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {
             Some(crate::bus::Item::Surface { id, generation, .. }) => {
-                assert_eq!(id, agent.id, "the batch is stamped with the root session id");
+                assert_eq!(
+                    id, agent.id,
+                    "the batch is stamped with the root session id"
+                );
                 assert_eq!(generation, born, "stamped with the sink's birth generation");
             }
             other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),

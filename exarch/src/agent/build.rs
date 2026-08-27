@@ -3,6 +3,7 @@
 //! and its [`Build`] bundle. `clear` rebuilds a node's context in place
 //! rather than ending it; `Drop` is the one exit every life takes.
 
+use crate::agent::cancel::EvalReach;
 use crate::agent::dial::Dial;
 use crate::agent::event::{AgentLog, ContextOp, EditAuthority};
 use crate::agent::seat::{self, Seat};
@@ -10,7 +11,6 @@ use crate::agent::shell::LogCell;
 use crate::agent::{Agent, Avatar, ProviderHandle, SPAWN_FUEL, cancel, nudge};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Emitter, Inbox};
-use crate::agent::cancel::EvalReach;
 use crate::fleet::{Fleet, Unborn};
 use crate::prompt::Grants;
 use crate::provider::Provider;
@@ -514,7 +514,11 @@ impl Avatar {
         self.agent.schedules.clear();
         // The frontend wipes its pin register on `/clear`, so the session's
         // mirror must follow.
-        self.agent.pins.lock().expect("pin register poisoned").clear();
+        self.agent
+            .pins
+            .lock()
+            .expect("pin register poisoned")
+            .clear();
         error.map_or(Ok(()), Err)
     }
 
@@ -541,7 +545,10 @@ impl Avatar {
     #[cfg(test)]
     pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> Result<Self, Unforked> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        self.fork_named(caps, &format!("fork-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
+        self.fork_named(
+            caps,
+            &format!("fork-{}", SEQ.fetch_add(1, Ordering::Relaxed)),
+        )
     }
 
     /// A returning fork under a chosen name — the shape a production spawn
@@ -864,7 +871,10 @@ mod tests {
             chain = chain.fork(chain.caps().clone()).expect("fork child");
             assert_eq!(chain.agent.fuel, expected);
         }
-        assert_eq!(chain.agent.fuel, 0, "the chain must bottom out at zero, not wrap");
+        assert_eq!(
+            chain.agent.fuel, 0,
+            "the chain must bottom out at zero, not wrap"
+        );
     }
 
     /// A fork carries its parent's search reach verbatim, in both directions
@@ -875,7 +885,11 @@ mod tests {
         assert!(parent.fork(parent.caps().clone()).unwrap().agent.search);
         let searchless = searchless_trunk();
         assert!(
-            !searchless.fork(searchless.caps().clone()).unwrap().agent.search,
+            !searchless
+                .fork(searchless.caps().clone())
+                .unwrap()
+                .agent
+                .search,
             "a searchless parent can hand out no search of its own"
         );
     }
@@ -1018,7 +1032,9 @@ mod tests {
              system, not its non-returning parent's"
         );
 
-        let grandchild = child.branch("grandchild".into()).expect("branch grandchild");
+        let grandchild = child
+            .branch("grandchild".into())
+            .expect("branch grandchild");
         assert_ne!(
             grandchild.agent.system.len(),
             child.agent.system.len(),

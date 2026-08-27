@@ -751,12 +751,12 @@ pub fn converse_settled<S: Sink>(
 )]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
     use crate::bus::{AgentResult, AgentState, Post};
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Record};
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
+    use std::sync::Arc;
 
     /// A fresh conversing trunk over a scripted provider, in a throwaway run
     /// dir beside its scratch — both go when the trunk does.

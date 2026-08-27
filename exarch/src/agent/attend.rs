@@ -382,10 +382,14 @@ impl Avatar {
         }
 
         let card = crate::bus::card::services_pin_card(&live);
-        self.agent.pins.lock().expect("pin register poisoned").insert(
-            shell_eval::SERVICES_PIN_KEY.to_string(),
-            shell_eval::PinDigest::new(card.clone()),
-        );
+        self.agent
+            .pins
+            .lock()
+            .expect("pin register poisoned")
+            .insert(
+                shell_eval::SERVICES_PIN_KEY.to_string(),
+                shell_eval::PinDigest::new(card.clone()),
+            );
         if let Err(error) = recorder.emit(crate::record::Forensic::Pin { key: key() }) {
             recorder.report_fault(&error);
         }
@@ -679,7 +683,9 @@ mod tests {
 
         // A distinct name: `root` already holds `TRUNK_NAME` in this same
         // fleet, and names are unique among the live.
-        let mut branch = root.branch("branch".into()).expect("branch a conversing child");
+        let mut branch = root
+            .branch("branch".into())
+            .expect("branch a conversing child");
         let branch_result = branch.run_shell("c2".into(), "agents `reply 1", 5, &emit);
         assert!(
             branch_result.content.contains(refusal),

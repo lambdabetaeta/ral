@@ -202,10 +202,6 @@ impl ActFragment {
 
 /// Everything a desk handler may read off `&Avatar`, snapshotted fresh at every
 /// [`crate::agent::Avatar::run_shell`] install so no capture goes stale mid-call.
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "each bool is an independent axis captured off the agent (interactive, returns, allow_schedule, search); not a candidate for a combined enum"
-)]
 pub(crate) struct HostServices {
     /// This run's own agent: parent of what it spawns, root of the descendant
     /// check `` `message ``/`` `cancel `` enforce, and the source every
@@ -1400,7 +1396,12 @@ impl ExarchDesk {
     fn pin_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let [key] = payload_list(payload, "pin-read", "[key]")?;
         let key = payload_string(key, "pin-read", "key")?;
-        let m = self.services.agent.pins.lock().expect("pin register poisoned");
+        let m = self
+            .services
+            .agent
+            .pins
+            .lock()
+            .expect("pin register poisoned");
         match m.get(&key) {
             // A card value is always first-order, so this conversion never fails.
             Some(digest) => FOValue::try_from(&crate::bus::card::encode_card(&digest.card)),
@@ -2169,7 +2170,6 @@ mod tests {
         }
     }
 
-
     /// Booted exactly once per test. `boot_shell` resets process-global signal
     /// state, the ceremony the fleet runs once at its root; booting again per
     /// spawn races that reset against a sibling's in-flight run and deadlocks.
@@ -2925,10 +2925,13 @@ mod tests {
     #[test]
     fn start_answers_the_whole_roster_not_a_receipt() {
         let (desk, fleet, parent_inbox) = spawnable_desk(3);
-        desk.services.agent.provider_handle().swap(Arc::new(Provider::scripted(
-            "test-model",
-            Script::new().then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")])),
-        )));
+        desk.services
+            .agent
+            .provider_handle()
+            .swap(Arc::new(Provider::scripted(
+                "test-model",
+                Script::new().then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")])),
+            )));
         // Held for the whole test, and with no worker behind it, so it never
         // settles out from under the assertion below.
         let mut sibling = crate::agent::testkit::TestAgentSpec::new("already-there");
@@ -3281,8 +3284,7 @@ mod tests {
         let under = |name: &str, parent: &Arc<Agent>| {
             let mut spec = crate::agent::testkit::TestAgentSpec::new(name);
             spec.parent = Some(parent.clone());
-            crate::agent::testkit::test_agent(&fleet, spec)
-                .expect("a fresh child of a live parent")
+            crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh child of a live parent")
         };
         let root = desk_root.services.agent.clone();
         let mid = under("mid", &root);
@@ -3726,7 +3728,8 @@ mod tests {
     /// [`crate::bus::ParkMode::HeldByChildren`] instead of quiescing.  The
     /// caller must hold what comes back — that is what keeps it live.
     fn keepalive(fleet: &Arc<Fleet>, parent: &Arc<Agent>) -> Arc<Agent> {
-        let mut spec = crate::agent::testkit::TestAgentSpec::new(&format!("keepalive-{}", parent.id));
+        let mut spec =
+            crate::agent::testkit::TestAgentSpec::new(&format!("keepalive-{}", parent.id));
         spec.parent = Some(parent.clone());
         crate::agent::testkit::test_agent(fleet, spec).expect("a fresh child of a live parent")
     }
@@ -3772,10 +3775,7 @@ mod tests {
         let handle = attend_and_deliver(child, "helper", parent.mailbox());
 
         child_agent.mailbox().steer("first message".into());
-        assert!(
-            child_agent.messageable(),
-            "steer renews the exchange clock"
-        );
+        assert!(child_agent.messageable(), "steer renews the exchange clock");
         assert!(
             eventually_logged(
                 &log_dir.join("record.jsonl"),
@@ -3905,9 +3905,9 @@ mod tests {
 mod wire_tests {
     use super::tests::{message_req, roster_names, start_req_forked};
     use super::*;
+    use crate::agent::cancel::EvalReach;
     use crate::agent::event::AgentLog;
     use crate::agent::testkit::ral_call;
-    use crate::agent::cancel::EvalReach;
     use crate::bus::Inbox;
     use crate::provider::{
         Provider,
@@ -4094,8 +4094,8 @@ mod wire_tests {
         spec.returns = true;
         spec.search = true;
         spec.dial = Some(dial);
-        let agent = crate::agent::testkit::test_agent(&fleet, spec)
-            .expect("a fresh fleet's wire trunk");
+        let agent =
+            crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's wire trunk");
         let (emit, _rx) = crate::bus::dummy_emitter();
         let desk = ExarchDesk {
             services: HostServices {
@@ -4287,8 +4287,8 @@ mod wire_tests {
         parent_spec.fuel = 3;
         parent_spec.returns = true;
         parent_spec.search = true;
-        let parent = crate::agent::testkit::test_agent(&fleet, parent_spec)
-            .expect("a fresh fleet's trunk");
+        let parent =
+            crate::agent::testkit::test_agent(&fleet, parent_spec).expect("a fresh fleet's trunk");
 
         let identity_inbox = Inbox::new();
         let mut identity = crate::agent::testkit::TestAgentSpec::new("identity-peer");

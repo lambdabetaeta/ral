@@ -6,9 +6,12 @@
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 
-use crate::agent::{Agent, Avatar, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL, cancel};
-use crate::bootstrap::Scratch;
 use crate::agent::cancel::EvalReach;
+use crate::agent::{
+    Agent, Avatar, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL,
+    cancel,
+};
+use crate::bootstrap::Scratch;
 use crate::bus::{AgentOutcome, Emitter, Mailbox};
 use crate::fleet::Fleet;
 use crate::provider::scripted::Script;

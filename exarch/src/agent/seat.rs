@@ -2,9 +2,9 @@
 //! host-side state that seat kind owns.  Every engine-side reach is a
 //! method here, so a new seat kind is one more variant, not a second agent.
 
+use crate::agent::cancel::{EvalReach, InterruptTarget};
 use crate::agent::event::AgentLog;
 use crate::bootstrap::Scratch;
-use crate::agent::cancel::{EvalReach, InterruptTarget};
 use crate::fleet::desk::{AbsentDesk, DeskBinding, HostSeam};
 use crate::shell_eval::builtins;
 use ral_core::Shell;

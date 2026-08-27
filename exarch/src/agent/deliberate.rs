@@ -527,10 +527,10 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 )]
 mod tests {
     use super::*;
-    use crate::agent::testkit::*;
     use crate::agent::NoControl;
-    use crate::bus::{AgentOutcome, Post};
     use crate::agent::cancel::{EvalReach, InterruptTarget};
+    use crate::agent::testkit::*;
+    use crate::bus::{AgentOutcome, Post};
     use crate::provider::scripted::{Reply, Script};
     use genai::chat::ChatRole;
     use ral_core::Shell;
@@ -900,7 +900,10 @@ mod tests {
                 generation: stale,
             }))
             .unwrap();
-        session.agent.provider.swap(scripted("test-model", Script::new()));
+        session
+            .agent
+            .provider
+            .swap(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
@@ -930,8 +933,14 @@ mod tests {
         session.agent.provider.swap(scripted(
             "test-model",
             Script::new()
-                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'done'")]))
-                .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'done'")])),
+                .then(Reply::tool_calls(vec![ral_call(
+                    "r1",
+                    "agents `reply 'done'",
+                )]))
+                .then(Reply::tool_calls(vec![ral_call(
+                    "r2",
+                    "agents `reply 'done'",
+                )])),
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
@@ -963,7 +972,10 @@ mod tests {
                 generation: stale,
             })
             .unwrap();
-        session.agent.provider.swap(scripted("test-model", Script::new()));
+        session
+            .agent
+            .provider
+            .swap(scripted("test-model", Script::new()));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
@@ -992,8 +1004,14 @@ mod tests {
         session.agent.provider.swap(scripted(
             "test-model",
             Script::new()
-                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'done'")]))
-                .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'done'")])),
+                .then(Reply::tool_calls(vec![ral_call(
+                    "r1",
+                    "agents `reply 'done'",
+                )]))
+                .then(Reply::tool_calls(vec![ral_call(
+                    "r2",
+                    "agents `reply 'done'",
+                )])),
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);

@@ -53,19 +53,19 @@ pub(crate) mod testkit;
 
 pub(crate) use attend::quiesce_when_childless;
 pub use attend::{Control, NoControl, Verdict};
-pub(crate) use build::{Build, fresh_id};
 #[cfg(test)]
 pub(crate) use build::TestTrunk;
+pub(crate) use build::{Build, fresh_id};
 pub use build::{RecordedAccount, RootConfig, RootSeat};
 pub use dial::Dial;
 pub(crate) use probe::ProbedWorker;
 pub(crate) use shell::{LogCell, ReplyCell};
 
+use crate::agent::cancel::EvalReach;
 use crate::agent::seat::Seat;
 use crate::bus::{
     AgentId, AgentMessage, AgentOutcome, AgentResult, Inbox, InboxReject, Mailbox, Post,
 };
-use crate::agent::cancel::EvalReach;
 use crate::fleet::Fleet;
 use crate::provider::Provider;
 use crate::shell_eval;
