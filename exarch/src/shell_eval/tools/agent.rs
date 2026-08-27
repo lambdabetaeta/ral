@@ -5,7 +5,7 @@
 
 use crate::agent::Agent;
 use crate::bus::{AgentId, AgentOutcome, AgentResult, Emitter, Mailbox, Post};
-use crate::fleet::registry::{AGENT_LEASE_IDLE, AgentRegistry, RegisterError, Registration};
+use crate::fleet::registry::{AgentRegistry, RegisterError, Registration};
 use crate::record::Transient;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -105,13 +105,12 @@ pub(crate) fn spawn_async(
     // from it, so a later `/model` on either never disturbs the other.
     let child_provider = child.provider_handle();
     // A returning sub-agent holds `reply`; a conversing branch does not.  This
-    // one fact gates the lease, the parent edge, and the settle epilogue.
+    // one fact gates the parent edge and the settle epilogue.
     let delivers = child.returns();
     let spawner = delivers.then_some(parent);
     let generation = match registry.register(Registration {
         id: agent_id,
         parent: spawner,
-        lease: delivers.then_some(AGENT_LEASE_IDLE), // an hour of silence must not reap a conversation
         name: name.clone(),
         log_dir: log_dir.clone(),
         cancel,

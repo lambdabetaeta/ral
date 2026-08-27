@@ -1304,7 +1304,6 @@ keep-bottom
         let _ = registry.register(crate::fleet::registry::Registration {
             id: 7,
             parent: None,
-            lease: None,
             name: "root".into(),
             log_dir: std::path::PathBuf::from("/tmp"),
             cancel: crate::agent::cancel::Token::new(),

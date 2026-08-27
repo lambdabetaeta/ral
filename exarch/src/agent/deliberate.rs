@@ -529,7 +529,7 @@ mod tests {
     use crate::agent::testkit::*;
     use crate::agent::{NoControl, ProviderHandle, fresh_id};
     use crate::bus::{AgentOutcome, Inbox, Post};
-    use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, InterruptTarget, Registration};
+    use crate::fleet::registry::{EvalReach, InterruptTarget, Registration};
     use crate::provider::scripted::{Reply, Script};
     use genai::chat::ChatRole;
     use ral_core::Shell;
@@ -595,7 +595,6 @@ mod tests {
             .register(Registration {
                 id: child.id,
                 parent: Some(parent.id),
-                lease: Some(AGENT_LEASE_IDLE),
                 name: "child".into(),
                 log_dir: dir.path().join("child"),
                 cancel: child.cancel_token().clone(),
@@ -607,7 +606,6 @@ mod tests {
         let _ = child.agents.register(Registration {
             id: direct,
             parent: Some(child.id),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "direct".into(),
             log_dir: dir.path().join("direct"),
             cancel: direct_token.clone(),
@@ -621,7 +619,6 @@ mod tests {
         let _ = child.agents.register(Registration {
             id: grandchild,
             parent: Some(direct),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "grandchild".into(),
             log_dir: dir.path().join("grandchild"),
             cancel: grandchild_token.clone(),
@@ -637,7 +634,6 @@ mod tests {
             .register(Registration {
                 id: sibling,
                 parent: Some(parent.id),
-                lease: Some(AGENT_LEASE_IDLE),
                 name: "sibling".into(),
                 log_dir: dir.path().join("sibling"),
                 cancel: sibling_token.clone(),
@@ -1088,7 +1084,6 @@ mod tests {
         let _ = parent.agents.register(Registration {
             id: child.id,
             parent: Some(parent.id),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "child".into(),
             log_dir: child.log_dir(),
             cancel: child.cancel_token().clone(),

@@ -299,8 +299,9 @@ disagree about what is shared.
   parks under its idle lease and leaves when it is reaped. There is no
   human-less daemon: nothing lingers without a present human, running work, a
   bounded lease, or a bounded self-schedule.
-- **The idle lease is dynamic; focus is not.** A leased child
-  (`Registration::lease`, armed only for a returning sub-agent) is reaped once
+- **The idle lease is dynamic; focus is not.** A leased child — every
+  parented entry, i.e. every returning sub-agent; the registry derives the
+  lease from `Registration::parent`, no caller chooses it — is reaped once
   its idle span — measured off the registry's last-exchange clock, seeded at
   birth — exceeds its bound: the reaper (`fleet/registry.rs`'s `lease_fire`)
   re-arms itself for the remaining margin on every fire that finds the entry

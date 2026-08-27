@@ -1301,7 +1301,6 @@ mod tests {
             .register(crate::fleet::registry::Registration {
                 id: target,
                 parent: Some(session.id),
-                lease: Some(crate::fleet::registry::AGENT_LEASE_IDLE),
                 name: "doomed".to_string(),
                 log_dir: std::path::PathBuf::from("/tmp"),
                 cancel: crate::agent::cancel::Token::new(),

@@ -281,7 +281,8 @@ presentational, read by neither the registry nor `park_mode`. `TAB`bing to a
 tab lets it receive the human's typed lines and own `Esc`, but looking at a
 tab keeps nothing alive. What keeps a non-conversing returning child alive
 past quiescence is a renewable **idle lease** the registry arms at birth
-(`Registration::lease`, one hour), not the human's attention: the one thing
+for every parented entry (one hour, `AGENT_LEASE_IDLE`, a registry-level
+bound rather than a per-entry field), not the human's attention: the one thing
 that renews it is a delivered *message* — a human's typed line
 (`AgentRegistry::steer`) or the parent's `` agents `message `` — so a child
 that is being talked to, and a child parked on a deposited reply, keep their

@@ -598,7 +598,7 @@ mod tests {
     use super::*;
     use crate::agent::ProviderHandle;
     use crate::agent::testkit::*;
-    use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
+    use crate::fleet::registry::{Registration};
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Forensic, Record};
     use ral_core::Value;
@@ -668,7 +668,6 @@ mod tests {
             .register(Registration {
                 id: child.id,
                 parent: Some(parent.id),
-                lease: Some(AGENT_LEASE_IDLE),
                 name: "child".into(),
                 log_dir: dir.path().join("child"),
                 cancel: child.cancel_token().clone(),
@@ -761,7 +760,6 @@ mod tests {
             .register(Registration {
                 id: child.id,
                 parent: Some(parent.id),
-                lease: Some(AGENT_LEASE_IDLE),
                 name: "child".into(),
                 log_dir: dir.path().join("child"),
                 cancel: child.cancel_token().clone(),

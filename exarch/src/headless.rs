@@ -764,7 +764,7 @@ mod tests {
     use super::*;
     use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
     use crate::bus::{AgentResult, AgentState, Post};
-    use crate::fleet::registry::{AGENT_LEASE_IDLE, Registration};
+    use crate::fleet::registry::{Registration};
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Record};
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
@@ -1182,7 +1182,6 @@ mod tests {
             .register(Registration {
                 id: child.id,
                 parent: Some(parent.id),
-                lease: Some(AGENT_LEASE_IDLE),
                 name: name.to_string(),
                 log_dir: child.log_dir(),
                 cancel: child.cancel_token().clone(),

@@ -202,12 +202,10 @@ pub fn check_name(name: &str) -> Result<(), String> {
 pub struct Registration {
     pub id: AgentId,
     /// `None` for a root: the trunk, or a conversing `/branch` child that
-    /// owes no reply and is nobody's to manage.
+    /// owes no reply and is nobody's to manage.  `Some` is what arms the idle
+    /// lease: a returning child abandoned by its parent must be reaped, while
+    /// a conversation must never lose an exchange at the hour mark.
     pub parent: Option<AgentId>,
-    /// The idle lease to arm over this agent's subtree, or `None` for none.
-    /// Duration-typed rather than a bare flag so a test can arm a millisecond
-    /// lease instead of waiting out [`AGENT_LEASE_IDLE`].
-    pub lease: Option<Duration>,
     pub name: String,
     pub log_dir: PathBuf,
     pub cancel: Token,
@@ -232,6 +230,9 @@ pub struct AgentRegistry {
 
 struct Inner {
     entries: HashMap<AgentId, Entry>,
+    /// The idle bound every parented entry is reaped at.  [`AGENT_LEASE_IDLE`]
+    /// outside tests; each fire re-reads it, so nothing caches a copy.
+    lease: Duration,
 }
 
 impl Inner {
@@ -268,10 +269,6 @@ struct Entry {
     /// Hot-swappable, so a `/model` on the focused agent swaps *its* provider
     /// and disturbs no other.
     provider: ProviderHandle,
-    /// [`AgentRegistry::register`] arms the first fire from this; each fire
-    /// re-reads it by id rather than closing over a copy, so a removed entry
-    /// ends the chain simply by not being found.
-    lease: Option<Duration>,
     /// The last exchange — human or parent message — or `None` before the first
     /// one, `started` being the epoch until then.  [`renew_entry`] is the only
     /// writer.
@@ -291,6 +288,12 @@ impl Entry {
     fn idle(&self) -> Duration {
         self.last_exchange.unwrap_or(self.started).elapsed()
     }
+
+    /// Leased iff parented: a returning child is reaped at the bound, a
+    /// conversing root never.
+    fn leased(&self) -> bool {
+        self.parent.is_some()
+    }
 }
 
 impl Default for AgentRegistry {
@@ -304,8 +307,16 @@ impl AgentRegistry {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 entries: HashMap::new(),
+                lease: AGENT_LEASE_IDLE,
             })),
         }
+    }
+
+    /// Shorten the idle bound so a test can watch a reap instead of waiting out
+    /// [`AGENT_LEASE_IDLE`].  Shared by every clone, like the rest of the map.
+    #[cfg(test)]
+    pub fn set_lease(&self, bound: Duration) {
+        self.lock().lease = bound;
     }
 
     /// `id`'s generation: captured by a worker at birth so a result arriving
@@ -349,10 +360,8 @@ impl AgentRegistry {
 
     /// Register an agent, returning the generation it carries into its result:
     /// its *parent's*, read at this birth, since the parent is who must still
-    /// be listening when the result lands.  A lease is the caller's choice, not
-    /// a consequence of being parented: a detached worker gets one (abandoned,
-    /// it must be reaped), a branch does not (a conversation must not lose an
-    /// exchange at the hour mark).
+    /// be listening when the result lands.  Parented means leased: the idle
+    /// chain is armed here, so no caller can build an unbounded park.
     ///
     /// # Errors
     /// [`RegisterError::SessionDead`] when `parent` is not, at this instant, a
@@ -372,7 +381,6 @@ impl AgentRegistry {
         let Registration {
             id,
             parent,
-            lease,
             name,
             log_dir,
             cancel,
@@ -425,7 +433,6 @@ impl AgentRegistry {
                 reach,
                 mailbox,
                 provider,
-                lease,
                 last_exchange: None,
                 reply: None,
                 rest: None,
@@ -434,8 +441,9 @@ impl AgentRegistry {
         // Armed only after the entry exists: `lease_fire` re-reads the entry by
         // id, so arming earlier would let the first fire find nothing and end
         // the chain before it started.
+        let ttl = g.lease;
         drop(g);
-        if let Some(ttl) = lease {
+        if parent.is_some() {
             let reg = self.clone();
             process::arm_callback(ttl, move || lease_fire(&reg, id)).keep();
         }
@@ -589,27 +597,25 @@ impl AgentRegistry {
         g.entries.get(&id).map(Entry::idle)
     }
 
-    /// The nearest time-to-reap across the leased entries, `None` when none
-    /// carries a lease.  A pure survey for `/resources`: it renews nothing.
+    /// The nearest time-to-reap across the leased entries, `None` when none is
+    /// leased.  A pure survey for `/resources`: it renews nothing.
     pub fn nearest_reap(&self) -> Option<Duration> {
         let g = self.lock();
         g.entries
             .values()
-            .filter_map(|e| {
-                let ttl = e.lease?;
-                Some(ttl.saturating_sub(e.idle()))
-            })
+            .filter(|e| e.leased())
+            .map(|e| g.lease.saturating_sub(e.idle()))
             .min()
     }
 
     /// `(idle, ttl)` for a live leased entry, read by [`lease_fire`].  `None`
-    /// once the entry is gone or if it carries no lease — either way the chain
-    /// has nothing left to arm.
+    /// once the entry is gone — the chain then has nothing left to arm.
     fn lease_state(&self, id: AgentId) -> Option<(Duration, Duration)> {
-        self.lock().entries.get(&id).and_then(|e| {
-            let ttl = e.lease?;
-            Some((e.idle(), ttl))
-        })
+        let g = self.lock();
+        g.entries
+            .get(&id)
+            .filter(|e| e.leased())
+            .map(|e| (e.idle(), g.lease))
     }
 
     /// Send a marked model-visible message to a proper descendant of `from` —
@@ -960,7 +966,6 @@ mod tests {
         reg.register(Registration {
             id,
             parent,
-            lease: parent.is_some().then_some(AGENT_LEASE_IDLE),
             name: format!("a{id}"),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
@@ -982,19 +987,19 @@ mod tests {
         assert!(!reg.settle(1), "a settled entry is gone");
     }
 
-    /// A lease is an explicit knob, not a consequence of being parented.
+    /// A lease is a consequence of being parented, and of nothing else.
     /// Asserted behaviourally, since there is no guard field to peek at: the
     /// reap only stamps the cancel layers, and a live attend loop — absent
     /// here — is what would go on to settle the entry out of the map.
     #[test]
-    fn register_arms_a_lease_only_when_asked() {
+    fn register_arms_a_lease_only_when_parented() {
         let reg = AgentRegistry::new();
-        entry(&reg, 0, None); // the trunk: a live parent for 1 and 2
+        reg.set_lease(Duration::from_millis(50));
+        entry(&reg, 0, None); // the trunk: a live parent for 2
         let branch_token = Token::new();
         let _ = reg.register(Registration {
             id: 1,
-            parent: Some(0),
-            lease: None,
+            parent: None,
             name: "branch".into(),
             log_dir: PathBuf::from("/tmp"),
             cancel: branch_token.clone(),
@@ -1009,7 +1014,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(0),
-            lease: Some(Duration::from_millis(50)),
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp"),
             cancel: Token::new(),
@@ -1025,12 +1029,12 @@ mod tests {
             eventually(Duration::from_secs(2), || worker_root
                 .as_scope()
                 .is_cancelled()),
-            "lease: Some(short) is reaped once its bound elapses"
+            "a parented entry is reaped once the bound elapses"
         );
         std::thread::sleep(Duration::from_millis(300));
         assert!(
             !branch_token.is_cancelled(),
-            "lease: None arms no reaper deadline"
+            "a root arms no reaper deadline"
         );
     }
 
@@ -1076,7 +1080,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: token.clone(),
@@ -1107,7 +1110,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 0,
             parent: None,
-            lease: None,
             name: "trunk".into(),
             log_dir: PathBuf::from("/tmp/trunk"),
             cancel: trunk_token.clone(),
@@ -1122,7 +1124,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
@@ -1172,7 +1173,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 0,
             parent: None,
-            lease: None,
             name: "trunk".into(),
             log_dir: PathBuf::from("/tmp/trunk"),
             cancel: trunk_token.clone(),
@@ -1210,7 +1210,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: None, // a branch carries no lease
             name: "branch".into(),
             log_dir: PathBuf::from("/tmp/branch"),
             cancel: branch_token.clone(),
@@ -1224,7 +1223,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: child_token.clone(),
@@ -1277,7 +1275,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: None,
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: child_token.clone(),
@@ -1291,7 +1288,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/gc"),
             cancel: grandchild_token.clone(),
@@ -1347,7 +1343,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: None,
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
@@ -1391,7 +1386,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 7,
             parent: Some(0),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "lint".into(),
             log_dir: PathBuf::from("/log/7"),
             cancel: token.clone(),
@@ -1423,7 +1417,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: None,
-            lease: None,
             name: "r".into(),
             log_dir: "/l".into(),
             cancel: r.clone(),
@@ -1437,7 +1430,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "c".into(),
             log_dir: "/l".into(),
             cancel: c.clone(),
@@ -1451,7 +1443,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 3,
             parent: Some(2),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "g".into(),
             log_dir: "/l".into(),
             cancel: g.clone(),
@@ -1465,7 +1456,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 4,
             parent: Some(1),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "s".into(),
             log_dir: "/l".into(),
             cancel: sibling.clone(),
@@ -1504,7 +1494,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
@@ -1569,7 +1558,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 3,
             parent: Some(1),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: Token::new(),
@@ -1593,7 +1581,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: None,
             name: "leaf".into(),
             log_dir: PathBuf::from("/tmp/1"),
             cancel: Token::new(),
@@ -1608,7 +1595,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 2,
             parent: Some(0),
-            lease: None,
             name: "sibling".into(),
             log_dir: PathBuf::from("/tmp/2"),
             cancel: sibling_token.clone(),
@@ -1623,7 +1609,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 3,
             parent: Some(1),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "grandchild".into(),
             log_dir: PathBuf::from("/tmp/3"),
             cancel: grandchild_token.clone(),
@@ -1700,7 +1685,6 @@ mod tests {
         let outcome = reg.register(Registration {
             id: 1,
             parent: Some(99), // never registered
-            lease: None,
             name: "orphan".into(),
             log_dir: PathBuf::from("/tmp/orphan"),
             cancel: Token::new(),
@@ -1730,7 +1714,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: None,
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: parent_token.clone(),
@@ -1747,7 +1730,6 @@ mod tests {
         let outcome = reg.register(Registration {
             id: 2,
             parent: Some(1),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "late-child".into(),
             log_dir: PathBuf::from("/tmp/late-child"),
             cancel: Token::new(),
@@ -1776,7 +1758,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "helper".into(),
             log_dir: PathBuf::from("/tmp/helper"),
             cancel: Token::new(),
@@ -1792,7 +1773,6 @@ mod tests {
         let outcome = reg.register(Registration {
             id: 2,
             parent: Some(0),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "helper".into(),
             log_dir: PathBuf::from("/tmp/helper-2"),
             cancel: Token::new(),
@@ -1830,7 +1810,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "worker".into(),
             log_dir: PathBuf::from("/tmp/worker"),
             cancel: Token::new(),
@@ -1874,11 +1853,11 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let ttl = Duration::from_millis(300);
+        reg.set_lease(ttl);
         let eval_root = DurableRoot::default();
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: Some(ttl),
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
@@ -1912,11 +1891,11 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let ttl = Duration::from_millis(80);
+        reg.set_lease(ttl);
         let token = Token::new();
         reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: Some(ttl),
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: token.clone(),
@@ -1943,11 +1922,11 @@ mod tests {
         let reg = AgentRegistry::new();
         entry(&reg, 0, None); // the trunk
         let ttl = Duration::from_millis(80);
+        reg.set_lease(ttl);
         let eval_root = DurableRoot::default();
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: Some(ttl),
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
@@ -1985,7 +1964,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),
@@ -2023,7 +2001,6 @@ mod tests {
         let _ = reg.register(Registration {
             id: 1,
             parent: Some(0),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "child".into(),
             log_dir: PathBuf::from("/tmp/child"),
             cancel: Token::new(),

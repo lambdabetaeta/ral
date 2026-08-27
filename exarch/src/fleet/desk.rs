@@ -1866,7 +1866,7 @@ mod tests {
     use crate::agent::testkit::ral_call;
     use crate::bus::{Inbox, Signal, channel};
     use crate::egress::Egress;
-    use crate::fleet::registry::{AGENT_LEASE_IDLE, EvalReach, InterruptTarget, Registration};
+    use crate::fleet::registry::{EvalReach, InterruptTarget, Registration};
     use crate::provider::{
         Provider,
         scripted::{Reply, Script},
@@ -2184,7 +2184,6 @@ mod tests {
         let _ = registry.register(Registration {
             id: parent_id,
             parent: None,
-            lease: None,
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/parent"),
             cancel: crate::agent::cancel::Token::new(),
@@ -3018,7 +3017,6 @@ mod tests {
         let _ = registry.register(Registration {
             id: crate::agent::fresh_id(),
             parent: Some(desk.services.parent),
-            lease: Some(AGENT_LEASE_IDLE),
             name: "already-there".into(),
             log_dir: PathBuf::from("/tmp/already-there"),
             cancel: crate::agent::cancel::Token::new(),
@@ -3382,7 +3380,6 @@ mod tests {
             let _ = registry.register(Registration {
                 id,
                 parent: Some(parent),
-                lease: Some(AGENT_LEASE_IDLE),
                 name: name.to_string(),
                 log_dir: PathBuf::from(format!("/tmp/{id}")),
                 cancel: crate::agent::cancel::Token::new(),
@@ -3798,21 +3795,13 @@ mod tests {
 
     // ── engaged-child lifecycle ────────────────────────────────────────────
 
-    /// The registration half of `spawn_async`, but with a caller-chosen lease: a
-    /// production spawn always arms the fixed [`AGENT_LEASE_IDLE`], which no
-    /// test can wait out.
-    fn register_lease_child(
-        parent_id: AgentId,
-        lease: Option<Duration>,
-        name: &str,
-        child: &Agent,
-    ) -> u64 {
+    /// The registration half of `spawn_async`.
+    fn register_child(parent_id: AgentId, name: &str, child: &Agent) -> u64 {
         child
             .agents
             .register(Registration {
                 id: child.id,
                 parent: Some(parent_id),
-                lease,
                 name: name.to_string(),
                 log_dir: child.log_dir(),
                 cancel: child.cancel_token().clone(),
@@ -3855,11 +3844,15 @@ mod tests {
     /// A live, never-attended child: just enough for
     /// [`AgentRegistry::has_children`] to read true, so `parent_id` parks
     /// [`crate::bus::ParkMode::HeldByChildren`] instead of quiescing.
-    fn register_keepalive(registry: &AgentRegistry, parent_id: AgentId, log_dir: &std::path::Path) {
+    fn register_keepalive(
+        registry: &AgentRegistry,
+        parent_id: AgentId,
+        log_dir: &std::path::Path,
+    ) -> AgentId {
+        let id = crate::agent::fresh_id();
         let _ = registry.register(Registration {
-            id: crate::agent::fresh_id(),
+            id,
             parent: Some(parent_id),
-            lease: None,
             name: format!("keepalive-{parent_id}"),
             log_dir: log_dir.to_path_buf(),
             cancel: crate::agent::cancel::Token::new(),
@@ -3870,6 +3863,7 @@ mod tests {
             mailbox: crate::bus::Inbox::new().mailbox(),
             provider: ProviderHandle::new(scripted_provider()),
         });
+        id
     }
 
     /// Poll `path` until it contains `needle` or `timeout` elapses. A child's
@@ -3910,7 +3904,7 @@ mod tests {
         let child_id = child.id;
         let registry = child.agents.clone();
 
-        let generation = register_lease_child(parent.id, None, "helper", &child);
+        let generation = register_child(parent.id, "helper", &child);
         register_keepalive(&registry, child_id, &dir.path().join("keepalive"));
         let handle = attend_and_deliver(child, "helper", generation, parent.mailbox());
 
@@ -3981,7 +3975,8 @@ mod tests {
         child_a.seed("go".into());
         let id_a = child_a.id;
         let registry = child_a.agents.clone();
-        let gen_a = register_lease_child(parent.id, Some(ttl_a), "child-a", &child_a);
+        registry.set_lease(ttl_a);
+        let gen_a = register_child(parent.id, "child-a", &child_a);
         let handle_a = attend_and_deliver(child_a, "child-a", gen_a, parent.mailbox());
 
         match wait_for_settle(&parent.inbox()) {
@@ -4001,12 +3996,14 @@ mod tests {
         // race, so `renew` alone must be what defers its reap.
         let child_b = parent.fork(parent.caps().clone()).expect("fork child b");
         let id_b = child_b.id;
-        let gen_b = register_lease_child(parent.id, Some(ttl_b), "child-b", &child_b);
-        register_keepalive(&registry, id_b, &dir.path().join("keepalive-b"));
+        registry.set_lease(ttl_b);
+        let gen_b = register_child(parent.id, "child-b", &child_b);
+        let keepalive_b = register_keepalive(&registry, id_b, &dir.path().join("keepalive-b"));
         let handle_b = attend_and_deliver(child_b, "child-b", gen_b, parent.mailbox());
 
         std::thread::sleep(ttl_b / 2);
         assert!(registry.renew(id_b), "a live entry renews");
+        assert!(registry.renew(keepalive_b), "so does its keepalive");
 
         std::thread::sleep(ttl_b / 2 + Duration::from_millis(150));
         assert!(
@@ -4221,7 +4218,6 @@ mod wire_tests {
         let _ = registry.register(Registration {
             id: parent_id,
             parent: None,
-            lease: None,
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/wire-parent"),
             cancel: crate::agent::cancel::Token::new(),
@@ -4436,7 +4432,6 @@ mod wire_tests {
         let _ = registry.register(Registration {
             id: parent_id,
             parent: None,
-            lease: None,
             name: "parent".into(),
             log_dir: PathBuf::from("/tmp/peer-parent"),
             cancel: crate::agent::cancel::Token::new(),
@@ -4453,7 +4448,6 @@ mod wire_tests {
         let _ = registry.register(Registration {
             id: identity_id,
             parent: Some(parent_id),
-            lease: None,
             name: "identity-peer".into(),
             log_dir: PathBuf::from("/tmp/peer-identity"),
             cancel: crate::agent::cancel::Token::new(),
@@ -4470,7 +4464,6 @@ mod wire_tests {
         let _ = registry.register(Registration {
             id: wire_id,
             parent: Some(parent_id),
-            lease: None,
             name: "wire-peer".into(),
             log_dir: PathBuf::from("/tmp/peer-wire"),
             cancel: crate::agent::cancel::Token::new(),

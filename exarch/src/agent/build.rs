@@ -253,7 +253,6 @@ impl Agent {
         let _ = self.agents.register(Registration {
             id: self.id,
             parent: self.parent,
-            lease: None, // a root (trunk or headless) is never abandoned: no lease
             name: name.to_string(),
             log_dir: self.log.lock().dir().to_path_buf(),
             cancel: self.cancel.clone(),
