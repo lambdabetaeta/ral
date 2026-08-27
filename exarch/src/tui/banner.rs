@@ -383,7 +383,7 @@ mod tests {
             eprintln!(
                 "[{:>2}] {}",
                 l.spans.first().map_or(0, |s| s.content.chars().count()),
-                line::plain(l)
+                line::text(l)
             );
         }
         for l in &lines {
@@ -403,25 +403,11 @@ mod tests {
     fn legend_names_every_rail_shape() {
         let text: String = legend_panel()
             .iter()
-            .map(line::plain)
+            .map(line::text)
             .collect::<Vec<_>>()
             .join("\n");
         for (_, name) in rail::RAIL_SHAPES {
             assert!(text.contains(name), "legend omits the {name:?} shape row");
-        }
-    }
-
-    /// The samples carry rail glyphs, but always in a value cell behind a
-    /// label — never as the leading span `line::plain` strips on copy.
-    #[test]
-    fn legend_wears_no_marginal_rail() {
-        for l in legend_panel() {
-            assert_eq!(
-                line::rail_skip(&l),
-                0,
-                "a legend row leads with a rail glyph: {:?}",
-                line::plain(&l)
-            );
         }
     }
 }

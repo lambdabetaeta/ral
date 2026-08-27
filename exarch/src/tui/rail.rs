@@ -40,8 +40,9 @@ pub(super) enum RailKind {
 }
 impl RailKind {
     /// The shape glyph. Every one is a single display column, so the rail keeps
-    /// its fixed 2-column width (glyph plus space) across kinds.
-    fn glyph(self) -> &'static str {
+    /// its fixed 2-column width (glyph plus space) across kinds — checked for
+    /// the whole vocabulary by `super::row`'s gutter-width test.
+    pub(super) fn glyph(self) -> &'static str {
         match self {
             Self::Patch => "▎",
             Self::ToolCall(true) => "▽",
@@ -59,9 +60,10 @@ impl RailKind {
     }
 }
 
-/// The shape vocabulary with its glosses: both the rows `/legend` draws (in
-/// `super::banner`) and the set [`is_rail_prefix`] recognises. A kind left out
-/// here is one the rail draws but copy will not strip.
+/// The shape vocabulary with its glosses: the rows `/legend` draws (in
+/// `super::banner`), and the set `super::row`'s width invariant is checked
+/// against.  Copy is no longer coupled to this list — a
+/// [`super::row::Row`]'s margin is a field, not a span copy must recognise.
 pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
     (RailKind::Patch, "file change — diff or write"),
     (RailKind::ToolCall(false), "tool call, shut"),
@@ -145,14 +147,6 @@ pub(super) fn desaturate(c: Color, t: f32) -> Color {
     )]
     let luma = (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round() as u8;
     mix(c, Color::Rgb(luma, luma, luma), t)
-}
-
-/// True when `s` is one shape glyph and its trailing space — the chrome
-/// [`super::line::plain`] strips on copy and [`super::line::wrap_line`] hangs a
-/// wrapped line's continuations under.
-pub(super) fn is_rail_prefix(s: &str) -> bool {
-    s.strip_suffix(' ')
-        .is_some_and(|glyph| RAIL_SHAPES.iter().any(|(k, _)| k.glyph() == glyph))
 }
 
 /// The 2-column rail cell: the kind's glyph in the agent's hue, lightened by

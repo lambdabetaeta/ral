@@ -25,6 +25,7 @@ use super::gesture::COPY_TOAST_TTL;
 use super::line;
 use super::matrix::matrix_bar;
 use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
+use super::row::Row;
 use super::select::highlight_range;
 use super::status::rule_line;
 use super::terminal::Term;
@@ -88,11 +89,14 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     // the commands queued among them, in the order typed, through the same
     // chrome a committed prompt echo uses.
     let queued = app.inbox.queued_human_messages();
-    let queued_lines = if queued.is_empty() {
+    let queued_lines: Vec<Line<'static>> = if queued.is_empty() {
         Vec::new()
     } else {
         let w = area.width.saturating_sub(LEFT_MARGIN).min(READ_W);
         queued_prompt_rows(&queued, w, (area.height / 3).max(1) as usize)
+            .into_iter()
+            .map(Row::into_line)
+            .collect()
     };
     #[allow(
         clippy::cast_possible_truncation,
@@ -160,15 +164,18 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         }
         _ => Vec::new(),
     };
-    let (mut lines, offset, scroll_pct) = match app.tabs.viewport_mut(focused) {
+    let (mut rows, offset, scroll_pct) = match app.tabs.viewport_mut(focused) {
         Some(vp) => {
             let w = vp.render_window(text_rect.width, text_rect.height as usize);
             (w.lines, w.offset, w.scroll_pct)
         }
         None => (Vec::new(), 0, None),
     };
-    paint_selection(app, &mut lines, offset);
-    paint_hover(app, &mut lines, offset);
+    paint_selection(app, &mut rows, offset);
+    paint_hover(app, &mut rows, offset);
+    // The screen flatten — one of the two seams where a margin rejoins its
+    // content, the other being `user.log`.
+    let lines: Vec<Line<'static>> = rows.into_iter().map(Row::into_line).collect();
     app.gesture.record_frame(FrameGeom {
         text: text_rect,
         offset,
@@ -320,48 +327,45 @@ fn emit_tab_title(app: &mut App) {
 }
 
 /// Reverse-video the part of the active selection inside the visible window.
-fn paint_selection(app: &App, lines: &mut [Line<'static>], offset: usize) {
+fn paint_selection(app: &App, rows: &mut [Row], offset: usize) {
     let Some((a, b)) = app.gesture.selection() else {
         return;
     };
     let (lo, hi) = (a.min(b), a.max(b));
     let (lo_row, lo_col) = lo;
     let (hi_row, hi_col) = hi;
-    for (i, line) in lines.iter_mut().enumerate() {
-        let row = offset + i;
-        if row < lo_row || row > hi_row {
+    for (i, row) in rows.iter_mut().enumerate() {
+        let n = offset + i;
+        if n < lo_row || n > hi_row {
             continue;
         }
-        if lo_row == hi_row {
-            highlight_range(line, lo_col, hi_col);
-        } else if row == lo_row {
-            highlight_range(line, lo_col, u16::MAX);
-        } else if row == hi_row {
-            highlight_range(line, 0, hi_col);
-        } else {
-            for span in &mut line.spans {
-                span.style = span.style.add_modifier(Modifier::REVERSED);
-            }
-        }
+        // Every row goes through `highlight_range`, interior ones included: it
+        // is the only thing that knows where content starts, and an interior
+        // row painted span-wise would light the margin.
+        let (from, to) = match (n == lo_row, n == hi_row) {
+            (true, true) => (lo_col, hi_col),
+            (true, false) => (lo_col, u16::MAX),
+            (false, true) => (0, hi_col),
+            (false, false) => (0, u16::MAX),
+        };
+        highlight_range(row, from, to);
     }
 }
 
 /// Light the rail glyph of the hovered dialable block.  Only its first row
 /// carries a glyph, so a block scrolled past its header shows no mark.
-fn paint_hover(app: &App, lines: &mut [Line<'static>], offset: usize) {
+fn paint_hover(app: &App, rows: &mut [Row], offset: usize) {
     let Some(target) = app.gesture.hover() else {
         return;
     };
     let Some(vp) = app.tabs.viewport(app.tabs.focused()) else {
         return;
     };
-    for (i, line) in lines.iter_mut().enumerate() {
-        let row = offset + i;
-        let head = row == 0 || vp.block_at(row - 1) != Some(target);
-        if vp.block_at(row) == Some(target) && head {
-            if let Some(glyph) = line.spans.first_mut() {
-                glyph.style = glyph.style.add_modifier(Modifier::REVERSED);
-            }
+    for (i, row) in rows.iter_mut().enumerate() {
+        let n = offset + i;
+        let head = n == 0 || vp.block_at(n - 1) != Some(target);
+        if vp.block_at(n) == Some(target) && head {
+            row.hover();
             break;
         }
     }

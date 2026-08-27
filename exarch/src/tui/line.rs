@@ -7,12 +7,14 @@
 
 use super::highlight::highlight_ral;
 use super::palette::{
-    CODE_BG, CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, READ_W, RED, RED_HOT, SLATE,
+    CODE_BG, CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, READ_CONTENT_W, READ_W, RED,
+    RED_HOT, SLATE, content_w,
 };
-use super::rail::is_rail_prefix;
+use super::row::Row;
 use crate::agent::event::ProviderErrorRecord;
 use crate::bus::card::{
-    Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row, Seg, Span as CardSpan,
+    Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row as DiffRow, Seg,
+    Span as CardSpan,
 };
 use crate::provider;
 use ratatui::{
@@ -30,20 +32,12 @@ pub(super) fn is_blank(l: &Line<'_>) -> bool {
     l.spans.iter().all(|s| s.content.trim().is_empty())
 }
 
-/// `1` when `l` opens with the rail's 2-column glyph span, else `0` — the
-/// leading spans the copy contract and [`wrap_line`] step over.
-pub(super) fn rail_skip(l: &Line<'_>) -> usize {
-    usize::from(l.spans.first().is_some_and(|s| is_rail_prefix(&s.content)))
-}
-
-/// One scrollback line as the text a reader would copy: spans joined, rail
-/// glyph dropped.
-pub(super) fn plain(line: &Line<'_>) -> String {
-    let skip = rail_skip(line);
-    line.spans[skip..]
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect()
+/// A line's spans joined.  Copy goes through [`super::row::Row::plain`] — a
+/// transcript row's margin is a `Row`'s own field, never a span here — so
+/// nothing in the app needs this, and it reads bodies for the tests alone.
+#[cfg(test)]
+pub(super) fn text(line: &Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
 /// Width in cells of the header size-bar — the size channel, ordered beside
@@ -178,12 +172,15 @@ pub(super) fn user_prompt(s: &str) -> Vec<Line<'static>> {
 
 /// The human turn's opening seam: a full-width rule in [`PROMPT_INK`].  A
 /// boundary drawn as a line rather than a region, so background stays free to
-/// mean "machine".
-pub(super) fn prompt_fence(width: u16) -> Line<'static> {
-    Line::from(Span::styled(
-        "─".repeat(width as usize),
-        Style::default().fg(PROMPT_INK),
-    ))
+/// mean "machine".  The one row whose margin is not blank chrome but part of
+/// the mark itself: a rule that stopped short of the edge would read as a rail
+/// glyph beside a shorter rule.
+pub(super) fn prompt_fence(width: u16) -> Row {
+    let ink = Style::default().fg(PROMPT_INK);
+    Row::new(
+        Span::styled("─".repeat(RAIL_W), ink),
+        Line::from(Span::styled("─".repeat(content_w(width).into()), ink)),
+    )
 }
 
 /// Tool-call header rows: the slate `label`, continuations wrapped under its
@@ -191,7 +188,6 @@ pub(super) fn prompt_fence(width: u16) -> Line<'static> {
 /// *is* the call's summary, so the bar is its readout.  `None` for the expanded
 /// and static headers, which have a body to speak for them.
 fn tool_call_header(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'static>> {
-    let prefix_w = RAIL_W;
     // Reserve the bar's gutter so the label wraps before it: pinning the bar to
     // a fixed right column is what makes magnitudes comparable down the page,
     // so it must never spill onto a wrapped row.
@@ -200,7 +196,7 @@ fn tool_call_header(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'sta
     } else {
         0
     };
-    let body_w = (width as usize).saturating_sub(prefix_w + bar_w).max(8);
+    let body_w = (width as usize).saturating_sub(bar_w).max(8);
     let mut out = Vec::new();
     push_wrapped(&mut out, label, body_w, |chunk, first| {
         if first {
@@ -211,10 +207,7 @@ fn tool_call_header(label: &str, size: Option<u32>, width: u16) -> Vec<Line<'sta
             }
             Line::from(spans)
         } else {
-            Line::from(vec![
-                Span::raw(" ".repeat(prefix_w)),
-                Span::styled(chunk, Style::default().fg(SLATE)),
-            ])
+            Line::from(Span::styled(chunk, Style::default().fg(SLATE)))
         }
     });
     out
@@ -244,7 +237,7 @@ pub(super) fn tool_call_body(
     ls.push(Line::default());
     let take = cap.unwrap_or(usize::MAX);
     for line in highlight_ral(cmd).into_iter().take(take) {
-        push_code_row(&mut ls, line, width);
+        push_code_row(&mut ls, &line, width);
     }
     ls
 }
@@ -275,11 +268,8 @@ pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Lin
 /// [`CODE_BG`] panel padded to `width`.  Continuations hang under the inset
 /// plus the line's own leading whitespace, so a long expression folds where its
 /// content began.
-fn push_code_row(ls: &mut Vec<Line<'static>>, line: Line<'static>, width: u16) {
-    const CODE_INDENT: &str = "  ";
-    let mut spans = vec![Span::raw(CODE_INDENT)];
-    spans.extend(line.spans);
-    for row in wrap_line(&Line::from(spans), width as usize) {
+fn push_code_row(ls: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16) {
+    for row in wrap_line(line, width as usize) {
         ls.push(wash(row, CODE_BG, Some(width as usize)));
     }
 }
@@ -326,7 +316,7 @@ pub(super) fn act_row(
     full: bool,
 ) -> Vec<Line<'static>> {
     let payload_w = (width as usize)
-        .saturating_sub(RAIL_W + ACT_VERB_W + ACT_SUBJECT_W)
+        .saturating_sub(ACT_VERB_W + ACT_SUBJECT_W)
         .max(8);
     let ink = if failed {
         Style::default().fg(RED_HOT).add_modifier(Modifier::BOLD)
@@ -359,7 +349,7 @@ pub(super) fn act_row(
                 Line::from(spans)
             } else {
                 Line::from(vec![
-                    Span::raw(" ".repeat(RAIL_W + ACT_VERB_W + ACT_SUBJECT_W)),
+                    Span::raw(" ".repeat(ACT_VERB_W + ACT_SUBJECT_W)),
                     Span::styled(chunk, ink),
                 ])
             }
@@ -441,7 +431,7 @@ fn diff_body(path: &str, hunks: &[Hunk], level: u8) -> Vec<Line<'static>> {
 /// Rows across every hunk satisfying `pred` — the tallies the header's grain
 /// run reads.
 #[allow(clippy::cast_possible_truncation, reason = "diff row count")]
-fn count_rows(hunks: &[Hunk], pred: impl Fn(&Row) -> bool) -> u32 {
+fn count_rows(hunks: &[Hunk], pred: impl Fn(&DiffRow) -> bool) -> u32 {
     hunks
         .iter()
         .flat_map(|h| h.rows.iter())
@@ -460,8 +450,8 @@ fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
         size_bar(crate::bus::card::hunk_magnitude(hunks)),
         Span::raw("  "),
         grain_run(
-            count_rows(hunks, |r| matches!(r, Row::Add(_))),
-            count_rows(hunks, |r| matches!(r, Row::Del(_))),
+            count_rows(hunks, |r| matches!(r, DiffRow::Add(_))),
+            count_rows(hunks, |r| matches!(r, DiffRow::Del(_))),
         ),
     ])
 }
@@ -493,10 +483,10 @@ fn diff_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'stat
 /// by [`diff_capped`] both between hunks and at its cap, so a break in the
 /// middle of a diff and a diff cut short read alike.
 fn elision_row(gutter: usize) -> Line<'static> {
-    Line::from(vec![
-        Span::raw("  "),
-        Span::styled(format!("{:>gutter$} ", "⋮"), Style::default().fg(SLATE)),
-    ])
+    Line::from(Span::styled(
+        format!("{:>gutter$} ", "⋮"),
+        Style::default().fg(SLATE),
+    ))
 }
 
 /// The largest number [`push_hunk`] will stamp on `h`, which sizes the gutter.
@@ -506,16 +496,16 @@ fn hunk_max_lineno(h: &Hunk) -> u32 {
     let mut max = h.start;
     for row in &h.rows {
         match row {
-            Row::Context(_) => {
+            DiffRow::Context(_) => {
                 max = max.max(new);
                 old += 1;
                 new += 1;
             }
-            Row::Del(_) => {
+            DiffRow::Del(_) => {
                 max = max.max(old);
                 old += 1;
             }
-            Row::Add(_) => {
+            DiffRow::Add(_) => {
                 max = max.max(new);
                 new += 1;
             }
@@ -531,16 +521,16 @@ fn push_hunk(ls: &mut Vec<Line<'static>>, h: &Hunk, gutter: usize) {
     let (mut old, mut new) = (h.start, h.start);
     for row in &h.rows {
         match row {
-            Row::Context(segs) => {
+            DiffRow::Context(segs) => {
                 push_gutter_row(ls, gutter, new, ' ', segs, SLATE, None);
                 old += 1;
                 new += 1;
             }
-            Row::Del(segs) => {
+            DiffRow::Del(segs) => {
                 push_gutter_row(ls, gutter, old, '-', segs, RED_HOT, Some(RED_HOT));
                 old += 1;
             }
-            Row::Add(segs) => {
+            DiffRow::Add(segs) => {
                 push_gutter_row(ls, gutter, new, '+', segs, LIME_HOT, Some(LIME_HOT));
                 new += 1;
             }
@@ -562,9 +552,11 @@ fn push_gutter_row(
     base: Color,
     hot: Option<Color>,
 ) {
-    // READ_W less the indent, the gutter and its space, and "<sign> ", floored
-    // so a pathological width still wraps.
-    let body_w = (READ_W as usize).saturating_sub(2 + gutter + 1 + 2).max(8);
+    // The readable content width less the line-number gutter and its space and
+    // "<sign> ", floored so a pathological width still wraps.
+    let body_w = usize::from(READ_CONTENT_W)
+        .saturating_sub(gutter + 1 + 2)
+        .max(8);
     let body: Vec<Span<'static>> = segs
         .iter()
         .filter(|s| !s.text.is_empty())
@@ -584,7 +576,6 @@ fn push_gutter_row(
             (" ".repeat(gutter), "  ".to_string())
         };
         let mut spans = vec![
-            Span::raw("  "),
             Span::styled(format!("{num} "), Style::default().fg(SLATE)),
             Span::styled(marker, Style::default().fg(base)),
         ];
@@ -653,7 +644,7 @@ pub(super) fn render_card_framed(card: &Card, width: u16) -> Vec<Line<'static>> 
         card,
         CARD_INDENT,
         Style::default().fg(SLATE),
-        width.min(READ_W),
+        width.min(READ_CONTENT_W),
         false,
     )
 }
@@ -939,7 +930,7 @@ fn render_fields(rows: &[CardField]) -> Vec<Line<'static>> {
             },
         })
         .collect();
-    render_field_rows(&field_rows, READ_W as usize)
+    render_field_rows(&field_rows, READ_CONTENT_W.into())
 }
 
 /// A `raw` mark — bytes appended verbatim as lossy UTF-8, unstyled: it is an
@@ -1079,7 +1070,7 @@ pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>) -> Vec<Line<'st
             value: FieldValue::Inline(spans),
         })
         .collect();
-    render_field_rows(&rows, READ_W as usize)
+    render_field_rows(&rows, READ_CONTENT_W.into())
 }
 
 // ── Provider-error rendering ────────────────────────────────────────────────
@@ -1101,7 +1092,7 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
         return ls;
     }
     ls.push(headline(error_kind(e)));
-    ls.extend(render_field_rows(&error_fields(e), READ_W as usize));
+    ls.extend(render_field_rows(&error_fields(e), READ_CONTENT_W.into()));
     ls
 }
 
@@ -1116,7 +1107,7 @@ pub(super) fn stalled(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
         "continuing",
         "the partial reply above is kept; the turn resumes from it",
     ));
-    ls.extend(render_field_rows(&fields, READ_W as usize));
+    ls.extend(render_field_rows(&fields, READ_CONTENT_W.into()));
     ls
 }
 
@@ -1337,20 +1328,18 @@ fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
 /// style-preserving.  The builders already lay out within [`READ_W`], so a
 /// terminal at least that wide gets the line straight back.
 ///
-/// Continuations re-indent to the line's own leading indentation — a rail glyph
-/// ([`is_rail_prefix`]) plus whatever whitespace the builder inset with — so a
-/// wrapped prompt echo or code row folds under its content rather than sliding
-/// to column zero.  A word wider than the column is hard-broken char by char.
+/// Continuations re-indent to the line's own leading whitespace, so a wrapped
+/// prompt echo or code row folds under its content rather than sliding to
+/// column zero.  A word wider than the column is hard-broken char by char.
 pub(super) fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width == 0 || line.width() <= width {
         return vec![line.clone()];
     }
-    // The hang column: the rail glyph, then any whitespace-only spans.  It goes
-    // in the head, not the body, or row 0 would lose it — leading body
-    // whitespace is dropped as a row-leading gap — and row 0 keeps the head
-    // verbatim, so `plain` can still strip the glyph off a copy.
+    // The hang column: the leading whitespace-only spans.  It goes in the head,
+    // not the body, or row 0 would lose it — leading body whitespace is dropped
+    // as a row-leading gap.
     let spans = line.spans.as_slice();
-    let mut head_len = rail_skip(line);
+    let mut head_len = 0;
     while spans
         .get(head_len)
         .is_some_and(|s| !s.content.is_empty() && s.content.chars().all(|c| c == ' '))
@@ -1582,22 +1571,19 @@ mod tests {
         }
     }
 
-    /// A rail-led line hangs continuations under the glyph, which rides row 0
-    /// as its own span — what [`plain`] keys off to strip the chrome on copy.
+    /// An inset line hangs its continuations under its own indent rather than
+    /// sliding back to column zero.  The rail is no business of this function's:
+    /// a margin lives on a [`super::row::Row`], never in these spans.
     #[test]
-    fn wrap_hangs_rail_led_line_under_the_glyph() {
-        let rail = Span::styled("▸ ", Style::default().fg(ratatui::style::Color::Cyan));
+    fn wrap_hangs_inset_line_under_its_indent() {
         let line = Line::from(vec![
-            rail,
+            Span::raw("  "),
             Span::raw("alpha beta gamma delta epsilon zeta eta theta iota"),
         ]);
         let rows = wrap_line(&line, 20);
         assert!(rows.len() > 1);
-        assert!(is_rail_prefix(&rows[0].spans[0].content));
-        for row in &rows[1..] {
-            let t = text(row);
-            assert_eq!(indent_of(&t), 2);
-            assert!(!t.starts_with('▸'));
+        for row in &rows {
+            assert_eq!(indent_of(&text(row)), 2);
         }
     }
 

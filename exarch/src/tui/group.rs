@@ -22,7 +22,7 @@ use super::block::Reveal;
 use super::highlight::highlight_ral;
 use super::line::{self, push_wrapped, wash, wrap_line};
 use super::md;
-use super::palette::{CODE_BG, RAIL_W, SLATE};
+use super::palette::{CODE_BG, SLATE};
 use crate::bus::card::ObservationKind;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -140,25 +140,21 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         .find(|c| c.magnitude.is_some())
         .unwrap_or_else(|| calls.last().expect("a run has at least one call"));
     let mut ls = vec![Line::default()];
-    // The head row opens flush: the rail the viewport prepends is its margin.
     ls.extend(pinned_intent(
         &[],
-        RAIL_W,
         &tip.intent,
         tip.context,
         &sparkline(calls),
         width,
     ));
-    // The effects hang at RAIL_W — where the intent opens once the rail is
-    // prepended — so each reads as belonging to the call above it.
-    let effect_indent = " ".repeat(RAIL_W);
-    ls.extend(indent_rows(&tip.effects, &effect_indent, width));
+    // The effects open in the intent's own column, so each reads as belonging
+    // to the call above it.
+    ls.extend(indent_rows(&tip.effects, "", width));
     ls
 }
 
 /// `Census`: the run in one slate line — its calls counted as scripts, its `|>`
-/// effects summed by bucket and named by verb.  The viewport prepends the rail
-/// to the census row, so a wrapped continuation hangs under [`RAIL_W`].
+/// effects summed by bucket and named by verb.
 fn census(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     let mut tally = Tally::default();
     for call in calls {
@@ -167,19 +163,9 @@ fn census(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     #[allow(clippy::cast_possible_truncation, reason = "coalesced-run call count")]
     let text = census_line(calls.len() as u32, tally);
     let mut ls = vec![Line::default()];
-    push_wrapped(
-        &mut ls,
-        &text,
-        width.saturating_sub(RAIL_W),
-        |chunk, first| {
-            let mut spans = Vec::new();
-            if !first {
-                spans.push(Span::raw(" ".repeat(RAIL_W)));
-            }
-            spans.push(Span::styled(chunk, Style::default().fg(SLATE)));
-            Line::from(spans)
-        },
-    );
+    push_wrapped(&mut ls, &text, width, |chunk, _| {
+        Line::from(Span::styled(chunk, Style::default().fg(SLATE)))
+    });
     ls
 }
 
@@ -222,8 +208,8 @@ fn full_list(calls: &[Call], source: bool, width: usize) -> Vec<Line<'static>> {
 }
 
 /// One call's intent rows, wrapped under a hanging indent with its bar pinned to
-/// the shared column.  The `railed` row is the one the viewport seats the rail
-/// on, so it drops its own indent and lets the rail be its margin.
+/// the shared column.  The `railed` row is the one the viewport seats the glyph
+/// on, so it drops its own indent and lets the margin be its indent.
 fn intent_row(call: &Call, railed: bool, width: usize) -> Vec<Line<'static>> {
     let lead: Vec<Span<'static>> = if railed {
         Vec::new()
@@ -232,7 +218,6 @@ fn intent_row(call: &Call, railed: bool, width: usize) -> Vec<Line<'static>> {
     };
     pinned_intent(
         &lead,
-        if railed { RAIL_W } else { 0 },
         &call.intent,
         call.context,
         &bar(call.magnitude),
@@ -240,22 +225,20 @@ fn intent_row(call: &Call, railed: bool, width: usize) -> Vec<Line<'static>> {
     )
 }
 
-/// Lay one intent out as a left text block with its `bars` pinned right.  `lead`
-/// and `rail_offset` together are the row's margin — the offset being what the
-/// viewport will prepend to row 0 — so the bars target
-/// `bar_col(width) - rail_offset` and land in the shared column once row 0
-/// shifts.  The `context` floor drains a row's ink, never a bar's height.
+/// Lay one intent out as a left text block with its `bars` pinned right, in
+/// content columns: `lead` is the row's whole indent and the bars target
+/// [`bar_col`] directly.  The `context` floor drains a row's ink, never a bar's
+/// height.
 fn pinned_intent(
     lead: &[Span<'static>],
-    rail_offset: usize,
     intent: &str,
     context: u8,
     bars: &Span<'static>,
     width: usize,
 ) -> Vec<Line<'static>> {
     let lead_w: usize = lead.iter().map(Span::width).sum();
-    let cont_indent = rail_offset + lead_w;
-    let bar_last = bar_col(width).saturating_sub(rail_offset);
+    let cont_indent = lead_w;
+    let bar_last = bar_col(width);
     let bars_w = bars.width();
     let bars_left = (bar_last + 1).saturating_sub(bars_w);
     let body_w = bars_left.saturating_sub(lead_w + GAP).max(8);
@@ -344,10 +327,6 @@ fn wash_inset(out: &mut Vec<Line<'static>>, body: &Line<'static>, indent: &str, 
 mod tests {
     use super::*;
 
-    const LONG: &str = "Reading the definition of poles, biorthogonal logical \
-        relations, and the fundamental lemma for bimodels, which together span \
-        rather more than a single rendered row at this width.";
-
     fn call(intent: &'static str, magnitude: Option<u32>) -> Call {
         Call::new(
             CallParts {
@@ -406,34 +385,6 @@ mod tests {
             .collect()
     }
 
-    fn indent_of(s: &str) -> usize {
-        s.len() - s.trim_start().len()
-    }
-
-    /// The head row opens flush and is pinned so the sparkline's last glyph
-    /// lands at `bar_col` once the viewport shifts the row by [`RAIL_W`]; the
-    /// continuation hangs under the intent, not back under the rail.
-    #[test]
-    fn live_tip_pins_sparkline_and_hangs_intent() {
-        let width = 100;
-        let calls = vec![call("short", Some(3)), call(LONG, Some(40))];
-        let rows = nonblank(&body(&calls, Reveal::Summary, width));
-
-        let head = &rows[0];
-        assert_eq!(indent_of(head), 0);
-        assert!(head.starts_with("Reading the definition"));
-        assert!(head.ends_with(line::spark_glyph(Some(40))));
-        assert_eq!(
-            UnicodeWidthStr::width(head.as_str()),
-            bar_col(width) - RAIL_W + 1
-        );
-
-        assert_eq!(indent_of(&rows[1]), RAIL_W);
-    }
-
-    /// A pending call carries no effects, so anchoring the tip on `calls.last()`
-    /// would blank the prior call's reads; the tip narrates the latest settled
-    /// call while the pending one still adds its bar.
     #[test]
     fn live_tip_anchors_on_latest_settled_call_not_a_pending_one() {
         let width = 100;
@@ -448,31 +399,5 @@ mod tests {
         assert!(!head.contains("pending grep"), "not the in-flight call");
         // The pending call still counts toward the sparkline, as its shortest bar.
         assert!(head.ends_with(line::spark_glyph(None)));
-        assert_eq!(
-            UnicodeWidthStr::width(head.as_str()),
-            bar_col(width) - RAIL_W + 1
-        );
-    }
-
-    /// The run's first intent row is the railed one: it opens flush and targets
-    /// `bar_col - RAIL_W`, landing in the same column as every later row, which
-    /// carries [`INTENT_INDENT`] and pins to `bar_col` directly.
-    #[test]
-    fn intent_rows_pin_bars_in_one_column() {
-        let width = 100;
-        let calls = vec![call(LONG, Some(12)), call("short tail", Some(3))];
-        let rows = nonblank(&body(&calls, Reveal::Context, width));
-
-        assert_eq!(indent_of(&rows[0]), 0);
-        assert_eq!(
-            UnicodeWidthStr::width(rows[0].as_str()),
-            bar_col(width) - RAIL_W + 1
-        );
-        assert_eq!(indent_of(&rows[1]), RAIL_W);
-
-        let tail = rows.last().expect("the second call renders its intent row");
-        assert!(tail.trim_start().starts_with("short tail"));
-        assert_eq!(indent_of(tail), UnicodeWidthStr::width(INTENT_INDENT));
-        assert_eq!(UnicodeWidthStr::width(tail.as_str()), bar_col(width) + 1);
     }
 }

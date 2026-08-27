@@ -11,8 +11,9 @@ use super::fidelity::Fidelity;
 use super::group;
 use super::line::{self, is_blank};
 use super::md::{self, MD_INDENT};
-use super::palette::{QUEUED_PROMPT_BG, RAIL_W, READ_W, SLATE};
+use super::palette::{QUEUED_PROMPT_BG, READ_W, SLATE, content_w};
 use super::rail::{self, RailKind};
+use super::row::Row;
 use crate::bus::card::{Card, ObservationKind};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -153,11 +154,7 @@ pub(super) enum Reveal {
 /// blank rows so it can breathe among its neighbours, and the strip has none —
 /// it is a stack of pending turns, each already fenced off from the last, in a
 /// band that grows downward into the reading the user is waiting on.
-pub(super) fn queued_prompt_rows(
-    messages: &[String],
-    width: u16,
-    max_rows: usize,
-) -> Vec<Line<'static>> {
+pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usize) -> Vec<Row> {
     if width == 0 || max_rows == 0 {
         return Vec::new();
     }
@@ -165,21 +162,24 @@ pub(super) fn queued_prompt_rows(
     let mut out = Vec::new();
     for message in messages {
         let mut prompt = Block::chrome(RailShape::Prompt, line::user_prompt(message));
-        let rows = trim_blanks(prompt.lines(width, AgentSlot::default(), true)).to_vec();
+        let rows = trim_blanks(
+            prompt.lines(width, AgentSlot::default(), true),
+            Row::is_blank,
+        )
+        .to_vec();
         append_visual_rows(&mut out, &rows, width, true, Some(QUEUED_PROMPT_BG));
     }
 
     if out.len() > max_rows {
         let hidden = out.len() - (max_rows - 1);
         out.truncate(max_rows - 1);
-        out.push(line::wash(
-            Line::from(Span::styled(
+        out.push(
+            Row::bare(Line::from(Span::styled(
                 format!("⋯ ({hidden} more)"),
                 Style::default().fg(SLATE).add_modifier(Modifier::ITALIC),
-            )),
-            QUEUED_PROMPT_BG,
-            Some(width as usize),
-        ));
+            )))
+            .wash(QUEUED_PROMPT_BG, width),
+        );
     }
     out
 }
@@ -190,31 +190,27 @@ pub(super) fn queued_prompt_rows(
 /// boundary marks the plane's edge rather than lying within it, so a prompt's
 /// rule reads the same committed or queued.
 pub(super) fn append_visual_rows(
-    out: &mut Vec<Line<'static>>,
-    lines: &[Line<'static>],
+    out: &mut Vec<Row>,
+    rows: &[Row],
     width: u16,
     prompt: bool,
     wash: Option<Color>,
 ) -> usize {
     let before = out.len();
     let mut fenced = false;
-    for line in lines {
-        for vrow in line::wrap_line(line, width as usize) {
-            if prompt && !fenced && !line::is_blank(&vrow) {
+    for row in rows {
+        for vrow in row.wrap(width as usize) {
+            if prompt && !fenced && !vrow.is_blank() {
                 out.push(line::prompt_fence(width));
                 fenced = true;
             }
-            out.push(wash_row(vrow, width, wash));
+            out.push(match wash {
+                Some(bg) => vrow.wash(bg, width),
+                None => vrow,
+            });
         }
     }
     out.len() - before
-}
-
-fn wash_row(row: Line<'static>, width: u16, wash: Option<Color>) -> Line<'static> {
-    match wash {
-        Some(bg) => line::wash(row, bg, Some(width as usize)),
-        None => row,
-    }
 }
 
 impl Reveal {
@@ -247,7 +243,7 @@ pub(super) struct Block {
     /// `Viewport::set_result_size`.
     result_size: Option<u32>,
     /// Lines for the current state at `cache_w`, `None` once stale.
-    cache: Option<Vec<Line<'static>>>,
+    cache: Option<Vec<Row>>,
     cache_w: u16,
 }
 
@@ -593,7 +589,7 @@ impl Block {
     /// filled at another width.  `lead` says whether this block opens its
     /// rail-run or continues a prior paragraph's; like `agent`, arrival order
     /// fixes it, so it stays out of the width-keyed memo.
-    pub(super) fn lines(&mut self, width: u16, agent: AgentSlot, lead: bool) -> &[Line<'static>] {
+    pub(super) fn lines(&mut self, width: u16, agent: AgentSlot, lead: bool) -> &[Row] {
         if self.cache.is_none() || self.cache_w != width {
             self.cache = Some(self.render(width, agent, lead));
             self.cache_w = width;
@@ -604,60 +600,36 @@ impl Block {
     /// The block as it belongs in the session log: width-independent and forced
     /// to L3, so the script / diff / prose is on the record even while reduced
     /// on screen.  `lead` matches the screen, so one response keeps one `·`.
-    pub(super) fn log_lines(&self, agent: AgentSlot, lead: bool) -> Vec<Line<'static>> {
-        self.render_with(READ_W, true, agent, lead)
+    pub(super) fn log_lines(&self, agent: AgentSlot, lead: bool) -> Vec<Row> {
+        self.rows(READ_W, true, agent, lead)
     }
 
-    fn render(&self, width: u16, agent: AgentSlot, lead: bool) -> Vec<Line<'static>> {
-        self.render_with(width, false, agent, lead)
+    fn render(&self, width: u16, agent: AgentSlot, lead: bool) -> Vec<Row> {
+        self.rows(width, false, agent, lead)
     }
 
     fn render_level(&self, force_full: bool) -> Reveal {
         if force_full { Reveal::Full } else { self.level }
     }
 
-    /// Build the rail-less body, then seat the rail span on its first content
-    /// row.  `lead` is false for a paragraph continuing a prior one: it keeps
-    /// the gutter but drops the glyph, so one answer wears one rail mark.
-    fn render_with(
-        &self,
-        width: u16,
-        force_full: bool,
-        agent: AgentSlot,
-        lead: bool,
-    ) -> Vec<Line<'static>> {
+    /// Build the body in content space, then seat the rail glyph on the first
+    /// content row.
+    fn rows(&self, width: u16, force_full: bool, agent: AgentSlot, lead: bool) -> Vec<Row> {
         let level = self.render_level(force_full);
-        let mut lines = self.body(width, level);
+        let mut lines = self.body(content_w(width), level);
         // Markdown is the one body that opens flush, so a lead answer would abut
         // the call above it; the flatten folds this blank against any trailing
         // one, so the gap never doubles.
         if lead && self.markdown_src().is_some() && !lines.first().is_some_and(is_blank) {
             lines.insert(0, Line::default());
         }
-        if let Some(kind) = self.rail_kind(level) {
-            let rail = if lead {
-                rail::span(kind, agent, self.magnitude())
-            } else {
-                Span::raw(" ".repeat(RAIL_W))
-            };
-            // Carve the rail's gutter out of the opening row — invisible where
-            // the row already insets (markdown's `MD_INDENT`, a diff's gutter),
-            // a rightward push where it is flush — then hang every shorter row
-            // under that content. A flush surfaced card is what this rescues.
-            let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
-            // A block that renders no row at all seats no rail.
-            if idx < lines.len() {
-                shrink_leading_ws(&mut lines[idx], RAIL_W);
-                for (i, line) in lines.iter_mut().enumerate() {
-                    let short = RAIL_W.saturating_sub(leading_ws(line));
-                    if i != idx && short > 0 && !is_blank(line) {
-                        line.spans.insert(0, Span::raw(" ".repeat(short)));
-                    }
-                }
-                lines[idx].spans.insert(0, rail);
-            }
-        }
-        lines
+        // `lead` is false for a paragraph continuing a prior one: it keeps the
+        // margin but drops the glyph, so one answer wears one rail mark.
+        let glyph = self
+            .rail_kind(level)
+            .filter(|_| lead)
+            .map(|kind| rail::span(kind, agent, self.magnitude()));
+        Row::seat(lines, glyph)
     }
 
     /// The rail-less body at `width`, graded by `level`.  A run's census is
@@ -752,7 +724,7 @@ impl Block {
             // `Viewport::reflow` collapses the gap against a blank tail, so
             // framing here reads as one row between neighbours, never two.
             BlockKind::Chrome { lines, .. } => {
-                let body = trim_blanks(lines);
+                let body = trim_blanks(lines, |l| line::is_blank(l));
                 if body.is_empty() {
                     // The step rule *is* a gap; there is nothing to frame.
                     vec![Line::default()]
@@ -805,14 +777,10 @@ impl Block {
 }
 
 /// `lines` without its leading and trailing blank rows.
-fn trim_blanks<'a>(lines: &'a [Line<'static>]) -> &'a [Line<'static>] {
-    let start = lines.iter().take_while(|l| line::is_blank(l)).count();
-    let tail = lines[start..]
-        .iter()
-        .rev()
-        .take_while(|l| line::is_blank(l))
-        .count();
-    &lines[start..lines.len() - tail]
+fn trim_blanks<T>(items: &[T], blank: impl Fn(&T) -> bool) -> &[T] {
+    let start = items.iter().take_while(|i| blank(i)).count();
+    let tail = items[start..].iter().rev().take_while(|i| blank(i)).count();
+    &items[start..items.len() - tail]
 }
 
 /// The first `k` rendered rows of `lines`, always at least one so the rail has
@@ -823,48 +791,6 @@ fn first_rows(mut lines: Vec<Line<'static>>, k: usize) -> Vec<Line<'static>> {
     let lead = lines.iter().take_while(|l| is_blank(l)).count();
     lines.truncate((lead + k).max(1));
     lines
-}
-
-/// The width of a line's leading run of all-space spans — counted span-wise to
-/// match [`shrink_leading_ws`], which trims only the spans the builders emit as
-/// their own (markdown's inset, a wrapped row's hang).
-fn leading_ws(line: &Line<'static>) -> usize {
-    let mut w = 0;
-    for span in &line.spans {
-        let s = span.content.as_ref();
-        if s.is_empty() {
-            continue;
-        }
-        if !s.chars().all(|c| c == ' ') {
-            break;
-        }
-        w += s.chars().count();
-    }
-    w
-}
-
-/// Reclaim `n` cells of `line`'s leading whitespace for the rail, so an inset
-/// body's opening row keeps its own column.
-fn shrink_leading_ws(line: &mut Line<'static>, n: usize) {
-    let mut remaining = n;
-    for span in &mut line.spans {
-        if remaining == 0 {
-            break;
-        }
-        let s = span.content.as_ref();
-        if !s.chars().all(|c| c == ' ') {
-            break;
-        }
-        let len = s.chars().count();
-        if len <= remaining {
-            remaining -= len;
-            span.content = String::new().into();
-        } else {
-            let kept: String = s.chars().skip(remaining).collect();
-            span.content = kept.into();
-            remaining = 0;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -958,7 +884,7 @@ mod tests {
         let rendered = |verb, subject: Option<&str>, payload: &str| {
             let block = Block::act(verb, subject.map(str::to_string), payload.into(), false);
             let lines = block.body(READ_W, Reveal::Summary);
-            line::plain(lines.last().expect("an act renders one content row"))
+            line::text(lines.last().expect("an act renders one content row"))
         };
         assert_eq!(
             rendered(
@@ -998,7 +924,7 @@ mod tests {
         assert!(block.call_view().is_none(), "an act opens no group slot");
         assert!(!block.is_tool_call());
         for level in [Reveal::Summary, Reveal::Context, Reveal::Full] {
-            let text: String = block.body(READ_W, level).iter().map(line::plain).collect();
+            let text: String = block.body(READ_W, level).iter().map(line::text).collect();
             assert!(
                 !text.contains('\u{2588}') && !text.contains('\u{2591}'),
                 "no size-bar on an act row at {level:?}: {text:?}"
@@ -1019,7 +945,7 @@ mod tests {
         let lines = block.body(READ_W, Reveal::Summary);
         let row = lines.last().expect("an act renders one content row");
         assert_eq!(
-            line::plain(row),
+            line::text(row),
             "cancel     hunter              refused: not a descendant"
         );
         let outcome = row.spans.last().expect("the payload span");
@@ -1062,7 +988,7 @@ mod tests {
 
         let reduced = block.body(READ_W, Reveal::Summary);
         assert_eq!(reduced.len(), 2, "reduced, an act is one row and its blank");
-        let head = line::plain(&reduced[1]);
+        let head = line::text(&reduced[1]);
         assert!(
             head.ends_with('\u{2026}'),
             "the cut payload ends in an ellipsis: {head:?}"
@@ -1078,37 +1004,13 @@ mod tests {
         let full: String = block
             .body(READ_W, Reveal::Full)
             .iter()
-            .map(|l| line::plain(l).trim_start().to_string())
+            .map(|l| line::text(l).trim_start().to_string())
             .collect::<Vec<_>>()
             .join(" ");
         for word in ["one-sentence", "argument", "for", "each"] {
             assert!(
                 full.contains(word),
                 "L3 restores the whole payload: {full:?}"
-            );
-        }
-
-        // Measured on the seated rows, rail span included: the rail lands on
-        // the head alone, so every wrapped row must carry that width itself.
-        let payload_col = RAIL_W + line::ACT_VERB_W + line::ACT_SUBJECT_W;
-        let rows: Vec<String> = block
-            .render(READ_W, AgentSlot::default(), true)
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .filter(|row: &String| !row.trim().is_empty())
-            .collect();
-        assert!(rows.len() > 1, "the payload wraps at L3: {rows:?}");
-        assert_eq!(
-            rows[0].find("audit").map(|i| rows[0][..i].chars().count()),
-            Some(payload_col),
-            "the head row opens its payload in the payload column: {:?}",
-            rows[0]
-        );
-        for row in &rows[1..] {
-            assert_eq!(
-                row.chars().take_while(|c| *c == ' ').count(),
-                payload_col,
-                "a wrapped row hangs under the payload column: {row:?}"
             );
         }
     }

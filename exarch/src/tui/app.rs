@@ -601,8 +601,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::bus::card::{Card, Mark};
-    use crate::tui::line::plain;
     use crate::tui::palette::READ_W;
+    use crate::tui::row::Row;
     use ral_core::types::{CallSite, Observation, Observed};
 
     fn app() -> (App, BusReceiver) {
@@ -624,7 +624,11 @@ mod tests {
             .viewport_mut(id)
             .expect("the tab under test has a viewport")
             .render_window(READ_W, 40);
-        w.lines.iter().map(plain).collect::<Vec<_>>().join("\n")
+        w.lines
+            .iter()
+            .map(Row::plain)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// A pin is ambient register state, and the coalescing that used to be

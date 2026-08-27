@@ -366,6 +366,34 @@ event on the bus, while move 7 can deepen with one.
   depends on the rail being uniform; `wrap_line` and the `line::plain`
   rail-stripping already treat the rail as separable chrome, so the copy path
   is unaffected.
+
+  > **Amended 2026-08-27 — the copy path was not unaffected, and "separable
+  > chrome" was the error.** This paragraph and the *Copy contract* note below
+  > assumed the rail could be *recovered* downstream by recognising a leading
+  > span (`RAIL_GLYPHS` → `is_rail_prefix` → `line::rail_skip`). It cannot, and
+  > three bugs followed: `wrap_line`'s `push_char` coalesced the glyph into the
+  > first body span whenever their styles matched — which the prompt fence
+  > guarantees, both being `PROMPT_INK` — so a wrapped prompt echo *copied its
+  > own `❖`*; `paint_selection`'s interior rows reverse-videoed every span, rail
+  > included; and `select::content_range` subtracted `RAIL_W` on rows whose
+  > margin was whitespace rather than a glyph span, putting pointer and
+  > highlight two cells out. The rail was never uniform either — it had three
+  > encodings (a `rail::span`, a raw 2-space span, the body's own indent) and the
+  > sniff knew one.
+  >
+  > The margin is now *represented*: `tui/row.rs`'s `Row { gutter, content }`,
+  > with the width invariant checked in its one constructor. Copy is
+  > `Row::plain` — content, always — and the margin is unreachable from
+  > selection by construction rather than by promise. Builders lay out in
+  > content space (`palette::content_w`); rows are born in the two seats
+  > (`Block::rows`, `Viewport::render_group`, both via `Row::seat`) and
+  > flattened by `Row::into_line` at two seams only: the screen and `user.log`,
+  > which keeps its rail deliberately. `RAIL_SHAPES` is no longer coupled to
+  > copy — it feeds the legend and the gutter-width test. Consequences accepted:
+  > copied text is now uniform in content space (markdown continuations 4→2
+  > spaces, diff rows lose a phantom 2-space lead), and blocks that seated no
+  > glyph at all — framed cards, observations — take the blank margin every row
+  > takes, moving 2 columns right into alignment.
 - **Multi-agent legibility.** The matrix is the move that makes a fan-out of
   subagents readable — today a 1D tab bar loses the global picture the moment a
   second agent is born.

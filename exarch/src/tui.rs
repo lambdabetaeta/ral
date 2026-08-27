@@ -25,6 +25,7 @@ mod picker;
 mod prompt;
 mod rail;
 mod render;
+mod row;
 mod select;
 mod status;
 mod tabs;

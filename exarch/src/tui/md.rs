@@ -26,8 +26,9 @@ use super::line::{is_blank, wrap_line};
 use super::palette::{CYAN, LIME, READ_W, SLATE};
 use super::rail::{desaturate, mix};
 
-/// Left inset for assistant markdown, holding the model's voice off the chrome.
-pub(super) const MD_INDENT: u16 = 4;
+/// Left inset for assistant markdown within content space, holding the model's
+/// voice off the chrome.  On screen it reads as `RAIL_W + MD_INDENT`.
+pub(super) const MD_INDENT: u16 = 2;
 
 /// The foreground assumed for uncoloured spans — the drain needs a hue to take.
 const BASE_FG: Color = Color::Rgb(208, 213, 224);

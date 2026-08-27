@@ -168,7 +168,9 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  literal it is. `tui/group.rs` is the
  coalescing projection that folds an observation run into one dialable
  object; `tui/viewport.rs` the per-session block buffer, scroll position, and
- `user.log` writer; `tui/rail.rs` the data-encoding marginal rail. The
+ `user.log` writer; `tui/rail.rs` the data-encoding marginal rail, and
+ `tui/row.rs` the `Row { gutter, content }` that *represents* the margin so
+ copy and selection can never reach it. The
  transcript is laid out as a graphic on two orthogonal planes
  ([[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]],
  Phases 0–7 landed):
@@ -242,7 +244,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
    renders through `line::render_card_framed` as an indented framed box, its
    heading lifted into the top rule, no marginal rail glyph (the frame is its
-   mark). A file mutation — a diff card or a write card — wears the
+   mark) — though it still wears the blank margin every row wears, so its left
+   edge aligns with the rest of the transcript. A file mutation — a diff card or a write card — wears the
    patch-shape change-bar `▎`; an observation card folds into its ral group.
    A cancelled turn is `RailShape::Cancelled`: it wears the error rail `╳`
    while remaining distinct from `RailShape::Error`, so `Block::is_error` and
@@ -439,7 +442,8 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
         - `tui/gesture.rs` — mouse/selection: `GestureState`, `Press`, frame geometry, selection, copy toast, hover, scroll
-        - `tui/render.rs` — frame layout: `draw`, `FrameGeom`, `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`
+        - `tui/render.rs` — frame layout: `draw`, `FrameGeom`, `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten
+        - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `seat`/`wrap`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version), `legend_panel`, ART/EAGLE constants
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`

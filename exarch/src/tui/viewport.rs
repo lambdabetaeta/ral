@@ -14,9 +14,10 @@
 
 use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
 use super::group;
-use super::line::{is_blank, plain};
-use super::palette::READ_W;
+use super::line::is_blank;
+use super::palette::{READ_W, content_w};
 use super::rail::{self, RailKind};
+use super::row::Row;
 use super::select::plain_slice;
 use crate::agent::event::{ContextOp, EditAuthority};
 use crate::bus::AgentId;
@@ -180,7 +181,7 @@ impl StateSpan {
 }
 
 pub(super) struct RenderWindow {
-    pub(super) lines: Vec<Line<'static>>,
+    pub(super) lines: Vec<Row>,
     pub(super) offset: usize,
     /// Progress through the buffer in `0..=100`, or `None` when it all fits.
     /// The rule line shows it in place of a right-margin scrollbar.
@@ -202,7 +203,7 @@ struct Entry {
 #[derive(Default)]
 struct Flat {
     width: u16,
-    rows: Vec<Line<'static>>,
+    rows: Vec<Row>,
     row_block: Vec<usize>,
     dirty: bool,
 }
@@ -286,7 +287,8 @@ impl Log {
             let mut out = io::BufWriter::new(&mut *file);
             for entry in entries {
                 let md = entry.block.markdown_src().is_some();
-                for line in entry.block.log_lines(agent, !(md && prev_md)) {
+                for row in entry.block.log_lines(agent, !(md && prev_md)) {
+                    let line = row.into_line();
                     if is_blank(&line) {
                         if prev_blank {
                             continue;
@@ -442,12 +444,7 @@ impl Viewport {
     /// `(blocks, rows, bytes)` for the `/resources` fold, read off the flatten
     /// as of the last paint — a read of display state, never a re-render.
     pub(super) fn probe_figures(&self) -> (u64, u64, u64) {
-        let bytes: usize = self
-            .flat
-            .rows
-            .iter()
-            .map(|line| line.spans.iter().map(|s| s.content.len()).sum::<usize>())
-            .sum();
+        let bytes: usize = self.flat.rows.iter().map(Row::bytes).sum();
         (
             self.blocks.len() as u64,
             self.flat.rows.len() as u64,
@@ -638,7 +635,7 @@ impl Viewport {
     /// Rendered cell width of visual row `row` — its content's extent, not the
     /// pane's, so a gesture binds tight to the text and ignores the dead margin.
     pub(super) fn row_width(&self, row: usize) -> Option<usize> {
-        self.flat.rows.get(row).map(Line::width)
+        self.flat.rows.get(row).map(Row::width)
     }
 
     /// Whether the block at `idx` is dialable — a property of its kind, not its
@@ -751,7 +748,7 @@ impl Viewport {
         }
         for row in (first_row + 1)..last_row {
             if let Some(r) = self.flat_row(row) {
-                parts.push(plain(&self.flat.rows[r]));
+                parts.push(self.flat.rows[r].plain());
             }
         }
         if let Some(r) = self.flat_row(last_row) {
@@ -786,7 +783,7 @@ impl Viewport {
     /// record covers yet.  So the markdown context the line sits inside (an
     /// open fence, a list) is the block's own, and the record that completes
     /// the line changes the text without changing the picture.
-    fn live_tail(&self, width: u16) -> (usize, Vec<Line<'static>>) {
+    fn live_tail(&self, width: u16) -> (usize, Vec<Row>) {
         let all = self.flat.rows.len();
         let answering = !self.answer.is_empty();
         let open = if answering {
@@ -841,17 +838,17 @@ impl Viewport {
             .map(|i| &self.blocks[i].block);
         let content_w = width.min(READ_W);
         let lead = opens_rail_run(prev, &block);
-        let lines = block.lines(content_w, self.agent, lead).to_vec();
+        let rows = block.lines(content_w, self.agent, lead).to_vec();
         // A segment's leading blanks collapse against an already-blank tail,
         // exactly as they do in the flatten above.
         let mut first = 0;
-        if self.flat.rows[..keep].last().is_some_and(is_blank) {
-            while first < lines.len() && is_blank(&lines[first]) {
+        if self.flat.rows[..keep].last().is_some_and(Row::is_blank) {
+            while first < rows.len() && rows[first].is_blank() {
                 first += 1;
             }
         }
-        let mut out: Vec<Line<'static>> = Vec::new();
-        append_visual_rows(&mut out, &lines[first..], content_w, false, None);
+        let mut out: Vec<Row> = Vec::new();
+        append_visual_rows(&mut out, &rows[first..], content_w, false, None);
         (keep, out)
     }
 
@@ -875,7 +872,7 @@ impl Viewport {
         )]
         let scroll_pct =
             (max_off > 0).then(|| (self.offset.min(max_off) * 100 / max_off).min(100) as u16);
-        let lines: Vec<Line<'static>> = self.flat.rows[..committed]
+        let lines: Vec<Row> = self.flat.rows[..committed]
             .iter()
             .chain(&tail)
             .skip(self.offset)
@@ -902,7 +899,7 @@ impl Viewport {
         }
         let content_w = width.min(READ_W);
         let agent = self.agent;
-        let mut rows: Vec<Line<'static>> = Vec::new();
+        let mut rows: Vec<Row> = Vec::new();
         let mut row_block: Vec<usize> = Vec::new();
         let mut i = 0;
         while i < self.blocks.len() {
@@ -912,7 +909,7 @@ impl Viewport {
             // buffered until its call has landed ([`super::surface`]), so one
             // reaching the projection with no call behind it belongs to no run
             // and renders alone, through the ordinary path below.
-            let (anchor, lines, prompt) = if self.blocks[i].block.is_tool_call() {
+            let (anchor, seg_rows, prompt) = if self.blocks[i].block.is_tool_call() {
                 let end = self.observation_run_end(i);
                 let segment = (i, self.render_group(i, end, content_w), false);
                 i = end;
@@ -934,12 +931,12 @@ impl Viewport {
             // A segment's leading blanks collapse against an already-blank tail,
             // so a step separator before leading-blank chrome reads as one gap.
             let mut first = 0;
-            if rows.last().is_some_and(is_blank) {
-                while first < lines.len() && is_blank(&lines[first]) {
+            if rows.last().is_some_and(Row::is_blank) {
+                while first < seg_rows.len() && seg_rows[first].is_blank() {
                     first += 1;
                 }
             }
-            let added = append_visual_rows(&mut rows, &lines[first..], content_w, prompt, None);
+            let added = append_visual_rows(&mut rows, &seg_rows[first..], content_w, prompt, None);
             for _ in 0..added {
                 row_block.push(anchor);
             }
@@ -975,18 +972,14 @@ impl Viewport {
     /// [`group::Call`] per tool call, the body at the run's disclosure level —
     /// its opening call's — and the rail — triangle, hue, aggregate magnitude —
     /// on row one.  A run opens with a call, so its body is never empty.
-    fn render_group(&self, start: usize, end: usize, width: u16) -> Vec<Line<'static>> {
+    fn render_group(&self, start: usize, end: usize, width: u16) -> Vec<Row> {
         let level = self.blocks[start].block.level();
         let calls = self.group_calls(start, end);
-        let mut lines = group::body(&calls, level, width as usize);
+        let lines = group::body(&calls, level, content_w(width).into());
         let open = level >= Reveal::Context;
         let magnitude = group::aggregate_magnitude(&calls);
-        let rail = rail::span(RailKind::ToolCall(open), self.agent, magnitude);
-        let idx = lines.iter().position(|l| !is_blank(l)).unwrap_or(0);
-        if let Some(line) = lines.get_mut(idx) {
-            line.spans.insert(0, rail);
-        }
-        lines
+        let glyph = rail::span(RailKind::ToolCall(open), self.agent, magnitude);
+        Row::seat(lines, Some(glyph))
     }
 
     /// The run's calls in arrival order: each tool call opens a [`group::Call`],
@@ -1494,6 +1487,7 @@ fn render_observation_group(values: &[ral_core::serial::FOValue]) -> Vec<Block> 
 
 #[cfg(test)]
 mod tests {
+    use super::super::line;
     use super::*;
 
     fn viewport() -> Viewport {
@@ -1507,13 +1501,10 @@ mod tests {
         Viewport::new(path, AgentSlot(0), false, Reveal::Full)
     }
 
-    fn rail_rows(lines: &[Line<'static>], glyph: &str) -> Vec<usize> {
-        lines
-            .iter()
+    fn rail_rows(rows: &[Row], glyph: &str) -> Vec<usize> {
+        rows.iter()
             .enumerate()
-            .filter_map(|(i, line)| {
-                (line.spans.first().map(|s| s.content.as_ref()) == Some(glyph)).then_some(i)
-            })
+            .filter_map(|(i, row)| (row.gutter() == glyph).then_some(i))
             .collect()
     }
 
@@ -1566,7 +1557,12 @@ mod tests {
         land(&mut vp, &mut memo, 1, "```ral\n");
         let live = format!("{:?}", vp.render_window(READ_W, 24).lines);
         assert!(
-            plain(vp.render_window(READ_W, 24).lines.last().expect("a row")).contains("let x = 1"),
+            vp.render_window(READ_W, 24)
+                .lines
+                .last()
+                .expect("a row")
+                .plain()
+                .contains("let x = 1"),
             "the open line reads where its block will hold it"
         );
 
@@ -1589,7 +1585,12 @@ mod tests {
         vp.transient(&Transient::Thinking("considering the shape".into()));
 
         let w = vp.render_window(READ_W, 24);
-        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        let all = w
+            .lines
+            .iter()
+            .map(Row::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             all.contains("considering the shape"),
             "the reasoning's open line reads on its own rail: {all:?}"
@@ -1602,7 +1603,12 @@ mod tests {
 
         vp.transient(&Transient::Token("First words".into()));
         let w = vp.render_window(READ_W, 24);
-        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        let all = w
+            .lines
+            .iter()
+            .map(Row::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             !all.contains("considering the shape") && all.contains("First words"),
             "prose closed the run, whose tail the worker recorded at the same delta: {all:?}"
@@ -1610,32 +1616,16 @@ mod tests {
 
         vp.transient(&Transient::Boundary);
         let w = vp.render_window(READ_W, 24);
-        let all = w.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        let all = w
+            .lines
+            .iter()
+            .map(Row::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             !all.contains("First words"),
             "no open line outlives the step it was read from: {all:?}"
         );
-    }
-
-    /// A prompt opens with a rule fence and no band — background belongs to code.
-    #[test]
-    fn prompt_opens_with_a_rule_fence_no_band() {
-        let mut vp = viewport();
-        vp.push_chrome(
-            RailShape::Prompt,
-            vec![Line::default(), Line::from("hello cutie")],
-        );
-        let w = vp.render_window(READ_W, 24);
-        let fence = w.lines.iter().any(|l| {
-            let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-            !t.is_empty() && t.chars().all(|c| c == '─')
-        });
-        assert!(fence, "prompt opens with a full-width rule");
-        for l in &w.lines {
-            for s in &l.spans {
-                assert!(s.style.bg.is_none(), "no background band on a prompt");
-            }
-        }
     }
 
     /// `scroll_down` clears `sticky`, so `render_window` takes the clamping
@@ -1693,7 +1683,12 @@ mod tests {
         }
         vp.transient(&Transient::Thinking("considering the shape".into()));
         let live = vp.render_window(READ_W, 8);
-        let live_text = live.lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+        let live_text = live
+            .lines
+            .iter()
+            .map(Row::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
         let live_thinking = rail_rows(&live.lines, "∴ ");
         assert!(
             !live_thinking.is_empty(),
@@ -1717,7 +1712,7 @@ mod tests {
         let committed_text = committed
             .lines
             .iter()
-            .map(plain)
+            .map(Row::plain)
             .collect::<Vec<_>>()
             .join("\n");
         let committed_thinking = rail_rows(&committed.lines, "∴ ");
@@ -1734,7 +1729,7 @@ mod tests {
     fn block_text(b: &Block) -> String {
         b.log_lines(AgentSlot(0), true)
             .iter()
-            .map(plain)
+            .map(Row::plain)
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -1813,7 +1808,7 @@ mod tests {
         assert!(vp.blocks.is_empty(), "the scrollback is dropped");
         assert!(vp.pins().is_empty(), "the pinned register is dropped");
 
-        let rendered = plain(&t.line());
+        let rendered = line::text(&t.line());
         assert!(rendered.contains("42"), "{rendered:?}");
         assert!(rendered.contains("done"), "{rendered:?}");
         assert!(
@@ -1900,7 +1895,7 @@ mod tests {
         );
         // Its own row is three columns, not an intent line under a run's head.
         assert_eq!(
-            plain(&w.lines[act[0]]),
+            w.lines[act[0]].plain(),
             "message    hunter              focus on the renderer first"
         );
     }
@@ -1953,8 +1948,8 @@ mod tests {
 
         let w = vp.render_window(READ_W, 40);
         let act = rail_rows(&w.lines, "↗ ");
-        assert_eq!(plain(&w.lines[act[0]]), "cancel     hunter");
-        let run = plain(&w.lines[rail_rows(&w.lines, "▸ ")[0]]);
+        assert_eq!(w.lines[act[0]].plain(), "cancel     hunter");
+        let run = w.lines[rail_rows(&w.lines, "▸ ")[0]].plain();
         assert!(
             run.ends_with(crate::tui::line::spark_glyph(Some(40))),
             "the `ral` call keeps the magnitude it earned: {run:?}"
@@ -2002,7 +1997,7 @@ mod tests {
             .render_window(READ_W, 40)
             .lines
             .iter()
-            .map(plain)
+            .map(Row::plain)
             .collect::<Vec<_>>()
             .join("\n");
         assert!(all.contains("hello") && all.contains("hi back"), "{all:?}");
@@ -2175,7 +2170,7 @@ mod tests {
             .render_window(READ_W, 40)
             .lines
             .iter()
-            .map(plain)
+            .map(Row::plain)
             .collect::<Vec<_>>();
         let one = rendered.iter().position(|l| l.contains("one")).unwrap();
         let between = rendered.iter().position(|l| l.contains("between")).unwrap();

@@ -69,6 +69,21 @@ pub(super) const BANNER_GOLD: Color = Color::Rgb(255, 191, 0);
 /// Maximum readable width in columns; markdown is wrapped to this.
 pub(super) const READ_W: u16 = 100;
 
-/// Rail gutter: one shape glyph plus a trailing space.  Only a block's first
-/// content row carries it, so a selection through the block copies as plain text.
+/// Rail gutter: one shape glyph plus a trailing space.  Every transcript row
+/// carries exactly this margin — a glyph on a block's first content row, blank
+/// elsewhere — so content columns are the same on every row and no selection
+/// can reach the chrome.  See [`super::row::Row`].
 pub(super) const RAIL_W: usize = 2;
+
+/// Content columns available in a row `width` columns wide — the one place the
+/// margin is subtracted, and the only cast of [`RAIL_W`].
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "RAIL_W is a small compile-time constant"
+)]
+pub(super) const fn content_w(width: u16) -> u16 {
+    width.saturating_sub(RAIL_W as u16)
+}
+
+/// Content columns at the readable width — the width builders wrap to.
+pub(super) const READ_CONTENT_W: u16 = content_w(READ_W);
