@@ -12,52 +12,55 @@ gui := if os() == "linux" { "--exclude synod" } else { "" }
 default:
     @just --list
 
-# Build the whole workspace, including tests and examples.
-build:
+# Warnings are errors in every recipe scripts/ci.sh runs, and all of them carry
+# this one value: a step differing re-fingerprints every unit in the graph,
+# third-party crates included (measured 2026-08-25: 408 rebuilt).
+deny := '-D warnings'
+
+# Private, and a dependency of `test`: `cargo test` alone does not reliably
+# refresh the `ral` binary that ral/tests/ shells out to.
+_build $RUSTFLAGS=deny:
     cargo build --workspace {{gui}} --all-targets
 
-# Type-check the workspace without producing binaries — the fast dev loop.
-check:
-    cargo check --workspace {{gui}} --all-targets
-
-# Cross-check the workspace against the shipping Windows ABI (exarch/synod/guest-net excluded: their C deps can't cross-compile from Unix).
-check-windows $RUSTFLAGS='-D warnings' $CC_x86_64_pc_windows_msvc='cc-absent-use-blake3-pure-fallback':
-    cargo check --workspace --exclude exarch --exclude synod --exclude guest-net --all-targets --target x86_64-pc-windows-msvc
-
-# `linux-ci` covers this ground properly, in a container; this is seconds
-# because `check` never links. `ral`/`ral-ripgrep-core` are excluded on top of
-# the Windows twin's three: musl gives ripgrep a jemalloc allocator with no
-# pure-Rust fallback, so the absent-CC trick that spares blake3 can't spare it.
-
-# Cross-check the guest's musl target — the only cheap check of the `cfg(target_os = "linux")` code (vsock, hatch, spawn jail) a macOS host gates out entirely.
-check-linux $RUSTFLAGS='-D warnings' $CC_x86_64_unknown_linux_musl='cc-absent-use-blake3-pure-fallback':
-    cargo check --workspace --exclude exarch --exclude synod --exclude guest-net --exclude ral --exclude ral-ripgrep-core --all-targets --target x86_64-unknown-linux-musl
-
-# Builds first: `cargo test` alone won't reliably refresh the `ral` binary
-# that ral/tests/ shells out to.
-
 # Run the workspace test suite.
-test: build
+test $RUSTFLAGS=deny: _build
     cargo test --workspace {{gui}} --features ral-core/test-util,exarch/test-util
-
-# Format every crate in place.
-fmt:
-    cargo fmt
 
 # No `-- -D warnings`: it'd override vendored ral-ripgrep-core's `all = "allow"`
 # opt-out. Pedantry (pedantic + nursery, I/O-door denylist) lives in RUSTFLAGS
 # and `[workspace.lints.clippy]` instead.
 
-# Clippy across the workspace, warnings as errors — exactly what CI lints with.
-lint $RUSTFLAGS='-D warnings':
+# Clippy across the workspace, warnings as errors.
+lint $RUSTFLAGS=deny:
     cargo clippy --workspace {{gui}} --all-targets
 
-# Lint and test the workspace: the gate before every commit.
-gate: lint test
+# Never links, so a Unix host can run it. exarch and synod are excluded because
+# rustls -> aws-lc-sys compiles C against Windows system headers; guest-net
+# because it depends on exarch, which brings that tree (fff-search -> git2 ->
+# libgit2-sys) straight back. The poisoned CC makes blake3's build script fall
+# back to its pure-Rust intrinsics instead of hunting for ml64.exe. Real
+# Windows *test execution* still needs .github/workflows/windows.yml.
+
+# Cross-check the workspace against the shipping Windows ABI.
+check-windows $RUSTFLAGS=deny $CC_x86_64_pc_windows_msvc='cc-absent-use-blake3-pure-fallback':
+    cargo check --workspace --exclude exarch --exclude synod --exclude guest-net --all-targets --target x86_64-pc-windows-msvc
+
+# plugins/*.ral are left out: the `_ed-*` builtins they call live only on the
+# interactive shell's table, so a batch --check cannot type them — the REPL
+# checks each plugin as rc loads it. One shell for all hundred files: under
+# `just linux-ci` the container then starts once, not once per file.
+
+# Type-check every example under examples/.
+[unix]
+examples-check:
+    #!/bin/sh
+    set -eu
+    for f in examples/*/*.ral; do cargo run -p ral --quiet -- --check "$f"; done
 
 # Both run scripts/ci.sh — the same step list GitHub Actions runs, differing
-# only in where cargo runs.  POSIX sh, so `just ci` still works when ral does
-# not build; that is the point of it not being a `.ral` script.
+# only in where cargo runs.  It calls the recipes above rather than spelling
+# out their cargo lines, so `just test` is CI's test and cannot drift from it;
+# it stays POSIX sh so CI still runs when ral does not build.
 
 # Run CI on this host's toolchain: lint, build, test, the Windows cross-check, the site, the examples.
 [unix]

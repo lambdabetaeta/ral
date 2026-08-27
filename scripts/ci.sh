@@ -1,7 +1,15 @@
 #!/bin/sh
 # ci.sh — the one CI step list.  GitHub Actions runs it (.github/workflows/ci.yml),
 # `just ci` runs it before a push, `just linux-ci` runs it in the container.
-# POSIX sh and cargo only, on purpose: CI must not depend on ral building.
+#
+# Every step is a justfile recipe, invoked by name.  The justfile is where a
+# developer's commands already live, so this script owning only the *order* and
+# the *place* leaves one definition of what linting and testing the workspace
+# means — `just lint` locally is CI's lint, not a copy that resembles it.
+#
+# POSIX sh, and it may call `just` but never `ral`: ral is the thing under test,
+# and a CI that cannot run when ral is broken cannot report that ral is broken.
+# A justfile is an inert recipe registry that fails loudly on a parse error.
 #
 # The mode picks only where cargo runs.
 #   native     this host's toolchain — on macOS the only way to exercise
@@ -22,21 +30,10 @@ esac
 
 cd "$(dirname "$0")/.."
 
-# What CI lints and builds with.  Clippy takes no `-- -D warnings`: that would
-# override the vendored ral-ripgrep-core's `all = "allow"` opt-out.  Every step
-# carries the same value — one that differs re-fingerprints every unit in the
-# graph, third-party crates included (measured 2026-08-25: 408 rebuilt).
-RUSTFLAGS='-D warnings'
-export RUSTFLAGS
-
-# synod's tauri dependency links the GTK/WebKit stack, which no Linux host here
-# carries; synod ships on macOS and Windows only.  Spliced unquoted below: a
-# quoted empty $GUI would hand cargo an empty argument, which it rejects.
-if [ "$MODE" = linux-box ] || [ "$(uname -s)" = Linux ]; then
-    GUI='--exclude synod'
-else
-    GUI=''
-fi
+# RUSTFLAGS and synod's exclusion on Linux are the justfile's (`deny`, `gui`),
+# not repeated here.  `gui` keys off `os()`, which — because the recipes run
+# inside the container in linux-box mode — reports the platform cargo actually
+# targets, so no second rule here has to predict it.
 
 # Docker, not podman: docker is rootful, so --privileged is real host
 # privilege.  Rootless podman's is namespace-root only, and if that falls short
@@ -69,7 +66,7 @@ at_toolchain() {
     case $MODE in
     native) "$@" ;;
     linux-box)
-        docker run --rm --privileged --init --env RUSTFLAGS \
+        docker run --rm --privileged --init \
             -v "$PWD:/workspace" \
             -v ral-linux-cargo:/home/dev/.cargo \
             -v ral-linux-rustup:/usr/local/rustup \
@@ -79,15 +76,16 @@ at_toolchain() {
     esac
 }
 
-# Every cargo invocation goes through here, so each one is named once and the
-# banner cannot drift from what runs.
-cargo_step() {
-    printf '\n\033[36m==>\033[0m \033[33mcargo %s\033[0m\n' "$*"
-    at_toolchain cargo "$@"
-}
-
 banner() {
     printf '\n\033[36m==>\033[0m \033[33m%s\033[0m\n' "$1"
+}
+
+# Every step goes through here, so each is named once and the banner cannot
+# drift from what runs.  `just` echoes the cargo line it expands to, so the
+# recipe name and the command both appear.
+step() {
+    banner "just $*"
+    at_toolchain just "$@"
 }
 
 # /workspace/.target-linux is not in the image, so docker creates its volume
@@ -103,38 +101,24 @@ fi
 # Clippy's I/O-door denylist (clippy.toml) needs no `-D` flag: the
 # `[workspace.lints.clippy] disallowed_methods = "deny"` table already makes a
 # stray fs/process constructor a build break.
-cargo_step clippy --workspace $GUI --all-targets
+step lint
 
-# Load-bearing before the tests: ral/tests/ invokes the `ral` binary as a
-# subprocess, and `cargo test` alone does not reliably refresh it.
-cargo_step build --workspace $GUI --all-targets
-cargo_step test --workspace $GUI --features ral-core/test-util,exarch/test-util
+# `test` depends on `_build`, which is load-bearing: ral/tests/ invokes the
+# `ral` binary as a subprocess, and `cargo test` alone won't refresh it.
+step test
 
-# The Windows ABI cross-check never links, so a Unix host can run it.  exarch
-# and synod are excluded because rustls -> aws-lc-sys compiles C against
-# Windows system headers; guest-net because it depends on exarch, which brings
-# that tree (fff-search -> git2 -> libgit2-sys) straight back.  The poisoned CC
-# makes blake3's build script fall back to its pure-Rust intrinsics instead of
-# hunting for ml64.exe.  Real Windows *test execution* still needs
-# .github/workflows/windows.yml.  Skipped in linux-box mode: no rustup target
-# in the image.
+# Skipped in linux-box mode: the image carries no rustup Windows target.  Run
+# on the host either way — the recipe never links, so it costs seconds.
 if [ "$MODE" = native ]; then
-    CC_x86_64_pc_windows_msvc='cc-absent-use-blake3-pure-fallback'
-    export CC_x86_64_pc_windows_msvc
-    cargo_step check --workspace --exclude exarch --exclude synod \
-        --exclude guest-net --all-targets --target x86_64-pc-windows-msvc
+    banner 'just check-windows'
+    just check-windows
 fi
 
 # Always this host's python: the box's image carries neither uv nor the
 # tree-sitter CLI, and render-site.py has no highlighting fallback.
-banner 'uv run scripts/render-site.py'
-uv run scripts/render-site.py
+banner 'just site'
+just site
 
-# plugins/*.ral are left out: the `_ed-*` builtins they call live only on the
-# interactive shell's table, so a batch --check cannot type them — the REPL
-# checks each plugin as rc loads it.  One `sh -ec` so the container starts once
-# for all hundred files rather than once each.
-banner 'ral --check examples/*/*.ral'
-at_toolchain sh -ec 'for f in examples/*/*.ral; do cargo run -p ral --quiet -- --check "$f"; done'
+step examples-check
 
 printf '\n\033[32m  CI OK (%s).\033[0m\n' "$MODE"

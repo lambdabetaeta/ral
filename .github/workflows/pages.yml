@@ -38,7 +38,7 @@ jobs:
         run: tree-sitter generate --js-runtime native
         working-directory: editors/tree-sitter-ral
 
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
 
       # Renders index.html, examples.html (tree-sitter), and spec.html /
       # rationale.html (markdown) into site/.  uv resolves the one dependency.

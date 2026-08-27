@@ -1,7 +1,8 @@
 name: CI
 # The step list is scripts/ci.sh, the same one `just ci` and `just linux-ci`
-# run.  This file only provisions the runner: the sandbox image the cargo steps
-# run in, and the site toolchain render-site.py needs.
+# run, and its steps are justfile recipes.  This file only provisions the
+# runner: the sandbox image the cargo steps run in, the site toolchain
+# render-site.py needs, and `just` itself.
 #
 # Runs on a `v*` tag and on manual dispatch.  Cross-target release builds live
 # in build-binaries.yml (same tags); the Windows job in windows.yml, which
@@ -36,7 +37,11 @@ jobs:
             | gunzip > /usr/local/bin/tree-sitter
           chmod +x /usr/local/bin/tree-sitter
 
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      # scripts/ci.sh runs its steps as justfile recipes; the cargo ones go
+      # through the image above, but `just site` runs on the runner itself.
+      - uses: extractions/setup-just@v4
 
       - name: Lint, build, test, site, examples
         run: scripts/ci.sh linux-box
