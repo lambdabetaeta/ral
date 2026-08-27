@@ -335,14 +335,16 @@ impl Avatar {
             egress,
             dial,
         } = cfg;
+        // The CLI rejects both pairings at parse; these hold the invariant for
+        // every other caller that builds a root.
         if resume.is_some() && no_logs {
             return Err(io::Error::other(
-                "--resume cannot be combined with --no-logs — a transient session writes nothing to reopen",
+                "cannot resume a logless session — it writes nothing to reopen",
             ));
         }
         if resume.is_some() && chat {
             return Err(io::Error::other(
-                "--resume cannot be combined with --chat — chat sessions have no resumable harness history",
+                "cannot resume a chat session — chat keeps no resumable harness history",
             ));
         }
         if resume.is_some() && matches!(&root_seat, RootSeat::Wire { .. }) {

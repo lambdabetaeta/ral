@@ -37,7 +37,7 @@ pub(super) fn resolve_base(
         "dangerous" => DANGEROUS_RAL,
         other => {
             return Err(format!(
-                "exarch: unknown base '{other}'; \
+                "unknown base '{other}'; \
                  expected one of: dangerous, reasonable, edit-only, read-only, minimal, confined"
             ));
         }
@@ -53,11 +53,11 @@ pub(super) fn resolve_base(
     )
     .map_err(|e| match e {
         ral_core::types::Break::Error(err) => format!(
-            "exarch: built-in base '{name}' failed to parse: {}",
+            "built-in base '{name}' failed to parse: {}",
             err.message
         ),
         other @ ral_core::types::Break::Escape(_) => {
-            format!("exarch: built-in base '{name}' failed: {other:?}")
+            format!("built-in base '{name}' failed: {other:?}")
         }
     })?;
     drop_dead_exec_grants(&mut caps, cfg!(unix));

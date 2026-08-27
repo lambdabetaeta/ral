@@ -539,7 +539,7 @@ pub fn run(
     format: OutputFormat,
 ) -> Result<(), String> {
     let prompt = seed
-        .ok_or("--headless requires a seed prompt: --prompt, --file, or trailing words after --")?;
+        .ok_or("--headless requires a seed prompt: --prompt or --file")?;
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
     // The account id, not a label: a label is relative to a set this banner
@@ -1054,14 +1054,14 @@ mod tests {
     }
 
     /// A seed of whitespace is no seed: [`crate::cli::load_seed`] collapses it,
-    /// and `run` refuses before the provider is touched, naming all three ways
-    /// to supply one — the only thing a scripted caller has to go on.
+    /// and `run` refuses before the provider is touched, naming both ways to
+    /// supply one — the only thing a scripted caller has to go on.
     #[test]
     fn a_blank_seed_is_no_seed_and_the_refusal_names_every_flag() {
         use clap::Parser;
         let cli = crate::cli::Cli::try_parse_from(["exarch", "--headless", "--prompt", "   \n\t"])
             .expect("whitespace is a value, not a parse error");
-        let seed = crate::cli::load_seed(cli.prompt, cli.file, cli.trailing_prompt)
+        let seed = crate::cli::load_seed(cli.prompt, cli.file)
             .expect("no --file to read");
         assert_eq!(seed, None, "a blank seed must never reach the model");
 
@@ -1083,12 +1083,12 @@ mod tests {
         .expect_err("a headless run with no seed has nothing to do");
         assert_eq!(
             err,
-            "--headless requires a seed prompt: --prompt, --file, or trailing words after --"
+            "--headless requires a seed prompt: --prompt or --file"
         );
 
         // The filter trims only to judge: real content keeps its own spacing.
         assert_eq!(
-            crate::cli::load_seed(Some(" x ".into()), None, Vec::new())
+            crate::cli::load_seed(Some(" x ".into()), None)
                 .expect("no --file to read")
                 .as_deref(),
             Some(" x ")

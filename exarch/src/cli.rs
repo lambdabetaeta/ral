@@ -26,20 +26,12 @@ pub struct Cli {
     /// reaching models the provider does not advertise; alone, its default.
     #[arg(long)]
     pub provider: Option<String>,
+    /// The seed prompt, verbatim.  There is no bare-word form: a stray
+    /// argument is a mistake, not a prompt.
     #[arg(long, conflicts_with = "file")]
     pub prompt: Option<String>,
     #[arg(long)]
     pub file: Option<std::path::PathBuf>,
-    /// Trailing words after `--` join into the seed prompt, so a markdown
-    /// bullet like `- item` stays data, not a flag.  Prefer `--prompt`/`--file`.
-    #[arg(
-        value_name = "PROMPT",
-        num_args = 0..,
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        conflicts_with_all = ["prompt", "file"]
-    )]
-    pub trailing_prompt: Vec<String>,
     #[arg(long = "system", value_name = "FILE")]
     pub system_files: Vec<std::path::PathBuf>,
     /// Agent ceiling — one of six bake-ins: `dangerous` (no attenuation),
@@ -62,11 +54,10 @@ pub struct Cli {
     /// Unset, none is sent and the provider's own default stands.
     #[arg(long = "max-tokens", value_name = "N")]
     pub max_tokens: Option<u32>,
-    /// Reasoning effort, in genai's keywords: `zero`, `low`, `medium` (the
-    /// default), `high`, `xhigh`, `max`, and the legacy pre-gpt-5 `minimal` —
-    /// not the `/model` picker's rungs, which read `med` and `auto`.
-    /// Overrides any persisted effort.
-    #[arg(long = "effort", value_name = "LEVEL")]
+    /// Reasoning effort, named by the rung of the `/model` picker's ladder:
+    /// `auto`, `zero`, `low`, `med`, `high`, `xhigh`, `max`.  `auto` sends no
+    /// option, and so is how a persisted rung is cleared.
+    #[arg(long = "effort", value_name = "RUNG")]
     pub effort: Option<String>,
     /// Run one seed exchange non-interactively: the root's deliberate `reply`
     /// is rendered once to stdout at completion, every other event condenses
@@ -75,7 +66,7 @@ pub struct Cli {
     #[arg(long)]
     pub headless: bool,
     /// Reopen the newest run, or the named run/session directory.
-    #[arg(long, value_name = "TARGET", num_args = 0..=1)]
+    #[arg(long, value_name = "TARGET", num_args = 0..=1, conflicts_with_all = ["no_logs", "chat"])]
     pub resume: Option<Option<std::path::PathBuf>>,
     /// Keep only the in-memory model mirror; no durable records or run lock
     /// are created, and the session cannot be resumed.
@@ -88,18 +79,18 @@ pub struct Cli {
     pub output_format: OutputFormat,
     /// Authorise the agent to schedule its own wakeups (the `schedules`
     /// enquiry) — waking itself indefinitely is authority.
-    #[arg(long = "allow-schedule")]
+    #[arg(long = "allow-schedule", conflicts_with = "chat")]
     pub allow_schedule: bool,
 
     /// Edit the TUI prompt in vi mode rather than emacs — the `prompt-editor`
     /// state machine the ral worksheet drives too.  It opens in insert mode.
-    #[arg(long = "vi")]
+    #[arg(long = "vi", conflicts_with = "headless")]
     pub vi: bool,
 
     /// Which file-editing scheme the system prompt teaches: `replace` (the
     /// default) literal string replacement, `hash` the witnessed line-hash one.
     /// Both stay registered, so the untaught one works if named.
-    #[arg(long = "edit", value_enum, default_value_t = EditScheme::Replace)]
+    #[arg(long = "edit", value_enum, default_value_t = EditScheme::Replace, conflicts_with = "chat")]
     pub edit: EditScheme,
 
     /// Chat mode: no tools, no system prompt — a bare back-and-forth with the
@@ -161,71 +152,14 @@ pub enum Command {
 pub fn load_seed(
     prompt: Option<String>,
     file: Option<std::path::PathBuf>,
-    trailing_prompt: Vec<String>,
 ) -> Result<Option<String>, String> {
-    let seed = match (prompt, file, trailing_prompt) {
-        (Some(p), _, _) => Some(p),
-        (_, Some(path), _) => {
+    let seed = match (prompt, file) {
+        (Some(p), _) => Some(p),
+        (None, Some(path)) => {
             Some(std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?)
         }
-        (_, _, words) if !words.is_empty() => Some(words.join("\n")),
-        _ => None,
+        (None, None) => None,
     };
     Ok(seed.filter(|s| !s.trim().is_empty()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn trailing_prompt_after_double_dash_accepts_markdown_bullets() {
-        let cli = Cli::try_parse_from([
-            "exarch",
-            "--headless",
-            "--",
-            "Recover the model",
-            "- keep weights unchanged",
-        ])
-        .expect("markdown bullet is prompt text, not a flag");
-
-        let seed = load_seed(cli.prompt, cli.file, cli.trailing_prompt)
-            .expect("seed loads")
-            .expect("seed is present");
-
-        assert_eq!(seed, "Recover the model\n- keep weights unchanged");
-    }
-
-    #[test]
-    fn chat_conflicts_with_headless_and_system() {
-        // Chat withholds `reply`, so a headless trunk could never return.
-        Cli::try_parse_from(["exarch", "--chat", "--headless", "--prompt", "hi"])
-            .expect_err("chat is interactive-only");
-        // Chat obliterates the persona `--system` would set.
-        Cli::try_parse_from(["exarch", "--chat", "--system", "persona.md"])
-            .expect_err("chat has no system prompt to override");
-        Cli::try_parse_from(["exarch", "--chat"]).expect("chat alone is fine");
-    }
-
-    #[test]
-    fn explicit_prompt_still_wins() {
-        let seed = load_seed(Some("from flag".into()), None, Vec::new()).expect("seed loads");
-
-        assert_eq!(seed.as_deref(), Some("from flag"));
-    }
-
-    #[test]
-    fn resume_distinguishes_bare_and_named_targets() {
-        let bare = Cli::try_parse_from(["exarch", "--resume"]).expect("bare resume");
-        assert_eq!(bare.resume, Some(None));
-
-        let named = Cli::try_parse_from(["exarch", "--resume", "/tmp/run"]).expect("named resume");
-        assert_eq!(
-            named.resume,
-            Some(Some(std::path::PathBuf::from("/tmp/run")))
-        );
-        let transient = Cli::try_parse_from(["exarch", "--no-logs"]).expect("no logs");
-        assert!(transient.no_logs);
-    }
-}

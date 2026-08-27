@@ -119,12 +119,7 @@ pub fn run() -> Result<(), String> {
             }
         };
     }
-    // Doubles the `requires = "headless"` in `cli`: `--output-format` reaches
-    // only the headless frontend, so asking for `json` alone is a mistake.
-    if c.output_format == headless::OutputFormat::Json && !c.headless {
-        return Err("--output-format is only meaningful with --headless".into());
-    }
-    let seed = cli::load_seed(c.prompt, c.file, c.trailing_prompt)?;
+    let seed = cli::load_seed(c.prompt, c.file)?;
 
     let custom = config::load()?;
     let disk_warn_bytes = config::disk_warn_bytes()?;
@@ -161,14 +156,8 @@ pub fn run() -> Result<(), String> {
         &available,
         &mut catalog,
     )?;
-    if let Some(keyword) = c.effort.as_deref() {
-        tuning.effort = Some(provider::ReasoningEffort::from_keyword(keyword).ok_or_else(
-            || {
-                format!(
-                    "invalid effort '{keyword}' — expected zero|low|medium|high|xhigh|max|minimal"
-                )
-            },
-        )?);
+    if let Some(rung) = c.effort.as_deref() {
+        tuning.effort = provider::effort_by_label(rung)?;
     }
     // An unset model means "the `/model` picker will choose"; a headless run has
     // no picker, so it must be told one.
@@ -178,9 +167,9 @@ pub fn run() -> Result<(), String> {
             provider::identity::label(&account, &available)
         ));
     }
-    // A `--model` override is a deliberate choice, remembered like the picker's,
+    // Every selection flag is a deliberate choice, remembered like the picker's,
     // so the next launch in this project restores it.
-    if c.model.is_some() && !model.is_empty() {
+    if (c.model.is_some() || c.provider.is_some() || c.effort.is_some()) && !model.is_empty() {
         let _ = provider::state::save(
             &state_dir,
             &provider::state::State::new(&account, &available, &model, &tuning, route.as_deref()),
@@ -376,6 +365,10 @@ fn resolve_run(
     Ok((run_dir, lock, None))
 }
 
+/// The account, model, tuning, and `OpenRouter` route a launch opens with.
+///
+/// The saved selection is the ground each override is laid over, so pinning a
+/// model keeps the effort rung the picker last chose rather than resetting it.
 fn resolve_initial_selection(
     provider_override: Option<&str>,
     model_override: Option<&str>,
@@ -383,41 +376,51 @@ fn resolve_initial_selection(
     available: &[provider::Account],
     catalog: &mut provider::models::ModelCatalog<provider::models::LiveSource>,
 ) -> Result<(provider::Account, String, provider::Tuning, Option<String>), String> {
-    if let Some(pname) = provider_override {
-        let account = provider::models::resolve_pinned_provider(pname, available)?;
-        let model = match model_override {
-            Some(m) => m.to_string(),
-            None => match &account.service.default_model {
-                Some(m) => m.clone(),
-                None => {
-                    return Err(format!(
-                        "'{pname}' has no default model — also pass --model NAME",
-                    ));
-                }
-            },
-        };
-        return Ok((account, model, provider::Tuning::initial(), None));
+    let saved = provider::state::load(state_dir);
+    let saved_account = saved.as_ref().and_then(|s| s.account(available));
+    if let (Some(s), None) = (&saved, &saved_account) {
+        eprintln!(
+            "exarch: the saved provider '{}' is no longer available; using the default instead",
+            s.provider_name
+        );
     }
-    if let Some(name) = model_override {
-        let account = provider::models::resolve_model_provider(name, available, catalog)?;
-        return Ok((account, name.to_string(), provider::Tuning::initial(), None));
-    }
-    if let Some(saved) = provider::state::load(state_dir) {
-        match saved.account(available) {
-            Some(account) => {
-                let tuning = saved.tuning();
-                return Ok((account, saved.model, tuning, saved.route));
-            }
-            None => eprintln!(
-                "exarch: the saved provider '{}' is no longer available; using the default instead",
-                saved.provider_name
-            ),
+    let tuning = saved
+        .as_ref()
+        .map_or_else(provider::Tuning::initial, provider::state::State::tuning);
+
+    let (account, model) = match (provider_override, model_override) {
+        (Some(pname), _) => {
+            let account = provider::models::resolve_pinned_provider(pname, available)?;
+            let model = match model_override {
+                Some(m) => m.to_string(),
+                None => account.service.default_model.clone().ok_or_else(|| {
+                    format!("'{pname}' has no default model — also pass --model NAME")
+                })?,
+            };
+            (account, model)
         }
-    }
-    let account = available[0].clone();
-    // No default model is no reason to refuse to launch: open with the model
-    // unset — the empty sentinel — so the interactive frontend lands on its
-    // `/model` hint. `run` rejects that for a headless launch.
-    let model = account.service.default_model.clone().unwrap_or_default();
-    Ok((account, model, provider::Tuning::initial(), None))
+        (None, Some(name)) => (
+            provider::models::resolve_model_provider(name, available, catalog)?,
+            name.to_string(),
+        ),
+        (None, None) => match (&saved, &saved_account) {
+            (Some(s), Some(account)) => (account.clone(), s.model.clone()),
+            // No default model is no reason to refuse to launch: open with the
+            // model unset — the empty sentinel — so the interactive frontend
+            // lands on its `/model` hint. `run` rejects that for a headless launch.
+            _ => {
+                let account = available[0].clone();
+                let model = account.service.default_model.clone().unwrap_or_default();
+                (account, model)
+            }
+        },
+    };
+    // The route names an `OpenRouter` serving provider, so it means nothing on
+    // any account but the one that saved it.
+    let route = saved.and_then(|s| s.route).filter(|_| {
+        saved_account
+            .as_ref()
+            .is_some_and(|saved| saved.id == account.id)
+    });
+    Ok((account, model, tuning, route))
 }

@@ -23,7 +23,7 @@ pub(super) fn load_capabilities_ral(
 ) -> Result<Capabilities, String> {
     if !path.exists() {
         return Err(format!(
-            "exarch: {flag} path does not exist: {}",
+            "{flag} path does not exist: {}",
             path.display()
         ));
     }
@@ -36,7 +36,7 @@ pub(super) fn load_capabilities_ral(
                 format!("{cmd}: stopped by signal {}", signal.display())
             }
         };
-        format!("exarch: {flag} {}: {detail}", path.display())
+        format!("{flag} {}: {detail}", path.display())
     })
 }
 

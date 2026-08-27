@@ -45,8 +45,11 @@ exit code.
   setup: `login` / `logout` / `accounts` manage signed-in ChatGPT accounts (see
   below), `--model` and the session flags are ignored on this path.
 - **Session.** Absent a subcommand, `run` resolves the initial provider+model
-  (`--provider` pins the identity; `--effort` sets reasoning effort; `--chat`
-  drops the system prompt and all tools), composes the capability lattice
+  (`--provider` pins the identity; `--effort` names a rung of the `/model`
+  picker's own `EFFORT_LADDER`; `--chat` drops the system prompt and all
+  tools). The saved project selection is the ground each of those is laid
+  over, and any of them being given saves the result back, so a flag and the
+  picker leave the same trace. Then `run` composes the capability lattice
   (`policy::for_invocation`, → [[map/exarch/policy|policy]]),
   assembles the system prompt (`prompt::assemble`), builds the trunk
   [[map/exarch/agent|`Avatar`]] via `Avatar::root(RootConfig, RootSeat, provider)`
