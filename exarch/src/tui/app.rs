@@ -3,7 +3,7 @@
 //! [`Signal::Transient`] through [`Self::transient`] — into scrollback blocks.
 
 use super::banner;
-use super::block::{AgentSlot, RailShape};
+use super::block::{AgentSlot, ChromeKind};
 use super::gesture::GestureState;
 use super::line;
 use super::line::bold;
@@ -371,12 +371,12 @@ impl App {
         card.0
             .push(crate::agent::resources::section_mark("frontend"));
         card.0.push(crate::agent::resources::rows_mark(&frontend));
-        self.push_chrome(id, RailShape::Plain, line::render_card(&card, 3));
+        self.push_chrome(id, ChromeKind::Plain, line::render_card(&card, 3));
         // The `views.dead` row is a count; this names each tombstoned
         // view's id, status, and log path.
         let tombstones = self.tabs.tombstone_lines();
         if !tombstones.is_empty() {
-            self.push_chrome(id, RailShape::Plain, tombstones);
+            self.push_chrome(id, ChromeKind::Plain, tombstones);
         }
     }
 
@@ -394,20 +394,25 @@ impl App {
         }
     }
 
-    pub(super) fn push_chrome(&mut self, id: AgentId, shape: RailShape, lines: Vec<Line<'static>>) {
+    pub(super) fn push_chrome(
+        &mut self,
+        id: AgentId,
+        shape: ChromeKind,
+        lines: Vec<Line<'static>>,
+    ) {
         self.with_viewport(id, |vp| vp.push_chrome(shape, lines));
     }
 
     /// A dim view-local note — a slash legend, a clipboard ack. Drawn, not
     /// recorded: unlike `Forensic::SystemNote` it never becomes a fact.
     pub(super) fn push_note(&mut self, id: AgentId, text: &str) {
-        self.push_chrome(id, RailShape::Plain, line::note(text));
+        self.push_chrome(id, ChromeKind::Plain, line::note(text));
     }
 
     /// The UI-thread twin of `Avatar::note_error`, for view commands that
     /// surface their own failures. Drawn, not recorded.
     pub(super) fn push_error(&mut self, id: AgentId, message: &str) {
-        self.push_chrome(id, RailShape::Error, line::error(message));
+        self.push_chrome(id, ChromeKind::Error, line::error(message));
     }
     pub fn key(&mut self, k: KeyEvent) {
         if k.kind != KeyEventKind::Press {
@@ -587,9 +592,9 @@ impl App {
         }
 
         if let Some(vp) = self.tabs.viewport_mut(self.tabs.root()) {
-            vp.push_chrome(RailShape::Plain, splash);
+            vp.push_chrome(ChromeKind::Plain, splash);
             vp.push_chrome(
-                RailShape::Plain,
+                ChromeKind::Plain,
                 line::render_card(&banner::session_card(s), 3),
             );
         }

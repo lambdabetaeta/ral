@@ -1,7 +1,7 @@
 ---
 verified_at_commit: fcf36a94
 verified_at_date: 2026-08-27
-anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, RailShape, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
+anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, ChromeKind, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
 # Cancellation
@@ -286,9 +286,9 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   foreground cause. `deliver_interrupt` re-creates the SIGINT the kernel would
   have sent a foreground *external* child via `interrupt_foreground_child`
   (Windows re-injects `CTRL_C_EVENT`).
-- A cancelled turn is a distinct TUI `RailShape::Cancelled`: the rail maps it
+- A cancelled turn is a distinct TUI `ChromeKind::Cancelled`: the rail maps it
   to the error `╳` so the broken-off work is visible, while `Block::is_error`
-  still matches only `RailShape::Error`, keeping the matrix's failure cell for
+  still matches only `ChromeKind::Error`, keeping the matrix's failure cell for
   actual failures.
 
 ## Why interactive Ctrl-C cannot force-exit

@@ -15,7 +15,7 @@ use ratatui::text::Span;
 
 /// The shape a block wears, one glyph per kind and no two kinds sharing one.
 /// Derived from [`super::block::BlockKind`]; chrome's coarser
-/// [`super::block::RailShape`] is lifted into this set by `Block::rail_kind`.
+/// [`super::block::ChromeKind`] is lifted into this set by `Block::rail_kind`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum RailKind {
     /// A file mutation, diff or whole-file write alike; the body says which.

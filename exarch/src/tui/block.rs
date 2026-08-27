@@ -28,7 +28,7 @@ pub(super) struct AgentSlot(pub u8);
 /// Coarse chrome sub-kind, carried so the rail need not re-parse built lines.
 /// Every other kind derives its shape from its [`BlockKind`] variant.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub(super) enum RailShape {
+pub(super) enum ChromeKind {
     Step,
     /// A detached block that settled — the `` `done `` a deferred worker flushes
     /// at completion. It wears the `↘` of [`RailKind::Subagent`]: background
@@ -127,7 +127,7 @@ pub(super) enum BlockKind {
     Card { card: Card, origin: CardOrigin },
     /// Pre-built chrome whose builder already wrapped to [`READ_W`].
     Chrome {
-        shape: RailShape,
+        shape: ChromeKind,
         lines: Vec<Line<'static>>,
     },
 }
@@ -165,7 +165,7 @@ pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usiz
 
     let mut out = Vec::new();
     for message in messages {
-        let mut prompt = Block::chrome(RailShape::Prompt, line::user_prompt(message));
+        let mut prompt = Block::chrome(ChromeKind::Prompt, line::user_prompt(message));
         let rows = trim_blanks(
             prompt.lines(width, AgentSlot::default(), true),
             Row::is_blank,
@@ -344,7 +344,7 @@ impl Block {
     fn card_with(card: Card, origin: CardOrigin) -> Self {
         Self::new(BlockKind::Card { card, origin }, Fidelity::default())
     }
-    pub(super) fn chrome(shape: RailShape, lines: Vec<Line<'static>>) -> Self {
+    pub(super) fn chrome(shape: ChromeKind, lines: Vec<Line<'static>>) -> Self {
         Self::new(BlockKind::Chrome { shape, lines }, Fidelity::default())
     }
     pub(super) fn plain_call(details: Option<String>) -> Self {
@@ -485,7 +485,7 @@ impl Block {
         matches!(
             self.kind,
             BlockKind::Chrome {
-                shape: RailShape::Step,
+                shape: ChromeKind::Step,
                 ..
             }
         )
@@ -496,7 +496,7 @@ impl Block {
         matches!(
             self.kind,
             BlockKind::Chrome {
-                shape: RailShape::Error,
+                shape: ChromeKind::Error,
                 ..
             }
         )
@@ -507,7 +507,7 @@ impl Block {
         matches!(
             self.kind,
             BlockKind::Chrome {
-                shape: RailShape::Prompt,
+                shape: ChromeKind::Prompt,
                 ..
             }
         )
@@ -770,12 +770,12 @@ impl Block {
                 }
             }
             BlockKind::Chrome { shape, .. } => match shape {
-                RailShape::Step => Some(RailKind::Step),
-                RailShape::Settled => Some(RailKind::Subagent),
-                RailShape::Spawned => Some(RailKind::FleetAct),
-                RailShape::Error | RailShape::Cancelled => Some(RailKind::Error),
-                RailShape::Plain => Some(RailKind::Note),
-                RailShape::Prompt => Some(RailKind::Prompt),
+                ChromeKind::Step => Some(RailKind::Step),
+                ChromeKind::Settled => Some(RailKind::Subagent),
+                ChromeKind::Spawned => Some(RailKind::FleetAct),
+                ChromeKind::Error | ChromeKind::Cancelled => Some(RailKind::Error),
+                ChromeKind::Plain => Some(RailKind::Note),
+                ChromeKind::Prompt => Some(RailKind::Prompt),
             },
         }
     }

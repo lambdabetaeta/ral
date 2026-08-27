@@ -30,7 +30,7 @@ use crate::{
 use std::sync::mpsc::TryRecvError;
 
 use super::banner::SessionInfo;
-use super::block::RailShape;
+use super::block::ChromeKind;
 use super::{
     App, banner, commands, line,
     render::draw,
@@ -225,7 +225,7 @@ pub fn run(
         // not replay a prior resume's note as if it were history.
         tui.app.push_chrome(
             session.agent.id,
-            RailShape::Plain,
+            ChromeKind::Plain,
             line::note(&format!(
                 "resumed: {exchanges} exchanges, {} KB",
                 bytes.div_ceil(1024)

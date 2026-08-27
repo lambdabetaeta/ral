@@ -300,7 +300,7 @@ impl Tabs {
 
 #[cfg(test)]
 mod tests {
-    use super::super::block::RailShape;
+    use super::super::block::ChromeKind;
     use super::*;
     use ratatui::text::Line;
     use std::time::{Duration, Instant};
@@ -334,10 +334,10 @@ mod tests {
             AgentSlot(1),
         );
         if let Some(vp) = tabs.viewport_mut(child) {
-            vp.push_chrome(RailShape::Plain, vec![Line::from("child says hi")]);
+            vp.push_chrome(ChromeKind::Plain, vec![Line::from("child says hi")]);
         }
         if let Some(vp) = tabs.viewport_mut(root) {
-            vp.push_chrome(RailShape::Plain, vec![Line::from("root says hi")]);
+            vp.push_chrome(ChromeKind::Plain, vec![Line::from("root says hi")]);
         }
         tabs.died(child);
         // Backdate rather than wait LINGER out in a test.

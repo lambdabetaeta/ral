@@ -12,7 +12,7 @@
 //! [`Self::push_chrome`], the chrome lane's door, and [`Self::push_thinking`],
 //! which carries the open line a reasoning seat draws.
 
-use super::block::{AgentSlot, Block, RailShape, Reveal, append_visual_rows};
+use super::block::{AgentSlot, Block, ChromeKind, Reveal, append_visual_rows};
 use super::group;
 use super::line::is_blank;
 use super::palette::{READ_W, content_w};
@@ -22,8 +22,8 @@ use super::select::plain_slice;
 use crate::agent::event::{ContextOp, EditAuthority};
 use crate::bus::AgentId;
 use crate::bus::card::{
-    self, Card, ObservationKind, RailPlace, execs_card, greps_card, observation_card,
-    observation_from_wire, rail_place, reads_card,
+    self, Card, Landing, ObservationKind, execs_card, greps_card, landing, observation_card,
+    observation_from_wire, reads_card,
 };
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Fold as _, Printer, Seq, Transient};
@@ -146,7 +146,7 @@ pub(super) struct Viewport {
     /// Chrome rows [`Self::push_chrome`] has authored, named by the
     /// [`Anchor`] they were drawn at.  [`Self::sync`] stable-merges these
     /// into the folded rows it rebuilds.
-    chrome: Vec<(Anchor, RailShape, Vec<Line<'static>>)>,
+    chrome: Vec<(Anchor, ChromeKind, Vec<Line<'static>>)>,
     /// The highest [`record::Seq`] [`Self::sync`] has last seen — the anchor
     /// a chrome row drawn right now would be named by.
     last_seq: Anchor,
@@ -547,7 +547,7 @@ impl Viewport {
     /// sub-kind.  Also records the row into the chrome lane, anchored at the
     /// last `Seq` [`Self::sync`] saw — the door [`Self::sync`]'s stable merge
     /// draws from on every rebuild.
-    pub(super) fn push_chrome(&mut self, shape: RailShape, lines: Vec<Line<'static>>) {
+    pub(super) fn push_chrome(&mut self, shape: ChromeKind, lines: Vec<Line<'static>>) {
         self.chrome.push((self.last_seq, shape, lines.clone()));
         self.push_block(Block::chrome(shape, lines));
     }
@@ -1065,12 +1065,12 @@ impl Printer for Viewport {
             Transient::State(state) => self.set_state(*state),
             Transient::Cleared => self.reset(),
             Transient::StopReason(raw) => {
-                self.push_chrome(RailShape::Plain, super::line::stop_reason(raw));
+                self.push_chrome(ChromeKind::Plain, super::line::stop_reason(raw));
             }
             Transient::Pin { key, card } => self.set_pin(key.clone(), card.clone()),
             Transient::Unpin { key } => self.drop_pin(key),
             Transient::Fault { text } => {
-                self.push_chrome(RailShape::Error, super::line::error(text));
+                self.push_chrome(ChromeKind::Error, super::line::error(text));
             }
             // The step's stream is sealed: the worker has recorded every
             // line it means to, tails included, so an open line still
@@ -1234,7 +1234,7 @@ impl Viewport {
         merged
     }
 
-    fn chrome_entry(agent: AgentSlot, shape: RailShape, lines: Vec<Line<'static>>) -> Entry {
+    fn chrome_entry(agent: AgentSlot, shape: ChromeKind, lines: Vec<Line<'static>>) -> Entry {
         let block = Block::chrome(shape, lines);
         let rows = Self::estimate_rows(&block, agent);
         Entry {
@@ -1264,7 +1264,7 @@ impl Viewport {
         match kind {
             K::Thinking { text } => vec![Block::thinking(text.clone(), answer_run(after))],
             K::Prompt { text } => vec![Block::chrome(
-                RailShape::Prompt,
+                ChromeKind::Prompt,
                 super::line::user_prompt(text),
             )],
             K::Answer { text } => {
@@ -1345,7 +1345,7 @@ impl Viewport {
             // red status in the row here just as it does on an exec.
             K::Done { outcome } => {
                 vec![Block::chrome(
-                    RailShape::Settled,
+                    ChromeKind::Settled,
                     super::line::render_text(&card::settled_spans(&card::to_card_done(outcome))),
                 )]
             }
@@ -1356,33 +1356,36 @@ impl Viewport {
             }
             K::Context { rows } => vec![Block::card(card::context_rows_card(rows))],
             K::Cancelled => vec![Block::chrome(
-                RailShape::Cancelled,
+                ChromeKind::Cancelled,
                 super::line::note("cancelled"),
             )],
-            K::Error { text } => vec![Block::chrome(RailShape::Error, super::line::error(text))],
+            K::Error { text } => vec![Block::chrome(ChromeKind::Error, super::line::error(text))],
             K::Nudge { used, max, cause } => vec![Block::chrome(
-                RailShape::Plain,
+                ChromeKind::Plain,
                 super::line::note(&format!("nudge {used}/{max}: {cause}")),
             )],
             K::ProviderError { error } => {
                 vec![Block::chrome(
-                    RailShape::Error,
+                    ChromeKind::Error,
                     super::line::provider_error(error),
                 )]
             }
             K::Stalled { error } => {
-                vec![Block::chrome(RailShape::Error, super::line::stalled(error))]
+                vec![Block::chrome(
+                    ChromeKind::Error,
+                    super::line::stalled(error),
+                )]
             }
             K::SystemNote { text } => {
-                vec![Block::chrome(RailShape::Plain, super::line::note(text))]
+                vec![Block::chrome(ChromeKind::Plain, super::line::note(text))]
             }
             K::HarnessResult { .. } => Vec::new(),
             K::ModelChanged { model, provider } => vec![Block::chrome(
-                RailShape::Plain,
+                ChromeKind::Plain,
                 super::line::note(&format!("model changed: {provider}/{model}")),
             )],
             K::Step { n } => vec![Block::chrome(
-                RailShape::Step,
+                ChromeKind::Step,
                 super::line::step(*n as usize),
             )],
             K::ContextEdited { op, by } => {
@@ -1406,14 +1409,14 @@ impl Viewport {
                         format!("[context dropped exchange(s) {list} ({authority})]")
                     }
                 };
-                vec![Block::chrome(RailShape::Plain, super::line::note(&text))]
+                vec![Block::chrome(ChromeKind::Plain, super::line::note(&text))]
             }
         }
     }
 }
 
 /// Rebuild one [`Display::Observation`](record::Display::Observation)'s block,
-/// through the same [`rail_place`] the live rail draws from — a rendering,
+/// through the same [`landing`] the live rail draws from — a rendering,
 /// never recorded, rebuilt fresh at sync time.
 fn render_observation(value: ral_core::serial::FOValue) -> Vec<Block> {
     let Some(obs) = observation_from_wire(value) else {
@@ -1423,17 +1426,17 @@ fn render_observation(value: ral_core::serial::FOValue) -> Vec<Block> {
 }
 
 fn render_observed(what: &Observed) -> Vec<Block> {
-    let Some(place) = rail_place(what) else {
+    let Some(place) = landing(what) else {
         return Vec::new();
     };
     match place {
-        RailPlace::Grouped(kind) => {
+        Landing::Grouped(kind) => {
             vec![Block::observation_card(observation_card(what), kind, 1)]
         }
-        RailPlace::Barrier => vec![Block::write_card(observation_card(what))],
-        RailPlace::Standalone => vec![Block::card(observation_card(what))],
-        RailPlace::Announced => vec![Block::chrome(
-            RailShape::Spawned,
+        Landing::Barrier => vec![Block::write_card(observation_card(what))],
+        Landing::Standalone => vec![Block::card(observation_card(what))],
+        Landing::Announced => vec![Block::chrome(
+            ChromeKind::Spawned,
             super::line::render_text(&card::observation_spans(what)),
         )],
     }
@@ -1642,7 +1645,7 @@ mod tests {
         // Enough chrome blocks to overflow a 10-row window.
         for i in 0..10 {
             vp.push_chrome(
-                RailShape::Plain,
+                ChromeKind::Plain,
                 vec![
                     Line::from(format!("block {i} line a")),
                     Line::from(format!("block {i} line b")),
@@ -1675,11 +1678,11 @@ mod tests {
         use crate::record::{Blocks, Display, Fold, Record, Recorded, Seq, Stamp, View};
 
         let mut vp = viewport();
-        vp.push_chrome(RailShape::Prompt, vec![Line::from("hello cutie")]);
+        vp.push_chrome(ChromeKind::Prompt, vec![Line::from("hello cutie")]);
         // Fill enough chrome to overflow a small window.
         for i in 0..8 {
             vp.push_chrome(
-                RailShape::Plain,
+                ChromeKind::Plain,
                 vec![
                     Line::from(format!("block {i} line a")),
                     Line::from(format!("block {i} line b")),
@@ -1744,7 +1747,7 @@ mod tests {
     fn window_evicts_oldest_blocks_first_past_the_block_cap() {
         let mut vp = viewport();
         for i in 0..(VIEWPORT_MAX_BLOCKS + 50) {
-            vp.push_chrome(RailShape::Plain, vec![Line::from(format!("marker {i}"))]);
+            vp.push_chrome(ChromeKind::Plain, vec![Line::from(format!("marker {i}"))]);
         }
         assert_eq!(
             vp.blocks.len(),
@@ -1773,7 +1776,7 @@ mod tests {
             let lines = (0..6000)
                 .map(|i| Line::from(format!("b{block} line {i}")))
                 .collect();
-            vp.push_chrome(RailShape::Plain, lines);
+            vp.push_chrome(ChromeKind::Plain, lines);
         }
         assert!(
             vp.blocks.len() < 5,
@@ -1798,7 +1801,7 @@ mod tests {
     #[test]
     fn evict_to_tombstone_keeps_exactly_the_three_facts() {
         let mut vp = viewport();
-        vp.push_chrome(RailShape::Plain, vec![Line::from("hello")]);
+        vp.push_chrome(ChromeKind::Plain, vec![Line::from("hello")]);
         vp.set_pin("k".into(), Card(Vec::new()));
         assert!(vp.tombstone().is_none());
 
@@ -1826,7 +1829,7 @@ mod tests {
     #[test]
     fn evict_to_tombstone_reads_error_status_off_the_last_block() {
         let mut vp = viewport();
-        vp.push_chrome(RailShape::Error, vec![Line::from("boom")]);
+        vp.push_chrome(ChromeKind::Error, vec![Line::from("boom")]);
         assert!(vp.last_is_error());
         vp.evict_to_tombstone(7);
         assert!(vp.tombstone().unwrap().error);
@@ -1837,7 +1840,7 @@ mod tests {
     #[test]
     fn evict_to_tombstone_is_idempotent() {
         let mut vp = viewport();
-        vp.push_chrome(RailShape::Error, vec![Line::from("boom")]);
+        vp.push_chrome(ChromeKind::Error, vec![Line::from("boom")]);
         vp.evict_to_tombstone(1);
         assert!(vp.tombstone().unwrap().error);
         vp.evict_to_tombstone(999);
@@ -2162,7 +2165,7 @@ mod tests {
 
         let mut vp = viewport();
         vp.sync(&memo);
-        vp.push_chrome(RailShape::Plain, vec![Line::from("between")]);
+        vp.push_chrome(ChromeKind::Plain, vec![Line::from("between")]);
 
         advance(
             &mut memo,
@@ -2205,7 +2208,7 @@ mod tests {
     fn the_transcript_keeps_what_the_window_evicts() {
         let mut vp = viewport();
         for i in 0..(VIEWPORT_MAX_BLOCKS + 50) {
-            vp.push_chrome(RailShape::Plain, vec![Line::from(format!("marker {i}"))]);
+            vp.push_chrome(ChromeKind::Plain, vec![Line::from(format!("marker {i}"))]);
         }
         let path = vp
             .flush_log()
@@ -2228,7 +2231,7 @@ mod tests {
     fn a_second_flush_rewinds_the_provisional_tail() {
         let mut vp = viewport();
         for i in 0..3 {
-            vp.push_chrome(RailShape::Plain, vec![Line::from(format!("marker {i}"))]);
+            vp.push_chrome(ChromeKind::Plain, vec![Line::from(format!("marker {i}"))]);
         }
         let path = vp
             .flush_log()
@@ -2236,7 +2239,7 @@ mod tests {
             .to_path_buf();
         let once = fs::read_to_string(&path).expect("the transcript reads back");
 
-        vp.push_chrome(RailShape::Plain, vec![Line::from("marker 3")]);
+        vp.push_chrome(ChromeKind::Plain, vec![Line::from("marker 3")]);
         vp.flush_log().expect("the transcript flushes");
         let twice = fs::read_to_string(&path).expect("the transcript reads back");
 
@@ -2415,7 +2418,7 @@ mod tests {
 
         let mut vp = viewport();
         vp.sync(&memo);
-        vp.push_chrome(RailShape::Plain, vec![Line::from("anchored on first")]);
+        vp.push_chrome(ChromeKind::Plain, vec![Line::from("anchored on first")]);
         assert_eq!(vp.chrome.len(), 1);
 
         // Pushing past the fold's own window evicts `first`.

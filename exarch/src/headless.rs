@@ -12,8 +12,8 @@
 use crate::agent::Avatar;
 use crate::agent::event::{ContextOp, EditAuthority};
 use crate::bus::card::{
-    self, Card, Mark, Row, execs_card, greps_card, observation_card, observation_from_wire,
-    rail_place, reads_card,
+    self, Card, Mark, Row, execs_card, greps_card, landing, observation_card,
+    observation_from_wire, reads_card,
 };
 use crate::bus::{AgentId, AgentOutcome, BusReceiver, FleetBus, Signal, Sink, pump};
 use crate::provider::{Provider, Usage};
@@ -483,7 +483,7 @@ impl Headless<'_> {
     }
 
     fn print_observed(&mut self, what: &Observed) {
-        if rail_place(what).is_none() {
+        if landing(what).is_none() {
             return;
         }
         let card = observation_card(what);
@@ -538,8 +538,7 @@ pub fn run(
     seed: Option<String>,
     format: OutputFormat,
 ) -> Result<(), String> {
-    let prompt = seed
-        .ok_or("--headless requires a seed prompt: --prompt or --file")?;
+    let prompt = seed.ok_or("--headless requires a seed prompt: --prompt or --file")?;
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
     // The account id, not a label: a label is relative to a set this banner
@@ -1061,8 +1060,7 @@ mod tests {
         use clap::Parser;
         let cli = crate::cli::Cli::try_parse_from(["exarch", "--headless", "--prompt", "   \n\t"])
             .expect("whitespace is a value, not a parse error");
-        let seed = crate::cli::load_seed(cli.prompt, cli.file)
-            .expect("no --file to read");
+        let seed = crate::cli::load_seed(cli.prompt, cli.file).expect("no --file to read");
         assert_eq!(seed, None, "a blank seed must never reach the model");
 
         let err = run(
@@ -1081,10 +1079,7 @@ mod tests {
             OutputFormat::Text,
         )
         .expect_err("a headless run with no seed has nothing to do");
-        assert_eq!(
-            err,
-            "--headless requires a seed prompt: --prompt or --file"
-        );
+        assert_eq!(err, "--headless requires a seed prompt: --prompt or --file");
 
         // The filter trims only to judge: real content keeps its own spacing.
         assert_eq!(

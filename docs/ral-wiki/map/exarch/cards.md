@@ -95,7 +95,7 @@ core spells a `spawn`'s `cmd` `<block>` and `prelude.ral`'s `defer` is a
 `spawn`.
 
 A settlement is *announced*, not bounded, so it is no card at all. Exarch's
-transcript seats those spans as a chrome line on the rail — `RailShape::Settled`
+transcript seats those spans as a chrome line on the rail — `ChromeKind::Settled`
 lifts to the `↘` of `RailKind::Subagent`, since background work landing in
 root's scrollback turns after the run that spawned it is the same event as an
 agent's answer arriving, whatever produced it — and synod's fold drops

@@ -12,7 +12,7 @@ pub(crate) mod report;
 pub mod skill;
 pub mod tools;
 
-use crate::bus::card::{rail_place, value_to_card, value_to_done, value_to_pin};
+use crate::bus::card::{landing, value_to_card, value_to_done, value_to_pin};
 use crate::bus::{AgentId, Emitter, Mailbox, Post};
 use base64::Engine;
 use ral_core::Value as RalValue;
@@ -162,10 +162,10 @@ pub fn decode_surface(ev: &RalValue) -> Option<Surface> {
         })
     } else if let Some(event) = Observation::from_value(ev) {
         // Core reports every observation it makes and judges none of them;
-        // `rail_place` is where this host says which it wants.  One core
+        // `landing` is where this host says which it wants.  One core
         // dispatch is one observation, so a rejected one is dropped outright
         // rather than offered to the decoders below.
-        rail_place(&event.what)?;
+        landing(&event.what)?;
         Some(Surface::Observation(Box::new(event)))
     } else if let Some(notice) = crate::bus::card::value_to_notice(ev) {
         Some(Surface::Notice(notice))

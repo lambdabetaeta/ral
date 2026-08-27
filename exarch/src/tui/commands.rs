@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::App;
 use super::banner::{self, SessionInfo};
-use super::block::{RailShape, Reveal};
+use super::block::{ChromeKind, Reveal};
 use super::login;
 use super::model_picker::pick_model;
 use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
@@ -291,7 +291,7 @@ pub(super) fn cmd_help(app: &mut App) {
 }
 
 pub(super) fn cmd_legend(app: &mut App) {
-    app.push_chrome(app.tabs.root(), RailShape::Plain, banner::legend_panel());
+    app.push_chrome(app.tabs.root(), ChromeKind::Plain, banner::legend_panel());
 }
 
 /// Flip the disclosure of thinking traces everywhere at once: one setting, so a

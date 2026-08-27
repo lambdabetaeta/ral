@@ -34,7 +34,7 @@ builds one `Observation` (`types/observation.rs`) and hands it to `observe`
 observation goes to the run's `Mooring::surface` (`types/mooring.rs`) and onto
 the open [[design/audit|audit trail]], each already inert when its consumer is
 absent. **Which observations matter is the host's call**, made once in
-`rail_place` (`bus/card/observation.rs`) and applied at `decode_surface` — so
+`landing` (`bus/card/observation.rs`) and applied at `decode_surface` — so
 a builtin command and an allowed capability check are reported by core and
 dropped by exarch, never drawn and never journalled.
 

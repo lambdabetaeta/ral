@@ -52,7 +52,7 @@ pub(crate) enum ObservationKind {
 /// was not a denial. Core reports every observation it makes; this is where
 /// the host says which of them it wants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum RailPlace {
+pub(crate) enum Landing {
     /// Joins a coalesced run, tallied under this bucket.
     Grouped(ObservationKind),
     /// Lands alone and ends the run before it.
@@ -64,23 +64,23 @@ pub(crate) enum RailPlace {
     Announced,
 }
 
-pub(crate) fn rail_place(what: &Observed) -> Option<RailPlace> {
+pub(crate) fn landing(what: &Observed) -> Option<Landing> {
     Some(match what {
-        Observed::Read { .. } => RailPlace::Grouped(ObservationKind::Read),
-        Observed::Grep { .. } => RailPlace::Grouped(ObservationKind::Grep),
+        Observed::Read { .. } => Landing::Grouped(ObservationKind::Read),
+        Observed::Grep { .. } => Landing::Grouped(ObservationKind::Grep),
         Observed::Command {
             origin: CommandOrigin::External | CommandOrigin::Detached,
             ..
-        } => RailPlace::Grouped(ObservationKind::Exec),
-        Observed::Write { .. } => RailPlace::Barrier,
+        } => Landing::Grouped(ObservationKind::Exec),
+        Observed::Write { .. } => Landing::Barrier,
         // A denial reads best whole, not dissolved into a tally.
         Observed::Capability {
             decision: Decision::Denied,
             ..
-        } => RailPlace::Standalone,
+        } => Landing::Standalone,
         // A birth is the departure a settlement is the arrival of, and reads
         // as that mirror.
-        Observed::Worker { .. } => RailPlace::Announced,
+        Observed::Worker { .. } => Landing::Announced,
         // Desk-fed only: an `Act` never reaches the rail from the engine seam.
         Observed::Command { .. } | Observed::Capability { .. } | Observed::Act { .. } => {
             return None;
@@ -92,7 +92,7 @@ pub(crate) fn rail_place(what: &Observed) -> Option<RailPlace> {
 ///
 /// A muted verb, the path, program, or resource as its [`Role::Path`] subject,
 /// and the outcome, status, or decision roled by its level.  A card wraps this
-/// as its heading; a [`RailPlace::Announced`] observation is only this, drawn
+/// as its heading; a [`Landing::Announced`] observation is only this, drawn
 /// on the rail.
 pub fn observation_spans(what: &Observed) -> Vec<Span> {
     match what {

@@ -253,8 +253,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    mark) — though it still wears the blank margin every row wears, so its left
    edge aligns with the rest of the transcript. A file mutation — a diff card or a write card — wears the
    patch-shape change-bar `▎`; an observation card folds into its ral group.
-   A cancelled turn is `RailShape::Cancelled`: it wears the error rail `╳`
-   while remaining distinct from `RailShape::Error`, so `Block::is_error` and
+   A cancelled turn is `ChromeKind::Cancelled`: it wears the error rail `╳`
+   while remaining distinct from `ChromeKind::Error`, so `Block::is_error` and
    the matrix failure cell report actual failures only.
 
  The frame's terminal writes are bracketed in a synchronized update
@@ -331,8 +331,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  is posted to the `Inbox`; `run_batch` drains non-slash steering at
  the next safe tool boundary, and the rest lands at the exchange
  boundary — a coalesced human run, or a wakeup / settled agent as its own
- marked item. A committed human prompt echoes on the `RailShape::Prompt` band;
- a wakeup stays dim, ambient chrome with no rail glyph (`RailShape::Plain`).
+ marked item. A committed human prompt echoes on the `ChromeKind::Prompt` band;
+ a wakeup stays dim, ambient chrome with no rail glyph (`ChromeKind::Plain`).
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
