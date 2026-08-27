@@ -10,7 +10,7 @@ let digits = re-find-matches '.' '0123456789abcdef'
 
 let nybble = { |c|
     let hit = first { |d| equal $d[item] !{lower $c} } !{enumerate $digits}
-    return !{option-or [index: 0] $hit}[index]
+    return !{option-or [index: 0, item: ''] $hit}[index]
 }
 
 let byte = { |pair|
