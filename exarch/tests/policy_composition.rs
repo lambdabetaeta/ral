@@ -238,7 +238,7 @@ fn an_unknown_base_names_every_base_that_exists() {
     assert_eq!(
         for_invocation(&cwd, "resonable", None, &[]).unwrap_err(),
         format!(
-            "exarch: unknown base 'resonable'; expected one of: {}",
+            "unknown base 'resonable'; expected one of: {}",
             BASES.join(", ")
         )
     );
@@ -268,7 +268,7 @@ fn a_missing_restrict_file_is_reported_by_its_absolute_path() {
     assert_eq!(
         err,
         format!(
-            "exarch: --restrict path does not exist: {}",
+            "--restrict path does not exist: {}",
             dir.path().join("no-such-file.ral").display()
         )
     );
