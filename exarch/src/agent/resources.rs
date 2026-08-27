@@ -11,7 +11,7 @@
 use crate::agent::Avatar;
 use crate::agent::digest::{COMPACT_THRESHOLD, compaction_trigger};
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
-use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE};
+use crate::fleet::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE};
 use crate::shell_eval;
 use ral_core::serial::FOValue;
 use serde::Serialize;
@@ -496,7 +496,7 @@ impl Avatar {
 
         rows.push(ProbeRow::new(
             "agents.lease",
-            self.agents
+            self.fleet
                 .nearest_reap()
                 .unwrap_or(AGENT_LEASE_IDLE)
                 .as_secs(),

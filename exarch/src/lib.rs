@@ -287,14 +287,7 @@ pub fn run() -> Result<(), String> {
         cwd: &cwd,
     };
     if c.headless {
-        headless::run(
-            &mut session,
-            &info,
-            &provider,
-            seed,
-            c.output_format,
-            Arc::clone(&engine),
-        )
+        headless::run(&mut session, &info, &provider, seed, c.output_format)
     } else {
         tui::run(
             &mut session,
@@ -305,7 +298,7 @@ pub fn run() -> Result<(), String> {
             &run_dir,
             seed,
             c.vi,
-            Arc::clone(&engine),
+            &engine,
         )
     }
 }

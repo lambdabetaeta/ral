@@ -132,37 +132,22 @@ impl Avatar {
         // `` agents `start `` chooses its arm on this one fact.
         let wire_seat = matches!(self.seat, Seat::Wire { .. });
         desk::HostServices {
-            registry: self.agents.clone(),
+            fleet: self.fleet.clone(),
             scratch,
-            parent: self.agent.clone(),
-            mailbox: self.mailbox(),
+            agent: self.agent.clone(),
             emit: emit.clone(),
-            provider: self.agent.provider.clone(),
-            caps: self.agent.caps.clone(),
             cwd: self.cwd(),
-            fuel: self.agent.fuel,
-            returns: self.agent.returns,
-            allow_schedule: self.agent.allow_schedule,
-            search: self.agent.search,
             reply,
             schedules: self.schedules.clone(),
             log: self.log.clone(),
-            // The unresolved template, not this agent's own `system`: a
-            // desk-spawned child always returns, so it refilters its own index.
-            system_template: self.agent.system_base.clone(),
-            index: self.agent.index.clone(),
-            interactive: self.agent.interactive,
             nursery,
             generation: self.agent.generation(),
-            disk_warn_bytes: self.agent.disk_warn_bytes,
-            egress: self.agent.egress.clone(),
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
             principal: ral_core::host::user(),
             pins: Some(self.pins.clone()),
             wire_seat,
-            dial: self.agent.dial.clone(),
         }
     }
 

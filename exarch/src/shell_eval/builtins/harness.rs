@@ -315,9 +315,9 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
     };
 
     let name = name.to_string();
-    // The door's own early refusal; `AgentRegistry::enrol` is what makes it
+    // The door's own early refusal; `Fleet::enrol` is what makes it
     // unskippable.
-    crate::fleet::registry::check_name(&name).map_err(|why| sig(format!("agents: {why}")))?;
+    crate::fleet::check_name(&name).map_err(|why| sig(format!("agents: {why}")))?;
     agent_type_label(kind)?;
     permission_label(grant)?;
     // The door admitted it, so the grant is a bare tag; the hatch needs its
@@ -1103,7 +1103,7 @@ mod tests {
             );
         }
         assert!(
-            crate::fleet::registry::listing(&session.agent).is_empty(),
+            crate::fleet::roster::listing(&session.agent).is_empty(),
             "an unknown grant label must never register a child"
         );
     }
@@ -1126,7 +1126,7 @@ mod tests {
         );
         assert!(result.content.contains("mnemon"), "got: {}", result.content);
         assert!(
-            crate::fleet::registry::listing(&session.agent).is_empty(),
+            crate::fleet::roster::listing(&session.agent).is_empty(),
             "an unknown type tag must never register a child"
         );
     }
@@ -1144,7 +1144,7 @@ mod tests {
         );
         assert!(result.content.contains("name"), "got: {}", result.content);
         assert!(
-            crate::fleet::registry::listing(&session.agent).is_empty(),
+            crate::fleet::roster::listing(&session.agent).is_empty(),
             "an invalid name must never register a child"
         );
     }
@@ -1185,7 +1185,7 @@ mod tests {
             result.content
         );
         assert!(
-            crate::fleet::registry::listing(&session.agent).is_empty(),
+            crate::fleet::roster::listing(&session.agent).is_empty(),
             "a missing spec field must never register a child"
         );
     }
@@ -1210,7 +1210,7 @@ mod tests {
             result.content
         );
         assert!(
-            crate::fleet::registry::listing(&session.agent).is_empty(),
+            crate::fleet::roster::listing(&session.agent).is_empty(),
             "a misspelled spec field must never register a child"
         );
     }
@@ -1297,7 +1297,7 @@ mod tests {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let mut doomed = crate::agent::testkit::TestAgentSpec::new("doomed");
         doomed.parent = Some(session.agent.clone());
-        let _doomed = crate::agent::testkit::test_agent(&session.agents, doomed)
+        let _doomed = crate::agent::testkit::test_agent(&session.fleet, doomed)
             .expect("a fresh child of a live parent");
 
         let (tx, _rx) = crate::bus::channel();

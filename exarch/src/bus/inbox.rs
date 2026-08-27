@@ -198,7 +198,7 @@ const PARK_POLL: Duration = Duration::from_millis(100);
 /// The cloneable **sender** side of a session's inbox — producers hold this,
 /// never the [`Inbox`].
 ///
-/// The fleet registry holds each peer's, so the frontend can steer a focused
+/// Every agent's own is reached off it, so the frontend can steer a focused
 /// tab and the `message` tool can reach a live agent without exposing raw
 /// senders to model code.
 #[derive(Clone)]
@@ -209,7 +209,7 @@ pub struct Mailbox {
 impl Mailbox {
     /// Post any message, applying the coalesce/quota rule
     /// ([`Shared::try_push`]) and waking a parked consumer.  Takes the queue
-    /// mutex, so no caller may hold a registry lock: clone the mailbox out and
+    /// mutex, so no caller may hold a fleet lock: clone the mailbox out and
     /// push after the guard drops.
     ///
     /// # Errors
@@ -227,7 +227,7 @@ impl Mailbox {
             .expect("UserSteering is idempotent and never rejects");
     }
 
-    /// The registry's one delivery door for a human message: stamp the
+    /// The fleet's one delivery door for a human message: stamp the
     /// exchange clock, then push — the order [`Shared::last_exchange`]'s doc
     /// requires, so a park verdict woken by this push already reads engaged.
     ///
@@ -238,7 +238,7 @@ impl Mailbox {
         self.push_user(text);
     }
 
-    /// Stamp the exchange clock without a delivery — the registry's `message`
+    /// Stamp the exchange clock without a delivery — the fleet's `message`
     /// door, whose delivery is a marked [`Post::AgentMessage`] rather than
     /// `UserSteering`, so it stamps and pushes as two calls in the same order
     /// [`Self::steer`] holds internally.

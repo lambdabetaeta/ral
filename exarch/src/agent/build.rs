@@ -10,7 +10,8 @@ use crate::agent::shell::LogCell;
 use crate::agent::{Agent, Avatar, ProviderHandle, SPAWN_FUEL, cancel, nudge};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Emitter, Inbox};
-use crate::fleet::registry::{AgentRegistry, EvalReach, Unborn};
+use crate::agent::cancel::EvalReach;
+use crate::fleet::{Fleet, Unborn};
 use crate::prompt::Grants;
 use crate::provider::Provider;
 use std::io;
@@ -40,8 +41,8 @@ fn seed_id_counter(sessions_root: &std::path::Path) -> io::Result<()> {
     Ok(())
 }
 
-/// The trunk's registry name. Never shown — the trunk lists its descendants,
-/// not itself — but the entry carries its mailbox and provider for the frontend.
+/// The trunk's fleet name. Never shown — the trunk lists its descendants,
+/// not itself — but the agent carries its mailbox and provider for the frontend.
 const TRUNK_NAME: &str = "main";
 
 /// What `Avatar::assemble` needs.  Fields are `pub(crate)` because a desk
@@ -88,8 +89,8 @@ pub(crate) struct Build {
     /// Whether the agent may ride the provider's own hosted web search —
     /// bounded by the IT policy verdict, never a CLI flag or user config.
     pub(crate) search: bool,
-    /// Fresh for the trunk, the parent's clone for a fork: one index per fleet.
-    pub(crate) agents: AgentRegistry,
+    /// Fresh for the trunk, the parent's clone for a fork: one fleet per run.
+    pub(crate) fleet: Arc<Fleet>,
     /// A host setting, not a per-agent choice: every fork inherits the trunk's
     /// ceiling verbatim.
     pub(crate) disk_warn_bytes: Option<u64>,
@@ -217,8 +218,8 @@ impl Avatar {
     /// caller can ever hold an unenrolled child.
     ///
     /// # Errors
-    /// Whatever [`AgentRegistry::enrol`] refuses.  The refusal is decided
-    /// before the avatar exists, so there is nothing to unwind.
+    /// Whatever [`Fleet::enrol`] refuses.  The refusal is decided before the
+    /// avatar exists, so there is nothing to unwind.
     pub(crate) fn assemble(b: Build) -> Result<Self, Unborn> {
         let Build {
             name,
@@ -236,7 +237,7 @@ impl Avatar {
             allow_schedule,
             tool_enabled,
             search,
-            agents,
+            fleet,
             run_lock,
             resume_summary,
             disk_warn_bytes,
@@ -284,7 +285,7 @@ impl Avatar {
             }),
             consumer,
         });
-        agents.enrol(&agent)?;
+        fleet.enrol(&agent)?;
         Ok(Self {
             agent,
             log: LogCell::new(log),
@@ -294,7 +295,7 @@ impl Avatar {
             inbox,
             nudges,
             reply: None,
-            agents,
+            fleet,
             schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             last_input: (0, 0),
             pins: Arc::default(),
@@ -465,7 +466,7 @@ impl Avatar {
             // Chat mode advertises no tool at all: a bare conversation.
             tool_enabled: !chat,
             search,
-            agents: AgentRegistry::new(),
+            fleet: Fleet::new(),
             run_lock,
             resume_summary,
             disk_warn_bytes,
@@ -622,7 +623,7 @@ impl Avatar {
             tool_enabled: true,
             // Never a fresh grant: a child's reach is bounded by its parent's.
             search: self.agent.search,
-            agents: self.agents.clone(),
+            fleet: self.fleet.clone(),
             run_lock: None,
             resume_summary: None,
             disk_warn_bytes: self.agent.disk_warn_bytes,
@@ -747,7 +748,7 @@ impl Avatar {
             allow_schedule,
             tool_enabled: true,
             search,
-            agents: AgentRegistry::new(),
+            fleet: Fleet::new(),
             run_lock: None,
             resume_summary: None,
             disk_warn_bytes,

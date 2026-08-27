@@ -530,7 +530,7 @@ mod tests {
     use crate::agent::testkit::*;
     use crate::agent::NoControl;
     use crate::bus::{AgentOutcome, Post};
-    use crate::fleet::registry::{EvalReach, InterruptTarget};
+    use crate::agent::cancel::{EvalReach, InterruptTarget};
     use crate::provider::scripted::{Reply, Script};
     use genai::chat::ChatRole;
     use ral_core::Shell;
@@ -588,13 +588,13 @@ mod tests {
             eval_root: Some(direct_root.clone()),
             interrupt_target: InterruptTarget::default(),
         };
-        let direct = test_agent(&child.agents, direct).expect("a live child of the replying agent");
+        let direct = test_agent(&child.fleet, direct).expect("a live child of the replying agent");
         let mut grandchild = TestAgentSpec::new("grandchild");
         grandchild.parent = Some(direct.clone());
-        let grandchild = test_agent(&child.agents, grandchild).expect("a live grandchild");
+        let grandchild = test_agent(&child.fleet, grandchild).expect("a live grandchild");
         let mut sibling = TestAgentSpec::new("sibling");
         sibling.parent = Some(parent.agent.clone());
-        let sibling = test_agent(&child.agents, sibling).expect("a live sibling of the replier");
+        let sibling = test_agent(&child.fleet, sibling).expect("a live sibling of the replier");
 
         let provider = scripted(
             "test-model",

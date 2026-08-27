@@ -18,7 +18,7 @@ use super::terminal::Term;
 use super::viewport::Viewport;
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use crate::bus::{AgentId, AgentState, BusReceiver, Inbox};
-use crate::fleet::registry::{AGENT_DEMOTE_IDLE, AgentRegistry};
+use crate::fleet::{AGENT_DEMOTE_IDLE, Fleet};
 use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
 use crate::record::{Display, Forensic, Printer as _, Record, Recorded, Transient};
@@ -33,6 +33,7 @@ use std::{
     collections::HashMap,
     io::{self},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -57,7 +58,7 @@ pub(crate) struct App {
     pub(super) inbox: Inbox,
     /// A clone of the handle the worker and every fork mutate, so steerability
     /// and waiting-for-input are looked up rather than pushed in each frame.
-    agents: AgentRegistry,
+    agents: Arc<Fleet>,
     pub(super) total_usage: Usage,
     /// Last turn's prompt size — genai's `prompt_tokens`, which already folds
     /// the cache counts in. Overwritten, not accumulated.
@@ -88,7 +89,7 @@ impl App {
         vi: bool,
         append_log: bool,
         inbox: Inbox,
-        agents: AgentRegistry,
+        agents: Arc<Fleet>,
     ) -> Self {
         let tabs = Tabs::new(root_id, root_log_dir, append_log);
         let cwd_basename = std::env::current_dir()
@@ -612,7 +613,7 @@ mod tests {
             false,
             false,
             Inbox::new(),
-            AgentRegistry::new(),
+            Fleet::new(),
         );
         (app, rx)
     }

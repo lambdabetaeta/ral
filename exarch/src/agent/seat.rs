@@ -4,8 +4,8 @@
 
 use crate::agent::event::AgentLog;
 use crate::bootstrap::Scratch;
+use crate::agent::cancel::{EvalReach, InterruptTarget};
 use crate::fleet::desk::{AbsentDesk, DeskBinding, HostSeam};
-use crate::fleet::registry::{EvalReach, InterruptTarget};
 use crate::shell_eval::builtins;
 use ral_core::Shell;
 use ral_core::transport::{IdentityTransport, Transport};
@@ -267,9 +267,8 @@ fn identity_ceremony(
 mod tests {
     use super::*;
     use crate::bus::{Emitter, Inbox};
+    use crate::fleet::Fleet;
     use crate::fleet::desk::{ExarchDesk, HostServices};
-    use crate::fleet::registry::AgentRegistry;
-    use crate::provider::{Provider, scripted::Script};
     use ral_core::transport::{EnquiryError, Liveness, Program, Report, Run, WireTransport};
     use ral_core::types::{Capabilities, Nursery};
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
@@ -339,12 +338,11 @@ mod tests {
 
     /// The trunk a wire desk's handlers scope against — inert: this file's
     /// tests never spawn from it.
-    fn test_trunk(fleet: &AgentRegistry) -> Arc<crate::agent::Agent> {
-        crate::agent::testkit::test_agent(
-            fleet,
-            crate::agent::testkit::TestAgentSpec::new("wire-trunk"),
-        )
-        .expect("a fresh fleet's trunk")
+    fn test_trunk(fleet: &Arc<Fleet>) -> Arc<crate::agent::Agent> {
+        let mut spec = crate::agent::testkit::TestAgentSpec::new("wire-trunk");
+        spec.caps = Capabilities::root();
+        spec.returns = true;
+        crate::agent::testkit::test_agent(fleet, spec).expect("a fresh fleet's trunk")
     }
 
     fn wire_seat(liveness: Liveness) -> (Seat, std::process::Child) {
@@ -357,38 +355,20 @@ mod tests {
     /// fleet and its one trunk, no scratch.
     fn wire_host_services(emit: &Emitter, parent: &Arc<crate::agent::Agent>) -> HostServices {
         HostServices {
-            registry: AgentRegistry::new(),
+            fleet: Fleet::new(),
             scratch: None,
-            parent: parent.clone(),
-            mailbox: Inbox::new().mailbox(),
+            generation: parent.generation(),
+            agent: parent.clone(),
             emit: emit.clone(),
-            provider: crate::agent::ProviderHandle::new(Arc::new(Provider::scripted(
-                "test-model",
-                Script::new(),
-            ))),
-            caps: Capabilities::root(),
             cwd: std::env::temp_dir(),
-            fuel: 0,
-            returns: true,
-            allow_schedule: false,
-            search: false,
             reply: crate::agent::ReplyCell::default(),
             schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             log: crate::agent::LogCell::new(test_log()),
-            system_template: String::new(),
-            index: crate::prompt::BuiltinIndex::resolve(&ral_core::Shell::new(
-                ral_core::io::TerminalState::default(),
-            )),
-            interactive: false,
             nursery: Nursery::default(),
-            generation: 0,
-            disk_warn_bytes: None,
-            egress: crate::egress::Egress::for_test(),
             acts: crate::fleet::desk::ActFragment::default(),
             principal: ral_core::host::user(),
             pins: None,
             wire_seat: true,
-            dial: None,
         }
     }
 
@@ -435,7 +415,7 @@ mod tests {
     fn wire_seat_enquiry_is_answered_through_the_drain_loop() {
         let (seat, mut child) = wire_seat(Liveness::default());
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let fleet = AgentRegistry::new();
+        let fleet = Fleet::new();
         let trunk = test_trunk(&fleet);
         let desk = Arc::new(ExarchDesk {
             services: wire_host_services(&emit, &trunk),
@@ -476,7 +456,7 @@ mod tests {
         let (seat, mut child) = wire_seat(Liveness::default());
         let inbox = Inbox::new();
         let (tx, _rx) = crate::bus::channel();
-        let fleet = AgentRegistry::new();
+        let fleet = Fleet::new();
         let trunk = test_trunk(&fleet);
         let root_id = trunk.id;
         let emit = Emitter::with_mailbox(tx, root_id, inbox.mailbox());

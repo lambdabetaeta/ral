@@ -8,8 +8,9 @@
 
 use crate::agent::{Agent, Avatar, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL, cancel};
 use crate::bootstrap::Scratch;
+use crate::agent::cancel::EvalReach;
 use crate::bus::{AgentOutcome, Emitter, Mailbox};
-use crate::fleet::registry::EvalReach;
+use crate::fleet::Fleet;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
 use ral_core::Shell;
@@ -36,6 +37,18 @@ pub(crate) struct TestAgentSpec {
     pub(crate) mailbox: Mailbox,
     /// `None` builds a root, `Some` a reporting child of that agent.
     pub(crate) parent: Option<Arc<Agent>>,
+    pub(crate) caps: ral_core::types::Capabilities,
+    pub(crate) fuel: u32,
+    pub(crate) returns: bool,
+    pub(crate) search: bool,
+    pub(crate) allow_schedule: bool,
+    pub(crate) disk_warn_bytes: Option<u64>,
+    pub(crate) egress: crate::egress::Egress,
+    pub(crate) dial: Option<Arc<dyn crate::agent::Dial>>,
+    /// Still carrying [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`], like
+    /// [`Agent::system_base`](crate::agent::Agent) itself.
+    pub(crate) system_base: String,
+    pub(crate) index: Arc<crate::prompt::BuiltinIndex>,
 }
 
 impl TestAgentSpec {
@@ -46,10 +59,22 @@ impl TestAgentSpec {
             cancel: cancel::Token::new(),
             reach: EvalReach::Identity {
                 eval_root: Some(ral_core::process::DurableRoot::default()),
-                interrupt_target: crate::fleet::registry::InterruptTarget::default(),
+                interrupt_target: crate::agent::cancel::InterruptTarget::default(),
             },
             mailbox: crate::bus::Inbox::new().mailbox(),
             parent: None,
+            caps: ral_core::types::Capabilities::default(),
+            fuel: 0,
+            returns: false,
+            search: false,
+            allow_schedule: false,
+            disk_warn_bytes: None,
+            egress: crate::egress::Egress::for_test(),
+            dial: None,
+            system_base: String::new(),
+            index: crate::prompt::BuiltinIndex::resolve(&Shell::new(
+                ral_core::io::TerminalState::default(),
+            )),
         }
     }
 }
@@ -59,18 +84,27 @@ impl TestAgentSpec {
 /// and dropping it settles the agent.
 ///
 /// # Errors
-/// Whatever [`AgentRegistry::enrol`](crate::fleet::registry::AgentRegistry::enrol)
-/// refuses.
+/// Whatever [`Fleet::enrol`] refuses.
 pub(crate) fn test_agent(
-    fleet: &crate::fleet::registry::AgentRegistry,
+    fleet: &Arc<Fleet>,
     spec: TestAgentSpec,
-) -> Result<Arc<Agent>, crate::fleet::registry::Unborn> {
+) -> Result<Arc<Agent>, crate::fleet::Unborn> {
     let TestAgentSpec {
         name,
         cancel,
         reach,
         mailbox,
         parent,
+        caps,
+        fuel,
+        returns,
+        search,
+        allow_schedule,
+        disk_warn_bytes,
+        egress,
+        dial,
+        system_base,
+        index,
     } = spec;
     let id = crate::agent::fresh_id();
     let consumer = parent.as_ref().map_or(0, |p| p.generation());
@@ -80,23 +114,21 @@ pub(crate) fn test_agent(
         log_dir: PathBuf::from("/nonexistent/test-agent"),
         started: std::time::Instant::now(),
         system: String::new(),
-        system_base: String::new(),
-        index: crate::prompt::BuiltinIndex::resolve(&Shell::new(
-            ral_core::io::TerminalState::default(),
-        )),
-        caps: ral_core::types::Capabilities::default(),
+        system_base,
+        index,
+        caps,
         parent,
         children: Mutex::new(Vec::new()),
-        fuel: 0,
+        fuel,
         provider: ProviderHandle::new(scripted("test-model", Script::new())),
         interactive: false,
         tool_enabled: false,
-        search: false,
-        returns: false,
-        allow_schedule: false,
-        disk_warn_bytes: None,
-        egress: crate::egress::Egress::for_test(),
-        dial: None,
+        search,
+        returns,
+        allow_schedule,
+        disk_warn_bytes,
+        egress,
+        dial,
         cancel,
         reach,
         mailbox,

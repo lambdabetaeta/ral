@@ -32,6 +32,7 @@
 //! regardless, and for the termination events, which have no key-event twin.
 //! On both, [`crate::bootstrap::boot_shell`] owns the install ceremony.
 
+use crate::sync::LockExt;
 use ral_core::process::CancelCause;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
@@ -263,6 +264,98 @@ extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::core::BO
         return windows_sys::Win32::Foundation::TRUE;
     }
     windows_sys::Win32::Foundation::FALSE
+}
+
+/// Where an interrupt lands: a live agent's current-dispatch scope, republished
+/// by its transport as each dispatch is minted, into the target the host
+/// installed once with
+/// [`ral_core::transport::IdentityTransport::set_interrupt_target`].  It sits
+/// outside the engine lock the run itself holds, so an interrupt can reach the
+/// in-flight run from another thread — and it is published *ahead* of that
+/// lock, so an interrupt raised while a dispatch still waits on it lands on
+/// the scope that dispatch minted: the run's frame is born a descendant and
+/// observes a cancel recorded before it existed.  `None` until the first
+/// dispatch.
+pub(crate) type InterruptTarget = Arc<std::sync::Mutex<Option<ral_core::process::ForegroundScope>>>;
+
+/// How an agent reaches its own running eval, per seat kind — the eval-layer
+/// half of every cancel path, beside the cooperative [`Token`] every
+/// [`crate::agent::Agent`] also carries.
+pub(crate) enum EvalReach {
+    /// The in-process reach: the agent's own shell's durable root (terminate,
+    /// and through the cancel-scope ancestor chain its detached workers too),
+    /// and the interrupt target its transport refreshes each dispatch
+    /// (interrupt).  `eval_root` is `None` for the trunk's interrupt-only
+    /// reach — see [`Self::interrupt_only`].
+    Identity {
+        eval_root: Option<ral_core::process::DurableRoot>,
+        interrupt_target: InterruptTarget,
+    },
+    /// The wire reach: the engine lives in another process, whose only
+    /// host-reachable cancel primitive is a `Cancel` control frame against
+    /// the in-flight dispatch, so both motions collapse into it — a wire
+    /// trunk (synod's guest-VM engine) carries this reach directly, and only
+    /// an identity seat can be forked into, so no descendant of one ever
+    /// does.
+    Wire(ral_core::transport::ControlSender),
+}
+
+impl EvalReach {
+    /// Unwind the in-flight run without ending the agent.  Never touches the
+    /// durable root, so the next run is born uncancelled.
+    pub(crate) fn interrupt(&self) {
+        match self {
+            Self::Identity {
+                interrupt_target, ..
+            } => {
+                if let Some(scope) = interrupt_target.lock_ignore_poison().as_ref() {
+                    scope.cancel(CancelCause::Interrupt);
+                }
+            }
+            Self::Wire(ctrl) => ctrl.cancel_in_flight(),
+        }
+    }
+
+    /// End the agent's eval by cancelling its session's durable root.  That
+    /// poisons the root permanently, by design: every caller is ending the
+    /// agent, so there is no later run to break.  A no-op when `eval_root` is
+    /// absent — the trunk's interrupt-only reach.
+    pub(crate) fn terminate(&self, cause: CancelCause) {
+        match self {
+            Self::Identity { eval_root, .. } => {
+                if let Some(root) = eval_root {
+                    root.cancel(cause);
+                }
+            }
+            Self::Wire(ctrl) => ctrl.cancel_in_flight(),
+        }
+    }
+
+    /// Weaken a reach so its terminate side can no longer poison a session:
+    /// a seat rebuilt in place under a standing agent — the trunk's — must
+    /// never carry a `DurableRoot`, for two reasons.  [`crate::agent::Agent::cancel`]
+    /// fires on every agent a cascade visits, such a seat's included, and its
+    /// root would turn that into a permanent kill of the whole session rather
+    /// than a subtree reap.  And the rebuild mints a fresh root under a
+    /// standing agent, so a root captured then would go stale — the interrupt
+    /// target is host-owned precisely so it survives that rebuild, and a root
+    /// has no such target.  Because this is stated once, at construction, and
+    /// never touched again, the rebuild has nothing to keep in step with it.
+    ///
+    /// A wire reach passes through: its only primitive is `Control::Cancel`
+    /// against the in-flight dispatch, which is not permanent, so it carries
+    /// nothing to weaken.
+    pub(crate) fn interrupt_only(self) -> Self {
+        match self {
+            Self::Identity {
+                interrupt_target, ..
+            } => Self::Identity {
+                eval_root: None,
+                interrupt_target,
+            },
+            wire @ Self::Wire(_) => wire,
+        }
+    }
 }
 
 /// `cancels_exchange` is a plain function of a `u32` event code, so it is

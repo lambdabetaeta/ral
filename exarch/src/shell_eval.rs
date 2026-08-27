@@ -207,9 +207,9 @@ fn reject_protected_pin(surface: &Surface, recorder: &crate::record::Emitter) ->
 ///
 /// A worker settling mid-`/clear` cannot decide its own staleness, since
 /// composing the batch and pushing it are two steps a `/clear` can fall
-/// between; so the sink stamps every batch with the root session's
-/// [`AgentRegistry`] generation as captured at construction and always pushes,
-/// leaving `Avatar::admits` to reject a stale one at the consuming edge.
+/// between; so the sink stamps every batch with the root session's own
+/// generation as captured at construction and always pushes, leaving
+/// `Avatar::admits` to reject a stale one at the consuming edge.
 struct InboxDeferred {
     mailbox: Mailbox,
     /// The **root** session's id: a spawn worker registers no tab of its own,
@@ -1295,7 +1295,7 @@ keep-bottom
     fn inbox_deferred_always_pushes_stamped_with_its_birth_generation() {
         use crate::agent::testkit::{TestAgentSpec, test_agent};
 
-        let fleet = crate::fleet::registry::AgentRegistry::new();
+        let fleet = crate::fleet::Fleet::new();
         let inbox = Inbox::new();
         let mut spec = TestAgentSpec::new("root");
         spec.mailbox = inbox.mailbox();
@@ -1527,8 +1527,8 @@ keep-bottom
         );
     }
 
-    /// The eval-layer half of the registry cascade: cancelling the durable root
-    /// `AgentRegistry` holds per agent (`Shell::cancel_handle`) unwinds an
+    /// The eval-layer half of the fleet's cascade: cancelling the durable root
+    /// each agent's `EvalReach` holds (`Shell::cancel_handle`) unwinds an
     /// in-flight `run_shell` and tears down its tree.  A 30 s budget, so only
     /// the cancel can explain a fast return, over a `fork_session` child — the
     /// sub-agent shape, which publishes no process signal slots, leaving this

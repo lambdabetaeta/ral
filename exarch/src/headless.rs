@@ -16,8 +16,7 @@ use crate::bus::card::{
     rail_place, reads_card,
 };
 use crate::bus::{AgentId, AgentOutcome, BusReceiver, FleetBus, Signal, Sink, pump};
-use crate::fleet::Fleet;
-use crate::provider::{Engine, Provider, Usage};
+use crate::provider::{Provider, Usage};
 use crate::record::{self, Blocks, Fold, Printer, Transient, View};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
@@ -25,7 +24,6 @@ use ral_core::serial::FOValue;
 use ral_core::types::{CommandOrigin, Observation, Observed};
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
@@ -539,7 +537,6 @@ pub fn run(
     p: &Provider,
     seed: Option<String>,
     format: OutputFormat,
-    engine: Arc<Engine>,
 ) -> Result<(), String> {
     let prompt = seed
         .ok_or("--headless requires a seed prompt: --prompt, --file, or trailing words after --")?;
@@ -562,11 +559,7 @@ pub fn run(
     // A per-exchange bus over the trunk's *own* inbox, so the attend worker and
     // any in-exchange producer share one queue.  It closes when the worker
     // finishes, muting async children on the display — never in the trace.
-    let fleet = Fleet {
-        agents: session.agents.clone(),
-        bus: FleetBus::per_exchange(&session.inbox()),
-        engine,
-    };
+    let bus = FleetBus::per_exchange(&session.inbox());
     // A headless trunk is a returning agent that does not park, so `attend`
     // runs this seeded work and returns once idle.
     session.seed(prompt);
@@ -579,7 +572,7 @@ pub fn run(
     // in the tree — so its token is what an OS signal must reach, for as long
     // as it attends.
     let _slot = crate::agent::cancel::publish(session.cancel_token());
-    let outcome = pump(&mut headless, &fleet.bus, root_id, &recorder, |emit| {
+    let outcome = pump(&mut headless, &bus, root_id, &recorder, |emit| {
         session.attend(&mut control, emit)
     });
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
@@ -599,7 +592,7 @@ pub fn run(
     };
     // Summed at the emit seam, so it includes async children muted on this
     // per-exchange bus whose usage never reached the sink.
-    headless.usage = fleet.bus.usage_total();
+    headless.usage = bus.usage_total();
     let elapsed = headless.started.elapsed();
     match format {
         OutputFormat::Json => {
@@ -631,10 +624,10 @@ pub fn run(
 ///
 /// # Errors
 /// Returns `Err` if the attend worker panics or the sink's drive fails.
-pub fn converse(session: &mut Avatar, message: String, engine: Arc<Engine>) -> Result<(), String> {
+pub fn converse(session: &mut Avatar, message: String) -> Result<(), String> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
-    converse_on(session, message, engine, &mut stdout, &mut stderr)
+    converse_on(session, message, &mut stdout, &mut stderr)
 }
 
 /// One exchange of a converse session: assistant tokens stream to `out`,
@@ -655,12 +648,11 @@ pub fn converse(session: &mut Avatar, message: String, engine: Arc<Engine>) -> R
 pub fn converse_on(
     session: &mut Avatar,
     message: String,
-    engine: Arc<Engine>,
     out: &mut (dyn Write + Send),
     err: &mut (dyn Write + Send),
 ) -> Result<(), String> {
     let mut sink = Headless::new(Projection::Conversation, session.agent.id, out, err);
-    let outcome = converse_sink(session, message, engine, &mut sink);
+    let outcome = converse_sink(session, message, &mut sink);
     if outcome.is_ok() && !sink.ended_with_newline {
         let _ = writeln!(sink.out);
     }
@@ -678,20 +670,15 @@ pub fn converse_on(
 pub fn converse_sink<S: Sink>(
     session: &mut Avatar,
     message: String,
-    engine: Arc<Engine>,
     sink: &mut S,
 ) -> Result<(), String> {
     // Per-exchange: this call's channel closes when the exchange parks, so
     // draining can never block on a message the caller has not sent yet.
-    let fleet = Fleet {
-        agents: session.agents.clone(),
-        bus: FleetBus::per_exchange(&session.inbox()),
-        engine,
-    };
+    let bus = FleetBus::per_exchange(&session.inbox());
     session.seed(message);
     let root_id = session.agent.id;
     let recorder = session.recorder();
-    let outcome = pump(sink, &fleet.bus, root_id, &recorder, |emit| {
+    let outcome = pump(sink, &bus, root_id, &recorder, |emit| {
         session.attend_backlog(emit)
     });
     match outcome {
@@ -726,7 +713,6 @@ pub fn converse_sink<S: Sink>(
 pub fn converse_settled<S: Sink>(
     session: &mut Avatar,
     message: String,
-    engine: Arc<Engine>,
     sink: &mut S,
 ) -> Result<(), String> {
     if session.agent.allow_schedule {
@@ -737,18 +723,14 @@ pub fn converse_settled<S: Sink>(
                 .to_string(),
         );
     }
-    let fleet = Fleet {
-        agents: session.agents.clone(),
-        bus: FleetBus::per_exchange_live(&session.inbox()),
-        engine,
-    };
+    let bus = FleetBus::per_exchange_live(&session.inbox());
     session.seed(message);
     let root_id = session.agent.id;
     let recorder = session.recorder();
     // The embedder's trunk, for the extent of the exchange it drives: an OS
     // signal reaching this process must find that token published.
     let _slot = crate::agent::cancel::publish(session.cancel_token());
-    let outcome = pump(sink, &fleet.bus, root_id, &recorder, |emit| {
+    let outcome = pump(sink, &bus, root_id, &recorder, |emit| {
         session.attend_with(
             &mut crate::agent::NoControl,
             emit,
@@ -769,6 +751,7 @@ pub fn converse_settled<S: Sink>(
 )]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
     use crate::bus::{AgentResult, AgentState, Post};
     use crate::provider::scripted::{Reply, Script};
@@ -821,10 +804,9 @@ mod tests {
                 .then(Reply::text("hello back"))
                 .then(Reply::text("and again")),
         );
-        let engine = Engine::new();
-        converse(&mut session, "first message".into(), engine.clone())
+        converse(&mut session, "first message".into())
             .expect("a conversing trunk never fails for want of a reply");
-        converse(&mut session, "second message".into(), engine)
+        converse(&mut session, "second message".into())
             .expect("the second exchange runs on the same, unbroken session");
 
         let rendered = format!("{:?}", session.rendered_messages());
@@ -1097,7 +1079,6 @@ mod tests {
             &Provider::scripted("test-model", Script::new()),
             seed,
             OutputFormat::Text,
-            Engine::new(),
         )
         .expect_err("a headless run with no seed has nothing to do");
         assert_eq!(
@@ -1119,10 +1100,9 @@ mod tests {
     #[test]
     fn converse_on_projects_into_the_given_writers() {
         let mut session = converse_trunk("writers", Script::new().then(Reply::text("hi there")));
-        let engine = Engine::new();
         let mut out = Vec::new();
         let mut err = Vec::new();
-        converse_on(&mut session, "hello".into(), engine, &mut out, &mut err)
+        converse_on(&mut session, "hello".into(), &mut out, &mut err)
             .expect("a conversing trunk never fails for want of a reply");
         assert!(
             String::from_utf8_lossy(&out).contains("hi there"),
@@ -1261,12 +1241,11 @@ mod tests {
             drop(child);
         });
 
-        let engine = Engine::new();
         let mut sink = SignalOnWaiting {
             inner: Collecting::default(),
             release: release_tx,
         };
-        converse_settled(&mut session, "please help".into(), engine, &mut sink)
+        converse_settled(&mut session, "please help".into(), &mut sink)
             .expect("the exchange itself must not fail for want of a reply");
         settler.join().expect("the settling thread must not panic");
 
@@ -1326,9 +1305,8 @@ mod tests {
         )
         .expect("spawn must succeed");
 
-        let engine = Engine::new();
         let mut sink = Collecting::default();
-        converse_settled(&mut session, "please help".into(), engine, &mut sink)
+        converse_settled(&mut session, "please help".into(), &mut sink)
             .expect("the exchange itself must not fail merely because a child did");
 
         assert!(
@@ -1347,9 +1325,8 @@ mod tests {
     #[test]
     fn converse_settled_refuses_an_allow_schedule_trunk() {
         let mut session = settled_trunk("allow-schedule", Script::new(), true);
-        let engine = Engine::new();
         let mut sink = Collecting::default();
-        let err = converse_settled(&mut session, "hello".into(), engine, &mut sink)
+        let err = converse_settled(&mut session, "hello".into(), &mut sink)
             .expect_err("an allow_schedule trunk must be refused, not run");
         assert!(
             err.contains("allow_schedule") || err.to_lowercase().contains("schedule"),

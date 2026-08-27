@@ -9,10 +9,9 @@
 
 use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
-use crate::bus::{AgentId, Emitter, Mailbox};
-use crate::egress;
-use crate::fleet::registry::{AgentRegistry, check_name, listing};
+use crate::bus::{AgentId, Emitter};
 use crate::fleet::schedule::{CronSchedule, ScheduleRegistry, Trigger, parse_duration};
+use crate::fleet::{Fleet, check_name, roster::listing};
 use crate::record::commit::SurfaceBuffer;
 use crate::shell_eval::{self, PinDigests, Surface};
 use crate::sync::LockExt;
@@ -207,48 +206,28 @@ impl ActFragment {
     reason = "each bool is an independent axis captured off the agent (interactive, returns, allow_schedule, search); not a candidate for a combined enum"
 )]
 pub(crate) struct HostServices {
-    pub registry: AgentRegistry,
+    /// This run's own agent: parent of what it spawns, root of the descendant
+    /// check `` `message ``/`` `cancel `` enforce, and the source every
+    /// immutable-config read (`caps`, `fuel`, `returns`, …) is taken from.
+    pub agent: Arc<Agent>,
+    pub fleet: Arc<Fleet>,
     /// `None` on a wire seat, whose real scratch lives in the guest it dials.
     pub scratch: Option<Arc<crate::bootstrap::Scratch>>,
-    /// This run's own agent: parent of what it spawns, root of the descendant
-    /// check `` `message ``/`` `cancel `` enforce.
-    pub parent: Arc<Agent>,
-    pub mailbox: Mailbox,
     pub emit: Emitter,
-    pub provider: ProviderHandle,
-    /// The ceiling [`crate::policy::narrow`] attenuates a `grant` against.
-    pub caps: Capabilities,
     /// Frozen at install: the path root `narrow` and every handler resolves from.
     pub cwd: PathBuf,
-    /// Immutable for this run's extent; `` `start `` refuses once it reads zero.
-    pub fuel: u32,
-    /// Whether this agent holds `reply`; the desk's refusal keys on this bit,
-    /// never on trunk-ness.
-    pub returns: bool,
-    pub allow_schedule: bool,
-    /// A ceiling like `caps`: a spawn may narrow this bit, never widen it.
-    pub search: bool,
     /// Where the `reply` handler stages its value, holding no `&mut Avatar` to
     /// write it any other way.
     pub reply: ReplyCell,
     pub schedules: ScheduleRegistry,
     /// A `mnemon` spawn forks its inherited context off this.
     pub log: LogCell,
-    /// Still carrying [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`]: the index is
-    /// filtered per agent, so only an unresolved template is shareable.
-    pub system_template: String,
-    /// Resolves `system_template` with no live `Shell` at the desk.
-    pub index: std::sync::Arc<crate::prompt::BuiltinIndex>,
-    pub interactive: bool,
     /// The adoption end of the body's own [`ral_core::Shell::fork_into_nursery`];
     /// `` `start `` redeems a [`NurseryId`] here.
     pub nursery: Nursery,
     /// The calling agent's own generation, read at install, so a desk older
     /// than *its* `/clear` refuses to spawn.
     pub generation: u64,
-    pub disk_warn_bytes: Option<u64>,
-    /// A spawn shares its parent's egress policy, never a fresh one.
-    pub egress: egress::Egress,
     /// What this call has committed so far: minted per `ral` call, and read
     /// back by [`crate::shell_eval::report::render`] when a raise discards
     /// the bindings but not the acts.
@@ -265,9 +244,6 @@ pub(crate) struct HostServices {
     /// Stated, never inferred from `scratch`'s incidental absence:
     /// `` `start `` chooses its identity or wire arm on this one fact.
     pub wire_seat: bool,
-    /// The dial-side capability a wire trunk's `` `start `` reaches its
-    /// child's listener through; `None` on every identity trunk.
-    pub dial: Option<Arc<dyn crate::agent::Dial>>,
 }
 
 impl HostServices {
@@ -705,7 +681,7 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `agents `` — the agent registry, one class for the whole family.
+    /// `` `agents `` — the fleet, one class for the whole family.
     /// Every tag answers the roster, both spawn arms included: a wire spawn
     /// does not answer until its child exists, so it has one to be listed on.
     fn agents(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
@@ -747,7 +723,7 @@ impl ExarchDesk {
         // The captured fuel, caps, and grant are only as fresh as the
         // generation they were snapshotted under — this caller's own, so a
         // `/clear` in another tab does not refuse a spawn here.
-        if s.generation != s.parent.generation() {
+        if s.generation != s.agent.generation() {
             return Err(Error::new(
                 "`agents `start` refused: the agent tree was cleared while this call was still in \
                  flight, so the fuel and permissions snapshot it captured are now stale — \
@@ -758,7 +734,7 @@ impl ExarchDesk {
 
         // Fuel bounds depth, not fan-out: the parent's own is never debited, so
         // siblings are free and only a deep enough chain bottoms out.
-        if s.fuel == 0 {
+        if s.agent.fuel() == 0 {
             return Err(Error::new(
                 "`agents `start` refused: no spawn fuel remains at this depth, so you cannot \
                  delegate any further here. Fuel bounds how deep a chain of spawns may \
@@ -778,7 +754,7 @@ impl ExarchDesk {
 
         // Didactic, not race-free: `register` below re-checks under its own
         // lock, and that is what closes a same-name race.
-        if s.registry.name_live(&spec.name) {
+        if s.fleet.name_live(&spec.name) {
             return Err(Error::new(
                 format!(
                     "`agents `start` refused: a live agent already bears the name '{}' — pick \
@@ -814,7 +790,7 @@ impl ExarchDesk {
 
         // Mirrors `Avatar::fork_with`'s `Build` literal, with the adopted shell
         // and forked log standing in for `fork_session`'s fresh ones.
-        let fuel = s.fuel - 1;
+        let fuel = s.agent.fuel() - 1;
         // Unreachable: an identity seat always carries its own scratch.
         let Some(scratch) = s.scratch.clone() else {
             return Err(Error::new(
@@ -832,27 +808,27 @@ impl ExarchDesk {
         let reach = seat.eval_reach();
         let child = Avatar::assemble(Build {
             name: spec.name.clone(),
-            system: s.system_template.clone(),
+            system: s.agent.system_base().to_string(),
             system_prompt,
-            index: s.index.clone(),
+            index: s.agent.index().clone(),
             caps: child_caps,
             seat,
             log: child_log,
-            parent: Some(s.parent.clone()),
+            parent: Some(s.agent.clone()),
             fuel,
-            provider: ProviderHandle::new(s.provider.current()),
-            interactive: s.interactive,
+            provider: ProviderHandle::new(s.agent.current_provider()),
+            interactive: s.agent.interactive(),
             returns: true,
-            allow_schedule: s.allow_schedule,
+            allow_schedule: s.agent.allow_schedule,
             tool_enabled: true,
             // A child may narrow its parent's search reach, never widen it.
-            search: s.search && spec.search,
-            agents: s.registry.clone(),
+            search: s.agent.search() && spec.search,
+            fleet: s.fleet.clone(),
             run_lock: None,
             resume_summary: None,
-            disk_warn_bytes: s.disk_warn_bytes,
-            egress: s.egress.clone(),
-            dial: s.dial.clone(),
+            disk_warn_bytes: s.agent.disk_warn_bytes(),
+            egress: s.agent.egress().clone(),
+            dial: s.agent.dial().cloned(),
             reach,
         })
         .map_err(|why| Error::new(format!("`agents `start` refused: {why}"), 1))?;
@@ -871,7 +847,7 @@ impl ExarchDesk {
         // `narrow` names all six legal bases in its own diagnostic, so an
         // unknown `grant` needs no refusal text here.
         let cwd = s.cwd.to_string_lossy();
-        let child_caps = crate::policy::narrow(&s.caps, spec.grant, &cwd)
+        let child_caps = crate::policy::narrow(s.agent.caps(), spec.grant, &cwd)
             .map_err(|reason| Error::new(reason, 1))?;
 
         // On the raw `AgentLog`, not through `Avatar::inherit_context`, which
@@ -879,12 +855,12 @@ impl ExarchDesk {
         // same bits the `Build` below fixes, so the opening bookend records the
         // child's real system length rather than the template's.
         let child_id = crate::agent::fresh_id();
-        let system_prompt = s.index.apply(
-            &s.system_template,
+        let system_prompt = s.agent.index().apply(
+            s.agent.system_base(),
             &crate::prompt::Grants {
                 returns: true,
-                allow_schedule: s.allow_schedule,
-                spawns: s.fuel.saturating_sub(1) > 0,
+                allow_schedule: s.agent.allow_schedule,
+                spawns: s.agent.fuel().saturating_sub(1) > 0,
             },
         );
         let child_log = {
@@ -922,7 +898,7 @@ impl ExarchDesk {
                 1,
             ));
         };
-        let Some(dial) = s.dial.clone() else {
+        let Some(dial) = s.agent.dial().cloned() else {
             return Err(Error::new(
                 "`agents `start` refused: this wire session has no dialler installed to reach a \
                  helper engine's listener — a construction bug, since a fuelled wire trunk is \
@@ -964,29 +940,29 @@ impl ExarchDesk {
             PathBuf::from(HATCHED_HOME),
         );
 
-        let fuel = s.fuel - 1;
+        let fuel = s.agent.fuel() - 1;
         let reach = seat.eval_reach();
         let child = Avatar::assemble(Build {
             name: spec.name.clone(),
-            system: s.system_template.clone(),
+            system: s.agent.system_base().to_string(),
             system_prompt,
-            index: s.index.clone(),
+            index: s.agent.index().clone(),
             caps: child_caps,
             seat,
             log: child_log,
-            parent: Some(s.parent.clone()),
+            parent: Some(s.agent.clone()),
             fuel,
-            provider: ProviderHandle::new(s.provider.current()),
-            interactive: s.interactive,
+            provider: ProviderHandle::new(s.agent.current_provider()),
+            interactive: s.agent.interactive(),
             returns: true,
-            allow_schedule: s.allow_schedule,
+            allow_schedule: s.agent.allow_schedule,
             tool_enabled: true,
-            search: s.search && spec.search,
-            agents: s.registry.clone(),
+            search: s.agent.search() && spec.search,
+            fleet: s.fleet.clone(),
             run_lock: None,
             resume_summary: None,
-            disk_warn_bytes: s.disk_warn_bytes,
-            egress: s.egress.clone(),
+            disk_warn_bytes: s.agent.disk_warn_bytes(),
+            egress: s.agent.egress().clone(),
             dial: Some(dial),
             reach,
         })
@@ -1087,7 +1063,7 @@ impl ExarchDesk {
     fn roster(&self) -> FOValue {
         let s = &self.services;
         let rows = FOValue::List {
-            items: listing(&s.parent)
+            items: listing(&s.agent)
                 .into_iter()
                 .map(|a| {
                     let elapsed_s = secs_to_i64(a.elapsed);
@@ -1134,9 +1110,9 @@ impl ExarchDesk {
         // The row is derived after the call: one claiming "cancelled" ahead of
         // it would assert an effect the world never saw. `cancel` takes no
         // argument, so its payload column carries the outcome instead.
-        let cancelled = match s.registry.resolve(&name) {
+        let cancelled = match s.fleet.resolve(&name) {
             None => Ok(false),
-            Some(found) => match s.parent.descendant(&found) {
+            Some(found) => match s.agent.descendant(&found) {
                 Some(target) => {
                     target.cancel_tree(ral_core::process::CancelCause::Explicit);
                     Ok(true)
@@ -1186,13 +1162,13 @@ impl ExarchDesk {
         // same arm, one step later. The row goes up after the send, since a
         // delivery's payload is its text but a refusal's is why.
         let sent = text.clone();
-        let (payload, content, ok) = match s.registry.resolve(&name) {
+        let (payload, content, ok) = match s.fleet.resolve(&name) {
             None => (
                 "refused: no live agent by that name".to_string(),
                 format!("no live agent named '{name}'; did it finish already?"),
                 false,
             ),
-            Some(found) => match s.parent.descendant(&found) {
+            Some(found) => match s.agent.descendant(&found) {
                 None => (
                     "refused: not a descendant".to_string(),
                     format!(
@@ -1200,7 +1176,7 @@ impl ExarchDesk {
                     ),
                     false,
                 ),
-                Some(to) => match s.parent.message(&to, text) {
+                Some(to) => match s.agent.message(&to, text) {
                     Ok(()) => (sent, format!("sent message to agent '{name}'"), true),
                     Err(reject) => (
                         format!("refused: {reject}"),
@@ -1227,7 +1203,7 @@ impl ExarchDesk {
     /// handed the tag the model typed, so the refusal names that and not a
     /// vocabulary the model was never taught.
     fn require_schedule_grant(&self, verb: &str) -> Result<(), Error> {
-        if self.services.allow_schedule {
+        if self.services.agent.allow_schedule {
             return Ok(());
         }
         Err(Error::new(
@@ -1266,7 +1242,7 @@ impl ExarchDesk {
         let described = trigger.describe();
         let result = s
             .schedules
-            .schedule(trigger, prompt, label.clone(), &s.mailbox);
+            .schedule(trigger, prompt, label.clone(), s.agent.mailbox());
         let (payload, content) = match &result {
             Ok(receipt) => (
                 described,
@@ -1354,7 +1330,7 @@ impl ExarchDesk {
     /// on `returns` and never on trunk-ness.
     fn agent_reply(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let s = &self.services;
-        if !s.returns {
+        if !s.agent.returns() {
             return Err(Error::new(
                 "agents `reply` refused: you converse with the user; you do not return. \
                  `reply` parks you and hands your value to your parent's agents `read — \
@@ -1389,11 +1365,11 @@ impl ExarchDesk {
         let name = payload_value(payload, CLASS, "naming the descendant to read")?;
         let name = payload_string(name, CLASS, "name")?;
 
-        let content = match s.registry.resolve(&name) {
+        let content = match s.fleet.resolve(&name) {
             None => Err(format!(
                 "no live agent named '{name}'; did it finish, or was it never started?"
             )),
-            Some(found) => match s.parent.descendant(&found) {
+            Some(found) => match s.agent.descendant(&found) {
                 None => Err(format!(
                     "agent '{name}' is not an agent you started; `agents `read` may only reach \
                      a descendant of yours"
@@ -1875,7 +1851,6 @@ mod tests {
     use crate::agent::event::AgentLog;
     use crate::agent::testkit::ral_call;
     use crate::bus::{Inbox, Signal, channel};
-    use crate::egress::Egress;
     use crate::provider::{
         Provider,
         scripted::{Reply, Script},
@@ -1890,26 +1865,30 @@ mod tests {
             .expect("session log")
     }
 
-    fn scripted_provider() -> Arc<Provider> {
-        Arc::new(Provider::scripted("test-model", Script::new()))
-    }
-
-    /// The trunk a desk's handlers scope against, born into `fleet` with
-    /// `mailbox` as its own inbox sender.
-    fn desk_trunk(fleet: &AgentRegistry, mailbox: Mailbox) -> Arc<Agent> {
+    /// A fresh fleet's trunk and the [`HostServices`] a desk running as it
+    /// captures, with `configure` free to narrow the trunk's own config
+    /// before it is born — `search: false` for the one case that must be
+    /// narrowed rather than granted, a custom `system_base`/`index` for the
+    /// bookend test, `returns: false` for the one refusal that keys on it.
+    /// Returns the fleet and the trunk's own inbox too, since a spawn test
+    /// needs both to drive `` `start `` end to end.
+    fn services_with(
+        fuel: u32,
+        configure: impl FnOnce(&mut crate::agent::testkit::TestAgentSpec),
+    ) -> (HostServices, Arc<Fleet>, Inbox) {
+        let parent_inbox = Inbox::new();
+        let fleet = Fleet::new();
         let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
-        spec.mailbox = mailbox;
-        crate::agent::testkit::test_agent(fleet, spec).expect("a fresh fleet's trunk")
-    }
-
-    /// The base capture every desk below builds on, so growing [`HostServices`]
-    /// means touching one literal, not three.
-    fn base_services() -> HostServices {
+        spec.mailbox = parent_inbox.mailbox();
+        spec.caps = Capabilities::root();
+        spec.fuel = fuel;
+        spec.returns = true;
+        spec.search = true;
+        configure(&mut spec);
+        let agent = crate::agent::testkit::test_agent(&fleet, spec).expect("a fresh fleet's trunk");
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let fleet = AgentRegistry::new();
-        let parent = desk_trunk(&fleet, Inbox::new().mailbox());
-        HostServices {
-            registry: fleet,
+        let services = HostServices {
+            fleet: fleet.clone(),
             scratch: Some(Arc::new(
                 crate::bootstrap::Scratch::for_test(
                     crate::bootstrap::EXARCH,
@@ -1917,34 +1896,26 @@ mod tests {
                 )
                 .expect("scratch dir"),
             )),
-            mailbox: parent.mailbox().clone(),
-            parent,
+            generation: agent.generation(),
+            agent,
             emit,
-            provider: ProviderHandle::new(scripted_provider()),
-            caps: Capabilities::root(),
             cwd: PathBuf::from("/"),
-            fuel: 3,
-            returns: true,
-            allow_schedule: false,
-            search: true,
             reply: ReplyCell::default(),
             schedules: ScheduleRegistry::new(),
             log: LogCell::new(fresh_log()),
-            system_template: String::new(),
-            index: crate::prompt::BuiltinIndex::resolve(&ral_core::Shell::new(
-                ral_core::io::TerminalState::default(),
-            )),
-            interactive: false,
             nursery: Nursery::default(),
-            generation: 0,
-            disk_warn_bytes: None,
-            egress: Egress::for_test(),
             acts: ActFragment::default(),
             principal: ral_core::host::user(),
             pins: None,
             wire_seat: false,
-            dial: None,
-        }
+        };
+        (services, fleet, parent_inbox)
+    }
+
+    /// The base capture every desk below builds on, so growing [`HostServices`]
+    /// means touching one literal, not three.
+    fn base_services() -> HostServices {
+        services_with(3, |_| {}).0
     }
 
     fn desk() -> ExarchDesk {
@@ -2163,7 +2134,7 @@ mod tests {
         items
     }
 
-    /// The names a `` `roster `` answer lists, in registry order.
+    /// The names a `` `roster `` answer lists, in listing order.
     pub(super) fn roster_names(answer: FOValue) -> Vec<String> {
         roster(answer)
             .iter()
@@ -2182,31 +2153,16 @@ mod tests {
     /// [`desk`] holding the self-wakeup grant, so a schedule test reaches past it.
     fn granted_desk() -> ExarchDesk {
         ExarchDesk {
-            services: HostServices {
-                allow_schedule: true,
-                ..base_services()
-            },
+            services: services_with(3, |spec| spec.allow_schedule = true).0,
         }
     }
 
     /// A desk whose parent holds the very inbox this returns, so
     /// `` `start ``/`` `cancel ``/`` `message `` run end to end and a child's
     /// result is observable — unlike [`desk`].
-    fn spawnable_desk(fuel: u32) -> (ExarchDesk, AgentRegistry, Inbox) {
-        let parent_inbox = Inbox::new();
-        let fleet = AgentRegistry::new();
-        let parent = desk_trunk(&fleet, parent_inbox.mailbox());
-        let desk = ExarchDesk {
-            services: HostServices {
-                registry: fleet.clone(),
-                mailbox: parent_inbox.mailbox(),
-                fuel,
-                generation: parent.generation(),
-                parent,
-                ..base_services()
-            },
-        };
-        (desk, fleet, parent_inbox)
+    fn spawnable_desk(fuel: u32) -> (ExarchDesk, Arc<Fleet>, Inbox) {
+        let (services, fleet, parent_inbox) = services_with(fuel, |_| {});
+        (ExarchDesk { services }, fleet, parent_inbox)
     }
 
     /// Poll `inbox` for the next exchange-boundary item — a spawned child's
@@ -2908,7 +2864,7 @@ mod tests {
     /// inbox once it settles — the value itself is fetched with `` `read ``.
     #[test]
     fn agent_start_spawns_and_delivers_result_to_parent_inbox() {
-        let (desk, registry, parent_inbox) = spawnable_desk(3);
+        let (desk, fleet, parent_inbox) = spawnable_desk(3);
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -2916,7 +2872,7 @@ mod tests {
                 "agents `reply 'hi from child'",
             )])),
         ));
-        desk.services.provider.swap(provider);
+        desk.services.agent.provider_handle().swap(provider);
 
         let root = root_shell();
         let shell = forkable_child_shell(&root);
@@ -2944,10 +2900,10 @@ mod tests {
             }
             other => panic!("expected an Agent result item, got {other:?}"),
         }
-        let helper = registry.resolve("helper").expect("the child is still live");
+        let helper = fleet.resolve("helper").expect("the child is still live");
         assert_eq!(
             desk.services
-                .parent
+                .agent
                 .descendant(&helper)
                 .and_then(|child| child.reply()),
             Some(FOValue::String {
@@ -2962,7 +2918,7 @@ mod tests {
     /// what it deposited.
     #[test]
     fn agent_read_answers_the_childs_deposited_reply() {
-        let (desk, _registry, parent_inbox) = spawnable_desk(3);
+        let (desk, _fleet, parent_inbox) = spawnable_desk(3);
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -2970,7 +2926,7 @@ mod tests {
                 "agents `reply 'read me'",
             )])),
         ));
-        desk.services.provider.swap(provider);
+        desk.services.agent.provider_handle().swap(provider);
 
         let root = root_shell();
         let shell = forkable_child_shell(&root);
@@ -3003,16 +2959,16 @@ mod tests {
     /// touched, so nothing has to ask again to see what the fleet now is.
     #[test]
     fn start_answers_the_whole_roster_not_a_receipt() {
-        let (desk, registry, parent_inbox) = spawnable_desk(3);
-        desk.services.provider.swap(Arc::new(Provider::scripted(
+        let (desk, fleet, parent_inbox) = spawnable_desk(3);
+        desk.services.agent.provider_handle().swap(Arc::new(Provider::scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")])),
         )));
         // Held for the whole test, and with no worker behind it, so it never
         // settles out from under the assertion below.
         let mut sibling = crate::agent::testkit::TestAgentSpec::new("already-there");
-        sibling.parent = Some(desk.services.parent.clone());
-        let _already_there = crate::agent::testkit::test_agent(&registry, sibling)
+        sibling.parent = Some(desk.services.agent.clone());
+        let _already_there = crate::agent::testkit::test_agent(&fleet, sibling)
             .expect("a fresh child of a live parent");
 
         let root = root_shell();
@@ -3076,8 +3032,8 @@ mod tests {
     /// `agent::build`'s fork test asserts the narrowing itself.
     #[test]
     fn agent_start_admits_a_search_request_above_the_parents_ceiling() {
-        let (mut desk, _registry, parent_inbox) = spawnable_desk(3);
-        desk.services.search = false;
+        let (services, _fleet, parent_inbox) = services_with(3, |spec| spec.search = false);
+        let desk = ExarchDesk { services };
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -3085,7 +3041,7 @@ mod tests {
                 "agents `reply 'done'",
             )])),
         ));
-        desk.services.provider.swap(provider);
+        desk.services.agent.provider_handle().swap(provider);
 
         let root = root_shell();
         let shell = forkable_child_shell(&root);
@@ -3120,12 +3076,19 @@ mod tests {
     /// raw `system_template` [`ExarchDesk::launch`] forks its log from.
     #[test]
     fn agent_start_bookend_records_the_childs_resolved_length() {
-        let (mut desk, _registry, parent_inbox) = spawnable_desk(3);
         let template = format!(
             "persona\n\n# Builtins\n\n{}",
             crate::prompt::BUILTIN_INDEX_PLACEHOLDER
         );
-        desk.services.system_template = template.clone();
+        let root = root_shell();
+        // The production seam: the index table resolves from the same booted
+        // surface the parked child shells fork from.
+        let index = crate::prompt::BuiltinIndex::resolve(&root);
+        let (services, _fleet, parent_inbox) = services_with(3, |spec| {
+            spec.system_base = template.clone();
+            spec.index = index.clone();
+        });
+        let desk = ExarchDesk { services };
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -3133,12 +3096,8 @@ mod tests {
                 "agents `reply 'hi from child'",
             )])),
         ));
-        desk.services.provider.swap(provider);
+        desk.services.agent.provider_handle().swap(provider);
 
-        let root = root_shell();
-        // The production seam: the index table resolves from the same booted
-        // surface the parked child shells fork from.
-        desk.services.index = crate::prompt::BuiltinIndex::resolve(&root);
         let shell = forkable_child_shell(&root);
         let session = desk.services.nursery.park(shell);
 
@@ -3151,13 +3110,14 @@ mod tests {
 
         let expected = desk
             .services
-            .index
+            .agent
+            .index()
             .apply(
                 &template,
                 &crate::prompt::Grants {
                     returns: true,
-                    allow_schedule: desk.services.allow_schedule,
-                    spawns: desk.services.fuel.saturating_sub(1) > 0,
+                    allow_schedule: desk.services.agent.allow_schedule,
+                    spawns: desk.services.agent.fuel().saturating_sub(1) > 0,
                 },
             )
             .len();
@@ -3174,7 +3134,7 @@ mod tests {
 
     #[test]
     fn agent_start_refuses_at_zero_fuel_with_the_exhaustion_text() {
-        let (desk, _registry, _parent_inbox) = spawnable_desk(0);
+        let (desk, _fleet, _parent_inbox) = spawnable_desk(0);
         let root = root_shell();
         let shell = forkable_child_shell(&root);
         let session = desk.services.nursery.park(shell);
@@ -3198,16 +3158,16 @@ mod tests {
         );
     }
 
-    /// [`AgentRegistry::name_live`] catches the ordinary case before the parked
+    /// [`Fleet::name_live`] catches the ordinary case before the parked
     /// fork is ever adopted, so the refused spawn registers no child.
     #[test]
     fn agent_start_refuses_a_name_already_borne_by_a_live_agent() {
-        let (desk, _registry, _parent_inbox) = spawnable_desk(3);
+        let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'a'")])),
         ));
-        desk.services.provider.swap(provider);
+        desk.services.agent.provider_handle().swap(provider);
 
         let root = root_shell();
         let shell1 = forkable_child_shell(&root);
@@ -3232,7 +3192,7 @@ mod tests {
              refused call"
         );
         assert_eq!(
-            listing(&desk.services.parent).len(),
+            listing(&desk.services.agent).len(),
             1,
             "the second, refused spawn must leave no child behind"
         );
@@ -3243,7 +3203,7 @@ mod tests {
     /// or a listener dialled, rather than leaving it all to the enrolment.
     #[test]
     fn agent_start_refuses_a_malformed_name_before_it_adopts_the_fork() {
-        let (desk, _registry, _parent_inbox) = spawnable_desk(3);
+        let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
 
         let root = root_shell();
         let shell = forkable_child_shell(&root);
@@ -3262,7 +3222,7 @@ mod tests {
              for the run guard to reap"
         );
         assert!(
-            listing(&desk.services.parent).is_empty(),
+            listing(&desk.services.agent).is_empty(),
             "a refused spawn leaves no child behind"
         );
     }
@@ -3271,7 +3231,7 @@ mod tests {
     /// parent's own is never debited.
     #[test]
     fn fuel_bounds_depth_not_fanout() {
-        let (desk, _registry, parent_inbox) = spawnable_desk(1);
+        let (desk, _fleet, parent_inbox) = spawnable_desk(1);
         let provider = Arc::new(Provider::scripted(
             "test-model",
             Script::new()
@@ -3279,7 +3239,7 @@ mod tests {
                 .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'b'")]))
                 .then(Reply::tool_calls(vec![ral_call("r3", "agents `reply 'c'")])),
         ));
-        desk.services.provider.swap(provider);
+        desk.services.agent.provider_handle().swap(provider);
 
         let root = root_shell();
         for i in 0..3 {
@@ -3309,8 +3269,8 @@ mod tests {
     /// moved past what was snapshotted at install.
     #[test]
     fn agent_start_refuses_after_clear() {
-        let (desk, _registry, _parent_inbox) = spawnable_desk(3);
-        desk.services.parent.clear_subtree(); // the /clear gesture, on this caller
+        let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
+        desk.services.agent.clear_subtree(); // the /clear gesture, on this caller
         let root = root_shell();
         let shell = forkable_child_shell(&root);
         let session = desk.services.nursery.park(shell);
@@ -3328,7 +3288,7 @@ mod tests {
     /// adopted `Shell` rather than leaving it to be adopted twice.
     #[test]
     fn refused_enquiry_leaves_the_nursery_empty() {
-        let (desk, _registry, _parent_inbox) = spawnable_desk(3);
+        let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
         let root = root_shell();
         let shell = forkable_child_shell(&root);
         let session = desk.services.nursery.park(shell);
@@ -3351,21 +3311,21 @@ mod tests {
     /// check on the climb, checked here at the desk entry point.
     #[test]
     fn message_and_cancel_scope_to_descendants() {
-        let (desk_root, registry, _root_inbox) = spawnable_desk(3);
+        let (desk_root, fleet, _root_inbox) = spawnable_desk(3);
         // root -> mid -> grandchild, and root -> sibling (mid's sibling).
         let under = |name: &str, parent: &Arc<Agent>| {
             let mut spec = crate::agent::testkit::TestAgentSpec::new(name);
             spec.parent = Some(parent.clone());
-            crate::agent::testkit::test_agent(&registry, spec)
+            crate::agent::testkit::test_agent(&fleet, spec)
                 .expect("a fresh child of a live parent")
         };
-        let root = desk_root.services.parent.clone();
+        let root = desk_root.services.agent.clone();
         let mid = under("mid", &root);
         let _sibling = under("sibling", &root);
         let _grandchild = under("grandchild", &mid);
 
         let mut desk1 = desk_root;
-        desk1.services.parent = mid;
+        desk1.services.agent = mid;
 
         let err = desk1
             .handle(message_req("sibling", "hi"))
@@ -3600,9 +3560,9 @@ mod tests {
     #[test]
     fn reply_refused_without_returns() {
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let mut d = desk();
+        let (services, _fleet, _inbox) = services_with(3, |spec| spec.returns = false);
+        let mut d = ExarchDesk { services };
         d.services.emit = emit;
-        d.services.returns = false;
         let err = d
             .handle(family_req(
                 "agents",
@@ -3774,7 +3734,7 @@ mod tests {
     fn attend_and_deliver(
         mut child: Avatar,
         name: &str,
-        parent_mailbox: Mailbox,
+        parent_mailbox: crate::bus::Mailbox,
     ) -> std::thread::JoinHandle<()> {
         let id = child.agent.id;
         let generation = child.agent.consumer();
@@ -3800,7 +3760,7 @@ mod tests {
     /// [`Agent::has_busy_children`] to read true, so `parent` parks
     /// [`crate::bus::ParkMode::HeldByChildren`] instead of quiescing.  The
     /// caller must hold what comes back — that is what keeps it live.
-    fn keepalive(fleet: &AgentRegistry, parent: &Arc<Agent>) -> Arc<Agent> {
+    fn keepalive(fleet: &Arc<Fleet>, parent: &Arc<Agent>) -> Arc<Agent> {
         let mut spec = crate::agent::testkit::TestAgentSpec::new(&format!("keepalive-{}", parent.id));
         spec.parent = Some(parent.clone());
         crate::agent::testkit::test_agent(fleet, spec).expect("a fresh child of a live parent")
@@ -3843,7 +3803,7 @@ mod tests {
         child.seed("say hi".into());
         let log_dir = child.log_dir();
         let child_agent = child.agent.clone();
-        let _keepalive = keepalive(&parent.agents, &child_agent);
+        let _keepalive = keepalive(&parent.fleet, &child_agent);
         let handle = attend_and_deliver(child, "helper", parent.mailbox());
 
         child_agent.mailbox().steer("first message".into());
@@ -3891,7 +3851,7 @@ mod tests {
     #[test]
     fn ms_lease_child_never_renewed_is_cancelled_but_a_renewed_one_survives() {
         let parent = Avatar::for_test("system").unwrap();
-        let fleet = parent.agents.clone();
+        let fleet = parent.fleet.clone();
         // Child A's ttl must expire well inside the round-trip loop's own
         // `MAX_STEPS` cap, so the lease and not the step cap ends its exchange.
         // Child B's is generous instead: its renewal is paced by `thread::sleep`
@@ -3972,9 +3932,8 @@ mod wire_tests {
     use super::*;
     use crate::agent::event::AgentLog;
     use crate::agent::testkit::ral_call;
+    use crate::agent::cancel::EvalReach;
     use crate::bus::Inbox;
-    use crate::egress::Egress;
-    use crate::fleet::registry::EvalReach;
     use crate::provider::{
         Provider,
         scripted::{Reply, Script},
@@ -4149,49 +4108,39 @@ mod wire_tests {
     /// A wire-seat desk fixture whose parent holds the very inbox this
     /// returns, exactly [`super::tests::spawnable_desk`]'s identity shape with
     /// `wire_seat: true` and a dialler installed.
-    fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, AgentRegistry, Inbox) {
+    fn wire_spawnable_desk(fuel: u32, dial: Arc<FakeDial>) -> (ExarchDesk, Arc<Fleet>, Inbox) {
         let parent_inbox = Inbox::new();
-        let registry = AgentRegistry::new();
+        let fleet = Fleet::new();
         let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
         spec.reach = fake_wire_reach();
         spec.mailbox = parent_inbox.mailbox();
-        let parent = crate::agent::testkit::test_agent(&registry, spec)
+        spec.caps = Capabilities::root();
+        spec.fuel = fuel;
+        spec.returns = true;
+        spec.search = true;
+        spec.dial = Some(dial);
+        let agent = crate::agent::testkit::test_agent(&fleet, spec)
             .expect("a fresh fleet's wire trunk");
         let (emit, _rx) = crate::bus::dummy_emitter();
         let desk = ExarchDesk {
             services: HostServices {
-                registry: registry.clone(),
+                fleet: fleet.clone(),
                 scratch: None,
-                generation: parent.generation(),
-                parent,
-                mailbox: parent_inbox.mailbox(),
+                generation: agent.generation(),
+                agent,
                 emit,
-                provider: ProviderHandle::new(scripted_provider(Script::new())),
-                caps: Capabilities::root(),
                 cwd: PathBuf::from("/work"),
-                fuel,
-                returns: true,
-                allow_schedule: false,
-                search: true,
                 reply: ReplyCell::default(),
                 schedules: ScheduleRegistry::new(),
                 log: LogCell::new(fresh_log()),
-                system_template: String::new(),
-                index: crate::prompt::BuiltinIndex::resolve(&ral_core::Shell::new(
-                    ral_core::io::TerminalState::default(),
-                )),
-                interactive: false,
                 nursery: Nursery::default(),
-                disk_warn_bytes: None,
-                egress: Egress::for_test(),
                 acts: ActFragment::default(),
                 principal: ral_core::host::user(),
                 pins: None,
                 wire_seat: true,
-                dial: Some(dial),
             },
         };
-        (desk, registry, parent_inbox)
+        (desk, fleet, parent_inbox)
     }
 
     /// `` `agents `start `` as a listening engine sends it: the port its
@@ -4232,12 +4181,13 @@ mod wire_tests {
         // bit-for-bit, not as an arithmetic value.
         let token = 0xF0DE_BA5E_1234_5678;
         let dial = FakeDial::new(Guest::Hatches);
-        let (desk, registry, parent_inbox) = wire_spawnable_desk(3, dial.clone());
+        let (desk, fleet, parent_inbox) = wire_spawnable_desk(3, dial.clone());
 
         // The assembled child seeds its own provider from the desk's captured
         // handle, so swap it before `` `start `` assembles.
         desk.services
-            .provider
+            .agent
+            .provider_handle()
             .swap(scripted_provider(Script::new().then(Reply::tool_calls(
                 vec![ral_call("r1", "agents `reply 'hi from wire'")],
             ))));
@@ -4271,10 +4221,10 @@ mod wire_tests {
             }
             other => panic!("expected an Agent result item, got {other:?}"),
         }
-        let helper = registry.resolve("helper").expect("the child is still live");
+        let helper = fleet.resolve("helper").expect("the child is still live");
         assert_eq!(
             desk.services
-                .parent
+                .agent
                 .descendant(&helper)
                 .and_then(|child| child.reply()),
             Some(FOValue::String {
@@ -4291,7 +4241,7 @@ mod wire_tests {
     #[test]
     fn wire_spawn_refuses_when_the_guest_closes_without_acking() {
         let dial = FakeDial::new(Guest::ClosesWithoutAcking);
-        let (desk, _registry, _parent_inbox) = wire_spawnable_desk(3, dial);
+        let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial);
 
         let err = desk
             .handle(wire_start_req("unacked", 41_731, 7))
@@ -4303,7 +4253,7 @@ mod wire_tests {
             err.message
         );
         assert!(
-            listing(&desk.services.parent).is_empty(),
+            listing(&desk.services.agent).is_empty(),
             "a hatch that was never acknowledged names no child on the roster"
         );
     }
@@ -4314,7 +4264,7 @@ mod wire_tests {
     #[test]
     fn wire_spawn_refuses_naming_the_dial_when_the_guest_refuses_it() {
         let dial = FakeDial::new(Guest::Refuses("connection reset by peer".to_string()));
-        let (desk, _registry, _parent_inbox) = wire_spawnable_desk(3, dial);
+        let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial);
 
         let err = desk
             .handle(wire_start_req("never-reached", 41_731, 7))
@@ -4331,7 +4281,7 @@ mod wire_tests {
     #[test]
     fn wire_spawn_refuses_a_parked_fork_without_dialling() {
         let dial = FakeDial::new(Guest::Hatches);
-        let (desk, _registry, _parent_inbox) = wire_spawnable_desk(3, dial.clone());
+        let (desk, _fleet, _parent_inbox) = wire_spawnable_desk(3, dial.clone());
 
         let err = desk
             .handle(super::tests::start_req(
@@ -4359,18 +4309,20 @@ mod wire_tests {
     /// sender and recipient never learn each other's transport.
     #[test]
     fn identity_and_wire_peers_exchange_messages_through_one_desk() {
-        let registry = AgentRegistry::new();
-        let parent = crate::agent::testkit::test_agent(
-            &registry,
-            crate::agent::testkit::TestAgentSpec::new("parent"),
-        )
-        .expect("a fresh fleet's trunk");
+        let fleet = Fleet::new();
+        let mut parent_spec = crate::agent::testkit::TestAgentSpec::new("parent");
+        parent_spec.caps = Capabilities::root();
+        parent_spec.fuel = 3;
+        parent_spec.returns = true;
+        parent_spec.search = true;
+        let parent = crate::agent::testkit::test_agent(&fleet, parent_spec)
+            .expect("a fresh fleet's trunk");
 
         let identity_inbox = Inbox::new();
         let mut identity = crate::agent::testkit::TestAgentSpec::new("identity-peer");
         identity.parent = Some(parent.clone());
         identity.mailbox = identity_inbox.mailbox();
-        let _identity_peer = crate::agent::testkit::test_agent(&registry, identity)
+        let _identity_peer = crate::agent::testkit::test_agent(&fleet, identity)
             .expect("a fresh child of a live parent");
 
         let wire_inbox = Inbox::new();
@@ -4378,41 +4330,26 @@ mod wire_tests {
         wire.parent = Some(parent.clone());
         wire.reach = fake_wire_reach();
         wire.mailbox = wire_inbox.mailbox();
-        let _wire_peer = crate::agent::testkit::test_agent(&registry, wire)
+        let _wire_peer = crate::agent::testkit::test_agent(&fleet, wire)
             .expect("a fresh child of a live parent");
 
         let (emit, _rx) = crate::bus::dummy_emitter();
         let desk = ExarchDesk {
             services: HostServices {
-                registry,
+                fleet,
                 scratch: None,
                 generation: parent.generation(),
-                parent,
-                mailbox: Inbox::new().mailbox(),
+                agent: parent,
                 emit,
-                provider: ProviderHandle::new(scripted_provider(Script::new())),
-                caps: Capabilities::root(),
                 cwd: PathBuf::from("/"),
-                fuel: 3,
-                returns: true,
-                allow_schedule: false,
-                search: true,
                 reply: ReplyCell::default(),
                 schedules: ScheduleRegistry::new(),
                 log: LogCell::new(fresh_log()),
-                system_template: String::new(),
-                index: crate::prompt::BuiltinIndex::resolve(&ral_core::Shell::new(
-                    ral_core::io::TerminalState::default(),
-                )),
-                interactive: false,
                 nursery: Nursery::default(),
-                disk_warn_bytes: None,
-                egress: Egress::for_test(),
                 acts: ActFragment::default(),
                 principal: ral_core::host::user(),
                 pins: None,
                 wire_seat: false,
-                dial: None,
             },
         };
 

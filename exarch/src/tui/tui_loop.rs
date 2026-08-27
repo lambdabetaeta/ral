@@ -19,7 +19,7 @@ use crossterm::event::{
 use crate::{
     agent::{Avatar, Control, Verdict, cancel},
     bus::{AgentId, BusReceiver, Emitter, FleetBus, Inbox, Pass, Post, Signal},
-    fleet::{Fleet, registry::AgentRegistry},
+    fleet::Fleet,
     provider::{
         self, Provider,
         credential::CredentialStore,
@@ -52,7 +52,7 @@ impl Tui {
         vi: bool,
         append_log: bool,
         inbox: Inbox,
-        agents: AgentRegistry,
+        agents: Arc<Fleet>,
     ) -> io::Result<Self> {
         let guard = TerminalGuard::enter(stderr_log)?;
         let app = App::new(root_id, root_log_dir, vi, append_log, inbox, agents);
@@ -160,7 +160,7 @@ pub fn run(
     run_dir: &Path,
     seed: Option<String>,
     vi: bool,
-    engine: Arc<provider::Engine>,
+    engine: &Arc<provider::Engine>,
 ) -> Result<(), String> {
     let stderr_log = run_dir.join("stderr.log");
     let mut tui = Tui::new(
@@ -170,17 +170,16 @@ pub fn run(
         vi,
         session.is_resumed(),
         session.inbox(),
-        session.agents.clone(),
+        session.fleet.clone(),
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
     tui.app.update_live_model(provider, &store.available());
     // A *session*-lived bus, not per-exchange: a detached async child keeps
     // streaming to its tab after the exchange that spawned it ends.
-    let fleet = Fleet {
-        agents: session.agents.clone(),
-        bus: FleetBus::session(&session.inbox()),
-        engine,
-    };
+    let bus = FleetBus::session(&session.inbox());
+    // Owned, not borrowed off `session`: the worker below moves `session`
+    // into its closure, so `CommandCtx` cannot hold a borrow across that.
+    let fleet = session.fleet.clone();
     if let Some(s) = seed {
         session.seed(s);
     }
@@ -196,7 +195,7 @@ pub fn run(
     // The worker crosses the thread boundary with an emitter, not the bus:
     // `FleetBus` holds a single-consumer `Receiver` and so is not `Sync`, while
     // an `Emitter` is `Send` and is all the worker needs.
-    let worker_emit = fleet.bus.emitter(session.agent.id);
+    let worker_emit = bus.emitter(session.agent.id);
     // The UI thread's own door onto the record seam — reachable here, before
     // the worker spawns, where `LogCell`'s no-wait rule is trivially
     // satisfied.  A cheap `Arc<Log>` clone, so a `/model` switch or a login
@@ -237,12 +236,12 @@ pub fn run(
     // would deadlock whenever the UI loop dies first.
     let quit_mailbox = session.inbox().mailbox();
     let mut cmd_ctx = CommandCtx {
-        agents: &fleet.agents,
+        agents: &fleet,
         store,
         catalog,
         info,
         recorder: &recorder,
-        engine: &fleet.engine,
+        engine,
     };
     // This is the process's trunk — a fact of the launch, not of any position
     // in the tree — so its token is what an OS signal must reach, held for as
@@ -258,7 +257,7 @@ pub fn run(
             })
             .expect("spawn agent worker");
 
-        let r = ui_loop(&mut tui, &fleet.bus, done_ref, &mut cmd_ctx);
+        let r = ui_loop(&mut tui, &bus, done_ref, &mut cmd_ctx);
         if r.is_err() {
             // A rejected push (the inbox at quota) has nowhere to be reported:
             // `r`'s error is already the one in flight.
@@ -295,7 +294,7 @@ pub fn run(
 /// `agents` is the same shared map the worker mutates, so an agent it registers
 /// is steerable at once.
 pub struct CommandCtx<'a> {
-    pub(super) agents: &'a AgentRegistry,
+    pub(super) agents: &'a Fleet,
     pub(super) store: &'a mut CredentialStore,
     pub(super) catalog: &'a mut ModelCatalog<LiveSource>,
     pub(super) info: &'a SessionInfo<'a>,

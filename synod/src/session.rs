@@ -426,7 +426,6 @@ pub struct Conversation {
     /// holds, which drops first.
     dial: Arc<crate::machine_dial::MachineDial>,
     agent: Avatar,
-    engine: Arc<Engine>,
     baseline: Baseline,
     /// The guest's whole network, running on its own threads since before
     /// the first exchange — see [`net_seat`].
@@ -571,7 +570,6 @@ fn as_gb(bytes: u64) -> String {
 struct Booted {
     dial: Arc<crate::machine_dial::MachineDial>,
     agent: Avatar,
-    engine: Arc<Engine>,
     net: guest_net::Session<NetWire>,
 }
 
@@ -705,7 +703,7 @@ impl Conversation {
 
             let engine = Engine::new();
             let provider = Arc::new(Provider::build(
-                engine.clone(),
+                engine,
                 &account,
                 model.clone(),
                 &credential,
@@ -751,26 +749,15 @@ impl Conversation {
             )
             .map_err(|e| format!("could not start the assistant: {e}"))?;
 
-            Ok(Booted {
-                dial,
-                agent,
-                engine,
-                net,
-            })
+            Ok(Booted { dial, agent, net })
         })();
 
         match booted {
-            Ok(Booted {
-                dial,
-                agent,
-                engine,
-                net,
-            }) => Ok((
+            Ok(Booted { dial, agent, net }) => Ok((
                 Self {
                     grant,
                     dial,
                     agent,
-                    engine,
                     baseline: Baseline::Pending(handle),
                     net,
                 },
@@ -815,8 +802,7 @@ impl Conversation {
         sink: &mut S,
     ) -> Result<(), String> {
         let history = self.baseline.store()?;
-        let outcome =
-            exarch::headless::converse_settled(&mut self.agent, message, self.engine.clone(), sink);
+        let outcome = exarch::headless::converse_settled(&mut self.agent, message, sink);
         let after = history.capture(self.grant.root(), workspace::Moment::After);
         outcome.and_then(|()| after.map(drop))
     }

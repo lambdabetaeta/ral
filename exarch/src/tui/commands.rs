@@ -13,7 +13,7 @@ use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
 use super::viewport;
 use crate::bus::{Mailbox, Post};
-use crate::fleet::registry::AgentRegistry;
+use crate::fleet::Fleet;
 use prompt_editor::completion::Candidate;
 use ral_core::path::sigil::expand_path_prefix;
 pub(super) struct SlashCommand {
@@ -360,7 +360,7 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
 /// Jump focus to the live tab named `arg` — the only way onto a demoted tab,
 /// which `TAB` skips.  The name resolves, but nothing is renewed: attention
 /// alone must not keep a child alive.
-pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &AgentRegistry) {
+pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &Fleet) {
     let id = app.tabs.focused();
     if arg.is_empty() {
         app.push_error(id, "usage: /focus <name>");

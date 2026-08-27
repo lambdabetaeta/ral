@@ -46,7 +46,7 @@ use exarch::bus::{AgentId, Sink};
 use exarch::egress::Egress;
 use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
-use exarch::provider::{Engine, Provider, ToolCall};
+use exarch::provider::{Provider, ToolCall};
 use exarch::record::{Display, Record, Transient};
 use ral_core::transport::{Liveness, WireTransport};
 use ral_core::types::Capabilities;
@@ -150,7 +150,6 @@ fn main() {
         .then(Reply::text("all set"))
         .then(Reply::text("all set"));
 
-    let engine = Engine::new();
     let provider = Arc::new(Provider::scripted("test-model", script));
     // Made here, not by `Avatar::root`: it takes the directory as given so that
     // a `--resume` naming one that does not exist fails instead of quietly
@@ -192,7 +191,6 @@ fn main() {
     let exchange = converse_settled(
         &mut agent,
         "please have the helper write the file".to_string(),
-        engine,
         &mut sink,
     );
 

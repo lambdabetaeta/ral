@@ -61,7 +61,8 @@ use crate::agent::seat::Seat;
 use crate::bus::{
     AgentId, AgentMessage, AgentOutcome, AgentResult, Inbox, InboxReject, Mailbox, Post,
 };
-use crate::fleet::registry::{AgentRegistry, EvalReach};
+use crate::agent::cancel::EvalReach;
+use crate::fleet::Fleet;
 use crate::provider::Provider;
 use crate::shell_eval;
 use crate::sync::LockExt;
@@ -76,18 +77,16 @@ use std::time::{Duration, Instant};
 /// Identity and immutable config, fixed at construction — except
 /// [`Self::status`], the one register the avatar writes as it runs, and
 /// [`Self::children`], which the spawn site pushes onto.  Live exactly while
-/// its [`Avatar`] holds the `Arc`: its parent and the fleet's
-/// [`AgentRegistry`](crate::fleet::registry::AgentRegistry) hold only
-/// [`Weak`], and every walk prunes what fails to upgrade.
+/// its [`Avatar`] holds the `Arc`: its parent and the fleet's [`Fleet`] hold
+/// only [`Weak`], and every walk prunes what fails to upgrade.
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, search); not a candidate for a combined enum"
 )]
 pub struct Agent {
     pub id: AgentId,
-    /// The tab-bar identity [`crate::fleet::registry::check_name`] validates —
-    /// unique among live agents, enforced at
-    /// [`AgentRegistry::enrol`](crate::fleet::registry::AgentRegistry::enrol).
+    /// The tab-bar identity [`crate::fleet::check_name`] validates — unique
+    /// among live agents, enforced at [`Fleet::enrol`].
     name: String,
     /// Where this agent's own session log is written.
     log_dir: PathBuf,
@@ -227,10 +226,10 @@ pub struct Avatar {
     /// [`Self::deliberate`] clears it on entry, so a cancelled or panicking
     /// deliberation cannot poison the next.
     reply: Option<FOValue>,
-    /// The **fleet's** index, one handle cloned to every node: the name a
+    /// The fleet itself, `Arc`-shared with every other node: the name a
     /// spawn claims and the by-id door a frontend command arrives through.
     /// Not the tree — that is [`Agent::parent`] and [`Agent::children`].
-    pub(crate) agents: AgentRegistry,
+    pub(crate) fleet: Arc<Fleet>,
     /// Live wakeups (cron / after), posted into this agent's own inbox; the
     /// builtins that arm them gate on `allow_schedule`.
     pub(crate) schedules: crate::fleet::schedule::ScheduleRegistry,
@@ -316,11 +315,40 @@ impl Agent {
         self.returns
     }
 
-    /// Production spawns read the private field directly or narrow the desk's
-    /// captured snapshot ([`crate::policy::narrow`]); this is test-only.
-    #[cfg(test)]
     pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
         &self.caps
+    }
+
+    pub(crate) fn fuel(&self) -> u32 {
+        self.fuel
+    }
+
+    pub(crate) fn search(&self) -> bool {
+        self.search
+    }
+
+    pub(crate) fn interactive(&self) -> bool {
+        self.interactive
+    }
+
+    pub(crate) fn disk_warn_bytes(&self) -> Option<u64> {
+        self.disk_warn_bytes
+    }
+
+    pub(crate) fn egress(&self) -> &crate::egress::Egress {
+        &self.egress
+    }
+
+    pub(crate) fn dial(&self) -> Option<&Arc<dyn Dial>> {
+        self.dial.as_ref()
+    }
+
+    pub(crate) fn system_base(&self) -> &str {
+        &self.system_base
+    }
+
+    pub(crate) fn index(&self) -> &Arc<crate::prompt::BuiltinIndex> {
+        &self.index
     }
 
     pub(crate) fn name(&self) -> &str {
