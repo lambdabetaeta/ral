@@ -28,8 +28,8 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     // defaults.
     let initial_tuning = ctx
         .agents
-        .provider(tui.app.tabs.focused())
-        .map(|p| p.current().tuning().clone())
+        .by_id(tui.app.tabs.focused())
+        .map(|agent| agent.current_provider().tuning().clone())
         .unwrap_or_default();
     let mut picker = Picker::new(
         available.clone(),
@@ -169,11 +169,12 @@ fn apply_model_switch(
         return;
     };
     // A tab that settled while the picker was open has no handle to swap.
-    let Some(provider) = ctx.agents.provider(focused) else {
+    let Some(agent) = ctx.agents.by_id(focused) else {
         tui.app
             .push_error(focused, "the focused agent is no longer live");
         return;
     };
+    let provider = agent.provider_handle();
     // The token override is no part of the selection, so it rides across by hand.
     let current_override = provider.current().max_tokens_override();
     let engine = ctx.engine.clone();

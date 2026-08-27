@@ -2,10 +2,9 @@
 //! take it up, do the ready-boundary housekeeping, and turn a nudge-worthy
 //! outcome into a self-posted nudge.  Stepping the model to quiescence over
 //! one item is [`super::deliberate`]'s job; nothing here special-cases a
-//! node's position, since a child's reply is deposited on its registry entry
-//! and a non-reply end is delivered up its parent's mailbox by the spawn site.
+//! node's position, since a child's reply is deposited on its own agent and a
+//! non-reply end is delivered up its parent's mailbox by the spawn site.
 
-use crate::agent::cancel;
 use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
@@ -85,13 +84,6 @@ impl Avatar {
         policy: impl Fn(&Self, ParkMode) -> ParkMode,
     ) -> (AgentOutcome, Option<FOValue>) {
         self.couple(emit);
-        // Only the trunk publishes to the OS-signal slot; a sub-agent's token
-        // is reached through the registry cascade instead.
-        let _slot = self
-            .agent
-            .parent
-            .is_none()
-            .then(|| cancel::publish(&self.agent.cancel));
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         loop {
             // Every pass is a settled ready boundary.  A lease-chain reap is
@@ -106,8 +98,7 @@ impl Avatar {
             // deliberation's own transitions are the truth.
             if self.inbox.is_empty() {
                 let mode = policy(self, self.park_mode());
-                self.agents
-                    .set_resting(self.agent.id, mode == ParkMode::Engaged);
+                self.agent.set_resting(mode == ParkMode::Engaged);
                 self.recorder()
                     .transient(crate::record::Transient::State(idle_state(mode)));
             }
@@ -120,7 +111,7 @@ impl Avatar {
             else {
                 break;
             };
-            self.agents.set_resting(self.agent.id, false);
+            self.agent.set_resting(false);
             if matches!(
                 self.take_up(&item, control, emit, &mut final_outcome),
                 Flow::Stop
@@ -137,11 +128,6 @@ impl Avatar {
             self.log.lock().is_ready(),
             "attend must leave the agent ReadyForUser"
         );
-        // A child is removed by its spawn site through `settle`; the trunk has
-        // nobody to do it, so it removes itself and the fleet empties.
-        if self.agent.parent.is_none() {
-            self.agents.deregister(self.agent.id);
-        }
         final_outcome
     }
 
@@ -241,9 +227,12 @@ impl Avatar {
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
         }
+        // A root's reply goes to whoever drives its loop, not to a deposit: it
+        // has no parent to fetch it, and staging one would read as a standing
+        // reply the nudge layer must fall silent for.
         if let Ok(deliberate::Outcome::Replied(v)) = &outcome
             && self.agent.parent.is_some()
-            && let Err(reject) = self.agents.deposit_reply(self.agent.id, v.clone())
+            && let Err(reject) = self.agent.deposit_reply(v.clone())
         {
             self.note_error(format!("the parent's inbox rejected this reply: {reject}"));
         }
@@ -261,9 +250,9 @@ impl Avatar {
         // Nudged only when nothing else is already carrying this agent
         // forward: no reply standing for a parent to fetch, no detached shell
         // work, no busy children.
-        let quiet = !self.agents.has_reply(self.agent.id)
+        let quiet = !self.agent.has_reply()
             && self.probe_workers().is_empty()
-            && !self.has_busy_children();
+            && !self.agent.has_busy_children();
         let ctx = nudge::NudgeCtx {
             must_reply: self.returns(),
             pinned: self.pinned_digest(),
@@ -309,7 +298,7 @@ impl Avatar {
     }
 
     /// Whether a drawn item still belongs to the live context.  A worker posts
-    /// its result *before* retiring its registry entry (deliver-then-retire,
+    /// its result *before* retiring itself (deliver-then-retire,
     /// so a parked parent never sees "no live child" without the result
     /// already queued), and a deferred `spawn`'s surface batch composes and
     /// pushes in two steps a `/clear` can fall between: neither can judge its
@@ -337,38 +326,30 @@ impl Avatar {
     /// conversing agent parks [`ParkMode::Held`], immune to cancellation; a
     /// returning agent a human has exchanged with parks [`ParkMode::Engaged`]
     /// — the same wait, but a terminate-cause cancel still ends it, and the
-    /// registry's idle lease rather than this predicate bounds it.
+    /// fleet's idle lease rather than this predicate bounds it.
     fn park_mode(&self) -> ParkMode {
         let conversing = self.agent.interactive && !self.returns();
         if conversing {
-            // `/clear` reaps the entry, and an unlisted agent is unreachable —
-            // its mailbox resolves to None — so Held would be a zombie.
-            if !self.agents.is_live(self.agent.id) {
+            // `next_or_idle` lets a terminate cause end every park but `Held`,
+            // so a conversing agent asks here instead: `/close` stamps this
+            // token, and parking Held past it would be a zombie.
+            if self.agent.cancel.terminated() {
                 return ParkMode::Quiesce;
             }
             return ParkMode::Held;
         }
-        // No `is_live` guard, unlike `Held` above: every entry-removal path for
-        // a parented agent terminate-stamps its token first
-        // (`cancel_and_remove`), and `next_or_idle` checks `terminated()` on
-        // every wake.
-        if self.agent.parent.is_some() && self.returns() && self.agents.messageable(self.agent.id)
-        {
+        // Only an agent with somewhere to report waits to be messaged; a
+        // headless root returns and ends.
+        if self.agent.parent.is_some() && self.returns() && self.agent.messageable() {
             return ParkMode::Engaged;
         }
-        if self.has_busy_children() {
+        if self.agent.has_busy_children() {
             return ParkMode::HeldByChildren;
         }
         if self.schedules.armed() {
             return ParkMode::UntilCancelled;
         }
         ParkMode::Quiesce
-    }
-
-    /// Whether an async child launched from here is still working, rather
-    /// than parked on its own deposited reply.
-    fn has_busy_children(&self) -> bool {
-        self.agents.has_busy_children(self.agent.id)
     }
 
     /// Re-pin the host-owned `services` card against the shell's live worker
@@ -549,7 +530,7 @@ fn record_commit(recorder: &crate::record::Emitter, commit: crate::record::Displ
 /// armed schedule `converse_settled` already refused at construction.
 pub(crate) fn quiesce_when_childless(avatar: &Avatar, mode: ParkMode) -> ParkMode {
     match mode {
-        ParkMode::Held if avatar.has_busy_children() => ParkMode::HeldByChildren,
+        ParkMode::Held if avatar.agent.has_busy_children() => ParkMode::HeldByChildren,
         ParkMode::Held => ParkMode::Quiesce,
         other => other,
     }
@@ -579,7 +560,7 @@ fn agent_outcome(
 ) -> (AgentOutcome, Option<FOValue>) {
     match r {
         // The headless root's own `reply` reaches the epilogue directly — a
-        // child's is deposited on its registry entry instead, and never
+        // child's is deposited on its own agent instead, and never
         // drives `take_up`'s call here.
         Ok(deliberate::Outcome::Replied(v)) => (AgentOutcome::Replied, Some(v.clone())),
         // Re-nudged within budget by `nudge` before it ever reaches here.
@@ -657,26 +638,22 @@ mod tests {
         assert_eq!(facts, ["prompt", "subagent"], "both commits reach the seam");
     }
 
-    /// The park verdict reads engagement from the registry, never from the
-    /// TUI's focus cursor.
+    /// The park verdict reads engagement off the agent's own exchange clock,
+    /// never off the TUI's focus cursor.
     #[test]
-    fn park_mode_reads_engagement_from_the_registry() {
+    fn park_mode_reads_engagement_from_the_exchange_clock() {
         let held = trunk(true);
         assert_eq!(held.park_mode(), ParkMode::Held);
 
         let parent = Avatar::for_test("system").unwrap();
         let child = parent.fork(parent.caps().clone()).expect("fork child");
-        child
-            .agents
-            .register(Some(parent.agent.id), child.agent.clone())
-            .expect("child registration must succeed: its parent is live");
         assert_eq!(
             child.park_mode(),
             ParkMode::Quiesce,
             "un-engaged, no live children, no schedule: idle quiesce delivers the outcome"
         );
 
-        child.agents.steer(child.agent.id, "hi".into());
+        child.agent.mailbox().steer("hi".into());
         assert_eq!(
             child.park_mode(),
             ParkMode::Engaged,
@@ -700,14 +677,8 @@ mod tests {
         );
 
         // A distinct name: `root` already holds `TRUNK_NAME` in this same
-        // shared registry, and names are unique among live entries.
+        // fleet, and names are unique among the live.
         let mut branch = root.branch("branch".into()).expect("branch a conversing child");
-        // Registered as a real `/branch` would be — parentless in the
-        // registry's own tree, matching `spawn_async`'s `delivers.then_some`.
-        branch
-            .agents
-            .register(None, branch.agent.clone())
-            .expect("a fresh branch name never collides");
         let branch_result = branch.run_shell("c2".into(), "agents `reply 1", 5, &emit);
         assert!(
             branch_result.content.contains(refusal),
@@ -754,18 +725,11 @@ mod tests {
         let parent = Avatar::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child
-            .agents
-            .register(Some(parent.agent.id), child.agent.clone())
-            .expect("child registration must succeed: its parent is live");
-        child
-            .agents
-            .deposit_reply(
-                child.agent.id,
-                FOValue::String {
-                    value: "already replied".into(),
-                },
-            )
-            .expect("deposit onto a live entry never rejects on an empty parent inbox");
+            .agent
+            .deposit_reply(FOValue::String {
+                value: "already replied".into(),
+            })
+            .expect("an empty parent inbox never rejects the notice");
 
         child
             .agent
@@ -1187,6 +1151,19 @@ mod tests {
         );
     }
 
+    /// The disk-warn ceiling a fixture is built under, comfortably above a
+    /// fresh session's own footprint, and a file that alone crosses it.
+    const WARN_CEILING: u64 = 64 * 1024;
+    const OVER_CEILING: usize = 1024 * 1024;
+
+    fn warned_at(ceiling: u64) -> Avatar {
+        Avatar::for_test_with(crate::agent::TestTrunk {
+            disk_warn_bytes: Some(ceiling),
+            ..crate::agent::TestTrunk::new("system")
+        })
+        .expect("a trunk under a disk-warn ceiling")
+    }
+
     /// Unconfigured, the check returns before the epoch bookkeeping: no walk,
     /// no emission, no cost.
     #[test]
@@ -1215,10 +1192,8 @@ mod tests {
     /// The latch suppresses a repeat until the figure falls back under.
     #[test]
     fn check_disk_warn_still_above_does_not_repeat() {
-        let mut session = Avatar::for_test("system").unwrap();
-        let baseline = crate::agent::resources::dir_size(&session.log_dir());
-        std::fs::write(session.log_dir().join("big.txt"), vec![0u8; 4096]).unwrap();
-        session.agent_mut().disk_warn_bytes = Some(baseline + 100);
+        let mut session = warned_at(WARN_CEILING);
+        std::fs::write(session.log_dir().join("big.txt"), vec![0u8; OVER_CEILING]).unwrap();
 
         let (tx, rx) = crate::bus::channel();
         session.recorder().attach(crate::record::FleetSink {
@@ -1244,14 +1219,12 @@ mod tests {
     /// Falling back under clears the latch, so a re-crossing warns again.
     #[test]
     fn check_disk_warn_falling_below_rearms_the_latch() {
-        let mut session = Avatar::for_test("system").unwrap();
+        let mut session = warned_at(WARN_CEILING);
         // The ceiling sits comfortably above the session's own baseline plus
         // one durable warning note's own footprint, so the big file alone —
         // not the warning's own record — decides whether it is crossed.
-        let baseline = crate::agent::resources::dir_size(&session.log_dir());
         let big = session.log_dir().join("big.txt");
-        std::fs::write(&big, vec![0u8; 4096]).unwrap();
-        session.agent_mut().disk_warn_bytes = Some(baseline + 2000);
+        std::fs::write(&big, vec![0u8; OVER_CEILING]).unwrap();
 
         let (tx, rx) = crate::bus::channel();
         session.recorder().attach(crate::record::FleetSink {
@@ -1280,7 +1253,7 @@ mod tests {
         );
         assert!(!session.disk_warn_latched, "the latch is cleared");
 
-        std::fs::write(&big, vec![0u8; 4096]).unwrap();
+        std::fs::write(&big, vec![0u8; OVER_CEILING]).unwrap();
         session.disk_check_epoch = session.ral_epoch;
         session.check_disk_warn();
         assert!(

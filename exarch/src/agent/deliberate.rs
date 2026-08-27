@@ -28,7 +28,7 @@ use std::sync::Arc;
 pub enum Outcome {
     Complete(String),
     /// A returning agent called `reply`.  The payload stays a value — a child
-    /// deposits it on its registry entry, a headless root hands it to its
+    /// deposits it on its own agent, a headless root hands it to its
     /// sink — and stays distinct from [`Self::Complete`] so the nudge layer
     /// never re-nudges an agent that already answered.
     Replied(FOValue),
@@ -415,7 +415,8 @@ impl Avatar {
     /// parks, deposit and all — only a parentless agent's `attend` loop stops
     /// here.
     fn replied(&self, payload: FOValue) -> Outcome {
-        self.agents.cancel_descendants(self.agent.id);
+        self.agent
+            .cancel_descendants(ral_core::process::CancelCause::Explicit);
         self.log.lock().quiesce(QuiesceReason::Replied);
         Outcome::Replied(payload)
     }
@@ -527,8 +528,8 @@ fn admit_assistant(msg: &mut genai::chat::ChatMessage) {
 mod tests {
     use super::*;
     use crate::agent::testkit::*;
-    use crate::agent::{NoControl, fresh_id};
-    use crate::bus::{AgentOutcome, Inbox, Post};
+    use crate::agent::NoControl;
+    use crate::bus::{AgentOutcome, Post};
     use crate::fleet::registry::{EvalReach, InterruptTarget};
     use crate::provider::scripted::{Reply, Script};
     use genai::chat::ChatRole;
@@ -573,78 +574,27 @@ mod tests {
     }
 
     /// `reply` settles the whole owned subtree: children still running when the
-    /// parent returns are cancelled and reaped, siblings left untouched.
+    /// parent returns are cancelled and abandoned, siblings left untouched.
     #[test]
     fn reply_cancels_live_descendants() {
-        let dir = tmp("reply-cancels-children");
         let parent = Avatar::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
         child.seed("return early".into());
 
-        let direct = fresh_id();
-        let grandchild = fresh_id();
-        let sibling = fresh_id();
-        let direct_token = cancel::Token::new();
-        let grandchild_token = cancel::Token::new();
-        let sibling_token = cancel::Token::new();
         let direct_root = ral_core::process::DurableRoot::default();
-        // `register` refuses a child whose declared parent is not live at this
-        // instant, so `child` must be registered before `direct` can be.
-        child
-            .agents
-            .register(Some(parent.agent.id), child.agent.clone())
-            .expect("child registration must succeed: its parent is live");
-        let _ = child.agents.register(
-            Some(child.agent.id),
-            test_agent(TestAgentSpec {
-                id: direct,
-                name: "direct".into(),
-                log_dir: dir.path().join("direct"),
-                cancel: direct_token.clone(),
-                reach: EvalReach::Identity {
-                    eval_root: Some(direct_root.clone()),
-                    interrupt_target: InterruptTarget::default(),
-                },
-                mailbox: Inbox::new().mailbox(),
-                provider: child.agent.provider.clone(),
-                consumer: child.agents.generation(child.agent.id),
-            }),
-        );
-        let _ = child.agents.register(
-            Some(direct),
-            test_agent(TestAgentSpec {
-                id: grandchild,
-                name: "grandchild".into(),
-                log_dir: dir.path().join("grandchild"),
-                cancel: grandchild_token.clone(),
-                reach: EvalReach::Identity {
-                    eval_root: Some(ral_core::process::DurableRoot::default()),
-                    interrupt_target: InterruptTarget::default(),
-                },
-                mailbox: Inbox::new().mailbox(),
-                provider: child.agent.provider.clone(),
-                consumer: child.agents.generation(direct),
-            }),
-        );
-        child
-            .agents
-            .register(
-                Some(parent.agent.id),
-                test_agent(TestAgentSpec {
-                    id: sibling,
-                    name: "sibling".into(),
-                    log_dir: dir.path().join("sibling"),
-                    cancel: sibling_token.clone(),
-                    reach: EvalReach::Identity {
-                        eval_root: Some(ral_core::process::DurableRoot::default()),
-                        interrupt_target: InterruptTarget::default(),
-                    },
-                    mailbox: Inbox::new().mailbox(),
-                    provider: child.agent.provider.clone(),
-                    consumer: child.agents.generation(parent.agent.id),
-                }),
-            )
-            .expect("sibling registration must succeed: its parent is live");
+        let mut direct = TestAgentSpec::new("direct");
+        direct.parent = Some(child.agent.clone());
+        direct.reach = EvalReach::Identity {
+            eval_root: Some(direct_root.clone()),
+            interrupt_target: InterruptTarget::default(),
+        };
+        let direct = test_agent(&child.agents, direct).expect("a live child of the replying agent");
+        let mut grandchild = TestAgentSpec::new("grandchild");
+        grandchild.parent = Some(direct.clone());
+        let grandchild = test_agent(&child.agents, grandchild).expect("a live grandchild");
+        let mut sibling = TestAgentSpec::new("sibling");
+        sibling.parent = Some(parent.agent.clone());
+        let sibling = test_agent(&child.agents, sibling).expect("a live sibling of the replier");
 
         let provider = scripted(
             "test-model",
@@ -653,21 +603,6 @@ mod tests {
                 "agents `reply 'done'",
             )])),
         );
-        // A replied child parks for a follow-up; the reap must already have
-        // happened by the time the deposit is visible, so read it there and
-        // only then end the park.
-        let release = {
-            let registry = child.agents.clone();
-            let id = child.agent.id;
-            std::thread::spawn(move || {
-                while !registry.has_reply(id) {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                let reaped_before_release = direct_token.is_cancelled();
-                registry.cancel(id);
-                reaped_before_release
-            })
-        };
         let (outcome, payload) = drive_peer(&mut child, provider);
 
         assert!(matches!(outcome, AgentOutcome::Replied));
@@ -677,29 +612,37 @@ mod tests {
                 value: "done".into()
             })
         );
+        // The cascade runs inside the deliberation that replied, so it has
+        // already landed by the time that reply is the settled outcome.
         assert!(
-            release.join().expect("release thread"),
-            "direct child is cancelled by the reply itself"
+            direct.cancel_token().is_cancelled(),
+            "the direct child is cancelled by the reply itself"
         );
         assert!(
             direct_root.as_scope().is_cancelled(),
-            "the reap cancels the abandoned child's eval layer too"
+            "the cascade cancels the abandoned child's eval layer too"
         );
         assert!(
-            grandchild_token.is_cancelled(),
+            grandchild.cancel_token().is_cancelled(),
             "grandchild is cancelled recursively"
         );
         assert!(
-            child.agents.list(child.agent.id).is_empty(),
-            "reply reaps the abandoned subtree"
-        );
-        assert!(
-            !sibling_token.is_cancelled(),
+            !sibling.cancel_token().is_cancelled(),
             "a sibling outside the replying subtree is untouched"
         );
-        assert!(
-            child.agents.settle(sibling),
+        assert_eq!(
+            sibling.consumer(),
+            parent.agent.generation(),
             "reply must not bump the global generation and poison siblings"
+        );
+
+        // The abandoned subtree leaves the tree as its holders drop, which in
+        // production is each child's own worker retiring it.
+        drop(grandchild);
+        drop(direct);
+        assert!(
+            child.agent.walk().is_empty(),
+            "the abandoned subtree is pruned once nothing holds it"
         );
     }
 
@@ -947,7 +890,7 @@ mod tests {
     fn stale_agent_result_is_dropped_by_generation_admission() {
         let mut session = Avatar::for_test("system").unwrap();
         let stale = session.agent.generation();
-        session.agents.clear_subtree(session.agent.id);
+        session.agent.clear_subtree();
         session
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
@@ -1011,7 +954,7 @@ mod tests {
     fn stale_surface_batch_is_dropped_by_generation_admission() {
         let mut session = Avatar::for_test("system").unwrap();
         let stale = session.agent.generation();
-        session.agents.clear_subtree(session.agent.id);
+        session.agent.clear_subtree();
         session
             .inbox
             .push(Post::Surface {
@@ -1067,8 +1010,8 @@ mod tests {
         );
     }
 
-    /// `AgentRegistry::cancel` never touches a shell's worker registry — it
-    /// only cancels the entry's `eval_root`.  That suffices: a worker's cancel
+    /// The cancel cascade never touches a shell's worker registry — it
+    /// only cancels the agent's `eval_root`.  That suffices: a worker's cancel
     /// scope is a child of that root and `is_cancelled` walks ancestors.
     /// Pinned because it must keep holding with no wiring of its own.
     #[test]
@@ -1081,10 +1024,6 @@ mod tests {
             .shell
             .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
 
-        let _ = parent
-            .agents
-            .register(Some(parent.agent.id), child.agent.clone());
-
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, child.agent.id, child.inbox.mailbox());
         let _ = child.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
@@ -1093,10 +1032,9 @@ mod tests {
         assert_eq!(entries.len(), 1, "the child's own spawn must register");
         assert!(!entries[0].handle.cancel.is_cancelled(), "freshly spawned");
 
-        assert!(
-            parent.agents.cancel(child.agent.id),
-            "the child must still be live"
-        );
+        child
+            .agent
+            .cancel_tree(ral_core::process::CancelCause::Explicit);
 
         assert!(
             entries[0].handle.cancel.is_cancelled(),

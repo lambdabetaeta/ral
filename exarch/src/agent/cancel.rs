@@ -9,7 +9,7 @@
 //!
 //! Esc and Ctrl-C are a per-tab exchange interrupt — never a cascade, never an
 //! agent's death, and they never tick ral's escalation ladder.  Every focused
-//! tab routes through [`crate::fleet::registry::AgentRegistry::interrupt`],
+//! tab routes through [`crate::agent::Agent::interrupt`],
 //! which cancels that agent's own token and the scope of its dispatch in
 //! flight, never its durable root; the trunk additionally routes through
 //! [`raise_interrupt`] and the published slot, the only path that re-creates
@@ -38,8 +38,8 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 /// An agent's cancellation handle.
 ///
-/// Clones share one flag, so the registry's entry and the attend loop hold the
-/// same token: cancelling either halts the agent's exchange.
+/// Clones share one flag, so a cascade and the attend loop hold the same
+/// token: cancelling either halts the agent's exchange.
 #[derive(Clone, Default)]
 pub struct Token(Arc<AtomicU8>);
 
@@ -138,7 +138,7 @@ fn raise(cause: CancelCause) {
 
 /// The process-wide half of an interrupt.
 ///
-/// Beside the registry interrupt every focused tab gets: `Interrupt` on the
+/// Beside the per-agent interrupt every focused tab gets: `Interrupt` on the
 /// published token, then [`deliver_interrupt`] to unwind the exchange.  Neither
 /// reach names a dispatch or an agent, so both are gated to the trunk — the
 /// only tab that publishes the process-wide slot.

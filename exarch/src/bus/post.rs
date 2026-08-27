@@ -31,11 +31,11 @@ pub(super) enum Boundary {
 
 /// How an async agent ended the exchange, as the one line the parent reads.
 ///
-/// No payload rides here: a reply is deposited on the child's registry entry
+/// No payload rides here: a reply is deposited on the child's own agent
 /// and fetched from there, and provider detail stays in the child's own log.
 #[derive(Clone, Debug)]
 pub enum AgentOutcome {
-    /// Called `reply`: the value stands on the child's registry entry, and the
+    /// Called `reply`: the value stands on the child's own agent, and the
     /// child is parked waiting to be messaged.  Not a settlement.
     Replied,
     /// Stopped for a non-routine reason (content filter, step cap, …).

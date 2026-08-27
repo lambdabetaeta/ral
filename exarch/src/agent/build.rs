@@ -10,7 +10,7 @@ use crate::agent::shell::LogCell;
 use crate::agent::{Agent, Avatar, ProviderHandle, SPAWN_FUEL, cancel, nudge};
 use crate::bootstrap::Scratch;
 use crate::bus::{AgentId, Emitter, Inbox};
-use crate::fleet::registry::{AgentRegistry, EvalReach};
+use crate::fleet::registry::{AgentRegistry, EvalReach, Unborn};
 use crate::prompt::Grants;
 use crate::provider::Provider;
 use std::io;
@@ -74,7 +74,9 @@ pub(crate) struct Build {
     pub(crate) log: AgentLog,
     pub(crate) run_lock: Option<crate::bootstrap::RunLock>,
     pub(crate) resume_summary: Option<(u64, u64)>,
-    pub(crate) parent: Option<AgentId>,
+    /// Whom the constructed agent reports to — `None` builds a root, the
+    /// trunk or a `/branch` child, which converses and never delivers.
+    pub(crate) parent: Option<Arc<Agent>>,
     pub(crate) fuel: u32,
     pub(crate) provider: ProviderHandle,
     pub(crate) interactive: bool,
@@ -86,7 +88,7 @@ pub(crate) struct Build {
     /// Whether the agent may ride the provider's own hosted web search —
     /// bounded by the IT policy verdict, never a CLI flag or user config.
     pub(crate) search: bool,
-    /// Fresh for the trunk, the parent's clone for a fork: one map per fleet.
+    /// Fresh for the trunk, the parent's clone for a fork: one index per fleet.
     pub(crate) agents: AgentRegistry,
     /// A host setting, not a per-agent choice: every fork inherits the trunk's
     /// ceiling verbatim.
@@ -98,15 +100,33 @@ pub(crate) struct Build {
     /// its own agent, never off a fresh construction.
     pub(crate) dial: Option<Arc<dyn Dial>>,
     /// This agent's reach into its own running eval, read off `seat` before it
-    /// moves into this bundle — a self-registering root states it pre-weakened
+    /// moves into this bundle — a root states it pre-weakened
     /// ([`EvalReach::interrupt_only`]).
     pub(crate) reach: EvalReach,
-    /// The parent's own generation at this birth — the fence a result
-    /// addressed upward must survive.  0 for an agent with no reporting
-    /// parent: the trunk, or a `/branch` child, which is parentless in the
-    /// registry's own tree even though [`Self::parent`] still names its
-    /// creator.
-    pub(crate) consumer: u64,
+}
+
+/// Why a fork did not happen.
+#[derive(Debug)]
+pub(crate) enum Unforked {
+    /// The child's own session log could not be opened off its parent's.
+    Log(io::Error),
+    /// The fleet refused the child — see [`Unborn`].
+    Unborn(Unborn),
+}
+
+impl From<Unborn> for Unforked {
+    fn from(why: Unborn) -> Self {
+        Self::Unborn(why)
+    }
+}
+
+impl std::fmt::Display for Unforked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Log(error) => write!(f, "could not fork the session log: {error}"),
+            Self::Unborn(why) => write!(f, "{why}"),
+        }
+    }
 }
 
 /// A session's provider identity, snapshotted for the record.
@@ -192,7 +212,14 @@ pub enum RootSeat {
 }
 
 impl Avatar {
-    pub(crate) fn assemble(b: Build) -> Self {
+    /// Build an agent and its avatar in one step: the agent is in its parent's
+    /// subtree, holds its name, and carries a lease before this returns, so no
+    /// caller can ever hold an unenrolled child.
+    ///
+    /// # Errors
+    /// Whatever [`AgentRegistry::enrol`] refuses.  The refusal is decided
+    /// before the avatar exists, so there is nothing to unwind.
+    pub(crate) fn assemble(b: Build) -> Result<Self, Unborn> {
         let Build {
             name,
             system,
@@ -216,12 +243,16 @@ impl Avatar {
             egress,
             dial,
             reach,
-            consumer,
         } = b;
         let nudges = tool_enabled.then(nudge::Registry::new);
         let log_dir = log.dir().to_path_buf();
         let inbox = Inbox::new();
         let mailbox = inbox.mailbox();
+        // The parent's generation as it stands right now.  Its own avatar is
+        // the only writer, and that avatar is the thread running this
+        // construction, so nothing can bump it between here and the enrolment
+        // below.
+        let consumer = parent.as_ref().map_or(0, |p| p.generation());
         let agent = Arc::new(Agent {
             id: log.id(),
             name,
@@ -232,6 +263,7 @@ impl Avatar {
             index,
             caps,
             parent,
+            children: Mutex::new(Vec::new()),
             fuel,
             provider,
             interactive,
@@ -252,7 +284,8 @@ impl Avatar {
             }),
             consumer,
         });
-        Self {
+        agents.enrol(&agent)?;
+        Ok(Self {
             agent,
             log: LogCell::new(log),
             _run_lock: run_lock,
@@ -269,22 +302,13 @@ impl Avatar {
             disk_check_epoch: 0,
             disk_warn_latched: false,
             context_warn_latched: false,
-        }
+        })
     }
 
-    /// Register this trunk under its own name (`None` parent): the one
-    /// self-registration every root performs, once, at construction — a
-    /// child is registered by its spawn site instead, which also arms the
-    /// idle lease.
-    fn register(&self) -> Result<(), crate::fleet::registry::RegisterError> {
-        self.agents.register(None, self.agent.clone())
-    }
-
-    /// The trunk — the parent-less root of a fresh fleet.  Creates the fleet's
-    /// shared registry and registers itself in it, so the frontend can build
-    /// its [`Fleet`](crate::fleet::Fleet) by reading these handles back.
-    /// `cfg.interactive` makes it the *conversing* trunk; off it, a one-shot
-    /// headless one.
+    /// The trunk — the root of a fresh fleet.  Creates the fleet's shared
+    /// index, so the frontend can build its [`Fleet`](crate::fleet::Fleet) by
+    /// reading these handles back.  `cfg.interactive` makes it the *conversing*
+    /// trunk; off it, a one-shot headless one.
     ///
     /// # Errors
     /// If the trunk's session directory or its event log cannot be opened.
@@ -421,9 +445,8 @@ impl Avatar {
                 home,
             } => Seat::wire(*transport, cwd, home),
         };
-        // This seat is rebuilt in place under the standing entry a root
-        // registers as, so a raw reach captured now would go stale — see
-        // `EvalReach::interrupt_only`.
+        // This seat is rebuilt in place under a standing root, so a raw reach
+        // captured now would go stale — see `EvalReach::interrupt_only`.
         let reach = seat.eval_reach().interrupt_only();
         let avatar = Self::assemble(Build {
             name: TRUNK_NAME.to_string(),
@@ -449,9 +472,10 @@ impl Avatar {
             egress,
             dial,
             reach,
-            // A parentless root reports to nobody.
-            consumer: 0,
-        });
+        })
+        // A brand-new fleet, so this can never collide or find its rootless
+        // self dead.
+        .expect("a fresh fleet's trunk is born unrefused");
         if resume.is_some() {
             avatar
                 .log
@@ -461,9 +485,6 @@ impl Avatar {
                 )])
                 .map_err(io::Error::other)?;
         }
-        // A brand-new registry, so this can never collide or find its
-        // parentless self dead.
-        let _ = avatar.register();
         Ok(avatar)
     }
 
@@ -484,11 +505,11 @@ impl Avatar {
         self.last_input = (0, 0);
         // A fresh context carries no pressure of its own to warn about.
         self.context_warn_latched = false;
-        // Retire the subtree — this agent itself stays registered — and disarm
-        // the schedules.  A straggler that composed its message before this
-        // call carries its own stamp and is rejected at a consuming edge, so
+        // Abandon the subtree — this agent itself stays live — and disarm the
+        // schedules.  A straggler that composed its message before this call
+        // carries its own stamp and is rejected at a consuming edge, so
         // neither order is load-bearing.
-        self.agents.clear_subtree(self.agent.id);
+        self.agent.clear_subtree();
         self.schedules.clear();
         // The frontend wipes its pin register on `/clear`, so the session's
         // mirror must follow.
@@ -512,15 +533,25 @@ impl Avatar {
         Ok(())
     }
 
-    /// A plain returning fork, under a placeholder name.  Tests only: a
-    /// production spawn assembles its own `Build` through the desk's spawn
-    /// spine (`ExarchDesk::launch`), and `/branch` calls `fork_with` directly
-    /// with the name it already chose.  A test that goes on to register this
-    /// child under a chosen name uses [`Agent::set_name`] first — construction
-    /// is still the only place a *registered* agent's name is fixed.
+    /// A plain returning fork, under a minted name.  Tests only: a production
+    /// spawn assembles its own `Build` through the desk's spawn spine
+    /// (`ExarchDesk::launch`), and `/branch` calls `fork_with` directly with
+    /// the name it already chose.
     #[cfg(test)]
-    pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> io::Result<Self> {
-        self.fork_with(caps, true, "fork".to_string())
+    pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> Result<Self, Unforked> {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        self.fork_named(caps, &format!("fork-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
+    }
+
+    /// A returning fork under a chosen name — the shape a production spawn
+    /// assembles, for a test that goes on to name the child in an assertion.
+    #[cfg(test)]
+    pub(crate) fn fork_named(
+        &self,
+        caps: ral_core::types::Capabilities,
+        name: &str,
+    ) -> Result<Self, Unforked> {
+        self.fork_with(caps, true, name.to_string())
     }
 
     /// An independent child of this agent capped at `caps`; `returns` decides
@@ -531,7 +562,7 @@ impl Avatar {
         caps: ral_core::types::Capabilities,
         returns: bool,
         name: String,
-    ) -> io::Result<Self> {
+    ) -> Result<Self, Unforked> {
         // Scope, dynamic context, and installed builtin table cross in this
         // one step, because core owns the flow matrix — no hand-copied field
         // here can drift from it.  Per-agent state starts fresh.
@@ -548,7 +579,11 @@ impl Avatar {
                 spawns: fuel > 0,
             },
         );
-        let log = self.log.lock().fork(child_id, system_prompt.len())?;
+        let log = self
+            .log
+            .lock()
+            .fork(child_id, system_prompt.len())
+            .map_err(Unforked::Log)?;
         let seat = match &self.seat {
             // No detach: `fork_session` carries no such policy across, so
             // granting it here would grant nothing now and conjure the verb
@@ -569,13 +604,17 @@ impl Avatar {
             caps,
             seat,
             log,
-            parent: Some(self.agent.id),
+            // A branch converses and never returns, so it reports to nobody and
+            // roots its own tree.  Its fuel, caps, and prompt are copied from
+            // its creator right here, which is the whole of what an edge to the
+            // creator would have bounded.
+            parent: returns.then(|| self.agent.clone()),
             fuel,
             // Seeded from the parent's *current* provider, so a later `/model`
             // on either never disturbs the other.
             provider: ProviderHandle::new(self.agent.provider.current()),
-            // Human-attachment is inherited; engagement is not, being a
-            // per-agent registry read from the child's first exchange.
+            // Human-attachment is inherited; engagement is not, being read off
+            // the child's own exchange clock from its first exchange.
             interactive: self.agent.interactive,
             returns,
             allow_schedule: self.agent.allow_schedule,
@@ -590,30 +629,29 @@ impl Avatar {
             egress: self.agent.egress.clone(),
             dial: self.agent.dial.clone(),
             reach,
-            // Both `fork_with`'s callers register with no reporting parent: a
-            // `/branch` child always does (it never delivers), and the other,
-            // `fork` above, is test-only and usually never registered at all.
-            consumer: 0,
-        }))
+        })?)
     }
 
     /// Fork a conversing child under `name`: the creator's context and
     /// capabilities verbatim, but `reply` withheld, so it parks for the
     /// human instead of returning a value.
-    pub(crate) fn branch(&self, name: String) -> io::Result<Self> {
+    ///
+    /// # Errors
+    /// Whatever [`Self::fork_with`] refuses.
+    pub(crate) fn branch(&self, name: String) -> Result<Self, Unforked> {
         let child = self.fork_with(self.agent.caps.clone(), false, name)?;
         self.inherit_context(&child)?;
         Ok(child)
     }
 
     /// Import the creator's model-visible context into `child`, mnemon-style.
-    fn inherit_context(&self, child: &Self) -> io::Result<()> {
+    fn inherit_context(&self, child: &Self) -> Result<(), Unforked> {
         let messages = self.log.lock().inherited_context_messages();
         child
             .log
             .lock()
             .import_context(messages)
-            .map_err(io::Error::other)
+            .map_err(|why| Unforked::Log(io::Error::other(why)))
     }
 
     /// Seed a freshly forked child's inbox with its launch prompt — the spawn
@@ -630,10 +668,30 @@ impl Avatar {
     ///
     /// # Errors
     /// If the throwaway scratch or the session log inside it cannot be created.
+    pub fn for_test(system: &str) -> io::Result<Self> {
+        Self::for_test_with(TestTrunk::new(system))
+    }
+
+    /// [`Self::for_test`] with a knob turned — the bits an agent fixes at
+    /// construction and no test can set afterwards, its `Arc` being shared the
+    /// moment it exists.
+    ///
+    /// # Errors
+    /// If the throwaway scratch or the session log inside it cannot be created.
     ///
     /// # Panics
     /// If the test process has no cwd.
-    pub fn for_test(system: &str) -> io::Result<Self> {
+    pub(crate) fn for_test_with(cfg: TestTrunk) -> io::Result<Self> {
+        let TestTrunk {
+            system,
+            allow_schedule,
+            egress,
+            disk_warn_bytes,
+        } = cfg;
+        let system = system.as_str();
+        // Derived from the policy, exactly as `root` derives it, so a fixture
+        // can never claim a reach its own egress denies.
+        let search = egress.policy.search;
         let mut shell = crate::bootstrap::boot_shell();
         let id = fresh_id();
         // Keyed by this agent's own fresh id, so concurrent tests never
@@ -652,7 +710,7 @@ impl Avatar {
             system,
             &Grants {
                 returns: true,
-                allow_schedule: false,
+                allow_schedule,
                 spawns: SPAWN_FUEL > 0,
             },
         );
@@ -673,7 +731,7 @@ impl Avatar {
         let seat = Seat::identity(shell, scratch, cwd, false, &log);
         // Pre-weakened for the same reason a real root's is — see `root`.
         let reach = seat.eval_reach().interrupt_only();
-        let avatar = Self::assemble(Build {
+        Ok(Self::assemble(Build {
             name: TRUNK_NAME.to_string(),
             system: system.to_string(),
             system_prompt,
@@ -686,33 +744,48 @@ impl Avatar {
             provider,
             interactive: false,
             returns: true,
-            allow_schedule: false,
+            allow_schedule,
             tool_enabled: true,
-            // Matches `Egress::for_test`'s own permissive policy below.
-            search: true,
+            search,
             agents: AgentRegistry::new(),
             run_lock: None,
             resume_summary: None,
-            // A test exercising the disk-warn check sets this directly.
-            disk_warn_bytes: None,
-            egress: crate::egress::Egress::for_test(),
+            disk_warn_bytes,
+            egress,
             dial: None,
             reach,
-            consumer: 0,
-        });
-        // A brand-new registry, so this can never collide or find its
-        // parentless self dead.
-        let _ = avatar.register();
-        Ok(avatar)
+        })
+        .expect("a fresh fleet's trunk is born unrefused"))
+    }
+}
+
+/// What a unit test may vary about a [`Avatar::for_test`] trunk.
+pub(crate) struct TestTrunk {
+    pub(crate) system: String,
+    pub(crate) allow_schedule: bool,
+    /// The IT policy the trunk's `search` reach is derived from.
+    pub(crate) egress: crate::egress::Egress,
+    pub(crate) disk_warn_bytes: Option<u64>,
+}
+
+impl TestTrunk {
+    pub(crate) fn new(system: &str) -> Self {
+        Self {
+            system: system.to_string(),
+            allow_schedule: false,
+            egress: crate::egress::Egress::for_test(),
+            disk_warn_bytes: None,
+        }
     }
 }
 
 impl Drop for Avatar {
-    /// The one exit every life takes — a settle, the subtree cascade, or the
-    /// trunk's own `deregister` at the end of `attend`.  A cascade cancels
-    /// only an agent's *eval root*, leaving its armed schedules for whoever
-    /// drops it, so they are cleared here unconditionally and its workers die
-    /// with the seat below: a settled-but-never-cancelled agent leaks neither.
+    /// The one exit every life takes, and the whole of deregistration: the
+    /// agent's last strong reference goes with this, so its parent's subtree
+    /// and both fleet doors prune it at the next walk.  A cascade cancels only
+    /// an agent's *eval root*, leaving its armed schedules for whoever drops
+    /// it, so they are cleared here unconditionally and its workers die with
+    /// the seat below: a settled-but-never-cancelled agent leaks neither.
     /// `/clear` never reaches this — it rebuilds in place, clearing its own.
     fn drop(&mut self) {
         self.schedules.clear();
@@ -793,11 +866,11 @@ mod tests {
     /// — the ceiling the desk's own clamp narrows a spawn against.
     #[test]
     fn fork_inherits_its_parents_search_reach() {
-        let mut parent = Avatar::for_test("system").unwrap();
+        let parent = Avatar::for_test("system").unwrap();
         assert!(parent.fork(parent.caps().clone()).unwrap().agent.search);
-        parent.agent_mut().search = false;
+        let searchless = searchless_trunk();
         assert!(
-            !parent.fork(parent.caps().clone()).unwrap().agent.search,
+            !searchless.fork(searchless.caps().clone()).unwrap().agent.search,
             "a searchless parent can hand out no search of its own"
         );
     }
@@ -1049,9 +1122,9 @@ mod tests {
         );
     }
 
-    /// An agent that ends without ever being cancelled — the ordinary settle,
-    /// or the trunk's end-of-`attend` `deregister` — has no cascade edge
-    /// pointed at it, so `Drop` is the only thing that reaches its workers.
+    /// An agent that ends without ever being cancelled — the ordinary settle
+    /// at the end of its `attend` — has no cascade edge pointed at it, so
+    /// `Drop` is the only thing that reaches its workers.
     #[test]
     fn agent_drop_cancels_its_own_unclosed_workers() {
         let mut avatar = Avatar::for_test("system").unwrap();
@@ -1073,8 +1146,8 @@ mod tests {
 
         assert!(
             entries[0].handle.cancel.is_cancelled(),
-            "dropping the agent (settle, cancel, or deregister — however its \
-             life ended) must cancel its own still-running workers"
+            "dropping the agent (settle or cancel — however its life ended) \
+             must cancel its own still-running workers"
         );
     }
 

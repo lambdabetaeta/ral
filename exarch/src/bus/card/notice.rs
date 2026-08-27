@@ -97,7 +97,7 @@ pub fn notice_card(notice: &Notice) -> Card {
 }
 
 /// One policy removal as a warned one-liner.  Unlike `settled_spans` it names the
-/// `cmd`: once the registry entry is gone, nothing else says which worker this
+/// `cmd`: once the worker's registry entry is gone, nothing else says which one
 /// was.
 fn reap_card(cmd: &str, cause: ral_core::types::ReapCause) -> Card {
     let phrase = match cause {

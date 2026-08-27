@@ -414,8 +414,8 @@ fn apply_login(tui: &Tui, ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced
     let (account, credential) = ctx.store.add_oauth(token);
     let already_active = ctx
         .agents
-        .provider(tui.app.tabs.focused())
-        .is_some_and(|provider| provider.current().account().id == account.id);
+        .by_id(tui.app.tabs.focused())
+        .is_some_and(|agent| agent.current_provider().account().id == account.id);
     let action = if replaced {
         "Updated the login for"
     } else {

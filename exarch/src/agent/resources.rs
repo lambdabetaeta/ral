@@ -218,7 +218,7 @@ pub fn frontend_rows(
             views.agents,
             None,
             "reap",
-            Some("the frontend's tab view; the registry is the authority".to_string()),
+            Some("the frontend's tab view; the spawn tree is the authority".to_string()),
         ),
     ]
 }

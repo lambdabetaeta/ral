@@ -244,6 +244,10 @@ pub fn run(
         recorder: &recorder,
         engine: &fleet.engine,
     };
+    // This is the process's trunk — a fact of the launch, not of any position
+    // in the tree — so its token is what an OS signal must reach, held for as
+    // long as it attends.
+    let _slot = crate::agent::cancel::publish(session.cancel_token());
     std::thread::scope(|scope| -> Result<(), String> {
         let worker = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
@@ -421,8 +425,8 @@ fn ui_loop(
                         action != KeyAction::Interrupt && tui.app.prompt_state.menu_key(k.code);
                     match action {
                         _ if consumed => {}
-                        // Every tab interrupts through the registry, which
-                        // cancels the focused entry's token and its current
+                        // Every tab interrupts through its own agent, which
+                        // cancels the focused agent's token and its current
                         // dispatch scope by handle — published ahead of the
                         // engine lock, so the keypress cannot land on a run
                         // that just ended — and never the durable root: the
@@ -434,7 +438,9 @@ fn ui_loop(
                         // foreground external child and stamps the ambient
                         // foreground cause, which needs no dispatch to name.
                         KeyAction::Cancel | KeyAction::Interrupt => {
-                            ctx.agents.interrupt(focused);
+                            if let Some(agent) = ctx.agents.by_id(focused) {
+                                agent.interrupt();
+                            }
                             if focused == tui.app.tabs.root() {
                                 cancel::raise_interrupt();
                             }
@@ -475,9 +481,9 @@ fn ui_loop(
         let now_focus = tui.app.tabs.focused();
         if now_focus != prev_focus {
             dirty = true;
-            if let Some(ph) = ctx.agents.provider(now_focus) {
+            if let Some(agent) = ctx.agents.by_id(now_focus) {
                 tui.app
-                    .update_live_model(&ph.current(), &ctx.store.available());
+                    .update_live_model(&agent.current_provider(), &ctx.store.available());
             }
         }
     }

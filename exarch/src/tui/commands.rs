@@ -358,22 +358,26 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
 }
 
 /// Jump focus to the live tab named `arg` — the only way onto a demoted tab,
-/// which `TAB` skips.  The registry resolves the name but is never renewed:
-/// attention alone must not keep a child alive.
+/// which `TAB` skips.  The name resolves, but nothing is renewed: attention
+/// alone must not keep a child alive.
 pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &AgentRegistry) {
     let id = app.tabs.focused();
     if arg.is_empty() {
         app.push_error(id, "usage: /focus <name>");
         return;
     }
-    match agents.resolve_name(arg).filter(|&t| app.tabs.is_tab(t)) {
+    match agents
+        .resolve(arg)
+        .map(|agent| agent.id)
+        .filter(|&t| app.tabs.is_tab(t))
+    {
         Some(target) => app.tabs.set_focus(target),
         None => app.push_error(id, &format!("no live tab named {arg}")),
     }
 }
 
 /// Post a session command to the worker's inbox under the boundary its
-/// registry entry declares, surfacing a full-inbox rejection rather than
+/// command declares, surfacing a full-inbox rejection rather than
 /// dropping the command silently.
 fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: &SlashCommand, line: String) {
     let post = if cmd.rewrites {
@@ -423,8 +427,8 @@ pub(super) fn route_submit(
                 } else if !tui.app.tabs.is_branch(focused) {
                     tui.app
                         .push_error(focused, "/close closes a branch, not this tab");
-                } else {
-                    ctx.agents.remove_subtree(focused);
+                } else if let Some(agent) = ctx.agents.by_id(focused) {
+                    agent.cancel_tree(ral_core::process::CancelCause::Explicit);
                 }
             }
             "/focus" => cmd_focus(&mut tui.app, arg, ctx.agents),
@@ -446,8 +450,10 @@ pub(super) fn route_submit(
             // handle too, not only the ambient stamp.
             "/clear" => {
                 crate::agent::cancel::raise_interrupt();
-                ctx.agents.interrupt(root);
-                ctx.agents.cancel_descendants(root);
+                if let Some(agent) = ctx.agents.by_id(root) {
+                    agent.interrupt();
+                    agent.cancel_descendants(ral_core::process::CancelCause::Explicit);
+                }
                 tui.app.clear(info, tui.guard.term())?;
                 push_command(tui, mailbox, cmd, "/clear".into());
             }
@@ -460,24 +466,24 @@ pub(super) fn route_submit(
             tui.app
                 .push_error(focused, &format!("unknown command: {head} (see /help)"));
         }
-        // `steer` is the registry's one delivery door: it renews the agent's
-        // idle lease, and drops the line if that agent died since it was focused.
+        // `steer` is the one delivery door: it renews the agent's idle lease,
+        // and the line is dropped if that agent died since it was focused.
         None => {
             if focused == root {
                 // A model-less launch would reach the provider with an empty
                 // model and fail on the wire; point at `/model` instead.
                 if ctx
                     .agents
-                    .provider(root)
-                    .is_some_and(|p| p.current().model().is_empty())
+                    .by_id(root)
+                    .is_some_and(|agent| agent.current_provider().model().is_empty())
                 {
                     tui.app
                         .push_error(root, "no model selected — run /model to choose one");
                     return Ok(());
                 }
                 mailbox.push_user(text);
-            } else {
-                ctx.agents.steer(focused, text);
+            } else if let Some(agent) = ctx.agents.by_id(focused) {
+                agent.mailbox().steer(text);
             }
         }
     }

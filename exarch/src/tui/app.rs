@@ -141,23 +141,22 @@ impl App {
         }
     }
 
-    /// Root and any sub-agent with a registered mailbox; a dead or lingering
-    /// tab is not.
+    /// Root and any sub-agent still live; a dead or lingering tab is not.
     pub(super) fn is_steerable(&self) -> bool {
         let focused = self.tabs.focused();
-        focused == self.tabs.root() || self.agents.mailbox(focused).is_some()
+        focused == self.tabs.root() || self.agents.by_id(focused).is_some()
     }
 
     /// A dead or lingering tab has no mailbox to be busy on, so it reads as
     /// waiting.
     pub(super) fn focused_waiting(&self) -> bool {
         self.agents
-            .mailbox(self.tabs.focused())
-            .is_none_or(|mb| mb.waiting_for_input())
+            .by_id(self.tabs.focused())
+            .is_none_or(|agent| agent.mailbox().waiting_for_input())
     }
 
     /// Idle-and-parked sub-agent tabs due to leave the TAB cycle for the matrix
-    /// strip, with their idle spans — projected per frame off the registry's
+    /// strip, with their idle spans — projected per frame off each agent's own
     /// exchange clock, never stored. Excluding the focused id means a tab leaves
     /// the cycle only the frame after `TAB` moves off it; root never leaves.
     pub(super) fn demoted(&self) -> HashMap<AgentId, Duration> {
@@ -170,12 +169,10 @@ impl App {
                 if id == root || id == focused {
                     return None;
                 }
-                let waiting = self
-                    .agents
-                    .mailbox(id)
-                    .is_some_and(|mb| mb.waiting_for_input());
-                let idle = self.agents.idle(id)?;
-                (waiting && idle >= AGENT_DEMOTE_IDLE).then_some((id, idle))
+                let agent = self.agents.by_id(id)?;
+                let idle = agent.idle();
+                (agent.mailbox().waiting_for_input() && idle >= AGENT_DEMOTE_IDLE)
+                    .then_some((id, idle))
             })
             .collect()
     }

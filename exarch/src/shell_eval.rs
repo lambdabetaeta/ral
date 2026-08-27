@@ -14,7 +14,6 @@ pub mod tools;
 
 use crate::bus::card::{rail_place, value_to_card, value_to_done, value_to_pin};
 use crate::bus::{AgentId, Emitter, Mailbox, Post};
-use crate::fleet::registry::AgentRegistry;
 use base64::Engine;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -246,16 +245,15 @@ impl DeferredSink for InboxDeferred {
 /// Build the [`DeferredSink`] a tool run installs, over `emit`'s session inbox.
 /// Core clones it into each worker's run state, so a nested `spawn` inherits it
 /// and flushes at its own completion.
-pub fn deferred_sink(
+pub(crate) fn deferred_sink(
     emit: &Emitter,
-    root: AgentId,
-    registry: &AgentRegistry,
+    session: &crate::agent::Agent,
     recorder: crate::record::Emitter,
 ) -> Arc<dyn DeferredSink> {
     Arc::new(InboxDeferred {
         mailbox: emit.mailbox(),
-        root,
-        generation: registry.generation(root),
+        root: session.id,
+        generation: session.generation(),
         recorder,
     })
 }
@@ -1290,50 +1288,34 @@ keep-bottom
     }
 
     /// The sink always posts, stamped with the root id and its birth
-    /// generation — even after a `/clear` advanced the registry past it.
+    /// generation — even after a `/clear` advanced the session past it.
     /// Staleness is `Avatar::admits`'s call at the consuming edge, so the sink
     /// itself neither checks nor withholds.
     #[test]
     fn inbox_deferred_always_pushes_stamped_with_its_birth_generation() {
-        let registry = AgentRegistry::new();
+        use crate::agent::testkit::{TestAgentSpec, test_agent};
+
+        let fleet = crate::fleet::registry::AgentRegistry::new();
         let inbox = Inbox::new();
+        let mut spec = TestAgentSpec::new("root");
+        spec.mailbox = inbox.mailbox();
+        let agent = test_agent(&fleet, spec).expect("a fresh trunk");
         let (tx, _rx) = channel();
-        let emit = Emitter::with_mailbox(tx, 7, inbox.mailbox());
-        // Registered, so the `/clear` below has an entry whose generation to
-        // bump: the counter lives on the session, not on the fleet.
-        let agent = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
-            id: 7,
-            name: "root".into(),
-            log_dir: std::path::PathBuf::from("/tmp"),
-            cancel: crate::agent::cancel::Token::new(),
-            reach: crate::fleet::registry::EvalReach::Identity {
-                eval_root: None,
-                interrupt_target: crate::fleet::registry::InterruptTarget::default(),
-            },
-            mailbox: inbox.mailbox(),
-            provider: crate::agent::ProviderHandle::new(std::sync::Arc::new(
-                crate::provider::Provider::scripted(
-                    "test",
-                    crate::provider::scripted::Script::new(),
-                ),
-            )),
-            consumer: 0,
-        });
-        let _ = registry.register(None, agent);
-        let deferred = deferred_sink(&emit, 7, &registry, crate::record::Emitter::none());
-        let born = registry.generation(7);
+        let emit = Emitter::with_mailbox(tx, agent.id, inbox.mailbox());
+        let deferred = deferred_sink(&emit, &agent, crate::record::Emitter::none());
+        let born = agent.generation();
 
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {
             Some(crate::bus::Item::Surface { id, generation, .. }) => {
-                assert_eq!(id, 7, "the batch is stamped with the root session id");
+                assert_eq!(id, agent.id, "the batch is stamped with the root session id");
                 assert_eq!(generation, born, "stamped with the sink's birth generation");
             }
             other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),
         }
 
         // A `/clear` bumps this root past the sink's captured generation.
-        registry.clear_subtree(7);
+        agent.clear_subtree();
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {
             Some(crate::bus::Item::Surface { generation, .. }) => {

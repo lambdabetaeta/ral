@@ -245,6 +245,19 @@ impl Egress {
             audit: AuditLog::in_scratch(),
         }
     }
+
+    /// [`Self::for_test`] with the provider's own web search denied — the IT
+    /// verdict a searchless fixture is built from.
+    #[must_use]
+    pub fn for_test_without_search() -> Self {
+        Self {
+            policy: Arc::new(crate::net_policy::NetPolicy {
+                hosts: std::collections::HashSet::new(),
+                search: false,
+            }),
+            ..Self::for_test()
+        }
+    }
 }
 
 #[cfg(test)]

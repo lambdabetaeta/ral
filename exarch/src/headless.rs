@@ -575,6 +575,10 @@ pub fn run(
     let mut control = crate::agent::NoControl;
     let root_id = session.agent.id;
     let recorder = session.recorder();
+    // This is the process's trunk — a fact of the launch, not of any position
+    // in the tree — so its token is what an OS signal must reach, for as long
+    // as it attends.
+    let _slot = crate::agent::cancel::publish(session.cancel_token());
     let outcome = pump(&mut headless, &fleet.bus, root_id, &recorder, |emit| {
         session.attend(&mut control, emit)
     });
@@ -741,6 +745,9 @@ pub fn converse_settled<S: Sink>(
     session.seed(message);
     let root_id = session.agent.id;
     let recorder = session.recorder();
+    // The embedder's trunk, for the extent of the exchange it drives: an OS
+    // signal reaching this process must find that token published.
+    let _slot = crate::agent::cancel::publish(session.cancel_token());
     let outcome = pump(sink, &fleet.bus, root_id, &recorder, |emit| {
         session.attend_with(
             &mut crate::agent::NoControl,
@@ -1168,21 +1175,15 @@ mod tests {
         .expect("root trunk")
     }
 
-    /// Register a live child of `parent` in the shared registry — the one
-    /// fact [`Avatar::has_live_children`] reads — without running any attend
-    /// loop of its own. The caller settles it (or not) on its own clock, so a
-    /// test can hold `parent` on it for exactly as long as it chooses,
-    /// deterministically, rather than racing a real child's own thread
-    /// against a sleep.
-    fn register_live_child(parent: &Avatar, name: &str) -> (crate::bus::AgentId, u64) {
-        let mut child = parent.fork(parent.caps().clone()).expect("fork child");
-        child.agent_mut().set_name(name);
-        let generation = parent.agent.generation();
+    /// A live child of `parent` with no attend loop of its own. The caller
+    /// holds it — that is what keeps it live — and drops it on its own clock,
+    /// so a test can hold `parent` on it for exactly as long as it chooses,
+    /// deterministically, rather than racing a real child's own thread against
+    /// a sleep.
+    fn live_child(parent: &Avatar, name: &str) -> Avatar {
         parent
-            .agents
-            .register(Some(parent.agent.id), child.agent.clone())
-            .expect("registration must succeed: its parent is live");
-        (child.agent.id, generation)
+            .fork_named(parent.caps().clone(), name)
+            .expect("fork child")
     }
 
     /// Every signal a caller's own `Sink` can receive, folded into one place —
@@ -1224,7 +1225,7 @@ mod tests {
 
     /// Law B, exercised deterministically: the exchange holds open while a
     /// live child is registered but not yet settled, and only completes the
-    /// settlement — pushing its result and retiring its registry entry —
+    /// settlement — pushing its result and retiring itself —
     /// once the sink has observed the exchange genuinely park on it
     /// ([`AgentState::WaitingOnAgents`]). A driver that quiesced without
     /// waiting would never signal the release, and the call would hang
@@ -1238,9 +1239,9 @@ mod tests {
                 .then(Reply::text("thanks for the update")),
             false,
         );
-        let (child_id, generation) = register_live_child(&session, "helper");
+        let child = live_child(&session, "helper");
+        let generation = child.agent.consumer();
         let parent_mailbox = session.mailbox();
-        let registry = session.agents.clone();
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
         let settler = std::thread::spawn(move || {
             release_rx
@@ -1256,10 +1257,8 @@ mod tests {
                 rejected.is_ok(),
                 "the parent's inbox must accept the result"
             );
-            assert!(
-                registry.settle(child_id),
-                "settling a still-live registration must succeed"
-            );
+            // Deliver, then retire: dropping the avatar is the retirement.
+            drop(child);
         });
 
         let engine = Engine::new();
@@ -1308,8 +1307,9 @@ mod tests {
         for _ in 0..8 {
             no_reply = no_reply.then(Reply::text("prose, but never a reply"));
         }
-        let mut child = session.fork(session.caps().clone()).expect("fork child");
-        child.agent_mut().set_name("flaky");
+        let child = session
+            .fork_named(session.caps().clone(), "flaky")
+            .expect("fork child");
         crate::agent::testkit::set_provider(
             &child,
             crate::agent::testkit::scripted("test-model", no_reply),
@@ -1317,9 +1317,6 @@ mod tests {
         child.seed("go".into());
         let (spawn_emit, _rx) = crate::bus::dummy_emitter();
         spawn_async(
-            &session.agents,
-            session.agent.id,
-            session.mailbox(),
             child,
             AsyncSpawn {
                 name: "flaky".into(),

@@ -9,7 +9,7 @@
 //! order is **inbox → agent**: clone a [`Mailbox`] out and drop any agent-side
 //! guard before pushing.  And the verdict is computed *before* the pop, so a
 //! producer that both changes a verdict input and delivers must deliver first —
-//! a settling child posts its result, then retires its registry entry — or the
+//! a settling child posts its result, then retires itself — or the
 //! consumer could quiesce between the two facts.  [`Mailbox::steer`] holds
 //! this same ordering within itself: it stamps the exchange clock before the
 //! push that wakes a parked consumer, so a park verdict recomputed on the
@@ -31,10 +31,10 @@ pub(crate) enum ParkMode {
     /// A live human conversation: park *and ignore cancellation* entirely, for
     /// an Esc cancels the exchange, not the agent.
     Held,
-    /// A non-conversing agent a human has exchanged with, per the registry
-    /// rather than the TUI's focus cursor.  Parks like [`Self::Held`] but with
-    /// no immunity, or a `HeldByChildren` parent would wait forever on the
-    /// cancelled result it is owed; the registry's idle lease bounds it.
+    /// A non-conversing agent a human has exchanged with, per its own exchange
+    /// clock rather than the TUI's focus cursor.  Parks like [`Self::Held`] but
+    /// with no immunity, or a `HeldByChildren` parent would wait forever on the
+    /// cancelled result it is owed; the fleet's idle lease bounds it.
     Engaged,
     /// Live children will each deliver a result up this inbox, so park rather
     /// than kill a headless root waiting on its fleet; the last one settling
@@ -98,8 +98,9 @@ struct Shared {
     /// the lock `clear` holds: a push landing before the bump is swept with the
     /// queue, one landing after is refused as stale.
     epoch: AtomicU64,
-    /// The last human or parent exchange — [`Mailbox::steer`] or the
-    /// registry's `message` — that reached this inbox; `None` before the
+    /// The last human or parent exchange — [`Mailbox::steer`] or
+    /// [`Agent::message`](crate::agent::Agent::message) — that reached this
+    /// inbox; `None` before the
     /// first.  Stamped ahead of the delivery it accompanies, so a park
     /// verdict recomputed on the wakeup that delivery causes already reads
     /// engaged: whichever thread next acquires `queue` observes both, since

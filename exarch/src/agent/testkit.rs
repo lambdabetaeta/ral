@@ -8,7 +8,7 @@
 
 use crate::agent::{Agent, Avatar, NoControl, ProviderHandle, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL, cancel};
 use crate::bootstrap::Scratch;
-use crate::bus::{AgentId, AgentOutcome, Emitter, Mailbox};
+use crate::bus::{AgentOutcome, Emitter, Mailbox};
 use crate::fleet::registry::EvalReach;
 use crate::provider::scripted::Script;
 use crate::provider::{Provider, ToolCall};
@@ -26,41 +26,58 @@ pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, script))
 }
 
-/// What a registry-focused test needs to build a synthetic `Arc<Agent>` —
-/// no seat, no shell, nothing an attend loop would touch.
+/// What a fleet-focused test varies about a synthetic agent — no seat, no
+/// shell, nothing an attend loop would touch.  Every other field is the inert
+/// placeholder [`test_agent`] fills in.
 pub(crate) struct TestAgentSpec {
-    pub(crate) id: AgentId,
     pub(crate) name: String,
-    pub(crate) log_dir: PathBuf,
     pub(crate) cancel: cancel::Token,
     pub(crate) reach: EvalReach,
     pub(crate) mailbox: Mailbox,
-    pub(crate) provider: ProviderHandle,
-    /// The parent's own generation at this birth, exactly as a real
-    /// registration reads it — 0 for a parentless agent, or whatever the
-    /// caller read live off the parent immediately before this call.
-    pub(crate) consumer: u64,
+    /// `None` builds a root, `Some` a reporting child of that agent.
+    pub(crate) parent: Option<Arc<Agent>>,
 }
 
-/// Build the `Arc<Agent>` a real fork or root would carry into
-/// [`crate::fleet::registry::AgentRegistry::register`], filling in every
-/// field an attend loop would touch with an inert placeholder: registry
-/// tests exercise the map, never a session behind it.
-pub(crate) fn test_agent(spec: TestAgentSpec) -> Arc<Agent> {
+impl TestAgentSpec {
+    /// A root under `name`, with handles no assertion inspects.
+    pub(crate) fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            cancel: cancel::Token::new(),
+            reach: EvalReach::Identity {
+                eval_root: Some(ral_core::process::DurableRoot::default()),
+                interrupt_target: crate::fleet::registry::InterruptTarget::default(),
+            },
+            mailbox: crate::bus::Inbox::new().mailbox(),
+            parent: None,
+        }
+    }
+}
+
+/// The `Arc<Agent>` a real fork or root carries, born exactly as one is —
+/// enrolled, adopted, leased — so the caller holds the only strong reference
+/// and dropping it settles the agent.
+///
+/// # Errors
+/// Whatever [`AgentRegistry::enrol`](crate::fleet::registry::AgentRegistry::enrol)
+/// refuses.
+pub(crate) fn test_agent(
+    fleet: &crate::fleet::registry::AgentRegistry,
+    spec: TestAgentSpec,
+) -> Result<Arc<Agent>, crate::fleet::registry::Unborn> {
     let TestAgentSpec {
-        id,
         name,
-        log_dir,
         cancel,
         reach,
         mailbox,
-        provider,
-        consumer,
+        parent,
     } = spec;
-    Arc::new(Agent {
+    let id = crate::agent::fresh_id();
+    let consumer = parent.as_ref().map_or(0, |p| p.generation());
+    let agent = Arc::new(Agent {
         id,
         name,
-        log_dir,
+        log_dir: PathBuf::from("/nonexistent/test-agent"),
         started: std::time::Instant::now(),
         system: String::new(),
         system_base: String::new(),
@@ -68,9 +85,10 @@ pub(crate) fn test_agent(spec: TestAgentSpec) -> Arc<Agent> {
             ral_core::io::TerminalState::default(),
         )),
         caps: ral_core::types::Capabilities::default(),
-        parent: None,
+        parent,
+        children: Mutex::new(Vec::new()),
         fuel: 0,
-        provider,
+        provider: ProviderHandle::new(scripted("test-model", Script::new())),
         interactive: false,
         tool_enabled: false,
         search: false,
@@ -88,7 +106,9 @@ pub(crate) fn test_agent(spec: TestAgentSpec) -> Arc<Agent> {
             reply: None,
         }),
         consumer,
-    })
+    });
+    fleet.enrol(&agent)?;
+    Ok(agent)
 }
 
 /// A boundary read — unlike `scope_has` it ticks no epoch and no ledger.
@@ -162,6 +182,16 @@ pub(crate) fn chat_trunk() -> Avatar {
     root(true, true)
 }
 
+/// A trunk whose IT policy denies hosted search — the ceiling a fork inherits,
+/// in the direction the ordinary fixture does not cover.
+pub(crate) fn searchless_trunk() -> Avatar {
+    Avatar::for_test_with(crate::agent::TestTrunk {
+        egress: crate::egress::Egress::for_test_without_search(),
+        ..crate::agent::TestTrunk::new("system")
+    })
+    .expect("searchless test trunk")
+}
+
 fn root(interactive: bool, chat: bool) -> Avatar {
     // The run dir sits beside the scratch, which the seat below owns, so the
     // trunk's whole footprint goes when the trunk does.
@@ -196,14 +226,38 @@ fn root(interactive: bool, chat: bool) -> Avatar {
 }
 
 /// Drive a forked peer to quiescence, returning what its `attend` settles.
+///
+/// A peer that replies parks for a follow-up rather than ending, exactly as a
+/// spawned child does, so this stands in for the parent that would end that
+/// park: a terminate once the reply stands.  A peer that never replies
+/// quiesces on its own and the watcher simply retires with it.
 pub(crate) fn drive_peer(
     child: &mut Avatar,
     provider: Arc<Provider>,
 ) -> (AgentOutcome, Option<FOValue>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let (tx, _rx) = crate::bus::channel();
     let emit = Emitter::new(tx, child.agent.id);
     child.agent.provider.swap(provider);
-    child.attend(&mut NoControl, &emit)
+    let attending = Arc::new(AtomicBool::new(true));
+    let watcher = {
+        let agent = child.agent.clone();
+        let attending = attending.clone();
+        std::thread::spawn(move || {
+            while attending.load(Ordering::Acquire) {
+                if agent.has_reply() {
+                    agent.cancel(ral_core::process::CancelCause::Explicit);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        })
+    };
+    let settled = child.attend(&mut NoControl, &emit);
+    attending.store(false, Ordering::Release);
+    watcher.join().expect("the watcher thread must not panic");
+    settled
 }
 
 // ── worker registry: `/clear` cascade, lease-reap drain ───────────────

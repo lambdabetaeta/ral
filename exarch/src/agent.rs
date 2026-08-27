@@ -5,8 +5,7 @@
 //! share.
 //!
 //! No node is privileged by special-case code — the distinctions reduce to
-//! *position*.  The parent-less trunk publishes its cancel token for the
-//! OS-signal path; holding `reply` falls out of `returns`, parking out of
+//! *position*.  Holding `reply` falls out of `returns`, parking out of
 //! `interactive`.  A child's result is posted up its parent's mailbox by the
 //! spawn site, not by the loop, so the loop is identical for all.
 //!
@@ -15,6 +14,19 @@
 //! it.  [`Avatar`] is the private half — the log, the seat, the inbox, and
 //! every other field only the attend thread touches — plus the `Arc<Agent>`
 //! it embodies; every method that runs the agent takes `&mut Avatar`.
+//!
+//! An agent is *live* while its avatar holds the `Arc`; nothing deregisters.
+//! The tree that carries that liveness has one direction of strength, and it
+//! is the invariant everything else here rests on: **nothing holds an
+//! `Arc<Agent>` to a descendant.**  Up is strong ([`Agent::parent`]), so the
+//! climb a scope check makes never dangles; down is weak
+//! ([`Agent::children`]), so a walk prunes what fails to upgrade, and reaper
+//! closures and results addressed upward carry [`std::sync::Weak`].
+//!
+//! Two per-agent mutexes, [`Agent::status`] and [`Agent::children`].  Rule:
+//! hold at most one at a time.  `children` is locked to push or to snapshot,
+//! never across a walk; `status` is a single-writer register, and nothing is
+//! computed under it.
 //!
 //! This file holds the state; the machinery lives in [`build`], [`attend`],
 //! [`deliberate`], [`shell`], and [`probe`], which reach these private fields
@@ -38,13 +50,17 @@ pub(crate) mod testkit;
 pub(crate) use attend::quiesce_when_childless;
 pub use attend::{Control, NoControl, Verdict};
 pub(crate) use build::{Build, fresh_id};
+#[cfg(test)]
+pub(crate) use build::TestTrunk;
 pub use build::{RecordedAccount, RootConfig, RootSeat};
 pub use dial::Dial;
 pub(crate) use probe::ProbedWorker;
 pub(crate) use shell::{LogCell, ReplyCell};
 
 use crate::agent::seat::Seat;
-use crate::bus::{AgentId, Inbox, Mailbox};
+use crate::bus::{
+    AgentId, AgentMessage, AgentOutcome, AgentResult, Inbox, InboxReject, Mailbox, Post,
+};
 use crate::fleet::registry::{AgentRegistry, EvalReach};
 use crate::provider::Provider;
 use crate::shell_eval;
@@ -52,16 +68,17 @@ use crate::sync::LockExt;
 use ral_core::process::CancelCause;
 use ral_core::serial::FOValue;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// What the fleet knows an agent as.
 ///
 /// Identity and immutable config, fixed at construction — except
-/// [`Self::status`], the one register the avatar writes as it runs.  Held by
-/// its [`Avatar`] behind an `Arc`, and by the fleet's
-/// [`AgentRegistry`](crate::fleet::registry::AgentRegistry), keyed by
-/// [`Self::id`].
+/// [`Self::status`], the one register the avatar writes as it runs, and
+/// [`Self::children`], which the spawn site pushes onto.  Live exactly while
+/// its [`Avatar`] holds the `Arc`: its parent and the fleet's
+/// [`AgentRegistry`](crate::fleet::registry::AgentRegistry) hold only
+/// [`Weak`], and every walk prunes what fails to upgrade.
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, search); not a candidate for a combined enum"
@@ -70,7 +87,7 @@ pub struct Agent {
     pub id: AgentId,
     /// The tab-bar identity [`crate::fleet::registry::check_name`] validates —
     /// unique among live agents, enforced at
-    /// [`AgentRegistry::register`](crate::fleet::registry::AgentRegistry::register).
+    /// [`AgentRegistry::enrol`](crate::fleet::registry::AgentRegistry::enrol).
     name: String,
     /// Where this agent's own session log is written.
     log_dir: PathBuf,
@@ -85,9 +102,14 @@ pub struct Agent {
     /// resolving its own prompt never needs a live [`Shell`](ral_core::Shell).
     index: Arc<crate::prompt::BuiltinIndex>,
     caps: ral_core::types::Capabilities,
-    /// `None` for the trunk.  Read with `interactive` wherever position
-    /// matters, in place of an `is_root` branch.
-    parent: Option<AgentId>,
+    /// Strong and upward: `None` ⇔ this agent is a root — the trunk, or a
+    /// `/branch` child, which converses and reports to nobody.  A parent
+    /// whose avatar has gone is still reachable here, terminated token and
+    /// all, so `deposit_reply` and the scope climb never dangle.
+    parent: Option<Arc<Self>>,
+    /// Weak and downward, so no cycle exists to reason about: a child that
+    /// fails to upgrade has settled, and the walk that found it prunes it.
+    children: Mutex<Vec<Weak<Self>>>,
     /// Spawn generations still available below here.  Bounds depth, not
     /// fan-out: a fork spends none of the parent's, only handing the child one
     /// less, and at zero the desk refuses `` agents `start ``.
@@ -98,11 +120,12 @@ pub struct Agent {
     /// Whether a human is attached (the TUI).  With no parent it makes the
     /// trunk converse rather than run one-shot and headless.  Inherited.
     interactive: bool,
-    /// One sticky token for this agent's life, registered in the fleet so the
-    /// subtree cascade reaches the live exchange.  The attend loop
+    /// One sticky token for this agent's life, so the subtree cascade reaches
+    /// the live exchange.  The attend loop
     /// [`reset`](cancel::Token::reset)s it at each exchange boundary so an Esc
-    /// never bleeds into the next; the trunk also [`publish`](cancel::publish)es
-    /// it for OS signals.
+    /// never bleeds into the next; the process's trunk is additionally
+    /// [`publish`](cancel::publish)ed for OS signals by the site that launches
+    /// it.
     cancel: cancel::Token,
     /// `provider.complete` (advertisement) and [`Avatar::invoke`] (dispatch)
     /// read this one bit, so they cannot disagree about whether the `ral` call
@@ -140,14 +163,14 @@ pub struct Agent {
     /// [`Avatar`], reachable only by the attend thread.
     mailbox: Mailbox,
     /// A process publishing its status: written by the avatar alone
-    /// ([`Self::set_resting`], [`Self::deposit_reply`], the generation bump a
-    /// `/clear` gesture applies to the cleared subtree's own root), read by
-    /// everyone else.  A reader takes one snapshot and computes nothing under
-    /// the lock — the mutex buys atomicity, nothing more.
+    /// ([`Self::set_resting`], [`Self::deposit_reply`], [`Self::clear_subtree`]'s
+    /// generation bump), read by everyone else.  A reader takes one snapshot
+    /// and computes nothing under the lock — the mutex buys atomicity, nothing
+    /// more.
     status: Mutex<Status>,
-    /// The parent's own generation as this agent was registered: the fence a
-    /// result addressed upward must survive, since the parent is who reads
-    /// it.  0 for a parentless agent, which reports to nobody.
+    /// The parent's own generation at this agent's birth: the fence a result
+    /// addressed upward must survive, since the parent is who reads it.  0 for
+    /// a root, which reports to nobody.
     consumer: u64,
 }
 
@@ -155,10 +178,9 @@ pub struct Agent {
 /// writes what.
 struct Status {
     /// How many times this session has rebuilt its context
-    /// ([`crate::fleet::registry::AgentRegistry::clear_subtree`]).  Work bound
-    /// for this session is stamped with the value current at its birth, so a
-    /// `/clear` here invalidates it — and a `/clear` anywhere else leaves it
-    /// alone.
+    /// ([`Agent::clear_subtree`]).  Work bound for this session is stamped
+    /// with the value current at its birth, so a `/clear` here invalidates it
+    /// — and a `/clear` anywhere else leaves it alone.
     generation: u64,
     /// When this agent parked waiting for a message, or `None` while it is
     /// working.  The roster's `idle-s`, and the whole of "not busy".
@@ -205,12 +227,9 @@ pub struct Avatar {
     /// [`Self::deliberate`] clears it on entry, so a cancelled or panicking
     /// deliberation cannot poison the next.
     reply: Option<FOValue>,
-    /// The **fleet's** registry, one map cloned to every node: each agent
-    /// registers itself and its children, so this is the spawn tree at any
-    /// depth.  [`clear_subtree`](crate::fleet::registry::AgentRegistry::clear_subtree)
-    /// bumps the cleared session's own generation, so a worker settling after
-    /// *that* session's `/clear` drops its result — and one settling after
-    /// some other tab's does not.
+    /// The **fleet's** index, one handle cloned to every node: the name a
+    /// spawn claims and the by-id door a frontend command arrives through.
+    /// Not the tree — that is [`Agent::parent`] and [`Agent::children`].
     pub(crate) agents: AgentRegistry,
     /// Live wakeups (cron / after), posted into this agent's own inbox; the
     /// builtins that arm them gate on `allow_schedule`.
@@ -289,7 +308,6 @@ impl Agent {
         self.provider.current()
     }
 
-    /// The spawn site registers a peer's in the parent's registry.
     pub(crate) fn cancel_token(&self) -> &cancel::Token {
         &self.cancel
     }
@@ -309,15 +327,6 @@ impl Agent {
         &self.name
     }
 
-    /// A registry-focused test's escape hatch onto the name a real fork or
-    /// branch was constructed with — set once, here, before registering: the
-    /// caller must hold the only strong reference, exactly as
-    /// [`Avatar::agent_mut`]'s does.
-    #[cfg(test)]
-    pub(crate) fn set_name(&mut self, name: impl Into<String>) {
-        self.name = name.into();
-    }
-
     pub(crate) fn log_dir(&self) -> &Path {
         &self.log_dir
     }
@@ -331,10 +340,21 @@ impl Agent {
         &self.mailbox
     }
 
-    /// The parent's own generation this agent was registered against — the
-    /// fence a result addressed upward must survive.
+    /// The parent's own generation at this agent's birth — the fence a result
+    /// addressed upward must survive.
     pub(crate) fn consumer(&self) -> u64 {
         self.consumer
+    }
+
+    /// Whom this agent reports to, `None` for a root.
+    pub(crate) fn parent(&self) -> Option<&Arc<Self>> {
+        self.parent.as_ref()
+    }
+
+    /// The same edge as an id, for the birth notice the frontend draws a tab
+    /// from.
+    pub(crate) fn parent_id(&self) -> Option<AgentId> {
+        self.parent.as_ref().map(|p| p.id)
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -365,19 +385,43 @@ impl Agent {
         }
     }
 
-    /// Stage `reply` for this agent's parent to fetch.  The notice that wakes
-    /// the parent is a registry concern — [`crate::fleet::registry::AgentRegistry::deposit_reply`]
-    /// wraps this with it.
-    pub(crate) fn deposit_reply(&self, reply: FOValue) {
+    /// Stage `reply` for this agent's parent to fetch, and wake it with the
+    /// one-line [`AgentOutcome::Replied`] notice — deposit first, so a parent
+    /// woken by the notice always finds the value already there.  A root has
+    /// nobody to notify: its reply goes to whoever drives its loop.
+    ///
+    /// # Errors
+    /// The parent's inbox was at quota, so the notice was refused; the deposit
+    /// stands either way and `` agents `read `` would still find it.
+    pub(crate) fn deposit_reply(&self, reply: FOValue) -> Result<(), InboxReject> {
         self.status.lock_ignore_poison().reply = Some(reply);
+        let Some(parent) = &self.parent else {
+            return Ok(());
+        };
+        // After the status guard drops: the process-wide lock order is
+        // inbox → agent.
+        parent.mailbox.push(Post::AgentResult(AgentResult {
+            name: self.name.clone(),
+            outcome: AgentOutcome::Replied,
+            elapsed: self.elapsed(),
+            generation: self.consumer,
+        }))
     }
 
-    /// `/clear`'s fence: bump this agent's own generation so a late result
-    /// addressed to it is rejected.  Written by the avatar's own `/clear`
-    /// gesture, even though that gesture reaches here through the registry —
-    /// see [`crate::fleet::registry::AgentRegistry::clear_subtree`].
-    pub(crate) fn bump_generation(&self) {
-        self.status.lock_ignore_poison().generation += 1;
+    /// Send a marked model-visible note to `to`, stamping its exchange clock
+    /// as a steer does, and for the same reason: a message is an exchange, and
+    /// one that woke a resting child must not leave it to be reaped
+    /// mid-answer.  Scoping is the caller's — [`Self::descendant`].
+    ///
+    /// # Errors
+    /// The recipient's inbox is at quota.
+    pub(crate) fn message(&self, to: &Self, text: String) -> Result<(), InboxReject> {
+        to.mailbox.stamp_exchange();
+        to.mailbox.push(Post::AgentMessage(AgentMessage {
+            from: self.id,
+            from_name: self.name.clone(),
+            text,
+        }))
     }
 
     /// Whether this agent may still be talked to: something has already
@@ -409,6 +453,90 @@ impl Agent {
         self.cancel.cancel(CancelCause::Interrupt);
         self.reach.interrupt();
     }
+
+    /// Take `child` under this agent — the one downward edge, weak, written
+    /// once at the child's construction.
+    pub(crate) fn adopt(&self, child: &Arc<Self>) {
+        self.children
+            .lock_ignore_poison()
+            .push(Arc::downgrade(child));
+    }
+
+    /// This agent's live direct children, pruning the settled ones as it
+    /// snapshots.  The lock is held for the snapshot alone: every walk runs
+    /// outside it.
+    pub(crate) fn children(&self) -> Vec<Arc<Self>> {
+        let mut kids = self.children.lock_ignore_poison();
+        let live: Vec<Arc<Self>> = kids.iter().filter_map(Weak::upgrade).collect();
+        if live.len() != kids.len() {
+            *kids = live.iter().map(Arc::downgrade).collect();
+        }
+        live
+    }
+
+    /// This agent's live proper descendants at any depth — the pruning
+    /// descent.  An agent walks what it spawned, never itself.
+    pub(crate) fn walk(&self) -> Vec<Arc<Self>> {
+        let mut out = Vec::new();
+        let mut frontier = self.children();
+        while let Some(node) = frontier.pop() {
+            frontier.extend(node.children());
+            out.push(node);
+        }
+        out
+    }
+
+    /// `target` if it is a proper descendant of this agent, else `None` — the
+    /// scoping `` agents `cancel ``/`` `message ``/`` `read `` share.  A climb
+    /// from `target`'s *parent*, so it costs O(depth) and takes no lock, and
+    /// so nothing is a proper descendant of itself.
+    pub(crate) fn descendant(&self, target: &Arc<Self>) -> Option<Arc<Self>> {
+        let mut above = target.parent.as_ref();
+        while let Some(node) = above {
+            if std::ptr::eq(Arc::as_ptr(node), std::ptr::from_ref(self)) {
+                return Some(target.clone());
+            }
+            above = node.parent.as_ref();
+        }
+        None
+    }
+
+    /// The park signal for a node that launched async agents: a direct child
+    /// still *working* is what may yet deliver to this mailbox.  A resting one
+    /// has already said what it had to say — it holds its reply and waits to
+    /// be messaged — so it must not hold its parent open for the hour its
+    /// lease allows.
+    pub(crate) fn has_busy_children(&self) -> bool {
+        self.children().iter().any(|c| c.rest().is_none())
+    }
+
+    /// Cancel this agent and its whole subtree.  Every victim is stamped
+    /// across both layers, so an in-flight eval unwinds instead of grinding on
+    /// as an orphan whose result nobody will collect.
+    pub(crate) fn cancel_tree(&self, cause: CancelCause) {
+        self.cancel(cause);
+        self.cancel_descendants(cause);
+    }
+
+    /// Cancel this agent's proper descendants, leaving it live — a settling
+    /// parent abandoning its children, and `/clear`.  Both rebuild in place,
+    /// so this must never stamp the root's own [`cancel::Token`]: a terminate
+    /// cause there is permanent ([`cancel::Token::reset`] clears only a bare
+    /// [`CancelCause::Interrupt`]) and every later run would fail.
+    pub(crate) fn cancel_descendants(&self, cause: CancelCause) {
+        for node in self.walk() {
+            node.cancel(cause);
+        }
+    }
+
+    /// `/clear`: abandon the subtree the rebuilt context no longer owns, and
+    /// bump *this* agent's own generation so any late result addressed to it
+    /// is rejected.  Bumping only this agent is what keeps one tab's `/clear`
+    /// from dropping work another tab is still waiting on.
+    pub(crate) fn clear_subtree(&self) {
+        self.cancel_descendants(CancelCause::Explicit);
+        self.status.lock_ignore_poison().generation += 1;
+    }
 }
 
 impl Avatar {
@@ -426,18 +554,6 @@ impl Avatar {
         self.measured_input()
             .filter(|tokens| crate::agent::digest::pressure_due(*tokens, window))
             .map(|tokens| format!("{tokens} of {window} tokens"))
-    }
-
-    /// Test-only escape hatch for scenarios that must poke the public half
-    /// directly rather than through `` `model ``/`` `clear ``-style surface.
-    /// A registered agent's `Arc` is shared with the registry's own map, so
-    /// this deregisters first to reclaim sole ownership — the caller's own
-    /// avatar is what every test call site here still reads afterward, never
-    /// the registry, so its liveness going quiet is never observed.
-    #[cfg(test)]
-    pub(crate) fn agent_mut(&mut self) -> &mut Agent {
-        self.agents.deregister(self.agent.id);
-        Arc::get_mut(&mut self.agent).expect("no other clone should outlive deregistration")
     }
 
     /// This agent's wire identity — the public half's `id`, reachable without

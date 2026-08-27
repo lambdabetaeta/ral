@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 /// off the [`Transport`] trait, so this stays a closed enum.
 pub(crate) enum Seat {
     /// In-process.  `/clear` rebuilds it, but onto the *same* `interrupt_target`:
-    /// the cell the registry interrupts through must outlive the rebuild.
+    /// the cell an interrupt reaches the run through must outlive the rebuild.
     Identity {
         transport: Box<IdentityTransport>,
         scratch: Arc<Scratch>,
@@ -207,7 +207,7 @@ pub(crate) fn boot_root_shell(scratch: &Scratch, cwd: std::path::PathBuf, detach
     let mut shell = crate::bootstrap::boot_shell();
     // The trunk owns this process's signals: an Esc or async SIGINT
     // interrupts its in-flight run, a SIGTERM the session. A sub-agent's
-    // `fork_session` stays deaf; the registry stops one by cancel handle.
+    // `fork_session` stays deaf; a cascade stops one by cancel handle.
     shell.face_signals();
     shell.seed_cwd(cwd);
     scratch.install_into(&mut shell);
@@ -337,19 +337,29 @@ mod tests {
         )
     }
 
+    /// The trunk a wire desk's handlers scope against — inert: this file's
+    /// tests never spawn from it.
+    fn test_trunk(fleet: &AgentRegistry) -> Arc<crate::agent::Agent> {
+        crate::agent::testkit::test_agent(
+            fleet,
+            crate::agent::testkit::TestAgentSpec::new("wire-trunk"),
+        )
+        .expect("a fresh fleet's trunk")
+    }
+
     fn wire_seat(liveness: Liveness) -> (Seat, std::process::Child) {
         let (transport, child) = spawn_engine(liveness);
         let dir = std::env::temp_dir();
         (Seat::wire(transport, dir.clone(), dir), child)
     }
 
-    /// The wire seat's own shape as `Avatar::host_services` builds it:
-    /// fresh registry, no scratch.
-    fn wire_host_services(emit: &Emitter, registry: &AgentRegistry) -> HostServices {
+    /// The wire seat's own shape as `Avatar::host_services` builds it: a fresh
+    /// fleet and its one trunk, no scratch.
+    fn wire_host_services(emit: &Emitter, parent: &Arc<crate::agent::Agent>) -> HostServices {
         HostServices {
-            registry: registry.clone(),
+            registry: AgentRegistry::new(),
             scratch: None,
-            parent: 0,
+            parent: parent.clone(),
             mailbox: Inbox::new().mailbox(),
             emit: emit.clone(),
             provider: crate::agent::ProviderHandle::new(Arc::new(Provider::scripted(
@@ -425,9 +435,10 @@ mod tests {
     fn wire_seat_enquiry_is_answered_through_the_drain_loop() {
         let (seat, mut child) = wire_seat(Liveness::default());
         let (emit, _rx) = crate::bus::dummy_emitter();
-        let registry = AgentRegistry::new();
+        let fleet = AgentRegistry::new();
+        let trunk = test_trunk(&fleet);
         let desk = Arc::new(ExarchDesk {
-            services: wire_host_services(&emit, &registry),
+            services: wire_host_services(&emit, &trunk),
         });
 
         let report = ral_core::transport::dispatch_to_report(
@@ -465,14 +476,15 @@ mod tests {
         let (seat, mut child) = wire_seat(Liveness::default());
         let inbox = Inbox::new();
         let (tx, _rx) = crate::bus::channel();
-        let root_id = crate::agent::fresh_id();
+        let fleet = AgentRegistry::new();
+        let trunk = test_trunk(&fleet);
+        let root_id = trunk.id;
         let emit = Emitter::with_mailbox(tx, root_id, inbox.mailbox());
-        let registry = AgentRegistry::new();
 
         let install = RunInstall {
             seam: Arc::new(HostSeam {
                 desk: ExarchDesk {
-                    services: wire_host_services(&emit, &registry),
+                    services: wire_host_services(&emit, &trunk),
                 },
                 apply: crate::fleet::desk::SurfaceApplier {
                     pins: None,
@@ -483,8 +495,7 @@ mod tests {
             }),
             deferred: crate::shell_eval::deferred_sink(
                 &emit,
-                root_id,
-                &registry,
+                &trunk,
                 crate::record::Emitter::none(),
             ),
             fork: ral_core::types::Fork::Park(Nursery::default()),
@@ -544,7 +555,7 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// `eval_reach().interrupt()` is the registry's per-tab interrupt path.
+    /// `eval_reach().interrupt()` is the per-tab interrupt path.
     /// Generous timing throughout: the dev fleet includes a jittery VM.
     #[test]
     fn wire_eval_reach_cancel_settles_an_in_flight_run_promptly() {

@@ -134,7 +134,7 @@ impl Avatar {
         desk::HostServices {
             registry: self.agents.clone(),
             scratch,
-            parent: self.agent.id,
+            parent: self.agent.clone(),
             mailbox: self.mailbox(),
             emit: emit.clone(),
             provider: self.agent.provider.clone(),
@@ -198,14 +198,9 @@ impl Avatar {
         let outcome = {
             let _guard = self.seat.install_run(RunInstall {
                 seam: seam.clone(),
-                // Stamped with the registry generation read now, so a batch
-                // from a worker that settles after a `/clear` is dropped.
-                deferred: shell_eval::deferred_sink(
-                    emit,
-                    self.agent.id,
-                    &self.agents,
-                    self.recorder(),
-                ),
+                // Stamped with this session's generation as read now, so a
+                // batch from a worker that settles after a `/clear` is dropped.
+                deferred: shell_eval::deferred_sink(emit, &self.agent, self.recorder()),
                 fork: ral_core::types::Fork::Park(nursery),
             });
             self.recorder()

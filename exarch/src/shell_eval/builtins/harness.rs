@@ -315,7 +315,7 @@ fn start_agent(spec: &Value, mooring: &Mooring, shell: &Shell) -> Settled<FOValu
     };
 
     let name = name.to_string();
-    // The door's own early refusal; `AgentRegistry::register` is what makes it
+    // The door's own early refusal; `AgentRegistry::enrol` is what makes it
     // unskippable.
     crate::fleet::registry::check_name(&name).map_err(|why| sig(format!("agents: {why}")))?;
     agent_type_label(kind)?;
@@ -1103,7 +1103,7 @@ mod tests {
             );
         }
         assert!(
-            session.agents.list(session.agent.id).is_empty(),
+            crate::fleet::registry::listing(&session.agent).is_empty(),
             "an unknown grant label must never register a child"
         );
     }
@@ -1126,7 +1126,7 @@ mod tests {
         );
         assert!(result.content.contains("mnemon"), "got: {}", result.content);
         assert!(
-            session.agents.list(session.agent.id).is_empty(),
+            crate::fleet::registry::listing(&session.agent).is_empty(),
             "an unknown type tag must never register a child"
         );
     }
@@ -1144,7 +1144,7 @@ mod tests {
         );
         assert!(result.content.contains("name"), "got: {}", result.content);
         assert!(
-            session.agents.list(session.agent.id).is_empty(),
+            crate::fleet::registry::listing(&session.agent).is_empty(),
             "an invalid name must never register a child"
         );
     }
@@ -1185,7 +1185,7 @@ mod tests {
             result.content
         );
         assert!(
-            session.agents.list(session.agent.id).is_empty(),
+            crate::fleet::registry::listing(&session.agent).is_empty(),
             "a missing spec field must never register a child"
         );
     }
@@ -1210,7 +1210,7 @@ mod tests {
             result.content
         );
         assert!(
-            session.agents.list(session.agent.id).is_empty(),
+            crate::fleet::registry::listing(&session.agent).is_empty(),
             "a misspelled spec field must never register a child"
         );
     }
@@ -1283,41 +1283,22 @@ mod tests {
         );
     }
 
-    /// A cancel is a request, not a transaction: `AgentRegistry::cancel` only
-    /// flips the cooperative token, and only `clear_subtree`/`remove_subtree`
-    /// reap — so the row must still be listed the instant this answers.
+    /// A cancel is a request, not a transaction: it only stamps the cancel
+    /// layers, and the cancelled agent's own loop is what retires it — so the
+    /// row must still be listed the instant this answers.
     ///
-    /// Pinned at the registry level rather than through a real spawned
-    /// child: a scripted child runs to completion and settles (reaping its
-    /// own entry) on the same synchronous thread that starts it, so a
-    /// second `run_shell` racing a real `` `start ``/`` `cancel `` pair would
-    /// be racing CPU-bound work with no reliable window in between.
+    /// Pinned with a bare agent rather than a real spawned child: a scripted
+    /// child runs to completion and settles on the same synchronous thread
+    /// that starts it, so a second `run_shell` racing a real
+    /// `` `start ``/`` `cancel `` pair would be racing CPU-bound work with no
+    /// reliable window in between.
     #[test]
     fn agents_cancel_answer_still_lists_the_cancelled_row() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
-        let target = session.agent.id + 1;
-        let doomed = crate::agent::testkit::test_agent(crate::agent::testkit::TestAgentSpec {
-            id: target,
-            name: "doomed".to_string(),
-            log_dir: std::path::PathBuf::from("/tmp"),
-            cancel: crate::agent::cancel::Token::new(),
-            reach: crate::fleet::registry::EvalReach::Identity {
-                eval_root: Some(ral_core::process::DurableRoot::default()),
-                interrupt_target: crate::fleet::registry::InterruptTarget::default(),
-            },
-            mailbox: crate::bus::Inbox::new().mailbox(),
-            provider: crate::agent::ProviderHandle::new(std::sync::Arc::new(
-                crate::provider::Provider::scripted(
-                    "test",
-                    crate::provider::scripted::Script::new(),
-                ),
-            )),
-            consumer: session.agent.generation(),
-        });
-        session
-            .agents
-            .register(Some(session.agent.id), doomed)
-            .unwrap();
+        let mut doomed = crate::agent::testkit::TestAgentSpec::new("doomed");
+        doomed.parent = Some(session.agent.clone());
+        let _doomed = crate::agent::testkit::test_agent(&session.agents, doomed)
+            .expect("a fresh child of a live parent");
 
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
@@ -1454,10 +1435,19 @@ mod tests {
         );
     }
 
+    /// A trunk holding the self-wakeup grant, which `for_test` withholds.
+    fn granted_trunk() -> crate::agent::Avatar {
+        crate::agent::Avatar::for_test_with(crate::agent::TestTrunk {
+            allow_schedule: true,
+            ..crate::agent::TestTrunk::new("system")
+        })
+        .expect("a granted test trunk")
+    }
+
     #[test]
     fn schedule_add_answer_carries_the_new_row() {
-        let mut session = crate::agent::Avatar::for_test("system").unwrap();
-        session.agent_mut().allow_schedule = true;
+        let mut session = granted_trunk();
+
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
@@ -1478,8 +1468,8 @@ mod tests {
     /// away: `parse_duration`'s smallest unit is whole seconds.
     #[test]
     fn schedule_full_stack_round_trip_answers_the_table_and_fires_into_inbox() {
-        let mut session = crate::agent::Avatar::for_test("system").unwrap();
-        session.agent_mut().allow_schedule = true;
+        let mut session = granted_trunk();
+
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
@@ -1536,8 +1526,8 @@ mod tests {
     /// way as a hit, and that is not itself proof of a mistake.
     #[test]
     fn schedule_remove_full_stack_disarms_by_label() {
-        let mut session = crate::agent::Avatar::for_test("system").unwrap();
-        session.agent_mut().allow_schedule = true;
+        let mut session = granted_trunk();
+
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
@@ -1596,8 +1586,8 @@ mod tests {
     /// from "the table is empty" — two distinguishable labels can.
     #[test]
     fn schedule_remove_answer_omits_the_removed_row_but_keeps_the_other() {
-        let mut session = crate::agent::Avatar::for_test("system").unwrap();
-        session.agent_mut().allow_schedule = true;
+        let mut session = granted_trunk();
+
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
