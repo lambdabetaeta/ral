@@ -791,7 +791,7 @@ impl ExarchDesk {
         let reach = seat.eval_reach();
         let child = Avatar::assemble(Build {
             name: spec.name.clone(),
-            system: s.agent.system_base().to_string(),
+            system: s.agent.system_base().clone(),
             system_prompt,
             index: s.agent.index().clone(),
             caps: child_caps,
@@ -847,7 +847,7 @@ impl ExarchDesk {
             },
         );
         let child_log = {
-            let parent_log = s.log.lock();
+            let mut parent_log = s.log.lock();
             let mut child_log = parent_log
                 .fork(child_id, system_prompt.len())
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
@@ -927,7 +927,7 @@ impl ExarchDesk {
         let reach = seat.eval_reach();
         let child = Avatar::assemble(Build {
             name: spec.name.clone(),
-            system: s.agent.system_base().to_string(),
+            system: s.agent.system_base().clone(),
             system_prompt,
             index: s.agent.index().clone(),
             caps: child_caps,

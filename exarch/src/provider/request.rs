@@ -1,10 +1,6 @@
 //! Provider-independent request shaping.
 
-use genai::adapter::AdapterKind;
-use genai::chat::{
-    CacheControl, ChatMessage, ChatOptions, ChatRequest, MessageOptions, ReasoningEffort, Tool,
-    ToolConfig,
-};
+use genai::chat::{ChatOptions, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 
 /// Per-selection reasoning and sampling controls. A `None` field sends no
@@ -147,108 +143,9 @@ pub(super) fn complete_options(
     options
 }
 
-/// Shape the transcript for prompt caching. Breakpoints are Anthropic-only:
-/// on `OpenAI` the same `CacheControl` selects the metered explicit cache,
-/// which the `ChatGPT` and Codex endpoints reject outright; elsewhere the
-/// prompt-cache key carries the intent alone.
-///
-/// Marking the system prompt and the last two messages leaves two anchors of
-/// different depths. Splitting one range writes the same tokens, so the
-/// shallower is free, and it saves the rewrite whenever the next tail diverges
-/// rather than extends — a retry, a fork, a compaction.
-pub(super) fn build_cached_request(
-    adapter: AdapterKind,
-    system: &str,
-    mut messages: Vec<ChatMessage>,
-) -> ChatRequest {
-    if adapter != AdapterKind::Anthropic {
-        return ChatRequest::new(messages).with_system(system);
-    }
-    for message in messages.iter_mut().rev().take(2) {
-        message.options = Some(MessageOptions::from(CacheControl::Ephemeral));
-    }
-    let mut all = Vec::with_capacity(messages.len() + 1);
-    all.push(
-        ChatMessage::system(system.to_string())
-            .with_options(MessageOptions::from(CacheControl::Ephemeral)),
-    );
-    all.extend(messages);
-    ChatRequest::new(all)
-}
-
-/// The tools a request carries: the `ral` wire tool under `tool_enabled`, the
-/// provider's built-in web search under `search`.
-///
-/// Search rides only the adapters genai maps `Tool::new_web_search()` to a
-/// native tool for; the rest, plain `OpenAI` included, would serialise
-/// `ToolName::WebSearch` into the function-name slot as junk on the wire.
-/// `external_web_access` — codex's switch from its cached index to the live
-/// internet — is `Custom` because genai's Responses arm drops the typed
-/// `ToolConfig::WebSearch`, and `OpenAIResp`-only because genai merges a
-/// `Custom` config onto the tool object, where Anthropic's
-/// `web_search_20250305` would reject the unknown field.
-pub(super) fn tool_defs(adapter: AdapterKind, tool_enabled: bool, search: bool) -> Vec<Tool> {
-    let mut tools: Vec<Tool> = tool_enabled
-        .then(crate::shell_eval::tools::wire_tool)
-        .into_iter()
-        .collect();
-    if search
-        && matches!(
-            adapter,
-            AdapterKind::OpenAIResp | AdapterKind::Anthropic | AdapterKind::Gemini
-        )
-    {
-        let mut web_search = Tool::new_web_search();
-        if adapter == AdapterKind::OpenAIResp {
-            web_search = web_search.with_config(ToolConfig::Custom(serde_json::json!({
-                "external_web_access": true
-            })));
-        }
-        tools.push(web_search);
-    }
-    tools
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genai::chat::{ChatRole, ToolName};
-
-    #[test]
-    fn anthropic_marks_the_system_prompt_and_the_last_two_messages() {
-        let request = build_cached_request(
-            AdapterKind::Anthropic,
-            "SYS",
-            vec![
-                ChatMessage::user("one"),
-                ChatMessage::user("two"),
-                ChatMessage::user("three"),
-            ],
-        );
-        assert!(request.system.is_none());
-        assert_eq!(request.messages[0].role, ChatRole::System);
-        let marked = |index: usize| {
-            request.messages[index]
-                .options
-                .as_ref()
-                .and_then(|options| options.cache_control.clone())
-        };
-        assert_eq!(marked(0), Some(CacheControl::Ephemeral));
-        assert_eq!(marked(1), None);
-        assert_eq!(marked(2), Some(CacheControl::Ephemeral));
-        assert_eq!(marked(3), Some(CacheControl::Ephemeral));
-    }
-
-    #[test]
-    fn openai_gets_a_bare_system_prompt_and_no_breakpoints() {
-        let request = build_cached_request(
-            AdapterKind::OpenAIResp,
-            "SYS",
-            vec![ChatMessage::user("hi")],
-        );
-        assert_eq!(request.system.as_deref(), Some("SYS"));
-        assert!(request.messages[0].options.is_none());
-    }
 
     #[test]
     fn complete_options_leave_auto_controls_unset() {
@@ -290,43 +187,5 @@ mod tests {
         let err = effort_by_label("extreme").unwrap_err();
         assert!(err.contains("extreme"), "got: {err}");
         assert!(err.contains("xhigh"), "got: {err}");
-    }
-
-    #[test]
-    fn openai_resp_search_carries_live_internet_access() {
-        let tools = tool_defs(AdapterKind::OpenAIResp, false, true);
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, ToolName::WebSearch);
-        assert_eq!(
-            tools[0].config,
-            Some(ToolConfig::Custom(
-                serde_json::json!({"external_web_access": true})
-            ))
-        );
-    }
-
-    #[test]
-    fn anthropic_search_carries_the_bare_tool() {
-        let tools = tool_defs(AdapterKind::Anthropic, false, true);
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, ToolName::WebSearch);
-        assert_eq!(tools[0].config, None);
-    }
-
-    #[test]
-    fn unsupported_adapter_gets_no_search_tool() {
-        let tools = tool_defs(AdapterKind::OpenAI, false, true);
-        assert!(tools.is_empty());
-    }
-
-    #[test]
-    fn search_off_carries_no_tool_on_any_adapter() {
-        for adapter in [
-            AdapterKind::OpenAIResp,
-            AdapterKind::Anthropic,
-            AdapterKind::Gemini,
-        ] {
-            assert!(tool_defs(adapter, false, false).is_empty());
-        }
     }
 }

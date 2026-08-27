@@ -1,7 +1,7 @@
 ---
-verified_at_commit: cbeb5457
-verified_at_date: 2026-08-17
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Printer::sync, replay, model::resume, Viewport::commit_fact, seed, enforce_window_caps, flush_log, rotate, clear]
+verified_at_commit: 3606091a
+verified_at_date: 2026-08-27
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Printer::sync, replay, model::resume, Viewport::commit_fact, seed, enforce_window_caps, flush_log, rotate, clear, Transcript, SpanRender, render_closed_entry, render_tail, Memo::transcript]
 ---
 
 # Session record: one seam, one log
@@ -78,6 +78,52 @@ their `Stamp` byte ranges and reads those lines back from `record.jsonl` when a
 refold needs them; no recorded protocol fact is deleted and the whole log is
 never held in memory.
 
+### The provider-facing transcript is a persistent value
+
+`Memo::transcript()` does not walk the ledger and materialise owned
+`genai::ChatMessage`s on every call. It returns a `Transcript`
+(`record/model.rs`): `Vec<Arc<[ChatMessage]>>` segments plus a cached byte
+length, private fields, clone is `Arc` bumps. The committed history is
+immutable and append-only — one deliberation step adds one assistant message
+and its tool results, and nothing already recorded ever changes — so the
+memo caches each *closed* span's rendering exactly once, keyed by span id and
+its end index (`SpanRender`). A span id never recurs (a span opens only
+strictly past the running maximum exchange), so `(id, end)` determines a
+rendering globally and forever, and a stale cache entry is inexpressible: a
+still-growing span simply misses the key it would need to hit.
+
+The renderer is split along the one axis that actually varies. Only the last
+span's projection is retroactive — its `omit`/`repair_end` flags depend on
+whether it is still live and on what the *next* fact does to it — so that
+variation gets its own function with no cached path to leak into:
+
+- `render_closed_entry` renders a closed span's full range and repairs its
+  end. It takes no flags, so nothing can vary one; the memo's key is the
+  whole of the function's input.
+- `render_tail` renders only the live last span, carrying the two retroactive
+  flags, and its result is never cached.
+
+`transcript()` assembles the digest segment (replaced wholesale when a `Fold`
+replaces the digest text), `render_closed_entry` per non-last span through
+the memo, and `render_tail` fresh for the tail. `history_bytes` and
+`context_survey` read each closed segment's byte count from the same cache
+entry; only the live tail is ever re-serialised. This preserves the model
+fold's recompute invariant rather than contradicting it: correctness never
+reads the memo as authority, it is a memo of a pure function at immutable
+arguments — droppable and reconstructible at any moment, never serialised,
+rebuilt from nothing by this fold on resume. "Recomputed on every call"
+becomes cheap instead of false.
+
+The one remaining place an owned whole-history `Vec<ChatMessage>` is
+materialised outside the wire is `Memo::inherited_context_messages` — the
+context a `mnemon` child inherits at spawn, where ownership genuinely
+transfers into the child's own ledger. Every other crossing — the provider
+seam, `CompactionPlan.prefix` — carries a `Transcript` by shared reference;
+[[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] is
+the ADR, and [[map/exarch/provider|the provider map]] describes the one door,
+`provider/wire.rs`, where a `Transcript` is finally turned into an owned
+`genai::ChatRequest`.
+
 `record::model::resume` quarantines a torn crash tail, then streams the file
 through admission and the model fold, checking the incrementally maintained
 projection against a refold. A missing `record.jsonl` is a named refusal, not
@@ -145,3 +191,7 @@ for retirement and incremental sync, and
 the live bus lifetime. The broader accumulator/fold distinction is in
 [[design/residency|residency]], and the visual projection discipline is in
 [[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]].
+[[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] is the
+ADR for the persistent `Transcript` value and the closed-span render cache
+described above; [[map/exarch/provider|provider]] covers the one door that
+turns it into an owned wire request.

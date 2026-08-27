@@ -403,17 +403,19 @@ fn resolve_initial_selection(
             provider::models::resolve_model_provider(name, available, catalog)?,
             name.to_string(),
         ),
-        (None, None) => match (&saved, &saved_account) {
-            (Some(s), Some(account)) => (account.clone(), s.model.clone()),
-            // No default model is no reason to refuse to launch: open with the
-            // model unset — the empty sentinel — so the interactive frontend
-            // lands on its `/model` hint. `run` rejects that for a headless launch.
-            _ => {
+        (None, None) => {
+            if let (Some(s), Some(account)) = (&saved, &saved_account) {
+                (account.clone(), s.model.clone())
+            } else {
+                // No default model is no reason to refuse to launch: open with
+                // the model unset — the empty sentinel — so the interactive
+                // frontend lands on its `/model` hint. `run` rejects that for
+                // a headless launch.
                 let account = available[0].clone();
                 let model = account.service.default_model.clone().unwrap_or_default();
                 (account, model)
             }
-        },
+        }
     };
     // The route names an `OpenRouter` serving provider, so it means nothing on
     // any account but the one that saved it.

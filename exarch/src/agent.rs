@@ -95,12 +95,14 @@ pub struct Agent {
     /// Where this agent's own session log is written.
     log_dir: PathBuf,
     started: Instant,
-    /// The resolved prompt that reaches the model on every step.
-    pub(crate) system: String,
+    /// The resolved prompt that reaches the model on every step.  `Arc<str>`
+    /// so a fork's per-step read and the desk's own copy are refcount bumps,
+    /// never a re-copy of the ~38 KB template.
+    pub(crate) system: Arc<str>,
     /// The template [`Self::system`] came from, still carrying
     /// [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`]: a child inherits *this*,
     /// so it resolves for its own grants rather than its parent's.
-    system_base: String,
+    system_base: Arc<str>,
     /// The fleet-shared builtin index, resolved once at the trunk, so a fork
     /// resolving its own prompt never needs a live [`Shell`](ral_core::Shell).
     index: Arc<crate::prompt::BuiltinIndex>,
@@ -350,7 +352,7 @@ impl Agent {
         self.dial.as_ref()
     }
 
-    pub(crate) fn system_base(&self) -> &str {
+    pub(crate) fn system_base(&self) -> &Arc<str> {
         &self.system_base
     }
 
@@ -661,7 +663,12 @@ impl Avatar {
     /// # Panics
     /// Panics if the log mutex is poisoned.
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
-        self.log.lock().history_messages()
+        self.log
+            .lock()
+            .history_transcript()
+            .messages()
+            .cloned()
+            .collect()
     }
 
     /// Serialised model-view byte count — the compaction-threshold input.

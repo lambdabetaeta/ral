@@ -49,7 +49,7 @@ pub(crate) use observation::{ObservationKind, RailPlace, rail_place};
 pub use done::{settled_spans, settled_text};
 pub use notice::notice_card;
 pub use observation::{
-    execs_card, greps_card, observation_card, observation_from_wire, reads_card,
+    execs_card, greps_card, observation_card, observation_from_wire, observation_spans, reads_card,
 };
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.

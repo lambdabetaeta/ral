@@ -59,7 +59,8 @@ pub(crate) struct Build {
     pub(crate) name: String,
     /// The still-unresolved template, carrying the builtin-index placeholder
     /// so the constructed agent's own children resolve from it in turn.
-    pub(crate) system: String,
+    /// `Arc<str>` so a fork's inheritance is a bump, not a re-copy.
+    pub(crate) system: Arc<str>,
     /// `system` resolved for this bundle's own [`Grants`] — what reaches the
     /// model. The caller resolves it because the log's `SessionStarted`
     /// bookend records the resolved length, and the log must exist before the
@@ -259,7 +260,7 @@ impl Avatar {
             name,
             log_dir,
             started: std::time::Instant::now(),
-            system: system_prompt,
+            system: system_prompt.into(),
             system_base: system,
             index,
             caps,
@@ -453,7 +454,7 @@ impl Avatar {
         let reach = seat.eval_reach().interrupt_only();
         let avatar = Self::assemble(Build {
             name: TRUNK_NAME.to_string(),
-            system,
+            system: system.into(),
             system_prompt,
             index,
             caps,
@@ -699,7 +700,6 @@ impl Avatar {
             disk_warn_bytes,
             lease,
         } = cfg;
-        let system = system.as_str();
         // Derived from the policy, exactly as `root` derives it, so a fixture
         // can never claim a reach its own egress denies.
         let search = egress.policy.search;
@@ -718,7 +718,7 @@ impl Avatar {
         scratch.install_into(&mut shell);
         let index = crate::prompt::BuiltinIndex::resolve(&shell);
         let system_prompt = index.apply(
-            system,
+            &system,
             &Grants {
                 returns: true,
                 allow_schedule,
@@ -744,7 +744,7 @@ impl Avatar {
         let reach = seat.eval_reach().interrupt_only();
         Ok(Self::assemble(Build {
             name: TRUNK_NAME.to_string(),
-            system: system.to_string(),
+            system: system.into(),
             system_prompt,
             index,
             caps: ral_core::types::Capabilities::default(),
@@ -939,7 +939,15 @@ mod tests {
 
         let child = parent.branch("branch".into()).expect("branch child");
 
-        let view = serde_json::to_string(&child.log.lock().history_messages()).unwrap();
+        let view = serde_json::to_string(
+            &child
+                .log
+                .lock()
+                .history_transcript()
+                .messages()
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         assert!(view.contains("what did we learn?"));
         assert!(view.contains("the invariant matters"));
         assert!(
@@ -1347,7 +1355,7 @@ mod tests {
         log.append_user("before the crash".into(), None).unwrap();
         log.append_assistant(ChatMessage::assistant("saved answer"), vec![], None)
             .unwrap();
-        let before = log.history_messages();
+        let before: Vec<_> = log.history_transcript().messages().cloned().collect();
         drop(log);
 
         let scratch =

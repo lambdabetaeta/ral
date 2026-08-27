@@ -23,6 +23,7 @@ mod stream;
 pub mod tls;
 mod transport;
 mod usage;
+mod wire;
 
 pub use error::ProviderError;
 pub(crate) use error::{error_object, extract_url};
@@ -41,8 +42,8 @@ pub use usage::{Usage, UsageParts, humanize_tokens};
 pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
 use crate::agent::cancel;
+use crate::record::model::Transcript;
 use credential::Credential;
-use genai::chat::ChatMessage;
 use std::sync::Arc;
 use transport::Transport;
 
@@ -134,7 +135,7 @@ impl Provider {
     pub(crate) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         system: &str,
-        messages: Vec<ChatMessage>,
+        transcript: &Transcript,
         tool_enabled: bool,
         search: bool,
         on_delta: &mut F,
@@ -148,7 +149,7 @@ impl Provider {
                 &self.tuning,
                 self.openrouter_route(),
                 system,
-                messages,
+                transcript,
                 tool_enabled,
                 search,
                 on_delta,
@@ -176,14 +177,19 @@ impl Provider {
     pub fn summarize(
         &self,
         system: &str,
-        messages: Vec<ChatMessage>,
+        transcript: &Transcript,
         max_tokens: u32,
         cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         match &self.backend {
-            Backend::Live { engine, transport } => {
-                engine.summarize(transport, &self.model, system, messages, max_tokens, cancel)
-            }
+            Backend::Live { engine, transport } => engine.summarize(
+                transport,
+                &self.model,
+                system,
+                transcript,
+                max_tokens,
+                cancel,
+            ),
             Backend::Scripted(script) => script.summarize(&self.model),
         }
     }

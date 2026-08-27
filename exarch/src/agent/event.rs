@@ -9,7 +9,7 @@
 use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
-use crate::record::model::{Memo, View};
+use crate::record::model::{Memo, Transcript, View};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
 use serde::{Deserialize, Serialize};
@@ -265,10 +265,10 @@ pub struct AgentLog {
 }
 
 /// A planned cut: the visible prefix through `through_exchange` becomes the
-/// messages to summarise, while the newer spans stay verbatim.
+/// transcript to summarise, while the newer spans stay verbatim.
 pub struct CompactionPlan {
     pub through_exchange: u64,
-    pub prefix_messages: Vec<ChatMessage>,
+    pub prefix: Transcript,
 }
 
 pub(crate) struct ClearRecord {
@@ -528,7 +528,7 @@ impl AgentLog {
 
     /// # Panics
     /// Panics if a view span is not resident in the ledger.
-    pub fn context_survey(&self) -> ContextSurvey {
+    pub fn context_survey(&mut self) -> ContextSurvey {
         self.model_memo.context_survey()
     }
 
@@ -544,34 +544,36 @@ impl AgentLog {
     /// Approximate context size in serialised model-view bytes.  The fallback
     /// compaction trigger in [`crate::agent::Avatar::compact`] when the model's
     /// context window is unknown; otherwise that tracks token pressure instead.
-    pub fn history_bytes(&self) -> usize {
+    pub fn history_bytes(&mut self) -> usize {
         self.model_memo.history_bytes()
     }
 
-    /// Render the model-view messages for the next provider request.
+    /// Render the model-view transcript for the next provider request.
     ///
     /// # Errors
     /// The session is not awaiting an assistant reply.
-    pub fn render_messages(&self) -> Result<Vec<ChatMessage>, String> {
+    pub fn render_messages(&mut self) -> Result<Transcript, String> {
         if !self.model_memo.is_awaiting_assistant() {
             return Err(format!(
                 "cannot render request while session is in state {}",
                 self.model_memo.state_description()
             ));
         }
-        Ok(self.model_memo.model_messages())
+        Ok(self.model_memo.transcript())
     }
 
     /// Every committed message whatever the phase; compaction's input.
-    pub fn history_messages(&self) -> Vec<ChatMessage> {
-        self.model_memo.model_messages()
+    pub fn history_transcript(&mut self) -> Transcript {
+        self.model_memo.transcript()
     }
 
-    /// The parent context a `mnemon` child inherits.  A spawn from inside a
-    /// tool batch leaves the parent waiting on the very call that made the
+    /// The parent context a `mnemon` child inherits, materialised whole — the
+    /// mnemon child seed, where ownership genuinely transfers into the
+    /// child's own ledger via [`Self::import_context`].  A spawn from inside
+    /// a tool batch leaves the parent waiting on the very call that made the
     /// child, so that unfinished assistant frame is dropped: the child starts
     /// from the request context, not a dangling tool protocol.
-    pub fn inherited_context_messages(&self) -> Vec<ChatMessage> {
+    pub fn inherited_context_messages(&mut self) -> Vec<ChatMessage> {
         self.model_memo.inherited_context_messages()
     }
 
@@ -712,12 +714,12 @@ impl AgentLog {
         }
     }
 
-    pub fn plan_compaction(&self, keep_budget_bytes: usize) -> Option<CompactionPlan> {
+    pub fn plan_compaction(&mut self, keep_budget_bytes: usize) -> Option<CompactionPlan> {
         self.model_memo.plan_compaction(keep_budget_bytes, None)
     }
 
     pub fn plan_compaction_before(
-        &self,
+        &mut self,
         keep_budget_bytes: usize,
         before_exchange: u64,
     ) -> Option<CompactionPlan> {
@@ -1154,8 +1156,8 @@ mod tests {
             vec![1, 2, 3]
         );
         assert!(
-            !s.history_messages()
-                .iter()
+            !s.history_transcript()
+                .messages()
                 .any(|message| message.content.first_text() == Some("before the first prompt"))
         );
     }
@@ -1381,8 +1383,8 @@ mod tests {
         let plan = s.plan_compaction(keep).expect("old spans to fold");
         assert_eq!(plan.through_exchange, 2);
         assert!(
-            plan.prefix_messages
-                .iter()
+            plan.prefix
+                .messages()
                 .any(|message| { message.content.first_text() == Some("one") })
         );
         s.apply_edit(
@@ -1395,8 +1397,8 @@ mod tests {
         .unwrap();
         assert_eq!(s.view().digest.as_ref().unwrap().through_exchange, 2);
         assert!(
-            !s.history_messages()
-                .iter()
+            !s.history_transcript()
+                .messages()
                 .any(|message| { message.content.first_text() == Some("one") })
         );
     }
@@ -1408,10 +1410,10 @@ mod tests {
             .unwrap();
         complete_exchange(&mut s, "normal", "answer");
 
-        let messages = s.history_messages();
+        let transcript = s.history_transcript();
         assert_eq!(
-            messages
-                .iter()
+            transcript
+                .messages()
                 .filter_map(|message| message.content.first_text())
                 .collect::<Vec<_>>(),
             vec!["imported user", "normal", "answer"]
@@ -1515,13 +1517,15 @@ mod tests {
             EditAuthority::Harness,
         )
         .unwrap();
-        let expected = serde_json::to_vec(&live.history_messages()).unwrap();
+        let expected =
+            serde_json::to_vec(&live.history_transcript().messages().collect::<Vec<_>>()).unwrap();
         drop(live);
 
-        let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
+        let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
         assert!(resumed.is_ready());
         assert_eq!(
-            serde_json::to_vec(&resumed.history_messages()).unwrap(),
+            serde_json::to_vec(&resumed.history_transcript().messages().collect::<Vec<_>>())
+                .unwrap(),
             expected
         );
     }
@@ -1759,7 +1763,7 @@ mod tests {
 
         let mut resumed = AgentLog::resume(sessions.path(), 0).expect("interior seam repair");
         assert!(resumed.is_ready());
-        assert!(resumed.history_messages().iter().any(|message| {
+        assert!(resumed.history_transcript().messages().any(|message| {
             message.content.first_text() == Some("(no reply: exchange aborted)")
         }));
         resumed.append_user("next".into(), None).unwrap();
@@ -1843,12 +1847,15 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            let expected = serde_json::to_vec(&live.history_messages()).unwrap();
+            let expected =
+                serde_json::to_vec(&live.history_transcript().messages().collect::<Vec<_>>())
+                    .unwrap();
             drop(live);
-            let resumed = AgentLog::resume(sessions.path(), 0).expect("resume edit sequence");
+            let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume edit sequence");
             assert!(resumed.is_ready());
             assert_eq!(
-                serde_json::to_vec(&resumed.history_messages()).unwrap(),
+                serde_json::to_vec(&resumed.history_transcript().messages().collect::<Vec<_>>())
+                    .unwrap(),
                 expected,
                 "pattern {pattern}"
             );

@@ -1,11 +1,13 @@
 //! Streaming turns, summaries, and partial-response projection.
 
 use super::ProviderError;
-use super::request::{Tuning, build_cached_request, complete_options, tool_defs};
+use super::request::{Tuning, complete_options};
 use super::retry::{Attempt, idle_timeout, retry_with_backoff, wait_for_cancel};
 use super::transport::{Engine, Transport};
 use super::usage::{Usage, usage_from};
+use super::wire::{manufacture, tool_defs};
 use crate::agent::cancel;
+use crate::record::model::Transcript;
 use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatOptions, ChatStreamEvent, StopReason, StreamEnd, ToolCall};
@@ -57,7 +59,7 @@ impl Engine {
         tuning: &Tuning,
         route: Option<&str>,
         system: &str,
-        messages: Vec<ChatMessage>,
+        transcript: &Transcript,
         tool_enabled: bool,
         search: bool,
         on_delta: &mut F,
@@ -65,7 +67,6 @@ impl Engine {
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale(transport);
         let adapter = transport.adapter();
-        let request_template = build_cached_request(adapter, system, messages);
         let tools = tool_defs(adapter, tool_enabled, search);
         let options = complete_options(self.cache_key(), max_tokens_override, tuning, route);
 
@@ -73,8 +74,7 @@ impl Engine {
             "before request",
             cancel,
             async |attempt| {
-                let mut request = request_template.clone();
-                request.tools = (!tools.is_empty()).then(|| tools.clone());
+                let request = manufacture(adapter, system, transcript, None, &tools).into_request();
                 let mut seen_streamed_content = false;
                 let mut streamed = String::new();
                 let mut streamed_reasoning = String::new();
@@ -179,20 +179,12 @@ impl Engine {
         transport: &Transport,
         model: &str,
         system: &str,
-        mut messages: Vec<ChatMessage>,
+        transcript: &Transcript,
         max_tokens: u32,
         cancel: &cancel::Token,
     ) -> Result<SummaryOut, ProviderError> {
         self.refresh_if_stale(transport);
         let adapter = transport.adapter();
-        messages.push(ChatMessage::user(
-            "Summarise the conversation so far concisely: \
-            the user's task, what has been tried, what worked, what state the \
-            shell is in (cwd, env, defined names), and any open subtasks. \
-            A prior summary may appear first — fold it in. \
-            Return only the summary, no preamble.",
-        ));
-        let request_template = build_cached_request(adapter, system, messages);
         let options = ChatOptions::default()
             .with_max_tokens(max_tokens)
             .with_prompt_cache_key(self.cache_key());
@@ -201,7 +193,14 @@ impl Engine {
             "during summary",
             cancel,
             async |attempt| {
-                let request = request_template.clone();
+                let request = manufacture(
+                    adapter,
+                    system,
+                    transcript,
+                    Some(summary_instruction()),
+                    &[],
+                )
+                .into_request();
                 // `exec_chat` returns only when the whole reply is in, so this
                 // bounds the whole call; no per-read timeout backs it up.
                 let result = tokio::select! {
@@ -235,6 +234,18 @@ impl Engine {
             usage: usage_from(model, &response.usage, transport.metered(), adapter),
         })
     }
+}
+
+/// Freshly minted per attempt — never a clone of a shared message, so it
+/// carries none of the wire door's single annotated clone site.
+fn summary_instruction() -> ChatMessage {
+    ChatMessage::user(
+        "Summarise the conversation so far concisely: \
+        the user's task, what has been tried, what worked, what state the \
+        shell is in (cwd, env, defined names), and any open subtasks. \
+        A prior summary may appear first — fold it in. \
+        Return only the summary, no preamble.",
+    )
 }
 
 fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: AdapterKind) -> StepOut {

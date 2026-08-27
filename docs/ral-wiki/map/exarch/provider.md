@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fcf36a94
+generated_at_commit: 3606091a
 generated_at_date: 2026-08-27
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
@@ -10,11 +10,13 @@ covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/mode
 scripted `Backend`, and OpenRouter route admission. The transcript owns
 history; the provider only sends bytes and parses replies. Invariants are
 local below the facade: `provider/identity.rs` owns selectable identity,
-`request.rs` wire shaping (including `Tuning` and the `EFFORT_LADDER` rungs;
-the TUI keeps only the glyphs), `transport.rs` credential binding and caching,
-`stream.rs` completion and summary execution, `retry.rs` recovery timing,
-`usage.rs` accounting, `error.rs` fault classification, and `listing.rs`
-model-list fetch orchestration. The public facade
+`request.rs` per-request `ChatOptions` and tuning (`Tuning`, the
+`EFFORT_LADDER` rungs — the TUI keeps only the glyphs), `wire.rs` the one door
+that turns a `Transcript` into an owned `genai::ChatRequest` (below),
+`transport.rs` credential binding and caching, `stream.rs` completion and
+summary execution, `retry.rs` recovery timing, `usage.rs` accounting,
+`error.rs` fault classification, and `listing.rs` model-list fetch
+orchestration. The public facade
 re-exports their established types; sibling modules meet through narrow
 methods on `Engine` and `Transport`, not visible fields.
 
@@ -221,7 +223,7 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 
 ## The streaming and summary paths
 
-- `complete(system, messages, tool_enabled, search, on_delta, cancel)` —
+- `complete(system, transcript, tool_enabled, search, on_delta, cancel)` —
   streams one assistant reply, calling `on_delta` with a `Delta::Say` per text
   chunk and a `Delta::Think` per reasoning chunk, and projects the `StreamEnd`
   into a `StepOut` (assistant message, tool calls, `Usage`, `StopReason`). One
@@ -322,18 +324,33 @@ cannot land mid-character and panic (X8).
   also supplies `ModelCaps` (context window and supported request parameters)
   for startup and picker decisions. Offline starts degrade to `—`.
 
-`provider/request.rs::build_cached_request` marks `cache_control: ephemeral`
-breakpoints on the system prompt and the last two messages, for Anthropic
-alone: two anchors of different depths, so a diverging tail (retry, fork,
-compaction) still lands on a cached prefix. On OpenAI the same marks would
-select the metered *explicit* prompt cache, which the ChatGPT and Codex
-Responses endpoints reject outright (rust-genai #273), so every other adapter
-carries its system prompt in the request's own `system` field — where the
-Responses adapter's `instructions` string wants it anyway — and leans on the
-per-process `prompt_cache_key` alone, which genai reads as intent for the free
-implicit cache. `tool_defs(adapter, tool_enabled, search)` builds the request's tool array:
-the `ral` wire tool under `tool_enabled`, plus the provider's own hosted
-web-search tool under `search` — carried only on the three adapters genai maps it
-for (`OpenAIResp`, `Anthropic`, `Gemini`), and `OpenAIResp` alone adds the
+## The wire door
+
+`provider/wire.rs` is the one place an owned `genai::ChatRequest` is built —
+[[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] is the
+ADR, [[internals/session-record|session-record]] covers the persistent
+`Transcript` value it consumes. `Sealed(ChatRequest)` wraps the result and is
+deliberately not `Clone`, so a built request cannot be kept alive and cloned
+for a later retry; `manufacture(adapter, system, transcript: &Transcript, tail,
+tools)` is called fresh inside each retry attempt in `stream.rs`'s
+`Engine::complete`/`Engine::summarize`, and is the sole successor to the old
+free-standing `build_cached_request` and both engines' `request_template`s,
+which no longer exist.
+
+`manufacture` marks `cache_control: ephemeral` breakpoints on the system
+prompt and the last two messages, for Anthropic alone: two anchors of
+different depths, so a diverging tail (retry, fork, compaction) still lands on
+a cached prefix. The marks land on `manufacture`'s own fresh clone of the
+transcript's shared messages, never on the shared segments themselves. On
+OpenAI the same marks would select the metered *explicit* prompt cache, which
+the ChatGPT and Codex Responses endpoints reject outright (rust-genai #273),
+so every other adapter carries its system prompt in the request's own
+`system` field — where the Responses adapter's `instructions` string wants it
+anyway — and leans on the per-process `prompt_cache_key` alone, which genai
+reads as intent for the free implicit cache. `tool_defs(adapter, tool_enabled,
+search)`, also in `wire.rs`, builds the request's tool array: the `ral` wire
+tool under `tool_enabled`, plus the provider's own hosted web-search tool
+under `search` — carried only on the three adapters genai maps it for
+(`OpenAIResp`, `Anthropic`, `Gemini`), and `OpenAIResp` alone adds the
 `external_web_access` config that switches codex from its cached index to the
 live internet; the bit is [[map/exarch/agent|agent]]'s `search`.

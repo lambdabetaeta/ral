@@ -1,5 +1,5 @@
 ---
-generated_at_commit: fcf36a94
+generated_at_commit: 3606091a
 generated_at_date: 2026-08-27
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -82,7 +82,10 @@ order); `record/log.rs` (the `record.jsonl` io-door, with the attachable
 time); `record/commit.rs` (the worker-side
 commit producer: one `Chopper` per lane of the model's stream, and
 `SurfaceBuffer`, moved whole from `tui/surface.rs`); `record/model.rs` (the model fold, `Protocol` alone, with
-streaming resume/admission);
+streaming resume/admission, and the `Transcript` persistent value + closed-span
+render cache the provider-facing projection is built from — see
+[[internals/session-record#The provider-facing transcript is a persistent value|the transcript-as-value section]]
+and [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 `record/view.rs` (the view fold into `Blocks`; block construction is private).
 `Viewport` and `Headless` both implement `record::Printer`
 (`transient`/`sync`): a live `Signal::Fact` steps the view fold beside the
@@ -100,10 +103,13 @@ stays visible until quiescence.
 `agent/event.rs` is the canonical per-session record. `AgentLog` owns two things:
 
 - the model fold's `Memo` (`record/model.rs`) — its only session state:
-  renders the next provider request and drives
-  the protocol state machine (`is_ready` gates a fresh prompt and `quiesce` winds
-  any in-flight exchange back to it, so an exchange never strands a prompt mid-protocol;
-  [[invariants/turn-ends-ready|exchange-ends-ready]]);
+  drives the protocol state machine (`is_ready` gates a fresh prompt and
+  `quiesce` winds any in-flight exchange back to it, so an exchange never
+  strands a prompt mid-protocol; [[invariants/turn-ends-ready|exchange-ends-ready]])
+  and answers `transcript()` — the provider-facing `Transcript`, a shared,
+  `Arc`-backed persistent value rather than a fresh `Vec<ChatMessage>` per
+  call — which `provider/wire.rs` alone turns into an owned request, once per
+  HTTP attempt ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 - the record seam (`record::Emitter`) onto `sessions/<n>/record.jsonl` — the
   one durable log every fact this session authors crosses, whose protocol
   fold is the model view, with display commits and forensic breadcrumbs

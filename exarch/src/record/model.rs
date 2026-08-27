@@ -21,12 +21,13 @@ use crate::agent::event::{
     ToolResult, summary_prompt, validate_result_ids,
 };
 use genai::chat::{ChatMessage, ChatRole, ToolResponse};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Marker type implementing [`Fold`] for the model view; carries no state of
 /// its own; [`Memo`] is where the projection lives.
@@ -80,6 +81,73 @@ pub struct Span {
 pub struct View {
     pub digest: Option<Digest>,
     pub spans: Vec<Span>,
+}
+
+/// The provider-facing view as a persistent value: one shared segment per
+/// closed span (digest included), the live tail rendered fresh. Clone is
+/// Arc bumps; the only routes back to owned messages are the wire door and
+/// the mnemon child seed.
+#[derive(Clone, Default)]
+pub struct Transcript {
+    segments: Vec<Arc<[ChatMessage]>>,
+    bytes: usize,
+}
+
+impl Transcript {
+    fn push(&mut self, segment: Arc<[ChatMessage]>, bytes: usize) {
+        self.bytes += bytes;
+        self.segments.push(segment);
+    }
+
+    pub fn messages(&self) -> impl Iterator<Item = &ChatMessage> {
+        self.segments.iter().flat_map(|segment| segment.iter())
+    }
+
+    pub fn len(&self) -> usize {
+        self.segments.iter().map(|segment| segment.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.segments.iter().all(|segment| segment.is_empty())
+    }
+
+    /// Serialised size, from per-segment measures cached at render.
+    pub fn byte_len(&self) -> usize {
+        self.bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(messages: Vec<ChatMessage>) -> Self {
+        let bytes = message_bytes(&messages);
+        Self {
+            segments: vec![Arc::from(messages)],
+            bytes,
+        }
+    }
+}
+
+/// A closed span's rendering, cached beside the span's own end index: a hit
+/// requires `end` to match, so a still-growing span re-renders and staleness
+/// is inexpressible.
+struct SpanRender {
+    end: usize,
+    segment: Arc<[ChatMessage]>,
+    /// Serialised bytes of `segment`, measured once.
+    bytes: usize,
+}
+
+/// The digest's rendering, replaced wholesale whenever a `Fold` replaces the
+/// digest text itself.
+struct DigestRender {
+    segment: Arc<[ChatMessage]>,
+    bytes: usize,
+}
+
+fn message_bytes(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .map(|m| serde_json::to_string(m).map_or(0, |s| s.len()))
+        .sum()
 }
 
 /// One resident protocol record, or the [`Stamp`] to read it back by once a
@@ -177,7 +245,10 @@ fn read_freed(reader: &mut File, stamp: &Stamp) -> io::Result<Protocol> {
 }
 
 /// The model fold's memo: the running protocol-view projection, per-record
-/// residency, and the ledger those two are built from.
+/// residency, the ledger those two are built from, and the render cache
+/// under the recompute invariant — a memo of a pure function at immutable
+/// arguments, never serialised, rebuilt from nothing by this same fold on
+/// resume.
 #[derive(Default)]
 pub struct Memo {
     ledger: Ledger,
@@ -185,6 +256,11 @@ pub struct Memo {
     view: View,
     max_exchange: u64,
     newest_edit: Option<usize>,
+    /// Closed-span renderings, keyed by span id — a span id never recurs
+    /// (`record_event_span` only opens a span strictly past the running
+    /// maximum), so `(id, end)` determines a rendering globally and forever.
+    render: HashMap<u64, SpanRender>,
+    digest_render: Option<DigestRender>,
 }
 
 impl Memo {
@@ -270,36 +346,74 @@ impl Memo {
         stubs_to_ready(&self.state, reason)
     }
 
-    /// The parent context a `mnemon` child inherits. A spawn from inside a
-    /// tool batch leaves the parent waiting on the very call that made the
-    /// child, so that unfinished assistant frame is dropped: the child
-    /// starts from the request context, not a dangling tool protocol.
-    pub(crate) fn inherited_context_messages(&self) -> Vec<ChatMessage> {
+    /// The parent context a `mnemon` child inherits, materialised whole: the
+    /// one other place ownership genuinely transfers, beside the wire door.
+    /// A spawn from inside a tool batch leaves the parent waiting on the very
+    /// call that made the child, so that unfinished assistant frame is
+    /// dropped: the child starts from the request context, not a dangling
+    /// tool protocol.
+    pub(crate) fn inherited_context_messages(&mut self) -> Vec<ChatMessage> {
         let omit_tail_assistant = matches!(self.state, State::AwaitingToolResults { .. });
-        self.project_view(omit_tail_assistant)
+        self.assemble(omit_tail_assistant)
+            .messages()
+            .cloned()
+            .collect()
     }
 
-    /// The provider-facing message list — recomputed from the protocol
-    /// subsequence on every call, never accumulator state: `span_messages`'s
-    /// `omit`/`repair_end` flags depend on which span is currently last, so
-    /// they must be free to change retroactively when an edit removes the
-    /// tail.
-    pub fn model_messages(&self) -> Vec<ChatMessage> {
-        self.project_view(false)
+    /// The provider-facing transcript — recomputed from the protocol
+    /// subsequence on every call, never accumulator state: closed spans hit
+    /// the memo, and the tail is rendered fresh because its `omit`/
+    /// `repair_end` flags depend on which span is currently last and must
+    /// stay free to change retroactively when an edit removes the tail.
+    pub fn transcript(&mut self) -> Transcript {
+        self.assemble(false)
     }
 
-    fn project_view(&self, omit_tail_assistant: bool) -> Vec<ChatMessage> {
-        let spans = &self.view.spans;
-        let mut messages = Vec::new();
-        if let Some(digest) = &self.view.digest {
-            messages.push(ChatMessage::user(summary_prompt(&digest.text)));
+    fn assemble(&mut self, omit_tail_assistant: bool) -> Transcript {
+        let mut transcript = Transcript::default();
+        if let Some(digest) = &self.digest_render {
+            transcript.push(Arc::clone(&digest.segment), digest.bytes);
         }
-        for (index, span) in spans.iter().enumerate() {
-            let omit = omit_tail_assistant && index + 1 == spans.len();
-            let repair_end = index + 1 < spans.len() && !omit;
-            messages.extend(self.span_messages(span, omit, repair_end));
+        let spans = self.view.spans.clone();
+        if let Some((last, closed)) = spans.split_last() {
+            for span in closed {
+                let entry = self.render_closed_entry(span);
+                transcript.push(Arc::clone(&entry.segment), entry.bytes);
+            }
+            let tail = self.render_tail(last, omit_tail_assistant);
+            let bytes = message_bytes(&tail);
+            transcript.push(Arc::from(tail), bytes);
         }
-        messages
+        transcript
+    }
+
+    /// A closed span's rendering, cached beside its own end index. No flags
+    /// parameter exists, so nothing can vary one: the memo's key is the
+    /// whole of this function's input.
+    fn render_closed_entry(&mut self, span: &Span) -> &SpanRender {
+        let stale = self
+            .render
+            .get(&span.id)
+            .is_none_or(|cached| cached.end != span.events.end);
+        if stale {
+            let messages = self.span_messages(span, false, true);
+            let bytes = message_bytes(&messages);
+            let _ = self.render.insert(
+                span.id,
+                SpanRender {
+                    end: span.events.end,
+                    segment: Arc::from(messages),
+                    bytes,
+                },
+            );
+        }
+        self.render.get(&span.id).expect("just ensured present")
+    }
+
+    /// The last span only — the two retroactive flags live here and nowhere
+    /// else, and the result is never cached.
+    fn render_tail(&self, span: &Span, omit_tail_assistant: bool) -> Vec<ChatMessage> {
+        self.span_messages(span, omit_tail_assistant, false)
     }
 
     fn span_messages(
@@ -336,26 +450,17 @@ impl Memo {
         messages
     }
 
-    fn span_message_bytes(&self, span: &Span) -> usize {
-        self.span_message_bytes_with_repair(span, true)
-    }
-
-    fn span_message_bytes_with_repair(&self, span: &Span, repair_end: bool) -> usize {
-        self.span_messages(span, false, repair_end)
-            .iter()
-            .map(|message| serde_json::to_string(message).map_or(0, |s| s.len()))
-            .sum()
-    }
-
-    fn messages_for_spans(&self, spans: &[Span]) -> Vec<ChatMessage> {
-        let mut messages = Vec::new();
-        if let Some(digest) = &self.view.digest {
-            messages.push(ChatMessage::user(summary_prompt(&digest.text)));
+    fn messages_for_spans(&mut self, spans: &[Span]) -> Transcript {
+        let mut transcript = Transcript::default();
+        if let Some(digest) = &self.digest_render {
+            transcript.push(Arc::clone(&digest.segment), digest.bytes);
         }
-        for span in spans {
-            messages.extend(self.span_messages(span, false, true));
+        let spans = spans.to_vec();
+        for span in &spans {
+            let entry = self.render_closed_entry(span);
+            transcript.push(Arc::clone(&entry.segment), entry.bytes);
         }
-        messages
+        transcript
     }
 
     /// The window every read query of the model view answers over — private
@@ -387,49 +492,62 @@ impl Memo {
 
     /// Approximate context size in serialised model-view bytes — the
     /// fallback compaction trigger when the model's context window is
-    /// unknown.
-    pub(crate) fn history_bytes(&self) -> usize {
-        self.model_messages()
-            .iter()
-            .map(|m| serde_json::to_string(m).map_or(0, |s| s.len()))
-            .sum()
+    /// unknown. Closed spans read the memo's cached bytes; only the live
+    /// tail is re-serialised.
+    pub(crate) fn history_bytes(&mut self) -> usize {
+        self.transcript().byte_len()
     }
 
     /// # Panics
     /// Panics if a view span is not resident in the ledger.
-    pub(crate) fn context_survey(&self) -> ContextSurvey {
+    pub(crate) fn context_survey(&mut self) -> ContextSurvey {
         let mut survey = ContextSurvey::default();
         if let Some(digest) = &self.view.digest {
+            let bytes = self
+                .digest_render
+                .as_ref()
+                .expect("a view digest always has a cached rendering")
+                .bytes;
             let item = ContextSurveyItem {
                 exchange: digest.through_exchange,
                 kind: ContextSpanKind::Digest,
                 opening: opening_line(&digest.text),
-                bytes: serde_json::to_string(&ChatMessage::user(summary_prompt(&digest.text)))
-                    .map_or(0, |text| text.len()),
+                bytes,
                 steps: 0,
                 live: false,
             };
             survey.add(item);
         }
-        for span in &self.view.spans {
-            let events = self
-                .ledger
-                .resident_events(span.events.clone())
-                .expect("view spans are resident in the ledger");
-            let kind = match events.first() {
-                Some(Protocol::ContextMessage { .. }) => ContextSpanKind::Import,
-                _ => ContextSpanKind::Exchange,
+        let spans = self.view.spans.clone();
+        for span in &spans {
+            let (kind, opening, steps) = {
+                let events = self
+                    .ledger
+                    .resident_events(span.events.clone())
+                    .expect("view spans are resident in the ledger");
+                let kind = match events.first() {
+                    Some(Protocol::ContextMessage { .. }) => ContextSpanKind::Import,
+                    _ => ContextSpanKind::Exchange,
+                };
+                let opening = opening_line_for_events(&events);
+                let steps = events
+                    .iter()
+                    .filter(|event| matches!(event, Protocol::StepStarted { .. }))
+                    .count();
+                (kind, opening, steps)
             };
             let live = self.is_live_exchange(span.id);
+            let bytes = if live {
+                message_bytes(&self.render_tail(span, false))
+            } else {
+                self.render_closed_entry(span).bytes
+            };
             let item = ContextSurveyItem {
                 exchange: span.id,
                 kind,
-                opening: opening_line_for_events(&events),
-                bytes: self.span_message_bytes_with_repair(span, !live),
-                steps: events
-                    .iter()
-                    .filter(|event| matches!(event, Protocol::StepStarted { .. }))
-                    .count(),
+                opening,
+                bytes,
+                steps,
                 live,
             };
             survey.add(item);
@@ -540,12 +658,16 @@ impl Memo {
         Ok(())
     }
 
+    /// Plan-compaction only ever runs at a ready boundary
+    /// ([`Self::can_compact`]), so every span it weighs — including the one
+    /// last in `view.spans` — is already closed and safe to cache through
+    /// [`Self::render_closed_entry`].
     pub(crate) fn plan_compaction(
-        &self,
+        &mut self,
         keep_budget_bytes: usize,
         before_exchange: Option<u64>,
     ) -> Option<CompactionPlan> {
-        let spans = &self.view.spans;
+        let spans = self.view.spans.clone();
         let cap = before_exchange.map(|id| {
             spans
                 .iter()
@@ -557,12 +679,12 @@ impl Memo {
             return None;
         }
 
-        let mut suffix_bytes = spans[suffix_start..]
+        let mut suffix_bytes: usize = spans[suffix_start..]
             .iter()
-            .map(|span| self.span_message_bytes(span))
-            .sum::<usize>();
+            .map(|span| self.render_closed_entry(span).bytes)
+            .sum();
         for index in (0..suffix_start).rev() {
-            let bytes = self.span_message_bytes(&spans[index]);
+            let bytes = self.render_closed_entry(&spans[index]).bytes;
             let Some(total) = suffix_bytes.checked_add(bytes) else {
                 break;
             };
@@ -578,7 +700,7 @@ impl Memo {
 
         Some(CompactionPlan {
             through_exchange: spans[suffix_start - 1].id,
-            prefix_messages: self.messages_for_spans(&spans[..suffix_start]),
+            prefix: self.messages_for_spans(&spans[..suffix_start]),
         })
     }
 }
@@ -882,6 +1004,25 @@ fn step_protocol(memo: &mut Memo, stamp: Stamp, protocol: &Protocol) {
         let removed = removed_event_ranges(&memo.view, op);
         apply_context_op(&mut memo.view, op);
         memo.newest_edit = Some(index);
+        match op {
+            ContextOp::Fold { digest, .. } => {
+                let message = ChatMessage::user(summary_prompt(digest));
+                let bytes = message_bytes(std::slice::from_ref(&message));
+                memo.digest_render = Some(DigestRender {
+                    segment: Arc::from(vec![message]),
+                    bytes,
+                });
+            }
+            ContextOp::Drop { .. } => {
+                if memo.view.digest.is_none() {
+                    memo.digest_render = None;
+                }
+            }
+        }
+        // Memory hygiene, not correctness: a stale render can never be read
+        // back, since a hit demands `end` to match a span still in view.
+        let live_ids: HashSet<u64> = memo.view.spans.iter().map(|span| span.id).collect();
+        memo.render.retain(|id, _| live_ids.contains(id));
         removed
     } else {
         Vec::new()

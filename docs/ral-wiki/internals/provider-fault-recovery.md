@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 6d48e9af
-verified_at_date: 2026-08-26
-anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS]
+verified_at_commit: 3606091a
+verified_at_date: 2026-08-27
+anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
 # Provider faults and recovery
@@ -154,6 +154,19 @@ The loop is small and the rules read straight off it:
   attempt count and surfaced. So a 4xx never burns the budget.
 - Between attempts it `select!`s the backoff sleep against the cancel token, so
   a user can interrupt a wait.
+
+Each retry re-**manufactures** the request rather than cloning one. Both
+`Engine::complete` and `Engine::summarize` (`provider/stream.rs`) hold
+`&Transcript` — the shared, `Arc`-backed history — and call
+`provider/wire.rs::manufacture` inside the retry closure, once per attempt.
+There is no request template kept alive across attempts to clone: `manufacture`
+returns a `Sealed(ChatRequest)` that is deliberately not `Clone`, so a second
+copy of a built request cannot be expressed on this path even by accident. A
+retry storm still pays one whole-history deep copy per attempt — the genai
+floor, since `exec_chat_stream`/`exec_chat` consume an owned request — but it
+is bounded by exactly the tiers above, and it is the *only* copy the retry
+loop pays, not a copy of a copy. See
+[[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]].
 
 `retry_limits` gives rate limits a strictly more patient tier than generic
 transient faults — they are the only thing now retried on a 429, so they must be

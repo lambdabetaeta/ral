@@ -127,7 +127,7 @@ impl Avatar {
                 let unrecorded = &mut unrecorded;
                 provider.complete(
                     &self.agent.system,
-                    messages,
+                    &messages,
                     self.agent.tool_enabled,
                     self.agent.search,
                     &mut |delta: Delta<'_>| {
@@ -335,7 +335,7 @@ impl Avatar {
         };
         self.recorder()
             .transient(Transient::State(AgentState::Compacting));
-        match provider.summarize(&self.agent.system, plan.prefix_messages, summary_cap, token) {
+        match provider.summarize(&self.agent.system, &plan.prefix, summary_cap, token) {
             Ok(summary) => {
                 let recorded = self.log.lock().record_usage(summary.usage.into());
                 if let Err(e) = recorded {

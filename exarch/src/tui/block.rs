@@ -35,6 +35,10 @@ pub(super) enum RailShape {
     /// work landing in root's scrollback turns after the run that spawned it is
     /// the same event as an agent's answer arriving, whatever produced it.
     Settled,
+    /// A detached worker's birth. It wears the `↗` of [`RailKind::FleetAct`],
+    /// the act that made it: work leaving the run, to which [`Self::Settled`]
+    /// is the `↘` of its return.
+    Spawned,
     Error,
     /// The turn the human stopped: it wears the `╳` an error does — the work
     /// broke off either way — but stays a separate shape so [`Block::is_error`]
@@ -768,6 +772,7 @@ impl Block {
             BlockKind::Chrome { shape, .. } => match shape {
                 RailShape::Step => Some(RailKind::Step),
                 RailShape::Settled => Some(RailKind::Subagent),
+                RailShape::Spawned => Some(RailKind::FleetAct),
                 RailShape::Error | RailShape::Cancelled => Some(RailKind::Error),
                 RailShape::Plain => Some(RailKind::Note),
                 RailShape::Prompt => Some(RailKind::Prompt),

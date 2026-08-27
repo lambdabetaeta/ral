@@ -1412,9 +1412,9 @@ impl Viewport {
     }
 }
 
-/// Rebuild one [`Display::Observation`](record::Display::Observation)'s card,
-/// through the same [`observation_card`]/[`rail_place`] the live rail draws
-/// from — a rendering, never recorded, rebuilt fresh at sync time.
+/// Rebuild one [`Display::Observation`](record::Display::Observation)'s block,
+/// through the same [`rail_place`] the live rail draws from — a rendering,
+/// never recorded, rebuilt fresh at sync time.
 fn render_observation(value: ral_core::serial::FOValue) -> Vec<Block> {
     let Some(obs) = observation_from_wire(value) else {
         return Vec::new();
@@ -1426,11 +1426,16 @@ fn render_observed(what: &Observed) -> Vec<Block> {
     let Some(place) = rail_place(what) else {
         return Vec::new();
     };
-    let card = observation_card(what);
     match place {
-        RailPlace::Grouped(kind) => vec![Block::observation_card(card, kind, 1)],
-        RailPlace::Barrier => vec![Block::write_card(card)],
-        RailPlace::Standalone => vec![Block::card(card)],
+        RailPlace::Grouped(kind) => {
+            vec![Block::observation_card(observation_card(what), kind, 1)]
+        }
+        RailPlace::Barrier => vec![Block::write_card(observation_card(what))],
+        RailPlace::Standalone => vec![Block::card(observation_card(what))],
+        RailPlace::Announced => vec![Block::chrome(
+            RailShape::Spawned,
+            super::line::render_text(&card::observation_spans(what)),
+        )],
     }
 }
 

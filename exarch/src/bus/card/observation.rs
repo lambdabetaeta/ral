@@ -59,6 +59,9 @@ pub(crate) enum RailPlace {
     Barrier,
     /// Lands alone, tallied under nothing.
     Standalone,
+    /// Announced rather than bounded: a rail notice whose whole content is
+    /// its heading, the place a settled background block also takes.
+    Announced,
 }
 
 pub(crate) fn rail_place(what: &Observed) -> Option<RailPlace> {
@@ -70,14 +73,14 @@ pub(crate) fn rail_place(what: &Observed) -> Option<RailPlace> {
             ..
         } => RailPlace::Grouped(ObservationKind::Exec),
         Observed::Write { .. } => RailPlace::Barrier,
-        // A denial reads best whole, not dissolved into a tally; a birth
-        // stays whole for the same reason — kept even where redundant, so
-        // the rail can name what the trail names.
+        // A denial reads best whole, not dissolved into a tally.
         Observed::Capability {
             decision: Decision::Denied,
             ..
-        }
-        | Observed::Worker { .. } => RailPlace::Standalone,
+        } => RailPlace::Standalone,
+        // A birth is the departure a settlement is the arrival of, and reads
+        // as that mirror.
+        Observed::Worker { .. } => RailPlace::Announced,
         // Desk-fed only: an `Act` never reaches the rail from the engine seam.
         Observed::Command { .. } | Observed::Capability { .. } | Observed::Act { .. } => {
             return None;
@@ -85,23 +88,16 @@ pub(crate) fn rail_place(what: &Observed) -> Option<RailPlace> {
     })
 }
 
-/// Compose an [`Observed`] into a [`Card`].
+/// The one line an [`Observed`] reads as.
 ///
-/// One [`Mark::Text`] heading of a muted verb, the path, program, or resource
-/// as its [`Role::Path`] subject, and the outcome, status, or decision roled by
-/// its level.  A write is the one observation that carries a body, and so the
-/// one that departs — see [`write_card`].
-pub fn observation_card(what: &Observed) -> Card {
-    let spans = match what {
+/// A muted verb, the path, program, or resource as its [`Role::Path`] subject,
+/// and the outcome, status, or decision roled by its level.  A card wraps this
+/// as its heading; a [`RailPlace::Announced`] observation is only this, drawn
+/// on the rail.
+pub fn observation_spans(what: &Observed) -> Vec<Span> {
+    match what {
         Observed::Read { path } => read_spans(path),
-        Observed::Write {
-            path,
-            outcome,
-            new_bytes,
-            ..
-        } => {
-            return write_card(path, *outcome, new_bytes.as_deref());
-        }
+        Observed::Write { path, outcome, .. } => write_spans(path, *outcome),
         Observed::Command { argv, status, .. } => {
             let mut spans = vec![Span::plain("$ ")];
             spans.extend(exec_cmd_spans(argv));
@@ -124,8 +120,25 @@ pub fn observation_card(what: &Observed) -> Card {
         Observed::Act { .. } => {
             unreachable!("an `Act` never reaches the rail from the engine seam")
         }
-    };
-    Card(vec![Mark::Text { spans }])
+    }
+}
+
+/// Compose an [`Observed`] into a [`Card`]: its [`observation_spans`] heading.
+/// A write is the one observation that carries a body, and so the one that
+/// departs — see [`write_card`].
+pub fn observation_card(what: &Observed) -> Card {
+    if let Observed::Write {
+        path,
+        outcome,
+        new_bytes,
+        ..
+    } = what
+    {
+        return write_card(path, *outcome, new_bytes.as_deref());
+    }
+    Card(vec![Mark::Text {
+        spans: observation_spans(what),
+    }])
 }
 
 /// A write's card: its [`write_preview`] under a `write <path> <outcome>`

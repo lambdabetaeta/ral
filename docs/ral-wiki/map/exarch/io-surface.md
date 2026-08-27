@@ -187,7 +187,10 @@ buckets (reads by path, execs by argv, greps by `(scope, pattern)`), flushed at
 natural boundaries through per-kind group helpers into **one card per
 non-empty kind** in a fixed Read → Exec → Grep order. A capability check or
 worker birth never joins the buffer — rare and high-signal enough to earn its
-own line. A **write**
+own line. A denial stands as its own card; a **worker birth** is not a card at
+all but a rail notice wearing the `↗` of the fleet act that made it, mirroring
+the `↘` its settlement arrives on — the departure and the return of the same
+detached work read as a pair of announcements around the run. A **write**
 joins it but no group: its diff is a barrier, not a foldable
 observation, so it flushes as its own card, *last*, after the read/exec/grep
 groups. That last position is the point. A redirect writes at the *seam*,
