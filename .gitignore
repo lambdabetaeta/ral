@@ -50,6 +50,7 @@ guest-net/fuzz/target/
 
 # Working notes for a person, not part of the tree.
 scratch/
+.scratch/
 
 # Tauri regenerates a permission schema per host it is built on. The three
 # synod ships on are tracked; a Linux host's is a build product of a platform
