@@ -9,10 +9,6 @@
 //!
 //! [`Transient`] is the disjoint, unrecorded half of the channel: deltas, the
 //! provisional thinking seat, and chrome that dies with the process.
-#![allow(
-    dead_code,
-    reason = "the producers author through this surface, but the printers do not draw it yet: record::view's Blocks and the replay driver stay unconsumed until tui/headless are reborn as printers (P3/P6)"
-)]
 #![deny(unused_results)]
 #![deny(clippy::let_underscore_must_use)]
 #![deny(clippy::wildcard_enum_match_arm)]

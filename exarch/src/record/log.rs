@@ -124,6 +124,11 @@ impl Log {
     /// the file's, never the session's: swapping the `Log` instead would
     /// strand the bus and every `Emitter` clone on the rotated-away file.
     ///
+    /// `Seq`/`Stamp` ranges are per-segment, not per-session: this only stays
+    /// sound because `rotate`'s one caller, `/clear`, resets every fold
+    /// (model memo, view) in the same beat, so nothing straddling the old
+    /// numbering survives to be confused by the new one starting at zero.
+    ///
     /// # Errors
     /// Returns `Err` if the new file cannot be created, or the lock is
     /// poisoned; on either the old segment stays live.

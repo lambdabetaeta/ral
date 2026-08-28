@@ -1,6 +1,6 @@
 //! A session's typed, multi-producer inbound queue: [`Inbox`] is the owned
-//! consumer end, [`Mailbox`] the cloneable sender end.  Pushes coalesce or are
-//! quota-checked; the attend loop drains mid-exchange at a tool boundary
+//! consumer end, [`Mailbox`] the cloneable sender end.  Idempotent pushes
+//! coalesce; the attend loop drains mid-exchange at a tool boundary
 //! ([`Inbox::drain_steering`]) and parks at the exchange boundary
 //! ([`Inbox::next_or_idle`]).
 //!
@@ -15,7 +15,7 @@
 //! push that wakes a parked consumer, so a park verdict recomputed on the
 //! wakeup already reads engaged.
 
-use super::post::{Boundary, is_slash, source_name};
+use super::post::{Boundary, Source, is_slash};
 use super::{Item, Post};
 use crate::agent::cancel;
 use crate::sync::LockExt;
@@ -45,39 +45,6 @@ pub(crate) enum ParkMode {
     UntilCancelled,
     /// Nothing will ever feed this agent again: terminate at quiescence.
     Quiesce,
-}
-
-/// Per-agent, per-source cap on a *non-idempotent* message (`AgentResult`,
-/// `AgentMessage`, `Command`, `Surface`) — generous, so only a runaway producer
-/// meets it.  The idempotent sources coalesce and are never counted: `nudge`
-/// holds one entry, while `schedule` and `user` are bounded only by armed
-/// schedules and by a human's typing, neither machine-floodable.
-pub(crate) const INBOX_SOURCE_CAP: usize = 64;
-/// Total across the four quota-checked sources, so several near their own cap
-/// cannot add up past one ceiling.  Bounds no idempotent source either.
-pub(crate) const INBOX_TOTAL_CAP: usize = 256;
-
-/// Why a quota-checked [`Post`] push was rejected.  Every producer surfaces
-/// this to its own caller; a push is never silently dropped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InboxReject {
-    SourceFull { source: &'static str, cap: usize },
-    TotalFull { cap: usize },
-}
-
-impl std::fmt::Display for InboxReject {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SourceFull { source, cap } => write!(
-                f,
-                "inbox[{source}] is full ({cap} queued) — drain before sending more"
-            ),
-            Self::TotalFull { cap } => write!(
-                f,
-                "inbox is full ({cap} messages queued) — drain before sending more"
-            ),
-        }
-    }
 }
 
 /// The queue an [`Inbox`] and its [`Mailbox`]es share: posts under a mutex,
@@ -127,15 +94,16 @@ impl Shared {
         self.queue.lock_ignore_poison()
     }
 
-    /// The push rule, waking a parked consumer on success.  The idempotent
-    /// sources always succeed by coalescing: a `ScheduledWakeup` replaces a
-    /// still-queued one for the same schedule id, a `Nudge` replaces a
-    /// still-queued nudge (a second means a fresher continuation superseded the
-    /// first, not that both are owed), and `UserSteering` joins a non-slash tail
-    /// entry on a new line — never across a slash line, whose
-    /// exchange-boundary classification ([`Post::boundary`]) must survive the
-    /// merge.  Every other source is quota-checked: rejected, never dropped.
-    fn try_push(&self, msg: Post) -> Result<(), InboxReject> {
+    /// The push rule, waking a parked consumer.  The idempotent sources
+    /// coalesce: a `ScheduledWakeup` replaces a still-queued one for the same
+    /// schedule id, a `Nudge` replaces a still-queued nudge (a second means a
+    /// fresher continuation superseded the first, not that both are owed), and
+    /// `UserSteering` joins a non-slash tail entry on a new line — never across
+    /// a slash line, whose exchange-boundary classification ([`Post::boundary`])
+    /// must survive the merge.  Every other source queues: each is posted at
+    /// most once per child, worker, or human keystroke, so the fuel and
+    /// admission caps that bound those already bound the queue.
+    fn push(&self, msg: Post) {
         let mut q = self.lock();
         match msg {
             Post::ScheduledWakeup { id, .. } => {
@@ -166,27 +134,11 @@ impl Shared {
                     None => q.push_back(msg),
                 }
             }
-            other => {
-                let source = source_name(&other);
-                let source_count = q.iter().filter(|m| source_name(m) == source).count();
-                if source_count >= INBOX_SOURCE_CAP {
-                    return Err(InboxReject::SourceFull {
-                        source,
-                        cap: INBOX_SOURCE_CAP,
-                    });
-                }
-                if q.len() >= INBOX_TOTAL_CAP {
-                    return Err(InboxReject::TotalFull {
-                        cap: INBOX_TOTAL_CAP,
-                    });
-                }
-                q.push_back(other);
-            }
+            other => q.push_back(other),
         }
         drop(q);
         self.waiting_for_input.store(false, Ordering::Release);
         self.signal.notify_all();
-        Ok(())
     }
 }
 
@@ -207,32 +159,21 @@ pub struct Mailbox {
 }
 
 impl Mailbox {
-    /// Post any message, applying the coalesce/quota rule
-    /// ([`Shared::try_push`]) and waking a parked consumer.  Takes the queue
-    /// mutex, so no caller may hold a fleet lock: clone the mailbox out and
-    /// push after the guard drops.
-    ///
-    /// # Errors
-    /// `Err(InboxReject)` when a quota-checked source is at its cap.
-    pub(crate) fn push(&self, msg: Post) -> Result<(), InboxReject> {
-        self.shared.try_push(msg)
+    /// Post any message, applying the coalesce rule ([`Shared::push`]) and
+    /// waking a parked consumer.  Takes the queue mutex, so no caller may hold
+    /// a fleet lock: clone the mailbox out and push after the guard drops.
+    pub(crate) fn push(&self, msg: Post) {
+        self.shared.push(msg);
     }
 
     /// Post a user-typed steering prompt — the TUI's `Enter`-while-busy path.
-    ///
-    /// # Panics
-    /// Never in practice: `UserSteering` coalesces, so it never rejects.
     pub(crate) fn push_user(&self, prompt: String) {
-        self.push(Post::UserSteering(prompt))
-            .expect("UserSteering is idempotent and never rejects");
+        self.push(Post::UserSteering(prompt));
     }
 
     /// The fleet's one delivery door for a human message: stamp the
     /// exchange clock, then push — the order [`Shared::last_exchange`]'s doc
     /// requires, so a park verdict woken by this push already reads engaged.
-    ///
-    /// # Panics
-    /// Never in practice: `UserSteering` coalesces, so it never rejects.
     pub(crate) fn steer(&self, text: String) {
         self.stamp_exchange();
         self.push_user(text);
@@ -292,16 +233,13 @@ impl Inbox {
     }
 
     /// The self-push path — a nudge or a self-armed wakeup landing in the
-    /// agent's own box.  Same rule and rejection contract as [`Mailbox::push`].
-    pub(crate) fn push(&self, msg: Post) -> Result<(), InboxReject> {
-        self.shared.try_push(msg)
+    /// agent's own box.  Same rule as [`Mailbox::push`].
+    pub(crate) fn push(&self, msg: Post) {
+        self.shared.push(msg);
     }
 
-    /// # Panics
-    /// Never in practice: `UserSteering` coalesces, so it never rejects.
     pub(crate) fn push_user(&self, prompt: String) {
-        self.push(Post::UserSteering(prompt))
-            .expect("UserSteering is idempotent and never rejects");
+        self.push(Post::UserSteering(prompt));
     }
 
     /// Whether anything is queued.  The attend loop's ready boundary reads it
@@ -318,18 +256,10 @@ impl Inbox {
 
     /// Queue depth per source for the `/resources` fold, zeros included so the
     /// row set is stable.  One pass under the lock; nothing is drained or woken.
-    pub(crate) fn source_depths(&self) -> Vec<(&'static str, u64)> {
-        let mut rows = vec![
-            ("user", 0u64),
-            ("schedule", 0),
-            ("agent", 0),
-            ("message", 0),
-            ("nudge", 0),
-            ("command", 0),
-            ("surface", 0),
-        ];
+    pub(crate) fn source_depths(&self) -> Vec<(Source, u64)> {
+        let mut rows: Vec<(Source, u64)> = Source::ALL.into_iter().map(|s| (s, 0u64)).collect();
         for msg in self.shared.lock().iter() {
-            if let Some(row) = rows.iter_mut().find(|(s, _)| *s == source_name(msg)) {
+            if let Some(row) = rows.iter_mut().find(|(s, _)| *s == msg.source()) {
                 row.1 += 1;
             }
         }
@@ -588,7 +518,7 @@ fn to_item(msg: Post, epoch: u64) -> Option<Item> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Boundary, INBOX_SOURCE_CAP, Inbox, InboxReject, Item, ParkMode, Post};
+    use super::{Boundary, Inbox, Item, ParkMode, Post, Source};
     use crate::agent::cancel;
     use crate::bus::AgentMessage;
     use std::sync::Arc;
@@ -851,8 +781,7 @@ mod tests {
         let inbox = Inbox::new();
         inbox.push_user("steer".into());
         inbox
-            .push(wakeup(1, "nightly", "0 3 * * *", "run the tests"))
-            .unwrap();
+            .push(wakeup(1, "nightly", "0 3 * * *", "run the tests"));
 
         assert!(
             matches!(
@@ -871,7 +800,7 @@ mod tests {
     #[test]
     fn inbox_tool_drain_takes_async_deliveries() {
         let inbox = Inbox::new();
-        inbox.push(wakeup(1, "nightly", "@", "go")).unwrap();
+        inbox.push(wakeup(1, "nightly", "@", "go"));
         inbox.push_user("redirect now".into());
         inbox.push_user("and also this".into());
 
@@ -893,8 +822,7 @@ mod tests {
                 from: 7,
                 from_name: "review".into(),
                 text: "please inspect the parser branch".into(),
-            }))
-            .unwrap();
+            }));
 
         assert!(matches!(
             inbox.drain_steering().as_slice(),
@@ -915,8 +843,8 @@ mod tests {
     fn inbox_tool_drain_stops_at_a_barrier() {
         let inbox = Inbox::new();
         inbox.push_user("before".into());
-        inbox.push(wakeup(1, "x", "@", "p")).unwrap();
-        inbox.push(Post::Barrier("/rewind 7".into())).unwrap();
+        inbox.push(wakeup(1, "x", "@", "p"));
+        inbox.push(Post::Barrier("/rewind 7".into()));
         inbox.push_user("after the rewind".into());
 
         assert!(matches!(
@@ -935,7 +863,7 @@ mod tests {
     #[test]
     fn inbox_tool_drain_passes_over_a_session_reading_command() {
         let inbox = Inbox::new();
-        inbox.push(Post::Command("/branch scout".into())).unwrap();
+        inbox.push(Post::Command("/branch scout".into()));
         inbox.push_user("look at the parser too".into());
 
         assert!(
@@ -958,9 +886,9 @@ mod tests {
     #[test]
     fn inbox_queued_human_messages_shows_typed_text_in_order() {
         let inbox = Inbox::new();
-        inbox.push(wakeup(1, "morning", "@daily", "check")).unwrap();
+        inbox.push(wakeup(1, "morning", "@daily", "check"));
         inbox.push_user("first".into());
-        inbox.push(Post::Command("/branch scout".into())).unwrap();
+        inbox.push(Post::Command("/branch scout".into()));
         inbox.push_user("second".into());
 
         assert_eq!(
@@ -981,7 +909,7 @@ mod tests {
     #[test]
     fn inbox_pop_back_user_all_no_user_prompts() {
         let inbox = Inbox::new();
-        inbox.push(wakeup(1, "x", "@", "p")).unwrap();
+        inbox.push(wakeup(1, "x", "@", "p"));
         assert_eq!(inbox.pop_back_user_all(), None, "no user prompts to recall");
         assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
     }
@@ -993,10 +921,10 @@ mod tests {
     fn inbox_pop_back_user_all_extracts_all_leaving_non_user_in_order() {
         let inbox = Inbox::new();
         inbox.push_user("first".into());
-        inbox.push(wakeup(1, "x", "@", "p")).unwrap();
+        inbox.push(wakeup(1, "x", "@", "p"));
         inbox.push_user("second".into());
         inbox.push_user("third".into());
-        inbox.push(Post::Command("/model".into())).unwrap();
+        inbox.push(Post::Command("/model".into()));
         inbox.push_user("fourth".into());
         assert_eq!(
             inbox.pop_back_user_all(),
@@ -1041,14 +969,14 @@ mod tests {
         let inbox = Inbox::new();
         assert_eq!(surface().boundary(), Boundary::Tool);
 
-        inbox.push(surface()).unwrap();
+        inbox.push(surface());
         inbox.clear();
         assert!(
             inbox.drain_steering().is_empty(),
             "a /clear drops the queued batch"
         );
 
-        inbox.push(surface()).unwrap();
+        inbox.push(surface());
         assert!(matches!(
             inbox.drain_steering().as_slice(),
             [Item::Surface { id, .. }] if *id == 0
@@ -1068,8 +996,7 @@ mod tests {
                 prompt: "go".into(),
                 pending: pending.clone(),
                 epoch: 0,
-            })
-            .unwrap();
+            });
         assert!(pending.load(std::sync::atomic::Ordering::Acquire));
         let _ = inbox.next_item();
         assert!(
@@ -1094,8 +1021,7 @@ mod tests {
                 prompt: "go".into(),
                 pending: pending.clone(),
                 epoch: 0,
-            })
-            .unwrap();
+            });
         inbox.clear();
         assert!(
             !pending.load(std::sync::atomic::Ordering::Acquire),
@@ -1112,7 +1038,7 @@ mod tests {
         let inbox = Inbox::new();
         let stale = inbox.mailbox().epoch();
         inbox.clear();
-        inbox.push(wakeup_at(1, "n", "@", "go", stale)).unwrap();
+        inbox.push(wakeup_at(1, "n", "@", "go", stale));
         assert!(
             inbox.next_item().is_none(),
             "a wakeup stamped with an epoch older than the inbox's own is dropped"
@@ -1124,13 +1050,13 @@ mod tests {
     fn current_epoch_wakeup_is_delivered() {
         let inbox = Inbox::new();
         let live = inbox.mailbox().epoch();
-        inbox.push(wakeup_at(1, "n", "@", "go", live)).unwrap();
+        inbox.push(wakeup_at(1, "n", "@", "go", live));
         assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
     }
 
     // ── inbox quotas without silent loss ───────────────────────────────────
 
-    fn depth_of(inbox: &Inbox, source: &str) -> u64 {
+    fn depth_of(inbox: &Inbox, source: Source) -> u64 {
         inbox
             .source_depths()
             .into_iter()
@@ -1143,15 +1069,13 @@ mod tests {
     #[test]
     fn inbox_scheduled_wakeup_dedupes_by_schedule_id_newest_wins() {
         let inbox = Inbox::new();
-        inbox.push(wakeup(1, "nightly", "@daily", "first")).unwrap();
+        inbox.push(wakeup(1, "nightly", "@daily", "first"));
         inbox
-            .push(wakeup(1, "nightly", "@daily", "second"))
-            .unwrap();
+            .push(wakeup(1, "nightly", "@daily", "second"));
         inbox
-            .push(wakeup(2, "morning", "@daily", "other schedule"))
-            .unwrap();
+            .push(wakeup(2, "morning", "@daily", "other schedule"));
         assert_eq!(
-            depth_of(&inbox, "schedule"),
+            depth_of(&inbox, Source::Schedule),
             2,
             "schedule 1 replaced in place; schedule 2 is its own entry"
         );
@@ -1175,7 +1099,7 @@ mod tests {
         inbox.push_user("first line".into());
         inbox.push_user("second line".into());
         assert_eq!(
-            depth_of(&inbox, "user"),
+            depth_of(&inbox, Source::User),
             1,
             "consecutive steering merges into one entry at push time"
         );
@@ -1198,13 +1122,13 @@ mod tests {
         inbox.push_user("plain text".into());
         inbox.push_user("/clear".into());
         assert_eq!(
-            depth_of(&inbox, "user"),
+            depth_of(&inbox, Source::User),
             2,
             "a slash line is never folded into a preceding plain-text entry"
         );
         inbox.push_user("after clear".into());
         assert_eq!(
-            depth_of(&inbox, "user"),
+            depth_of(&inbox, Source::User),
             3,
             "a plain line is never folded into a preceding slash entry either"
         );
@@ -1219,22 +1143,19 @@ mod tests {
             .push(Post::Nudge {
                 exchange: 1,
                 text: "retry".into(),
-            })
-            .unwrap();
+            });
         inbox
             .push(Post::Nudge {
                 exchange: 1,
                 text: "retry".into(),
-            })
-            .unwrap();
+            });
         inbox
             .push(Post::Nudge {
                 exchange: 2,
                 text: "different".into(),
-            })
-            .unwrap();
+            });
         assert_eq!(
-            depth_of(&inbox, "nudge"),
+            depth_of(&inbox, Source::Nudge),
             1,
             "a nudge never grows past one outstanding entry"
         );
@@ -1244,62 +1165,4 @@ mod tests {
         );
     }
 
-    /// The producer sees the rejection as an `Err`, never a silent drop.
-    #[test]
-    fn inbox_non_idempotent_source_rejects_at_quota() {
-        let inbox = Inbox::new();
-        for _ in 0..INBOX_SOURCE_CAP {
-            inbox
-                .push(Post::Command("/noop".into()))
-                .expect("under quota");
-        }
-        let err = inbox
-            .push(Post::Command("/noop".into()))
-            .expect_err("the cap-th push is rejected");
-        assert_eq!(
-            err,
-            InboxReject::SourceFull {
-                source: "command",
-                cap: INBOX_SOURCE_CAP,
-            }
-        );
-    }
-
-    #[test]
-    fn inbox_drain_frees_quota_for_a_rejected_source() {
-        let inbox = Inbox::new();
-        for _ in 0..INBOX_SOURCE_CAP {
-            inbox.push(Post::Command("/noop".into())).unwrap();
-        }
-        assert!(inbox.push(Post::Command("/noop".into())).is_err());
-        assert!(matches!(inbox.next_item(), Some(Item::Command(_))));
-        inbox
-            .push(Post::Command("/noop".into()))
-            .expect("draining freed one slot of quota");
-    }
-
-    /// `nudge` stays at its one outstanding entry; `schedule` and `user` are not
-    /// bounded by [`INBOX_SOURCE_CAP`] at all, since a distinct schedule id or a
-    /// slash-interleaved run of steering each mint their own entry.
-    #[test]
-    fn inbox_idempotent_sources_never_reject_past_the_source_cap() {
-        let inbox = Inbox::new();
-        for i in 0..(INBOX_SOURCE_CAP * 3) {
-            inbox
-                .push(Post::Nudge {
-                    exchange: i as u64,
-                    text: format!("n{i}"),
-                })
-                .expect("nudge never rejects");
-            inbox
-                .push(wakeup(i as u64, "s", "@", "p"))
-                .expect("wakeup never rejects");
-            inbox.push_user(format!("line {i}"));
-        }
-        assert_eq!(
-            depth_of(&inbox, "nudge"),
-            1,
-            "nudge alone stays bounded, however many distinct texts are pushed"
-        );
-    }
 }

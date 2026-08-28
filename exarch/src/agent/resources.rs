@@ -397,30 +397,17 @@ impl Avatar {
         ));
 
         for (source, depth) in self.inbox.source_depths() {
-            // Idempotent sources merge or dedupe and never reject, so no cap
-            // is enforced against their depth; the rest are admitted or
-            // rejected at `INBOX_SOURCE_CAP`, never silently dropped.
-            let (policy, cap, note) = match source {
-                "user" | "schedule" | "nudge" => (
-                    "coalesce",
-                    None,
-                    "merges/dedupes; never rejects".to_string(),
-                ),
-                _ => (
-                    "reject",
-                    Some(crate::bus::INBOX_SOURCE_CAP as u64),
-                    format!(
-                        "rejected at quota; {} total across every source",
-                        crate::bus::INBOX_TOTAL_CAP
-                    ),
-                ),
+            let (policy, note) = if source.coalesces() {
+                ("coalesce", "merges/dedupes")
+            } else {
+                ("queue", "one per child, worker, or keystroke")
             };
             rows.push(ProbeRow::new(
                 format!("inbox[{source}]"),
                 depth,
-                cap,
+                None,
                 policy,
-                Some(note),
+                Some(note.to_string()),
             ));
         }
 
@@ -792,17 +779,11 @@ mod tests {
         // The settled spawn's deferred `Surface` batch may also sit queued —
         // a legitimate arrival, not the probe's doing — so stability
         // compares snapshots rather than pinning the whole vector.
-        session
-            .inbox
-            .push(Post::UserSteering("hold".into()))
-            .unwrap();
-        session
-            .inbox
-            .push(Post::Nudge {
-                exchange: 1,
-                text: "go on".into(),
-            })
-            .unwrap();
+        session.inbox.push(Post::UserSteering("hold".into()));
+        session.inbox.push(Post::Nudge {
+            exchange: 1,
+            text: "go on".into(),
+        });
         let depths_before = session.inbox.source_depths();
         let rows = session.resource_rows();
         assert_eq!(row(&rows, "inbox[user]").current, 1);

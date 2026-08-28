@@ -1,12 +1,14 @@
-//! The bus transport: a bounded, coalescing queue shaped like `std::sync::mpsc`
-//! — same method names, same error types — so `Emitter` and `sink.rs`'s
-//! `drain_signals` and `Sink::drive` need only name the type.
+//! The bus transport: a coalescing queue shaped like `std::sync::mpsc` — same
+//! method names, same error types — so `Emitter` and `sink.rs`'s
+//! `drain_signals` and `Sink::drive` need only name the type.  Coalescing
+//! bounds a text flood's *entry*, not the queue's *depth*: reserved signals
+//! still push one entry apiece, uncapped and undropped.
 //!
 //! Pushing a `Token`/`Thinking` (concatenate) or `State` (replace) merges into
 //! the tail entry iff that tail is the same class and the same agent; every
 //! other signal is reserved, always pushed as its own entry, never merged,
 //! never dropped. So a token run can never migrate across a `ToolCall` of the
-//! same agent, and a flood bounds itself to one growing entry.
+//! same agent, and a flood of one class bounds itself to one growing entry.
 //!
 //! Past [`MERGE_TEXT_CAP`] a merged entry sheds its oldest text and the shed
 //! count rides out as a `Transient::Fault` marker when the entry drains —

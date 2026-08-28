@@ -15,14 +15,14 @@ mod sink;
 
 pub use channel::{BusReceiver, BusSender, channel};
 pub use emitter::Emitter;
-pub use inbox::{InboxReject, Mailbox};
+pub use inbox::Mailbox;
 pub use post::AgentOutcome;
 pub use signal::{AgentState, Signal};
 pub use sink::Sink;
 
 pub(crate) use channel::{MERGE_TEXT_CAP, WeakSender};
 pub(crate) use emitter::{FleetBus, UsageMeter};
-pub(crate) use inbox::{INBOX_SOURCE_CAP, INBOX_TOTAL_CAP, Inbox, ParkMode};
+pub(crate) use inbox::{Inbox, ParkMode};
 pub(crate) use post::{AgentMessage, AgentResult, Item, Post};
 pub(crate) use signal::WORKER_PANIC_PREFIX;
 pub(crate) use sink::{Pass, pump};

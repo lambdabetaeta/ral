@@ -295,27 +295,24 @@ owns (viewports, views, the bus) at render time; neither half reaches
 across a thread. Probing never mutates and never renews a lease —
 enumeration is not observation — and the fold is never model-facing.
 
-The inbox's per-source depth is a real quota now, not just a probe figure.
-`Mailbox`/`Inbox::push` return
-`Result<(), InboxReject>` from one shared rule (`Shared::try_push`), split
-by source: the three idempotent sources (`user`, `schedule`, `nudge`)
-always succeed, coalescing instead of growing the queue — a
-`ScheduledWakeup` replaces a still-queued wakeup for the same schedule id
-(newest wins), consecutive `UserSteering` pushes merge one per line
-(never across a slash line, which would silently change its
-exchange-boundary classification), and a `Nudge` replaces any still-queued
-nudge — newest wins, since a second means a fresher continuation superseded
-the first, not that both are owed.
-The other four (`AgentResult`, `AgentMessage`, `Command`, `Surface`) are
-quota-checked against `INBOX_SOURCE_CAP` (64) and the shared
-`INBOX_TOTAL_CAP` (256) and *rejected*, never dropped, once full — every
-producer surfaces the rejection to its own caller: `Agent::message`
-returns `InboxReject` (`` agents `message `` reports it),
-a rejected slash command reports through the UI's error line, and a
-rejected `spawn` completion or surfaced batch — which has no synchronous
-caller left to return to — records straight through the record seam as a
-`Transient::Fault` instead of the live bus, so holding the rejection report
-never extends a bus sender's lifetime past the run that queued it.
+The inbox's per-source depth is a probe figure, not a quota.
+`Mailbox`/`Inbox::push` is infallible, one shared rule (`Shared::push`)
+split by source: the three idempotent sources (`user`, `schedule`, `nudge`)
+coalesce instead of growing the queue — a `ScheduledWakeup` replaces a
+still-queued wakeup for the same schedule id (newest wins), consecutive
+`UserSteering` pushes merge one per line (never across a slash line, which
+would silently change its exchange-boundary classification), and a `Nudge`
+replaces any still-queued nudge — newest wins, since a second means a
+fresher continuation superseded the first, not that both are owed.
+The other four (`AgentResult`, `AgentMessage`, `Command`, `Surface`) simply
+queue. A per-source cap of 64 with a 256 total once rejected them, on the
+long-session-budgets principle that every accumulator needs a bound; it was
+retired because none of them is machine-floodable — a child or worker posts
+its result once, a slash command arrives at a human's typing rate, and a
+`message` costs its sender a model turn that fuel already bounds — so the
+cap could fire only wrongly, and when it did the child parked with its reply
+staged but its parent never notified, the very silent loss the cap was meant
+to rule out.
 
 The headless-completion gate is gone with `expect_action`: the one role flag
 that did not fit the `parent` collapse is dropped, not relocated. What

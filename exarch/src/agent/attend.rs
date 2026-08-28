@@ -58,10 +58,6 @@ impl Avatar {
     /// [`Self::park_mode`] that does not park, or a cancel ends one that does.
     /// The returned `payload` is the faithful [`FOValue`] a `reply` carried,
     /// left for the consuming edge to render.
-    ///
-    /// # Panics
-    /// Panics if the inbox rejects a reactive nudge, which the idempotent
-    /// nudge protocol makes impossible.
     pub fn attend(
         &mut self,
         control: &mut dyn Control,
@@ -230,9 +226,8 @@ impl Avatar {
         // reply the nudge layer must fall silent for.
         if let Ok(deliberate::Outcome::Replied(v)) = &outcome
             && self.agent.parent.is_some()
-            && let Err(reject) = self.agent.deposit_reply(v.clone())
         {
-            self.note_error(format!("the parent's inbox rejected this reply: {reject}"));
+            self.agent.deposit_reply(v.clone());
         }
         *final_outcome = agent_outcome(&outcome);
         // Before any nudge decision, and whether or not one follows: a chat
@@ -262,9 +257,7 @@ impl Avatar {
         if let Some(text) = nudge_msg {
             let exchange = self.log.lock().current_exchange();
             if let Some(exchange) = exchange {
-                self.inbox
-                    .push(Post::Nudge { exchange, text })
-                    .expect("Nudge is idempotent and never rejects");
+                self.inbox.push(Post::Nudge { exchange, text });
             } else {
                 // Unreachable: every outcome `react` answers followed a
                 // deliberation whose prompt `append_user` committed, which
@@ -288,11 +281,11 @@ impl Avatar {
         }
     }
 
-    /// Whether a drawn item still belongs to the live context.  A worker posts
-    /// its result *before* retiring itself (deliver-then-retire,
-    /// so a parked parent never sees "no live child" without the result
-    /// already queued), and a deferred `spawn`'s surface batch composes and
-    /// pushes in two steps a `/clear` can fall between: neither can judge its
+    /// Whether a drawn item still belongs to the live context.  [`Avatar::settle`]
+    /// makes deliver-then-retire structural, so a parked parent never sees
+    /// "no live child" without the result already queued, and a deferred
+    /// `spawn`'s surface batch composes and pushes in two steps a `/clear`
+    /// can fall between: neither can judge its
     /// own staleness, so both stamp this consuming session's generation to
     /// check against.  A `ScheduledWakeup` is settled earlier, at the inbox's own
     /// pop boundary against that inbox's clear-epoch; every other source is
@@ -665,12 +658,9 @@ mod tests {
     fn deposited_reply_suppresses_every_nudge() {
         let parent = Avatar::for_test("system").unwrap();
         let mut child = parent.fork(parent.caps().clone()).expect("fork child");
-        child
-            .agent
-            .deposit_reply(FOValue::String {
-                value: "already replied".into(),
-            })
-            .expect("an empty parent inbox never rejects the notice");
+        child.agent.deposit_reply(FOValue::String {
+            value: "already replied".into(),
+        });
 
         child
             .agent

@@ -376,18 +376,15 @@ pub(super) fn cmd_focus(app: &mut App, arg: &str, agents: &Fleet) {
     }
 }
 
-/// Post a session command to the worker's inbox under the boundary its
-/// command declares, surfacing a full-inbox rejection rather than
-/// dropping the command silently.
-fn push_command(tui: &mut Tui, mailbox: &Mailbox, cmd: &SlashCommand, line: String) {
-    let post = if cmd.rewrites {
-        Post::Barrier(line)
-    } else {
-        Post::Command(line)
-    };
-    if let Err(reject) = mailbox.push(post) {
-        tui.app
-            .push_error(tui.app.tabs.root(), &format!("command dropped: {reject}"));
+impl SlashCommand {
+    /// The typed `line` as an inbox post, under the boundary this command
+    /// declares.
+    fn post(&self, line: String) -> Post {
+        if self.rewrites {
+            Post::Barrier(line)
+        } else {
+            Post::Command(line)
+        }
     }
 }
 
@@ -455,9 +452,9 @@ pub(super) fn route_submit(
                     agent.cancel_descendants(ral_core::process::CancelCause::Explicit);
                 }
                 tui.app.clear(info, tui.guard.term())?;
-                push_command(tui, mailbox, cmd, "/clear".into());
+                mailbox.push(cmd.post("/clear".into()));
             }
-            _ => push_command(tui, mailbox, cmd, text.clone()),
+            _ => mailbox.push(cmd.post(text.clone())),
         },
         // A typo is not a prompt in disguise: say so rather than mail it to the
         // model as one.

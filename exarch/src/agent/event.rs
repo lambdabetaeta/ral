@@ -485,8 +485,11 @@ impl AgentLog {
             // Live authorship is typestate-correct by construction (see
             // record::model's own doc on why its Refusal never fires here),
             // so reaching this arm means a caller handed `advance` a foreign
-            // Recorded<Record> — a caller bug, not a runtime condition.
-            debug_assert!(false, "model fold refused a live record: {refusal}");
+            // Recorded<Record> — a caller bug, not a runtime condition. A
+            // release build must crash here too: silently skipping the step
+            // would desync the memo from record.jsonl with nothing to show
+            // for it.
+            unreachable!("model fold refused a live record: {refusal}");
         }
     }
 

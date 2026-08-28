@@ -748,7 +748,7 @@ pub fn converse_settled<S: Sink>(
 mod tests {
     use super::*;
     use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
-    use crate::bus::{AgentResult, AgentState, Post};
+    use crate::bus::AgentState;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Record};
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
@@ -1212,25 +1212,12 @@ mod tests {
             false,
         );
         let child = live_child(&session, "helper");
-        let generation = child.agent.consumer();
-        let parent_mailbox = session.mailbox();
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
         let settler = std::thread::spawn(move || {
             release_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .expect("the exchange must park on the child within the timeout");
-            let rejected = parent_mailbox.push(Post::AgentResult(AgentResult {
-                name: "helper".into(),
-                outcome: AgentOutcome::Stopped("done".into()),
-                elapsed: std::time::Duration::from_millis(1),
-                generation,
-            }));
-            assert!(
-                rejected.is_ok(),
-                "the parent's inbox must accept the result"
-            );
-            // Deliver, then retire: dropping the avatar is the retirement.
-            drop(child);
+            child.settle(AgentOutcome::Stopped("done".into()));
         });
 
         let mut sink = SignalOnWaiting {

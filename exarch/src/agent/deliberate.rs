@@ -180,6 +180,16 @@ impl Avatar {
             };
             close_step(&mut stream, unrecorded, &recorder)
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
+            // The committed message is the outcome's source of truth, not the
+            // streaming accumulator: a provider that returns final text with
+            // no `Say` deltas would otherwise read as an empty turn. Read
+            // before `admit_assistant` below can replace empty content with
+            // its stub.
+            let said = assistant_message
+                .content
+                .first_text()
+                .unwrap_or_default()
+                .to_string();
             // The live numerator the next `compact` weighs against the window.
             let input_tokens = usage.input;
             let measured_at = {
@@ -251,8 +261,8 @@ impl Avatar {
                             reason: r.raw().to_string(),
                         }
                     }
-                    _ if stream.said().is_empty() => Outcome::Empty,
-                    _ => Outcome::Complete(stream.said().to_string()),
+                    _ if said.is_empty() => Outcome::Empty,
+                    _ => Outcome::Complete(said),
                 });
             }
             if truncated {
@@ -651,12 +661,8 @@ mod tests {
         let mut session = Avatar::for_test("system").unwrap();
         session
             .inbox
-            .push(Post::UserSteering("actually, stop after this".into()))
-            .unwrap();
-        session
-            .inbox
-            .push(Post::UserSteering("and report".into()))
-            .unwrap();
+            .push(Post::UserSteering("actually, stop after this".into()));
+        session.inbox.push(Post::UserSteering("and report".into()));
 
         let provider = scripted(
             "test-model",
@@ -894,8 +900,7 @@ mod tests {
                 outcome: AgentOutcome::Stopped("done".into()),
                 elapsed: std::time::Duration::ZERO,
                 generation: stale,
-            }))
-            .unwrap();
+            }));
         session
             .agent
             .provider
@@ -923,8 +928,7 @@ mod tests {
                 outcome: AgentOutcome::Stopped("found it".into()),
                 elapsed: std::time::Duration::ZERO,
                 generation: session.agent.generation(),
-            }))
-            .unwrap();
+            }));
         session.agent.provider.swap(scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(
@@ -954,14 +958,11 @@ mod tests {
         let mut session = Avatar::for_test("system").unwrap();
         let stale = session.agent.generation();
         session.agent.clear_subtree();
-        session
-            .inbox
-            .push(Post::Surface {
-                id: session.agent.id,
-                values: Vec::new(),
-                generation: stale,
-            })
-            .unwrap();
+        session.inbox.push(Post::Surface {
+            id: session.agent.id,
+            values: Vec::new(),
+            generation: stale,
+        });
         session
             .agent
             .provider
@@ -982,14 +983,11 @@ mod tests {
     #[test]
     fn current_generation_surface_batch_is_delivered() {
         let mut session = Avatar::for_test("system").unwrap();
-        session
-            .inbox
-            .push(Post::Surface {
-                id: session.agent.id,
-                values: Vec::new(),
-                generation: session.agent.generation(),
-            })
-            .unwrap();
+        session.inbox.push(Post::Surface {
+            id: session.agent.id,
+            values: Vec::new(),
+            generation: session.agent.generation(),
+        });
         session.agent.provider.swap(scripted(
             "test-model",
             Script::new().then(Reply::tool_calls(vec![ral_call(

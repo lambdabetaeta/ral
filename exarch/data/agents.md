@@ -1,16 +1,38 @@
-`` agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>] `` launches a sub-agent, asynchronously, immediately returning the roster of live agents — the new child's row among them, carrying its `name` and `log-dir`. Give the child a descriptive kebab-case `name` ('todo-scan', 'fix-parser-tests'). `grant` is one of `` `confined ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, `` `dangerous `` and bounds the child to at most your own authority; `search` states whether it may use web search. `explain agents` has the full law.
+An agent is a function from a prompt and your bindings to a value. It runs in a copy of your shell, reads what you point it at, and replies with first-order ral data that you compute with. 
 
-Agents are expensive; use them sparingly, with the minimum grant that suffices. Here are four good reasons:
+`` agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>] `` asynchronously launches an agent. `name` is a descriptive handle ('todo-scan', 'chunk-3'). `grant` is one of `` `confined ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, `` `dangerous ``, at most your own authority. An agent that only reads bindings and answers needs `` `confined ``. `search` says whether it may use the web. `explain agents` has the full documentation.
 
-1. Explore: answer a question where you want the conclusion, not the working and context.
-2. Isolate: perform actions whose execution would flood your context with detail you will not reuse.
-3. Plan: survey the code with fresh eyes and return a detailed plan without the reasoning.
-4. Verify: adversarially verify that a change is correct.
+An agent's shell is a snapshot of yours at `start`, and has exactly the same definitions and cwd. 
 
-`` `amnemon `` agents are a fresh session. `` `mnemon `` agents are a fork of the current conversation, with `prompt` as the final prompt. Use `` `mnemon `` agents only if the current context contains significant information that the agent would have to rediscover. Otherwise, use the shell to transfer information to an `` `amnemon `` agent.
+The agent's initial prompt may be constructed by using `ral`:
 
-A new agent's shell is an exact copy of yours, and preserves all bindings and the cwd. You may hand information to a subagent by binding it, and mentioning the variable name in the prompt: e.g. `let ctx = from-string < design.md` along with the prompt `#'Review the plan bound at $ctx against src/solver/; reply with a verdict record.'#` The same goes for scripts: any parameterized block is inherited, so define e.g. `let run-test-suite = { … }` and mention it in the prompt. NEVER paste into a prompt what a binding can carry. Warning: process handles cannot be copied, so `await` first if the child needs the result.
+    let ctx = from-string < design.md
+    agents `start [prompt: #'Review the plan bound at $ctx against src/solver/. Reply [verdict: `ok|`revise, issues: [[file, line, why]]].'#, name: 'plan-review', type: `amnemon, grant: `read-only, search: false]
 
-A child's answer never lands in your context unasked. When it replies you receive one line naming it, and the value waits until you read it: `` agents `read <name> `` answers `[name: <Str>, reply: <value>]`, so `let r = agents `read 'todo-scan'` binds the answer and `$r.reply` is the child's own first-order value — a record to project, a list to fan out over, a string to grep — never prose to re-read. Ask for the shape you want in the prompt ("reply with a record `[verdict, files]`") and read only the fields you need.
+Do not quote something that an agent can access from a binding. Never read a binding to echo it to an agent. The same goes for repeatable scripts, e.g. define `let run-suite = { … }` and ask the agent to run it by name. 
 
-A replied child is not gone: it sits hidden and idle for up to an hour, and `` agents `message [to: <name>, text: <text>] `` wakes it for a follow-up — it answers by replying again, and you read again. One verb addresses the whole fleet, and every tag but `` `read `` answers with the roster afterwards, `[[name, state, idle-s, elapsed-s, log-dir]]` with `state` one of `` `busy ``, `` `waiting-on-agents ``, `` `replied ``, `` `waiting `` and `idle-s` the seconds since it parked: poll it with `` agents `list `` only when you have a reason, and stop one with `` agents `cancel <name> ``. A cancel is a request, not a transaction — the child stops at its next checkpoint, so a name still listed in the answer is not a failed cancel.
+Agents end their session with a `ral` value (a record with fields, a list, a
+variant). After receiving a notification you may access this value by ``
+agents `read <name> ``. Bind it and project
+
+    let r = agents `read 'plan-review'
+    if !{equal $r[reply][verdict] `ok} { … } else { for $r[reply][issues] { |i| … } }
+
+Example:
+
+    let chunks = map { |f| from-string < $f } !{glob #'notes/*.md'#}
+    for !{range 0 !{length $chunks}} { |i|
+      agents `start [prompt: "Summarise the text bound at $chunks[$i]. Reply [topic: Str, claims: [Str]].", name: "chunk-$i", type: `amnemon, grant: `confined, search: false]
+    }
+
+When all the agents are done:
+
+    let parts = map { |i| let r = agents `read "chunk-$i"; $r[reply] } !{range 0 !{length $chunks}}
+
+DO NOT POLL AGENTS. Wait to be notified of their completion.
+
+`` agents `message [to: <name>, text: <text>] `` messages an agent. An agent that has replied remains idle for an hour, and can still be messaged to have its context re-used. If a similar task has come in.
+
+There are two types of agents. `` `amnemon `` is the default; it begins a fresh session that sees only what your bindings and prompt carry. `` `mnemon `` forks your conversation with `prompt` as its final turn; use it only when the conversation itself is the input the child needs, and cannot be bound.
+
+Every tag but `` `read `` answers with a roster of agents afterwards, `[[name, state, idle-s, elapsed-s, log-dir]]`. `state` one of `` `busy ``, `` `waiting-on-agents ``, `` `replied ``, `` `waiting ``. `` agents `list `` shows it, and `` agents `cancel <name> `` stops one. A `` `cancel `` will take effect at the next tool boundary, so there might be some delay.

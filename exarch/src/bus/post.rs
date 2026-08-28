@@ -197,17 +197,60 @@ pub(super) fn is_slash(s: &str) -> bool {
     s.trim_start().starts_with('/')
 }
 
-/// The probe/quota source name — the seven-way split `Inbox::source_depths`
-/// and the per-source quota check both key on.
-pub(super) fn source_name(msg: &Post) -> &'static str {
-    match msg {
-        Post::UserSteering(_) => "user",
-        Post::ScheduledWakeup { .. } => "schedule",
-        Post::AgentResult(_) => "agent",
-        Post::AgentMessage(_) => "message",
-        Post::Nudge { .. } => "nudge",
-        Post::Command(_) | Post::Barrier(_) => "command",
-        Post::Surface { .. } => "surface",
+/// Which producer a post came from — the axis `Inbox::source_depths` folds on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Source {
+    User,
+    Schedule,
+    Agent,
+    Message,
+    Nudge,
+    Command,
+    Surface,
+}
+
+impl Source {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::User,
+        Self::Schedule,
+        Self::Agent,
+        Self::Message,
+        Self::Nudge,
+        Self::Command,
+        Self::Surface,
+    ];
+
+    /// Whether pushes from this source coalesce in the inbox rather than queue.
+    pub(crate) fn coalesces(self) -> bool {
+        matches!(self, Self::User | Self::Schedule | Self::Nudge)
+    }
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::User => "user",
+            Self::Schedule => "schedule",
+            Self::Agent => "agent",
+            Self::Message => "message",
+            Self::Nudge => "nudge",
+            Self::Command => "command",
+            Self::Surface => "surface",
+        })
+    }
+}
+
+impl Post {
+    pub(super) fn source(&self) -> Source {
+        match self {
+            Self::UserSteering(_) => Source::User,
+            Self::ScheduledWakeup { .. } => Source::Schedule,
+            Self::AgentResult(_) => Source::Agent,
+            Self::AgentMessage(_) => Source::Message,
+            Self::Nudge { .. } => Source::Nudge,
+            Self::Command(_) | Self::Barrier(_) => Source::Command,
+            Self::Surface { .. } => Source::Surface,
+        }
     }
 }
 

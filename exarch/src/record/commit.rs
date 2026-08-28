@@ -169,13 +169,6 @@ impl Stream {
             .flush(emitter)
             .and_then(|()| self.prose.flush(emitter))
     }
-
-    /// The step's whole prose — what it settles into as an `Outcome`.  The
-    /// chopper already holds every delta, so the driver keeps no second
-    /// accumulator of the same stream.
-    pub(crate) fn said(&self) -> &str {
-        &self.prose.open
-    }
 }
 
 pub(crate) struct SurfaceBuffer {
@@ -350,6 +343,10 @@ impl SurfaceBuffer {
 
     /// Discard both buffers unrecorded — `/clear` wipes the scrollback they
     /// would have landed in.
+    #[allow(
+        dead_code,
+        reason = "wired in once tui/headless are reborn as printers (P3/P6)"
+    )]
     pub(crate) fn clear(&mut self) {
         self.patch_buf = None;
         self.observation_buf = None;

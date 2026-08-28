@@ -1103,7 +1103,6 @@ impl ExarchDesk {
                 None => Err(()),
             },
         };
-        let landed = matches!(cancelled, Ok(true));
         let (payload, content, refused) = match cancelled {
             Ok(true) => (String::new(), format!("cancelling agent '{name}'"), false),
             Ok(false) => (
@@ -1119,7 +1118,7 @@ impl ExarchDesk {
                 true,
             ),
         };
-        s.commit_act(DeskAct::Cancel, Some(&name), payload, !landed);
+        s.commit_act(DeskAct::Cancel, Some(&name), payload, refused);
         s.record_forensic(crate::record::Forensic::HarnessResult {
             text: content.clone(),
         });
@@ -1159,14 +1158,10 @@ impl ExarchDesk {
                     ),
                     false,
                 ),
-                Some(to) => match s.agent.message(&to, text) {
-                    Ok(()) => (sent, format!("sent message to agent '{name}'"), true),
-                    Err(reject) => (
-                        format!("refused: {reject}"),
-                        format!("agent '{name}' did not receive the message: {reject}"),
-                        false,
-                    ),
-                },
+                Some(to) => {
+                    s.agent.message(&to, text);
+                    (sent, format!("sent message to agent '{name}'"), true)
+                }
             },
         };
         s.commit_act(DeskAct::Message, Some(&name), payload, !ok);
@@ -1373,7 +1368,7 @@ impl ExarchDesk {
         match content {
             Ok(reply) => {
                 s.record_forensic(crate::record::Forensic::HarnessResult {
-                    text: format!("read agent '{name}''s reply"),
+                    text: format!("read agent '{name}'s reply"),
                 });
                 Ok(FOValue::Map {
                     entries: vec![
@@ -3667,31 +3662,16 @@ mod tests {
     // ── engaged-child lifecycle ────────────────────────────────────────────
 
     /// Attend `child` to completion on a detached thread, in `spawn_async`'s own
-    /// worker-epilogue order: a `` `reply ``'s notice already rode `attend`'s own
-    /// deposit, so only a non-reply outcome is delivered here before the drop
-    /// that retires it.
-    fn attend_and_deliver(
-        mut child: Avatar,
-        name: &str,
-        parent_mailbox: crate::bus::Mailbox,
-    ) -> std::thread::JoinHandle<()> {
+    /// worker-epilogue order: `settle` delivers only a non-reply outcome — a
+    /// `` `reply ``'s notice already rode `attend`'s own deposit — before
+    /// retiring it.
+    fn attend_and_deliver(mut child: Avatar) -> std::thread::JoinHandle<()> {
         let id = child.agent.id;
-        let generation = child.agent.consumer();
-        let name = name.to_string();
         std::thread::spawn(move || {
             let (tx, _rx) = crate::bus::channel();
             let emit = Emitter::new(tx, id);
             let (outcome, _payload) = child.attend(&mut crate::agent::NoControl, &emit);
-            if !matches!(outcome, crate::bus::AgentOutcome::Replied) {
-                let _ =
-                    parent_mailbox.push(crate::bus::Post::AgentResult(crate::bus::AgentResult {
-                        name,
-                        outcome,
-                        elapsed: Duration::default(),
-                        generation,
-                    }));
-            }
-            drop(child);
+            child.settle(outcome);
         })
     }
 
@@ -3744,7 +3724,7 @@ mod tests {
         let log_dir = child.log_dir();
         let child_agent = child.agent.clone();
         let _keepalive = keepalive(&parent.fleet, &child_agent);
-        let handle = attend_and_deliver(child, "helper", parent.mailbox());
+        let handle = attend_and_deliver(child);
 
         child_agent.mailbox().steer("first message".into());
         assert!(child_agent.messageable(), "steer renews the exchange clock");
@@ -3808,7 +3788,7 @@ mod tests {
             .swap(Arc::new(Provider::scripted("test-model", long_script)));
         child.seed("go".into());
         let id = child.agent.id;
-        let handle = attend_and_deliver(child, "child-a", parent.mailbox());
+        let handle = attend_and_deliver(child);
 
         match wait_for_settle(&parent.inbox()) {
             crate::bus::Item::Agent(result) => {
@@ -3842,7 +3822,7 @@ mod tests {
             .expect("fork child b");
         let agent = child.agent.clone();
         let keepalive = keepalive(&fleet, &agent);
-        let handle = attend_and_deliver(child, "child-b", parent.mailbox());
+        let handle = attend_and_deliver(child);
 
         std::thread::sleep(ttl / 2);
         // A bare stamp, not a steer: the script is empty, so an actual

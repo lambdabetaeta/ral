@@ -648,9 +648,7 @@ mod tests {
         let to = trunk
             .descendant(&worker)
             .expect("a proper descendant is reachable");
-        trunk
-            .message(&to, "check the lexer".into())
-            .expect("a fresh inbox admits one note");
+        trunk.message(&to, "check the lexer".into());
 
         let Some(Item::Message(msg)) = inbox.next_item() else {
             panic!("expected a peer message");
@@ -857,7 +855,7 @@ mod tests {
 
         assert!(!child.messageable(), "a fresh agent has never been engaged");
 
-        inbox.push(Post::UserSteering("hello".into())).unwrap();
+        inbox.push(Post::UserSteering("hello".into()));
         assert!(
             !child.messageable(),
             "a raw mailbox push is not an exchange"
@@ -903,15 +901,12 @@ mod tests {
         );
 
         // The worker epilogue in production order: deliver, then retire.
-        inbox
-            .mailbox()
-            .push(Post::AgentResult(AgentResult {
-                name: "child".into(),
-                outcome: AgentOutcome::Stopped("done".into()),
-                elapsed: Duration::ZERO,
-                generation,
-            }))
-            .expect("a fresh inbox admits one result");
+        inbox.mailbox().push(Post::AgentResult(AgentResult {
+            name: "child".into(),
+            outcome: AgentOutcome::Stopped("done".into()),
+            elapsed: Duration::ZERO,
+            generation,
+        }));
         drop(child);
         assert_eq!(
             park(),

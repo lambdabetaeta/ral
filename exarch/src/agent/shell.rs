@@ -172,7 +172,7 @@ impl Avatar {
                 seam: seam.clone(),
                 // Stamped with this session's generation as read now, so a
                 // batch from a worker that settles after a `/clear` is dropped.
-                deferred: shell_eval::deferred_sink(emit, &self.agent, self.recorder()),
+                deferred: shell_eval::deferred_sink(emit, &self.agent),
                 fork: ral_core::types::Fork::Park(nursery),
             });
             self.recorder()

@@ -4,11 +4,10 @@
 //! child replies, a non-reply end when it quiesces.
 
 use crate::agent::Avatar;
-use crate::bus::{AgentOutcome, AgentResult, Emitter, Post};
+use crate::bus::{AgentOutcome, Emitter};
 use crate::record::Transient;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Instant;
 
 /// Mints `branch-{N}` labels for an unnamed branch; a label need only be
 /// distinguishable from the siblings on screen, so a process-lifetime counter
@@ -79,14 +78,7 @@ pub(crate) fn spawn_async(
     // Everything below is taken off `child` before it moves into the worker.
     let agent_id = child.agent.id;
     let log_dir = child.log_dir();
-    // A returning sub-agent holds `reply`; a conversing branch does not.  This
-    // one fact gates both the parent edge and the settle epilogue.
-    let delivers = child.returns();
     let spawner = child.agent.parent_id();
-    let parent_mailbox = child.agent.parent().map(|p| p.mailbox().clone());
-    // Baked in at construction: the generation of the session that will
-    // consume this child's result, so this is the one place it rides upward.
-    let generation = child.agent.consumer();
     // Off a bus whose children are muted (headless's per-exchange default)
     // the child's receiver is already dropped, so it streams nowhere; either
     // way its own record seam is recorded through whether or not anyone
@@ -96,9 +88,7 @@ pub(crate) fn spawn_async(
     } else {
         emit.muted_child(agent_id)
     };
-    let started = Instant::now();
     let born_name = name.clone();
-    let worker_name = name.clone();
     // The only downward edge into the child is this one write.
     if let Some(p) = &prompt {
         child.seed(p.clone());
@@ -137,36 +127,15 @@ pub(crate) fn spawn_async(
                     (AgentOutcome::Failed("sub-agent panicked".into()), None)
                 });
             child.recorder().transient(Transient::Died);
-            // A replied child's parent was notified at deposit time; any other
-            // end is delivered here.  A branch reports to nobody and delivers
-            // nothing, and only `/close` on its own tab ever ends it.  The
-            // parent's park verdict reads child liveness (the tree) and
-            // delivery (its inbox) under two different locks, and pops its
-            // queue only after the verdict, so the push must come before the
-            // drop below: a parent that observes this child gone then always
-            // finds the result already queued.  Staleness across a `/clear` is
-            // decided at the consuming edge, by the attend loop's admission of
-            // the birth `generation` stamped here.
-            if delivers && !matches!(outcome, AgentOutcome::Replied) {
-                let result = AgentResult {
-                    name: worker_name,
-                    outcome,
-                    elapsed: started.elapsed(),
-                    generation,
-                };
-                let rejected = parent_mailbox
-                    .expect("a delivering child has a parent to deliver to")
-                    .push(Post::AgentResult(result));
-                if let Err(reject) = rejected {
-                    let text = format!("the parent's inbox rejected this result: {reject}");
-                    if let Err(error) = recorder.emit(crate::record::Forensic::Error { text }) {
-                        recorder.report_fault(&error);
-                    }
-                }
-            }
-            // Dropping the avatar is the retirement: the fleet's doors and the
-            // parent's subtree prune this child at their next walk.
-            drop(child);
+            // A replied child's parent was notified at deposit time; `settle`
+            // skips a second report for it.  A branch reports to nobody and
+            // only `/close` on its own tab ever ends it.  The parent's park
+            // verdict reads child liveness (the tree) and delivery (its
+            // inbox) under two different locks, and pops its queue only
+            // after the verdict, so delivery must come before retirement: a
+            // parent that observes this child gone then always finds the
+            // result already queued.
+            child.settle(outcome);
         });
     match worker {
         Ok(_) => Ok(SpawnedChild { id: agent_id, name }),

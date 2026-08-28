@@ -174,6 +174,10 @@ impl Ledger {
         self.len
     }
 
+    #[allow(
+        dead_code,
+        reason = "wired in once tui/headless are reborn as printers (P3/P6)"
+    )]
     fn event(&self, index: usize) -> Option<&Protocol> {
         self.resident.get(&index).map(Recorded::value)
     }

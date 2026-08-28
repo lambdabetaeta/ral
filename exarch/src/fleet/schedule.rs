@@ -289,13 +289,16 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let n: u64 = num
         .parse()
         .map_err(|_| format!("invalid duration count in `{s}`"))?;
-    let secs = match unit.trim() {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86_400,
+    let mult: u64 = match unit.trim() {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
         other => return Err(format!("unknown duration unit `{other}` (use s/m/h/d)")),
     };
+    let secs = n
+        .checked_mul(mult)
+        .ok_or_else(|| format!("duration `{s}` is too large"))?;
     if secs == 0 {
         return Err("duration must be greater than zero".into());
     }
@@ -522,9 +525,7 @@ impl ScheduleRegistry {
         }
         drop(g);
         if let Some(msg) = msg {
-            mailbox
-                .push(msg)
-                .expect("ScheduledWakeup is idempotent and never rejects");
+            mailbox.push(msg);
         }
     }
 

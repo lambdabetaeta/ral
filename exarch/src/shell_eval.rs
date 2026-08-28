@@ -183,13 +183,6 @@ struct InboxDeferred {
     /// so its cards must land in the root viewport.
     root: AgentId,
     generation: u64,
-    /// `deliver` runs on the worker's own completion, with no caller to return
-    /// a `Result` to, so recording here is how a dropped batch stays visible.
-    /// A record-seam handle rather than a bus `Emitter`: this sink outlives
-    /// the run, and an `Emitter`'s live bus sender held that long is the
-    /// daemon-task-hang shape `drain_signals` guards against; the seam's own
-    /// handle is a cheap, long-lived `Arc` with no channel to leak.
-    recorder: crate::record::Emitter,
 }
 
 impl DeferredSink for InboxDeferred {
@@ -197,31 +190,22 @@ impl DeferredSink for InboxDeferred {
         // Decode once, totally, at this door: the batch crosses as first-order
         // values, the inbox renders `Value`s.
         let values = batch.into_iter().map(RalValue::from).collect();
-        if let Err(reject) = self.mailbox.push(Post::Surface {
+        self.mailbox.push(Post::Surface {
             id: self.root,
             values,
             generation: self.generation,
-        }) {
-            self.recorder.transient(crate::record::Transient::Fault {
-                text: format!("a spawn worker's surfaced batch was dropped: {reject}"),
-            });
-        }
+        });
     }
 }
 
 /// Build the [`DeferredSink`] a tool run installs, over `emit`'s session inbox.
 /// Core clones it into each worker's run state, so a nested `spawn` inherits it
 /// and flushes at its own completion.
-pub(crate) fn deferred_sink(
-    emit: &Emitter,
-    session: &crate::agent::Agent,
-    recorder: crate::record::Emitter,
-) -> Arc<dyn DeferredSink> {
+pub(crate) fn deferred_sink(emit: &Emitter, session: &crate::agent::Agent) -> Arc<dyn DeferredSink> {
     Arc::new(InboxDeferred {
         mailbox: emit.mailbox(),
         root: session.id,
         generation: session.generation(),
-        recorder,
     })
 }
 
@@ -1239,7 +1223,7 @@ keep-bottom
         let agent = test_agent(&fleet, spec).expect("a fresh trunk");
         let (tx, _rx) = channel();
         let emit = Emitter::with_mailbox(tx, agent.id, inbox.mailbox());
-        let deferred = deferred_sink(&emit, &agent, crate::record::Emitter::none());
+        let deferred = deferred_sink(&emit, &agent);
         let born = agent.generation();
 
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);

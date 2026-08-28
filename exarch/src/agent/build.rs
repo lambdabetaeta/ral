@@ -1267,13 +1267,10 @@ mod tests {
             "exchange 1 is folded into the digest through 2 — name 2 to drop the digest whole, or fold further"
         );
 
-        session
-            .inbox
-            .push(Post::Nudge {
-                exchange: 3,
-                text: "stale continuation".into(),
-            })
-            .unwrap();
+        session.inbox.push(Post::Nudge {
+            exchange: 3,
+            text: "stale continuation".into(),
+        });
         session.rewind(2, &emit).expect("the digest reach is legal");
         let view = session.log.lock().view().clone();
         assert!(view.digest.is_none(), "the digest reach was dropped whole");

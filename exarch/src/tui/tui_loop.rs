@@ -259,9 +259,7 @@ pub fn run(
 
         let r = ui_loop(&mut tui, &bus, done_ref, &mut cmd_ctx);
         if r.is_err() {
-            // A rejected push (the inbox at quota) has nowhere to be reported:
-            // `r`'s error is already the one in flight.
-            let _ = quit_mailbox.push(Post::Barrier("/quit".into()));
+            quit_mailbox.push(Post::Barrier("/quit".into()));
         }
         let _ = worker.join();
         r.map_err(|e| e.to_string())
@@ -571,10 +569,7 @@ mod tests {
     #[test]
     fn resources_command_routes_through_attend_and_emits_once() {
         let mut session = Avatar::for_test("system").unwrap();
-        session
-            .mailbox()
-            .push(Post::Command("/resources".into()))
-            .unwrap();
+        session.mailbox().push(Post::Command("/resources".into()));
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());
@@ -619,10 +614,7 @@ mod tests {
     #[test]
     fn rewind_command_with_argument_reaches_attend_control() {
         let mut session = Avatar::for_test("system").unwrap();
-        session
-            .mailbox()
-            .push(Post::Barrier("/rewind 7".into()))
-            .unwrap();
+        session.mailbox().push(Post::Barrier("/rewind 7".into()));
 
         let (tx, rx) = crate::bus::channel();
         let emit = Emitter::with_mailbox(tx, session.agent.id, session.mailbox());

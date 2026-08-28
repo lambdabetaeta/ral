@@ -63,9 +63,7 @@ pub(crate) use shell::{LogCell, ReplyCell};
 
 use crate::agent::cancel::EvalReach;
 use crate::agent::seat::Seat;
-use crate::bus::{
-    AgentId, AgentMessage, AgentOutcome, AgentResult, Inbox, InboxReject, Mailbox, Post,
-};
+use crate::bus::{AgentId, AgentMessage, AgentOutcome, AgentResult, Inbox, Mailbox, Post};
 use crate::fleet::Fleet;
 use crate::provider::Provider;
 use crate::shell_eval;
@@ -371,7 +369,10 @@ impl Agent {
     }
 
     /// The parent's own generation at this agent's birth — the fence a result
-    /// addressed upward must survive.
+    /// addressed upward must survive.  Production reads `self.consumer`
+    /// directly; this is test-only convenience for asserting on it from
+    /// outside the module.
+    #[cfg(test)]
     pub(crate) fn consumer(&self) -> u64 {
         self.consumer
     }
@@ -415,43 +416,39 @@ impl Agent {
         }
     }
 
-    /// Stage `reply` for this agent's parent to fetch, and wake it with the
-    /// one-line [`AgentOutcome::Replied`] notice — deposit first, so a parent
-    /// woken by the notice always finds the value already there.  A root has
-    /// nobody to notify: its reply goes to whoever drives its loop.
-    ///
-    /// # Errors
-    /// The parent's inbox was at quota, so the notice was refused; the deposit
-    /// stands either way and `` agents `read `` would still find it.
-    pub(crate) fn deposit_reply(&self, reply: FOValue) -> Result<(), InboxReject> {
+    /// Stage `reply` for this agent's parent to fetch, then report
+    /// [`AgentOutcome::Replied`] — deposit first, so a parent woken by the
+    /// notice always finds the value already there.
+    pub(crate) fn deposit_reply(&self, reply: FOValue) {
         self.status.lock_ignore_poison().reply = Some(reply);
-        let Some(parent) = &self.parent else {
-            return Ok(());
-        };
         // After the status guard drops: the process-wide lock order is
         // inbox → agent.
+        self.report(AgentOutcome::Replied);
+    }
+
+    /// Deliver `outcome` to the parent's inbox as this agent's result.  A root
+    /// has no parent and reports to nobody.
+    pub(crate) fn report(&self, outcome: AgentOutcome) {
+        let Some(parent) = &self.parent else { return };
         parent.mailbox.push(Post::AgentResult(AgentResult {
             name: self.name.clone(),
-            outcome: AgentOutcome::Replied,
+            outcome,
             elapsed: self.elapsed(),
             generation: self.consumer,
-        }))
+        }));
     }
 
     /// Send a marked model-visible note to `to`, stamping its exchange clock
     /// as a steer does, and for the same reason: a message is an exchange, and
     /// one that woke a resting child must not leave it to be reaped
     /// mid-answer.  Scoping is the caller's — [`Self::descendant`].
-    ///
-    /// # Errors
-    /// The recipient's inbox is at quota.
-    pub(crate) fn message(&self, to: &Self, text: String) -> Result<(), InboxReject> {
+    pub(crate) fn message(&self, to: &Self, text: String) {
         to.mailbox.stamp_exchange();
         to.mailbox.push(Post::AgentMessage(AgentMessage {
             from: self.id,
             from_name: self.name.clone(),
             text,
-        }))
+        }));
     }
 
     /// Whether this agent may still be talked to: something has already
@@ -610,6 +607,17 @@ impl Avatar {
 
     pub(crate) fn returns(&self) -> bool {
         self.agent.returns()
+    }
+
+    /// Deliver `outcome` to the parent, then retire: dropping the avatar is the
+    /// retirement, and consuming `self` here is what keeps the two in order.
+    /// A replied child was already reported at deposit time, so `outcome` is
+    /// reported here only when it is not [`AgentOutcome::Replied`].
+    pub(crate) fn settle(self, outcome: AgentOutcome) {
+        if !matches!(outcome, AgentOutcome::Replied) {
+            self.agent.report(outcome);
+        }
+        drop(self);
     }
 
     #[cfg(test)]
