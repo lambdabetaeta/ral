@@ -92,7 +92,7 @@ impl Avatar {
             // hand the agent is not idle for any observable moment, and the
             // deliberation's own transitions are the truth.
             if self.inbox.is_empty() {
-                let mode = policy(self, self.park_mode());
+                let mode = policy(self, self.park_mode(self.agent.engaged()));
                 self.agent.set_resting(mode == ParkMode::Engaged);
                 self.recorder()
                     .transient(crate::record::Transient::State(idle_state(mode)));
@@ -102,7 +102,7 @@ impl Avatar {
             // reaches its parent through the worker epilogue, not this break.
             let Some(item) = self
                 .inbox
-                .next_or_idle(|| policy(self, self.park_mode()), &self.agent.cancel)
+                .next_or_idle(|engaged| policy(self, self.park_mode(engaged)), &self.agent.cancel)
             else {
                 break;
             };
@@ -172,6 +172,7 @@ impl Avatar {
         if !self.admits(item) {
             return Flow::Continue;
         }
+        self.heard(item);
         // Only a genuine boundary clears the latches and a prior exchange's
         // Esc; a self-nudge is the same exchange continuing.
         if item.opens_exchange() {
@@ -292,6 +293,14 @@ impl Avatar {
     /// generation-free.  The `Surface` id is a debug assertion, not an
     /// admission rule — the deferred sink stamps and posts to the very session
     /// that drains it, so a mismatch could only be a routing bug.
+    /// Book an admitted item against the park verdict: a direct child's result
+    /// means it is no longer awaited.
+    pub(super) fn heard(&self, item: &Item) {
+        if let Item::Agent(r) = item {
+            self.agent.heard(r.id);
+        }
+    }
+
     pub(super) fn admits(&self, item: &Item) -> bool {
         match item {
             Item::Agent(r) => r.generation == self.agent.generation(),
@@ -306,12 +315,14 @@ impl Avatar {
         }
     }
 
-    /// How an empty inbox should be treated, recomputed on every wake.  A
+    /// How an empty inbox should be treated, recomputed on every wake, from
+    /// `engaged` — the exchange clock, read by `next_or_idle` under the queue
+    /// mutex — and this agent's own status.  A
     /// conversing agent parks [`ParkMode::Held`], immune to cancellation; a
     /// returning agent a human has exchanged with parks [`ParkMode::Engaged`]
     /// — the same wait, but a terminate-cause cancel still ends it, and the
     /// fleet's idle lease rather than this predicate bounds it.
-    fn park_mode(&self) -> ParkMode {
+    fn park_mode(&self, engaged: bool) -> ParkMode {
         let conversing = self.agent.interactive && !self.returns();
         if conversing {
             // `next_or_idle` lets a terminate cause end every park but `Held`,
@@ -324,7 +335,7 @@ impl Avatar {
         }
         // Only an agent with somewhere to report waits to be messaged; a
         // headless root returns and ends.
-        if self.agent.parent.is_some() && self.returns() && self.agent.messageable() {
+        if self.agent.parent.is_some() && self.returns() && (engaged || self.agent.has_reply()) {
             return ParkMode::Engaged;
         }
         if self.agent.has_busy_children() {
@@ -538,6 +549,7 @@ mod tests {
         announce(&Item::Human("hello".into()), &recorder);
         announce(
             &Item::Agent(AgentResult {
+                id: 7,
                 name: "helper".into(),
                 outcome: AgentOutcome::Failed("boom".into()),
                 elapsed: std::time::Duration::from_millis(1500),
@@ -575,19 +587,19 @@ mod tests {
     #[test]
     fn park_mode_reads_engagement_from_the_exchange_clock() {
         let held = trunk(true);
-        assert_eq!(held.park_mode(), ParkMode::Held);
+        assert_eq!(held.park_mode(held.agent.engaged()), ParkMode::Held);
 
         let parent = Avatar::for_test("system").unwrap();
         let child = parent.fork(parent.caps().clone()).expect("fork child");
         assert_eq!(
-            child.park_mode(),
+            child.park_mode(child.agent.engaged()),
             ParkMode::Quiesce,
             "un-engaged, no live children, no schedule: idle quiesce delivers the outcome"
         );
 
         child.agent.mailbox().steer("hi".into());
         assert_eq!(
-            child.park_mode(),
+            child.park_mode(child.agent.engaged()),
             ParkMode::Engaged,
             "a human exchange engages the child, which now parks messageable"
         );
@@ -620,7 +632,7 @@ mod tests {
             branch_result.content
         );
         assert_eq!(
-            branch.park_mode(),
+            branch.park_mode(branch.agent.engaged()),
             ParkMode::Held,
             "a /branch child still parks Held after a refused reply"
         );

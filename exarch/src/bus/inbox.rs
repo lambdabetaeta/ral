@@ -4,16 +4,11 @@
 //! ([`Inbox::drain_steering`]) and parks at the exchange boundary
 //! ([`Inbox::next_or_idle`]).
 //!
-//! Two orderings bind every producer.  The park verdict is computed *under the
-//! queue mutex* and reads [`crate::agent::Agent`]'s own status, so the lock
-//! order is **inbox → agent**: clone a [`Mailbox`] out and drop any agent-side
-//! guard before pushing.  And the verdict is computed *before* the pop, so a
-//! producer that both changes a verdict input and delivers must deliver first —
-//! a settling child posts its result, then retires itself — or the
-//! consumer could quiesce between the two facts.  [`Mailbox::steer`] holds
-//! this same ordering within itself: it stamps the exchange clock before the
-//! push that wakes a parked consumer, so a park verdict recomputed on the
-//! wakeup already reads engaged.
+//! The park verdict is computed *under the queue mutex* and *before* the pop.
+//! Every fact it reads is either kept under that same mutex (the exchange
+//! clock), written only by the consumer's own thread (`Agent`'s status), or
+//! changes only *after* a delivery into this queue (a child dies after posting
+//! its result) — so a delivery can never lose to the verdict it should wake.
 
 use super::post::{Boundary, Source, is_slash};
 use super::{Item, Post};
@@ -51,7 +46,7 @@ pub(crate) enum ParkMode {
 /// plus a [`Condvar`] a parked `next_or_idle` waits on so a push wakes it
 /// without polling.
 struct Shared {
-    queue: Mutex<VecDeque<Post>>,
+    queue: Mutex<Queue>,
     signal: Condvar,
     /// True while the consumer is parked in [`ParkMode::Held`] or
     /// [`ParkMode::Engaged`] on an empty queue.  A producer clears it before
@@ -65,24 +60,29 @@ struct Shared {
     /// the lock `clear` holds: a push landing before the bump is swept with the
     /// queue, one landing after is refused as stale.
     epoch: AtomicU64,
+}
+
+/// What the queue mutex guards: the posts, and the exchange clock they are
+/// stamped against, so an exchange's stamp and its delivery are one atomic
+/// step and a park verdict — computed under this same mutex — reads both.
+struct Queue {
+    posts: VecDeque<Post>,
     /// The last human or parent exchange — [`Mailbox::steer`] or
     /// [`Agent::message`](crate::agent::Agent::message) — that reached this
-    /// inbox; `None` before the
-    /// first.  Stamped ahead of the delivery it accompanies, so a park
-    /// verdict recomputed on the wakeup that delivery causes already reads
-    /// engaged: whichever thread next acquires `queue` observes both, since
-    /// the stamp always precedes that release.
-    last_exchange: Mutex<Option<Instant>>,
+    /// inbox; `None` before the first.
+    last_exchange: Option<Instant>,
 }
 
 impl Shared {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            queue: Mutex::new(VecDeque::new()),
+            queue: Mutex::new(Queue {
+                posts: VecDeque::new(),
+                last_exchange: None,
+            }),
             signal: Condvar::new(),
             waiting_for_input: AtomicBool::new(true),
             epoch: AtomicU64::new(0),
-            last_exchange: Mutex::new(None),
         })
     }
 
@@ -90,22 +90,44 @@ impl Shared {
     /// `ScheduleRegistry::lock` does: every operation here is a whole push, pop
     /// or clear, so a panicked holder leaves the deque usable, where
     /// propagating the poison would kill the fleet's inbox for good.
-    fn lock(&self) -> MutexGuard<'_, VecDeque<Post>> {
+    fn lock(&self) -> MutexGuard<'_, Queue> {
         self.queue.lock_ignore_poison()
     }
 
-    /// The push rule, waking a parked consumer.  The idempotent sources
-    /// coalesce: a `ScheduledWakeup` replaces a still-queued one for the same
-    /// schedule id, a `Nudge` replaces a still-queued nudge (a second means a
-    /// fresher continuation superseded the first, not that both are owed), and
-    /// `UserSteering` joins a non-slash tail entry on a new line — never across
-    /// a slash line, whose exchange-boundary classification ([`Post::boundary`])
-    /// must survive the merge.  Every other source queues: each is posted at
-    /// most once per child, worker, or human keystroke, so the fuel and
-    /// admission caps that bound those already bound the queue.
     fn push(&self, msg: Post) {
         let mut q = self.lock();
-        match msg {
+        enqueue(&mut q.posts, msg);
+        drop(q);
+        self.wake();
+    }
+
+    /// A delivery that is also an exchange: stamp and enqueue under one
+    /// acquisition of the queue mutex.
+    fn exchange(&self, msg: Post) {
+        let mut q = self.lock();
+        q.last_exchange = Some(Instant::now());
+        enqueue(&mut q.posts, msg);
+        drop(q);
+        self.wake();
+    }
+
+    fn wake(&self) {
+        self.waiting_for_input.store(false, Ordering::Release);
+        self.signal.notify_all();
+    }
+}
+
+/// The push rule.  The idempotent sources coalesce: a `ScheduledWakeup`
+/// replaces a still-queued one for the same schedule id, a `Nudge` replaces a
+/// still-queued nudge (a second means a fresher continuation superseded the
+/// first, not that both are owed), and `UserSteering` joins a non-slash tail
+/// entry on a new line — never across a slash line, whose exchange-boundary
+/// classification ([`Post::boundary`]) must survive the merge.  Every other
+/// source queues: each is posted at most once per child, worker, or human
+/// keystroke, so the fuel and admission caps that bound those already bound
+/// the queue.
+fn enqueue(q: &mut VecDeque<Post>, msg: Post) {
+    match msg {
             Post::ScheduledWakeup { id, .. } => {
                 let existing = q
                     .iter()
@@ -136,10 +158,6 @@ impl Shared {
             }
             other => q.push_back(other),
         }
-        drop(q);
-        self.waiting_for_input.store(false, Ordering::Release);
-        self.signal.notify_all();
-    }
 }
 
 /// How long a parked [`Inbox::next_or_idle`] sleeps between condvar wakes.  A
@@ -171,25 +189,28 @@ impl Mailbox {
         self.push(Post::UserSteering(prompt));
     }
 
-    /// The fleet's one delivery door for a human message: stamp the
-    /// exchange clock, then push — the order [`Shared::last_exchange`]'s doc
-    /// requires, so a park verdict woken by this push already reads engaged.
+    /// The fleet's delivery door for a human message: an exchange, so it
+    /// stamps the clock in the same step as it delivers.
     pub(crate) fn steer(&self, text: String) {
-        self.stamp_exchange();
-        self.push_user(text);
+        self.exchange(Post::UserSteering(text));
     }
 
-    /// Stamp the exchange clock without a delivery — the fleet's `message`
-    /// door, whose delivery is a marked [`Post::AgentMessage`] rather than
-    /// `UserSteering`, so it stamps and pushes as two calls in the same order
-    /// [`Self::steer`] holds internally.
+    /// Deliver `msg` as an exchange — a steer, or a parent's marked
+    /// [`Post::AgentMessage`] — stamping the clock atomically with the push.
+    pub(crate) fn exchange(&self, msg: Post) {
+        self.shared.exchange(msg);
+    }
+
+    /// Stamp the exchange clock with no delivery, for tests whose scripted
+    /// consumer has nothing to answer a steer with.
+    #[cfg(test)]
     pub(crate) fn stamp_exchange(&self) {
-        *self.shared.last_exchange.lock_ignore_poison() = Some(Instant::now());
+        self.shared.lock().last_exchange = Some(Instant::now());
     }
 
     /// The last exchange this inbox witnessed, or `None` before the first.
     pub(crate) fn last_exchange(&self) -> Option<Instant> {
-        *self.shared.last_exchange.lock_ignore_poison()
+        self.shared.lock().last_exchange
     }
 
     /// Whether this queue's consumer is parked at a human-input boundary — the
@@ -245,7 +266,7 @@ impl Inbox {
     /// Whether anything is queued.  The attend loop's ready boundary reads it
     /// to tell an idle pass from one that already has work in hand.
     pub(crate) fn is_empty(&self) -> bool {
-        self.shared.lock().is_empty()
+        self.shared.lock().posts.is_empty()
     }
 
     /// True once the consumer yields on an empty queue, cleared the moment a
@@ -258,7 +279,7 @@ impl Inbox {
     /// row set is stable.  One pass under the lock; nothing is drained or woken.
     pub(crate) fn source_depths(&self) -> Vec<(Source, u64)> {
         let mut rows: Vec<(Source, u64)> = Source::ALL.into_iter().map(|s| (s, 0u64)).collect();
-        for msg in self.shared.lock().iter() {
+        for msg in &self.shared.lock().posts {
             if let Some(row) = rows.iter_mut().find(|(s, _)| *s == msg.source()) {
                 row.1 += 1;
             }
@@ -276,6 +297,7 @@ impl Inbox {
     pub(crate) fn queued_human_messages(&self) -> Vec<String> {
         self.shared
             .lock()
+            .posts
             .iter()
             .filter_map(|msg| match msg {
                 Post::UserSteering(s) | Post::Command(s) | Post::Barrier(s) => Some(s.clone()),
@@ -288,7 +310,8 @@ impl Inbox {
     /// wherever it sits: a prompt queued behind a wakeup is still the user's
     /// draft, and the wakeup, left in place, is not.
     pub(crate) fn pop_back_user_all(&self) -> Option<Vec<String>> {
-        let mut q = self.shared.lock();
+        let mut guard = self.shared.lock();
+        let q = &mut guard.posts;
         let mut prompts: Vec<String> = Vec::new();
         let mut kept: VecDeque<Post> = VecDeque::with_capacity(q.len());
         while let Some(msg) = q.pop_front() {
@@ -298,7 +321,7 @@ impl Inbox {
             }
         }
         *q = kept;
-        drop(q);
+        drop(guard);
         (!prompts.is_empty()).then_some(prompts)
     }
 
@@ -320,7 +343,8 @@ impl Inbox {
     /// # Panics
     /// Never: every removal follows a same-iteration check of the same entry.
     pub(crate) fn drain_steering(&self) -> Vec<Item> {
-        let mut q = self.shared.lock();
+        let mut guard = self.shared.lock();
+        let q = &mut guard.posts;
         let epoch = self.shared.epoch.load(Ordering::Acquire);
         let mut items = Vec::new();
         // Rebuilt rather than popped: a passed-over entry stays queued, so what
@@ -334,7 +358,7 @@ impl Inbox {
                 }
                 Boundary::Tool => {
                     if matches!(front, Post::UserSteering(_)) {
-                        items.push(coalesce_steering(&mut q));
+                        items.push(coalesce_steering(q));
                     } else {
                         let msg = q.pop_front().expect("front present and tool-boundary");
                         if let Some(item) = to_item(msg, epoch) {
@@ -347,7 +371,7 @@ impl Inbox {
         while let Some(msg) = kept.pop_back() {
             q.push_front(msg);
         }
-        drop(q);
+        drop(guard);
         items
     }
 
@@ -356,7 +380,7 @@ impl Inbox {
     pub(crate) fn next_item(&self) -> Option<Item> {
         let mut q = self.shared.lock();
         let epoch = self.shared.epoch.load(Ordering::Acquire);
-        pop_item(&mut q, epoch)
+        pop_item(&mut q.posts, epoch)
     }
 
     /// The attend loop's exchange-boundary pull: the next deliverable, or, on
@@ -367,17 +391,18 @@ impl Inbox {
     ///
     /// Two orderings carry the correctness.  The verdict runs *under the queue
     /// mutex*, which the condvar releases atomically, so no push interleaves
-    /// between verdict and wait and no wakeup is lost.  And it runs *before* the
-    /// pop, so a producer need only deliver before it changes a verdict input:
-    /// a `Quiesce` can never win against the delivery it should wait for.
+    /// between verdict and wait and no wakeup is lost; `park` is handed the
+    /// exchange clock's reading from under that same lock.  And it runs
+    /// *before* the pop, so a `Quiesce` can never win against a delivery
+    /// already queued.
     pub(crate) fn next_or_idle(
         &self,
-        park: impl Fn() -> ParkMode,
+        park: impl Fn(bool) -> ParkMode,
         cancel: &cancel::Token,
     ) -> Option<Item> {
         let mut q = self.shared.lock();
         loop {
-            let mode = park();
+            let mode = park(q.last_exchange.is_some());
             // A *terminate*-cause cancel ends every park but `Held`; an
             // *interrupt* drops the in-flight exchange and the agent re-parks.
             // Only a live human conversation ignores cancellation entirely.
@@ -385,7 +410,7 @@ impl Inbox {
                 return None;
             }
             let epoch = self.shared.epoch.load(Ordering::Acquire);
-            if let Some(item) = pop_item(&mut q, epoch) {
+            if let Some(item) = pop_item(&mut q.posts, epoch) {
                 self.shared
                     .waiting_for_input
                     .store(false, Ordering::Release);
@@ -417,7 +442,7 @@ impl Inbox {
     /// clear-epoch under the same lock as the drain ([`Shared::epoch`]).
     pub(crate) fn clear(&self) {
         let mut q = self.shared.lock();
-        for msg in q.drain(..) {
+        for msg in q.posts.drain(..) {
             msg.on_drain();
         }
         self.shared.epoch.fetch_add(1, Ordering::Release);
@@ -429,6 +454,7 @@ impl Inbox {
     pub(crate) fn drop_nudges(&self) {
         self.shared
             .lock()
+            .posts
             .retain(|msg| !matches!(msg, Post::Nudge { .. }));
     }
 }
@@ -576,7 +602,7 @@ mod tests {
         let token = cancel::Token::new();
         let worker_token = token;
         let handle =
-            std::thread::spawn(move || worker_inbox.next_or_idle(|| ParkMode::Held, &worker_token));
+            std::thread::spawn(move || worker_inbox.next_or_idle(|_| ParkMode::Held, &worker_token));
 
         assert!(
             eventually(Duration::from_secs(1), || inbox.waiting_for_input()),
@@ -612,7 +638,7 @@ mod tests {
         let worker_token = token.clone();
         let handle = std::thread::spawn(move || {
             worker_inbox.next_or_idle(
-                || {
+                |_| {
                     worker_observed.store(true, Ordering::Release);
                     ParkMode::HeldByChildren
                 },
@@ -654,7 +680,7 @@ mod tests {
         let worker_token = token.clone();
         let handle = std::thread::spawn(move || {
             worker_inbox.next_or_idle(
-                || {
+                |_| {
                     worker_observed.store(true, Ordering::Release);
                     ParkMode::HeldByChildren
                 },
@@ -690,7 +716,7 @@ mod tests {
         let worker_token = token.clone();
         let handle = std::thread::spawn(move || {
             inbox.next_or_idle(
-                || {
+                |_| {
                     worker_observed.store(true, Ordering::Release);
                     ParkMode::Engaged
                 },
@@ -725,7 +751,7 @@ mod tests {
         let worker_token = token.clone();
         let handle = std::thread::spawn(move || {
             worker_inbox.next_or_idle(
-                || {
+                |_| {
                     worker_observed.store(true, Ordering::Release);
                     ParkMode::Held
                 },

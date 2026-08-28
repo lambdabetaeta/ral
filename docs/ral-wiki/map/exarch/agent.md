@@ -16,7 +16,7 @@ and the eval-layer `reach: EvalReach`), the sender half of its own
 config (`caps`, `fuel`, `returns`, `search`, `interactive`,
 `allow_schedule`, `egress`, `dial`, `index`, the resolved `system` prompt,
 `disk_warn_bytes`), the single-writer `status: Mutex<Status>` — `{
-generation, rest, reply }` — `consumer` (the parent's generation at this
+generation, rest, reply, awaiting }` — `consumer` (the parent's generation at this
 agent's birth), a strong `parent: Option<Arc<Agent>>`, and a weak
 `children: Mutex<Vec<Weak<Agent>>>`.
 
@@ -57,24 +57,34 @@ hold at most one at a time.** `children` is locked only to push
 (`Agent::adopt`) or to snapshot (`Agent::children`, which prunes as it
 copies); every walk (`Agent::walk`, `descendant`, cascade, roster) runs
 over the snapshot, never under the lock. `status` is a single-writer
-register — the avatar writes one field at a time
-(`Agent::set_resting`, `Agent::deposit_reply`, `Agent::clear_subtree`'s
-generation bump) and a reader takes one snapshot and computes nothing under
-the lock, so the mutex buys atomicity and nothing more. `parent` is a plain
-`Arc`, read lock-free. Inbox → agent stays the one cross-type order: a park
-verdict reads `agent.rest()` under the consumer's own inbox mutex, so no
-`Agent` method may take an inbox lock; nothing needs the reverse order
-either, since `steer` touches only the inbox.
+register — the avatar writes one field at a time (`set_resting`,
+`deposit_reply`, `heard`, `message`, `clear_subtree`) and a reader takes
+one snapshot and computes nothing under the lock, so the mutex buys
+atomicity and nothing more. `parent` is a plain `Arc`, read lock-free.
+
+**The park verdict reads no fact another thread can change without a
+delivery.** `Avatar::park_mode` runs under the consumer's own queue mutex
+(`Inbox::next_or_idle`) and before the pop, and each of its inputs is one
+of three kinds. The exchange clock is *under that same mutex*: `Queue {
+posts, last_exchange }` is what the mutex guards, so `Mailbox::steer` and
+`Agent::message` stamp and enqueue in one acquisition (`Mailbox::exchange`),
+and `next_or_idle` hands the verdict its reading as the `engaged` argument.
+The agent's own `status` — `reply`, and `awaiting`, the set of direct
+children spawned (`adopt`) or messaged (`message`) and not yet heard from
+(`heard`, at the moment the attend loop takes up the child's
+`AgentResult`) — is written only by the consumer's thread, so
+`has_busy_children` is *live children ∩ awaiting* and never reads a child's
+own `rest`. What remains — a child dying, a schedule firing — happens only
+*after* a delivery into this queue, which the pre-pop verdict cannot lose
+to. A `Status` writer drops its guard before pushing to any inbox; that is
+the whole of the cross-type lock discipline.
 
 **`last_exchange` lives on the inbox, not on `Agent::status`.** It was never
 agent state — it is "when did a human or a parent last push into this
-mailbox", a fact the `Mailbox` itself witnesses. `Mailbox::steer` (a human
-line, `bus/inbox.rs`) and `Agent::message` (a parent's marked note)
-both stamp it *before* the push, so a park verdict a woken consumer
-computes already reads `Engaged`. `Agent::idle()` reads
+mailbox", a fact the `Mailbox` itself witnesses. `Agent::engaged()` reads
+it, `Agent::idle()` reads
 `mailbox.last_exchange().unwrap_or(started).elapsed()` — the roster's
-`idle-s` and the reaper's bound, in one door, with `renew` gone as a
-separate method.
+`idle-s` and the reaper's bound, in one door.
 
 **Up is strong, down is weak.** `Agent::parent` is a strong `Arc`, so
 `deposit_reply` and the scope climb (`Agent::descendant`) never dangle: a
@@ -123,8 +133,8 @@ never an `is_root` branch:
   conversing(a) =  a.interactive ∧ ¬returns(a)
   park_mode(a)  =  Quiesce        if conversing(a) ∧ a.cancel.terminated()   // /close reaped it
                    Held           if conversing(a)                          // immune to cancellation
-                   Engaged        if a.parent ∧ returns(a) ∧ a.messageable()  // talked to, or holding a reply; a terminate cause still ends it
-                   HeldByChildren if a has busy children
+                   Engaged        if a.parent ∧ returns(a) ∧ (engaged ∨ a.has_reply())  // talked to, or holding a reply; a terminate cause still ends it
+                   HeldByChildren if some live child of a is still awaited
                    UntilCancelled if a.schedules.armed()
                    Quiesce        otherwise
 ```

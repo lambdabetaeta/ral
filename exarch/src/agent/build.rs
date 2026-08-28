@@ -285,6 +285,7 @@ impl Avatar {
                 generation: 0,
                 rest: None,
                 reply: None,
+                awaiting: std::collections::BTreeSet::new(),
             }),
             consumer,
         });

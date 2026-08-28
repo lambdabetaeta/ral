@@ -394,6 +394,7 @@ impl Avatar {
             .drain_steering()
             .into_iter()
             .filter(|t| self.admits(t))
+            .inspect(|t| self.heard(t))
             .collect();
         (results, injected)
     }
@@ -896,6 +897,7 @@ mod tests {
         session
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
+                id: 7,
                 name: "late".into(),
                 outcome: AgentOutcome::Stopped("done".into()),
                 elapsed: std::time::Duration::ZERO,
@@ -924,6 +926,7 @@ mod tests {
         session
             .inbox
             .push(Post::AgentResult(crate::bus::AgentResult {
+                id: 7,
                 name: "worker".into(),
                 outcome: AgentOutcome::Stopped("found it".into()),
                 elapsed: std::time::Duration::ZERO,

@@ -3727,7 +3727,7 @@ mod tests {
         let handle = attend_and_deliver(child);
 
         child_agent.mailbox().steer("first message".into());
-        assert!(child_agent.messageable(), "steer renews the exchange clock");
+        assert!(child_agent.engaged(), "steer renews the exchange clock");
         assert!(
             eventually_logged(
                 &log_dir.join("record.jsonl"),

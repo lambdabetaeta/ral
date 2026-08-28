@@ -129,12 +129,9 @@ pub(crate) fn spawn_async(
             child.recorder().transient(Transient::Died);
             // A replied child's parent was notified at deposit time; `settle`
             // skips a second report for it.  A branch reports to nobody and
-            // only `/close` on its own tab ever ends it.  The parent's park
-            // verdict reads child liveness (the tree) and delivery (its
-            // inbox) under two different locks, and pops its queue only
-            // after the verdict, so delivery must come before retirement: a
-            // parent that observes this child gone then always finds the
-            // result already queued.
+            // only `/close` on its own tab ever ends it.  Delivery precedes
+            // retirement: a parent that finds this child gone always finds
+            // the result already queued.
             child.settle(outcome);
         });
     match worker {

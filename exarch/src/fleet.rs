@@ -853,11 +853,11 @@ mod tests {
         child.mailbox = inbox.mailbox();
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
 
-        assert!(!child.messageable(), "a fresh agent has never been engaged");
+        assert!(!child.engaged(), "a fresh agent has never been engaged");
 
         inbox.push(Post::UserSteering("hello".into()));
         assert!(
-            !child.messageable(),
+            !child.engaged(),
             "a raw mailbox push is not an exchange"
         );
         // Drained, so the steer below lands as its own item rather than
@@ -865,7 +865,7 @@ mod tests {
         inbox.next_item();
 
         child.mailbox().steer("hi".into());
-        assert!(child.messageable(), "steered at least once");
+        assert!(child.engaged(), "steered at least once");
         assert!(
             child.idle() < Duration::from_secs(1),
             "idle resets to (near) zero right after a steer"
@@ -887,7 +887,7 @@ mod tests {
         let child = agent(&fleet, "child", Some(&trunk));
         let generation = child.consumer();
         let inbox = Inbox::new();
-        let park = || {
+        let park = |_engaged| {
             if trunk.has_busy_children() {
                 ParkMode::HeldByChildren
             } else {
@@ -895,21 +895,22 @@ mod tests {
             }
         };
         assert_eq!(
-            park(),
+            park(false),
             ParkMode::HeldByChildren,
             "a live direct child holds its parent's park"
         );
 
         // The worker epilogue in production order: deliver, then retire.
         inbox.mailbox().push(Post::AgentResult(AgentResult {
-            name: "child".into(),
+            id: child.id,
+                name: "child".into(),
             outcome: AgentOutcome::Stopped("done".into()),
             elapsed: Duration::ZERO,
             generation,
         }));
         drop(child);
         assert_eq!(
-            park(),
+            park(false),
             ParkMode::Quiesce,
             "the last child settling drains the fleet"
         );

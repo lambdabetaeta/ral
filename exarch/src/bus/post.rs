@@ -78,6 +78,7 @@ impl AgentOutcome {
 /// non-reply finish — turned to prose only at the model boundary.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentResult {
+    pub id: AgentId,
     pub name: String,
     pub outcome: AgentOutcome,
     pub elapsed: Duration,

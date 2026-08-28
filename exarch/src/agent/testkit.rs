@@ -141,6 +141,7 @@ pub(crate) fn test_agent(
             generation: 0,
             rest: None,
             reply: None,
+            awaiting: std::collections::BTreeSet::new(),
         }),
         consumer,
     });

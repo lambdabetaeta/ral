@@ -70,6 +70,7 @@ use crate::shell_eval;
 use crate::sync::LockExt;
 use ral_core::process::CancelCause;
 use ral_core::serial::FOValue;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -175,10 +176,11 @@ pub struct Agent {
     /// pinned. Public agent state, for the same reason as [`Self::schedules`].
     pub(crate) pins: shell_eval::PinDigests,
     /// A process publishing its status: written by the avatar alone
-    /// ([`Self::set_resting`], [`Self::deposit_reply`], [`Self::clear_subtree`]'s
-    /// generation bump), read by everyone else.  A reader takes one snapshot
-    /// and computes nothing under the lock — the mutex buys atomicity, nothing
-    /// more.
+    /// ([`Self::set_resting`], [`Self::deposit_reply`], [`Self::heard`],
+    /// [`Self::message`], [`Self::clear_subtree`]), read by everyone else.
+    /// A reader takes one snapshot and computes nothing under the lock — the
+    /// mutex buys atomicity, nothing more — and a writer drops its guard before
+    /// pushing to any inbox, since a park verdict reads this under one.
     status: Mutex<Status>,
     /// The parent's own generation at this agent's birth: the fence a result
     /// addressed upward must survive, since the parent is who reads it.  0 for
@@ -202,6 +204,12 @@ struct Status {
     /// because it must survive a wake: a messaged agent is busy again with
     /// its reply still standing, until it replies afresh.
     reply: Option<FOValue>,
+    /// Direct children this agent has spoken to — spawned or messaged — and
+    /// not yet heard back from.  The busy/at-rest bit of the parent–child
+    /// edge lives here, on the side that consumes the result, so the park
+    /// verdict flips exactly when the result is taken up and never reads a
+    /// child's own status.
+    awaiting: BTreeSet<AgentId>,
 }
 
 /// An agent's embodiment in this process: the thread that thinks and acts
@@ -421,8 +429,6 @@ impl Agent {
     /// notice always finds the value already there.
     pub(crate) fn deposit_reply(&self, reply: FOValue) {
         self.status.lock_ignore_poison().reply = Some(reply);
-        // After the status guard drops: the process-wide lock order is
-        // inbox → agent.
         self.report(AgentOutcome::Replied);
     }
 
@@ -431,6 +437,7 @@ impl Agent {
     pub(crate) fn report(&self, outcome: AgentOutcome) {
         let Some(parent) = &self.parent else { return };
         parent.mailbox.push(Post::AgentResult(AgentResult {
+            id: self.id,
             name: self.name.clone(),
             outcome,
             elapsed: self.elapsed(),
@@ -438,23 +445,30 @@ impl Agent {
         }));
     }
 
-    /// Send a marked model-visible note to `to`, stamping its exchange clock
-    /// as a steer does, and for the same reason: a message is an exchange, and
-    /// one that woke a resting child must not leave it to be reaped
-    /// mid-answer.  Scoping is the caller's — [`Self::descendant`].
+    /// Send a marked model-visible note to `to` as an exchange, so a woken
+    /// resting child is not reaped mid-answer.  A direct child so woken is
+    /// awaited again; a deeper descendant answers its own parent, not us.
+    /// Scoping is the caller's — [`Self::descendant`].
     pub(crate) fn message(&self, to: &Self, text: String) {
-        to.mailbox.stamp_exchange();
-        to.mailbox.push(Post::AgentMessage(AgentMessage {
+        if to.parent_id() == Some(self.id) {
+            self.status.lock_ignore_poison().awaiting.insert(to.id);
+        }
+        to.mailbox.exchange(Post::AgentMessage(AgentMessage {
             from: self.id,
             from_name: self.name.clone(),
             text,
         }));
     }
 
-    /// Whether this agent may still be talked to: something has already
-    /// spoken to it, or it holds a reply someone may want to follow up on.
-    pub(crate) fn messageable(&self) -> bool {
-        self.mailbox.last_exchange().is_some() || self.has_reply()
+    /// A result from direct child `child` has been taken up: it no longer
+    /// holds this agent's park.
+    pub(crate) fn heard(&self, child: AgentId) {
+        self.status.lock_ignore_poison().awaiting.remove(&child);
+    }
+
+    /// Whether a human or parent has ever exchanged with this agent.
+    pub(crate) fn engaged(&self) -> bool {
+        self.mailbox.last_exchange().is_some()
     }
 
     /// Time since this agent's last human exchange, or since birth if never
@@ -487,6 +501,7 @@ impl Agent {
         self.children
             .lock_ignore_poison()
             .push(Arc::downgrade(child));
+        self.status.lock_ignore_poison().awaiting.insert(child.id);
     }
 
     /// This agent's live direct children, pruning the settled ones as it
@@ -528,13 +543,14 @@ impl Agent {
         None
     }
 
-    /// The park signal for a node that launched async agents: a direct child
-    /// still *working* is what may yet deliver to this mailbox.  A resting one
-    /// has already said what it had to say — it holds its reply and waits to
-    /// be messaged — so it must not hold its parent open for the hour its
-    /// lease allows.
+    /// The park signal for a node that launched async agents: a live direct
+    /// child this agent is still [`Status::awaiting`] may yet deliver to this
+    /// mailbox.  One heard from has said what it had to say — it holds its
+    /// reply and waits to be messaged — and one that died delivered first.
     pub(crate) fn has_busy_children(&self) -> bool {
-        self.children().iter().any(|c| c.rest().is_none())
+        let live = self.children();
+        let status = self.status.lock_ignore_poison();
+        live.iter().any(|c| status.awaiting.contains(&c.id))
     }
 
     /// Cancel this agent and its whole subtree.  Every victim is stamped
@@ -562,7 +578,9 @@ impl Agent {
     /// from dropping work another tab is still waiting on.
     pub(crate) fn clear_subtree(&self) {
         self.cancel_descendants(CancelCause::Explicit);
-        self.status.lock_ignore_poison().generation += 1;
+        let mut status = self.status.lock_ignore_poison();
+        status.generation += 1;
+        status.awaiting.clear();
     }
 }
 
