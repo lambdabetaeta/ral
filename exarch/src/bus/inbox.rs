@@ -132,7 +132,7 @@ impl Shared {
     /// still-queued one for the same schedule id, a `Nudge` replaces a
     /// still-queued nudge (a second means a fresher continuation superseded the
     /// first, not that both are owed), and `UserSteering` joins a non-slash tail
-    /// entry with a blank line — never across a slash line, whose
+    /// entry on a new line — never across a slash line, whose
     /// exchange-boundary classification ([`Post::boundary`]) must survive the
     /// merge.  Every other source is quota-checked: rejected, never dropped.
     fn try_push(&self, msg: Post) -> Result<(), InboxReject> {
@@ -152,7 +152,7 @@ impl Shared {
                     && matches!(q.back(), Some(Post::UserSteering(s)) if !is_slash(s));
                 if merge {
                     if let Some(Post::UserSteering(s)) = q.back_mut() {
-                        s.push_str("\n\n");
+                        s.push('\n');
                         s.push_str(&text);
                     }
                 } else {
@@ -531,7 +531,7 @@ pub(super) fn pop_item(q: &mut VecDeque<Post>, epoch: u64) -> Option<Item> {
 }
 
 /// Pop the leading run of consecutive, non-slash [`Post::UserSteering`] entries
-/// and join them with a blank line — the coalesce half of the never-merge rule.
+/// and join them one per line — the coalesce half of the never-merge rule.
 /// Both callers enter with a non-slash steering at the front, so one always pops.
 fn coalesce_steering(q: &mut VecDeque<Post>) -> Item {
     let mut text = String::new();
@@ -543,7 +543,7 @@ fn coalesce_steering(q: &mut VecDeque<Post>) -> Item {
             unreachable!("front just checked to be user steering")
         };
         if !text.is_empty() {
-            text.push_str("\n\n");
+            text.push('\n');
         }
         text.push_str(&s);
     }
@@ -878,7 +878,7 @@ mod tests {
         assert!(
             matches!(
                 inbox.drain_steering().as_slice(),
-                [Item::Wakeup(_), Item::Human(s)] if s == "redirect now\n\nand also this",
+                [Item::Wakeup(_), Item::Human(s)] if s == "redirect now\nand also this",
             ),
             "the async wakeup and the coalesced steering both drain, in order",
         );
@@ -1002,7 +1002,7 @@ mod tests {
             inbox.pop_back_user_all(),
             Some(vec![
                 "first".to_string(),
-                "second\n\nthird".to_string(),
+                "second\nthird".to_string(),
                 "fourth".to_string(),
             ]),
             "all user prompts come back oldest-first, past interspersed deliveries",
@@ -1182,7 +1182,7 @@ mod tests {
         match inbox.next_item() {
             Some(Item::Human(text)) => {
                 assert_eq!(
-                    text, "first line\n\nsecond line",
+                    text, "first line\nsecond line",
                     "both texts survive in order"
                 );
             }

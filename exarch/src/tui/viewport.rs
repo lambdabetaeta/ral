@@ -13,6 +13,7 @@
 //! which carries the open line a reasoning seat draws.
 
 use super::block::{AgentSlot, Block, ChromeKind, Reveal, append_visual_rows};
+use super::gesture::Cell;
 use super::group;
 use super::line::is_blank;
 use super::palette::{READ_W, content_w};
@@ -597,9 +598,9 @@ impl Viewport {
         self.flat.row_block.get(row).copied()
     }
 
-    /// Visual row to index in `flat.rows`, or `None` past the end.
-    fn flat_row(&self, row: usize) -> Option<usize> {
-        (row < self.flat.rows.len()).then_some(row)
+    /// The first visual row of block `idx` — the one carrying its rail glyph.
+    pub(super) fn block_head(&self, idx: usize) -> Option<usize> {
+        self.flat.row_block.iter().position(|&b| b == idx)
     }
 
     /// Rendered cell width of visual row `row` — its content's extent, not the
@@ -609,15 +610,9 @@ impl Viewport {
     }
 
     /// Whether the block at `idx` is dialable — a property of its kind, not its
-    /// level, so a wheel on its glyph claims the gesture even when clamped.
+    /// level, so a click on its glyph claims the gesture even when clamped.
     pub(super) fn block_dialable(&self, idx: usize) -> bool {
         self.blocks.get(idx).is_some_and(|e| e.block.dialable())
-    }
-
-    /// Dial the block at `idx`, reporting whether it changed — so the caller
-    /// can tell a real dial from a gesture on inert chrome or a clamped level.
-    pub(super) fn dial_block(&mut self, idx: usize, delta: i8) -> bool {
-        self.mutate_block(idx, |b| b.dial(delta))
     }
 
     /// Cycle the block at `idx` between L1 and L3 — the click-on-rail affordance.
@@ -626,7 +621,7 @@ impl Viewport {
     }
 
     /// Set the rung every thinking trace reads at: the traces on screen move
-    /// now — through the same seam a wheel dials, so the rung is remembered
+    /// now — through the same seam a click cycles, so the rung is remembered
     /// against a resync — and the ones still to come are born there.
     pub(super) fn set_traces_level(&mut self, level: Reveal) {
         self.traces = level;
@@ -686,45 +681,20 @@ impl Viewport {
         }
     }
 
-    /// Plain text a drag selection copies.  `col` is a cell-column within the
-    /// text area (0 = left edge); the rail glyph is stripped automatically.
-    pub(super) fn selection_text(&self, lo: (usize, u16), hi: (usize, u16)) -> String {
-        let (lo_row, lo_col) = lo;
-        let (hi_row, hi_col) = hi;
-        if lo_row == hi_row {
-            let (a, b) = if lo_col <= hi_col {
-                (lo_col, hi_col)
-            } else {
-                (hi_col, lo_col)
-            };
-            return match self.flat_row(lo_row) {
-                Some(r) => plain_slice(&self.flat.rows[r], a, b),
-                None => String::new(),
-            };
+    /// Plain text a drag selection copies, `lo <= hi` in buffer order; the rail
+    /// glyph is stripped automatically.
+    pub(super) fn selection_text(&self, lo: Cell, hi: Cell) -> String {
+        let slice = |row: usize, a, b| self.flat.rows.get(row).map(|r| plain_slice(r, a, b));
+        if lo.row == hi.row {
+            return slice(lo.row, lo.col, hi.col).unwrap_or_default();
         }
-        let (first_row, first_col) = if lo_row < hi_row {
-            (lo_row, lo_col)
-        } else {
-            (hi_row, hi_col)
-        };
-        let (last_row, last_col) = if lo_row < hi_row {
-            (hi_row, hi_col)
-        } else {
-            (lo_row, lo_col)
-        };
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(r) = self.flat_row(first_row) {
-            parts.push(plain_slice(&self.flat.rows[r], first_col, u16::MAX));
-        }
-        for row in (first_row + 1)..last_row {
-            if let Some(r) = self.flat_row(row) {
-                parts.push(self.flat.rows[r].plain());
-            }
-        }
-        if let Some(r) = self.flat_row(last_row) {
-            parts.push(plain_slice(&self.flat.rows[r], 0, last_col));
-        }
-        parts.join("\n")
+        let interior = (lo.row + 1..hi.row).filter_map(|row| self.flat.rows.get(row).map(Row::plain));
+        slice(lo.row, lo.col, u16::MAX)
+            .into_iter()
+            .chain(interior)
+            .chain(slice(hi.row, 0, hi.col))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The assistant's latest reply as raw markdown — what `/copy` copies.  Each
@@ -1951,86 +1921,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(all.contains("hello") && all.contains("hi back"), "{all:?}");
-    }
-
-    /// A dial applied after one `sync` survives the next — the whole point of
-    /// keeping reveal state in a side table keyed by `BlockId` rather than
-    /// inside the rebuilt `Block`.
-    #[test]
-    fn dial_state_survives_a_resync() {
-        let mut memo = Blocks::default();
-        step(
-            &mut memo,
-            [Record::Display(Display::ToolCall {
-                tool: "ral".into(),
-                cmd: "read 'x'".into(),
-                summary: Some("look at x".into()),
-            })],
-        )
-        .expect("a display-only fold never refuses");
-
-        let mut vp = viewport();
-        vp.sync(&memo);
-        assert!(vp.dial_block(0, 1), "a tool call dials open");
-        let opened = vp.blocks[0].block.level();
-
-        vp.sync(&memo);
-        assert_eq!(
-            vp.blocks[0].block.level(),
-            opened,
-            "the rebuilt block keeps the dial a prior sync set"
-        );
-    }
-
-    /// The dial table is bounded by the same floor the block cache is: a block
-    /// the window has let go for good takes its remembered dial with it, so a
-    /// long session does not pay for every rung it ever turned.
-    #[test]
-    fn the_dial_table_is_evicted_with_the_block_it_names() {
-        let mut memo = Blocks::default();
-        let mut seq = 0u64;
-        advance(
-            &mut memo,
-            &mut seq,
-            Record::Display(Display::ToolCall {
-                tool: "ral".into(),
-                cmd: "read 'x'".into(),
-                summary: Some("look at x".into()),
-            }),
-        );
-
-        let mut vp = viewport();
-        vp.sync(&memo);
-        assert!(vp.dial_block(0, 1), "a tool call dials open");
-        let dialed = vp.blocks[0]
-            .id
-            .expect("a synced block is named by the fold");
-        assert!(vp.reveal.contains_key(&dialed), "the dial is remembered");
-
-        for i in 0..(VIEWPORT_MAX_BLOCKS + 50) {
-            advance(
-                &mut memo,
-                &mut seq,
-                Record::Display(Display::Prompt {
-                    text: format!("prompt {i}"),
-                }),
-            );
-        }
-        // The floor a sync prunes against is the one it opened with, so the
-        // dial goes on the sync after the one that evicted its block.
-        vp.sync(&memo);
-        vp.sync(&memo);
-
-        assert!(
-            !vp.reveal.contains_key(&dialed),
-            "the evicted block's dial goes with it"
-        );
-        assert!(
-            vp.reveal.len() <= vp.blocks.len(),
-            "the dial table never outgrows the window it is keyed against: {} dials, {} blocks",
-            vp.reveal.len(),
-            vp.blocks.len()
-        );
     }
 
     /// `/thinking`'s two obligations: the traces already synced move, and a

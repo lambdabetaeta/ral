@@ -1,19 +1,19 @@
-//! Frame drawing: [`draw`] paints every strip of the TUI into a [`Term`].
+//! Frame drawing: [`strips`] lays the frame out as a value, [`draw`] paints it
+//! into a [`Term`].
 
 use std::collections::HashMap;
 use std::io::{self, Write};
 
 use crossterm::{
     execute,
-    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, size},
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 
 use ratatui::{
-    crossterm::event::MouseEvent,
     layout::{Constraint, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, BorderType, Borders, Padding, Paragraph},
 };
 
 use crate::bus::{AgentId, AgentState};
@@ -21,7 +21,7 @@ use crate::bus::{AgentId, AgentState};
 use super::App;
 use super::app::Overlay;
 use super::block::queued_prompt_rows;
-use super::gesture::COPY_TOAST_TTL;
+use super::gesture::{FrameGeom, Toast};
 use super::line;
 use super::matrix::matrix_bar;
 use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
@@ -46,127 +46,105 @@ const SPINNER: &[char] = &[
     '\u{2807}', '\u{280F}',
 ];
 
-/// Where the content area sat in the last drawn frame.
-#[derive(Clone, Copy)]
-pub(super) struct FrameGeom {
-    pub(super) text: Rect,
-    /// First visible buffer row.
-    pub(super) offset: usize,
+/// The frame's strips, top to bottom.  Zero-height strips are painted by
+/// nothing, so a missing tab row or queue costs no branch downstream.
+struct Strips {
+    text: Rect,
+    /// Beside the transcript, in the margin `READ_W` leaves free.
+    register: Option<Rect>,
+    queued: Rect,
+    tabs: Rect,
+    prompt: Rect,
+    status: Rect,
+    footer: Rect,
 }
-impl FrameGeom {
-    /// Map a mouse event to its scrolled buffer row and text-area column
-    /// (0 = left edge), or `None` outside the content area.
-    pub(super) fn buffer_coords(&self, me: MouseEvent) -> Option<(usize, u16)> {
-        self.text
-            .contains(Position::new(me.column, me.row))
-            .then(|| {
-                let row = self.offset + (me.row - self.text.y) as usize;
-                (row, me.column - self.text.x)
-            })
-    }
-}
-/// Paint one frame into `term`.
-pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
-    let (cols, rows) = size().unwrap_or((READ_W, 24));
-    let area = Rect::new(0, 0, cols, rows);
-    let text_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
-    let prompt_h = app.prompt_state.height_hint(text_w, area.height);
-    // A lone root gets no tab row at all; a second tab of either kind brings
-    // up the matrix, one row per tab, so a demoted agent is never invisible.
-    let demoted = app.demoted();
-    let promoted_rows = app.tabs.len() - demoted.len();
-    let show_bar = !demoted.is_empty() || promoted_rows > 1;
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "live-agent tab count; a handful of subprocesses, never near u16::MAX"
-    )]
-    let tab_h = if show_bar {
-        app.tabs.len() as u16
+
+/// Lay out `area`.  `queued_h` and `show_tabs` are the two strips whose
+/// presence the caller has already settled from `app`.
+fn strips(app: &App, area: Rect, queued_h: u16, show_tabs: bool) -> Strips {
+    let prompt_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
+    let prompt_h = app.prompt_state.height_hint(prompt_w, area.height);
+    let tab_h = if show_tabs {
+        u16::try_from(app.tabs.len()).unwrap_or(u16::MAX)
     } else {
-        0u16
+        0
     };
-    // What the human typed mid-exchange and is still waiting on — prompts and
-    // the commands queued among them, in the order typed, through the same
-    // chrome a committed prompt echo uses.
-    let queued = app.inbox.queued_human_messages();
-    let queued_lines: Vec<Line<'static>> = if queued.is_empty() {
-        Vec::new()
-    } else {
-        let w = area.width.saturating_sub(LEFT_MARGIN).min(READ_W);
-        queued_prompt_rows(&queued, w, (area.height / 3).max(1) as usize)
-            .into_iter()
-            .map(Row::into_line)
-            .collect()
-    };
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "queued rows capped at (area.height/3).max(1) when built — viewport-bounded"
-    )]
-    let queued_h = queued_lines.len() as u16;
     // Settled before the layout: the vertical split keeps full width, so
     // `area.width` stands in for the content row's width.
-    let focused = app.tabs.focused();
     let has_pins = app
         .tabs
-        .viewport(focused)
+        .viewport(app.tabs.focused())
         .is_some_and(|vp| !vp.pins().is_empty());
     let register_w = area.width.saturating_sub(LEFT_MARGIN + READ_W);
     let show_register = has_pins && register_w >= REGISTER_MIN_W;
-    let layout = Layout::vertical([
+    let [content, _breath, queued, tabs, prompt, status, footer] = Layout::vertical([
         Constraint::Min(1),
-        Constraint::Length(1), // breathing row between output and chrome
+        Constraint::Length(1),
         Constraint::Length(queued_h),
         Constraint::Length(tab_h),
         Constraint::Length(prompt_h),
-        Constraint::Length(1), // rule_line
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
-    .split(area);
-    let (content, queued_row, tab_row, prompt_row, status_row, footer_row) = (
-        layout[0], layout[2], layout[3], layout[4], layout[5], layout[6],
-    );
+    .areas(area);
     // Capping the transcript at READ_W is what keeps the register to dead
     // margin, so it never narrows prose.
-    let text_w = if show_register {
-        READ_W
+    let content = indent(content);
+    let (text, register) = if show_register {
+        let [text, register] =
+            Layout::horizontal([Constraint::Length(READ_W), Constraint::Fill(1)]).areas(content);
+        (text, Some(register))
     } else {
-        content.width.saturating_sub(LEFT_MARGIN)
+        (content, None)
     };
-    let text_rect = Rect::new(content.x + LEFT_MARGIN, content.y, text_w, content.height);
-    let register_rect = show_register.then(|| {
-        Rect::new(
-            content.x + LEFT_MARGIN + READ_W,
-            content.y,
-            register_w,
-            content.height,
-        )
-    });
-    let queued_rect = Rect::new(
-        queued_row.x + LEFT_MARGIN,
-        queued_row.y,
-        queued_row.width.saturating_sub(LEFT_MARGIN),
-        queued_row.height,
+    Strips {
+        text,
+        register,
+        queued: indent(queued),
+        tabs,
+        prompt,
+        status: indent(status),
+        footer,
+    }
+}
+
+fn indent(r: Rect) -> Rect {
+    Rect {
+        x: r.x + LEFT_MARGIN,
+        width: r.width.saturating_sub(LEFT_MARGIN),
+        ..r
+    }
+}
+
+/// Paint one frame into `term`.
+pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
+    let area = Rect::from((Position::ORIGIN, term.size()?));
+    // A lone root gets no tab row at all; a second tab of either kind brings
+    // up the matrix, one row per tab, so a demoted agent is never invisible.
+    let demoted = app.demoted();
+    let show_tabs = !demoted.is_empty() || app.tabs.len() - demoted.len() > 1;
+    let queued_lines = queued_lines(app, area);
+    let s = strips(
+        app,
+        area,
+        u16::try_from(queued_lines.len()).unwrap_or(u16::MAX),
+        show_tabs,
     );
-    let status_rect = Rect::new(
-        status_row.x + LEFT_MARGIN,
-        status_row.y,
-        status_row.width.saturating_sub(LEFT_MARGIN),
-        status_row.height,
-    );
+    let focused = app.tabs.focused();
     // Built before the `viewport_mut` borrow that `render_window` needs.
-    let register_lines: Vec<Line<'static>> = match app.tabs.viewport(focused) {
-        Some(vp) if show_register => {
+    let register_lines: Vec<Line<'static>> = match (app.tabs.viewport(focused), s.register) {
+        (Some(vp), Some(reg)) => {
             let hue = AGENT_HUES
                 .get(vp.agent().0 as usize)
                 .copied()
                 .unwrap_or(AGENT_HUES[0]);
-            line::render_register(vp.pins(), register_w, hue)
+            line::render_register(vp.pins(), reg.width, hue)
         }
         _ => Vec::new(),
     };
     let (mut rows, offset, scroll_pct) = match app.tabs.viewport_mut(focused) {
         Some(vp) => {
-            let w = vp.render_window(text_rect.width, text_rect.height as usize);
+            let w = vp.render_window(s.text.width, s.text.height as usize);
             (w.lines, w.offset, w.scroll_pct)
         }
         None => (Vec::new(), 0, None),
@@ -177,25 +155,18 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     // content, the other being `user.log`.
     let lines: Vec<Line<'static>> = rows.into_iter().map(Row::into_line).collect();
     app.gesture.record_frame(FrameGeom {
-        text: text_rect,
+        text: s.text,
         offset,
     });
 
     app.prompt_state.style_prompt(focused == app.tabs.root());
-    // Owned copies from here down: the `'static` draw closure below may
-    // capture no borrow of `app`.
     let state = app
         .tabs
         .viewport(focused)
         .map_or_else(|| StateSpan::new(AgentState::Ready), Viewport::state);
-    let usage = app.total_usage;
-    let last_input = app.last_input;
-    let context_window = app.context_window;
-    let status_model = app.status_model.clone();
-    let matrix_lines = show_bar.then(|| {
-        let rows = app.tabs.matrix_rows();
+    let matrix_lines = show_tabs.then(|| {
         matrix_bar(
-            &rows,
+            &app.tabs.matrix_rows(),
             app.tabs.names(),
             app.tabs.parents(),
             focused,
@@ -211,7 +182,18 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         app.tabs.names(),
         focused,
     );
-    let overlay = app.overlay.as_ref();
+    // Field-wise from here: the editor draws through `&mut prompt_state` while
+    // the rest of the frame reads its siblings.
+    let App {
+        prompt_state,
+        gesture,
+        overlay,
+        total_usage,
+        last_input,
+        context_window,
+        status_model,
+        ..
+    } = &mut *app;
 
     // A tail-following redraw rewrites every visible cell, so without an
     // atomic swap a terminal scanning mid-write shows half a frame.  `drawn?`
@@ -219,78 +201,73 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     // synchronized mode.
     execute!(io::stdout(), BeginSynchronizedUpdate)?;
     let drawn = term.draw(|f| {
-        f.render_widget(Paragraph::new(lines.as_slice()), text_rect);
-        if let Some(reg) = register_rect {
+        f.render_widget(Paragraph::new(lines.as_slice()), s.text);
+        if let Some(reg) = s.register {
             f.render_widget(Paragraph::new(register_lines), reg);
         }
-        if !queued_lines.is_empty() {
-            f.render_widget(Paragraph::new(queued_lines), queued_rect);
-        }
+        f.render_widget(Paragraph::new(queued_lines), s.queued);
         if let Some(matrix) = matrix_lines {
-            f.render_widget(Paragraph::new(matrix), tab_row);
+            f.render_widget(Paragraph::new(matrix), s.tabs);
         }
         f.render_widget(
             Paragraph::new(rule_line(
-                text_rect.width.min(READ_W) as usize,
+                s.text.width.min(READ_W) as usize,
                 state,
                 scroll_pct,
-                &usage,
-                last_input,
-                context_window,
-                &status_model,
+                total_usage,
+                *last_input,
+                *context_window,
+                status_model,
             )),
-            status_rect,
+            s.status,
         );
         // One geometry for the box's interior: the editor draws inside it, and
         // the completion popup aligns its left edge with the text.
-        let inner = prompt_block(Style::default()).inner(prompt_row);
+        let inner = prompt_block(Style::default()).inner(s.prompt);
         if let Some(line) = prompt_hint {
             let block = prompt_block(Style::default().fg(SLATE).add_modifier(Modifier::DIM));
-            f.render_widget(Paragraph::new(line).block(block), prompt_row);
+            f.render_widget(Paragraph::new(line).block(block), s.prompt);
         } else {
-            f.render_widget(prompt_block(Style::default().fg(PINK)), prompt_row);
-            app.prompt_state.render(f, inner);
+            f.render_widget(prompt_block(Style::default().fg(PINK)), s.prompt);
+            prompt_state.render(f, inner);
             // No native cursor while an overlay owns the keyboard, or it
             // peeks out from beneath it.
             if overlay.is_none()
-                && let Some(pos) = app.prompt_state.cursor_screen_position()
+                && let Some((x, y)) = prompt_state.cursor_screen_position()
             {
-                let x = inner.x + pos.0.min(inner.width.saturating_sub(1));
-                let y = inner.y + pos.1.min(inner.height.saturating_sub(1));
-                f.set_cursor_position(Position::new(x, y));
+                f.set_cursor_position(Position::new(
+                    inner.x + x.min(inner.width.saturating_sub(1)),
+                    inner.y + y.min(inner.height.saturating_sub(1)),
+                ));
             }
         }
         // The slash-command popup rises out of the prompt box over the
         // transcript, reserving no row of its own: nothing below the prompt
         // is free, and a layout that grew and shrank with the typing would
         // shift the whole frame under the reader.
-        if let Some(menu) = app.prompt_state.menu() {
-            let h = menu.height().min(prompt_row.y);
+        if let Some(menu) = prompt_state.menu() {
+            let h = menu.height().min(s.prompt.y);
             menu.render(
                 f,
                 Rect {
                     x: inner.x,
-                    y: prompt_row.y - h,
+                    y: s.prompt.y - h,
                     width: inner.width,
                     height: h,
                 },
             );
         }
-        f.render_widget(Paragraph::new(footer_hint()), footer_row);
-        if let Some((n, ts)) = app.gesture.copy_toast()
-            && ts.elapsed() < COPY_TOAST_TTL
-        {
-            let msg = format!("[{n} characters copied]");
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "fixed short toast string, then clamped to footer width"
-            )]
-            let w = (msg.len() as u16).min(footer_row.width);
+        f.render_widget(Paragraph::new(footer_hint()), s.footer);
+        if let Some(toast) = gesture.toast() {
+            let msg = match toast {
+                Toast::Copied(n) => format!("[{n} characters copied]"),
+                Toast::CopyFailed => "[copy failed]".to_owned(),
+            };
+            let w = u16::try_from(msg.len()).unwrap_or(u16::MAX).min(s.footer.width);
             let r = Rect {
-                x: footer_row.x + footer_row.width.saturating_sub(w),
-                y: footer_row.y,
+                x: s.footer.right() - w,
                 width: w,
-                height: 1,
+                ..s.footer
             };
             f.render_widget(Paragraph::new(msg).style(Style::default().fg(LIME_HOT)), r);
         }
@@ -305,6 +282,21 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     emit_tab_title(app);
     drawn?;
     Ok(())
+}
+
+/// What the human typed mid-exchange and is still waiting on — prompts and
+/// the commands queued among them, in the order typed, through the same
+/// chrome a committed prompt echo uses.  Capped at a third of the frame.
+fn queued_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
+    let queued = app.inbox.queued_human_messages();
+    if queued.is_empty() {
+        return Vec::new();
+    }
+    let w = area.width.saturating_sub(LEFT_MARGIN).min(READ_W);
+    queued_prompt_rows(&queued, w, usize::from((area.height / 3).max(1)))
+        .into_iter()
+        .map(Row::into_line)
+        .collect()
 }
 
 /// Set the terminal tab title: a spinner until the root yields to the human,
@@ -328,26 +320,19 @@ fn emit_tab_title(app: &mut App) {
 
 /// Reverse-video the part of the active selection inside the visible window.
 fn paint_selection(app: &App, rows: &mut [Row], offset: usize) {
-    let Some((a, b)) = app.gesture.selection() else {
+    let Some((lo, hi)) = app.gesture.selection() else {
         return;
     };
-    let (lo, hi) = (a.min(b), a.max(b));
-    let (lo_row, lo_col) = lo;
-    let (hi_row, hi_col) = hi;
     for (i, row) in rows.iter_mut().enumerate() {
         let n = offset + i;
-        if n < lo_row || n > hi_row {
+        if !(lo.row..=hi.row).contains(&n) {
             continue;
         }
         // Every row goes through `highlight_range`, interior ones included: it
         // is the only thing that knows where content starts, and an interior
         // row painted span-wise would light the margin.
-        let (from, to) = match (n == lo_row, n == hi_row) {
-            (true, true) => (lo_col, hi_col),
-            (true, false) => (lo_col, u16::MAX),
-            (false, true) => (0, hi_col),
-            (false, false) => (0, u16::MAX),
-        };
+        let from = if n == lo.row { lo.col } else { 0 };
+        let to = if n == hi.row { hi.col } else { u16::MAX };
         highlight_range(row, from, to);
     }
 }
@@ -358,16 +343,15 @@ fn paint_hover(app: &App, rows: &mut [Row], offset: usize) {
     let Some(target) = app.gesture.hover() else {
         return;
     };
-    let Some(vp) = app.tabs.viewport(app.tabs.focused()) else {
+    let Some(vp) = app.tabs.focused_viewport() else {
         return;
     };
-    for (i, row) in rows.iter_mut().enumerate() {
-        let n = offset + i;
-        let head = n == 0 || vp.block_at(n - 1) != Some(target);
-        if vp.block_at(n) == Some(target) && head {
-            row.hover();
-            break;
-        }
+    if let Some(row) = vp
+        .block_head(target)
+        .and_then(|head| head.checked_sub(offset))
+        .and_then(|i| rows.get_mut(i))
+    {
+        row.hover();
     }
 }
 
@@ -393,12 +377,12 @@ fn prompt_hint(
 
 /// The prompt's rounded chrome in `border` ink: the editor renders bare text,
 /// so the box is exarch's, and the hint and editor paths share it.
-fn prompt_block(border: Style) -> ratatui::widgets::Block<'static> {
-    ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
+fn prompt_block(border: Style) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border)
-        .padding(ratatui::widgets::Padding::horizontal(PROMPT_PAD_H))
+        .padding(Padding::horizontal(PROMPT_PAD_H))
 }
 
 fn footer_hint() -> Line<'static> {

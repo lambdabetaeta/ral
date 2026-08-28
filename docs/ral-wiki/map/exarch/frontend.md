@@ -242,7 +242,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    (`Block::rung_up`/`rung_down`), which for a trace would be a dead detent.
    Traces also answer to one standing rung, `/thinking`'s datum: `Tabs::traces`
    holds it because it outlives any one view, `Viewport::set_traces_level`
-   moves the traces on screen through the same seam a wheel dials (so the rung
+   moves the traces on screen through the same seam a click cycles (so the rung
    is remembered against a resync), and every later `sync` and live seat is
    born there. A per-block dial still wins — `Viewport::reveal` is consulted
    after the standing rung.
@@ -447,8 +447,8 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, incremental `Printer::sync` (`rebuild_floor`, `evicted_through`), the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first, retired to `user.log` on the way out), the `Log` transcript writer, `Tombstone`
         - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
-        - `tui/gesture.rs` — mouse/selection: `GestureState`, `Press`, frame geometry, selection, copy toast, hover, scroll
-        - `tui/render.rs` — frame layout: `draw`, `FrameGeom`, `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten
+        - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Viewport`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a viewport or touches the terminal
+        - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten
         - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `seat`/`wrap`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version), `legend_panel`, ART/EAGLE constants
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions

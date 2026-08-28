@@ -225,14 +225,6 @@ impl Reveal {
             Self::Context | Self::Full => Self::Full,
         }
     }
-
-    fn down(self) -> Self {
-        match self {
-            Self::Full => Self::Context,
-            Self::Context => Self::Summary,
-            Self::Summary | Self::Census => Self::Census,
-        }
-    }
 }
 
 /// A block paired with the lines it last rendered, memoised by width.
@@ -539,27 +531,6 @@ impl Block {
         }
     }
 
-    /// The rung below, floored per kind and hopping `Context` like
-    /// [`Self::rung_up`].
-    fn rung_down(&self) -> Reveal {
-        let next = self.level.down().max(self.floor());
-        match (self.is_thinking(), next) {
-            (true, Reveal::Context) => Reveal::Summary,
-            _ => next,
-        }
-    }
-
-    /// One wheel notch — up reveals, down reduces — saturating at the band's edges.
-    pub(super) fn dial(&mut self, delta: i8) {
-        if self.dialable() {
-            let next = if delta >= 0 {
-                self.rung_up()
-            } else {
-                self.rung_down()
-            };
-            self.set_level(next);
-        }
-    }
 
     /// One click: a rung up, the ceiling wrapping to the floor, so clicking
     /// walks every reachable rung rather than toggling the extremes.
@@ -797,36 +768,11 @@ fn first_rows(mut lines: Vec<Line<'static>>, k: usize) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::card::{Hunk, Mark, Row, Seg};
-
-    fn diff_block() -> Block {
-        let hunks = vec![Hunk {
-            start: 1,
-            rows: vec![
-                Row::Add(vec![Seg::plain("a new line")]),
-                Row::Add(vec![Seg::plain("another")]),
-            ],
-        }];
-        Block::card(Card(vec![Mark::Diff {
-            path: "src/lib.rs".into(),
-            hunks,
-        }]))
-    }
-
-    fn subagent_block() -> Block {
-        Block::subagent(
-            "delegate".into(),
-            "the result\nspanning\na few lines".into(),
-            None,
-            Duration::from_secs(2),
-            Fidelity::default(),
-        )
-    }
 
     /// Prose has no summary to collapse to: every rung renders the same.
     #[test]
     fn markdown_is_inert_prose() {
-        let mut block = Block::markdown(
+        let block = Block::markdown(
             "# heading\n\nA paragraph of prose that the answer is to read.".into(),
             Fidelity::default(),
         );
@@ -843,38 +789,6 @@ mod tests {
             full,
             "L2 must render full prose"
         );
-
-        let before = block.level();
-        block.dial(-1);
-        block.cycle();
-        assert_eq!(block.level(), before, "gestures are inert on prose");
-    }
-
-    /// A run's anchor floors at the census, every other dialable kind at the
-    /// summary.  The wheel saturates there; the click wraps to it.
-    #[test]
-    fn the_floor_is_census_for_a_run_summary_otherwise() {
-        let cases = [
-            (
-                Block::tool_call("ral", "read lib".into(), "read src/lib.rs".into(), 0),
-                Reveal::Census,
-            ),
-            (diff_block(), Reveal::Summary),
-            (subagent_block(), Reveal::Summary),
-        ];
-        for (mut block, floor) in cases {
-            assert!(block.dialable());
-            for _ in 0..4 {
-                block.dial(-1);
-            }
-            assert_eq!(block.level(), floor);
-            for _ in 0..4 {
-                block.dial(1);
-            }
-            assert_eq!(block.level(), Reveal::Full);
-            block.cycle();
-            assert_eq!(block.level(), floor);
-        }
     }
 
     /// An act's first two columns are pinned, so verbs align down the page and
@@ -980,7 +894,7 @@ mod tests {
     fn a_long_payload_truncates_reduced_and_returns_whole_on_the_dial() {
         let payload = "audit every unwrap() in exarch/src and report the ones that can \
             actually fire, with the file and line and a one-sentence argument for each";
-        let mut block = Block::act("spawn", Some("hunter".into()), payload.into(), false);
+        let block = Block::act("spawn", Some("hunter".into()), payload.into(), false);
         assert_eq!(block.level(), Reveal::Summary, "an act arrives reduced");
         assert!(
             block.dialable(),
@@ -999,9 +913,6 @@ mod tests {
             "the payload was cut to its column"
         );
 
-        block.dial(1);
-        block.dial(1);
-        assert_eq!(block.level(), Reveal::Full);
         let full: String = block
             .body(READ_W, Reveal::Full)
             .iter()

@@ -266,14 +266,10 @@ impl Avatar {
             // `announce` draws each arrival's own chrome; the texts coalesce
             // into the one steering message the protocol admits after a batch.
             if !injected.is_empty() {
-                let mut text = String::new();
                 for item in &injected {
                     announce(item, &recorder);
-                    if !text.is_empty() {
-                        text.push_str("\n\n");
-                    }
-                    text.push_str(&item.text());
                 }
+                let text = injected.iter().map(Item::text).collect::<Vec<_>>().join("\n");
                 self.log
                     .lock()
                     .append_steering(text)
@@ -695,7 +691,7 @@ mod tests {
         );
         assert_eq!(
             ms[3].content.first_text(),
-            Some("actually, stop after this\n\nand report"),
+            Some("actually, stop after this\nand report"),
             "both drained prompts coalesce into the one admitted message"
         );
         assert!(

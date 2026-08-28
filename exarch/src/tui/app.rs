@@ -4,7 +4,7 @@
 
 use super::banner;
 use super::block::{AgentSlot, ChromeKind};
-use super::gesture::GestureState;
+use super::gesture::{Effect, GestureState};
 use super::line;
 use super::line::bold;
 use super::login::LoginOverlay;
@@ -14,7 +14,7 @@ use super::picker::Picker;
 use super::prompt::PromptState;
 use super::render::draw;
 use super::tabs::Tabs;
-use super::terminal::Term;
+use super::terminal::{Term, osc52_copy};
 use super::viewport::Viewport;
 use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
 use crate::bus::{AgentId, AgentState, BusReceiver, Inbox};
@@ -210,7 +210,7 @@ impl App {
     pub(super) fn animating(&self, margin: Duration) -> bool {
         let pending = self
             .tabs
-            .viewport(self.tabs.focused())
+            .focused_viewport()
             .is_some_and(|vp| vp.state().state.pending());
         pending || self.gesture.toast_live(margin) || !self.focused_waiting()
     }
@@ -440,14 +440,8 @@ impl App {
         // global prompt stays pristine for when the user tabs home.
         match k.code {
             // Paging scrolls any tab; bare Up/Down stay bound to history below.
-            KeyCode::PageUp => {
-                let f = self.tabs.focused();
-                self.gesture.scroll_page(self.tabs.viewports_mut(), f, -1);
-            }
-            KeyCode::PageDown => {
-                let f = self.tabs.focused();
-                self.gesture.scroll_page(self.tabs.viewports_mut(), f, 1);
-            }
+            KeyCode::PageUp => self.apply(self.gesture.scroll_page(-1)),
+            KeyCode::PageDown => self.apply(self.gesture.scroll_page(1)),
             // Not collapsible into a guard: with <=1 tab, Tab must be a no-op,
             // not fall through to the textarea arm below.
             #[allow(clippy::collapsible_match)]
@@ -488,59 +482,48 @@ impl App {
     /// terminal's own selection, so we never see — or fight — it.
     pub fn mouse(&mut self, me: MouseEvent) {
         self.prompt_state.clear_cx_pending();
-        // Motion, wheel, and press alike, so the dial glyph brightens the
-        // instant the pointer crosses a dialable block.
-        self.gesture
-            .update_hover(me, self.tabs.viewports(), self.tabs.focused());
-        match me.kind {
-            // Over a dialable block the wheel dials disclosure (up reveals) and
-            // consumes the event; once clamped, or over inert chrome, it scrolls.
-            MouseEventKind::ScrollUp if self.wheel_dial(1) => {}
-            MouseEventKind::ScrollDown if self.wheel_dial(-1) => {}
-            MouseEventKind::ScrollUp => {
-                let f = self.tabs.focused();
-                if let Some(vp) = self.tabs.viewport_mut(f) {
-                    vp.scroll_by(-SCROLL_STEP);
-                }
-            }
-            MouseEventKind::ScrollDown => {
-                let f = self.tabs.focused();
-                if let Some(vp) = self.tabs.viewport_mut(f) {
-                    vp.scroll_by(SCROLL_STEP);
-                }
-            }
+        // Motion and press alike, so the dial glyph brightens the instant the
+        // pointer crosses a dialable block.
+        self.gesture.update_hover(me, self.tabs.focused_viewport());
+        let effect = match me.kind {
+            MouseEventKind::ScrollUp => Some(Effect::Scroll(-SCROLL_STEP)),
+            MouseEventKind::ScrollDown => Some(Effect::Scroll(SCROLL_STEP)),
             MouseEventKind::Down(MouseButton::Left)
                 if !me.modifiers.contains(KeyModifiers::SHIFT) =>
             {
                 self.gesture.press(me);
+                None
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                let f = self.tabs.focused();
-                self.gesture.drag(me, self.tabs.viewports_mut(), f, SCROLL_STEP);
-            }
+            MouseEventKind::Drag(MouseButton::Left) => self.gesture.drag(me, SCROLL_STEP),
             MouseEventKind::Up(MouseButton::Left) => {
-                let f = self.tabs.focused();
-                self.gesture.release(self.tabs.viewports_mut(), f);
+                self.gesture.release(self.tabs.focused_viewport())
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some(effect) = effect {
+            self.apply(effect);
         }
     }
 
-    /// Dial the hovered block by `delta`, returning whether the level actually
-    /// changed. The block's whole vertical extent is the target, so the wheel
-    /// dials anywhere over a coalesced run. `false` — inert chrome, a
-    /// non-dialable block, one already clamped — falls through to a scroll, so
-    /// a tall run never traps the wheel.
-    fn wheel_dial(&mut self, delta: i8) -> bool {
-        // `App::mouse` already set the hover block for this event.
-        let Some(idx) = self.gesture.hover() else {
-            return false;
-        };
-        let id = self.tabs.focused();
-        let Some(vp) = self.tabs.viewport_mut(id) else {
-            return false;
-        };
-        vp.dial_block(idx, delta)
+    /// Run a gesture's requested mutation against the focused viewport.
+    fn apply(&mut self, effect: Effect) {
+        let f = self.tabs.focused();
+        match effect {
+            Effect::Scroll(delta) => {
+                if let Some(vp) = self.tabs.viewport_mut(f) {
+                    vp.scroll_by(delta);
+                }
+            }
+            Effect::CycleBlock(idx) => {
+                if let Some(vp) = self.tabs.viewport_mut(f) {
+                    vp.cycle_block(idx);
+                }
+            }
+            Effect::Copy(text) => {
+                let outcome = osc52_copy(&text).map(|()| text.chars().count());
+                self.gesture.note_copy(outcome);
+            }
+        }
     }
 
     /// Flush every viewport — live, dying, or aged-out — to its session's
@@ -561,7 +544,7 @@ impl App {
     /// the tab has no viewport or its last block is not prose.
     pub(in crate::tui) fn latest_reply(&self) -> String {
         self.tabs
-            .viewport(self.tabs.focused())
+            .focused_viewport()
             .map(Viewport::latest_reply_md)
             .unwrap_or_default()
     }

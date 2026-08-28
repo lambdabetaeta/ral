@@ -301,7 +301,7 @@ The inbox's per-source depth is a real quota now, not just a probe figure.
 by source: the three idempotent sources (`user`, `schedule`, `nudge`)
 always succeed, coalescing instead of growing the queue — a
 `ScheduledWakeup` replaces a still-queued wakeup for the same schedule id
-(newest wins), consecutive `UserSteering` pushes merge with a blank line
+(newest wins), consecutive `UserSteering` pushes merge one per line
 (never across a slash line, which would silently change its
 exchange-boundary classification), and a `Nudge` replaces any still-queued
 nudge — newest wins, since a second means a fresher continuation superseded

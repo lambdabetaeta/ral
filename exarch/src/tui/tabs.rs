@@ -228,6 +228,10 @@ impl Tabs {
         self.viewports.get_mut(&id)
     }
 
+    pub(super) fn focused_viewport(&self) -> Option<&Viewport> {
+        self.viewport(self.focused())
+    }
+
     pub(super) fn root(&self) -> AgentId {
         self.root
     }

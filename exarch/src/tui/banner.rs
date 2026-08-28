@@ -259,7 +259,7 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
     )));
 
     ls.push(Line::default());
-    ls.push(head("disclosure · dial detail on the rail (wheel / click)"));
+    ls.push(head("disclosure · click the rail to dial detail"));
     ls.push(Line::from(note(
         "  levels L1–L3; tool calls, diffs, and subagents floor at L1 — model prose always renders full",
     )));
