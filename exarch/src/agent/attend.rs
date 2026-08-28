@@ -90,7 +90,6 @@ impl Avatar {
             // deliberately not drained here: core pushes its `` `notice `` on
             // the surface stream of the run that observes it, so a reap during
             // a long idle surfaces once an item next runs.
-            self.reconcile_service_pins();
             self.check_disk_warn();
             // The state a frontend shows over the coming silence is this park's
             // own verdict.  Only on an empty queue: with an item already in
@@ -144,7 +143,6 @@ impl Avatar {
         let mut control = NoControl;
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         loop {
-            self.reconcile_service_pins();
             self.check_disk_warn();
             let Some(item) = self.inbox.next_item() else {
                 break;
@@ -246,49 +244,42 @@ impl Avatar {
         }
         // `last_input` is fresh off `deliberate`, so the gauge reads this
         // completion's own pressure, not the one it was called with.
-        let pressure = self.context_pressure(&active);
-        // Nudged only when nothing else is already carrying this agent
-        // forward: no reply standing for a parent to fetch, no detached shell
-        // work, no busy children.
-        let quiet = !self.agent.has_reply()
-            && self.probe_workers().is_empty()
-            && !self.agent.has_busy_children();
-        let ctx = nudge::NudgeCtx {
+        let facts = nudge::Facts {
             must_reply: self.returns(),
             pinned: self.pinned_digest(),
-            is_headless_root: self.agent.parent.is_none() && !self.agent.interactive,
-            pressure,
-            quiet,
+            pressure: self.pressure_gauge(&active),
+            // Nudged only when nothing else is already carrying this agent
+            // forward: no reply standing for a parent to fetch, no detached
+            // shell work, no busy children.
+            quiet: !self.agent.has_reply()
+                && self.probe_workers().is_empty()
+                && !self.agent.has_busy_children(),
         };
         let nudge_msg = match &mut self.nudges {
-            Some(nudges) => nudges.react(&outcome, &ctx, &mut self.log.lock()),
+            Some(nudges) => nudges.react(&outcome, &facts, &mut self.log.lock()),
             None => None,
         };
-        if let Some(msg) = &nudge_msg
-            && let Some(exchange) = self.log.lock().current_exchange()
-        {
-            self.inbox
-                .push(Post::Nudge {
-                    exchange,
-                    text: msg.clone(),
-                })
-                .expect("Nudge is idempotent and never rejects");
+        if let Some(text) = nudge_msg {
+            let exchange = self.log.lock().current_exchange();
+            if let Some(exchange) = exchange {
+                self.inbox
+                    .push(Post::Nudge { exchange, text })
+                    .expect("Nudge is idempotent and never rejects");
+            } else {
+                // Unreachable: every outcome `react` answers followed a
+                // deliberation whose prompt `append_user` committed, which
+                // opened an exchange.
+                let recorded = self.log.lock().record_error(format!(
+                    "a nudge was decided with no exchange open to continue — \
+                     dropping it: {text}"
+                ));
+                if let Err(error) = recorded {
+                    eprintln!("exarch: a dropped nudge was not recorded: {error}");
+                }
+            }
         }
-        // Latch only once the warning actually rode a message out: on the
-        // must-reply budget-exhausted path `react` returns `None` despite
-        // `ctx.pressure` being `Some`, and that warning went undelivered, so
-        // it must stay unlatched to retry on the very next completion.
-        if ctx.pressure.is_some()
-            && nudge_msg.is_some()
-            && matches!(outcome, Ok(deliberate::Outcome::Complete(_)))
-        {
-            self.context_warn_latched = true;
-        }
-        // Only the headless root ends on `reply` — a child parks on its
-        // deposit — and not when the nudge layer just turned it back for
-        // self-verification.
+        // Only the headless root ends on `reply` — a child parks on its deposit.
         if self.agent.parent.is_none()
-            && nudge_msg.is_none()
             && matches!(outcome, Ok(deliberate::Outcome::Replied(_)))
         {
             Flow::Stop
@@ -352,81 +343,25 @@ impl Avatar {
         ParkMode::Quiesce
     }
 
-    /// Re-pin the host-owned `services` card against the shell's live worker
-    /// registry, dropping it the moment no durable service remains.  The sole
-    /// writer: `shell_eval::reject_protected_pin` refuses the key to the model.
-    fn reconcile_service_pins(&self) {
-        let recorder = self.recorder();
-        let key = || shell_eval::SERVICES_PIN_KEY.to_string();
-        let live: Vec<crate::agent::ProbedWorker> = self
-            .probe_workers()
-            .into_iter()
-            .filter(|entry| entry.class == ral_core::types::LeaseClass::Durable)
-            .collect();
-
-        if live.is_empty() {
-            let had_one = self
-                .agent
-                .pins
-                .lock()
-                .expect("pin register poisoned")
-                .remove(shell_eval::SERVICES_PIN_KEY)
-                .is_some();
-            if had_one {
-                if let Err(error) = recorder.emit(crate::record::Forensic::Unpin { key: key() }) {
-                    recorder.report_fault(&error);
-                }
-                recorder.transient(crate::record::Transient::Unpin { key: key() });
-            }
-            return;
-        }
-
-        let card = crate::bus::card::services_pin_card(&live);
-        self.agent
-            .pins
-            .lock()
-            .expect("pin register poisoned")
-            .insert(
-                shell_eval::SERVICES_PIN_KEY.to_string(),
-                shell_eval::PinDigest::new(card.clone()),
-            );
-        if let Err(error) = recorder.emit(crate::record::Forensic::Pin { key: key() }) {
-            recorder.report_fault(&error);
-        }
-        recorder.transient(crate::record::Transient::Pin { key: key(), card });
-    }
-
-    /// The rendered pressure-gauge detail once the soft line ahead of
-    /// auto-compaction ([`crate::agent::digest::pressure_due`]) is crossed, or
-    /// `None` while the excursion is already latched or the line has not been
-    /// reached.  Mirrors [`Self::compact`]'s own two-armed match, one reserve
-    /// earlier: a known window weighs `last_input` against it, an unknown one
-    /// falls back to the byte heuristic.  A clean reading re-arms the next
-    /// pressure crossing — but only once the measure is known: a stale
-    /// measure relieves nothing, so it must not unlatch a warning still owed.
-    fn context_pressure(&mut self, provider: &Provider) -> Option<String> {
-        let pressure = match provider.context_window() {
-            Some(w) if w > 0 => {
-                let pressure = self.token_pressure(w);
-                if pressure.is_none() && self.measured_input().is_some() {
-                    self.context_warn_latched = false;
-                }
-                pressure
-            }
+    /// One reading of the pressure gauge, no state.  The soft line is
+    /// [`crate::agent::digest::pressure_due`], one reserve ahead of
+    /// auto-compaction; an unknown window falls back to the byte heuristic
+    /// against [`PRESSURE_THRESHOLD_FALLBACK`].
+    fn pressure_gauge(&self, provider: &Provider) -> nudge::Pressure {
+        match provider.context_window() {
+            Some(w) if w > 0 => match self.token_pressure(w) {
+                Some(detail) => nudge::Pressure::Over(detail),
+                None if self.measured_input().is_some() => nudge::Pressure::Under,
+                None => nudge::Pressure::Unknown,
+            },
             _ => {
                 let bytes = self.log.lock().history_bytes();
-                let pressure =
-                    (bytes >= PRESSURE_THRESHOLD_FALLBACK).then(|| format!("{} KB", bytes / 1024));
-                if pressure.is_none() {
-                    self.context_warn_latched = false;
+                if bytes >= PRESSURE_THRESHOLD_FALLBACK {
+                    nudge::Pressure::Over(format!("{} KB", bytes / 1024))
+                } else {
+                    nudge::Pressure::Under
                 }
-                pressure
             }
-        };
-        if self.context_warn_latched {
-            None
-        } else {
-            pressure
         }
     }
 
@@ -501,7 +436,7 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
         Item::Surface { id, values, .. } => {
             let mut buf = crate::record::commit::SurfaceBuffer::new();
             for v in values {
-                if let Some(surface) = shell_eval::accepted_surface(v, recorder)
+                if let Some(surface) = shell_eval::decode_surface(v)
                     && let Err(error) =
                         crate::fleet::desk::absorb_surface(&mut buf, recorder, *id, &surface)
                 {
@@ -591,7 +526,6 @@ mod tests {
     use crate::agent::testkit::*;
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Forensic, Record};
-    use ral_core::Value;
 
     /// Every item `announce` draws records its display commit through the
     /// seam: a prompt commits `Display::Prompt`, and a subagent's breadcrumb
@@ -907,127 +841,8 @@ mod tests {
         );
     }
 
-    // ── the `services` pin ledger ─────────────────────────────────────────
-
-    /// The `services` pin is born carrying the service's description, and
-    /// retired the moment no durable service remains.
-    #[test]
-    fn reconcile_service_pins_births_and_retires_the_services_pin() {
-        let mut session = Avatar::for_test("system").unwrap();
-        session
-            .seat
-            .shell_mut()
-            .shell
-            .install_builtins(WORKER_REGISTRY_TEST_BUILTINS);
-
-        let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-        session.run_shell(
-            "c1".into(),
-            r#"service "watch the thing" { test-clear-block-forever }"#,
-            5,
-            &emit,
-        );
-
-        session.reconcile_service_pins();
-        {
-            let pin = session
-                .agent
-                .pins
-                .lock()
-                .unwrap()
-                .get(shell_eval::SERVICES_PIN_KEY)
-                .expect("the services pin must be born")
-                .clone();
-            let line = crate::bus::card::summary_line(&pin.card);
-            assert!(
-                line.contains("watch the thing"),
-                "the description must render: {line}"
-            );
-        }
-        let mut saw_pin = false;
-        while let Ok(sig) = rx.try_recv() {
-            if let crate::bus::Signal::Transient(_, crate::record::Transient::Pin { key, .. }) = sig
-            {
-                assert_eq!(key, shell_eval::SERVICES_PIN_KEY);
-                saw_pin = true;
-            }
-        }
-        assert!(saw_pin, "the birth must publish a Transient::Pin");
-
-        // Through the ordinary `cancel` builtin — the same edge a model reaches.
-        let entry = session
-            .seat
-            .shell_mut()
-            .shell
-            .workers()
-            .pop()
-            .expect("the service registered");
-        let cancel_fn = session
-            .seat
-            .shell_mut()
-            .shell
-            .lookup_builtin("cancel")
-            .expect("core registers cancel");
-        let env = session.seat.shell_mut().shell.env().clone();
-        cancel_fn
-            .run(
-                &[Value::Handle(Box::new(entry.handle))],
-                &env,
-                &ral_core::types::Mooring::adrift(),
-                &mut session.seat.shell_mut().shell,
-            )
-            .expect("cancel must succeed");
-
-        session.reconcile_service_pins();
-        assert!(
-            session
-                .agent
-                .pins
-                .lock()
-                .unwrap()
-                .get(shell_eval::SERVICES_PIN_KEY)
-                .is_none(),
-            "the services pin must be retired once no durable service remains"
-        );
-        let mut saw_unpin = false;
-        while let Ok(sig) = rx.try_recv() {
-            if let crate::bus::Signal::Transient(_, crate::record::Transient::Unpin { key }) = sig {
-                assert_eq!(key, shell_eval::SERVICES_PIN_KEY);
-                saw_unpin = true;
-            }
-        }
-        assert!(saw_unpin, "retirement must publish a Transient::Unpin");
-    }
-
-    /// A forged `unpin` is refused with a diagnostic and leaves the register
-    /// untouched — proof `run_shell`'s applier routes through the guard.  The
-    /// write direction is covered at `shell_eval::reject_protected_pin`.
-    #[test]
-    fn program_cannot_write_the_services_pin() {
-        let mut session = Avatar::for_test("system").unwrap();
-        let (tx, rx) = crate::bus::channel();
-        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
-
-        session.run_shell("c1".into(), r#"surface `unpin [key: "services"]"#, 5, &emit);
-
-        let errors: Vec<String> = crate::bus::drain_records(&rx)
-            .into_iter()
-            .filter_map(|record| match record {
-                Record::Forensic(Forensic::Error { text }) => Some(text),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            errors
-                .iter()
-                .any(|text| text.contains("protected service-ledger pin")),
-            "the forged pin must be rejected with a diagnostic"
-        );
-    }
-
     /// The reminder is built from the register the model actually wrote, and it
-    /// becomes the next committed prompt: `pinned_digest` → `NudgeCtx` →
+    /// becomes the next committed prompt: `pinned_digest` → `Facts` →
     /// `Post::Nudge` → the user turn the next deliberation sends.  The nudge
     /// unit tests hand `react` a hand-written digest; only this joins it to the
     /// live register.
@@ -1047,18 +862,21 @@ mod tests {
             .expect("the model's own pin must reach the register");
         assert!(digest.contains("ship the reminder"), "got: {digest}");
 
-        // A finish with nothing returned draws the reminder; the two `reply`
-        // turns then satisfy the headless root's verification and end the loop.
+        // A finish with nothing returned draws the reminder; the single
+        // `reply` that follows ends the loop, with no verification round.
         session.agent.provider.swap(scripted(
             "test-model",
             Script::new()
                 .then(Reply::text("done"))
-                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'x'")]))
-                .then(Reply::tool_calls(vec![ral_call("r2", "agents `reply 'x'")])),
+                .then(Reply::tool_calls(vec![ral_call("r1", "agents `reply 'x'")])),
         ));
         session.seed("get on with it".into());
-        session.attend(&mut NoControl, &emit);
+        let (outcome, _) = session.attend(&mut NoControl, &emit);
 
+        assert!(
+            matches!(outcome, AgentOutcome::Replied),
+            "the loop must terminate on the first reply, got {outcome:?}"
+        );
         assert!(
             crate::bus::drain_records(&rx).into_iter().any(|record| matches!(
                 record,
@@ -1070,6 +888,54 @@ mod tests {
         assert!(
             view.contains("There is pinned state: ship the reminder"),
             "the reminder must be committed as the next prompt, not dropped: {view}"
+        );
+    }
+
+    /// A returning agent has no reply-triggered nudge round to relive; the
+    /// livelock regression instead lives here, for the interactive root: a
+    /// stationary model-written pin queues at most one nudge, never a
+    /// perpetual `Complete → nudge → Complete` cycle that would never let the
+    /// loop park.
+    #[test]
+    fn pin_reminder_does_not_relivelock_the_interactive_root() {
+        let mut session = trunk(true);
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::with_mailbox(tx, session.agent.id, session.inbox.mailbox());
+        session.run_shell(
+            "c0".into(),
+            r#"surface `pin [key: "goal", body: `text [spans: [[text: "keep going"]]]]"#,
+            5,
+            &emit,
+        );
+
+        session.agent.provider.swap(scripted(
+            "test-model",
+            Script::new().then(Reply::text("working on it")),
+        ));
+        session.seed("go".into());
+        let item = session.inbox.next_item().expect("the seeded item");
+        let mut control = NoControl;
+        let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
+        session.take_up(&item, &mut control, &emit, &mut final_outcome);
+
+        let nudge = session
+            .inbox
+            .next_item()
+            .expect("the first quiet completion must queue one pin reminder");
+        assert!(
+            matches!(&nudge, Item::Nudge { text, .. } if text.contains("There is pinned state")),
+            "expected a pin reminder, got {nudge:?}"
+        );
+
+        session.agent.provider.swap(scripted(
+            "test-model",
+            Script::new().then(Reply::text("still working")),
+        ));
+        session.take_up(&nudge, &mut control, &emit, &mut final_outcome);
+
+        assert!(
+            session.inbox.next_item().is_none(),
+            "a stationary pin must queue no second nudge — the loop would park, not relivelock"
         );
     }
 

@@ -1,12 +1,9 @@
 //! Core's own housekeeping at the run's ready boundary: a worker the lease
 //! chain reaped, or idle top-level bindings the ledger pruned, decoded from
 //! `` `notice `` and composed into a one-liner.
-//!
-//! The host-authored `services` ledger pin lives here too — same author, but
-//! state rather than event.
 
 use super::value::{map_of, str_field};
-use super::{Card, Field, FieldVal, Mark, Role, Span};
+use super::{Card, Mark, Role, Span};
 use ral_core::Value as RalValue;
 
 /// The decoded body of a `` `notice `` event, minted by core's
@@ -125,23 +122,4 @@ fn bindings_pruned_card(names: &[String], idle_calls: &[u64]) -> Card {
     );
     let spans = vec![Span::new(Role::Muted, phrase)];
     Card(vec![Mark::Text { spans }])
-}
-
-// ── `services`: the host-owned durable-service ledger ────────────────────
-
-/// Every live durable service as one [`Mark::Fields`] row, labelled by the id
-/// `service-handle` takes.  `Avatar::reconcile_service_pins` is the sole
-/// writer; `shell_eval::reject_protected_pin` refuses the key to the model.
-pub(crate) fn services_pin_card(services: &[crate::agent::ProbedWorker]) -> Card {
-    let rows = services
-        .iter()
-        .map(|entry| Field {
-            label: format!("service {}", entry.id),
-            value: FieldVal::Inline(vec![Span::plain(format!(
-                "{}  (up {}s)",
-                entry.cmd, entry.up_secs
-            ))]),
-        })
-        .collect();
-    Card(vec![Mark::Fields { rows }])
 }

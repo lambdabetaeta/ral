@@ -393,11 +393,6 @@ impl Headless<'_> {
             K::SystemNote { text } => {
                 let _ = writeln!(self.err, "{text}");
             }
-            K::Nudge { used, max, cause } => {
-                if id == self.root_id {
-                    let _ = writeln!(self.err, "[nudge {used}/{max}: {cause}]");
-                }
-            }
             K::ProviderError { error } => {
                 let _ = writeln!(self.err, "provider error: {error:?}");
             }
@@ -458,14 +453,16 @@ impl Headless<'_> {
                     }
                 }
             }
-            // Interactive-only, or pure presentation: nothing is lost by
-            // leaving them undrawn here.
+            // Interactive-only, pure presentation, or — the nudge — the agent
+            // steering itself, which stays forensic and never addresses the
+            // caller.
             K::Thinking { .. }
             | K::Prompt { .. }
             | K::Answer { .. }
             | K::Cancelled
             | K::HarnessResult { .. }
-            | K::ModelChanged { .. } => {}
+            | K::ModelChanged { .. }
+            | K::Nudge { .. } => {}
         }
     }
 

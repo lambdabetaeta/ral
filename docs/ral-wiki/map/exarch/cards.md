@@ -109,8 +109,7 @@ fired ("idle 1h unobserved" / "24h backstop"), with prune and large-binding
 notices rendered by its per-kind siblings
 ([[decisions/260706_enquiry-channel|enquiry-channel]]). All are fixed-position
 value marks, never an animation, and all stay inside the existing `text` mark
-vocabulary, so none widens the closed mark set above. `services_pin_card` is
-the host-authored protected `services` pin ([[map/exarch/agent|agent]]).
+vocabulary, so none widens the closed mark set above.
 
 A notice's raw fact is what reaches the record log — `Display::Notice
 { notice }` — exactly as a structural observation records only its raw wire

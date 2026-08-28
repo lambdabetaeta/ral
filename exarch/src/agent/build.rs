@@ -246,7 +246,7 @@ impl Avatar {
             dial,
             reach,
         } = b;
-        let nudges = tool_enabled.then(nudge::Registry::new);
+        let nudges = tool_enabled.then(nudge::Nudges::new);
         let log_dir = log.dir().to_path_buf();
         let inbox = Inbox::new();
         let mailbox = inbox.mailbox();
@@ -303,7 +303,6 @@ impl Avatar {
             ral_epoch: 0,
             disk_check_epoch: 0,
             disk_warn_latched: false,
-            context_warn_latched: false,
         })
     }
 
@@ -507,8 +506,10 @@ impl Avatar {
         self.seat.clear(&self.log.lock());
         // The rebuilt context is empty: the next step's usage sets this afresh.
         self.last_input = (0, 0);
-        // A fresh context carries no pressure of its own to warn about.
-        self.context_warn_latched = false;
+        // A rebuilt context has been told nothing.
+        if let Some(nudges) = &mut self.nudges {
+            *nudges = nudge::Nudges::new();
+        }
         // Abandon the subtree — this agent itself stays live — and disarm the
         // schedules.  A straggler that composed its message before this call
         // carries its own stamp and is rejected at a consuming edge, so
@@ -536,7 +537,7 @@ impl Avatar {
         }
         self.inbox.drop_nudges();
         if let Some(nudges) = &mut self.nudges {
-            nudges.reset_budget();
+            *nudges = nudge::Nudges::new();
         }
         Ok(())
     }

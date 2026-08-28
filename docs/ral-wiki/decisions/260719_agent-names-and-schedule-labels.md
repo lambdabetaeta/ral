@@ -110,6 +110,20 @@ mistake.
   that remains of the reserved-keyspace idea; there is no longer a *kind* on a
   pin.
 
+  > **Amended 2026-08-27.** The `services` protection recorded above is
+  > removed. `SERVICES_PIN_KEY`, `reject_protected_pin`, the
+  > `accepted_surface` wrapper that carried it, `Avatar::reconcile_service_pins`
+  > (the host writer that kept the pin in sync with live durable workers), and
+  > `services_pin_card` are all deleted — the operator's own words: "kill the
+  > protected pins, that mechanism shouldn't exist at all," no deeper
+  > technical rationale offered or needed. The pin register is now entirely
+  > model-authored: no reserved key, no host-only writer, nothing a program is
+  > refused. Durable-service legibility through the register is gone and not
+  > replaced by another pin; what remains is the same worker-birth trail card
+  > an ordinary `spawn` gets (`worker #id cmd durable`) plus an aggregate
+  > running count on `/resources` — see [[design/pins|pins]] and
+  > [[map/exarch/builtins|builtins]].
+
 ## Consequences
 
 - The spawn, listing, message, cancel, and schedule builtins all take or return

@@ -140,8 +140,12 @@ The escape is detachment — the *handle* is its evidence
   can never cross the host seam. Rediscovery instead splits by class: an
   ordinary `spawn`/`watch` worker (`LeaseClass::Worker`) is rediscovered
   through the binding lease, never by id; a `service`-born worker
-  (`LeaseClass::Durable`) is rediscovered through the host-owned `services`
-  pin, which shows each live service's id and birth description, and
+  (`LeaseClass::Durable`) is rediscovered by the id its birth trail card
+  named (`worker #id cmd durable`) — the pin register once carried a
+  host-owned `services` listing for this, deleted with the rest of the
+  protected-pin mechanism
+  ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]'s
+  2026-08-27 amendment) — and
   `service-handle <id>` (`exarch/src/shell_eval/builtins.rs`) takes the handle back
   by that id to resume the ordinary eliminator idiom
   ([[map/exarch/builtins|builtins]]).

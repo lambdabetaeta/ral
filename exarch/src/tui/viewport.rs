@@ -20,7 +20,6 @@ use super::rail::{self, RailKind};
 use super::row::Row;
 use super::select::plain_slice;
 use crate::agent::event::{ContextOp, EditAuthority};
-use crate::bus::AgentId;
 use crate::bus::card::{
     self, Card, Landing, ObservationKind, execs_card, greps_card, landing, observation_card,
     observation_from_wire, reads_card,
@@ -49,26 +48,6 @@ pub(super) const VIEWPORT_MAX_ROWS: usize = 20_000;
 /// again rather than lose it.
 type Anchor = Option<Seq>;
 
-/// All that outlives a dead sub-agent view once [`super::LINGER`] elapses.
-/// Nothing is ever reloaded from the log; it stays readable outside the TUI.
-pub(super) struct Tombstone {
-    pub(super) id: AgentId,
-    pub(super) error: bool,
-    pub(super) log_path: PathBuf,
-}
-
-impl Tombstone {
-    /// The row `Tabs::tombstone_lines` collects for the `/resources` fold.
-    pub(super) fn line(&self) -> Line<'static> {
-        let status = if self.error { "error" } else { "done" };
-        Line::from(format!(
-            "· agent {} {status} — {}",
-            self.id,
-            self.log_path.display()
-        ))
-    }
-}
-
 /// Carry a lane's open line across one delta: the text after the last newline
 /// is exactly what no record holds yet, since the worker cuts its records at
 /// that same newline.  Block text and open line are complementary by that one
@@ -87,8 +66,8 @@ pub(super) struct Viewport {
     /// The session's scrollback, oldest block first.
     blocks: Vec<Entry>,
     /// Set once evicted ([`Self::evict_to_tombstone`]); `blocks` is empty from
-    /// that point on, and `None` for a live or still-lingering view.
-    tombstone: Option<Tombstone>,
+    /// that point on, and `false` for a live or still-lingering view.
+    tombstoned: bool,
     /// Palette slot stamped onto every block at push; root is `0`.
     agent: AgentSlot,
     /// This session's spend — the matrix's per-agent readout, where
@@ -357,7 +336,7 @@ impl Viewport {
             evicted_through: None,
             synced_rev: 0,
             blocks: Vec::new(),
-            tombstone: None,
+            tombstoned: false,
             agent,
             usage: Usage::default(),
             answer: String::new(),
@@ -480,22 +459,17 @@ impl Viewport {
         self.context_window = context_window;
     }
 
-    /// Drop this view's heap state for a [`Tombstone`], reading the final status
-    /// off the last block before that block goes.  Idempotent: by a second call
-    /// the view is clean, so re-reading the status would record a lie.
+    /// Drop this view's heap state once its sub-agent has died and lingered
+    /// out.  Idempotent: a second call finds the view already clean.
     ///
-    /// The scrollback is retired to `user.log` on the way out — the tombstone
-    /// promises that log is readable, and a dead view's blocks are the last
-    /// stretch of it nothing else would ever write.
-    pub(super) fn evict_to_tombstone(&mut self, id: AgentId) {
-        if self.tombstone.is_some() {
+    /// The scrollback is retired to `user.log` on the way out — `log_path`
+    /// stays put, so that log is readable, and a dead view's blocks are the
+    /// last stretch of it nothing else would ever write.
+    pub(super) fn evict_to_tombstone(&mut self) {
+        if self.tombstoned {
             return;
         }
-        self.tombstone = Some(Tombstone {
-            id,
-            error: self.last_is_error(),
-            log_path: self.log_path.clone(),
-        });
+        self.tombstoned = true;
         let seeded = self.log.seeded.min(self.blocks.len());
         self.log.retire(&self.blocks[seeded..], self.agent);
         self.log.seeded = 0;
@@ -505,10 +479,6 @@ impl Viewport {
         self.flat = Flat::default();
         self.pins = Vec::new();
         self.chrome = Vec::new();
-    }
-
-    pub(super) fn tombstone(&self) -> Option<&Tombstone> {
-        self.tombstone.as_ref()
     }
 
     /// Write the resident window past the retired prefix and flush, so
@@ -1360,10 +1330,9 @@ impl Viewport {
                 super::line::note("cancelled"),
             )],
             K::Error { text } => vec![Block::chrome(ChromeKind::Error, super::line::error(text))],
-            K::Nudge { used, max, cause } => vec![Block::chrome(
-                ChromeKind::Plain,
-                super::line::note(&format!("nudge {used}/{max}: {cause}")),
-            )],
+            // Forensic only: a harness result is already said by its act row,
+            // and a nudge is the agent steering itself.
+            K::Nudge { .. } | K::HarnessResult { .. } => Vec::new(),
             K::ProviderError { error } => {
                 vec![Block::chrome(
                     ChromeKind::Error,
@@ -1379,7 +1348,6 @@ impl Viewport {
             K::SystemNote { text } => {
                 vec![Block::chrome(ChromeKind::Plain, super::line::note(text))]
             }
-            K::HarnessResult { .. } => Vec::new(),
             K::ModelChanged { model, provider } => vec![Block::chrome(
                 ChromeKind::Plain,
                 super::line::note(&format!("model changed: {provider}/{model}")),
@@ -1495,7 +1463,6 @@ fn render_observation_group(values: &[ral_core::serial::FOValue]) -> Vec<Block> 
 
 #[cfg(test)]
 mod tests {
-    use super::super::line;
     use super::*;
 
     fn viewport() -> Viewport {
@@ -1797,58 +1764,33 @@ mod tests {
         );
     }
 
-    /// A tombstone carries the id, the status, and the log path; the rest goes.
+    /// Eviction drops the scrollback and the pinned register, keeping only
+    /// the fact that the view is dead; `log_path` is untouched, so the log
+    /// stays readable.
     #[test]
-    fn evict_to_tombstone_keeps_exactly_the_three_facts() {
+    fn evict_to_tombstone_drops_scrollback_and_register() {
         let mut vp = viewport();
         vp.push_chrome(ChromeKind::Plain, vec![Line::from("hello")]);
         vp.set_pin("k".into(), Card(Vec::new()));
-        assert!(vp.tombstone().is_none());
+        assert!(!vp.blocks.is_empty());
 
         let log_path = vp.log_path.clone();
-        vp.evict_to_tombstone(42);
+        vp.evict_to_tombstone();
 
-        assert!(vp.tombstone().is_some());
-        let t = vp.tombstone().expect("tombstoned");
-        assert_eq!(t.id, 42);
-        assert!(!t.error);
-        assert_eq!(t.log_path, log_path);
+        assert_eq!(vp.log_path, log_path);
         assert!(vp.blocks.is_empty(), "the scrollback is dropped");
         assert!(vp.pins().is_empty(), "the pinned register is dropped");
-
-        let rendered = line::text(&t.line());
-        assert!(rendered.contains("42"), "{rendered:?}");
-        assert!(rendered.contains("done"), "{rendered:?}");
-        assert!(
-            rendered.contains(&log_path.display().to_string()),
-            "{rendered:?}"
-        );
     }
 
-    /// The status is read off the last block before that block is dropped.
-    #[test]
-    fn evict_to_tombstone_reads_error_status_off_the_last_block() {
-        let mut vp = viewport();
-        vp.push_chrome(ChromeKind::Error, vec![Line::from("boom")]);
-        assert!(vp.last_is_error());
-        vp.evict_to_tombstone(7);
-        assert!(vp.tombstone().unwrap().error);
-    }
-
-    /// Re-evicting is a no-op: the view is clean by then, so re-reading its
-    /// status would overwrite the first tombstone's with a lie.
+    /// Re-evicting is a harmless no-op: the view is already clean.
     #[test]
     fn evict_to_tombstone_is_idempotent() {
         let mut vp = viewport();
         vp.push_chrome(ChromeKind::Error, vec![Line::from("boom")]);
-        vp.evict_to_tombstone(1);
-        assert!(vp.tombstone().unwrap().error);
-        vp.evict_to_tombstone(999);
-        assert_eq!(vp.tombstone().unwrap().id, 1, "the id is not overwritten");
-        assert!(
-            vp.tombstone().unwrap().error,
-            "the status is not overwritten"
-        );
+        vp.evict_to_tombstone();
+        assert!(vp.blocks.is_empty());
+        vp.evict_to_tombstone();
+        assert!(vp.blocks.is_empty());
     }
 
     /// An act is a barrier: the run scan ends at it, so it renders standalone

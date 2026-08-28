@@ -209,10 +209,6 @@ struct Status {
 /// An agent's embodiment in this process: the thread that thinks and acts
 /// for it, owning everything only it touches, so every method is plain
 /// `&mut self`.
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "each bool gates an independent, orthogonal axis (disk_warn_latched, context_warn_latched); not a candidate for a combined enum"
-)]
 pub struct Avatar {
     /// The public half this avatar embodies — readable crate-wide, so a
     /// caller outside the `agent` module reaches identity and config at
@@ -229,11 +225,13 @@ pub struct Avatar {
     /// Self-nudges and armed wakeups land here; a child's result lands in its
     /// *parent's*, never reaching across into a sibling's.
     inbox: Inbox,
-    /// Its latches reset on a genuine exchange-boundary item, never on a
-    /// self-nudge, so a nudge sequence runs to completion within one exchange.
-    /// `None` for a toolless (`--chat`) trunk: every nudge steers an agent
-    /// toward a tool it does not hold, so such a turn is only ever reported.
-    nudges: Option<nudge::Registry>,
+    /// The repair budget resets on a genuine exchange-boundary item, never on
+    /// a self-nudge, so a nudge sequence runs to completion within one
+    /// exchange; the whole state is reborn with the context on `/clear` and
+    /// `/rewind`.  `None` for a toolless (`--chat`) trunk: every nudge steers
+    /// an agent toward a tool it does not hold, so such a turn is only ever
+    /// reported.
+    nudges: Option<nudge::Nudges>,
     /// The staged return value, harvested by [`Self::run_shell`] from that
     /// call's [`ReplyCell`] as the desk retires, then lifted into a
     /// [`deliberate::Outcome::Replied`] only once the tool-call batch drains,
@@ -259,11 +257,6 @@ pub struct Avatar {
     /// Latched on crossing the ceiling, so the warning fires once per
     /// excursion rather than once per boundary.
     disk_warn_latched: bool,
-    /// Latched on crossing the pressure soft line ahead of auto-compaction
-    /// ([`digest::pressure_due`]), so the nudge fires once per excursion
-    /// rather than on every clean completion.  Re-armed in `context_pressure`
-    /// after the measure falls back under the line.
-    context_warn_latched: bool,
 }
 
 /// The depth budget exarch's trunks start with.

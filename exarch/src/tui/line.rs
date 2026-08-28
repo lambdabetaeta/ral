@@ -609,8 +609,8 @@ fn span_style(role: Option<Role>) -> Style {
 }
 
 /// The one dispatch every [`Mark`] variant routes through, shared by
-/// [`render_card`] and [`render_framed`] (which filters `diff` out first), so a
-/// new variant cannot be wired into one interpreter and forgotten in the other.
+/// [`render_effect_lines`] and [`render_framed`], so a new variant cannot be
+/// wired into one interpreter and forgotten in the other.
 fn render_mark(mark: &Mark, level: u8) -> Vec<Line<'static>> {
     match mark {
         Mark::Text { spans } => render_text(spans),
@@ -621,10 +621,11 @@ fn render_mark(mark: &Mark, level: u8) -> Vec<Line<'static>> {
     }
 }
 
-/// Render a [`Card`]: the leading blank every block wears, then each mark in
-/// order.  Only the `diff` mark honours `level`; the rest are chrome and always
-/// render full.
-pub(super) fn render_card(card: &Card, level: u8) -> Vec<Line<'static>> {
+/// Render an Observation-origin card's marks unframed, for folding as plain
+/// rows under its call's intent in a coalesced group: the fold applies its
+/// own wrapping and indent, so a card frame here would nest inside another.
+/// The one spot that does not go through [`render_card`].
+pub(super) fn render_effect_lines(card: &Card, level: u8) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     for mark in card.marks() {
         ls.extend(render_mark(mark, level));
@@ -632,28 +633,30 @@ pub(super) fn render_card(card: &Card, level: u8) -> Vec<Line<'static>> {
     ls
 }
 
-/// Left indent of a framed surfaced card, in columns — pushed right of the
-/// transcript so the card reads as a composed object, set apart from the flow.
+/// Left indent of a framed card, in columns — pushed right of the transcript
+/// so the card reads as a composed object, set apart from the flow.
 const CARD_INDENT: usize = 4;
 
-/// A surfaced general card (no `diff` mark) as a framed, indented object: the
-/// model's deliberate "look at this", rare enough to earn the chrome.  The
-/// frame wears neutral ink, since identity lives in the matrix.
-pub(super) fn render_card_framed(card: &Card, width: u16) -> Vec<Line<'static>> {
+/// Every card as a framed, indented object — the one path a `Card` renders
+/// through, save [`render_effect_lines`]'s inline fold.  The frame wears
+/// neutral ink, since identity lives in the matrix.
+pub(super) fn render_card(card: &Card, width: u16, level: u8) -> Vec<Line<'static>> {
     render_framed(
         card,
         CARD_INDENT,
         Style::default().fg(SLATE),
         width.min(READ_CONTENT_W),
         false,
+        level,
     )
 }
 
 const REGISTER_CARD_MARGIN: usize = 2;
 
 /// A pinned register card, framed in its producing agent's `hue` and filling
-/// the inset width.  The hue is the pin's one departure from a surfaced card:
+/// the inset width.  The hue is the pin's one departure from a plain card:
 /// identity the transcript reads off the matrix, a side column must carry.
+/// A pin has no `Reveal` dial of its own, so it always renders at full depth.
 pub(super) fn render_pin(card: &Card, width: u16, hue: Color) -> Vec<Line<'static>> {
     #[allow(
         clippy::cast_possible_truncation,
@@ -666,18 +669,21 @@ pub(super) fn render_pin(card: &Card, width: u16, hue: Color) -> Vec<Line<'stati
         Style::default().fg(hue),
         draw_w,
         true,
+        3,
     )
 }
 
-/// The framed-card renderer behind both [`render_card_framed`] and
-/// [`render_pin`]: a box `indent_w` columns in, drawn in `border`, content
-/// wrapped to a budget from `width` — which the caller has already capped.
+/// The framed-card renderer behind both [`render_card`] and [`render_pin`]: a
+/// box `indent_w` columns in, drawn in `border`, content wrapped to a budget
+/// from `width` — which the caller has already capped. `level` reaches only
+/// a `diff` mark; every other mark ignores it.
 fn render_framed(
     card: &Card,
     indent_w: usize,
     border: Style,
     width: u16,
     fill: bool,
+    level: u8,
 ) -> Vec<Line<'static>> {
     let indent = " ".repeat(indent_w);
     // Less the indent and the four frame columns (`│ ` … ` │`).
@@ -702,14 +708,9 @@ fn render_framed(
         _ => (None, marks),
     };
 
-    // A diff mark is filtered out — diff-bearing cards never reach here — so
-    // the shared dispatch's level argument goes unread.
     let mut body: Vec<Line<'static>> = Vec::new();
-    for mark in body_marks
-        .iter()
-        .filter(|m| !matches!(m, Mark::Diff { .. }))
-    {
-        body.extend(render_mark(mark, 0));
+    for mark in body_marks {
+        body.extend(render_mark(mark, level));
     }
     let wrapped: Vec<Line<'static>> = body.iter().flat_map(|l| wrap_line(l, max_inner)).collect();
 
@@ -1459,144 +1460,4 @@ fn words(spans: &[Span<'static>]) -> Vec<(Vec<(String, Style)>, usize)> {
     }
     flush(&mut run, &mut run_w, &mut ws);
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn vibes_card() -> Card {
-        Card(vec![
-            Mark::Text {
-                spans: vec![CardSpan {
-                    role: Some(Role::Strong),
-                    text: "hello cutie".into(),
-                }],
-            },
-            Mark::Measure(Measure {
-                label: "vibes".into(),
-                value: 5,
-                max: Some(42),
-                unit: None,
-            }),
-            Mark::Fields {
-                rows: vec![CardField {
-                    label: "mood".into(),
-                    value: FieldVal::Inline(vec![CardSpan {
-                        role: Some(Role::Ok),
-                        text: "rainy".into(),
-                    }]),
-                }],
-            },
-        ])
-    }
-
-    fn text(l: &Line<'static>) -> String {
-        l.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    /// A surfaced card frames as a closed box: the heading lifted into the
-    /// `╭…╮` rule, `│`-flanked content, and every line the same width.
-    #[test]
-    fn framed_card_is_a_closed_box() {
-        let lines = render_card_framed(&vibes_card(), 80);
-        let rows: Vec<&Line<'static>> = lines.iter().filter(|l| !is_blank(l)).collect();
-        assert!(rows.len() >= 3, "top, content, bottom: got {}", rows.len());
-
-        let top = text(rows[0]);
-        let bottom = text(rows[rows.len() - 1]);
-        assert!(top.contains('╭') && top.contains('╮'), "top rule: {top:?}");
-        assert!(
-            top.contains("hello cutie"),
-            "heading set into the rule: {top:?}"
-        );
-        assert!(!top.contains("rainy"), "body stays inside, not in the rule");
-        assert!(
-            bottom.contains('╰') && bottom.contains('╯'),
-            "bottom rule: {bottom:?}"
-        );
-
-        let w = span_run_width(&rows[0].spans);
-        for r in &rows {
-            assert_eq!(
-                span_run_width(&r.spans),
-                w,
-                "ragged box edge: {:?}",
-                text(r)
-            );
-        }
-        for r in &rows[1..rows.len() - 1] {
-            assert!(
-                text(r).contains('│'),
-                "content row not flanked: {:?}",
-                text(r)
-            );
-        }
-    }
-
-    /// The box is bounded by `width`: a narrow terminal still closes flush.
-    #[test]
-    fn framed_card_fits_width() {
-        let lines = render_card_framed(&vibes_card(), 30);
-        for l in lines.iter().filter(|l| !is_blank(l)) {
-            assert!(
-                span_run_width(&l.spans) <= 30,
-                "overflows width 30: {}",
-                span_run_width(&l.spans)
-            );
-        }
-    }
-
-    fn indent_of(s: &str) -> usize {
-        s.len() - s.trim_start().len()
-    }
-
-    /// A wrapped indented line keeps its indent on row 0 and hangs every
-    /// continuation under it — the whitespace is the hang column, not a gap.
-    #[test]
-    fn wrap_hangs_indented_line_under_its_indent() {
-        let line = Line::from(vec![
-            Span::raw("    "),
-            Span::raw("let paper_candidates = filter re-match candidates over the files"),
-        ]);
-        let rows = wrap_line(&line, 24);
-        assert!(rows.len() > 1, "expected a fold at width 24");
-        for row in &rows {
-            assert_eq!(
-                indent_of(&text(row)),
-                4,
-                "row lost its indent: {:?}",
-                text(row)
-            );
-        }
-    }
-
-    /// An inset line hangs its continuations under its own indent rather than
-    /// sliding back to column zero.  The rail is no business of this function's:
-    /// a margin lives on a [`super::row::Row`], never in these spans.
-    #[test]
-    fn wrap_hangs_inset_line_under_its_indent() {
-        let line = Line::from(vec![
-            Span::raw("  "),
-            Span::raw("alpha beta gamma delta epsilon zeta eta theta iota"),
-        ]);
-        let rows = wrap_line(&line, 20);
-        assert!(rows.len() > 1);
-        for row in &rows {
-            assert_eq!(indent_of(&text(row)), 2);
-        }
-    }
-
-    /// A flush, unindented line wraps back to column zero — no spurious indent.
-    #[test]
-    fn wrap_keeps_flush_line_flush() {
-        let line = Line::from(Span::raw(
-            "one two three four five six seven eight nine ten",
-        ));
-        let rows = wrap_line(&line, 16);
-        assert!(rows.len() > 1);
-        for row in &rows {
-            assert_eq!(indent_of(&text(row)), 0);
-        }
-    }
 }

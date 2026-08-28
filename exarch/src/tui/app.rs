@@ -9,7 +9,7 @@ use super::line;
 use super::line::bold;
 use super::login::LoginOverlay;
 use super::matrix::MatrixSort;
-use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK};
+use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK, READ_W};
 use super::picker::Picker;
 use super::prompt::PromptState;
 use super::render::draw;
@@ -37,8 +37,8 @@ use std::{
     time::Duration,
 };
 
-/// Rows one wheel notch scrolls; paging keys instead move a frame height,
-/// measured per-keystroke off the last drawn content.
+/// Rows one wheel notch, or one edge-drag step, scrolls; paging keys instead
+/// move a frame height, measured per-keystroke off the last drawn content.
 const SCROLL_STEP: isize = 3;
 
 /// The one modal overlay that may be open at a time.
@@ -371,13 +371,7 @@ impl App {
         card.0
             .push(crate::agent::resources::section_mark("frontend"));
         card.0.push(crate::agent::resources::rows_mark(&frontend));
-        self.push_chrome(id, ChromeKind::Plain, line::render_card(&card, 3));
-        // The `views.dead` row is a count; this names each tombstoned
-        // view's id, status, and log path.
-        let tombstones = self.tabs.tombstone_lines();
-        if !tombstones.is_empty() {
-            self.push_chrome(id, ChromeKind::Plain, tombstones);
-        }
+        self.push_chrome(id, ChromeKind::Plain, line::render_card(&card, READ_W, 3));
     }
 
     /// Hand the session's viewport to `f`.
@@ -520,7 +514,10 @@ impl App {
             {
                 self.gesture.press(me);
             }
-            MouseEventKind::Drag(MouseButton::Left) => self.gesture.drag(me),
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let f = self.tabs.focused();
+                self.gesture.drag(me, self.tabs.viewports_mut(), f, SCROLL_STEP);
+            }
             MouseEventKind::Up(MouseButton::Left) => {
                 let f = self.tabs.focused();
                 self.gesture.release(self.tabs.viewports_mut(), f);
@@ -595,7 +592,7 @@ impl App {
             vp.push_chrome(ChromeKind::Plain, splash);
             vp.push_chrome(
                 ChromeKind::Plain,
-                line::render_card(&banner::session_card(s), 3),
+                line::render_card(&banner::session_card(s), READ_W, 3),
             );
         }
         draw(self, term)
@@ -606,7 +603,6 @@ impl App {
 mod tests {
     use super::*;
     use crate::bus::card::{Card, Mark};
-    use crate::tui::palette::READ_W;
     use crate::tui::row::Row;
     use ral_core::types::{CallSite, Observation, Observed};
 

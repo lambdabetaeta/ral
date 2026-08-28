@@ -5,8 +5,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ratatui::text::Line;
-
 use crate::bus::AgentId;
 
 use super::block::{AgentSlot, Reveal};
@@ -118,7 +116,7 @@ impl Tabs {
             }
             self.parents.remove(&id);
             if let Some(vp) = self.viewports.get_mut(&id) {
-                vp.evict_to_tombstone(id);
+                vp.evict_to_tombstone();
             }
         }
         self.title_frame += 1;
@@ -282,16 +280,6 @@ impl Tabs {
         self.viewports.keys().copied().collect()
     }
 
-    /// One line per tombstoned view — id, final status, log path.  Order is a
-    /// `HashMap` walk, so a caller wanting stability sorts.
-    pub(super) fn tombstone_lines(&self) -> Vec<Line<'static>> {
-        self.viewports
-            .values()
-            .filter_map(|vp| vp.tombstone())
-            .map(super::viewport::Tombstone::line)
-            .collect()
-    }
-
     /// Frame counter driving the terminal tab-title spinner.
     pub(super) fn title_frame(&self) -> u64 {
         self.title_frame
@@ -350,18 +338,10 @@ mod tests {
 
         tabs.tick();
 
-        assert!(
-            tabs.viewport(child).unwrap().tombstone().is_some(),
-            "the dead child is tombstoned once past LINGER"
-        );
         assert_eq!(
             tabs.viewport(child).unwrap().probe_figures().0,
             0,
-            "the tombstoned child's scrollback is gone"
-        );
-        assert!(
-            tabs.viewport(root).unwrap().tombstone().is_none(),
-            "root is never tombstoned"
+            "the dead child is tombstoned once past LINGER, its scrollback gone"
         );
         assert_eq!(
             tabs.viewport(root).unwrap().probe_figures().0,

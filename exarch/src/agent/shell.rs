@@ -231,16 +231,15 @@ impl Avatar {
     /// nudge reminder; `None` when nothing is pinned.  Rendered through the
     /// rail's own `summary_line`, so the reminder reads as the user sees it.
     pub(super) fn pinned_digest(&self) -> Option<String> {
-        let m = self.agent.pins.lock().expect("pin register poisoned");
-        if m.is_empty() {
-            return None;
-        }
-        Some(
-            m.values()
-                .map(|pin| crate::bus::card::summary_line(&pin.card))
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
+        let lines: Vec<String> = self
+            .agent
+            .pins
+            .lock()
+            .expect("pin register poisoned")
+            .values()
+            .map(|pin| crate::bus::card::summary_line(&pin.card))
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("; "))
     }
 }
 

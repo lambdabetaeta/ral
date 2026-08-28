@@ -24,15 +24,22 @@ this wire is unchanged by the read side:
 
 - `` `pin [key, body] `` — write `body` to register slot `key`, **overwriting in
   place** on re-pin. The `key` is model-chosen and *is the datum's identity* —
-  the thing the host cannot guess, save the one reserved key below.
+  the thing the host cannot guess. No key is reserved: the write side has no
+  guard at all, and every slot in the register is model-authored.
 - `` `unpin [key] `` — drop the slot (a finished plan clears its gauge). An
   **absent body** is the same as `` `unpin ``.
-- `services` — the one **host-owned** slot. Ordinary model-authored
-  `surface `` `pin ``/`` `unpin `` to it is rejected with a diagnostic
-  (`reject_protected_pin`, [[map/exarch/shell-eval|shell-eval]]); the host writes
-  it as durable [[design/residency|services]] are born and settle, so its
-  legibility is the host's to keep, not the model's to overwrite. Reading it
-  is unprotected: `pin-read "services"` answers like any other key.
+
+The register once carried one host-owned exception, a `services` slot the
+host reconciled and ordinary `surface` writes could not touch
+(`reject_protected_pin`); that mechanism is deleted outright, on no
+technical rationale beyond the operator's own — protected pins should not
+exist. Durable [[design/residency|services]] lose the register as a
+legibility channel with it: what a `service <desc> <thunk>` birth still
+shows is the same worker-birth trail card an ordinary `spawn` gets
+(`worker #id cmd durable`, [[map/exarch/builtins|builtins]]) plus an
+aggregate running count on `/resources` — no per-service listing survives.
+See [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]'s
+2026-08-27 amendment.
 
 On top of that wire sit four model-facing commands, one `pin-*` family:
 `pin-set`/`pin-clear` are ral wrappers over `` `pin ``/`` `unpin ``;
@@ -131,24 +138,31 @@ price of one keyspace shared between a schemaless mutator and a schema'd one.
 ## The model watches its own pins
 
 Because pinned state is something the *user is watching* on the rail, the
-[[map/exarch/agent|nudge]] facility keeps the model restless about it. The
+[[map/exarch/agent|nudge]] facility tells the model when it changes. The
 agent keeps the same small `key → one-line summary` mirror `pin-read` answers
 from, while the session is otherwise pin-blind and the
 events go straight to the frontend. There is **one** pinned-state nudge,
-uniform for every pin kind (a task, a goal, any other pinned state
-alike) and every agent role (the interactive trunk and a returning sub-agent
-alike): while anything is pinned, a **budget-free** reminder fires on every
-clean completion, naming the pinned state; with nothing pinned, a gentler,
-throttled reminder suggests `set-goal`/`add-task` instead. The exception is
-*actionability*: while the agent has live descendants, the pin/no-pin reminder
-waits for their results, because the agent has already delegated the next
-move. This nudge is independent of, and additive with, a *returning* agent's
-separate obligation to call `reply` — neither suppresses the other, so a
-sub-agent that finishes without replying while it still holds live pinned
-state is reminded of both once it is not waiting on children. This is the
-discipline pinning earns: a kit that publishes state to a slot the user watches
-is reminded to keep it true, whether the agent holding it is the trunk or a
-sub-agent.
+uniform for every pin kind (a task, a goal, any other pinned state alike) and
+every agent role (the interactive trunk and a returning sub-agent alike):
+**edge-triggered** and budget-free, it fires once, on the first quiet
+completion after the register's one-line digest differs from the one last
+told, and stays silent on every quiet completion that repeats an
+already-told digest. An emptied register is itself silent — unpinning only
+re-arms the edge, so a later re-pin fires again even at a digest told long
+before, and there is no fallback reminder that nudges an empty register
+toward `set-goal`/`add-task`: that advertisement is what let a completion,
+its own reminder, and the next completion cycle forever, and it is gone with
+the livelock it caused. The exception is *actionability*: while the agent has
+live descendants, the pin reminder waits for their results, because the
+agent has already delegated the next move. Restlessness in a *returning*
+agent is not this nudge's doing — that is its separate, budgeted obligation
+to call `reply`, re-issued while unmet. The pin reminder itself speaks once
+per change and then falls silent, so a sub-agent that finishes without
+replying right as its pinned state changes is told of both in the same
+completion, but only the reply obligation is told again next time. This is
+the discipline pinning earns: a kit that publishes state to a slot the user
+watches is told once when that state moves, whether the agent holding it is
+the trunk or a sub-agent.
 
 ## Why this shape
 
@@ -191,6 +205,7 @@ layout), [[map/exarch/shell-eval|shell-eval]] (the host sink, the pin-first
 decode, and the mirror `pin-read` answers from), [[map/exarch/agent|agent]]
 (the nudge that reminds the model of its pins, from the same mirror
 `pin-read` reads), [[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]
-(the commitment keyspace retired, leaving `services` the one protected slot),
+(the commitment keyspace retired, and its 2026-08-27 amendment records the
+later removal of `services`, the one protected slot that survived it),
 and `exarch/data/agent.ral` (the tasks section — the first client, now a pure
 prelude over the family).

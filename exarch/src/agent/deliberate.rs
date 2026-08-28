@@ -929,18 +929,12 @@ mod tests {
                 generation: session.agent.generation(),
             }))
             .unwrap();
-        // A headless root's first `reply` is turned back for self-verification.
         session.agent.provider.swap(scripted(
             "test-model",
-            Script::new()
-                .then(Reply::tool_calls(vec![ral_call(
-                    "r1",
-                    "agents `reply 'done'",
-                )]))
-                .then(Reply::tool_calls(vec![ral_call(
-                    "r2",
-                    "agents `reply 'done'",
-                )])),
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "agents `reply 'done'",
+            )])),
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);
@@ -1000,18 +994,12 @@ mod tests {
                 generation: session.agent.generation(),
             })
             .unwrap();
-        // Same self-verification turn-back as the agent-result twin above.
         session.agent.provider.swap(scripted(
             "test-model",
-            Script::new()
-                .then(Reply::tool_calls(vec![ral_call(
-                    "r1",
-                    "agents `reply 'done'",
-                )]))
-                .then(Reply::tool_calls(vec![ral_call(
-                    "r2",
-                    "agents `reply 'done'",
-                )])),
+            Script::new().then(Reply::tool_calls(vec![ral_call(
+                "r1",
+                "agents `reply 'done'",
+            )])),
         ));
         let (tx, _rx) = crate::bus::channel();
         let emit = Emitter::new(tx, session.agent.id);

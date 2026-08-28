@@ -1615,7 +1615,7 @@ pub(crate) struct SurfaceApplier {
 impl SurfaceApplier {
     /// Apply one live [`Event::Surface`] value.
     pub(crate) fn live(&self, val: FOValue) {
-        if let Some(surface) = shell_eval::accepted_surface(&RalValue::from(val), &self.recorder) {
+        if let Some(surface) = shell_eval::decode_surface(&RalValue::from(val)) {
             if let Some(pins) = &self.pins {
                 // Fatal, never skipped: dropping a disposition here would
                 // desync the mirror from the stream with no signal at all.
@@ -2794,34 +2794,6 @@ mod tests {
             facts,
             ["io", "card", "done", "notice", "pin", "unpin"],
             "every class records its twin, the buffered read flushed ahead of the card"
-        );
-    }
-
-    /// The protected-`services` guard blocks a model's `` `pin `` write,
-    /// never a read: `` `pin-read `` answers a host-authored `"services"`
-    /// slot exactly like any other key.
-    #[test]
-    fn pin_read_of_services_answers() {
-        let d = desk();
-        d.services
-            .agent
-            .pins
-            .lock()
-            .expect("pin register poisoned")
-            .insert(
-                "services".to_string(),
-                shell_eval::PinDigest::new(crate::bus::card::Card(vec![
-                    crate::bus::card::Mark::Text {
-                        spans: vec![crate::bus::card::Span {
-                            role: None,
-                            text: "svc".into(),
-                        }],
-                    },
-                ])),
-            );
-        assert!(
-            d.handle(pin_read_req("services")).is_ok(),
-            "reads are not writes: the protected-pin guard must not reach `pin-read`"
         );
     }
 

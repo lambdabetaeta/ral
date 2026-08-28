@@ -368,36 +368,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rendered_matrix_aligns_every_value_in_one_column() {
-        let card = session_card(&sample("dangerous"));
-        let lines = line::render_card(&card, 3);
-        let label_w = rows(&sample("dangerous"))
-            .iter()
-            .map(|(l, _)| l.chars().count())
-            .max()
-            .unwrap()
-            + 2;
-        for l in &lines {
-            // Dump so the column is eyeballable under `--nocapture`.
-            eprintln!(
-                "[{:>2}] {}",
-                l.spans.first().map_or(0, |s| s.content.chars().count()),
-                line::text(l)
-            );
-        }
-        for l in &lines {
-            let Some(first) = l.spans.first() else {
-                continue;
-            };
-            assert_eq!(
-                first.content.chars().count(),
-                label_w,
-                "every field line opens with a label cell of width {label_w}"
-            );
-        }
-    }
-
     /// Guards the derivation: a shape cannot reach the rail unnamed here.
     #[test]
     fn legend_names_every_rail_shape() {

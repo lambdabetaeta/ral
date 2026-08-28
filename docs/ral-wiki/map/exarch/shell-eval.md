@@ -184,7 +184,8 @@ nothing else in the digest walks the journal yet.
 regimes share: the live foreground sink `run_shell` hands `dispatch_to_report`
 emits now, and the deferred sink (`deferred_sink`, installed on the transport
 before each dispatch) mints identical events when a detached worker's batch
-flushes. `accepted_surface` wraps it with the protected-pin guard. The
+flushes, both calling it directly — the `accepted_surface` wrapper that once
+layered a protected-pin guard over it is gone with the guard itself. The
 codomain is `Surface`, the shell's own closed vocabulary: five channels (the
 `Pin`/`Unpin` variants are one pin channel), tried pin-first. It carries only
 the structured value each channel names —
@@ -194,14 +195,11 @@ over the recorded `Display` commit) or whoever records (the commit producer's
 
 - a `` `pin ``/`` `unpin `` wrapper decodes to `Surface::Pin { key, card }` /
   `Surface::Unpin { key }` — a pin is a rendered card in a slot, so its card
-  is the fact itself, not a copy of one — but the host-owned `services` key is
-  protected
-  ([[decisions/260703_protected-commitment-pins|protected-commitment-pins]]):
-  ordinary `surface` writes or clears there are rejected with a diagnostic
-  before they reach the pin mirror or viewport; accepted pins are mirrored as
-  `PinDigest`s so the [[map/exarch/agent|nudge]] layer can name pinned state
-  without parsing rendered text — the read side reuses the same store rather
-  than adding a second one ([[design/pins|pins]]);
+  is the fact itself, not a copy of one; no key is reserved, so every pin
+  decodes and writes the same way regardless of key. Accepted pins are
+  mirrored as `PinDigest`s so the [[map/exarch/agent|nudge]] layer can name
+  pinned state without parsing rendered text — the read side reuses the same
+  store rather than adding a second one ([[design/pins|pins]]);
 - a `Map` core emits at a redirect, exec, or capability-check door decodes
   through `Observation::from_value` into `Surface::Observation`, the raw
   observation alone ([[map/exarch/io-surface|io-surface]]);

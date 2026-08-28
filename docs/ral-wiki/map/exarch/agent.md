@@ -170,7 +170,7 @@ Three nested loops, the same for trunk and child alike:
   twin `attend_backlog` (converse's per-exchange drain): generation admission, the
   exchange-boundary latch reset, a session command's dispatch to `Control`, the
   `deliberate` call itself, and the nudge reaction. A genuine
-  exchange boundary resets the nudge latches and clears the sticky cancel token
+  exchange boundary resets the nudge budget and clears the sticky cancel token
   (`cancel::Token::reset`), so a prior exchange's Esc cannot bleed into the next; a
   self-nudge is the same exchange continuing and resets neither. A child's
   `reply` deposits its value on its own `Agent` (`Agent::deposit_reply`, which
@@ -241,9 +241,9 @@ observed away. Transcript and TUI only — the rendered one-liner is
 [[map/exarch/cards|cards]]'s `reap_card`, the completion card's sibling — never
 model-facing, since delivery of a reap to the model itself is deferred.
 What `attend`'s
-top still runs, each pass its own ready boundary: `reconcile_service_pins`
-(the protected `services` pin is (re-)born or dies here) and
-`check_disk_warn`.
+top still runs, each pass its own ready boundary: `check_disk_warn`. (The
+protected `services` pin and its reconciler are gone —
+[[design/pins|pins]].)
 
 The retention clock itself is core's: the engine ticks the worker registry
 once per source dispatch and sweeps it at each settled run's ready
@@ -303,7 +303,9 @@ always succeed, coalescing instead of growing the queue — a
 `ScheduledWakeup` replaces a still-queued wakeup for the same schedule id
 (newest wins), consecutive `UserSteering` pushes merge with a blank line
 (never across a slash line, which would silently change its
-exchange-boundary classification), and an exact-duplicate `Nudge` is a no-op.
+exchange-boundary classification), and a `Nudge` replaces any still-queued
+nudge — newest wins, since a second means a fresher continuation superseded
+the first, not that both are owed.
 The other four (`AgentResult`, `AgentMessage`, `Command`, `Surface`) are
 quota-checked against `INBOX_SOURCE_CAP` (64) and the shared
 `INBOX_TOTAL_CAP` (256) and *rejected*, never dropped, once full — every
@@ -316,34 +318,87 @@ caller left to return to — records straight through the record seam as a
 never extends a bus sender's lifetime past the run that queued it.
 
 The headless-completion gate is gone with `expect_action`: the one role flag
-that did not fit the `parent` collapse is dropped, not relocated. The nudges that
-remain — `must_reply` for a returning agent (`returns()`), `continue` on
-truncation, empty/early-stop repair, the one-shot latch that turns a headless
-root's *first* `reply` back for self-verification before honouring the next,
-the one pinned-state reminder, and the context-pressure warning
-([[decisions/260805_context-pressure-is-a-nudge|context-pressure-is-a-nudge]]:
-budget-free, latched once per crossing of the soft line one reserve ahead of
-auto-compaction, re-armed when the measured context crosses back below the line
-or the session resets) — are
-driven off the same `react` rule. Live descendants make the agent wait:
-`must_reply` is suspended, and pin/no-pin reminders wait too, since the agent has
-already delegated the next actionable fact — though the pressure warning does
-not wait, the swelling context being the agent's own. Once the descendants settle, the
-rules resume against the still-live pin register. The pinned-state reminder is
-uniform for every pin kind (tasks, goals, any other pinned state alike) and
-every actionable agent role: budget-free while anything is pinned, independent
-of and additive with `must_reply` — a returning agent that finishes without
-replying while it still holds pinned state is nudged for both after its
-children have landed. Reporting an attempt is not the nudger's job at all:
-`take_up` emits `Forensic::ProviderError` for whatever error the attempt carries,
-before it asks for a nudge and whether or not one follows, so `react` decides
-and nothing more.
+that did not fit the `parent` collapse is dropped, not relocated. What
+remains splits into two disciplines, named and owned by `agent/nudge.rs`'s
+`Nudges` (`Avatar::nudges`, `None` for a toolless `--chat` trunk): a
+**repair** — `Empty`, `Stopped`, `Truncated`, or a returning agent's
+`Complete` without `reply` — is event-shaped, exceptional, and spends the
+per-exchange repair budget (`BUDGET`, 3); a **standing condition** — the pin
+register, the context-pressure gauge — is a fact about the agent's own live
+state, **edge-triggered**: told once when it changes, silent while it holds,
+budget-free. Both still compose into at most one `EXARCH_REMINDER` message
+per completion, self-posted as `Post::Nudge`, committed by `append_user`
+inside the same exchange. `react`, the sole post-attempt entry point, gates
+everything on `quiet` — no standing reply, no detached shell work, no busy
+children, the one condition every nudge kind shares — before it reads the
+attempt:
 
-A `--chat` trunk holds **no nudge registry** (`nudges: Option<Registry>`, `None`
-when the tool is withheld): every nudge steers the model toward a tool it does
-not have, so no rule runs, no reminder fires, and nothing synthetic ever joins
-the conversation. Its provider errors still reach the human, since that report
-is the attend loop's own step.
+| kind | trigger | budget |
+|---|---|---|
+| empty-turn repair | quiet ∧ `Ok(Empty)` | spends |
+| early-stop repair | quiet ∧ `Ok(Stopped)` | spends |
+| truncation repair | quiet ∧ `Err(Truncated)` | spends |
+| reply repair | quiet ∧ `Ok(Complete)` ∧ `must_reply` | spends |
+| pin reminder | quiet ∧ `Ok(Complete)` ∧ register non-empty ∧ digest changed | free |
+| pressure warning | quiet ∧ `Ok(Complete)` ∧ gauge `Over` ∧ excursion untold | free |
+
+Everything else is accepted as-is, unspent, and deliberately so: `Replied` (a
+reply is final), `Cancelled` (the human asked), `Capped` (a nudge would only
+buy the deliberation another `MAX_STEPS` after it already burned 250 round
+trips without quiescing — the wrong channel for a terminal condition, which
+already reaches its consumer through `AgentOutcome::Stopped("step cap
+reached")`), and every unclassified provider error (the transport's own).
+
+`Nudges` is the one owner of every nudge-relevant latch: the repair budget
+`used`, the pin digest last told (`pinned_told`), and whether the live
+pressure excursion has been told (`pressure_told`). Nobody else holds
+state — `pressure_gauge` is a pure `&self` reading with no latch of its own,
+and `take_up` neither latches nor unlatches around it. An edge is **consumed
+at decide time, in the same act as the part's emission**, so "told but not
+sent" and "sent but not told" have no spelling. `reset()`, called on every
+exchange-opening item, clears only the budget — a new exchange is not a new
+condition, and clearing the edges there would re-tell an unchanged pin once
+per delivered item. Every path that discards a decided-but-uncommitted nudge
+instead rebuilds `Nudges` whole: `/clear` (`Inbox::clear` sweeps the queue,
+`Avatar::clear` rebirths) and `/rewind` (`drop_nudges` sheds the queued
+nudge, `rewind` rebirths) — the rebirth also covers a `/rewind` typed mid-
+deliberation, whose `Barrier` queues ahead of the nudge `take_up` posts
+after it: the nudge is decided (its edges already consumed) and then shed,
+so without the rebirth the telling would be recorded but never committed.
+
+Edge-triggering the pin reminder closes a livelock: a stationary register can
+now produce at most one nudge, where a bare per-completion reminder let a
+`Complete`, its own reminder, and the next `Complete` cycle forever while the
+register sat unchanged — the no-pins `set-goal` advertisement that used to
+steer an agent straight into that state is deleted outright with it. A
+standing condition staying *event-shaped* on the wire looks like it should
+strain the fold law
+([[decisions/260812_context-is-a-projection|context-is-a-projection]]'s "one
+state, one fold") — a condition that *holds* seems like it should not be
+re-stated per turn — but it does not: the transcript is already persistent,
+so a committed turn stands in every later render until an edit folds it, and
+re-stating the register on every turn was never persistence, only
+redundancy. What must be recorded is the level's *transitions*, and an edge —
+"the register changed", "pressure crossed the line" — is genuinely
+event-shaped, so recording it as a committed user turn is honest, not a
+workaround. The alternatives are strictly worse against the law: a
+render-time seam re-injecting live state would break `fold(log) == memo`,
+since the model's view would stop being reproducible from the record; a
+dedicated "standing condition" record class still has to enter the fold to
+reach the model, so it is a user turn with a fancier name plus a new record
+variant, fold arm, and admission rule — machinery for no semantic gain. A
+compaction may fold a telling into the digest without harm either way: both
+conditions self-heal regardless — pressure re-fires per excursion by
+construction, the pin reminder re-fires on the next register change, and the
+model can always `pin-list`.
+
+A `--chat` trunk holds **no `Nudges`** (`nudges: Option<nudge::Nudges>`,
+`None` when the tool is withheld): every nudge steers the model toward a
+tool it does not have, so no rule runs, no reminder fires, and nothing
+synthetic ever joins the conversation. Its provider errors still reach the
+human, since that report is the attend loop's own step — `take_up` emits
+`Forensic::ProviderError` for whatever error the attempt carries before it
+ever asks for a nudge, so `react` decides and nothing more.
 
 ## The Fleet
 
@@ -538,7 +593,7 @@ model reaches the other two: `context-read` and `context-drop` let it survey
 and shed closed exchanges of its own choosing, each recording `ContextEdited`
 with `EditAuthority::Model` rather than `Harness`. The user's own hand is
 `/rewind <exchange>`, which desugars to the same `Drop` at
-`EditAuthority::User`, sheds queued self-nudges, and resets the nudge budget;
+`EditAuthority::User`, sheds queued self-nudges, and rebuilds the nudge state;
 `/context` surveys the transcript without editing it, the read-only sibling
 `ReplControl::command` serves alongside `/clear`, `/compact`, `/branch`, and
 `/quit`.
@@ -549,7 +604,7 @@ Unconfigured (`config::disk_warn_bytes` absent, the default) it is a no-op
 by construction: no walk, no cost, ever. Configured, it rides the same
 `ral_epoch` the settled-worker and binding-lease sweeps already read,
 amortized to once every `DISK_WARN_CHECK_INTERVAL` (32) calls, at the same
-ready boundary as `reconcile_service_pins` in `attend`'s loop.
+ready boundary `attend`'s loop walks each pass.
 Crossing the ceiling (session log dir + `EXARCH_SCRATCH`, summed via the
 existing `resources::dir_size`) emits one `Forensic::SystemNote`, latched until
 a later check finds the total back under — one warning per excursion, not

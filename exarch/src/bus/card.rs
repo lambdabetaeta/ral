@@ -37,7 +37,7 @@ pub(crate) use decode::{value_to_card, value_to_pin};
 pub(crate) use diff::{clip_hunks, hunk_magnitude, whole_file_hunks};
 pub(crate) use done::value_to_done;
 pub(crate) use encode::encode_card;
-pub(crate) use notice::{services_pin_card, value_to_notice};
+pub(crate) use notice::value_to_notice;
 pub(crate) use observation::observation_wire;
 pub(crate) use observation::{Landing, ObservationKind, landing};
 

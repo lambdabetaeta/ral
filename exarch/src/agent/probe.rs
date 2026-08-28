@@ -8,8 +8,8 @@
 use crate::agent::Avatar;
 use ral_core::serial::FOValue;
 
-/// A `` `workers `` probe row, decoded.  `pub(crate)` so
-/// [`crate::bus::card::services_pin_card`] can render it.
+/// A `` `workers `` probe row, decoded.  `pub(crate)` so `shell_eval::report`
+/// and the nudge quiet-gate can read it across module boundaries.
 pub(crate) struct ProbedWorker {
     pub(crate) id: u64,
     pub(crate) cmd: String,

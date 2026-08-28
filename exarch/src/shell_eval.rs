@@ -113,15 +113,6 @@ impl PinDigest {
 /// (tests, any path with no nudge layer) disables it.
 pub type PinDigests = Arc<Mutex<std::collections::BTreeMap<String, PinDigest>>>;
 
-/// Reserved register key for the durable-service ledger — one card listing
-/// every live service, authored only by `Avatar::reconcile_service_pins` against
-/// the live worker registry.  A model may read it, never write or clear it.
-pub(crate) const SERVICES_PIN_KEY: &str = "services";
-
-pub(crate) fn is_service_pin(key: &str) -> bool {
-    key == SERVICES_PIN_KEY
-}
-
 /// The shell's own decode target: the five shapes the `surface` channel
 /// carries, closed and named rather than borrowed from the bus's vocabulary.
 ///
@@ -174,30 +165,6 @@ pub fn decode_surface(ev: &RalValue) -> Option<Surface> {
     } else {
         value_to_done(ev).map(Surface::Done)
     }
-}
-
-/// Decode one surfaced value and apply the protected-pin guard.  Shared by the
-/// live and deferred-batch surface sinks.
-pub(crate) fn accepted_surface(
-    val: &RalValue,
-    recorder: &crate::record::Emitter,
-) -> Option<Surface> {
-    let surface = decode_surface(val)?;
-    (!reject_protected_pin(&surface, recorder)).then_some(surface)
-}
-
-fn reject_protected_pin(surface: &Surface, recorder: &crate::record::Emitter) -> bool {
-    let key = match surface {
-        Surface::Pin { key, .. } | Surface::Unpin { key } if is_service_pin(key) => key,
-        _ => return false,
-    };
-    let text = format!(
-        "`{key}` is a protected service-ledger pin; ordinary `surface` calls cannot write or clear it — it is maintained by the host as services are born and settle"
-    );
-    if let Err(error) = recorder.emit(crate::record::Forensic::Error { text }) {
-        recorder.report_fault(&error);
-    }
-    true
 }
 
 /// The deferred half of `surface`: the session-lived [`DeferredSink`] a
@@ -1255,36 +1222,6 @@ keep-bottom
             Some(Surface::Unpin { .. })
         ));
         assert!(decode_surface(&RalValue::String("nope".into())).is_none());
-    }
-
-    #[test]
-    fn model_surface_cannot_write_service_pins() {
-        let (tx, rx) = channel();
-        let recorder = crate::record::Emitter::none();
-        recorder.attach(crate::record::FleetSink {
-            id: 0,
-            tx: tx.downgrade(),
-            meter: crate::bus::UsageMeter::default(),
-        });
-        let protected = Surface::Pin {
-            key: SERVICES_PIN_KEY.to_string(),
-            card: crate::bus::card::Card(Vec::new()),
-        };
-        assert!(reject_protected_pin(&protected, &recorder));
-        let fact = crate::bus::drain_records(&rx)
-            .into_iter()
-            .next()
-            .expect("rejection should record an error");
-        assert!(
-            matches!(fact, crate::record::Record::Forensic(crate::record::Forensic::Error { text }) if text.contains("protected service-ledger pin")),
-            "expected protected-pin diagnostic"
-        );
-
-        let recorder = crate::record::Emitter::none();
-        let ordinary = Surface::Unpin {
-            key: "tasks".into(),
-        };
-        assert!(!reject_protected_pin(&ordinary, &recorder));
     }
 
     /// The sink always posts, stamped with the root id and its birth

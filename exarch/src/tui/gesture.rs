@@ -97,12 +97,29 @@ impl GestureState {
         });
     }
 
-    /// Extend the selection to the pointer, clamped to the visible window — a
-    /// drag off the edge keeps growing rather than falling outside the frame.
-    pub(super) fn drag(&mut self, me: MouseEvent) {
+    /// Extend the selection to the pointer, clamped to the visible window; past
+    /// either edge the viewport scrolls one `step` instead, so a drag held
+    /// there keeps reaching further content rather than stalling at the
+    /// frame's rim.
+    pub(super) fn drag(
+        &mut self,
+        me: MouseEvent,
+        viewports: &mut HashMap<AgentId, Viewport>,
+        focused: AgentId,
+        step: isize,
+    ) {
         let Some(frame) = self.frame else { return };
         let Some(press) = &mut self.press else { return };
         press.dragged = true;
+        if me.row < frame.text.y
+            && let Some(vp) = viewports.get_mut(&focused)
+        {
+            vp.scroll_by(-step);
+        } else if me.row >= frame.text.bottom()
+            && let Some(vp) = viewports.get_mut(&focused)
+        {
+            vp.scroll_by(step);
+        }
         let anchor = (press.row, press.col);
         let rel = me
             .row

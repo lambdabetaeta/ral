@@ -102,14 +102,19 @@ splits by class instead:
   most an hour of one seat out of the cap, so a rail card at birth and a
   reap card at death are the whole story
   ([[map/exarch/shell-eval|shell-eval]]).
-- A `service`-born worker (`class: Durable`) is bound only by legibility, so
-  that bound is structural: the host reconciles a protected `services` pin —
-  one row per live service, keyed by id and its birth description, born and
-  retired at the attend loop's ready-boundary pass
-  (`Avatar::reconcile_service_pins`, `card::services_pin_card`). The pin is
-  the one host-owned, write-protected register slot — unwritable by the
-  program
-  ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
+- A `service`-born worker (`class: Durable`) is bound only by legibility, and
+  that bound is now the same one an ordinary worker gets, plus one aggregate:
+  the birth trail card (`worker #id cmd durable`,
+  [[map/exarch/shell-eval|shell-eval]]) shown at the moment of the `service`
+  call, and `/resources`' `workers.running[durable]` count. The register
+  once carried a protected `services` pin the host reconciled — one row per
+  live service, unwritable by the program — but that mechanism is deleted
+  outright, on no rationale beyond the operator's own: protected pins should
+  not exist
+  ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]'s
+  2026-08-27 amendment). There is no per-service listing left; a durable
+  worker's id must be read off its birth card or kept from the `Handle` the
+  `service` call returned.
 
 `service <desc> <thunk>` → `Handle`. The durable-birth verb: an ordinary
 buffered spawn registered under the durable class, which arms no lease chain
@@ -126,7 +131,7 @@ anything.
 
 `service-handle <id>` → `Handle`. The one narrow door back to a never-bound
 service's handle: looked up among this shell's `LeaseClass::Durable` entries
-only, by the id shown on the `services` pin. An id naming an ephemeral
+only, by the id its birth trail card named. An id naming an ephemeral
 `spawn`/`watch` worker is refused exactly like an unknown one — an ephemeral
 worker's rediscovery path is the binding lease, not enumeration by id. A bare
 top-level `service-handle N` result cannot cross the host seam (a `Handle` is

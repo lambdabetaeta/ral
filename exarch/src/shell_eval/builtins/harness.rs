@@ -2047,34 +2047,6 @@ mod tests {
         );
     }
 
-    /// The protected-`services` guard blocks the write direction only:
-    /// `pin-set "services"` is refused with the existing diagnostic, and
-    /// `pin-read "services"` still answers (reads are not writes).
-    #[test]
-    fn services_pin_refuses_writes_but_pin_read_still_answers() {
-        let mut session = crate::agent::Avatar::for_test("system").unwrap();
-        let (tx, rx) = crate::bus::channel();
-        let emit = crate::bus::Emitter::new(tx, session.agent.id);
-
-        session.run_shell(
-            "call-1".to_string(),
-            r#"pin-set "services" `card [`text [spans: [[text: "nope"]]]]"#,
-            5,
-            &emit,
-        );
-        let saw_refusal = crate::bus::drain_records(&rx).iter().any(|rec| {
-            matches!(rec, crate::record::Record::Forensic(crate::record::Forensic::Error { text }) if text.contains("protected service-ledger pin"))
-        });
-        assert!(saw_refusal, "expected the protected-pin diagnostic");
-
-        let read = session.run_shell("call-2".to_string(), r#"pin-read "services""#, 5, &emit);
-        assert!(
-            read.content.contains("EXIT: 0"),
-            "pin-read of a protected key must still answer, got: {}",
-            read.content
-        );
-    }
-
     /// `sync-tasks` clears the slot once no work remains: transitioning the
     /// last open task to `` `done `` empties the pin, and a later `add-task`
     /// finds no register and restarts id allocation at 1.
