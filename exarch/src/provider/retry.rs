@@ -108,10 +108,13 @@ pub(super) async fn wait_for_cancel(cancel: &cancel::Token) {
 /// Only `Transient` carries an attempt count; the rest pass through untouched.
 fn stamp_attempts(error: ProviderError, attempts: u32) -> ProviderError {
     match error {
-        ProviderError::Transient { cause, body, .. } => ProviderError::Transient {
+        ProviderError::Transient {
+            cause, body, status, ..
+        } => ProviderError::Transient {
             cause,
             attempts,
             body,
+            status,
         },
         other => other,
     }
@@ -139,6 +142,7 @@ mod tests {
             cause: "boom".into(),
             attempts: 1,
             body: None,
+            status: None,
         };
         let (rate_attempts, rate_ceiling) = retry_limits(&rate_limit);
         let (transient_attempts, transient_ceiling) = retry_limits(&transient);
@@ -162,6 +166,7 @@ mod tests {
                     cause: "stream idle: no response within timeout".into(),
                     attempts: 1,
                     body: None,
+                    status: None,
                 })
             },
         ));
@@ -251,6 +256,7 @@ mod tests {
                         cause: "retry me".into(),
                         attempts: 1,
                         body: None,
+                        status: None,
                     })
                 })
                 .await;

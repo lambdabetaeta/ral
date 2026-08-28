@@ -30,6 +30,12 @@ impl ModelPricing {
     /// tokens, so the two cache counts come off `input` before it bills at the
     /// base rate; a provider that never caches passes zeros and the uncached
     /// term is unchanged.
+    ///
+    /// A provider whose counts violate that sum — cache tokens outnumbering
+    /// `input` — is a provider bug, like the negative raw count
+    /// [`super::usage::usage_from`] already clamps: `saturating_sub` floors the
+    /// uncached term at `0` rather than panicking. The cache terms still bill
+    /// at their own rates, so the turn undercounts rather than reads as free.
     pub fn dollars(&self, input: u64, output: u64, cache_creation: u64, cache_read: u64) -> f64 {
         let uncached_input = input
             .saturating_sub(cache_creation)

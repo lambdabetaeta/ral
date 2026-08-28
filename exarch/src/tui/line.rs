@@ -58,8 +58,8 @@ fn log2_step(magnitude: u32, cap: usize) -> usize {
     step
 }
 
-/// Filled cells for `magnitude`: a 2-line event lights one, a ~500-line event
-/// fills the bar.
+/// Filled cells for `magnitude`, log2-scaled: a 1-line event lights one cell;
+/// the bar fills around 180 lines.
 fn size_cells(magnitude: u32) -> usize {
     log2_step(magnitude, SIZE_BAR_W)
 }
@@ -152,7 +152,7 @@ pub(super) fn thinking_header(
 
 /// Step separator: one blank line.  The number itself reaches only
 /// `events.jsonl` / `user.log`; on screen the boundary is whitespace alone.
-pub(super) fn step(_n: usize) -> Vec<Line<'static>> {
+pub(super) fn step() -> Vec<Line<'static>> {
     vec![Line::default()]
 }
 
@@ -1146,8 +1146,12 @@ fn error_fields(e: &ProviderErrorRecord) -> Vec<FieldRow> {
             cause,
             attempts,
             body,
+            status,
         } => {
             let mut fs = vec![text_field("attempts", attempts.to_string())];
+            if let Some(s) = status {
+                fs.push(text_field("status", s.to_string()));
+            }
             match body {
                 Some(b) => fs.extend(body_fields(b, &[])),
                 None => fs.push(text_field("cause", prettify(cause))),
@@ -1213,7 +1217,7 @@ fn headline(kind: &str) -> Line<'static> {
 fn error_kind(e: &ProviderErrorRecord) -> &'static str {
     match e {
         ProviderErrorRecord::Cancelled { .. } => "cancelled",
-        ProviderErrorRecord::Transient { .. } => "web stream failed",
+        ProviderErrorRecord::Transient { status, .. } => provider::transient_label(*status),
         ProviderErrorRecord::RateLimited { .. } => "rate limited",
         ProviderErrorRecord::Api { .. } => "api error",
         ProviderErrorRecord::Truncated { .. } => "truncated",

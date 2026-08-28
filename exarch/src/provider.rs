@@ -26,15 +26,10 @@ mod usage;
 mod wire;
 
 pub use error::ProviderError;
-pub(crate) use error::{error_object, extract_url};
+pub(crate) use error::{error_object, extract_url, transient_label};
 pub use identity::{Account, AccountId, Auth, Billing, Service, ServiceName};
 pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
-#[allow(
-    unused_imports,
-    reason = "crate-private facade path retained for tls rustdoc and subsystem callers"
-)]
-pub(crate) use retry::MAX_ATTEMPTS;
 pub use stream::{CutShort, Delta, StepOut, SummaryOut};
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};

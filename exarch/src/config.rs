@@ -276,8 +276,11 @@ fn string_field(value: Option<&Value>, field: &str, where_: &str) -> Result<Stri
     }
 }
 
-/// A present-but-non-string value is still an error: an omission is deliberate,
-/// a wrong type is a mistake to surface.
+/// A present-but-non-string value is still an error: an omission is
+/// deliberate, a wrong type is a mistake to surface. An empty string is
+/// rejected too — [`save_declared`]'s `quoted` never writes one, so a decoded
+/// `Auth::Env("")` could only be hand-written, and it would silently resolve
+/// as though the key were absent rather than the typo it is.
 fn optional_string_field(
     value: Option<&Value>,
     field: &str,
@@ -285,6 +288,9 @@ fn optional_string_field(
 ) -> Result<Option<String>, String> {
     match value {
         None => Ok(None),
+        Some(Value::String(s)) if s.is_empty() => Err(format!(
+            "{where_}: '{field}' is empty — omit it entirely for a no-auth endpoint"
+        )),
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(other) => Err(format!(
             "{where_}: '{field}' must be a string, got {}",

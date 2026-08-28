@@ -249,6 +249,7 @@ mod tests {
             cause: "stream idle: no response within timeout".into(),
             attempts: 3,
             body: None,
+            status: None,
         });
         assert!(
             nudges.react(&attempt, &facts(), &mut log).is_none(),

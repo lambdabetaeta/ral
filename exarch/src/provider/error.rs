@@ -31,6 +31,11 @@ pub enum ProviderError {
         /// The provider's JSON error frame when it sent one; `None` leaves
         /// the renderer only `cause`.
         body: Option<Body>,
+        /// The HTTP status when this came from a 5xx response; `None` for a
+        /// transport fault (connect/timeout/DNS) or a locally-raised idle
+        /// timeout, neither of which ever reached one.  What `summary`/the
+        /// TUI headline key their label on.
+        status: Option<u16>,
     },
     /// HTTP 429.  `retry_after` is the server's own explicit wait, when it
     /// asked for one; `retry.rs` gives this variant a longer leash than a
@@ -90,6 +95,7 @@ impl ProviderError {
                 cause: msg,
                 attempts: 1,
                 body,
+                status: Some(status.as_u16()),
             },
             Fault::Status { status, body, .. } => Self::Api {
                 status: Some(status.as_u16()),
@@ -101,6 +107,7 @@ impl ProviderError {
                 cause: msg,
                 attempts: 1,
                 body: None,
+                status: None,
             },
             Fault::Terminal => Self::Other(msg),
         }
@@ -222,17 +229,74 @@ fn json_status_code(body: &serde_json::Value) -> Option<u16> {
         .and_then(|c| u16::try_from(c).ok())
 }
 
-/// The server's explicit back-off in whole seconds, read from the headers genai
-/// retains on `ResponseFailedStatus` rather than scraped out of `Display`.
+/// The server's explicit back-off, read from the headers genai retains on
+/// `ResponseFailedStatus` rather than scraped out of `Display`. RFC 9110
+/// allows `Retry-After` as either delta-seconds or an HTTP-date; both forms
+/// reach real providers, so both are read.
 fn retry_after_header(headers: &HeaderMap) -> Option<Duration> {
-    let secs: u64 = headers
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    Some(Duration::from_secs(secs))
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(secs) = value.parse() {
+        return Some(Duration::from_secs(secs));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    parse_http_date(value, now)
+}
+
+/// `Retry-After`'s HTTP-date form, the IMF-fixdate RFC 9110 requires a sender
+/// use: `Sun, 06 Nov 1994 08:49:37 GMT`. A date already past floors at `0`
+/// rather than going negative — the caller backs off immediately.
+fn parse_http_date(s: &str, now_secs: u64) -> Option<Duration> {
+    let (_, rest) = s.split_once(", ")?;
+    let mut parts = rest.split_ascii_whitespace();
+    let day: i64 = parts.next()?.parse().ok()?;
+    let month = match parts.next()? {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts.next()?.parse().ok()?;
+    let mut hms = parts.next()?.split(':');
+    let hour: i64 = hms.next()?.parse().ok()?;
+    let min: i64 = hms.next()?.parse().ok()?;
+    let sec: i64 = hms.next()?.parse().ok()?;
+    if parts.next()? != "GMT" || hms.next().is_some() || parts.next().is_some() {
+        return None;
+    }
+    let epoch_secs = days_from_civil(year, month, day)
+        .checked_mul(86_400)?
+        .checked_add(hour * 3600 + min * 60 + sec)?;
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "now_secs is real wall-clock time, far below i64::MAX"
+    )]
+    let wait = epoch_secs - now_secs as i64;
+    Some(Duration::from_secs(wait.max(0).unsigned_abs()))
+}
+
+/// Days since the Unix epoch for a Gregorian civil date — Howard Hinnant's
+/// `days_from_civil`, the standard branch-free algorithm; valid for every
+/// date this era's HTTP servers will ever send.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m + 9) % 12; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
 }
 
 impl ProviderError {
@@ -244,7 +308,9 @@ impl ProviderError {
     pub fn summary(&self) -> String {
         match self {
             Self::Cancelled(where_) => format!("cancelled {where_}"),
-            Self::Transient { body, .. } => with_body_message("web stream failed", body.as_deref()),
+            Self::Transient { body, status, .. } => {
+                with_body_message(transient_label(*status), body.as_deref())
+            }
             Self::RateLimited { body, .. } => with_body_message("rate limited", body.as_deref()),
             Self::Api {
                 status,
@@ -264,6 +330,17 @@ impl ProviderError {
             Self::Truncated { reason } => format!("reply cut off ({reason})"),
             Self::Other(s) => first_line(s).to_string(),
         }
+    }
+}
+
+/// `Transient`'s kind label, shared with the TUI's structured renderer: a 5xx
+/// response is a server failure, anything without a status never got one — a
+/// dropped connection, a timeout, an idle stream.
+pub(crate) fn transient_label(status: Option<u16>) -> &'static str {
+    if status.is_some() {
+        "server error"
+    } else {
+        "connection failed"
     }
 }
 

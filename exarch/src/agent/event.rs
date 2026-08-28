@@ -85,6 +85,8 @@ pub enum ProviderErrorRecord {
         attempts: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
     },
     RateLimited {
         retry_after_secs: Option<u64>,
@@ -136,10 +138,12 @@ impl From<&ProviderError> for ProviderErrorRecord {
                 cause,
                 attempts,
                 body,
+                status,
             } => Self::Transient {
                 cause: cause.clone(),
                 attempts: *attempts,
                 body: body.as_deref().cloned(),
+                status: *status,
             },
             ProviderError::RateLimited {
                 retry_after,

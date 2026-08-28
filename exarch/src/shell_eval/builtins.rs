@@ -234,7 +234,7 @@ fn view_bound(arg: &Value, which: &str, tool: &str) -> Settled<usize> {
             Ok(bound)
         }
         _ => Err(sig(format!(
-            "{tool}: {which} must be an Int >= 1 (range is half-open: end > start), got {}",
+            "{tool}: {which} must be an Int >= 1, got {}",
             arg.type_name()
         ))),
     }
@@ -252,6 +252,11 @@ fn view_range(
     let path = args[0].to_string();
     let start = view_bound(&args[1], "start", tool)?;
     let end = view_bound(&args[2], "end", tool)?;
+    if end <= start {
+        return Err(sig(format!(
+            "{tool}: end must be greater than start (the range [start, end) is half-open), got start={start}, end={end}"
+        )));
+    }
 
     let body = read_text_file(shell, &path, tool)?;
     surface_read(shell, mooring, &path);
@@ -367,18 +372,20 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
             continue;
         }
         let Ok(bytes) = fs::read(abs) else { continue };
-        let _ = searcher.search_slice(
-            &matcher,
-            &bytes,
-            Lossy(|line_num, line| {
-                results.push(SearchHit {
-                    file: rel.clone(),
-                    line: line_num,
-                    text: line.trim_end_matches(['\r', '\n']).to_string(),
-                });
-                Ok(true)
-            }),
-        );
+        searcher
+            .search_slice(
+                &matcher,
+                &bytes,
+                Lossy(|line_num, line| {
+                    results.push(SearchHit {
+                        file: rel.clone(),
+                        line: line_num,
+                        text: line.trim_end_matches(['\r', '\n']).to_string(),
+                    });
+                    Ok(true)
+                }),
+            )
+            .map_err(|e| sig(format!("grep-files: {rel}: {e}")))?;
     }
     Ok(results)
 }

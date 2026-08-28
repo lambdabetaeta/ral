@@ -89,6 +89,7 @@ impl Engine {
                                 cause: "stream idle: no response within timeout".into(),
                                 attempts: 1,
                                 body: None,
+                                status: None,
                             });
                         }
                         result = transport.client().exec_chat_stream(
@@ -111,6 +112,7 @@ impl Engine {
                                     cause: "stream idle: no event within timeout".into(),
                                     attempts: 1,
                                     body: None,
+                                    status: None,
                                 });
                             }
                             event = response.stream.next() => match event {
@@ -147,6 +149,7 @@ impl Engine {
                         cause: "stream ended without End event".into(),
                         attempts: 1,
                         body: None,
+                        status: None,
                     })
                 }
                 .await;
@@ -213,6 +216,7 @@ impl Engine {
                             cause: "summary request: no response within timeout".into(),
                             attempts: 1,
                             body: None,
+                            status: None,
                         });
                     }
                     result = transport.client().exec_chat(model, request, Some(&options)) => result,

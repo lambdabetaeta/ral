@@ -234,6 +234,16 @@ impl LiveSource {
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
+                // Capped, not echoed whole: an error page from a proxy or WAF
+                // can reflect request context, and this string reaches logs
+                // and the screen — never the bearer token itself, but no
+                // reason to trust an arbitrary backend's page past a snippet.
+                const CAP: usize = 200;
+                let body = if body.chars().count() > CAP {
+                    format!("{}…", body.chars().take(CAP).collect::<String>())
+                } else {
+                    body
+                };
                 return Err(format!(
                     "list models for {}: Codex backend returned HTTP {status}: {body}",
                     self.label(account)
