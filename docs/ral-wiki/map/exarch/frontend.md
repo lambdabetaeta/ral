@@ -248,10 +248,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    after the standing rung.
  - **a surfaced general card as a bounded object.** A diff-less
    `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
-   renders through `line::render_card_framed` as an indented framed box, its
-   heading lifted into the top rule, no marginal rail glyph (the frame is its
-   mark) — though it still wears the blank margin every row wears, so its left
-   edge aligns with the rest of the transcript. A file mutation — a diff card or a write card — wears the
+   renders through `line::render_card` as a framed box indented `CARD_INDENT`
+   columns, its heading lifted into the top rule, no marginal rail glyph (the
+   frame is its mark) — though it still wears the blank margin every row wears,
+   so its left edge aligns with the rest of the transcript. A file mutation — a diff card or a write card — wears the
    patch-shape change-bar `▎`; an observation card folds into its ral group.
    A cancelled turn is `ChromeKind::Cancelled`: it wears the error rail `╳`
    while remaining distinct from `ChromeKind::Error`, so `Block::is_error` and

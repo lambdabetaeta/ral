@@ -682,7 +682,7 @@ impl Block {
                     Reveal::Full => 3,
                     Reveal::Census | Reveal::Summary => 1,
                 };
-                line::render_card(card, width, diff_level)
+                line::render_card(card, line::CARD_INDENT, width, diff_level)
             }
             // Only the log tee renders a query alone; on screen the flatten
             // coalesces a run of these into one `tool : …` line instead.

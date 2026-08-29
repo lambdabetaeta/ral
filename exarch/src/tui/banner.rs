@@ -20,6 +20,11 @@ pub(super) const ART: &str = include_str!("../../data/banner.txt");
 pub(super) const EAGLE: &str = include_str!("../../data/eagle.txt");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Left inset of the opening block, in columns — the wordmark and the session
+/// card share it, so the card's frame lands on the `E`'s own left edge.  The art
+/// files carry no pad of their own; this is the only thing that positions them.
+pub(super) const OPENING_INDENT: usize = 1;
+
 /// Metadata shown in the startup banner.
 pub struct SessionInfo<'a> {
     pub system_size: usize,

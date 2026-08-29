@@ -371,7 +371,11 @@ impl App {
         card.0
             .push(crate::agent::resources::section_mark("frontend"));
         card.0.push(crate::agent::resources::rows_mark(&frontend));
-        self.push_chrome(id, ChromeKind::Plain, line::render_card(&card, READ_W, 3));
+        self.push_chrome(
+            id,
+            ChromeKind::Plain,
+            line::render_card(&card, line::CARD_INDENT, READ_W, 3),
+        );
     }
 
     /// Hand the session's viewport to `f`.
@@ -562,9 +566,11 @@ impl App {
     pub fn banner(&mut self, term: &mut Term, s: &banner::SessionInfo<'_>) -> io::Result<()> {
         // The wordmark and eagle sit outside Bertin's data variables, so this
         // alone keeps the saturated palette and carries no rail.
+        let inset = " ".repeat(banner::OPENING_INDENT);
         let mut splash: Vec<Line<'static>> = vec![Line::default()];
         for (a, e) in banner::ART.lines().zip(banner::EAGLE.lines()) {
             splash.push(Line::from(vec![
+                Span::raw(inset.clone()),
                 bold(a.to_string(), BANNER_PINK),
                 Span::raw("  "),
                 bold(e.to_string(), BANNER_GOLD),
@@ -575,7 +581,7 @@ impl App {
             vp.push_chrome(ChromeKind::Plain, splash);
             vp.push_chrome(
                 ChromeKind::Plain,
-                line::render_card(&banner::session_card(s), READ_W, 3),
+                line::render_card(&banner::session_card(s), banner::OPENING_INDENT, READ_W, 3),
             );
         }
         draw(self, term)

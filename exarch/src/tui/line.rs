@@ -633,17 +633,23 @@ pub(super) fn render_effect_lines(card: &Card, level: u8) -> Vec<Line<'static>> 
     ls
 }
 
-/// Left indent of a framed card, in columns — pushed right of the transcript
-/// so the card reads as a composed object, set apart from the flow.
-const CARD_INDENT: usize = 4;
+/// Left indent of a card in the transcript, in columns — pushed right of the
+/// flow so it reads as a composed object, set apart.  The opening card is the
+/// one card placed elsewhere, and names its own inset.
+pub(super) const CARD_INDENT: usize = 4;
 
-/// Every card as a framed, indented object — the one path a `Card` renders
+/// Every card as a framed object at `indent_w` — the one path a `Card` renders
 /// through, save [`render_effect_lines`]'s inline fold.  The frame wears
 /// neutral ink, since identity lives in the matrix.
-pub(super) fn render_card(card: &Card, width: u16, level: u8) -> Vec<Line<'static>> {
+pub(super) fn render_card(
+    card: &Card,
+    indent_w: usize,
+    width: u16,
+    level: u8,
+) -> Vec<Line<'static>> {
     render_framed(
         card,
-        CARD_INDENT,
+        indent_w,
         Style::default().fg(SLATE),
         width.min(READ_CONTENT_W),
         false,
