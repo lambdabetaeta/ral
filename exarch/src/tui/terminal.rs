@@ -148,7 +148,10 @@ pub(super) fn edit_text_in_editor(draft: &str) -> io::Result<Option<String>> {
         .args(&args)
         .arg(&path)
         .status();
-    apply_terminal_modes()?;
+    if let Err(e) = apply_terminal_modes() {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
 
     let edited = match status {
         Ok(s) if s.success() => match std::fs::read_to_string(&path) {

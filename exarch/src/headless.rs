@@ -102,19 +102,19 @@ impl<'a> Headless<'a> {
 
     /// Write the deliberate reply as ral's existing `VALUE` projection. A
     /// unit reply has no textual projection and therefore writes nothing.
-    fn write_reply(&mut self) -> bool {
+    fn write_reply(&mut self) -> io::Result<bool> {
         let Some(reply) = &self.reply else {
-            return false;
+            return Ok(false);
         };
         let Some(text) =
             crate::shell_eval::ral_value_to_text(&ral_core::Value::from(reply.clone()))
         else {
-            return false;
+            return Ok(false);
         };
-        let _ = self.out.write_all(text.as_bytes());
-        let _ = self.out.flush();
+        self.out.write_all(text.as_bytes())?;
+        self.out.flush()?;
         self.ended_with_newline = text.as_bytes().last() == Some(&b'\n');
-        true
+        Ok(true)
     }
 }
 
@@ -573,7 +573,7 @@ pub fn run(
     });
     // The attend digest: an outcome driving `is_error`/`error`, and the root's
     // `reply`.  A panic arrives as `Ok(None)`, already latched by the sink.
-    let r: Result<(), String> = match outcome {
+    let mut r: Result<(), String> = match outcome {
         Ok(Some((agent_outcome, payload))) => {
             headless.reply = payload;
             match agent_outcome {
@@ -590,18 +590,27 @@ pub fn run(
     // per-exchange bus whose usage never reached the sink.
     headless.usage = bus.usage_total();
     let elapsed = headless.started.elapsed();
-    match format {
+    // A write failure here (e.g. a closed pipe) must not report as the clean
+    // success `r` would otherwise carry — text and JSON both project the same
+    // reply the run produced, whether or not the run itself succeeded.
+    let write_err = match format {
         OutputFormat::Json => {
             let result = result_json(&headless, &r, elapsed);
-            let _ = writeln!(headless.out, "{result}");
+            writeln!(headless.out, "{result}").err()
         }
-        OutputFormat::Text => {
-            let wrote_reply = r.is_ok() && headless.write_reply();
-            if wrote_reply && !headless.ended_with_newline {
+        OutputFormat::Text => match headless.write_reply() {
+            Ok(true) if !headless.ended_with_newline => {
                 // So the next shell prompt lands at column 1.
-                let _ = writeln!(headless.out);
+                writeln!(headless.out).err()
             }
-        }
+            Ok(_) => None,
+            Err(e) => Some(e),
+        },
+    };
+    if let Some(e) = write_err
+        && r.is_ok()
+    {
+        r = Err(format!("writing reply: {e}"));
     }
     let _ = writeln!(headless.err, "Agent log: {}", session.log_dir().display());
     let _ = writeln!(

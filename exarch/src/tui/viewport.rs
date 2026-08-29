@@ -1322,10 +1322,7 @@ impl Viewport {
                 ChromeKind::Plain,
                 super::line::note(&format!("model changed: {provider}/{model}")),
             )],
-            K::Step { n } => vec![Block::chrome(
-                ChromeKind::Step,
-                super::line::step(*n as usize),
-            )],
+            K::Step { .. } => vec![Block::chrome(ChromeKind::Step, super::line::step())],
             K::ContextEdited { op, by } => {
                 let authority = match by {
                     EditAuthority::Model => "model",

@@ -26,6 +26,9 @@ fn content_range(start_cell: u16, end_cell: u16) -> (u16, u16) {
 }
 
 /// Copyable text of `row` between two screen cell columns, in either order.
+/// A zero-width combining mark shares its base character's cell, so it rides
+/// along with whatever `in_range` that base landed: it never opens or closes
+/// the selection on its own.
 pub(super) fn plain_slice(row: &Row, start_cell: u16, end_cell: u16) -> String {
     let text = row.plain();
     if text.is_empty() {
@@ -35,18 +38,28 @@ pub(super) fn plain_slice(row: &Row, start_cell: u16, end_cell: u16) -> String {
     let mut cell: u16 = 0;
     let mut byte_lo = text.len();
     let mut byte_hi = text.len();
+    let mut in_range = false;
     for (i, ch) in text.char_indices() {
         #[allow(
             clippy::cast_possible_truncation,
             reason = "char display width is 0..=2"
         )]
         let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
-        if cell >= lo && byte_lo == text.len() {
-            byte_lo = i;
+        if w == 0 {
+            if in_range {
+                byte_hi = i + ch.len_utf8();
+            }
+            continue;
         }
         if cell >= hi {
-            byte_hi = i;
             break;
+        }
+        in_range = cell >= lo;
+        if in_range {
+            if byte_lo == text.len() {
+                byte_lo = i;
+            }
+            byte_hi = i + ch.len_utf8();
         }
         cell += w;
     }

@@ -269,4 +269,15 @@ mod tests {
             );
         }
     }
+
+    /// Bug 4 as a contract: a zero-width combining mark shares its base
+    /// character's cell, so a selection ending on that cell must not cut
+    /// between the two and drop the mark.
+    #[test]
+    fn plain_slice_keeps_a_trailing_combining_mark() {
+        use super::super::select::plain_slice;
+        let row = Row::bare(Line::from(Span::raw("e\u{301}bc")));
+        let origin = u16::try_from(RAIL_W).expect("the margin is two columns");
+        assert_eq!(plain_slice(&row, origin, origin + 1), "e\u{301}");
+    }
 }

@@ -378,12 +378,6 @@ fn resolve_initial_selection(
 ) -> Result<(provider::Account, String, provider::Tuning, Option<String>), String> {
     let saved = provider::state::load(state_dir);
     let saved_account = saved.as_ref().and_then(|s| s.account(available));
-    if let (Some(s), None) = (&saved, &saved_account) {
-        eprintln!(
-            "exarch: the saved provider '{}' is no longer available; using the default instead",
-            s.provider_name
-        );
-    }
     let tuning = saved
         .as_ref()
         .map_or_else(provider::Tuning::initial, provider::state::State::tuning);
@@ -411,7 +405,17 @@ fn resolve_initial_selection(
                 // the model unset — the empty sentinel — so the interactive
                 // frontend lands on its `/model` hint. `run` rejects that for
                 // a headless launch.
-                let account = available[0].clone();
+                let account = available
+                    .first()
+                    .ok_or("no provider available")?
+                    .clone();
+                if let Some(s) = &saved {
+                    eprintln!(
+                        "exarch: the saved provider '{}' is no longer available; using {} instead",
+                        s.provider_name,
+                        provider::identity::label(&account, available)
+                    );
+                }
                 let model = account.service.default_model.clone().unwrap_or_default();
                 (account, model)
             }
