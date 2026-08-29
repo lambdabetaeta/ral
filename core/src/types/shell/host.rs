@@ -206,7 +206,7 @@ impl Shell {
     }
 
     /// Distinct lexical names visible in scope, a shadowed one counted once —
-    /// what `crate::transport::answer_probe` serves exarch's `/resources` fold.
+    /// what `crate::protocol::answer_probe` serves exarch's `/resources` fold.
     /// Names only, never the values, and renewing nothing.
     pub fn binding_count(&self) -> usize {
         self.env.distinct_name_count()

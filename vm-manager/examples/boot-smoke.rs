@@ -21,12 +21,12 @@
 //! Usage: `boot-smoke <kernel> <initramfs> <rootfs> <folder>`
 
 use std::io::{Read as _, Write as _};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ral_core::io::TerminalState;
-use ral_core::transport::{
-    EnquiryError, Liveness, Program, Report, Run, TerminalEndpoint, Transport, WireTransport,
-    dispatch_to_report,
+use ral_core::protocol::{
+    Liveness, Program, Report, Run, TerminalEndpoint, Transport, WireTransport, dispatch_to_report,
 };
 use ral_core::types::Capabilities;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
@@ -202,6 +202,10 @@ fn prove_the_host_can_dial_in(
         None,
         INSTALLER_TAG.to_string(),
     );
+    if let Err(severed) = transport.await_attached() {
+        eprintln!("the guest refused to attach: {severed}");
+        return;
+    }
 
     let run = Run {
         program: Program::Source(format!("python3 << #####'{GUEST_LISTENER}'#####\n")),
@@ -221,14 +225,7 @@ fn prove_the_host_can_dial_in(
     // the other way round: `dyn Machine` is `Send` but not `Sync`, so the
     // machine stays on the thread that owns it.
     std::thread::scope(|scope| {
-        let listening = scope.spawn(|| {
-            dispatch_to_report(
-                &transport,
-                run,
-                |surface| println!("guest surfaced: {surface:?}"),
-                |_| Err(EnquiryError::no_desk()),
-            )
-        });
+        let listening = scope.spawn(|| dispatch_to_report(&transport, run, Arc::new(())));
 
         // Long enough for the dispatch to reach the guest and python to bind;
         // the guest's accept window is wider than this by design.
@@ -239,7 +236,7 @@ fn prove_the_host_can_dial_in(
         }
 
         match listening.join() {
-            Ok(Some(Report::Ran { captured, .. })) => {
+            Ok(Ok(Report::Ran { captured, .. })) => {
                 if let Some(captured) = captured {
                     print!("{}", String::from_utf8_lossy(&captured.stdout));
                     let stderr = String::from_utf8_lossy(&captured.stderr);
@@ -248,10 +245,10 @@ fn prove_the_host_can_dial_in(
                     }
                 }
             }
-            Ok(Some(Report::Static { diagnostics })) => {
+            Ok(Ok(Report::Static { diagnostics })) => {
                 eprintln!("the guest never ran the listener: {diagnostics:?}");
             }
-            Ok(None) => eprintln!("the control plane closed without reporting"),
+            Ok(Err(severed)) => eprintln!("{severed}"),
             Err(_) => eprintln!("the listening thread panicked"),
         }
     });

@@ -386,7 +386,7 @@ impl Observation {
         Value::map(pairs)
     }
 
-    /// The seam-facing projection: total where [`Self::to_value`] is not.
+    /// The protocol-facing projection: total where [`Self::to_value`] is not.
     /// Every handle or closure reachable through a `value` field crosses as a
     /// placeholder instead of vanishing; nothing about the envelope or any
     /// first-order field changes, so a host decoder built against

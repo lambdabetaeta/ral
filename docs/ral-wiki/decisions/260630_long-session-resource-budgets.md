@@ -177,9 +177,8 @@ visible in `/resources`, not buried as constants.
   session close?
 - How much retained-size estimation is worth building for `Value` graphs with
   `Arc<Env>` captures and shared handles?
-- Should the future transport-parametric frontend
-  ([[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]])
-  negotiate these budgets over the frontend/engine boundary?
+- Should the [[design/engine-protocol|engine protocol]] negotiate these budgets over the
+  frontend/engine boundary?
 
 ## See also
 

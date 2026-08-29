@@ -74,7 +74,7 @@ pub struct ToolResult {
 }
 
 /// What `run_shell` produces.  `Static` is a parse or type failure: ariadne
-/// text the seam already formatted, with no sections, so it is clipped whole.
+/// text the protocol already formatted, with no sections, so it is clipped whole.
 ///
 /// `Ran` is deliberately not yet a finished [`ToolResult`]: `ending` and
 /// `trail` are the raw materials `report::render` composes into the model's
@@ -86,10 +86,12 @@ pub(crate) enum Outcome {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
         value: Option<String>,
-        ending: ral_core::transport::Ending,
+        ending: ral_core::protocol::Ending,
         trail: Vec<FOValue>,
     },
     Static(String),
+    /// The engine is gone: no `Report` will ever arrive for this dispatch.
+    Severed(ral_core::protocol::Severed),
 }
 
 /// One mirrored pin.  The bus and viewport carry `Forensic::Pin` and
@@ -135,6 +137,19 @@ pub enum Surface {
     },
 }
 
+/// What [`decode_surface`] made of one surfaced value — its two silences are
+/// not the same fact, so a caller that must tell them apart (the extension
+/// law's loud-unknown-class clause) can.
+pub enum Decoded {
+    /// A recognised surface class, ready to apply.
+    Surface(Surface),
+    /// An observation `landing` declines to render: a known shape this host
+    /// chooses to keep off the rail, not a decode failure.
+    Landed,
+    /// No surface class recognises this value's shape at all.
+    Unknown,
+}
+
 /// Decode one surfaced `Value` into the [`Surface`] it names — the single
 /// decoder both delivery regimes share, so the live sink's events and the
 /// deferred sink's later `deliver` cannot drift.
@@ -143,11 +158,11 @@ pub enum Surface {
 /// observation is a `Map` tagged by its `kind` field, the rest are distinct
 /// variant labels — so the arm order below carries no meaning.  A pin is the
 /// odd one: it is *state*, keyed to a register slot and overwritten in place
-/// on re-pin, not an event appended to scrollback.  Anything else drops to
-/// `None`.
-pub fn decode_surface(ev: &RalValue) -> Option<Surface> {
+/// on re-pin, not an event appended to scrollback.  Anything else is
+/// [`Decoded::Unknown`].
+pub fn decode_surface(ev: &RalValue) -> Decoded {
     if let Some((key, body)) = value_to_pin(ev) {
-        Some(match body {
+        Decoded::Surface(match body {
             Some(card) => Surface::Pin { key, card },
             None => Surface::Unpin { key },
         })
@@ -155,15 +170,30 @@ pub fn decode_surface(ev: &RalValue) -> Option<Surface> {
         // Core reports every observation it makes and judges none of them;
         // `landing` is where this host says which it wants.  One core
         // dispatch is one observation, so a rejected one is dropped outright
-        // rather than offered to the decoders below.
-        landing(&event.what)?;
-        Some(Surface::Observation(Box::new(event)))
+        // rather than offered to the decoders below — deliberately, so it is
+        // `Landed`, not `Unknown`.
+        match landing(&event.what) {
+            Some(_) => Decoded::Surface(Surface::Observation(Box::new(event))),
+            None => Decoded::Landed,
+        }
     } else if let Some(notice) = crate::bus::card::value_to_notice(ev) {
-        Some(Surface::Notice(notice))
+        Decoded::Surface(Surface::Notice(notice))
     } else if let Some(card) = value_to_card(ev) {
-        Some(Surface::Card(card))
+        Decoded::Surface(Surface::Card(card))
+    } else if let Some(outcome) = value_to_done(ev) {
+        Decoded::Surface(Surface::Done(outcome))
     } else {
-        value_to_done(ev).map(Surface::Done)
+        Decoded::Unknown
+    }
+}
+
+/// The extension law's loud-unknown-class note, worded once for every
+/// [`Decoded::Unknown`] site — the live sink
+/// ([`crate::fleet::desk::SurfaceApplier::live`]) and a deferred batch's
+/// replay alike.
+pub(crate) fn unknown_surface_note(shape: impl std::fmt::Display) -> crate::record::Forensic {
+    crate::record::Forensic::SystemNote {
+        text: format!("surface: no rendering for a {shape} value; it was dropped"),
     }
 }
 
@@ -201,7 +231,10 @@ impl DeferredSink for InboxDeferred {
 /// Build the [`DeferredSink`] a tool run installs, over `emit`'s session inbox.
 /// Core clones it into each worker's run state, so a nested `spawn` inherits it
 /// and flushes at its own completion.
-pub(crate) fn deferred_sink(emit: &Emitter, session: &crate::agent::Agent) -> Arc<dyn DeferredSink> {
+pub(crate) fn deferred_sink(
+    emit: &Emitter,
+    session: &crate::agent::Agent,
+) -> Arc<dyn DeferredSink> {
     Arc::new(InboxDeferred {
         mailbox: emit.mailbox(),
         root: session.id,
@@ -210,18 +243,18 @@ pub(crate) fn deferred_sink(emit: &Emitter, session: &crate::agent::Agent) -> Ar
 }
 
 /// Evaluate `cmd` against `transport` under `caps`, capturing stdout and
-/// stderr.  Everything crosses the transport seam: a `Source` `Run` out, a
+/// stderr.  Everything crosses the engine protocol: a `Source` `Run` out, a
 /// stream of surface events drained to the bus, one terminal `Report` back.
 ///
-/// `seam` is `None` only in the test harness's bare `IdentityTransport`,
-/// which installs no desk of its own; every real caller has one.
+/// `host` is the host's side of this run — the test harness's bare
+/// `IdentityTransport` hands a pin-less, desk-less [`crate::fleet::desk::SurfaceApplier`],
+/// every real caller a [`crate::fleet::desk::RunHost`].
 pub(crate) fn run_shell(
-    transport: &dyn ral_core::transport::Transport,
+    transport: &dyn ral_core::protocol::Transport,
     caps: &ral_core::types::Capabilities,
     cmd: &str,
     timeout_secs: u64,
-    seam: Option<&crate::fleet::desk::HostSeam>,
-    recorder: &crate::record::Emitter,
+    host: Arc<dyn ral_core::protocol::Host>,
 ) -> Outcome {
     let name = "<tool>";
 
@@ -229,7 +262,7 @@ pub(crate) fn run_shell(
     #[cfg(debug_assertions)]
     let tool_start = std::time::Instant::now();
 
-    use ral_core::transport::{Ending, Program, Report, Run};
+    use ral_core::protocol::{Ending, Program, Report, Run};
     use ral_core::types::CapturePolicy;
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
@@ -249,55 +282,16 @@ pub(crate) fn run_shell(
         trail: Some(CapturePolicy::Off),
     };
 
-    // One applier, and `DeskBinding` drains through that same one under the
-    // identity transport: a surfaced value renders identically whichever of
-    // the two reads it off the channel first. A seamless caller — the test
-    // harness's bare `IdentityTransport` — gets a pin-less one rather than a
-    // second way of applying a value, so `SurfaceApplier` stays the only
-    // spelling of how a surfaced value reaches the bus.
-    let seamless = crate::fleet::desk::SurfaceApplier {
-        pins: None,
-        id: 0,
-        recorder: recorder.clone(),
-        surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
-    };
-    let apply = seam.map_or(&seamless, |seam| &seam.apply);
-    let report = ral_core::transport::dispatch_to_report(
-        transport,
-        run,
-        |val| apply.live(val),
-        // Dead under the identity transport, where the desk installed by
-        // `set_desk` answers a mid-dispatch `Shell::enquire` directly; live
-        // only for a wire engine's `Event::Enquiry`.  Either way it is
-        // `seam.desk.handle` — the same desk `DeskBinding` wraps, not a
-        // second one this call could have built differently.
-        |req| match seam {
-            Some(seam) => seam
-                .desk
-                .handle(req)
-                .map_err(|e| ral_core::transport::EnquiryError {
-                    status: e.exit_code(),
-                    message: e.message,
-                }),
-            None => Err(ral_core::transport::EnquiryError::no_desk()),
-        },
-    );
-
-    // A `Some(seam)` caller flushes `seam.apply` itself, once the call and its
-    // desk installation both drop; the seamless applier has no such caller,
-    // so this is its only chance to record what it buffered.
-    let Some(report) = report else {
-        if seam.is_none() {
-            seamless.flush();
-        }
-        return Outcome::Static("internal error: dispatch completed without a Report".into());
+    let report = match ral_core::protocol::dispatch_to_report(transport, run, host) {
+        Ok(report) => report,
+        Err(severed) => return Outcome::Severed(severed),
     };
 
     ral_core::dbg_trace!("shell", "eval in {:?}", tool_start.elapsed());
 
-    let outcome = match report {
+    match report {
         Report::Static { diagnostics } => {
-            use ral_core::transport::Diagnostics;
+            use ral_core::protocol::Diagnostics;
             match diagnostics {
                 Diagnostics::Types(errs) => Outcome::Static(errs.join("\n")),
                 Diagnostics::Parse(msg) | Diagnostics::Host(msg) => Outcome::Static(msg),
@@ -325,12 +319,7 @@ pub(crate) fn run_shell(
                 trail,
             }
         }
-    };
-
-    if seam.is_none() {
-        seamless.flush();
     }
-    outcome
 }
 
 /// Print settings for the `VALUE` section: structured values print in ral
@@ -491,11 +480,18 @@ mod tests {
             shell,
             ral_core::Shell::new(ral_core::io::TerminalState::probe_from_env().1),
         );
-        let transport = ral_core::transport::IdentityTransport::new(taken);
-        let outcome = run_shell(&transport, caps, cmd, timeout_secs, None, recorder);
+        let transport = ral_core::protocol::IdentityTransport::new(taken);
+        let applier = Arc::new(crate::fleet::desk::SurfaceApplier {
+            pins: None,
+            id: 0,
+            recorder: recorder.clone(),
+            surface: Mutex::new(crate::record::commit::SurfaceBuffer::new()),
+        });
+        let outcome = run_shell(&transport, caps, cmd, timeout_secs, applier.clone());
         // Recover the mutated shell so `let`/`cd`/binding state reaches the
         // caller's next run — the across-calls contract these tests pin.
         *shell = transport.into_shell();
+        applier.flush();
         match outcome {
             Outcome::Ran {
                 stdout,
@@ -520,6 +516,7 @@ mod tests {
                 }
             }
             Outcome::Static(s) => panic!("static failure: {s}"),
+            Outcome::Severed(s) => panic!("an identity seat never severs: {s}"),
         }
     }
 
@@ -1095,9 +1092,9 @@ keep-bottom
     }
 
     /// Every surface class round-trips to its `Surface`, structured payload
-    /// kept without a rendered card, and junk drops to `None`.  One decoder,
-    /// so what the live sink emits now is what a deferred `deliver` mints
-    /// later.
+    /// kept without a rendered card, and junk decodes to `Decoded::Unknown`.
+    /// One decoder, so what the live sink emits now is what a deferred
+    /// `deliver` mints later.
     #[test]
     fn decode_surface_round_trips_each_class() {
         assert!(matches!(
@@ -1115,7 +1112,7 @@ keep-bottom
                 )
                 .to_value()
             ),
-            Some(Surface::Observation(_))
+            Decoded::Surface(Surface::Observation(_))
         ));
         assert!(matches!(
             decode_surface(&RalValue::Variant {
@@ -1132,14 +1129,14 @@ keep-bottom
                     ("cause".into(), RalValue::String("idle".into())),
                 ]))),
             }),
-            Some(Surface::Notice(crate::bus::card::Notice::Reap { .. }))
+            Decoded::Surface(Surface::Notice(crate::bus::card::Notice::Reap { .. }))
         ));
         assert!(matches!(
             decode_surface(&RalValue::Variant {
                 label: "card".into(),
                 payload: Some(Box::new(RalValue::list(vec![]))),
             }),
-            Some(Surface::Card(_))
+            Decoded::Surface(Surface::Card(_))
         ));
         assert!(matches!(
             decode_surface(&RalValue::Variant {
@@ -1155,7 +1152,7 @@ keep-bottom
                     ),
                 ]))),
             }),
-            Some(Surface::Done(crate::bus::card::DoneOutcome::Ok))
+            Decoded::Surface(Surface::Done(crate::bus::card::DoneOutcome::Ok))
         ));
         assert!(matches!(
             decode_surface(&RalValue::Variant {
@@ -1173,7 +1170,7 @@ keep-bottom
                     ),
                 ]))),
             }),
-            Some(Surface::Pin { .. })
+            Decoded::Surface(Surface::Pin { .. })
         ));
         for label in ["unpin", "pin"] {
             assert!(matches!(
@@ -1184,7 +1181,7 @@ keep-bottom
                         RalValue::String("tasks".into()),
                     )]))),
                 }),
-                Some(Surface::Unpin { .. })
+                Decoded::Surface(Surface::Unpin { .. })
             ));
         }
         // An *empty* card drops the slot too: a pin with nothing to show is
@@ -1203,9 +1200,12 @@ keep-bottom
                     ),
                 ]))),
             }),
-            Some(Surface::Unpin { .. })
+            Decoded::Surface(Surface::Unpin { .. })
         ));
-        assert!(decode_surface(&RalValue::String("nope".into())).is_none());
+        assert!(matches!(
+            decode_surface(&RalValue::String("nope".into())),
+            Decoded::Unknown
+        ));
     }
 
     /// The sink always posts, stamped with the root id and its birth

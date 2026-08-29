@@ -40,6 +40,8 @@ pub enum Outcome {
     /// Hit [`MAX_STEPS`] without a tool-call-free reply.  Terminal and
     /// nudge-free: re-attending would just spend another [`MAX_STEPS`].
     Capped,
+    /// The engine died mid-deliberation: no further tool call can dispatch.
+    Severed(ral_core::protocol::Severed),
 }
 
 /// Hard ceiling on provider round-trips in one [`Avatar::deliberate`].  The
@@ -273,13 +275,22 @@ impl Avatar {
                 .lock()
                 .append_tool_results(results)
                 .map_err(ProviderError::Other)?;
+            // A tool call in the batch just run may have found the engine
+            // gone; no further dispatch can run once it has.
+            if let Some(s) = self.seat.severed() {
+                return Ok(Outcome::Severed(s));
+            }
             // `announce` draws each arrival's own chrome; the texts coalesce
             // into the one steering message the protocol admits after a batch.
             if !injected.is_empty() {
                 for item in &injected {
                     announce(item, &recorder);
                 }
-                let text = injected.iter().map(Item::text).collect::<Vec<_>>().join("\n");
+                let text = injected
+                    .iter()
+                    .map(Item::text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 self.log
                     .lock()
                     .append_steering(text)

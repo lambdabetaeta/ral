@@ -3,9 +3,10 @@
 //! [`HostServices`] is all `&Avatar` can lend a handler without lending
 //! `&mut Avatar`/`&mut Shell`, since the reentrancy law bars a handler from
 //! taking the session lock. [`ExarchDesk`] answers one enquiry against that
-//! capture, paired with its [`SurfaceApplier`] in one [`HostSeam`];
-//! [`DeskBinding`] wraps the seam for the identity transport, where a
-//! handler's chrome would otherwise outrun the run's earlier surface output.
+//! capture, paired with its [`SurfaceApplier`] in one [`RunHost`], which
+//! implements [`ral_core::protocol::Host`] — the object every dispatch
+//! rides, so a handler's chrome can never outrun the run's earlier surface
+//! output.
 
 use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
 use crate::agent::seat::SeatKind;
@@ -18,11 +19,8 @@ use crate::shell_eval::{self, PinDigests, Surface};
 use crate::sync::LockExt;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
-use ral_core::transport::{Event, EventReceiver};
-use ral_core::types::{
-    CallSite, Capabilities, EnquiryDesk, Error, NO_DESK, NO_DESK_STATUS, Nursery, NurseryId,
-    Observation, Observed,
-};
+use ral_core::protocol::{EnquiryError, Host};
+use ral_core::types::{CallSite, Capabilities, Error, Nursery, NurseryId, Observation, Observed};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,7 +43,7 @@ const HATCHED_HOME: &str = "/tmp";
 /// thread must then park in `read_frame` for as long as the child lives.
 fn greet_hatch(stream: &mut ral_core::wire::WireStream, token: u64) -> Result<(), String> {
     use std::io::{Read, Write};
-    let patience = ral_core::transport::Liveness::default().deadline;
+    let patience = ral_core::protocol::Liveness::default().deadline;
     stream
         .set_write_timeout(Some(patience))
         .and_then(|()| stream.set_read_timeout(Some(patience)))
@@ -60,7 +58,7 @@ fn greet_hatch(stream: &mut ral_core::wire::WireStream, token: u64) -> Result<()
         }
         _ => format!("could not read the guest's hatch acknowledgement: {e}"),
     })?;
-    if ack[0] != ral_core::transport::HATCH_ACK {
+    if ack[0] != ral_core::protocol::HATCH_ACK {
         return Err(format!(
             "the guest answered the hatch with byte {:#04x} rather than the acknowledgement — \
              whatever is listening on that port is not a ral engine waiting to be hatched",
@@ -287,8 +285,7 @@ impl HostServices {
 }
 
 /// Answers one [`FOValue`] enquiry against a captured [`HostServices`]. Fresh
-/// per `ral` call; wrapped in [`DeskBinding`] for the identity transport and
-/// passed bare to `shell_eval::run_shell` for the wire path.
+/// per `ral` call; wrapped in [`RunHost`], the [`Host`] every dispatch rides.
 pub(crate) struct ExarchDesk {
     pub(crate) services: HostServices,
 }
@@ -906,9 +903,9 @@ impl ExarchDesk {
         // Past the ack the child is alive, so a refusal from here on simply
         // drops the stream: the child reads EOF on fd 3 and the guest's own
         // table reaps it. Nothing to kill, and nothing to tell it.
-        let transport = ral_core::transport::WireTransport::adopt(
+        let transport = ral_core::protocol::WireTransport::adopt(
             stream,
-            ral_core::transport::Liveness::default(),
+            ral_core::protocol::Liveness::default(),
         )
         .map_err(|e| {
             Error::new(
@@ -921,7 +918,16 @@ impl ExarchDesk {
             transport,
             PathBuf::from(HATCHED_CWD),
             PathBuf::from(HATCHED_HOME),
-        );
+        )
+        .map_err(|s| {
+            Error::new(
+                format!(
+                    "`agents `start` refused: {}",
+                    crate::agent::seat::engine_gone(&s)
+                ),
+                1,
+            )
+        })?;
 
         let fuel = s.agent.fuel() - 1;
         let reach = seat.eval_reach();
@@ -1386,8 +1392,10 @@ impl ExarchDesk {
 
     /// `` `pin-read `` — the card stored under `key` on this agent's own
     /// register, canonically re-encoded, or `()` on a miss. Read-after-write
-    /// within one run is sound because [`DeskBinding::enquire`] drains queued
-    /// surface frames before handling.
+    /// within one run is sound because a surface frame the run wrote is
+    /// always applied before an enquiry raised after it — core's
+    /// `IdentityDesk` drains pending surfaces first under the identity
+    /// transport, and frame order alone guarantees it under the wire.
     fn pin_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let [key] = payload_list(payload, "pin-read", "[key]")?;
         let key = payload_string(key, "pin-read", "key")?;
@@ -1592,10 +1600,10 @@ impl ExarchDesk {
 /// Decodes a surfaced value onto the bus, folding a `` `pin ``/`` `unpin ``
 /// into the pin mirror and the io/diff surfaces into the commit producer's
 /// [`SurfaceBuffer`], so what reaches the record is the deduped, coalesced
-/// form the user saw. [`HostSeam::apply`] is the one instance
-/// `shell_eval::run_shell`'s own drain and [`DeskBinding`]'s both reach
-/// through, so the two paths render off the same applier rather than two that
-/// could drift.
+/// form the user saw. [`RunHost::apply`] is what every dispatch's drain loop
+/// ([`ral_core::protocol::dispatch_to_report`]) reaches through the protocol,
+/// so a call's surfaced values always render off the one applier it was built
+/// with.
 pub(crate) struct SurfaceApplier {
     pub(crate) pins: Option<PinDigests>,
     /// The owning session's id and record seam — what the buffered commits
@@ -1608,28 +1616,42 @@ pub(crate) struct SurfaceApplier {
 }
 
 impl SurfaceApplier {
-    /// Apply one live [`Event::Surface`] value.
+    /// Apply one live [`ral_core::protocol::Event::Surface`] value.
+    ///
+    /// A shape no surface class recognises at all is the extension law's
+    /// loud case — recorded, not dropped silently; `landing`'s own rejection
+    /// of a known observation stays silent, since that is a class this host
+    /// chose not to render, not an unknown one.
     pub(crate) fn live(&self, val: FOValue) {
-        if let Some(surface) = shell_eval::decode_surface(&RalValue::from(val)) {
-            if let Some(pins) = &self.pins {
-                // Fatal, never skipped: dropping a disposition here would
-                // desync the mirror from the stream with no signal at all.
-                let mut m = pins.lock().expect("pin register poisoned");
-                match &surface {
-                    Surface::Pin { key, card } => {
-                        m.insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
-                    }
-                    Surface::Unpin { key } => {
-                        m.remove(key);
-                    }
-                    _ => {}
+        let shape = val.shape();
+        let surface = match shell_eval::decode_surface(&RalValue::from(val)) {
+            shell_eval::Decoded::Surface(surface) => surface,
+            shell_eval::Decoded::Landed => return,
+            shell_eval::Decoded::Unknown => {
+                if let Err(error) = self.recorder.emit(shell_eval::unknown_surface_note(shape)) {
+                    self.recorder.report_fault(&error);
                 }
+                return;
             }
-            let mut buf = self.surface.lock_ignore_poison();
-            if let Err(error) = absorb_surface(&mut buf, &self.recorder, self.id, &surface) {
-                drop(buf);
-                self.recorder.report_fault(&error);
+        };
+        if let Some(pins) = &self.pins {
+            // Fatal, never skipped: dropping a disposition here would
+            // desync the mirror from the stream with no signal at all.
+            let mut m = pins.lock().expect("pin register poisoned");
+            match &surface {
+                Surface::Pin { key, card } => {
+                    m.insert(key.clone(), shell_eval::PinDigest::new(card.clone()));
+                }
+                Surface::Unpin { key } => {
+                    m.remove(key);
+                }
+                _ => {}
             }
+        }
+        let mut buf = self.surface.lock_ignore_poison();
+        if let Err(error) = absorb_surface(&mut buf, &self.recorder, self.id, &surface) {
+            drop(buf);
+            self.recorder.report_fault(&error);
         }
     }
 
@@ -1641,6 +1663,22 @@ impl SurfaceApplier {
             drop(buf);
             self.recorder.report_fault(&error);
         }
+    }
+}
+
+/// An applier alone is the mute host the bare harness runs under:
+/// nothing answers, nothing forks.
+impl Host for SurfaceApplier {
+    fn surface(&self, val: FOValue) {
+        self.live(val);
+    }
+
+    fn enquire(&self, _req: FOValue) -> Result<FOValue, EnquiryError> {
+        Err(EnquiryError::no_desk())
+    }
+
+    fn fork(&self) -> Option<ral_core::types::Fork> {
+        None
     }
 }
 
@@ -1762,67 +1800,32 @@ fn notice_fact(notice: &crate::bus::card::Notice) -> crate::record::NoticeFact {
     }
 }
 
-/// Installed by [`crate::agent::seat::RunGuard`] once a call's real desk
-/// retires, so nothing holds that call's [`HostServices`] — its [`Emitter`]
-/// above all — past the call that owns it. Never observed in practice: nothing
-/// dispatches without a fresh real desk installed first.
-pub(crate) struct AbsentDesk;
-
-impl EnquiryDesk for AbsentDesk {
-    /// `_cancel` goes unpolled: every answer here is immediate and
-    /// unconditional, so there is no wait for a poll point to interrupt.
-    fn enquire(
-        &self,
-        _req: FOValue,
-        _cancel: &ral_core::process::CancelScope,
-    ) -> Result<FOValue, Error> {
-        Err(Error::new(NO_DESK, NO_DESK_STATUS))
-    }
-}
-
-/// One `ral` call's whole host seam: the desk that answers its enquiries and
+/// One `ral` call's whole host: the desk that answers its enquiries and
 /// the applier that renders its surfaced values, built once per call and
-/// shared by `Arc` between [`DeskBinding`] (the identity install) and
-/// `shell_eval::run_shell`'s own drain — so the two paths through one call can
-/// never be handed different desks, or different appliers, by mistake.
-pub(crate) struct HostSeam {
+/// shared by `Arc` between the run's dispatch and `shell_eval::run_shell`'s
+/// own flush — so the two can never be handed different desks, or different
+/// appliers, by mistake.
+pub(crate) struct RunHost {
     pub(crate) desk: ExarchDesk,
     pub(crate) apply: SurfaceApplier,
 }
 
-/// The identity transport's drain-then-handle adapter.
-///
-/// Under [`ral_core::transport::IdentityTransport`], [`ral_core::Shell::enquire`]
-/// calls into the installed desk synchronously, mid-`dispatch` — before
-/// `dispatch_to_report`'s drain loop, which starts only once `dispatch` returns.
-/// The run's earlier surface frames are therefore still queued, so
-/// [`Self::enquire`] applies them first: answering ahead of them would render a
-/// handler's chrome before output that preceded it.
-pub(crate) struct DeskBinding {
-    pub(crate) seam: Arc<HostSeam>,
-    pub(crate) events: Arc<EventReceiver>,
-}
+impl Host for RunHost {
+    fn surface(&self, val: FOValue) {
+        self.apply.live(val);
+    }
 
-impl EnquiryDesk for DeskBinding {
-    /// `_cancel` goes unpolled: `ExarchDesk::handle` answers every class from
-    /// its captured `HostServices` without parking on another party — a spawn
-    /// starts a detached worker and returns, a cancel signals a token and
-    /// returns, neither waits for the far side to react. The one arm that
-    /// grows rather than finishing at once is `` `start ``'s `mnemon` copy of
-    /// the parent's inherited context (`ExarchDesk::launch`): still bounded,
-    /// by the conversation so far, but the largest uncancellable window this
-    /// desk ever holds open.
-    fn enquire(
-        &self,
-        req: FOValue,
-        _cancel: &ral_core::process::CancelScope,
-    ) -> Result<FOValue, Error> {
-        while let Some((_, event)) = self.events.try_recv() {
-            if let Event::Surface(val) = event {
-                self.seam.apply.live(val);
-            }
-        }
-        self.seam.desk.handle(req)
+    fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
+        self.desk.handle(req).map_err(|e| EnquiryError {
+            status: e.exit_code(),
+            message: e.message,
+        })
+    }
+
+    fn fork(&self) -> Option<ral_core::types::Fork> {
+        Some(ral_core::types::Fork::Park(
+            self.desk.services.nursery.clone(),
+        ))
     }
 }
 
@@ -1842,8 +1845,6 @@ mod tests {
     };
     use crate::record::{Display, FleetSink, Record, Transient};
     use crate::shell_eval::builtins::harness;
-    use ral_core::transport::{DispatchId, IdentityTransport, Program, Run, Transport};
-    use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
     fn fresh_log() -> AgentLog {
         AgentLog::for_test(0, "test", &crate::agent::RecordedAccount::for_test("test"))
@@ -2449,77 +2450,6 @@ mod tests {
         assert!(
             audit.contains("folded context"),
             "the audit sentence must name the fold, got: {audit}"
-        );
-    }
-
-    /// `enquire` is called bare, off the dispatching thread: the adapter's drain
-    /// is what is under test, not [`ral_core::Shell::enquire`]'s routing, which
-    /// core's own suite covers.
-    #[test]
-    fn desk_binding_drains_pending_surfaces_before_handling() {
-        let shell = ral_core::Shell::new(ral_core::io::TerminalState::default());
-        let transport = IdentityTransport::new(shell);
-        transport.dispatch(
-            DispatchId(1),
-            Run {
-                program: Program::Source(r#"surface `unpin [key: "test-marker"]"#.into()),
-                script_name: "<test>".into(),
-                caps: Capabilities::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Capture,
-                terminal: RequestedTerminalAccess::Denied,
-                stdin: RunStdin::Empty,
-                trail: None,
-            },
-        );
-
-        let (tx, rx) = crate::bus::channel();
-        let recorder = crate::record::Emitter::none();
-        recorder.attach(crate::record::FleetSink {
-            id: 0,
-            tx: tx.downgrade(),
-            meter: crate::bus::UsageMeter::default(),
-        });
-        let binding = DeskBinding {
-            seam: Arc::new(HostSeam {
-                desk: desk(),
-                apply: SurfaceApplier {
-                    pins: None,
-                    id: 0,
-                    recorder,
-                    surface: Mutex::new(SurfaceBuffer::new()),
-                },
-            }),
-            events: transport.events_shared(),
-        };
-
-        let answer = binding
-            .enquire(
-                FOValue::Variant {
-                    label: "probe".into(),
-                    payload: None,
-                },
-                &ral_core::process::CancelScope::default(),
-            )
-            .expect_err("the stub desk answers every class with the extension-law error");
-        assert_eq!(answer.message, "unrecognised enquiry class `probe`");
-
-        // Proof `apply` ran, not just that `handle` did.
-        let saw_unpin = crate::bus::drain_transients(&rx)
-            .into_iter()
-            .any(|t| matches!(t, Transient::Unpin { key } if key == "test-marker"));
-        assert!(
-            saw_unpin,
-            "the drained surface frame must render onto the bus"
-        );
-
-        // Nothing pending survives, so no straggler is left for a later drain to
-        // reorder ahead of.
-        assert!(
-            binding.events.try_recv().is_none(),
-            "enquire must drain the transport's event queue fully"
         );
     }
 
@@ -3290,8 +3220,8 @@ mod tests {
         );
     }
 
-    /// `desk_binding_drains_pending_surfaces_before_handling`'s law again, but
-    /// through a real spawn rather than a stub class.
+    /// The read-after-write law once more, through a real spawn: a surfaced
+    /// value must render before an enquiry raised after it in the same run.
     #[test]
     fn surface_then_spawn_observes_the_surface_first() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
@@ -4005,7 +3935,7 @@ mod wire_tests {
                 }
                 let child = spawn_engine_on(&guest);
                 guest
-                    .write_all(&[ral_core::transport::HATCH_ACK])
+                    .write_all(&[ral_core::protocol::HATCH_ACK])
                     .expect("ack the hatch");
                 children.lock().unwrap().push(child);
             });
@@ -4021,12 +3951,12 @@ mod wire_tests {
         let (host, guest) = UnixStream::pair().expect("socketpair standing in for the dial");
         let mut child = spawn_engine_on(&guest);
         drop(guest);
-        let transport = ral_core::transport::WireTransport::adopt(
+        let transport = ral_core::protocol::WireTransport::adopt(
             host,
-            ral_core::transport::Liveness::default(),
+            ral_core::protocol::Liveness::default(),
         )
         .expect("adopt host stream");
-        let control = ral_core::transport::Transport::control(&transport).clone();
+        let control = ral_core::protocol::Transport::control(&transport).clone();
         let _ = child.kill();
         let _ = child.wait();
         EvalReach::Wire(control)

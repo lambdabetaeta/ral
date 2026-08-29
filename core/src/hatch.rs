@@ -6,7 +6,7 @@
 //! bytes and hands the connection to [`hatch_over`], which re-execs this
 //! binary with the dial on fd 3 and a seed socketpair named by
 //! `RAL_ENGINE_SEED_FD`, writes the one framed [`EngineSeed`] while the child
-//! drains it, and answers [`crate::transport::HATCH_ACK`]: a peer that hears
+//! drains it, and answers [`crate::protocol::HATCH_ACK`]: a peer that hears
 //! the ack has a live child holding its whole seed. [`seed_from_env`] and
 //! [`apply_seed`] are the other end, narrowing the child through the
 //! [`GrantNarrower`] its [`crate::engine::EngineInstaller`] carries — core has
@@ -331,7 +331,7 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed, recipe: Recipe) -> Result<
     // The child exists and holds its seed, so the peer may now be told: the
     // ack is the byte before the first protocol frame, and it is all the peer
     // has to go on before it names this child on its roster.
-    let ack = dial.write_all(&[crate::transport::HATCH_ACK]).map_err(|e| {
+    let ack = dial.write_all(&[crate::protocol::HATCH_ACK]).map_err(|e| {
         format!("hatch: the child engine started, but the host could not be told so: {e}")
     });
     // The peer's end must read the child's death as EOF, so this process keeps
@@ -605,7 +605,7 @@ mod tests {
         let (_host, ack, answer) = dialled.join().expect("the host's thread");
         assert_eq!(
             (ack, answer),
-            (crate::transport::HATCH_ACK, PROBE),
+            (crate::protocol::HATCH_ACK, PROBE),
             "the host learns of the child by its ack, and of its fd 3 by its answer"
         );
         assert!(recorded(pid), "a started child must be recorded for reaping");

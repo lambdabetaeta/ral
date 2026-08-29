@@ -6,7 +6,7 @@
 mod common;
 
 use ral_core::builtins;
-use ral_core::transport::{Program, Run};
+use ral_core::protocol::{Program, Run};
 #[cfg(unix)]
 use ral_core::types::{ExecMap, ExecPolicy};
 use ral_core::types::{Break, Capabilities, Shell, Value};

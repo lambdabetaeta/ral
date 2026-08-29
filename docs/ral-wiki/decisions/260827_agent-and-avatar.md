@@ -156,6 +156,5 @@ that entry's top.
 
 [[design/agents|agents]] and [[map/exarch/agent|agent]] (rewritten against
 this shape), [[design/residency|residency]] (the resident ledger this
-tree is a chapter of), [[decisions/260825_the-host-dials-in|the-host-dials-in]]
-and [[decisions/260825_the-wire-carries-the-value|the-wire-carries-the-value]]
+tree is a chapter of), [[design/engine-protocol|engine-protocol]]
 (landed the same week, on the enquiry side of the same fleet).

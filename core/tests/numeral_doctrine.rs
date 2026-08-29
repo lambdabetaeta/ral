@@ -19,7 +19,7 @@ mod common;
 
 use ral_core::builtins::{REPL_PRINT_PARAMS, pretty_print};
 use ral_core::ir::Val;
-use ral_core::transport::{Program, Run};
+use ral_core::protocol::{Program, Run};
 use ral_core::types::{Capabilities, Shell, Value, fmt_float};
 use ral_core::{
     RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, StaticDiagnostics,

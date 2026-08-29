@@ -1,6 +1,6 @@
 //! Non-interactive execution for script, stdin, and `-c` modes.
 
-use ral_core::transport::{Program, Run};
+use ral_core::protocol::{Program, Run};
 use ral_core::types::{Break, Escape, Settled};
 use ral_core::{
     Ending, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, diagnostic,

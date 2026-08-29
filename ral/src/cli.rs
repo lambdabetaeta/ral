@@ -114,66 +114,119 @@ the trail as JSON.",
 )]
 #[allow(clippy::struct_excessive_bools)] // clap flag struct: each bool is a distinct CLI switch.
 pub(crate) struct Cli {
-    /// Start as a login shell; sources login profiles
+    /// Start an interactive login shell.
+    ///
+    /// Ral reads the normal interactive start-up file and the login profile.
+    /// This option has no effect when ral runs `-c` code, a script file, or a
+    /// script from standard input.
     #[arg(long, short = 'l')]
     login: bool,
 
-    /// After execution, emit the JSON audit trail to stderr (requires a script or -c)
+    /// Write a JSON audit trail to standard error after the program finishes.
+    ///
+    /// The trail records commands, redirected reads and writes, capability
+    /// checks, results, timings, source locations and principals. You must also
+    /// give ral a script file or use `-c`.
     #[arg(long)]
     audit: bool,
 
-    /// Pretty-print --audit output
+    /// Add indentation and line breaks to the JSON written by `--audit`.
+    ///
+    /// This makes the audit easier to read but larger. You must also use
+    /// `--audit`.
     #[arg(long, requires = "audit")]
     pretty: bool,
 
-    /// Parse and type-check; do not execute
+    /// Check the program without running it.
+    ///
+    /// Ral parses, elaborates and type-checks the program, then exits. It
+    /// returns status 0 when the check succeeds, 1 for a type error and 2 for a
+    /// syntax error. You must give ral a script file or use `-c`.
     #[arg(long, short = 'n')]
     check: bool,
 
-    /// Print the parsed AST to stderr; do not execute
+    /// Print ral's internal syntax tree to standard error without running it.
+    ///
+    /// Ral stops after parsing, so this option does not elaborate or type-check
+    /// the program. You must give ral a script file or use `-c`.
     #[arg(long = "dump-ast")]
     dump_ast: bool,
 
-    /// Maximum machine-frame recursion depth (default 100000; overrides rc `recursion_limit`:)
+    /// Set the maximum number of machine frames ral may use while running code.
+    ///
+    /// N must be a positive integer. The default is 100000. In an interactive
+    /// session, this option overrides `recursion_limit` in the rc file. It has
+    /// no effect with `--check` or `--dump-ast` because those modes do not run
+    /// the program.
     #[arg(long = "recursion-limit", value_name = "N",
           value_parser = clap::value_parser!(u64).range(1..))]
     recursion_limit: Option<u64>,
 
-    /// Comma-separated .ral capability profile paths loaded at session start; may be repeated
+    /// Restrict the session by loading one or more ral capability profiles.
+    ///
+    /// Separate paths with commas or repeat this option. Ral combines the
+    /// profiles from left to right and applies them before running code. It has
+    /// no effect with `--check` or `--dump-ast` because those modes do not start
+    /// a runtime session.
     #[arg(long, value_name = "PATHS", value_delimiter = ',',
           action = clap::ArgAction::Append)]
     capabilities: Vec<std::path::PathBuf>,
 
-    /// Treat the next positional as ral code; remaining positionals become $ARGS
+    /// Run the next argument as ral source code.
+    ///
+    /// Ral puts every later argument in `$ARGS`, even when it starts with a
+    /// hyphen. For example, `ral -c 'show $ARGS' one two` runs the given source
+    /// with `one` and `two` as its arguments. Inline code does not bind
+    /// `$SCRIPT`.
     #[arg(short = 'c')]
     code: bool,
 
-    /// Force interactive mode even when stdin is not a terminal
+    /// Start the interactive REPL even when standard input is not a terminal.
+    ///
+    /// This is useful when another program supplies ral's input. `-s` takes
+    /// priority over this option. A script path or `-c` also takes priority.
     #[arg(short = 'i')]
     force_interactive: bool,
 
-    /// Read stdin as a script even when stdin is a terminal (a script positional takes precedence)
+    /// Read and run a script from standard input, even when it is a terminal.
+    ///
+    /// This option takes priority over `-i`. A script path or `-c` takes
+    /// priority over both options. A script read from standard input does not
+    /// bind `$SCRIPT`.
     #[arg(short = 's')]
     force_stdin: bool,
 
-    /// Accepted for POSIX $SHELL compatibility; no effect
+    /// Accept `-e` from programs that expect a POSIX shell; do nothing.
     #[arg(short = 'e', hide = true)]
     posix_e: bool,
 
-    /// Accepted for POSIX $SHELL compatibility; no effect
+    /// Accept `-u` from programs that expect a POSIX shell; do nothing.
     #[arg(short = 'u', hide = true)]
     posix_u: bool,
 
-    /// Skip rc and profile files
+    /// Do not read interactive start-up files.
+    ///
+    /// Ral skips the rc file and, for a login shell, the system and user login
+    /// profiles. This option only affects an interactive session. You can also
+    /// spell it `--noprofile`.
     #[arg(long, visible_alias = "noprofile")]
     norc: bool,
 
-    /// Interactive surface: readline (default), minimal, or structural; overrides rc surface:
+    /// Choose the interface for an interactive session.
+    ///
+    /// This option overrides `surface` in the rc file. The choices are
+    /// `readline` (the default), `minimal` and `structural`. A terminal resolved
+    /// to minimal mode still uses the minimal interface. If the structural
+    /// interface is unavailable, ral warns and uses readline instead.
     #[arg(long, value_enum, value_name = "SURFACE")]
     surface: Option<crate::repl::Surface>,
 
-    /// Script path + trailing args, or (with -c) inline code + trailing args.
-    /// Supply after `--` explicitly, or let the binary inject it for you.
+    /// Give ral a script or the arguments that follow `-c`.
+    ///
+    /// Without `-c`, the first ARG is the script path and the remaining values
+    /// become `$ARGS`; ral also binds `$SCRIPT` to the path. With `-c`, the
+    /// first ARG is source code and the remaining values become `$ARGS`. Use
+    /// `--` before a script path that starts with a hyphen.
     #[arg(last = true, value_name = "ARG")]
     rest: Vec<String>,
 }

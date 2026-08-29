@@ -1529,7 +1529,7 @@ mod tests {
     /// Run `src` as one capturing top-level run on a shell the caller dressed.
     /// Panics on a static failure — every source here is expected to compile.
     fn run_source(shell: &mut Shell, src: &str) -> Settled<Value> {
-        use crate::transport::{Program, Run};
+        use crate::protocol::{Program, Run};
         use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
         let req = RunRequest {
             run: Run {
@@ -1560,7 +1560,7 @@ mod tests {
 
     /// [`run_source`], with a `worker_cap` the source runs under.
     fn run_source_capped(shell: &mut Shell, src: &str, worker_cap: usize) -> Settled<Value> {
-        use crate::transport::{Program, Run};
+        use crate::protocol::{Program, Run};
         use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
         let req = RunRequest {
             run: Run {

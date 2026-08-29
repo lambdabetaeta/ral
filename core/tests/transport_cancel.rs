@@ -17,9 +17,10 @@
 
 #![cfg(unix)]
 
-use ral_core::transport::{IdentityTransport, Program, Report, Run, Transport, dispatch_to_report};
+use ral_core::protocol::{IdentityTransport, Program, Report, Run, Transport, dispatch_to_report};
 use ral_core::types::{Capabilities, CapturePolicy, Observed, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -48,8 +49,7 @@ fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
             stdin: RunStdin::Empty,
             trail: Some(CapturePolicy::Off),
         },
-        |_| {},
-        |_| unreachable!("no desk is installed"),
+        Arc::new(()),
     )
     .expect("the identity transport sends the Report synchronously");
     let elapsed = started.elapsed();

@@ -9,11 +9,12 @@
 use crate::agent::Avatar;
 use crate::agent::digest::{OPAQUE_CAP, clip, render};
 use crate::agent::event::{AgentLog, ToolResult as SessionToolResult};
-use crate::agent::seat::RunInstall;
+use crate::agent::seat::engine_gone;
 use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
 use crate::shell_eval;
 use ral_core::serial::FOValue;
+use ral_core::protocol::Severed;
 use std::sync::{Arc, Mutex};
 
 /// One `ral` call's reply slot, minted fresh per call so a reply staged and
@@ -115,18 +116,21 @@ impl Avatar {
     /// Everything a desk handler may read off `&Avatar`, since the reentrancy
     /// law bars it from reaching back through `&mut Avatar`/`&mut Shell`.  Built
     /// fresh at each [`Self::run_shell`] install, so no capture goes stale.
+    ///
+    /// # Errors
+    /// The engine's severance, from the live `cwd` probe.
     pub(crate) fn host_services(
         &self,
         emit: &Emitter,
         nursery: ral_core::types::Nursery,
         reply: ReplyCell,
-    ) -> desk::HostServices {
-        desk::HostServices {
+    ) -> Result<desk::HostServices, Severed> {
+        Ok(desk::HostServices {
             fleet: self.fleet.clone(),
             kind: self.seat.kind(),
             agent: self.agent.clone(),
             emit: emit.clone(),
-            cwd: self.cwd(),
+            cwd: self.cwd()?,
             reply,
             log: self.log.clone(),
             nursery,
@@ -135,7 +139,7 @@ impl Avatar {
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
             principal: ral_core::host::user(),
-        }
+        })
     }
 
     pub(crate) fn run_shell(
@@ -149,17 +153,24 @@ impl Avatar {
         // At entry, so a call that fails to evaluate still ages the clock.
         self.ral_epoch += 1;
         // The adoption end of a handler's body-side `Shell::fork_into_nursery`,
-        // shared between the seat install and the desk's own capture.
+        // read back by `RunHost::fork`.
         let nursery = ral_core::types::Nursery::default();
         let reply_cell = ReplyCell::default();
-        // Built once and shared by `Arc`: the identity install and
-        // `shell_eval::run_shell`'s own drain reach the very same desk and
-        // the very same applier, so neither seam can be handed one this call
-        // did not also hand the other.
-        let seam = Arc::new(desk::HostSeam {
-            desk: desk::ExarchDesk {
-                services: self.host_services(emit, nursery.clone(), reply_cell.clone()),
-            },
+        let services = match self.host_services(emit, nursery, reply_cell.clone()) {
+            Ok(services) => services,
+            Err(s) => {
+                return SessionToolResult {
+                    id,
+                    content: engine_gone(&s),
+                };
+            }
+        };
+        // Built once and shared by `Arc`: the run's dispatch and
+        // `shell_eval::run_shell`'s own flush reach the very same desk and
+        // the very same applier, so neither can be handed one this call did
+        // not also hand the other.
+        let host = Arc::new(desk::RunHost {
+            desk: desk::ExarchDesk { services },
             apply: desk::SurfaceApplier {
                 pins: Some(self.agent.pins.clone()),
                 id: self.agent.id,
@@ -167,31 +178,25 @@ impl Avatar {
                 surface: Mutex::new(crate::record::commit::SurfaceBuffer::new()),
             },
         });
-        let outcome = {
-            let _guard = self.seat.install_run(RunInstall {
-                seam: seam.clone(),
-                // Stamped with this session's generation as read now, so a
-                // batch from a worker that settles after a `/clear` is dropped.
-                deferred: shell_eval::deferred_sink(emit, &self.agent),
-                fork: ral_core::types::Fork::Park(nursery),
-            });
-            self.recorder()
-                .transient(crate::record::Transient::State(AgentState::Evaluating));
-            shell_eval::run_shell(
-                self.seat.transport(),
-                &self.agent.caps,
-                cmd,
-                timeout_secs,
-                Some(&seam),
-                &self.recorder(),
-            )
-        };
+        // Stamped with this session's generation as read now, so a batch
+        // from a worker that settles after a `/clear` is dropped.
+        self.seat
+            .install_deferred(shell_eval::deferred_sink(emit, &self.agent));
+        self.recorder()
+            .transient(crate::record::Transient::State(AgentState::Evaluating));
+        let outcome = shell_eval::run_shell(
+            self.seat.transport(),
+            &self.agent.caps,
+            cmd,
+            timeout_secs,
+            host.clone() as Arc<dyn ral_core::protocol::Host>,
+        );
         // The call boundary: whatever the commit producer still buffers —
         // deduped io groups, a coalesced diff — records now, so a call's
         // effects land contiguously ahead of its result.
-        seam.apply.flush();
-        // Only now, with the dispatch returned and the install dropped: the
-        // worker probe below is legal at a run boundary and nowhere else.
+        host.apply.flush();
+        // Only now, with the dispatch returned: the worker probe below is
+        // legal at a run boundary and nowhere else.
         let content = match outcome {
             shell_eval::Outcome::Ran {
                 stdout,
@@ -199,24 +204,27 @@ impl Avatar {
                 value,
                 ending,
                 trail,
-            } => {
-                let workers = self.probe_workers();
-                let (suffix, exit) = shell_eval::report::render(
-                    &ending,
-                    &trail,
-                    &seam.desk.services.acts,
-                    &workers,
-                    timeout_secs,
-                );
-                stderr.extend_from_slice(suffix.as_bytes());
-                render(&shell_eval::ToolResult {
-                    stdout,
-                    stderr,
-                    value,
-                    exit,
-                })
-            }
+            } => match self.probe_workers() {
+                Ok(workers) => {
+                    let (suffix, exit) = shell_eval::report::render(
+                        &ending,
+                        &trail,
+                        &host.desk.services.acts,
+                        &workers,
+                        timeout_secs,
+                    );
+                    stderr.extend_from_slice(suffix.as_bytes());
+                    render(&shell_eval::ToolResult {
+                        stdout,
+                        stderr,
+                        value,
+                        exit,
+                    })
+                }
+                Err(s) => engine_gone(&s),
+            },
             shell_eval::Outcome::Static(s) => clip(&s, OPAQUE_CAP),
+            shell_eval::Outcome::Severed(s) => engine_gone(&s),
         };
         // `if let`, not an unconditional overwrite: last-wins is a property of
         // the batch, so a later call that stages nothing must leave an earlier
@@ -665,7 +673,12 @@ mod tests {
         // Through the probe rail, not a `run_shell`: a boundary read ticks
         // nothing, so the retention arithmetic below stays exact.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while !session.probe_workers().iter().any(|w| !w.running) {
+        while !session
+            .probe_workers()
+            .expect("an identity seat never severs")
+            .iter()
+            .any(|w| !w.running)
+        {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the instant worker must settle within the budget"

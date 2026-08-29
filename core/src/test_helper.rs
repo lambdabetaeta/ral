@@ -58,8 +58,8 @@ fn try_birth_detached() -> Option<u8> {
         shell.install_builtins(crate::builtins::DETACH_BUILTIN);
         shell.arm_detach(1);
         let report = shell.run(crate::RunRequest {
-            run: crate::transport::Run {
-                program: crate::transport::Program::Source(format!(
+            run: crate::protocol::Run {
+                program: crate::protocol::Program::Source(format!(
                     "let d = detach #'the survivor a test outlives'# \
                      /bin/sh -c 'while :; do echo {marker}; echo {marker} >&2; \
                      echo {marker} >> {trace}; sleep 0.05; done'; echo $d[pid]"

@@ -162,17 +162,6 @@ pub(crate) fn drain_records(rx: &BusReceiver) -> Vec<Record> {
         .collect()
 }
 
-/// [`drain_records`]'s twin for the live-only half of the seam.
-#[cfg(test)]
-pub(crate) fn drain_transients(rx: &BusReceiver) -> Vec<Transient> {
-    std::iter::from_fn(|| rx.try_recv().ok())
-        .filter_map(|sig| match sig {
-            Signal::Transient(_, t) => Some(t),
-            Signal::Fact(..) => None,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Sink, pump};

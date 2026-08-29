@@ -35,10 +35,10 @@ reduction primitive behind it. A host states policy; core owns resources.
 - Completion is the call returning, never a channel disconnecting, so a deferred
   worker holding a surface clone cannot keep a run from ending
   ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]).
-- The seam itself is transport-parametric: `transport` is the frame algebra
+- The protocol itself is transport-parametric: `protocol` is the frame algebra
   (Attach/Dispatch/Event/Control) a front-end speaks, run in-process as the
   identity transport or across a socket to the `engine` child
-  ([[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
+  ([[map/core/engine-protocol|engine-protocol]]).
 - The reduction host behind the door is crate-private, so a host cannot start an
   unframed evaluation that would foreground or capture against a stale frame.
 

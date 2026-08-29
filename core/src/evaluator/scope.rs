@@ -226,7 +226,7 @@ impl WithinUndo {
 mod tests {
     use super::*;
     use crate::run::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
-    use crate::transport::{Program, Run};
+    use crate::protocol::{Program, Run};
     use crate::types::Mooring;
     use crate::types::{BuiltinBody, BuiltinEntry, Capabilities};
 

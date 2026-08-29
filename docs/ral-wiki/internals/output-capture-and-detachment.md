@@ -137,7 +137,7 @@ The escape is detachment — the *handle* is its evidence
   `poll`, `await`, `race`, and `cancel` stay the only verbs that touch a
   worker, and there is no model-facing listing over the registry at all — the
   `workers` builtin was retired, since a listing carrying live `Value::Handle`s
-  can never cross the host seam. Rediscovery instead splits by class: an
+  can never cross the engine protocol. Rediscovery instead splits by class: an
   ordinary `spawn`/`watch` worker (`LeaseClass::Worker`) is rediscovered
   through the binding lease, never by id; a `service`-born worker
   (`LeaseClass::Durable`) is rediscovered by the id its birth trail card

@@ -431,8 +431,8 @@ mod tests {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
         let config = match shell.run(ral_core::RunRequest {
-            run: ral_core::transport::Run {
-                program: ral_core::transport::Program::Source(rc_src.to_string()),
+            run: ral_core::protocol::Run {
+                program: ral_core::protocol::Program::Source(rc_src.to_string()),
                 script_name: "<rc>".to_string(),
                 caps: ral_core::types::Capabilities::root(),
                 wall: None,

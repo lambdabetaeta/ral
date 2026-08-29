@@ -15,7 +15,7 @@ written while a helper is still writing to the folder it describes.
 
 This supersedes the "never a fleet" half of the old `fuel: 0` comment at
 `synod/src/session.rs`: synod's trunk no longer refuses every `agent-start`.
-[[decisions/260722_session-is-a-process|session-is-a-process]] left the shape
+The [[design/engine-protocol|engine protocol]] left the shape
 of a wire-side spawn fixed but deliberately unbuilt "until it has a caller" —
 synod is now that caller, delegating to helpers that run concurrently inside
 the same guest, against the same folder, under the same safety net. Synod's
@@ -81,7 +81,7 @@ died, and the repliers linger, fetchable by `` agents `reply ``.
 
 ## See also
 
-[[decisions/260722_session-is-a-process|session-is-a-process]] (the rendezvous
+[[design/engine-protocol|engine-protocol]] (the rendezvous
 shape this law's callers use, and the paragraph this ADR's caller now names),
 [[design/agents|agents]] (spawning is universal, bounded by fuel — the law
 synod's `SPAWN_FUEL` now carries with no seat-type exception),

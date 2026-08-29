@@ -11,7 +11,7 @@
 
 mod boot;
 
-use ral_core::transport::Transport;
+use ral_core::protocol::Transport;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
@@ -35,7 +35,7 @@ pub(super) enum Flow {
 /// an unwinding panic too, not only on the orderly `run` exit — a crash
 /// must not orphan a stopped process group or lose the session's history.
 pub(super) struct Session {
-    transport: ral_core::transport::IdentityTransport,
+    transport: ral_core::protocol::IdentityTransport,
     /// Job table shared with captured builtins installed at boot so
     /// `jobs`, `fg`, `bg`, and `disown` can mutate it from closures.
     jobs: Arc<Mutex<jobs::JobTable>>,
@@ -123,7 +123,7 @@ impl Session {
 
         // Prompt rendering, the terminal title, and `frontend.read()` all reach
         // through `shell_mut()`, which only `IdentityTransport` offers.
-        let transport = ral_core::transport::IdentityTransport::new(shell);
+        let transport = ral_core::protocol::IdentityTransport::new(shell);
 
         Ok(Self {
             transport,
@@ -209,7 +209,7 @@ impl Session {
             }
             Read::Interrupt => {
                 ral_core::process::clear();
-                ral_core::transport::ControlSender::cancel_current();
+                self.transport.control().cancel_in_flight();
                 Flow::Continue
             }
             Read::Eof => Flow::Break,

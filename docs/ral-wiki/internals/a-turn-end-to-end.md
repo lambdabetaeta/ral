@@ -1,6 +1,6 @@
 ---
-verified_at_commit: be7c59e3
-verified_at_date: 2026-08-26
+verified_at_commit: 50388d83
+verified_at_date: 2026-08-29
 anchors: [run, run_under, run_nested, enter, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck]
 ---
 
@@ -143,7 +143,7 @@ module's framed scaffold:
   `RunReport::into_report` then renders the engine's `Ending` against the
   `SourceDb` — a `Raised`/`Walled` error becomes the string the host prints
   verbatim, `command_exit`/`status` computed alongside it — onto the wire's own
-  `transport::Ending`, and projects each `Observation` through
+  `protocol::Ending`, and projects each `Observation` through
   [[design/audit|`to_wire`]] onto `Report::Ran.trail: Vec<FOValue>`, unbounded
   by declaration — the wire's frame fuse is the shared backstop, as it already
   is for `captured`.
@@ -154,8 +154,10 @@ module's framed scaffold:
   "<stdin>"`, `Capabilities::root()`, no limits, `RunIo::Inherit`,
   `RequestedTerminalAccess::Leased`, `RunStdin::Inherit`, no surface, and the
   `pre-exec` / `chpwd` / `post-exec` plugin hooks; it builds a `Program::Source`
-  `Run` and drains it through `transport::dispatch_to_report` on its prompt
-  thread, rendering the terminal `Report` with `print_result`. Its plugin hooks
+  `Run` and drains it through `protocol::dispatch_to_report` on its prompt
+  thread with the mute `Arc::new(())` host, rendering the terminal `Report`
+  with `print_result` — an `Err(Severed)` prints the cause and ends the line
+  instead. Its plugin hooks
   and prompt body (`ral/src/repl/plugin.rs`, `prompt.rs`) dispatch
   `Program::Hook` runs instead — hooks the REPL registered by name, run through
   the same frame.
@@ -165,9 +167,12 @@ module's framed scaffold:
   running workers, `RunIo::Capture`, `RequestedTerminalAccess::Denied`,
   `RunStdin::Empty`, `trail: Some(CapturePolicy::Off)`; it builds a
   `Program::Source` `Run` and drains it through
-  `transport::dispatch_to_report`, applying each live surface value onto its
-  presentation bus, and renders the capped
-  `ToolResult`. **The pushed grant frame *is* the sandbox** — ral's
+  `protocol::dispatch_to_report` against its call's `RunHost` — one `Host`
+  pairing the enquiry desk with the applier that renders each live surface
+  value onto the presentation bus — and renders the capped `ToolResult`, or
+  folds an `Err(Severed)` into `Outcome::Severed` and the one sentence
+  `agent::seat::engine_gone` renders for it
+  ([[map/exarch/agent|agent]]). **The pushed grant frame *is* the sandbox** — ral's
   [[design/grant|grant]], not a source-level `grant { … }` the model could
   escape — which is why exarch needs no runtime of its own
   ([[design/exarch-architecture|exarch-architecture]]).

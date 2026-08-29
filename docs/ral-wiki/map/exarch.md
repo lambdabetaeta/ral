@@ -239,7 +239,7 @@ the per-agent index and optional sections still resolve from the stored base.
 
 exarch does not invent its own sandbox. Each tool call is one transport `Run`
 carrying the **profile's capabilities in `Run.caps`**, dispatched across the
-host seam (`shell_eval::run_shell`, → [[map/exarch/shell-eval|shell-eval]]) and
+engine protocol (`shell_eval::run_shell`, → [[map/exarch/shell-eval|shell-eval]]) and
 pushed onto ral's capability stack by core's run door — so the safety
 boundary *is* ral's [[design/grant|grant]] mechanism — authority attenuated by
 intersection. There is no source-level `grant { … }` the model could escape;

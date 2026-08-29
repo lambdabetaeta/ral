@@ -269,7 +269,7 @@ extern "system" fn console_ctrl_handler(ctrl_type: u32) -> windows_sys::core::BO
 /// Where an interrupt lands: a live agent's current-dispatch scope, republished
 /// by its transport as each dispatch is minted, into the target the host
 /// installed once with
-/// [`ral_core::transport::IdentityTransport::set_interrupt_target`].  It sits
+/// [`ral_core::protocol::IdentityTransport::set_interrupt_target`].  It sits
 /// outside the engine lock the run itself holds, so an interrupt can reach the
 /// in-flight run from another thread — and it is published *ahead* of that
 /// lock, so an interrupt raised while a dispatch still waits on it lands on
@@ -297,7 +297,7 @@ pub(crate) enum EvalReach {
     /// trunk (synod's guest-VM engine) carries this reach directly, and only
     /// an identity seat can be forked into, so no descendant of one ever
     /// does.
-    Wire(ral_core::transport::ControlSender),
+    Wire(ral_core::protocol::ControlSender),
 }
 
 impl EvalReach {

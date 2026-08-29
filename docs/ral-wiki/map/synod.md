@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 8bd8b936
-generated_at_date: 2026-08-25
-covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/transport.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
+generated_at_commit: 50388d83
+generated_at_date: 2026-08-29
+covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/protocol.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
 # Map: synod
@@ -23,7 +23,7 @@ The design record is `dev/docs/VM/SYNOD.md`; the landed state is
 from shipped boot media — there is no software-only fallback — and the engine
 runs inside the guest, one engine process per session, driven over the
 design's §3 wire
-([[decisions/260722_session-is-a-process|session-is-a-process]]). **One guest,
+([[design/engine-protocol|engine-protocol]]). **One guest,
 two lifecycle backends**: Virtualization.framework on macOS arm64, Hyper-V
 through the Host Compute System API on Windows x86_64
 ([[decisions/260725_windows-hyper-v-backend|windows-hyper-v-backend]]). The
@@ -73,9 +73,9 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   on the wire the machine hands back (`exarch::agent::RootSeat::Wire` over
   `Machine::take_wires`, attached at the guest's `/work`). `control_seat`
   carries no platform condition at all: `take_wires` hands back each
-  platform's own owned handles and `ral_core::transport::WireTransport::adopt`
-  takes either, so the seam is one function
-  ([[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
+  platform's own owned handles and `ral_core::protocol::WireTransport::adopt`
+  takes either, so the protocol is one function
+  ([[design/engine-protocol|engine-protocol]]).
   Before any of that, `begin` stat-measures the folder
   (`workspace::manifest::measure`) and composes the large-folder warning —
   including a free-space sentence off `workspace::history::free_bytes` —
@@ -267,7 +267,7 @@ path that resolved for the caller names nothing by the time the machine is
 built. `Machine::take_wires` is the one signature that varies — `Wires` holds
 an `OwnedFd` per wire on Unix and an `OwnedSocket` per wire on Windows —
 because each platform owns its own accepted sockets, and both are adopted by
-the host seam unchanged.
+the engine protocol unchanged.
 
 **The crate boots only real machines.** `detect(Option<BootMedia>)` answers
 `Vz`, `Brokered`, or `Hyperv`, or refuses with a sentence for a
@@ -581,7 +581,7 @@ exarch's cross-by-copy position.
   the one fork both the identity arm's nursery park and the wire arm's
   `EngineSeed` take, so `` agents `start `` means one thing regardless of
   seat.
-- [[decisions/260825_the-host-dials-in|the-host-dials-in]] — why the guest
+- [[design/engine-protocol|engine-protocol]] — why the guest
   listens and the host dials, and why that direction is what deleted the
   correlation machinery rather than shrinking it.
 - [[decisions/260806_exchange-ends-at-fleet-quiescence|exchange-ends-at-fleet-quiescence]]

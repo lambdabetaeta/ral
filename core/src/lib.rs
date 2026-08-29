@@ -44,7 +44,7 @@ pub mod syntax;
 pub(crate) mod test_env;
 pub mod test_helper;
 pub mod text;
-pub mod transport;
+pub mod protocol;
 pub mod typecheck;
 pub mod types;
 pub mod uutils;

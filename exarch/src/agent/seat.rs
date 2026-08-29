@@ -5,10 +5,9 @@
 use crate::agent::cancel::{EvalReach, InterruptTarget};
 use crate::agent::event::AgentLog;
 use crate::bootstrap::Scratch;
-use crate::fleet::desk::{AbsentDesk, DeskBinding, HostSeam};
 use crate::shell_eval::builtins;
 use ral_core::Shell;
-use ral_core::transport::{IdentityTransport, Transport};
+use ral_core::protocol::{IdentityTransport, Severed, Transport};
 use std::sync::{Arc, Mutex};
 
 /// What kind of seat a `ral` call is running against, and the one thing
@@ -38,33 +37,16 @@ pub(crate) enum Seat {
     /// the drain loop's enquiry arm, the real scratch lives in the guest,
     /// and forks are refused at the desk for fuel 0, so no fork door either.
     Wire {
-        transport: Box<ral_core::transport::WireTransport>,
+        transport: Box<ral_core::protocol::WireTransport>,
     },
 }
 
-/// One `ral` call's capture set, built fresh per call so nothing a desk
-/// handler captures can go stale.
-pub(crate) struct RunInstall {
-    pub(crate) seam: Arc<HostSeam>,
-    pub(crate) deferred: Arc<dyn ral_core::types::DeferredSink>,
-    pub(crate) fork: ral_core::types::Fork,
-}
-
-/// Retires the install on *every* exit, including a panic `Avatar::attend`
-/// recovers from — straight-line teardown would leave the desk's whole
-/// capture installed for the rest of the session.
-pub(crate) struct RunGuard<'s>(&'s Seat);
-
-impl Drop for RunGuard<'_> {
-    fn drop(&mut self) {
-        match self.0 {
-            Seat::Identity { transport, .. } => {
-                transport.set_desk(Arc::new(AbsentDesk));
-                transport.clear_fork();
-            }
-            Seat::Wire { .. } => {}
-        }
-    }
+/// The one sentence every edge tells about a severed engine.
+pub(crate) fn engine_gone(s: &Severed) -> String {
+    format!(
+        "the engine behind this session is gone — {s}. Nothing further can run here; start a \
+         new session."
+    )
 }
 
 impl Seat {
@@ -95,13 +77,17 @@ impl Seat {
 
     /// `cwd` and `home` are the caller's word, never read from this
     /// process: under a VM they are guest paths this host cannot resolve.
+    ///
+    /// # Errors
+    /// The transport's severance, if the engine refuses the attach or falls
+    /// silent before answering it.
     pub(crate) fn wire(
-        transport: ral_core::transport::WireTransport,
+        transport: ral_core::protocol::WireTransport,
         cwd: std::path::PathBuf,
         home: std::path::PathBuf,
-    ) -> Self {
+    ) -> Result<Self, Severed> {
         transport.attach(
-            ral_core::transport::TerminalEndpoint {
+            ral_core::protocol::TerminalEndpoint {
                 lease: None,
                 state: ral_core::io::TerminalState::default(),
             },
@@ -110,9 +96,10 @@ impl Seat {
             None,
             builtins::INSTALLER_TAG.to_string(),
         );
-        Self::Wire {
+        transport.await_attached()?;
+        Ok(Self::Wire {
             transport: Box::new(transport),
-        }
+        })
     }
 
     pub(crate) fn transport(&self) -> &dyn Transport {
@@ -133,7 +120,7 @@ impl Seat {
 
     /// Identity-only: the test suite's state-inspection door and
     /// `Avatar::fork_with`'s [`Shell::fork_session`] reach.
-    pub(crate) fn shell_mut(&self) -> std::sync::MutexGuard<'_, ral_core::transport::EngineInner> {
+    pub(crate) fn shell_mut(&self) -> std::sync::MutexGuard<'_, ral_core::protocol::EngineInner> {
         match self {
             Self::Identity { transport, .. } => transport.shell_mut(),
             Self::Wire { .. } => panic!(
@@ -144,23 +131,33 @@ impl Seat {
         }
     }
 
-    pub(crate) fn install_run(&self, install: RunInstall) -> RunGuard<'_> {
+    /// Install the session sink a settling worker's deferred batch reaches —
+    /// the host itself now rides `dispatch_to_report`'s own `host` argument
+    /// rather than anything installed ahead of the dispatch.
+    pub(crate) fn install_deferred(&self, sink: Arc<dyn ral_core::types::DeferredSink>) {
         match self {
-            Self::Identity { transport, .. } => {
-                transport.set_deferred_sink(install.deferred);
-                transport.set_fork(install.fork);
-                // Drain-then-handle: a handler's chrome must never jump
-                // ahead of surface output still queued on the channel.
-                transport.set_desk(Arc::new(DeskBinding {
-                    seam: install.seam,
-                    events: transport.events_shared(),
-                }));
-            }
-            Self::Wire { transport } => {
-                transport.set_deferred_sink(install.deferred);
-            }
+            Self::Identity { transport, .. } => transport.set_deferred_sink(sink),
+            Self::Wire { transport } => transport.set_deferred_sink(sink),
         }
-        RunGuard(self)
+    }
+
+    /// Why no further frame will cross this seat's transport, if that has
+    /// happened.
+    pub(crate) fn severed(&self) -> Option<Severed> {
+        self.transport().severed()
+    }
+
+    /// Declare this seat's engine dead for a reason the host observed. An
+    /// identity engine is this process: a fault there is a program error,
+    /// and panics.
+    pub(crate) fn fault(&self, cause: Severed) -> Severed {
+        match self {
+            Self::Wire { transport } => {
+                transport.sever(cause.clone());
+                cause
+            }
+            Self::Identity { .. } => unreachable!("an identity engine cannot fault: {cause}"),
+        }
     }
 
     pub(crate) fn eval_reach(&self) -> EvalReach {
@@ -261,7 +258,7 @@ fn identity_ceremony(
     transport.set_interrupt_target(interrupt_target.clone());
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     transport.attach(
-        ral_core::transport::TerminalEndpoint {
+        ral_core::protocol::TerminalEndpoint {
             lease: None,
             state: crate::bootstrap::probe_terminal(),
         },
@@ -287,8 +284,8 @@ mod tests {
     use super::*;
     use crate::bus::{Emitter, Inbox};
     use crate::fleet::Fleet;
-    use crate::fleet::desk::{ExarchDesk, HostServices};
-    use ral_core::transport::{EnquiryError, Liveness, Program, Report, Run, WireTransport};
+    use crate::fleet::desk::{ExarchDesk, HostServices, RunHost, SurfaceApplier};
+    use ral_core::protocol::{EnquiryError, Host, Liveness, Program, Report, Run, WireTransport};
     use ral_core::types::{Capabilities, Nursery};
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
     use std::os::unix::io::AsRawFd;
@@ -367,7 +364,10 @@ mod tests {
     fn wire_seat(liveness: Liveness) -> (Seat, std::process::Child) {
         let (transport, child) = spawn_engine(liveness);
         let dir = std::env::temp_dir();
-        (Seat::wire(transport, dir.clone(), dir), child)
+        (
+            Seat::wire(transport, dir.clone(), dir).expect("a freshly spawned engine attaches"),
+            child,
+        )
     }
 
     /// The wire seat's own shape as `Avatar::host_services` builds it: a fresh
@@ -388,16 +388,34 @@ mod tests {
         }
     }
 
+    /// A `Host` that only records the values it is surfaced, for the
+    /// round-trip below — this run raises no enquiry and forks nothing.
+    struct SurfaceCollector(std::sync::Mutex<Vec<ral_core::serial::FOValue>>);
+
+    impl Host for SurfaceCollector {
+        fn surface(&self, val: ral_core::serial::FOValue) {
+            self.0.lock().unwrap().push(val);
+        }
+        fn enquire(
+            &self,
+            _req: ral_core::serial::FOValue,
+        ) -> Result<ral_core::serial::FOValue, EnquiryError> {
+            unreachable!("this run raises no enquiry")
+        }
+        fn fork(&self) -> Option<ral_core::types::Fork> {
+            None
+        }
+    }
+
     #[test]
     fn wire_seat_run_round_trips_and_surfaces_a_value() {
         let (seat, mut child) = wire_seat(Liveness::default());
 
-        let mut surfaced = Vec::new();
-        let report = ral_core::transport::dispatch_to_report(
+        let host = Arc::new(SurfaceCollector(std::sync::Mutex::new(Vec::new())));
+        let report = ral_core::protocol::dispatch_to_report(
             seat.transport(),
             source_run("surface `ping"),
-            |v| surfaced.push(v),
-            |_| unreachable!("this run raises no enquiry"),
+            host.clone() as Arc<dyn Host>,
         )
         .expect("the engine must answer the dispatch with a Report");
 
@@ -405,7 +423,7 @@ mod tests {
             matches!(
                 report,
                 Report::Ran {
-                    ending: ral_core::transport::Ending::Settled { .. },
+                    ending: ral_core::protocol::Ending::Settled { .. },
                     ..
                 }
             ),
@@ -413,6 +431,7 @@ mod tests {
         );
         // Core also reports an observation per dispatch on this sink; the
         // kit's own value is the variant among them.
+        let surfaced = host.0.lock().unwrap().clone();
         assert!(
             surfaced.contains(&ral_core::serial::FOValue::Variant {
                 label: "ping".into(),
@@ -433,26 +452,28 @@ mod tests {
         let (emit, _rx) = crate::bus::dummy_emitter();
         let fleet = Fleet::new();
         let trunk = test_trunk(&fleet);
-        let desk = Arc::new(ExarchDesk {
-            services: wire_host_services(&emit, &trunk),
+        let host: Arc<dyn Host> = Arc::new(RunHost {
+            desk: ExarchDesk {
+                services: wire_host_services(&emit, &trunk),
+            },
+            apply: SurfaceApplier {
+                pins: None,
+                id: trunk.id,
+                recorder: crate::record::Emitter::none(),
+                surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
+            },
         });
 
-        let report = ral_core::transport::dispatch_to_report(
+        let report = ral_core::protocol::dispatch_to_report(
             seat.transport(),
             source_run("agents `list"),
-            |_| {},
-            |req| {
-                desk.handle(req).map_err(|e| EnquiryError {
-                    status: e.exit_code(),
-                    message: e.message,
-                })
-            },
+            host,
         )
         .expect("the engine must answer the dispatch with a Report");
 
         match report {
             Report::Ran {
-                ending: ral_core::transport::Ending::Settled { .. },
+                ending: ral_core::protocol::Ending::Settled { .. },
                 ..
             } => {}
             other => panic!("`agents `list` must settle through the installed desk, got {other:?}"),
@@ -468,7 +489,7 @@ mod tests {
     /// landing in `inbox` as a `Post::Surface`. Polled with no dispatch in
     /// flight, the shape a real front-end sees between tool calls.
     #[test]
-    fn wire_seat_install_run_installs_the_deferred_sink_for_a_settled_spawn_worker() {
+    fn wire_seat_install_deferred_installs_the_sink_for_a_settled_spawn_worker() {
         let (seat, mut child) = wire_seat(Liveness::default());
         let inbox = Inbox::new();
         let (tx, _rx) = crate::bus::channel();
@@ -477,35 +498,30 @@ mod tests {
         let root_id = trunk.id;
         let emit = Emitter::with_mailbox(tx, root_id, inbox.mailbox());
 
-        let install = RunInstall {
-            seam: Arc::new(HostSeam {
-                desk: ExarchDesk {
-                    services: wire_host_services(&emit, &trunk),
-                },
-                apply: crate::fleet::desk::SurfaceApplier {
-                    pins: None,
-                    id: root_id,
-                    recorder: crate::record::Emitter::none(),
-                    surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
-                },
-            }),
-            deferred: crate::shell_eval::deferred_sink(&emit, &trunk),
-            fork: ral_core::types::Fork::Park(Nursery::default()),
-        };
-        let _guard = seat.install_run(install);
+        seat.install_deferred(crate::shell_eval::deferred_sink(&emit, &trunk));
+        let host: Arc<dyn Host> = Arc::new(RunHost {
+            desk: ExarchDesk {
+                services: wire_host_services(&emit, &trunk),
+            },
+            apply: SurfaceApplier {
+                pins: None,
+                id: root_id,
+                recorder: crate::record::Emitter::none(),
+                surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
+            },
+        });
 
-        let report = ral_core::transport::dispatch_to_report(
+        let report = ral_core::protocol::dispatch_to_report(
             seat.transport(),
             source_run("let h = spawn { sleep 1 }"),
-            |_| {},
-            |_| unreachable!("this run raises no enquiry"),
+            host,
         )
         .expect("the engine must answer the dispatch with a Report");
         assert!(
             matches!(
                 report,
                 Report::Ran {
-                    ending: ral_core::transport::Ending::Settled { .. },
+                    ending: ral_core::protocol::Ending::Settled { .. },
                     ..
                 }
             ),
@@ -557,11 +573,10 @@ mod tests {
 
         let settled = std::thread::scope(|s| {
             let dispatch = s.spawn(|| {
-                ral_core::transport::dispatch_to_report(
+                ral_core::protocol::dispatch_to_report(
                     seat.transport(),
                     source_run("sleep 30"),
-                    |_| {},
-                    |_| unreachable!("this run raises no enquiry"),
+                    Arc::new(()) as Arc<dyn Host>,
                 )
             });
             // Interrupt only once the engine is genuinely inside the sleep.
@@ -573,10 +588,7 @@ mod tests {
         });
         let (report, elapsed) = settled;
 
-        assert!(
-            report.is_some(),
-            "the engine must still answer with a Report"
-        );
+        assert!(report.is_ok(), "the engine must still answer with a Report");
         assert!(
             elapsed < WAIT,
             "cancel must settle the run well inside {WAIT:?} rather than run `sleep 30` to \
@@ -591,10 +603,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "/clear has no meaning on a wire seat")]
     fn wire_seat_clear_panics_didactically() {
+        // Built directly, bypassing `Seat::wire`'s attach handshake: the
+        // panic under test fires on the `Seat::Wire` shape alone, with no
+        // engine on the far end of this raw socketpair to answer it.
         let (host, _guest) = UnixStream::pair().expect("socketpair");
         let transport = WireTransport::adopt(host, Liveness::default()).expect("adopt");
-        let dir = std::env::temp_dir();
-        let mut seat = Seat::wire(transport, dir.clone(), dir);
+        let mut seat = Seat::Wire {
+            transport: Box::new(transport),
+        };
         seat.clear(&test_log());
     }
 
@@ -603,8 +619,9 @@ mod tests {
     fn wire_seat_shell_mut_panics_didactically() {
         let (host, _guest) = UnixStream::pair().expect("socketpair");
         let transport = WireTransport::adopt(host, Liveness::default()).expect("adopt");
-        let dir = std::env::temp_dir();
-        let seat = Seat::wire(transport, dir.clone(), dir);
+        let seat = Seat::Wire {
+            transport: Box::new(transport),
+        };
         let _guard = seat.shell_mut();
     }
 }

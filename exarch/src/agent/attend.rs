@@ -8,11 +8,13 @@
 use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
 use crate::agent::event::QuiesceReason;
 use crate::agent::nudge;
+use crate::agent::seat::engine_gone;
 use crate::agent::{Avatar, deliberate, panic_msg};
 use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
 use crate::provider::{Provider, ProviderError};
 use crate::shell_eval;
 use ral_core::serial::FOValue;
+use ral_core::protocol::Severed;
 
 /// What the surrounding loop does next: `Stop` on `/quit` or a headless root's `reply`.
 enum Flow {
@@ -82,11 +84,19 @@ impl Avatar {
         self.couple(emit);
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         loop {
+            if let Some(s) = self.seat.severed() {
+                self.severed(&s, &mut final_outcome);
+                break;
+            }
             // Every pass is a settled ready boundary.  A lease-chain reap is
             // deliberately not drained here: core pushes its `` `notice `` on
             // the surface stream of the run that observes it, so a reap during
             // a long idle surfaces once an item next runs.
-            self.check_disk_warn();
+            if let Err(s) = self.check_disk_warn()
+                && matches!(self.severed(&s, &mut final_outcome), Flow::Stop)
+            {
+                break;
+            }
             // The state a frontend shows over the coming silence is this park's
             // own verdict.  Only on an empty queue: with an item already in
             // hand the agent is not idle for any observable moment, and the
@@ -100,10 +110,10 @@ impl Avatar {
             // `next_or_idle` recomputes the park verdict on every wake.  A
             // returning agent that quiesces breaks here, and its outcome
             // reaches its parent through the worker epilogue, not this break.
-            let Some(item) = self
-                .inbox
-                .next_or_idle(|engaged| policy(self, self.park_mode(engaged)), &self.agent.cancel)
-            else {
+            let Some(item) = self.inbox.next_or_idle(
+                |engaged| policy(self, self.park_mode(engaged)),
+                &self.agent.cancel,
+            ) else {
                 break;
             };
             self.agent.set_resting(false);
@@ -113,6 +123,11 @@ impl Avatar {
             ) {
                 break;
             }
+        }
+        // A park that quiesced on severance must report `engine_gone`, not
+        // the generic `NO_REPLY_REASON` an empty inbox otherwise leaves.
+        if let Some(s) = self.seat.severed() {
+            self.severed(&s, &mut final_outcome);
         }
         // `take_up` quiesces per item; this catches whichever path breaks the
         // loop, so the agent is ReadyForUser however it ends.
@@ -139,7 +154,15 @@ impl Avatar {
         let mut control = NoControl;
         let mut final_outcome = (AgentOutcome::Failed(NO_REPLY_REASON.into()), None);
         loop {
-            self.check_disk_warn();
+            if let Some(s) = self.seat.severed() {
+                self.severed(&s, &mut final_outcome);
+                break;
+            }
+            if let Err(s) = self.check_disk_warn()
+                && matches!(self.severed(&s, &mut final_outcome), Flow::Stop)
+            {
+                break;
+            }
             let Some(item) = self.inbox.next_item() else {
                 break;
             };
@@ -149,6 +172,11 @@ impl Avatar {
             ) {
                 break;
             }
+        }
+        // A park that quiesced on severance must report `engine_gone`, not
+        // the generic `NO_REPLY_REASON` an empty inbox otherwise leaves.
+        if let Some(s) = self.seat.severed() {
+            self.severed(&s, &mut final_outcome);
         }
         if !self.log.lock().is_ready() {
             self.log.lock().quiesce(QuiesceReason::Aborted);
@@ -238,6 +266,15 @@ impl Avatar {
         {
             eprintln!("exarch: a provider error was not recorded: {error}");
         }
+        if let Ok(deliberate::Outcome::Severed(s)) = &outcome {
+            return self.severed(s, final_outcome);
+        }
+        // A boundary read, legal here: the batch has fully drained and no
+        // dispatch is in flight.
+        let workers_idle = match self.probe_workers() {
+            Ok(workers) => workers.is_empty(),
+            Err(s) => return self.severed(&s, final_outcome),
+        };
         // `last_input` is fresh off `deliberate`, so the gauge reads this
         // completion's own pressure, not the one it was called with.
         let facts = nudge::Facts {
@@ -247,9 +284,7 @@ impl Avatar {
             // Nudged only when nothing else is already carrying this agent
             // forward: no reply standing for a parent to fetch, no detached
             // shell work, no busy children.
-            quiet: !self.agent.has_reply()
-                && self.probe_workers().is_empty()
-                && !self.agent.has_busy_children(),
+            quiet: !self.agent.has_reply() && workers_idle && !self.agent.has_busy_children(),
         };
         let nudge_msg = match &mut self.nudges {
             Some(nudges) => nudges.react(&outcome, &facts, &mut self.log.lock()),
@@ -273,9 +308,7 @@ impl Avatar {
             }
         }
         // Only the headless root ends on `reply` — a child parks on its deposit.
-        if self.agent.parent.is_none()
-            && matches!(outcome, Ok(deliberate::Outcome::Replied(_)))
-        {
+        if self.agent.parent.is_none() && matches!(outcome, Ok(deliberate::Outcome::Replied(_))) {
             Flow::Stop
         } else {
             Flow::Continue
@@ -323,6 +356,10 @@ impl Avatar {
     /// — the same wait, but a terminate-cause cancel still ends it, and the
     /// fleet's idle lease rather than this predicate bounds it.
     fn park_mode(&self, engaged: bool) -> ParkMode {
+        // Nothing is left to wait for once the engine is gone.
+        if self.seat.severed().is_some() {
+            return ParkMode::Quiesce;
+        }
         let conversing = self.agent.interactive && !self.returns();
         if conversing {
             // `next_or_idle` lets a terminate cause end every park but `Held`,
@@ -374,16 +411,19 @@ impl Avatar {
     /// — nothing is ever rotated or deleted.  Unconfigured it walks nothing at
     /// all; otherwise it walks on the [`Self::ral_epoch`] cadence of
     /// [`DISK_WARN_CHECK_INTERVAL`].
-    fn check_disk_warn(&mut self) {
+    ///
+    /// # Errors
+    /// The engine's severance, from the `EXARCH_SCRATCH` probe.
+    fn check_disk_warn(&mut self) -> Result<(), Severed> {
         let Some(ceiling) = self.agent.disk_warn_bytes else {
-            return;
+            return Ok(());
         };
         if self.ral_epoch < self.disk_check_epoch {
-            return;
+            return Ok(());
         }
         self.disk_check_epoch = self.ral_epoch + DISK_WARN_CHECK_INTERVAL;
         let mut total = crate::agent::resources::dir_size(self.log.lock().dir());
-        if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH") {
+        if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH")? {
             total += crate::agent::resources::dir_size(&std::path::PathBuf::from(&scratch));
         }
         if total > ceiling {
@@ -403,6 +443,19 @@ impl Avatar {
         } else {
             self.disk_warn_latched = false;
         }
+        Ok(())
+    }
+
+    /// The one edge every caller ends on when it learns its engine is
+    /// severed: record the sentence, fail the outcome, quiesce the log if a
+    /// deliberation left it mid-protocol, and stop the loop that called this.
+    fn severed(&self, s: &Severed, final_outcome: &mut (AgentOutcome, Option<FOValue>)) -> Flow {
+        self.note_error(engine_gone(s));
+        *final_outcome = (AgentOutcome::Failed(engine_gone(s)), None);
+        if !self.log.lock().is_ready() {
+            self.log.lock().quiesce(QuiesceReason::Aborted);
+        }
+        Flow::Stop
     }
 }
 
@@ -440,11 +493,22 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
         Item::Surface { id, values, .. } => {
             let mut buf = crate::record::commit::SurfaceBuffer::new();
             for v in values {
-                if let Some(surface) = shell_eval::decode_surface(v)
-                    && let Err(error) =
-                        crate::fleet::desk::absorb_surface(&mut buf, recorder, *id, &surface)
-                {
-                    recorder.report_fault(&error);
+                match shell_eval::decode_surface(v) {
+                    shell_eval::Decoded::Surface(surface) => {
+                        if let Err(error) =
+                            crate::fleet::desk::absorb_surface(&mut buf, recorder, *id, &surface)
+                        {
+                            recorder.report_fault(&error);
+                        }
+                    }
+                    shell_eval::Decoded::Landed => {}
+                    shell_eval::Decoded::Unknown => {
+                        if let Err(error) =
+                            recorder.emit(shell_eval::unknown_surface_note(v.type_name()))
+                        {
+                            recorder.report_fault(&error);
+                        }
+                    }
                 }
             }
             if let Err(error) = buf.flush_surfaces(recorder) {
@@ -516,6 +580,7 @@ fn agent_outcome(
         }
         Ok(deliberate::Outcome::Cancelled) => (AgentOutcome::Cancelled, None),
         Ok(deliberate::Outcome::Capped) => (AgentOutcome::Stopped("step cap reached".into()), None),
+        Ok(deliberate::Outcome::Severed(s)) => (AgentOutcome::Failed(engine_gone(s)), None),
         Err(e) => (AgentOutcome::Failed(e.summary()), None),
     }
 }
@@ -762,7 +827,7 @@ mod tests {
     /// `deferred_lease`, so a reap test need not wait out `run_shell`'s real
     /// 1 h/24 h policy.
     fn dispatch_with_lease(session: &Avatar, cmd: &str, lease: ral_core::types::WorkerLease) {
-        use ral_core::transport::{DispatchId, Program, Run};
+        use ral_core::protocol::{DispatchId, Host, Program, Run};
         use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
         session.seat.transport().dispatch(
             DispatchId(0),
@@ -778,6 +843,7 @@ mod tests {
                 stdin: RunStdin::Empty,
                 trail: None,
             },
+            &(std::sync::Arc::new(()) as std::sync::Arc<dyn Host>),
         );
     }
 
@@ -1054,7 +1120,9 @@ mod tests {
             tx: tx.downgrade(),
             meter: crate::bus::UsageMeter::default(),
         });
-        session.check_disk_warn();
+        session
+            .check_disk_warn()
+            .expect("an identity seat never severs");
 
         assert_eq!(
             session.disk_check_epoch, 0,
@@ -1078,7 +1146,9 @@ mod tests {
             tx: tx.downgrade(),
             meter: crate::bus::UsageMeter::default(),
         });
-        session.check_disk_warn();
+        session
+            .check_disk_warn()
+            .expect("an identity seat never severs");
         assert!(
             !crate::bus::drain_records(&rx).is_empty(),
             "the first crossing warns"
@@ -1086,7 +1156,9 @@ mod tests {
 
         // Force the amortization window open without driving real ral calls.
         session.disk_check_epoch = session.ral_epoch;
-        session.check_disk_warn();
+        session
+            .check_disk_warn()
+            .expect("an identity seat never severs");
         assert!(
             crate::bus::drain_records(&rx).is_empty(),
             "still above the ceiling: the latch suppresses a repeat"
@@ -1109,7 +1181,9 @@ mod tests {
             tx: tx.downgrade(),
             meter: crate::bus::UsageMeter::default(),
         });
-        session.check_disk_warn();
+        session
+            .check_disk_warn()
+            .expect("an identity seat never severs");
         let fact = crate::bus::drain_records(&rx)
             .into_iter()
             .next()
@@ -1123,7 +1197,9 @@ mod tests {
 
         std::fs::remove_file(&big).unwrap();
         session.disk_check_epoch = session.ral_epoch;
-        session.check_disk_warn();
+        session
+            .check_disk_warn()
+            .expect("an identity seat never severs");
         assert!(
             crate::bus::drain_records(&rx).is_empty(),
             "back under the ceiling: no warning, just the latch clearing"
@@ -1132,7 +1208,9 @@ mod tests {
 
         std::fs::write(&big, vec![0u8; OVER_CEILING]).unwrap();
         session.disk_check_epoch = session.ral_epoch;
-        session.check_disk_warn();
+        session
+            .check_disk_warn()
+            .expect("an identity seat never severs");
         assert!(
             !crate::bus::drain_records(&rx).is_empty(),
             "re-crossing after falling below warns again"

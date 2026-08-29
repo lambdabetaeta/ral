@@ -35,7 +35,7 @@ pub type SurfaceSink = Arc<dyn EventSink>;
 /// The refusal a host with no desk answers, spelled once.
 ///
 /// Both transports, the engine, and every front-end reach for this rather than
-/// their own copy: a run must not be able to tell which seam refused it by the
+/// their own copy: a run must not be able to tell which host refused it by the
 /// wording.
 pub const NO_DESK: &str = "this host answers no enquiries";
 

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use crate::process::{CancelCause, ForegroundScope};
 use crate::serial::FOValue;
 use crate::sync::LockExt;
-use crate::transport::{
+use crate::protocol::{
     Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
     answer_probe,
 };
@@ -226,7 +226,7 @@ fn resolve_installer<'a>(
     proto_version: u32,
     installer: &str,
 ) -> Result<&'a EngineInstaller, String> {
-    use crate::transport::PROTOCOL_VERSION;
+    use crate::protocol::PROTOCOL_VERSION;
     if proto_version != PROTOCOL_VERSION {
         return Err(format!(
             "engine: protocol version mismatch (front-end {proto_version}, engine {PROTOCOL_VERSION})"
@@ -270,6 +270,26 @@ impl Drop for Dispatch {
     fn drop(&mut self) {
         self.stamp.store(0, Ordering::Relaxed);
         self.busy.store(false, Ordering::Release);
+    }
+}
+
+/// Raised while the worker holds an item, lowered once that item's Report is
+/// on the wire. Admission ([`Dispatch`]) and this are different questions: a
+/// claim is released *before* its own report write, so only this answers the
+/// teardown's — is the worker still producing frames? A guard, like the claim,
+/// so an unwind cannot leave it raised.
+struct Writing(Arc<AtomicBool>);
+
+impl Writing {
+    fn raise(flag: &Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag.clone())
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -347,6 +367,11 @@ fn engine_session(
                 Ok(target) => target,
                 Err(msg) => {
                     eprintln!("{msg}");
+                    let _ = engine_write(
+                        &writer,
+                        &wire_fault,
+                        &Frame::Session(SessionEvent::Refused(msg)),
+                    );
                     return 1;
                 }
             };
@@ -401,6 +426,11 @@ fn engine_session(
                 && let Err(msg) = crate::hatch::apply_seed(seed, &mut shell, target.narrow)
             {
                 eprintln!("engine: {msg}");
+                let _ = engine_write(
+                    &writer,
+                    &wire_fault,
+                    &Frame::Session(SessionEvent::Refused(msg)),
+                );
                 return 1;
             }
             shell
@@ -415,6 +445,14 @@ fn engine_session(
             return 1;
         }
     };
+
+    // The shell is booted and, where hatched, seeded: the engine now takes
+    // dispatches, and the front-end's `await_attached` unblocks.
+    let _ = engine_write(
+        &writer,
+        &wire_fault,
+        &Frame::Session(SessionEvent::Attached),
+    );
 
     // A probe rides the same rendezvous as a run, so it serialises with
     // dispatches for free: sent mid-run it gets "engine busy", the same arm a
@@ -433,10 +471,13 @@ fn engine_session(
     // dispatch's cancel cannot reach the next.
     let dispatches = shell.run_cancel_handle();
 
-    // Lowered by the claimed `Dispatch`'s `Drop`, which runs once the worker
-    // has written its Report, so "engine busy" means a run genuinely in
-    // flight, not a worker slow to re-park.
+    // Lowered by the claimed `Dispatch`'s `Drop`, right before the worker
+    // writes its Report, so a probe or dispatch the front-end sends the
+    // instant it has the Report in hand is never refused as busy.
     let busy = Arc::new(AtomicBool::new(false));
+    // The other half of the teardown's span: raised from the moment the worker
+    // takes an item until its Report is written.
+    let writing = Arc::new(AtomicBool::new(false));
     let (run_tx, run_rx) = mpsc::channel::<(Dispatch, WorkItem)>();
 
     let current_dispatch = Arc::new(AtomicU64::new(0));
@@ -462,9 +503,11 @@ fn engine_session(
     let worker_writer = writer.clone();
     let worker_fault = wire_fault.clone();
     let worker_desk = desk.clone();
+    let worker_writing = writing.clone();
     std::thread::spawn(move || {
         let mut shell = shell;
         while let Ok((dispatch, item)) = run_rx.recv() {
+            let _writing = Writing::raise(&worker_writing);
             let id = dispatch.id;
             // `Shell::run` already catches, rolls back, and reports a panic in
             // the run itself; this outer catch is for one escaping the report
@@ -488,7 +531,7 @@ fn engine_session(
                 }
                 WorkItem::Probe(reading) => match answer_probe(&mut shell, &reading) {
                     Ok(v) => Report::Ran {
-                        ending: crate::transport::Ending::Settled {
+                        ending: crate::protocol::Ending::Settled {
                             value: v,
                             status: 0,
                         },
@@ -496,7 +539,7 @@ fn engine_session(
                         trail: Vec::new(),
                     },
                     Err(message) => Report::Ran {
-                        ending: crate::transport::Ending::Raised {
+                        ending: crate::protocol::Ending::Raised {
                             rendered: message,
                             command_exit: false,
                             single_command: false,
@@ -508,13 +551,16 @@ fn engine_session(
                 },
             }))
             .unwrap_or_else(|_| Report::Static {
-                diagnostics: crate::transport::Diagnostics::Host(
+                diagnostics: crate::protocol::Diagnostics::Host(
                     "engine: dispatch panicked in the engine worker".into(),
                 ),
             });
 
-            // `dispatch` drops after this, never before: the engine reads idle
-            // only once the front-end has the report in hand.
+            // `dispatch` drops before this, never after: the same thread
+            // writes this Report and any later run's frames, so the wire
+            // order is unchanged, and a probe the front-end sends on
+            // receiving the Report is never refused "engine busy".
+            drop(dispatch);
             write_report(&worker_writer, &worker_fault, id, report);
         }
     });
@@ -542,7 +588,7 @@ fn engine_session(
                 &wire_fault,
                 id,
                 Report::Static {
-                    diagnostics: crate::transport::Diagnostics::Host("engine busy".into()),
+                    diagnostics: crate::protocol::Diagnostics::Host("engine busy".into()),
                 },
             );
             Claimed::Busy
@@ -661,8 +707,11 @@ fn engine_session(
     crate::process::request_foreground_cancel(CancelCause::Explicit);
     root.cancel(CancelCause::Explicit);
     crate::hatch::teardown_hatched();
+    // Claimed *or* still writing: a claim is released ahead of its own report
+    // write, so neither flag alone spans the work a settle must wait out.
+    let settling = || writing.load(Ordering::Acquire) || busy.load(Ordering::Acquire);
     let settle_by = Instant::now() + SETTLE_TIMEOUT;
-    while busy.load(Ordering::Acquire) && Instant::now() < settle_by {
+    while settling() && Instant::now() < settle_by {
         std::thread::sleep(SETTLE_POLL);
     }
     // A severed wire is never the clean detach the EOF arm's `0` reports: a
@@ -806,7 +855,7 @@ mod wire_desk_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::PROTOCOL_VERSION;
+    use crate::protocol::PROTOCOL_VERSION;
 
     fn stub_boot() -> Shell {
         Shell::new(crate::io::TerminalState::default())
@@ -872,7 +921,7 @@ mod tests {
 mod engine_session_tests {
     use super::*;
     use crate::process::cancel::REQUEST_SERIAL;
-    use crate::transport::{PROTOCOL_VERSION, TerminalEndpoint};
+    use crate::protocol::{PROTOCOL_VERSION, TerminalEndpoint};
 
     const WAIT: Duration = Duration::from_secs(20);
 
@@ -904,7 +953,7 @@ mod engine_session_tests {
     /// One capturing run under the ⊤ capability ceiling.
     fn run(src: &str) -> Run {
         Run {
-            program: crate::transport::Program::Source(src.into()),
+            program: crate::protocol::Program::Source(src.into()),
             script_name: "<test>".into(),
             caps: crate::types::Capabilities::root(),
             wall: None,
@@ -1022,7 +1071,7 @@ mod engine_session_tests {
         match report {
             Report::Ran {
                 ending:
-                    crate::transport::Ending::Settled {
+                    crate::protocol::Ending::Settled {
                         value: FOValue::Int { value },
                         ..
                     },
@@ -1034,7 +1083,7 @@ mod engine_session_tests {
 
     fn is_engine_busy(report: &Report) -> bool {
         matches!(report, Report::Static {
-            diagnostics: crate::transport::Diagnostics::Host(msg),
+            diagnostics: crate::protocol::Diagnostics::Host(msg),
         } if msg == "engine busy")
     }
 
@@ -1082,9 +1131,11 @@ mod engine_session_tests {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         host.run(1, "let h = spawn { sleep 1 }");
-        let frame = host.await_frame(|f| matches!(f, Frame::Session(..)));
+        let frame = host.await_frame(|f| {
+            matches!(f, Frame::Session(SessionEvent::DeferredSurface(_)))
+        });
         let Frame::Session(SessionEvent::DeferredSurface(batch)) = frame else {
-            unreachable!("await_frame matched a Session frame");
+            unreachable!("await_frame matched a deferred batch");
         };
         match batch.last() {
             Some(FOValue::Variant { label, .. }) if label == "done" => {}

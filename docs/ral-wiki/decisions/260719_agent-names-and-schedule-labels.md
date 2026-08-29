@@ -134,10 +134,10 @@ mistake.
 - [[decisions/260702_subagent-memory-modes|subagent-memory-modes]] stands: the
   two memory contracts are exactly the `type` field's two tags.
 - [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
-  and [[decisions/260706_enquiry-channel|enquiry-channel]] stand: the spawn
-  family is still a ral builtin answered by `ExarchDesk` over the enquiry rail;
-  only the class inventory shifts (the commitment classes leave, the spawn
-  enquiry carries the name).
+  stands: the spawn family is still a ral builtin answered by `ExarchDesk`
+  over the [[design/engine-protocol|engine protocol]]'s enquiry rail; only the class
+  inventory shifts (the commitment classes leave, the spawn enquiry carries
+  the name).
 - [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]] stands: fuel still
   bounds delegation depth; the retired commitment builtins simply leave the set
   of verbs a spent-fuel agent cannot reach.
@@ -154,4 +154,4 @@ mistake.
 [[decisions/260617_async-agent-tool|async-agent-tool]] (the launch-only async edge kept),
 [[decisions/260703_spawn-fuel-ceiling|spawn-fuel-ceiling]] (fuel bounds depth),
 [[decisions/260705_branch-minimal|branch-minimal]] (the conversing mnemon child),
-[[decisions/260706_enquiry-channel|enquiry-channel]] (the rail the builtins answer over).
+[[design/engine-protocol|engine-protocol]] (the rail the builtins answer over).

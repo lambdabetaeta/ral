@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 68f1964e
-generated_at_date: 2026-08-26
-covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/hatch.rs]
+generated_at_commit: 50388d83
+generated_at_date: 2026-08-29
+covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs]
 ---
 
 # Map: core / transport
@@ -14,53 +14,9 @@ framed, and reconstituted on the other side of a re-exec of this
 (A [[design/grant|grant]] does
 not ride this wire: its body evaluates locally, and external children are
 confined per-command — see
-[[decisions/260617_sandbox-external-children|sandbox-external-children]].
-Distinct from all of this is the crate-root `core/src/transport.rs`, the
-transport-parametric *host seam* — the frame algebra between a front-end and
-the engine, with `engine.rs` and the `wire.rs` socket channel —
-[[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]].
-A wire-seat child's hatch (`core/src/hatch.rs`,
-[[map/exarch/agent|exarch / agent]]) sits below both seams and reuses this
-one's machinery rather than the host seam's. The connection is opened from the
-*host's* side: the parent binds an ephemeral guest port for one spawn's
-duration and names it in its enquiry, the host dials it and writes eight
-little-endian token bytes, and the listener thread checks them before handing
-the connection to `hatch_over`. Core opens no socket for this — `AF_VSOCK` is a
-VM concept below the language, so the bind lives in exarch
-(`shell_eval/builtins/guest_port.rs`, the one endpoint exarch opens itself) and
-`listen_for_hatch` is handed a listening descriptor. Nothing under
-`core/src/hatch.rs` names a transport, which is also why the tests substitute a
-`UnixListener` on the production path rather than beside it. Every partial
-token read polls beside the wake pipe, so a peer that sends a prefix and stalls
-cannot pin cancellation — though it does hold the accept loop, and so denies that
-one spawn. `hatch_over` re-execs `current_exe` on the recipe the hatch carries —
-`--engine` in production, one exact fixture under test, so the spawn itself never
-branches on `cfg(test)` — with the dial on fd 3 and a
-seed channel named by `RAL_ENGINE_SEED_FD`; the child drains the framed
-`EngineSeed` before waiting for `Attach`, the parent writes it after `spawn`, and
-only then sends one `HATCH_ACK` byte back. That ordering is what lets a seed
-outgrow the socketpair's bounded buffer without deadlocking creation, and
-`spawn_engine` takes the child's end of that pair *by value*, so no write can
-precede the drop that turns a dead child into `EPIPE` rather than a blocked
-writer. The write is bounded by the same stall the engine allows its own protocol
-writes, and a seed that only partly crosses kills its child instead of recording
-it: half a frame would leave it blocked in a read forever, and the `HATCHED`
-table's sweep waits on exits, not on silence — it is `waitpid` and nothing else,
-since a child closes that seed channel the moment it has hydrated and so falls
-quiet long before it dies. The ack
-goes out only once `spawn` has returned and the seed has crossed, so a host that
-hears it has a live child holding its whole seed; the frame algebra offers no
-substitute, since the host speaks first and `Attach` is its only legal opening
-frame. Neither the token nor the ack is a
-`Frame`, so a hatch never touches `PROTOCOL_VERSION` at all — no new frame, no
-version bump. `HATCH_ACK` sits in the platform-neutral
-`core/src/transport.rs` because the two ends need not share an operating
-system, while spawning and seed hydration are Unix guest machinery. A seeded
-child's ceiling is narrowed by the `GrantNarrower` its `EngineInstaller`
-carries: core has no base-tag lexicon of its own, and a field rather than a
-registered hook means an engine whose seeded children have no policy is
-unrepresentable rather than merely unlikely. The seed a hatch carries is this
-page's `EngineSeed`, below.)
+[[decisions/260617_sandbox-external-children|sandbox-external-children]].)
+The front-end⇄engine protocol is a separate wire —
+[[map/core/engine-protocol|engine-protocol]].
 
 **Every wire↔runtime hop is an exhaustive, field-complete map: no hop may pass
 through a constructor that defaults a field the wire carries, and no kind may
@@ -88,7 +44,7 @@ realisations:
 
 `FOValue` is the serde-round-trippable *first-order* value — data all the way
 down, first-order by construction via an uninhabited-by-default extension slot
-— and the host seam's shared value vocabulary. `SerialValue = FOValue<Closure>`
+— and the engine protocol's shared value vocabulary. `SerialValue = FOValue<Closure>`
 fills that slot with closures, the mirror of the runtime `Value` this wire
 carries. Around it:
 
@@ -174,7 +130,7 @@ serialisable fragment and
 `write_frame` / `read_frame` are length-prefixed JSON frames (a `u32` length
 followed by the `serde_json` body). One codec carries the
 [[internals/pipeline-execution|pipeline-stage helper]]'s request/response frames
-— the single re-exec'd eval protocol — and the host seam's front-end⇄engine
+— the single re-exec'd eval protocol — and the engine protocol's front-end⇄engine
 `WireChannel` frames (`core/src/wire.rs`).
 
 This layer is the mechanism behind the mobile/local split — `env` /

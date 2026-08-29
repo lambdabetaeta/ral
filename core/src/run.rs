@@ -16,7 +16,7 @@ use crate::io::{Io, Sink, Source};
 use crate::process::{CancelCause, ForegroundScope};
 use crate::source::{FileId, Span};
 use crate::syntax::parser::ParseError;
-use crate::transport::{Program, Run};
+use crate::protocol::{Program, Run};
 use crate::typecheck::TypeError;
 use crate::types::{
     Break, Capabilities, DeferredSink, Desk, Error, Escape, Fork, Mooring, NurseryGuard,
@@ -47,7 +47,7 @@ pub enum StaticDiagnostics {
     Host(crate::types::Error),
 }
 
-// ── The run entry: one synchronous, runtime-agnostic host seam ──────────────
+// ── The run entry: one synchronous, runtime-agnostic host door ──────────────
 //
 // Hosts describe *policy*; core owns *resources*. The reduction primitive
 // behind the door is crate-private, so no host can start an unframed
@@ -111,7 +111,7 @@ pub struct RunRequest<'a> {
 }
 
 /// The byte streams captured under [`RunIo::Capture`], carried verbatim onto
-/// the protocol [`Report`](crate::transport::Report).
+/// the protocol [`Report`](crate::protocol::Report).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
     pub stdout: Vec<u8>,
@@ -136,7 +136,7 @@ pub enum RunReport {
 ///
 /// `Ok` beside a timed-out flag is not a state the type can hold.
 /// Unrendered: the error text is rendered once, in
-/// [`Report`](crate::transport::Report), where a
+/// [`Report`](crate::protocol::Report), where a
 /// [`SourceDb`](crate::source::SourceDb) is in hand.
 #[derive(Debug)]
 pub enum Ending {
@@ -237,7 +237,8 @@ impl Shell {
     /// worker may hold a clone of the surface sink forever without keeping the
     /// run alive. It is also the durability boundary — a panic anywhere in the
     /// run restores the `env`/`context`/`last_status` checkpointed at entry,
-    /// so the shell rolls itself back and no snapshot crosses the host seam.
+    /// so the shell rolls itself back and no snapshot crosses the engine
+    /// protocol.
     pub fn run(&mut self, req: RunRequest<'_>) -> RunReport {
         let anchor = self.session.anchor.clone();
         self.run_under(&anchor, req)
@@ -1519,12 +1520,12 @@ mod tests {
     /// The rendered runtime error of a run that must fault.
     fn rendered_fault(shell: &mut Shell, src: &str) -> String {
         let report = shell.run(capture_req(src)).into_report(shell.sources());
-        let crate::transport::Report::Ran { ending, .. } = report else {
+        let crate::protocol::Report::Ran { ending, .. } = report else {
             panic!("{src:?} must reach evaluation");
         };
         match ending {
-            crate::transport::Ending::Raised { rendered, .. }
-            | crate::transport::Ending::Walled { rendered, .. } => rendered,
+            crate::protocol::Ending::Raised { rendered, .. }
+            | crate::protocol::Ending::Walled { rendered, .. } => rendered,
             other => panic!("{src:?} must fault, got {other:?}"),
         }
     }
@@ -1602,7 +1603,7 @@ mod tests {
             },
             ..req
         });
-        let crate::transport::Report::Ran { trail, .. } = report.into_report(shell.sources())
+        let crate::protocol::Report::Ran { trail, .. } = report.into_report(shell.sources())
         else {
             panic!("valid source must reach evaluation");
         };

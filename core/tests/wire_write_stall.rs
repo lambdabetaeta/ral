@@ -13,13 +13,21 @@
 
 #![cfg(unix)]
 
-use ral_core::transport::{Control, DispatchId, Liveness, Program, Run, Transport, WireTransport};
+use ral_core::protocol::{
+    Control, DispatchId, Host, Liveness, Program, Run, Transport, WireTransport,
+};
 use ral_core::types::Capabilities;
 use ral_core::wire::WireChannel;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// The wire transport ignores the host it is handed on `dispatch` — see
+/// `Transport::dispatch`'s doc — so the mute host is all any test here needs.
+fn no_seam() -> Arc<dyn Host> {
+    Arc::new(())
+}
 
 /// Interval is irrelevant to every test here — none waits on the ticker's own
 /// silence check — but the deadline is the one bound the whole suite proves
@@ -58,7 +66,7 @@ const BOUND: Duration = Duration::from_secs(5);
 /// A stuck write cannot mute death: the peer never reads a byte, so the
 /// dispatch's write parks holding the write lock, and once the socket's own
 /// write deadline elapses the connection is severed — closing the event
-/// stream and setting `dead()`, exactly as a read EOF would.
+/// stream and setting `severed()`, exactly as a read EOF would.
 #[test]
 fn a_stuck_write_still_declares_death() {
     let (host_end, peer_end) = UnixStream::pair().expect("socketpair");
@@ -68,7 +76,7 @@ fn a_stuck_write_still_declares_death() {
 
     let dispatcher = transport.clone();
     std::thread::spawn(move || {
-        dispatcher.dispatch(DispatchId(1), big_run());
+        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
     });
 
     let started = Instant::now();
@@ -84,7 +92,7 @@ fn a_stuck_write_still_declares_death() {
         "recv() must unblock once the stalled write is severed, took {elapsed:?}"
     );
     assert!(
-        transport.dead(),
+        transport.severed().is_some(),
         "a severed write-stalled connection must be reported dead"
     );
 }
@@ -102,7 +110,7 @@ fn a_write_stalled_cancel_returns_and_declares_death() {
 
     let dispatcher = transport.clone();
     std::thread::spawn(move || {
-        dispatcher.dispatch(DispatchId(1), big_run());
+        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
     });
     // Give the dispatch a moment to park mid-write, holding the write lock.
     std::thread::sleep(Duration::from_millis(50));
@@ -116,7 +124,7 @@ fn a_write_stalled_cancel_returns_and_declares_death() {
         "a cancel behind a stalled write must return once that write times out, took {elapsed:?}"
     );
     assert!(
-        transport.dead(),
+        transport.severed().is_some(),
         "the stalled write must have declared death by the time the cancel returns"
     );
 }
@@ -137,7 +145,7 @@ fn liveness_refresh_cannot_mask_a_write_stall() {
         loop {
             seq += 1;
             if peer_ch
-                .write_frame(&ral_core::transport::Frame::Pong(seq))
+                .write_frame(&ral_core::protocol::Frame::Pong(seq))
                 .is_err()
             {
                 break;
@@ -148,15 +156,15 @@ fn liveness_refresh_cannot_mask_a_write_stall() {
 
     let dispatcher = transport.clone();
     std::thread::spawn(move || {
-        dispatcher.dispatch(DispatchId(1), big_run());
+        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
     });
 
     let deadline = Instant::now() + BOUND;
-    while !transport.dead() && Instant::now() < deadline {
+    while transport.severed().is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        transport.dead(),
+        transport.severed().is_some(),
         "a stalled write must still declare death despite continuous read-side traffic"
     );
 }
@@ -173,15 +181,15 @@ fn no_well_formed_frame_follows_a_severed_write() {
 
     let dispatcher = transport.clone();
     std::thread::spawn(move || {
-        dispatcher.dispatch(DispatchId(1), big_run());
+        dispatcher.dispatch(DispatchId(1), big_run(), &no_seam());
     });
 
     let deadline = Instant::now() + BOUND;
-    while !transport.dead() && Instant::now() < deadline {
+    while transport.severed().is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        transport.dead(),
+        transport.severed().is_some(),
         "setup: the stalled write must declare death"
     );
 

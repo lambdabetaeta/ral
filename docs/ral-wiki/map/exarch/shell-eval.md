@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fcf36a94
-generated_at_date: 2026-08-27
+generated_at_commit: 50388d83
+generated_at_date: 2026-08-29
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -9,12 +9,12 @@ covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exar
 `shell_eval.rs` runs one tool call as a ral top-level run against the
 persistent [[map/core/shell-state|`Shell`]]. **`run_shell` is a pure *request
 supplier*: it builds a transport-level `Source` `Run`, dispatches it through
-`ral_core::transport::dispatch_to_report` against the agent's seat transport —
+`ral_core::protocol::dispatch_to_report` against the agent's seat transport —
 the in-process `IdentityTransport`, or a wire engine's `WireTransport`
 ([[map/exarch/agent|agent]]) — and renders the terminal `Report` that comes
-back** — the
+back, or `Outcome::Severed` when the engine is gone before one arrives** — the
 transport is the canonical run vocabulary
-([[decisions/260706_enquiry-channel|enquiry-channel]];
+([[map/core/engine-protocol|engine-protocol]];
 [[internals/a-turn-end-to-end|a run, end to end]];
 [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]]). Evaluation can
 be entered *only* through a framed run door — the reduction primitive behind it
@@ -73,11 +73,14 @@ and `run_shell` owns only the run it builds and the outcome it formats:
   lease's scratch expiry) is not on the request at all — it is armed once
   through `Shell::arm_worker_retention`, and the sweep it parameterises is
   engine housekeeping;
-Surface delivery is not a `Run` field: `dispatch_to_report` takes the live and
-deferred-batch sink closures directly (below, both routed through
-`fleet::desk::SurfaceApplier`), plus an enquiry handler answering through the
-per-call `ExarchDesk` when one is installed ([[map/exarch/builtins|builtins]]);
-a desk-less dispatch gets an honest `EnquiryError`.
+Surface delivery and enquiry answering are not `Run` fields: `dispatch_to_report`
+takes one `host: Arc<dyn Host>` —
+[[map/core/engine-protocol|engine-protocol]]'s single object for a run's whole
+host-facing surface. Every real caller builds `fleet::desk::RunHost`, pairing
+the per-call `ExarchDesk` with a `SurfaceApplier`
+([[map/exarch/builtins|builtins]]); a bare `SurfaceApplier` alone is the mute
+host the harness runs under, whose `enquire` answers the honest
+`EnquiryError::no_desk()` rather than reaching a handler.
 
 `BINDING_IDLE_CALLS` (256, beside `DETACHED_WORKER_CEILING`) is the other
 lease constant this module owns but does not put on the request: it is not
@@ -91,7 +94,10 @@ clock, read by both ledgers for their own idle policy. `LARGE_BINDING_BYTES`
 residency threshold, not a lifetime one, so the install chokepoint checks it
 independently of idle age or baseline status.
 
-Completion is `dispatch_to_report` returning its `Report`. A detached `spawn`ed worker — a
+Completion is `dispatch_to_report` returning `Ok(Report)`; an `Err(Severed)`
+becomes `Outcome::Severed` instead, folded by every attend-loop caller into
+`agent::seat::engine_gone` ([[map/exarch/agent|agent]]). A detached `spawn`ed
+worker — a
 server, a watch — holds bounded deferred surface storage in core, never a clone
 of the bus [[map/exarch/frontend|`Emitter`]], so it cannot keep the tool run
 from ending ([[decisions/260618_run-turn-host-loop|run-turn-host-loop]]). Frame
@@ -100,7 +106,9 @@ on loan from the shell, self-healing on a caught worker panic as well as on the
 normal return ([[decisions/260612_exarch-panic-recovery|panic-recovery]]), while
 the run's invariant half — surface, deferred sink, desk, nursery, cancel, the
 leases — threads as an immutable `&Mooring` the stack itself restores. Exarch
-brackets only its own per-call desk install (`seat::RunGuard`). The
+needs no bracket of its own: its `RunHost` is a plain `Arc` `Avatar::run_shell`
+builds and passes to the dispatch, never installed as shared state, so an
+unwind drops it with the rest of that call's stack. The
 dynamic-context half of the contract lives in [[map/exarch/agent|agent]].
 
 **The wall is a place, and the acts before it stand.** A timed-out call unwinds
@@ -181,8 +189,9 @@ carries a per-command record — including the command a cancel struck — and
 nothing else in the digest walks the journal yet.
 
 **Surface decoding.** `decode_surface` is the single decoder both delivery
-regimes share: the live foreground sink `run_shell` hands `dispatch_to_report`
-emits now, and the deferred sink (`deferred_sink`, installed on the transport
+regimes share: the live path — `dispatch_to_report`'s drain loop calling
+`host.surface(val)` for every `Event::Surface`, which `SurfaceApplier::live`
+decodes — and the deferred sink (`deferred_sink`, installed on the transport
 before each dispatch) mints identical events when a detached worker's batch
 flushes, both calling it directly — the `accepted_surface` wrapper that once
 layered a protected-pin guard over it is gone with the guard itself. The
@@ -205,7 +214,7 @@ over the recorded `Display` commit) or whoever records (the commit producer's
   observation alone ([[map/exarch/io-surface|io-surface]]);
 - a `` `notice `` core's ready-boundary housekeeping pushes (a worker reap, an
   idle-binding prune, a large-binding warning) decodes to `Surface::Notice`
-  ([[decisions/260706_enquiry-channel|enquiry-channel]]);
+  ([[map/core/engine-protocol|engine-protocol]]);
 - any other value tries `value_to_card` and becomes a `Surface::Card`, the one
   shape whose payload *is* a card; the closed mark set and the `value_to_card`
   / `render_card` decode-and-bind path live in [[map/exarch/cards|cards]];

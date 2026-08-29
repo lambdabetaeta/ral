@@ -264,7 +264,7 @@ force it to keep compiling, with its output byte-identical.
 Bertin encoding and the observation/barrier rule this extends),
 [[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]] (the
 effects that make a `ral` call an observation),
-[[decisions/260706_enquiry-channel|enquiry-channel]] (the desk path a harness
+[[design/engine-protocol|engine-protocol]] (the desk path a harness
 call travels), [[decisions/260719_agent-names-and-schedule-labels|agent-names-and-
 schedule-labels]] (the names and labels that fill the subject column), and
 [[map/exarch/frontend|frontend]].

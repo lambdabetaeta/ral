@@ -960,7 +960,7 @@ fn select_account(
 /// [`vm_manager::Machine::take_wires`] hands over differs by platform — an
 /// `AF_VSOCK` descriptor under Virtualization.framework, an `AF_HYPERV`
 /// socket under Hyper-V — and yet no `#[cfg]` appears below, because
-/// [`ral_core::transport::WireTransport::adopt`] takes whatever converts into
+/// [`ral_core::protocol::WireTransport::adopt`] takes whatever converts into
 /// its own [`WireStream`](ral_core::wire::WireStream) and each platform's
 /// owned handle does. The frame protocol never learns which hypervisor it is
 /// talking through.
@@ -978,9 +978,9 @@ fn control_seat(
 ) -> Result<exarch::agent::RootSeat, String> {
     Ok(exarch::agent::RootSeat::Wire {
         transport: Box::new(
-            ral_core::transport::WireTransport::adopt(
+            ral_core::protocol::WireTransport::adopt(
                 control,
-                ral_core::transport::Liveness::default(),
+                ral_core::protocol::Liveness::default(),
             )
             .map_err(|e| format!("could not take control of the machine: {e}"))?,
         ),

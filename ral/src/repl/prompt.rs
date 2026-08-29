@@ -5,7 +5,7 @@
 //! pseudo-variables read by the prompt body directly.
 //! Plugins may transform the result via the `prompt` lifecycle hook.
 
-use ral_core::transport::{Program, Run};
+use ral_core::protocol::{Program, Run};
 use ral_core::types::{Break, Capabilities, HookName};
 use ral_core::{
     Captured, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell, Value,
@@ -233,8 +233,8 @@ mod tests {
         let mut shell = Shell::new(ral_core::io::TerminalState::default());
         ral_core::builtins::register(&mut shell, crate::PRELUDE.comp());
         let prompt = match shell.run(ral_core::RunRequest {
-            run: ral_core::transport::Run {
-                program: ral_core::transport::Program::Source(src.to_string()),
+            run: ral_core::protocol::Run {
+                program: ral_core::protocol::Program::Source(src.to_string()),
                 script_name: "<test>".to_string(),
                 caps: ral_core::types::Capabilities::root(),
                 wall: None,

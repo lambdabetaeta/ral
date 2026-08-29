@@ -27,7 +27,7 @@
 mod common;
 
 use ral_core::serial::FOValue;
-use ral_core::transport::{Program, Run};
+use ral_core::protocol::{Program, Run};
 use ral_core::types::{Capabilities, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins};
 use std::path::Path;
@@ -322,7 +322,7 @@ fn a_detached_process_is_in_no_worker_registry_and_no_workers_listing() {
         shell.workers().is_empty(),
         "a birth files nothing in the worker registry"
     );
-    match ral_core::transport::answer_probe(
+    match ral_core::protocol::answer_probe(
         &mut shell,
         &FOValue::Variant {
             label: "workers".into(),

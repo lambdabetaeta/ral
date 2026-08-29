@@ -397,8 +397,8 @@ mod tests {
         ));
 
         let thunk = match shell.run(ral_core::RunRequest {
-            run: ral_core::transport::Run {
-                program: ral_core::transport::Program::Source("{ |args| return 1 }".to_string()),
+            run: ral_core::protocol::Run {
+                program: ral_core::protocol::Program::Source("{ |args| return 1 }".to_string()),
                 script_name: "<test>".to_string(),
                 caps: ral_core::types::Capabilities::root(),
                 wall: None,
@@ -439,7 +439,7 @@ mod tests {
     /// dressed.  Panics on a static failure or a runtime error: every source
     /// here is expected to compile and succeed.
     fn run_source(shell: &mut Shell, src: &str) -> Value {
-        use ral_core::transport::{Program, Run};
+        use ral_core::protocol::{Program, Run};
         use ral_core::types::Capabilities;
         use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
         let req = RunRequest {

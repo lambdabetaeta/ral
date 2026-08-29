@@ -328,7 +328,7 @@ amendment in full),
 [[decisions/260726_cancel-is-a-join|cancel-is-a-join]] and
 [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]] (the unwind
 whose surviving prefix this ADR reports),
-[[decisions/260722_session-is-a-process|session-is-a-process]] (the wire seat
+[[design/engine-protocol|engine-protocol]] (the wire seat
 whose parked `enquire` fixes where the desk records),
 [[map/exarch/shell-eval|shell-eval]] and [[map/core/shell-state|shell-state]]
 (the maps that lost the epoch paragraphs).

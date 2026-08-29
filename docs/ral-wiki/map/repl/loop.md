@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 50388d83
+generated_at_date: 2026-08-29
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -23,7 +23,7 @@ behind.**
 
 `session::Session` (`session.rs`) owns the interactive state: an
 `IdentityTransport` wrapping the evaluator `Shell` (the in-process arm of
-core's transport seam), the shared `Arc<Mutex<JobTable>>` and
+the [[map/core/engine-protocol|engine protocol]]), the shared `Arc<Mutex<JobTable>>` and
 `Arc<Mutex<PluginRuntime>>`, the boxed [[map/repl/frontend|`Frontend`]], a
 `pending` buffer queued for re-edit, and the exit code. On a `structural`
 build it also owns the `Worksheet` (`worksheet.rs`) — the retained
@@ -88,9 +88,12 @@ the framed run doors** ([[decisions/260618_run-turn-host-loop|run-turn-host-loop
 `Run` — `Program::Source(trimmed)`, `script_name: "<stdin>"`,
 `Capabilities::root()`, no wall, `RunIo::Inherit`,
 `RequestedTerminalAccess::Leased`, `RunStdin::Inherit` — and dispatches it
-through `transport::dispatch_to_report` on the session's
-`IdentityTransport`, draining the event stream to the terminal `Report`.
-The lifecycle hooks fire around the dispatch from `exec.rs` itself via
+through `protocol::dispatch_to_report` on the session's `IdentityTransport`
+with the mute `Arc::new(())` host, draining the event stream to the terminal
+`Report`; an `Err(Severed)` — unreachable under an in-process engine, but
+handled rather than assumed away — prints the cause and ends the line
+without evaluating. The lifecycle hooks fire around the dispatch from
+`exec.rs` itself via
 `IdentityTransport::with_shell`: [[map/repl/plugins|`pre-exec`]] before,
 a pending `chpwd` then `post-exec` after. The door compiles and typechecks
 against the live session (`shell.session_schemes()`, the one name→scheme

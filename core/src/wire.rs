@@ -7,7 +7,7 @@
 //! used here being one syscall in any family.  Nothing here or above asks such
 //! a stream for an address — the one question that would expose the pretence.
 
-use crate::transport::Frame;
+use crate::protocol::Frame;
 use std::io;
 
 /// The connected stream socket a [`WireChannel`] frames over: std's owner
@@ -94,7 +94,7 @@ impl WireChannel {
     }
 
     /// The raw fd, for `pre_exec` to place on fd 3 in the engine child
-    /// ([`WireTransport::new`](crate::transport::WireTransport::new)).  Unix
+    /// ([`WireTransport::new`](crate::protocol::WireTransport::new)).  Unix
     /// only: a Windows engine is a guest, adopted through [`Self::from_stream`].
     #[cfg(unix)]
     pub fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
@@ -207,7 +207,7 @@ impl WireChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{Control, Winsize};
+    use crate::protocol::{Control, Winsize};
 
     #[test]
     fn round_trip_control() {

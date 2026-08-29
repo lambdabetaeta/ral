@@ -207,7 +207,7 @@ pub enum RootSeat {
     /// a guest VM. `cwd`/`home` come from the caller because under a VM the
     /// workspace is a guest path this process cannot resolve.
     Wire {
-        transport: Box<ral_core::transport::WireTransport>,
+        transport: Box<ral_core::protocol::WireTransport>,
         cwd: std::path::PathBuf,
         home: std::path::PathBuf,
     },
@@ -447,7 +447,8 @@ impl Avatar {
                 transport,
                 cwd,
                 home,
-            } => Seat::wire(*transport, cwd, home),
+            } => Seat::wire(*transport, cwd, home)
+                .map_err(|s| io::Error::other(seat::engine_gone(&s)))?,
         };
         // This seat is rebuilt in place under a standing root, so a raw reach
         // captured now would go stale — see `EvalReach::interrupt_only`.

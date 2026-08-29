@@ -199,7 +199,7 @@ What a run *fixes* is not on the `Shell` at all. The eight run-invariant
 members are a **`Mooring`**: the `surface` sink, the `deferred` sink (a
 detached worker's completion delivery — `None` outside an agent host), the
 `desk` answering the run's enquiries
-([[decisions/260706_enquiry-channel|enquiry-channel]]), the `fork` door
+([[map/core/engine-protocol|engine-protocol]]), the `fork` door
 naming how a forked session reaches the desk that adopts it (`None` outside a
 host that installs one; like `desk`, never given to a deferred worker), the
 foreground `cancel` scope, the deferred-worker `WorkerLease` (`deferred_lease` — the idle
@@ -258,7 +258,7 @@ The `surface` sink (`Mooring::surface`, `Option<SurfaceSink>` where
 `SurfaceSink = Arc<dyn EventSink>`) is the value-typed dual of the byte
 [[map/core/io-process|Io]] sinks. `EventSink` is a *synchronous* trait taking a
 borrowed first-order `FOValue`
-([[decisions/260706_enquiry-channel|enquiry-channel]]); the `Mooring::surface`
+([[map/core/engine-protocol|engine-protocol]]); the `Mooring::surface`
 method takes a borrowed `Value`, encodes it once at that door, and forwards onto
 the installed sink — inert when none is present (a bare REPL). Run-scoped, not
 a persistent capability — a run door installs it, so a clone of it has no

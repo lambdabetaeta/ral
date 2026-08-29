@@ -66,10 +66,10 @@ provider credentials remain host-owned.
 - Build I/O stays on guest ext4; the host filesystem is absent by topology.
 - A separate daemon may own init, supervision, and bulk transfer, while the
   existing ral/exarch multicall binary remains the engine.
-- Seam Phase C must provide engine-side durability, bounded decoding, and a
+- Protocol Phase C must provide engine-side durability, bounded decoding, and a
   strict frame automaton before the VM backend is coherent. Sessions multiply
   as engine processes, one connection each, never as multiplexed frames
-  ([[decisions/260722_session-is-a-process|session-is-a-process]]).
+  ([[design/engine-protocol|engine-protocol]]).
 - A guest crash loses unacknowledged guest state; the host retains the last
   acknowledged private checkpoint.
 - Private dependency credentials, PTY forwarding, server ingress, lazy huge
@@ -87,6 +87,6 @@ provider credentials remain host-owned.
   one another; it does not express ral's path, read/write, exec, or network
   lattice.
 
-See also [[decisions/260706_enquiry-channel|enquiry-channel]],
+See also [[design/engine-protocol|engine-protocol]],
 [[design/exarch-architecture|exarch-architecture]],
 [[design/agents|agents]], and [[design/residency|residency]].

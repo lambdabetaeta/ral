@@ -182,7 +182,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "core/src/subprocess_codec.rs",
         "io-door:silent:frame-dump-nonunix",
     ),
-    ("core/src/transport.rs", "io-door:silent:engine-spawn"),
+    ("core/src/protocol.rs", "io-door:silent:engine-spawn"),
     ("core/src/types/shell/cwd.rs", "io-door:silent:cwd-stat"),
     ("core/src/uutils.rs", "io-door:silent:diff-read"),
     // ── exarch ────────────────────────────────────────────────────────────

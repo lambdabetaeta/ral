@@ -529,7 +529,7 @@ impl FOValue<SerialClosure> {
 impl TryFrom<&Value> for FOValue {
     type Error = Error;
 
-    /// Recursion over the data variants *is* the host seam's first-orderness
+    /// Recursion over the data variants *is* the protocol's first-orderness
     /// check, rather than a separate test followed by a hopeful re-encode.
     fn try_from(v: &Value) -> Result<Self, Error> {
         Ok(match v {
@@ -557,7 +557,7 @@ impl TryFrom<&Value> for FOValue {
             },
             Value::Thunk(_) | Value::Native { .. } | Value::Handle(_) => {
                 return Err(Error::new(
-                    "value is not first-order: the host seam carries only data, \
+                    "value is not first-order: the protocol carries only data, \
                      not closures or handles",
                     1,
                 ));

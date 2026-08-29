@@ -107,7 +107,7 @@ rather than anything the window's reader has business with.
 through `reap_card` as a `warn` span plus the worker's `cmd` and which lease
 fired ("idle 1h unobserved" / "24h backstop"), with prune and large-binding
 notices rendered by its per-kind siblings
-([[decisions/260706_enquiry-channel|enquiry-channel]]). All are fixed-position
+([[map/core/engine-protocol|engine-protocol]]). All are fixed-position
 value marks, never an animation, and all stay inside the existing `text` mark
 vocabulary, so none widens the closed mark set above.
 

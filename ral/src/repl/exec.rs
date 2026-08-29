@@ -1,5 +1,5 @@
 //! Single-input parse / typecheck / evaluate cycle, routed through the
-//! transport seam.
+//! engine protocol.
 //!
 //! [`step`] is the per-line entry point.  It dispatches a source run
 //! through the [`IdentityTransport`] and drains the event stream for the
@@ -10,7 +10,7 @@
 //! Job-control and plugin-lifecycle commands are handled by the captured
 //! builtins installed at boot (see [`super::host_handlers`]).
 
-use ral_core::transport::{self, Diagnostics, IdentityTransport, Program, Report, Run};
+use ral_core::protocol::{self, Diagnostics, IdentityTransport, Program, Report, Run};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use ral_core::{Value, builtins};
 use std::sync::{Arc, Mutex};
@@ -135,19 +135,14 @@ pub(super) fn execute_input(
         trail: None,
     };
 
-    // Dispatch and drain to the terminal Report.  The REPL renders no live
-    // surface values and answers no enquiries; it installs no deferred sink,
-    // so a session-lived batch is dropped.
-    let report = transport::dispatch_to_report(
-        transport,
-        run,
-        |_val| {},
-        |_req| Err(transport::EnquiryError::no_desk()),
-    );
-
-    let Some(report) = report else {
-        eprintln!("ral: internal error: dispatch completed without a Report");
-        return None;
+    // The REPL renders no live surface values, answers no enquiries, and
+    // adopts no fork: the mute host.
+    let report = match protocol::dispatch_to_report(transport, run, Arc::new(())) {
+        Ok(report) => report,
+        Err(severed) => {
+            eprintln!("ral: {severed}");
+            return None;
+        }
     };
 
     match report {
@@ -170,7 +165,7 @@ pub(super) fn execute_input(
         Report::Ran { ending, .. } => {
             let status = ending.status();
             let exit_code = match ending {
-                transport::Ending::Settled { value, .. } => {
+                protocol::Ending::Settled { value, .. } => {
                     print_result(&Value::from(value));
                     // The run installed its bindings: record their dependency
                     // edges and effect verdict into the worksheet model.
@@ -178,14 +173,14 @@ pub(super) fn execute_input(
                     transport.with_shell(|shell| worksheet.record(trimmed, shell));
                     None
                 }
-                transport::Ending::Raised { rendered, .. }
-                | transport::Ending::Walled { rendered, .. } => {
+                protocol::Ending::Raised { rendered, .. }
+                | protocol::Ending::Walled { rendered, .. } => {
                     eprint!("{rendered}");
                     None
                 }
-                transport::Ending::Exited(code) => Some(crate::platform::exit_byte(code)),
+                protocol::Ending::Exited(code) => Some(crate::platform::exit_byte(code)),
                 #[cfg(unix)]
-                transport::Ending::Stopped {
+                protocol::Ending::Stopped {
                     pgid,
                     signal_name,
                     pending,
@@ -199,6 +194,10 @@ pub(super) fn execute_input(
                     );
                     eprintln!("[{id}] stopped\t{trimmed} ({signal_name})");
                     None
+                }
+                #[cfg(not(unix))]
+                protocol::Ending::Stopped { .. } => {
+                    unreachable!("an in-process engine stops no job on this platform")
                 }
             };
 
@@ -269,8 +268,8 @@ mod tests {
     /// a handler value.
     fn handler(shell: &mut Shell, src: &str) -> Value {
         match shell.run(ral_core::RunRequest {
-            run: ral_core::transport::Run {
-                program: ral_core::transport::Program::Source(src.to_string()),
+            run: ral_core::protocol::Run {
+                program: ral_core::protocol::Program::Source(src.to_string()),
                 script_name: "<test>".to_string(),
                 caps: ral_core::types::Capabilities::root(),
                 wall: None,

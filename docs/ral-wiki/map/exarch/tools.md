@@ -12,7 +12,7 @@ scheduling, replying, and reading a reply — is now a ral builtin reached by wr
 `ral` itself, per the
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
 migration; see [[map/exarch/builtins|builtins]] for the verbs and
-[[decisions/260706_enquiry-channel|enquiry-channel]] for the desk they speak
+[[map/core/engine-protocol|engine-protocol]] for the desk they speak
 through. `shell_eval/tools.rs` shrinks to:
 
 - **`ral`** (`shell_eval/tools/ral.rs`) — the one call that crosses the provider

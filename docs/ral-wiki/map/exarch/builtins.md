@@ -91,7 +91,7 @@ frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]
 
 There is no model-facing listing over the worker registry at all —
 `workers` was retired: a listing carrying live `Value::Handle`s cannot cross
-the host seam (`SerialValue`'s decoder rejects them), and returning the
+the engine protocol (`SerialValue`'s decoder rejects them), and returning the
 registry as a language value was mislayered in the first place — enumeration,
 reaping, and caps belong to the host and the lease layer, never this door.
 Legibility now
@@ -134,7 +134,7 @@ service's handle: looked up among this shell's `LeaseClass::Durable` entries
 only, by the id its birth trail card named. An id naming an ephemeral
 `spawn`/`watch` worker is refused exactly like an unknown one — an ephemeral
 worker's rediscovery path is the binding lease, not enumeration by id. A bare
-top-level `service-handle N` result cannot cross the host seam (a `Handle` is
+top-level `service-handle N` result cannot cross the engine protocol (a `Handle` is
 not ground) — it exists to be composed with an eliminator in the same run:
 `await (service-handle 3)`, `cancel (service-handle 3)`.
 
@@ -169,7 +169,7 @@ Every verb below is a `BuiltinEntry` in
 (`HARNESS_BUILTINS`, carried on `host_surface()` beside the atoms above — one
 surface for the boot install and the prompt's `builtin_index` alike), landed by
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
-over the rail [[decisions/260706_enquiry-channel|enquiry-channel]] built. A
+over the rail [[map/core/engine-protocol|engine-protocol]] built. A
 verb's body validates its arguments engine-side and calls
 `shell.enquire(class)`; `exarch/src/fleet/desk.rs`'s `ExarchDesk` decodes the class
 label and answers from shared handles (`HostServices`) captured at

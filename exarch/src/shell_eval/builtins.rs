@@ -1262,7 +1262,7 @@ mod tests {
     /// Run `src` as one top-level run, deliberately without a deferred lease so
     /// nothing races a reap mid-test.  Panics on any failure.
     fn run_top_level(shell: &mut Shell, src: &str) {
-        use ral_core::transport::{Program, Run};
+        use ral_core::protocol::{Program, Run};
         use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
         let req = RunRequest {
             run: Run {
@@ -1662,7 +1662,7 @@ mod tests {
     /// names the helpers on exactly the shells that have them.
     #[test]
     fn help_lists_a_library_section_only_on_a_shell_that_sourced_it() {
-        use ral_core::transport::{Program, Run};
+        use ral_core::protocol::{Program, Run};
         use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
         let run_help = |shell: &mut Shell| -> String {

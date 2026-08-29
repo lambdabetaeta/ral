@@ -128,9 +128,10 @@ storage and display one thing by construction.
 the agent's register, so the model can survey the board before reading a
 slot. It returns keys only; the cards stay behind `pin-read`.
 
-Read-after-write inside a single run is sound because `DeskBinding::enquire`
-drains queued surface frames before handling the request
-(`exarch/src/fleet/desk.rs:817`): a pin written earlier in the script is
+Read-after-write inside a single run is sound because the identity binding's
+`IdentityDesk::enquire` drains queued surface frames before handling the
+request (`core/src/protocol.rs`), and frame order does the same under the
+wire: a pin written earlier in the script is
 already applied when the read is answered.
 
 ### 3. The model is the register's default mutator
@@ -236,9 +237,9 @@ again, and assert the second decode equals the first.
    - `"pin-list"`: no payload. The mirror's keys as
      `FOValue::List` of strings — `BTreeMap` order, i.e. lexicographic;
      absent mirror → empty list.
-3. No drain work: `DeskBinding::enquire` (`desk.rs:817`) already applies
-   queued surface frames before handling, which is exactly the
-   read-after-write ordering §2 relies on.
+3. No drain work: the identity binding's `IdentityDesk::enquire`
+   (`core/src/protocol.rs`) already applies queued surface frames before
+   handling, which is exactly the read-after-write ordering §2 relies on.
 
 Tests, in `desk.rs`'s test module: pin through `SurfaceApplier::live`, then
 `handle` a `pin-read` and assert the canonical card comes back; unpin, assert

@@ -318,7 +318,7 @@ mod tests {
 )]
 mod chokepoint_tests {
     use crate::boot::BakedPrelude;
-    use crate::transport::{Program, Run};
+    use crate::protocol::{Program, Run};
     use crate::types::{Capabilities, HandleState, Settled, Shell, Value};
     use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
     use std::sync::OnceLock;

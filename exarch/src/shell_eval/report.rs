@@ -10,7 +10,7 @@ use crate::agent::ProbedWorker;
 use crate::fleet::desk::ActFragment;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
-use ral_core::transport::Ending;
+use ral_core::protocol::Ending;
 use ral_core::types::{Observation, Observed};
 use std::collections::HashSet;
 
@@ -36,7 +36,6 @@ pub(crate) fn render(
     let mut out = String::new();
     let exit = match ending {
         Ending::Settled { .. } => return (out, 0),
-        #[cfg(unix)]
         Ending::Stopped { .. } => return (out, 1),
         Ending::Walled { rendered, .. } => {
             out.push_str(rendered);

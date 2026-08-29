@@ -22,7 +22,7 @@ mod common;
 
 use std::io::Write;
 
-use ral_core::transport::{Program, Run};
+use ral_core::protocol::{Program, Run};
 use ral_core::types::{Break, Capabilities, Settled, Shell, Status};
 use ral_core::{
     RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins, diagnostic,

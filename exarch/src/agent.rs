@@ -701,13 +701,20 @@ impl Avatar {
     /// The *live* directory, probed so a prior `cd` shows — not the seat's own
     /// `cwd`, which only reseeds the shell on `/clear`.  [`Self::host_services`]
     /// wants the live one so a desk-spawned child starts where the model is.
-    pub(crate) fn cwd(&self) -> std::path::PathBuf {
+    ///
+    /// # Errors
+    /// The engine's severance — never a program error, since a `cwd` probe
+    /// is always legal at a run boundary.
+    pub(crate) fn cwd(&self) -> Result<std::path::PathBuf, ral_core::protocol::Severed> {
         match self.seat.transport().probe(FOValue::Variant {
             label: "cwd".into(),
             payload: None,
         }) {
-            Ok(FOValue::String { value }) => std::path::PathBuf::from(value),
-            other => unreachable!("`cwd probe always answers a String, got {other:?}"),
+            Ok(FOValue::String { value }) => Ok(std::path::PathBuf::from(value)),
+            Err(ral_core::protocol::ProbeError::Severed(s)) => Err(s),
+            other => Err(self.seat.fault(ral_core::protocol::Severed::Faulted(format!(
+                "`cwd probe answered {other:?}"
+            )))),
         }
     }
 

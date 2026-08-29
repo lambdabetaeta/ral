@@ -10,10 +10,12 @@
 
 use crate::agent::Avatar;
 use crate::agent::digest::{COMPACT_THRESHOLD, compaction_trigger};
+use crate::agent::seat::engine_gone;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::fleet::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE};
 use crate::shell_eval;
 use ral_core::serial::FOValue;
+use ral_core::protocol::{ProbeError, Severed};
 use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
@@ -328,10 +330,13 @@ impl Avatar {
     /// registry and bindings, the inbox, the event log, the log-dir and
     /// scratch footprint (walked here at invocation, not on a timer), and
     /// the sub-agent idle lease. Nothing mutated, no lease renewed.
-    fn resource_rows(&self) -> Vec<ProbeRow> {
+    ///
+    /// # Errors
+    /// The engine's severance.
+    fn resource_rows(&self) -> Result<Vec<ProbeRow>, Severed> {
         let mut rows = Vec::new();
 
-        let entries = self.probe_workers();
+        let entries = self.probe_workers()?;
         let mut running_worker = 0u64;
         let mut running_durable = 0u64;
         let mut settled = 0u64;
@@ -424,30 +429,35 @@ impl Avatar {
             self.current_provider().context_window(),
         ));
 
-        let probe_count = |label: &str| match self.seat.transport().probe(FOValue::Variant {
-            label: label.into(),
-            payload: None,
-        }) {
-            Ok(FOValue::Int { value }) => {
-                #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "probe binding-count is a non-negative cardinality"
-                )]
-                let count = value as u64;
-                count
+        let probe_count = |label: &str| -> Result<u64, Severed> {
+            match self.seat.transport().probe(FOValue::Variant {
+                label: label.into(),
+                payload: None,
+            }) {
+                Ok(FOValue::Int { value }) => {
+                    #[allow(
+                        clippy::cast_sign_loss,
+                        reason = "probe binding-count is a non-negative cardinality"
+                    )]
+                    let count = value as u64;
+                    Ok(count)
+                }
+                Err(ProbeError::Severed(s)) => Err(s),
+                other => Err(self.seat.fault(Severed::Faulted(format!(
+                    "`{label} probe answered {other:?}"
+                )))),
             }
-            other => unreachable!("`{label} probe must answer an Int, got {other:?}"),
         };
         rows.push(ProbeRow::new(
             "bindings.count",
-            probe_count("binding-count"),
+            probe_count("binding-count")?,
             None,
             "reap",
             Some("baseline (prelude, agent library, host seeds) never expires".to_string()),
         ));
         rows.push(ProbeRow::new(
             "bindings.leased",
-            probe_count("leased-binding-count"),
+            probe_count("leased-binding-count")?,
             None,
             "reap",
             Some(format!(
@@ -457,7 +467,7 @@ impl Avatar {
         ));
         rows.push(ProbeRow::new(
             "bindings.largest_bytes",
-            probe_count("largest-binding-bytes"),
+            probe_count("largest-binding-bytes")?,
             Some(shell_eval::LARGE_BINDING_BYTES),
             "warn",
             Some("shallow estimate; a closure's captures are never chased".to_string()),
@@ -471,7 +481,7 @@ impl Avatar {
             "warn",
             Some(log_dir.display().to_string()),
         ));
-        if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH") {
+        if let Some(scratch) = self.probe_env_var("EXARCH_SCRATCH")? {
             rows.push(ProbeRow::new(
                 "disk.scratch",
                 dir_size(&std::path::PathBuf::from(&scratch)),
@@ -499,7 +509,7 @@ impl Avatar {
             Some("idle threshold after which a child leaves the tab cycle".to_string()),
         ));
 
-        rows
+        Ok(rows)
     }
 
     /// Publish the fold as one [`Transient::Resources`]: the agent rows
@@ -508,7 +518,13 @@ impl Avatar {
     /// from `ReplControl` in `tui/tui_loop.rs`, at the exchange boundary
     /// where `/clear` runs; transcript and TUI only, never model-facing.
     pub(crate) fn emit_resources(&self, recorder: &crate::record::Emitter) {
-        let rows = self.resource_rows();
+        let rows = match self.resource_rows() {
+            Ok(rows) => rows,
+            Err(s) => {
+                Self::note(engine_gone(&s), self);
+                return;
+            }
+        };
         let card = resources_card(&rows);
         recorder.transient(crate::record::Transient::Resources { rows, card });
     }
@@ -717,7 +733,12 @@ mod tests {
         session.run_shell("c1".into(), "spawn { test-clear-block-forever }", 30, &emit);
         session.run_shell("c2".into(), "spawn { return 7 }", 30, &emit);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while !session.probe_workers().iter().any(|w| !w.running) {
+        while !session
+            .probe_workers()
+            .expect("an identity seat never severs")
+            .iter()
+            .any(|w| !w.running)
+        {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the instant worker must settle within the budget"
@@ -725,9 +746,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
 
-        let before = row(&session.resource_rows(), "bindings.count").current;
+        let before = row(
+            &session
+                .resource_rows()
+                .expect("an identity seat never severs"),
+            "bindings.count",
+        )
+        .current;
         session.run_shell("c3".into(), "let probe_marker = 1", 30, &emit);
-        let rows = session.resource_rows();
+        let rows = session
+            .resource_rows()
+            .expect("an identity seat never severs");
         assert_eq!(
             row(&rows, "bindings.count").current,
             before + 1,
@@ -785,7 +814,9 @@ mod tests {
             text: "go on".into(),
         });
         let depths_before = session.inbox.source_depths();
-        let rows = session.resource_rows();
+        let rows = session
+            .resource_rows()
+            .expect("an identity seat never severs");
         assert_eq!(row(&rows, "inbox[user]").current, 1);
         assert_eq!(row(&rows, "inbox[nudge]").current, 1);
         assert_eq!(
@@ -832,7 +863,9 @@ mod tests {
             .expect("the spawn registered its worker");
         let before = *entry.handle.last_observed.lock().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = session.resource_rows();
+        let _ = session
+            .resource_rows()
+            .expect("an identity seat never severs");
         let after = *entry.handle.last_observed.lock().unwrap();
         assert_eq!(after, before, "the probe must not renew the lease");
 
@@ -850,7 +883,9 @@ mod tests {
     #[test]
     fn resource_rows_unknown_window_falls_back_to_capped_log_bytes() {
         let session = Avatar::for_test("system").unwrap();
-        let rows = session.resource_rows();
+        let rows = session
+            .resource_rows()
+            .expect("an identity seat never severs");
         let bytes = row(&rows, "log.bytes");
         assert_eq!(
             bytes.cap,

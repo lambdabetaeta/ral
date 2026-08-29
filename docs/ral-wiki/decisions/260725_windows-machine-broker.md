@@ -136,8 +136,8 @@ connection that asked for it, held in the local of the thread serving that
 client; when the client asks it to stop, exits, or crashes, the thread drops it
 and the machine is torn down with its session disk. Nothing has to be reaped
 later and nothing outlives the process that owns it, which is the same law
-[[decisions/260722_session-is-a-process|session-is-a-process]] gives the
-engine's own wire, applied one layer down. It is also why a service stop is
+the [[design/engine-protocol|engine protocol]] gives the engine's own wire, applied one
+layer down. It is also why a service stop is
 honoured by process exit: unwinding those threads politely would mean tracking
 them, a second bookkeeping of live machines beside the one the connections
 already are.
@@ -257,7 +257,7 @@ maintainer is not left thinking the group is the only route.
 [[decisions/260725_windows-hyper-v-backend|windows-hyper-v-backend]] (the
 machine this service creates, and the deployment row this page replaces),
 [[map/synod|synod]] (where both halves live),
-[[decisions/260722_session-is-a-process|session-is-a-process]] (the lease law
+[[design/engine-protocol|engine-protocol]] (the lease law
 one layer up: a connection is a lifetime),
 [[decisions/260721_synod-is-a-second-product|synod-is-a-second-product]] (whose
 audience makes an unprivileged installation a requirement rather than a

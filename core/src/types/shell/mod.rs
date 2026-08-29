@@ -512,8 +512,8 @@ mod tests {
         }
 
         let _ = shell.run(crate::run::RunRequest {
-            run: crate::transport::Run {
-                program: crate::transport::Program::Source("$[1 + 1]".into()),
+            run: crate::protocol::Run {
+                program: crate::protocol::Program::Source("$[1 + 1]".into()),
                 script_name: "<test>".into(),
                 caps: crate::types::Capabilities::root(),
                 wall: None,

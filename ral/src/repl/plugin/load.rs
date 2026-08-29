@@ -11,7 +11,7 @@
 //! keybindings, undoes the env installation, and drops the record.
 
 use ral_core::source::Span;
-use ral_core::transport::Program;
+use ral_core::protocol::Program;
 use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Mooring, Settled};
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, Value};
 use std::sync::{Arc, Mutex};
@@ -358,8 +358,8 @@ mod tests {
     /// would carry.
     fn handler(shell: &mut Shell, src: &str) -> Value {
         match shell.run(ral_core::RunRequest {
-            run: ral_core::transport::Run {
-                program: ral_core::transport::Program::Source(src.to_string()),
+            run: ral_core::protocol::Run {
+                program: ral_core::protocol::Program::Source(src.to_string()),
                 script_name: "<test>".to_string(),
                 caps: ral_core::types::Capabilities::root(),
                 wall: None,

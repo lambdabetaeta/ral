@@ -50,13 +50,15 @@ use crate::jobs::JobTable;
 /// editor whatever surface was asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Surface {
-    /// Canonical-stdin line editor; no raw mode, no plugin features.
+    /// Use a basic line editor with no raw terminal mode or plugin features.
     Minimal,
-    /// Full readline-style line editor: completion, history, plugin
-    /// keybindings, ghost text, highlights.  The default.
+    /// Use the full line editor with completion, history, plugin keybindings,
+    /// suggested text and highlighting. This is the default.
     #[default]
     Readline,
-    /// The ratatui projection surface (`structural` builds only).
+    /// Show live types, bindings and running jobs around the prompt. This needs
+    /// a build with the `structural` feature and a terminal that supports raw
+    /// mode. Ral falls back to readline if either is unavailable.
     Structural,
 }
 

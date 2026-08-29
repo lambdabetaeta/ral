@@ -12,7 +12,7 @@
 //! part: nothing below is `#[cfg]`-ed except which backend is constructed —
 //! the control plane is an `AF_VSOCK` descriptor under Virtualization.framework
 //! and an `AF_HYPERV` socket under Hyper-V, and
-//! [`WireTransport::adopt`](ral_core::transport::WireTransport::adopt) takes
+//! [`WireTransport::adopt`](ral_core::protocol::WireTransport::adopt) takes
 //! either, so the protocol never learns which hypervisor it is talking
 //! through.
 //!
@@ -48,7 +48,7 @@ use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ToolCall};
 use exarch::record::{Display, Record, Transient};
-use ral_core::transport::{Liveness, WireTransport};
+use ral_core::protocol::{Liveness, WireTransport};
 use ral_core::types::Capabilities;
 use std::path::PathBuf;
 use std::sync::Arc;

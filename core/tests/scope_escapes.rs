@@ -11,7 +11,7 @@
 
 mod common;
 
-use ral_core::transport::{Program, Run};
+use ral_core::protocol::{Program, Run};
 use ral_core::types::{Capabilities, Escape, Mooring, Settled, Shell};
 use ral_core::{
     Break, HostSurface, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,

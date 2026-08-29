@@ -120,7 +120,7 @@ fn families(g: &Grants) -> [(bool, &'static [&'static str], Section); 4] {
 
 /// Every verb the product installs, resolved once from a booted shell — the
 /// surface is fixed per product, so no later prompt resolution needs a live
-/// `Shell` again, on either side of the host seam. Shared by a whole fleet: a
+/// `Shell` again, on either side of the engine protocol. Shared by a whole fleet: a
 /// fork or desk spawn applies its own grants against its parent's resolution.
 pub(crate) struct BuiltinIndex {
     /// Sorted and deduped: the shell's installed builtins, the documented

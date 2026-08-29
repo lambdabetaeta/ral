@@ -109,9 +109,10 @@ construction — the **WYSIWYG invariant**: only what the card renders can be
 read back, and two states that render identically are the same state to
 `pin-read`.
 
-Read-after-write within one run is sound for free: `DeskBinding::enquire`
-drains queued surface frames before answering a request
-(`exarch/src/fleet/desk.rs`), so a pin written earlier in the same script is
+Read-after-write within one run is sound for free: under the identity
+binding `IdentityDesk::enquire` drains queued surface frames before answering
+a request (`core/src/protocol.rs`), and under the wire frame order does the
+same, so a pin written earlier in the same script is
 already in the mirror when the read is answered. Both enquiries are per-agent,
 same as the mirror they read — a sub-agent's register is its own, and
 `pin-read` never crosses that line; a foreign-key read is deliberately out of

@@ -142,7 +142,7 @@ the absence of a listener.
 
 ## Standing beside this decision
 
-[[decisions/260706_enquiry-channel|enquiry-channel]] is not superseded by
-this page — it still carries the host seam's agent, schedule, and reply
-families, none of which this decision touches. Losing one enquiry class
-(`fetch-url`) is not a supersession of the channel that carried it.
+The [[design/engine-protocol|engine protocol]]'s enquiry channel still carries the
+agent, schedule, and reply families, none of which this decision touches:
+losing one enquiry class (`fetch-url`) is not a supersession of the channel
+that carried it.

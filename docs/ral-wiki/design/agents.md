@@ -169,7 +169,7 @@ model material.
 
 A `Seat::Wire` trunk ([[map/exarch/agent|agent]]) runs its shell in a guest
 engine, host-side of a vsock connection
-([[decisions/260722_session-is-a-process|session-is-a-process]]) — the desk
+([[design/engine-protocol|engine-protocol]]) — the desk
 that answers `` agents `start `` sits in the host process, and cannot reach a
 `Shell` living in another machine the way it reaches into its own nursery.
 **The whole of that asymmetry is one field of one enquiry.** Beside the model's
@@ -205,7 +205,7 @@ Open the connection from the other side and none of that has anything left to
 do — the host dialled a port it was told about, in the enquiry it is still
 answering, so it already holds the spawn the connection is for. What is left is
 not a cheaper correlation mechanism but no correlation at all
-([[decisions/260825_the-host-dials-in|the-host-dials-in]]). The token
+([[design/engine-protocol|engine-protocol]]). The token
 changes job with the direction: no longer a key naming a rendezvous, it is a
 guard — the guest's proof that the connection it is about to hand a seeded
 engine was opened by the host, and not by something inside the guest racing it
@@ -416,10 +416,9 @@ schedule labels, commitments retired),
 interrupt, not a subtree cascade),
 [[decisions/260705_branch-minimal|branch-minimal]] (the conversing child whose
 `returns` bit is fixed false at construction),
-[[decisions/260825_the-host-dials-in|the-host-dials-in]] (why the guest
-listens and the host dials, and what that direction deletes),
-[[decisions/260825_the-wire-carries-the-value|the-wire-carries-the-value]] (one
-enquiry class per registry, every tag answering the registry's state),
+[[design/engine-protocol|engine-protocol]] (why the guest
+listens and the host dials, what that direction deletes, and the enquiry
+class per registry, every tag answering the registry's state),
 [[decisions/260827_agent-and-avatar|agent-and-avatar]] (`Agent` as the `Arc`,
 `Avatar` as its embodiment, the fleet as `{ names, roots, lease }`),
 [[map/synod|synod]] (the dialler's landed home, and the helper surface built

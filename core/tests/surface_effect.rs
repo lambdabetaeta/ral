@@ -8,7 +8,7 @@
 mod common;
 
 use ral_core::serial::FOValue;
-use ral_core::transport::{Program, Run};
+use ral_core::protocol::{Program, Run};
 use ral_core::types::{Capabilities, Settled, Shell, Value};
 use ral_core::{
     EventSink, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, SurfaceSink,

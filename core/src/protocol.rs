@@ -1,5 +1,5 @@
-//! Transport-parametric host seam: the frame algebra between a front-end and
-//! the ral engine.
+//! The engine protocol: the frame algebra between a front-end and the ral
+//! engine, and the two transports that carry it.
 //!
 //! Attach/Detach/Ping/Pong bracket and keep alive one connection — the
 //! connection *is* the session — while Dispatch carries one whole run, Event
@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -29,7 +29,7 @@ use crate::types::DeferredSink;
 use crate::types::SurfaceSink;
 use std::sync::OnceLock;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// The byte before the first frame, written by a guest that has just spawned
 /// a child engine onto this connection and read by the host that dialled it.
@@ -40,8 +40,6 @@ pub const PROTOCOL_VERSION: u32 = 6;
 /// returned. ASCII ACK, and portable, because the two ends need not share an
 /// operating system.
 pub const HATCH_ACK: u8 = 0x06;
-
-static CURRENT_CONTROL: OnceLock<ControlSender> = OnceLock::new();
 
 // ── Dispatch identity ─────────────────────────────────────────────────
 
@@ -57,7 +55,7 @@ pub struct EnquiryId(pub u64);
 
 // ── Frame algebra ─────────────────────────────────────────────────────
 
-/// One frame that crosses the host seam in either direction.
+/// One frame that crosses the engine protocol in either direction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Frame {
     /// The only legal first frame: an engine speaks no shell until told a
@@ -174,15 +172,14 @@ pub enum Event {
     Report(Report),
 }
 
-/// Engine → front-end event with no dispatch to ride.
-///
-/// Produced by something that outlives the run which started it. One variant
-/// today — a detached worker's surface batch, settling after its spawning
-/// run's Report — but the enum, not `Frame`, is where the next session-lived
-/// event class joins it: this names the lifetime class once, so a new member
-/// costs one variant here rather than a new frame kind.
+/// Engine → front-end traffic with no dispatch to ride: the attach verdict,
+/// and a detached worker's batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionEvent {
+    /// The engine booted the installer `Attach` named and takes dispatches.
+    Attached,
+    /// The engine refuses to attach, in its own words, and exits.
+    Refused(String),
     /// A deferred worker's surface batch, delivered when it settles and
     /// rendered by the host at the next run boundary.
     DeferredSurface(Vec<FOValue>),
@@ -287,7 +284,7 @@ pub enum Diagnostics {
 ///
 /// The protocol projection of the engine's [`Ending`](crate::run::Ending),
 /// rendered against a [`SourceDb`](crate::source::SourceDb) — a live `Error`
-/// cannot cross the seam, so [`Self::Raised`]/[`Self::Walled`] carry the
+/// cannot cross the protocol, so [`Self::Raised`]/[`Self::Walled`] carry the
 /// string it rendered to instead. `status` is carried explicitly wherever it
 /// is not the whole of the arm's payload, since a renderer that has already
 /// discarded the engine `Error` for its `rendered` string has no other way
@@ -300,7 +297,7 @@ pub enum Ending {
     },
     /// `command_exit` says whether the status was an external command's
     /// non-zero exit rather than a raised error — the one classification a
-    /// host's didactics need from a `Status` that never crosses the seam.
+    /// host's didactics need from a `Status` that never crosses the protocol.
     /// `single_command` picks between the exit-code remedy's two wordings.
     Raised {
         rendered: String,
@@ -316,8 +313,9 @@ pub enum Ending {
     },
     Exited(i32),
     /// `pending` is the run's unfinished atomic writes, which the host parks
-    /// with the job: its end, not this frame's, decides each one.
-    #[cfg(unix)]
+    /// with the job: its end, not this frame's, decides each one. Wire data,
+    /// identical on every platform — only its producer (`render_ending`) is
+    /// Unix.
     Stopped {
         pgid: i32,
         signal: i32,
@@ -336,7 +334,6 @@ impl Ending {
             | Self::Raised { status, .. }
             | Self::Walled { status, .. } => *status,
             Self::Exited(code) => *code,
-            #[cfg(unix)]
             Self::Stopped { signal, .. } => 128 + signal,
         }
     }
@@ -344,7 +341,7 @@ impl Ending {
 
 /// Project an engine [`Ending`](crate::run::Ending) onto the wire, rendering
 /// a caught runtime error against `sources` — the one lossy step between the
-/// engine and the seam: the live `Error` renders to the string the host
+/// engine and the protocol: the live `Error` renders to the string the host
 /// prints verbatim.
 fn render_ending(ending: crate::run::Ending, sources: &crate::source::SourceDb) -> Ending {
     use crate::run::Ending as Raw;
@@ -358,7 +355,7 @@ fn render_ending(ending: crate::run::Ending, sources: &crate::source::SourceDb) 
             match FOValue::try_from(&value) {
                 Ok(value) => Ending::Settled { value, status },
                 Err(_) => Ending::Raised {
-                    rendered: "run result is not transportable across the host seam".into(),
+                    rendered: "run result is not transportable across the engine protocol".into(),
                     command_exit: false,
                     single_command: false,
                     status,
@@ -424,7 +421,7 @@ fn render_raise(
 
 impl crate::run::RunReport {
     /// Project into the protocol [`Report`] — the one lossy step between the
-    /// engine and the seam: the live `Value` becomes an [`FOValue`], and rich
+    /// engine and the protocol: the live `Value` becomes an [`FOValue`], and rich
     /// diagnostics render to strings. Rendering belongs here because this is
     /// the last point at which the engine's
     /// [`SourceDb`](crate::source::SourceDb) is in hand; the host receives the
@@ -516,7 +513,6 @@ mod ending_wire_round_trip_tests {
         round_trips(&ran(Ending::Exited(3)));
     }
 
-    #[cfg(unix)]
     #[test]
     fn stopped_round_trips() {
         round_trips(&ran(Ending::Stopped {
@@ -540,26 +536,108 @@ mod ending_wire_round_trip_tests {
     }
 }
 
+// ── Severance ──────────────────────────────────────────────────────────
+
+/// Why no further frame will cross the protocol. Terminal: a severed transport
+/// never recovers, so a front-end that sees one ends its session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Severed {
+    /// The engine refused `Attach`, in its own words: a protocol version
+    /// mismatch, an unknown installer, a seed it could not apply.
+    Refused(String),
+    /// The stream closed or a frame failed to cross.
+    Closed(String),
+    /// Nothing arrived for the liveness deadline — a virtual socket whose far
+    /// end died without an EOF.
+    Silent(Duration),
+    /// The engine answered outside the protocol — a refused boundary-time
+    /// probe, say — so nothing it says can be trusted further.
+    Faulted(String),
+}
+
+impl std::fmt::Display for Severed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(msg) => write!(f, "the engine refused to attach: {msg}"),
+            Self::Closed(msg) => write!(f, "the connection to the engine closed: {msg}"),
+            Self::Silent(d) => write!(
+                f,
+                "the engine fell silent for {}s and was declared dead",
+                d.as_secs()
+            ),
+            Self::Faulted(msg) => write!(f, "the engine broke the protocol: {msg}"),
+        }
+    }
+}
+
+/// First cause wins.
+fn sever(severance: &OnceLock<Severed>, cause: Severed) {
+    let _ = severance.set(cause);
+}
+
+/// Why a probe has no reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeError {
+    /// The engine answered but would not read: an unknown class, a malformed
+    /// payload, or the rendezvous held by an in-flight run. A program error
+    /// on the caller's side — probes are legal only at a run boundary and
+    /// only for the classes `answer_probe` knows.
+    Rejected(String),
+    /// No answer will ever come.
+    Severed(Severed),
+}
+
+// ── The host ───────────────────────────────────────────────────────────
+
+/// The host's side of one run: where its surfaced values go, who answers its
+/// enquiries, how a session it forks reaches that desk. One object, so the
+/// rails a run speaks on can never be bound to two hosts.
+pub trait Host: Send + Sync {
+    fn surface(&self, val: FOValue);
+
+    /// Answer one enquiry.
+    ///
+    /// # Errors
+    /// Returns `Err` when this host cannot answer `req`.
+    fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError>;
+
+    fn fork(&self) -> Option<crate::types::Fork>;
+}
+
+/// The mute host: renders nothing, answers nothing, adopts nothing.
+impl Host for () {
+    fn surface(&self, _val: FOValue) {}
+
+    fn enquire(&self, _req: FOValue) -> Result<FOValue, EnquiryError> {
+        Err(EnquiryError::no_desk())
+    }
+
+    fn fork(&self) -> Option<crate::types::Fork> {
+        None
+    }
+}
+
 // ── Transport trait ───────────────────────────────────────────────────
 
-/// The front-end side of the host seam.
+/// The front-end side of the engine protocol.
 pub trait Transport: Send + Sync {
     /// Run a dispatch synchronously. The `Report` arrives as the final `Event`,
-    /// after any `Surface` events, which may be drained concurrently.
-    fn dispatch(&self, id: DispatchId, run: Run);
+    /// after any `Surface` events, which may be drained concurrently. `host`
+    /// is the host's side of this run; see [`dispatch_to_report`] for how each
+    /// transport uses it.
+    fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>);
 
     /// Read session state at a run boundary, synchronously.
     ///
     /// # Errors
-    /// The `Err` string conflates two failures different in kind: the
-    /// rendezvous held by an in-flight dispatch ("engine busy", transport
-    /// state) and an unrecognised reading class (a program error, naming
-    /// it). No host may string-match either out of this text — `probe` is
-    /// legal only at a run boundary, so a caller that could observe "engine
-    /// busy" has already broken that rule. This is why
-    /// `exarch/src/agent/probe.rs` treats the whole channel as
-    /// `unreachable!`.
-    fn probe(&self, reading: FOValue) -> Result<FOValue, String>;
+    /// [`ProbeError::Rejected`] is a program error on the caller's side:
+    /// `probe` is legal only at a run boundary, so a caller that could see it
+    /// has already broken that rule — identity's own caller is this process,
+    /// so it treats it `unreachable!`. A wire caller cannot extend that trust
+    /// to the far side, and treats a `Rejected` there as the protocol fault
+    /// it would then be (`exarch/src/agent/probe.rs`). [`ProbeError::Severed`]
+    /// is the engine's death, never a program error.
+    fn probe(&self, reading: FOValue) -> Result<FOValue, ProbeError>;
 
     /// The out-of-band control sender — writable while a dispatch is in
     /// flight.  Under the identity transport this raises the ambient
@@ -568,6 +646,10 @@ pub trait Transport: Send + Sync {
 
     /// The event stream the front-end drains.
     fn events(&self) -> &EventReceiver;
+
+    /// Why no further frame will cross the protocol, if that has happened.
+    /// Identity answers `None`: an in-process transport never severs.
+    fn severed(&self) -> Option<Severed>;
 
     /// Convey the session terminal endpoint and bootstrap state.
     ///
@@ -606,9 +688,11 @@ pub trait Transport: Send + Sync {
 /// Mint a dispatch id, send `run` down `transport`, and drain events to the
 /// run's terminal [`Report`](Event::Report).
 ///
-/// `on_enquiry` is dead under the identity transport, whose `Desk` the run
-/// calls directly mid-evaluation; under the wire it is the front-end's side of
-/// that rendezvous, answered through [`Transport::answer`].
+/// `host` is the host's side of this run. Under the identity transport it
+/// rides straight onto the dispatch as the run's desk and fork door
+/// (`IdentityDesk`), so an enquiry never appears on this loop at all; under
+/// the wire, where an enquiry crosses as a frame on `events()`, this loop is
+/// what answers it, through [`Transport::answer`].
 ///
 /// The `did != id` filter rejects a cancelled predecessor's late run frames,
 /// and nothing else: every `Event` belongs to some dispatch, and this is the
@@ -616,32 +700,44 @@ pub trait Transport: Send + Sync {
 /// all — it rides `Frame::Session`, delivered to whatever sink
 /// `Transport::set_deferred_sink` installed.
 ///
-/// `None` means the stream closed without a Report — impossible under the
-/// identity transport, which sends it before `dispatch` returns.
+/// # Errors
+/// The event stream closed without a Report — impossible under the identity
+/// transport, which sends it before `dispatch` returns; under the wire, the
+/// transport's own severance.
+///
+/// # Panics
+/// Never: the `expect` on a closed event stream is guarded by the invariant
+/// [`spawn_wire_reader`] states — a severed cause is always recorded before
+/// `event_tx` drops.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "an owned Arc mirrors Transport::dispatch's own host handoff; the body only ever borrows it"
+)]
 pub fn dispatch_to_report(
     transport: &dyn Transport,
     run: Run,
-    mut on_surface: impl FnMut(FOValue),
-    mut on_enquiry: impl FnMut(FOValue) -> Result<FOValue, EnquiryError>,
-) -> Option<Report> {
+    host: Arc<dyn Host>,
+) -> Result<Report, Severed> {
     let id = mint_dispatch_id();
 
-    transport.dispatch(id, run);
+    transport.dispatch(id, run, &host);
 
     while let Some((did, event)) = transport.events().recv() {
         if did != id {
             continue;
         }
         match event {
-            Event::Surface(val) => on_surface(val),
+            Event::Surface(val) => host.surface(val),
             Event::Enquiry(eid, req) => {
-                let answer = on_enquiry(req);
+                let answer = host.enquire(req);
                 transport.answer(eid, answer);
             }
-            Event::Report(report) => return Some(report),
+            Event::Report(report) => return Ok(report),
         }
     }
-    None
+    Err(transport
+        .severed()
+        .expect("the reader severs before it closes the event stream"))
 }
 
 /// Dispatches and probes share this mint: both are answered by an
@@ -825,16 +921,18 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
 /// run miss rather than strike the successor.
 type CancelTarget = Arc<std::sync::Mutex<Option<(DispatchId, crate::process::ForegroundScope)>>>;
 
+/// A wire sender's write door and the severance cell a failed write records
+/// into.
+type WireControl = (Arc<Mutex<crate::wire::WireChannel>>, Arc<OnceLock<Severed>>);
+
 /// Out-of-band control sender.
 #[derive(Clone)]
 pub struct ControlSender {
     /// `Some` writes `Control` frames to a `WireChannel`, carrying that
-    /// transport's death flag so a failed control write declares the death a
-    /// failed data write declares; `None` acts on the in-process foreground
-    /// scope instead.
-    wire: Option<(Arc<Mutex<crate::wire::WireChannel>>, Arc<AtomicBool>)>,
-    /// Shared with the transport's own event-correlation bookkeeping, so
-    /// `cancel_current` names a real dispatch rather than a sentinel.
+    /// transport's severance cell so a failed control write severs the
+    /// connection the same way a failed data write does; `None` acts on the
+    /// in-process foreground scope instead.
+    wire: Option<WireControl>,
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
     /// `Some` for an identity sender, `None` for a wire one, whose cancel
     /// already reaches the run across the wire without a local scope to trip.
@@ -855,18 +953,14 @@ impl ControlSender {
 
     pub(crate) fn new_wire(
         ch: Arc<Mutex<crate::wire::WireChannel>>,
-        death: Arc<AtomicBool>,
+        severance: Arc<OnceLock<Severed>>,
         current_dispatch: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         Self {
-            wire: Some((ch, death)),
+            wire: Some((ch, severance)),
             current_dispatch,
             cancel_target: None,
         }
-    }
-
-    pub(crate) fn publish(self) {
-        let _ = CURRENT_CONTROL.set(self);
     }
 
     /// Cancel this sender's own in-flight dispatch, down whichever channel it
@@ -878,12 +972,6 @@ impl ControlSender {
         self.send(Control::Cancel(DispatchId(id)));
     }
 
-    pub fn cancel_current() {
-        if let Some(ctrl) = CURRENT_CONTROL.get() {
-            ctrl.cancel_in_flight();
-        }
-    }
-
     /// # Panics
     /// Panics if the wire-channel mutex is poisoned.
     #[allow(
@@ -891,11 +979,11 @@ impl ControlSender {
         reason = "the wire arm moves `ctrl` into the `Frame` it writes, and `Control` is not `Copy`; only the identity fallback below merely reads it"
     )]
     pub fn send(&self, ctrl: Control) {
-        if let Some((ch, death)) = &self.wire {
+        if let Some((ch, severance)) = &self.wire {
             // A control frame that cannot be written is as fatal as a dispatch
             // that cannot: the peer is gone, and waiting on the reader's
             // eventual EOF to say so leaves a cancel silently lost meanwhile.
-            let _ = write_through(ch, death, &Frame::Control(ctrl));
+            let _ = write_through(ch, severance, &Frame::Control(ctrl));
             return;
         }
         match ctrl {
@@ -923,10 +1011,10 @@ impl ControlSender {
 /// are ordered before the `Report`.
 ///
 /// Admits exactly one drainer at a time — [`dispatch_to_report`]'s loop and a
-/// desk's own pre-drain (`exarch`'s `DeskBinding::enquire`) never run
-/// together, because the desk call happens synchronously inside
-/// `Transport::dispatch`, on the same thread, strictly before the loop's own
-/// first `recv`. The `stash` and `rx` mutexes exist only to make
+/// desk's own pre-drain (`IdentityDesk::enquire`) never run together, because
+/// the desk call happens synchronously inside `Transport::dispatch`, on the
+/// same thread, strictly before the loop's own first `recv`. The `stash` and
+/// `rx` mutexes exist only to make
 /// `mpsc::Receiver` `Sync` across that single drainer; they do not arbitrate
 /// between two, and nothing here enforces the invariant — it is a scheduling
 /// fact about the callers, not a property of the locks.
@@ -1092,12 +1180,6 @@ pub struct EngineInner {
     /// `set_deferred_sink`, and while it is `None` a settling worker's batch is
     /// dropped.
     deferred_sink: Option<Arc<dyn DeferredSink>>,
-    /// `None` until a host calls `set_desk`, in which case `enquire` answers
-    /// its honest absence error.
-    desk: Option<crate::types::Desk>,
-    /// `None` until a host calls `set_fork`, in which case
-    /// `fork_into_nursery` answers its honest absence error.
-    fork: Option<crate::types::Fork>,
     /// Set by Attach.
     terminal_lease: Option<crate::process::TerminalLease>,
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
@@ -1127,15 +1209,12 @@ impl IdentityTransport {
         let dispatches = shell.run_cancel_handle();
         let cancel_target: CancelTarget = Arc::new(std::sync::Mutex::new(None));
         let control = ControlSender::new(current_dispatch.clone(), cancel_target.clone());
-        control.clone().publish();
 
         let engine = EngineInner {
             shell,
             event_tx,
             surface_sink: sink,
             deferred_sink: None,
-            desk: None,
-            fork: None,
             terminal_lease: None,
             current_dispatch,
         };
@@ -1174,25 +1253,6 @@ impl IdentityTransport {
         self.interrupt_target = Some(target);
     }
 
-    /// Install the session's enquiry desk. A per-run host calls this before
-    /// each dispatch, so whatever the desk captures is fresh.
-    pub fn set_desk(&self, desk: crate::types::Desk) {
-        self.engine.lock().desk = Some(desk);
-    }
-
-    /// Install the session's [`Fork`](crate::types::Fork) door. Called per run,
-    /// so a stale fork from an earlier generation is never adoptable.
-    pub fn set_fork(&self, fork: crate::types::Fork) {
-        self.engine.lock().fork = Some(fork);
-    }
-
-    /// Uninstall it. `set_desk` needs no counterpart — a desk retires by
-    /// installing one that answers nothing — but an empty `Nursery` would still
-    /// accept a park, so `None` is the only honest absence here.
-    pub fn clear_fork(&self) {
-        self.engine.lock().fork = None;
-    }
-
     /// The inverse of [`IdentityTransport::new`], for a caller that lent a
     /// shell in to route one run through production.
     pub fn into_shell(self) -> crate::types::Shell {
@@ -1229,8 +1289,43 @@ impl IdentityTransport {
     }
 }
 
+/// The identity transport's enquiry desk: a direct, same-thread wrapper
+/// around the host's `Host`, installed onto each dispatch's `RunRequest`.
+///
+/// Draining `events` before `host.enquire` is what keeps a handler from
+/// running ahead of the run's own surface output.
+struct IdentityDesk {
+    host: Arc<dyn Host>,
+    events: Arc<EventReceiver>,
+}
+
+impl crate::types::EnquiryDesk for IdentityDesk {
+    /// `_cancel` goes unpolled: [`EnquiryDesk::enquire`] is contractually
+    /// blocking and short, so a `Host` answers at once and leaves nothing
+    /// here to park on.
+    fn enquire(
+        &self,
+        req: FOValue,
+        _cancel: &crate::process::CancelScope,
+    ) -> Result<FOValue, crate::types::Error> {
+        let mut carried = std::collections::VecDeque::new();
+        while let Some((did, event)) = self.events.try_recv() {
+            match event {
+                Event::Surface(val) => self.host.surface(val),
+                other => carried.push_back((did, other)),
+            }
+        }
+        for item in carried {
+            self.events.stash.lock_ignore_poison().push_back(item);
+        }
+        self.host
+            .enquire(req)
+            .map_err(|e| crate::types::Error::new(e.message, e.status))
+    }
+}
+
 impl Transport for IdentityTransport {
-    fn dispatch(&self, id: DispatchId, run: Run) {
+    fn dispatch(&self, id: DispatchId, run: Run, host: &Arc<dyn Host>) {
         self.check_not_reentrant();
 
         // Minted ahead of the engine lock, so a cancel raised in that window —
@@ -1255,14 +1350,18 @@ impl Transport for IdentityTransport {
             .current_dispatch
             .store(id.0, std::sync::atomic::Ordering::Relaxed);
 
+        let desk: crate::types::Desk = Arc::new(IdentityDesk {
+            host: host.clone(),
+            events: self.events_recv.clone(),
+        });
         // The live, non-transportable handles this dispatch lends the run,
         // joined with the protocol `Run` the engine door takes.
         let req = crate::run::RunRequest {
             run,
             surface: Some(engine.surface_sink.clone() as SurfaceSink),
             deferred: engine.deferred_sink.clone(),
-            desk: engine.desk.clone(),
-            fork: engine.fork.clone(),
+            desk: Some(desk),
+            fork: host.fork(),
             lifecycle: Box::new(()),
         };
         let run_report = engine.shell.run_under(&scope, req);
@@ -1278,10 +1377,10 @@ impl Transport for IdentityTransport {
         clippy::needless_pass_by_value,
         reason = "Transport::probe signature is fixed by the trait; the sibling impl consumes `reading` into a Frame"
     )]
-    fn probe(&self, reading: FOValue) -> Result<FOValue, String> {
+    fn probe(&self, reading: FOValue) -> Result<FOValue, ProbeError> {
         self.check_not_reentrant();
         let mut engine = self.engine.lock();
-        answer_probe(&mut engine.shell, &reading)
+        answer_probe(&mut engine.shell, &reading).map_err(ProbeError::Rejected)
     }
 
     fn control(&self) -> &ControlSender {
@@ -1292,6 +1391,10 @@ impl Transport for IdentityTransport {
         &self.events_recv
     }
 
+    fn severed(&self) -> Option<Severed> {
+        None
+    }
+
     fn attach(
         &self,
         endpoint: TerminalEndpoint,
@@ -1300,16 +1403,19 @@ impl Transport for IdentityTransport {
         _rc_path: Option<PathBuf>,
         _installer: String,
     ) {
+        self.check_not_reentrant();
         let mut engine = self.engine.lock();
         engine.terminal_lease = endpoint.lease;
     }
 
     fn detach(&self) {
+        self.check_not_reentrant();
         crate::process::request_foreground_cancel(crate::process::CancelCause::Explicit);
         self.engine.lock().terminal_lease = None;
     }
 
     fn set_deferred_sink(&self, sink: Arc<dyn DeferredSink>) {
+        self.check_not_reentrant();
         self.engine.lock().deferred_sink = Some(sink);
     }
 
@@ -1359,7 +1465,11 @@ mod identity_cancel_tests {
         let worker = {
             let transport = transport.clone();
             std::thread::spawn(move || {
-                transport.dispatch(DispatchId(1), sleep_run("sleep 30"));
+                transport.dispatch(
+                    DispatchId(1),
+                    sleep_run("sleep 30"),
+                    &(Arc::new(()) as Arc<dyn Host>),
+                );
             })
         };
 
@@ -1414,7 +1524,11 @@ mod identity_cancel_tests {
         let worker = {
             let transport = transport.clone();
             std::thread::spawn(move || {
-                transport.dispatch(DispatchId(1), sleep_run("sleep 30"));
+                transport.dispatch(
+                    DispatchId(1),
+                    sleep_run("sleep 30"),
+                    &(Arc::new(()) as Arc<dyn Host>),
+                );
             })
         };
 
@@ -1450,9 +1564,10 @@ mod identity_cancel_tests {
 // ── Wire transport ────────────────────────────────────────────────────
 
 /// The one front-end write door: locks `ch`, writes `frame`, and on error
-/// severs the connection before the lock is released — stores `death`, shuts
-/// the channel down while the guard is still held, and reports the failure.
-/// Shared by [`WireTransport::write`] and the wire arm of [`ControlSender::send`].
+/// severs the connection before the lock is released — records `severance`,
+/// shuts the channel down while the guard is still held, and reports the
+/// failure. Shared by [`WireTransport::write`] and the wire arm of
+/// [`ControlSender::send`].
 ///
 /// Invariant: a stream that suffered a failed write is severed before the
 /// lock is released, so nothing can append a fresh frame after a truncated
@@ -1462,25 +1577,19 @@ mod identity_cancel_tests {
 ///
 /// Deliberately outside [`LockExt`]'s recover-poison policy: a panic between
 /// `write_frame` and `shutdown` can leave a partial frame already on the
-/// socket, severed by neither `death` nor a shutdown call. Recovering the
+/// socket, severed by neither `severance` nor a shutdown call. Recovering the
 /// poison would let the next writer resume into that torn frame stream, which
 /// is worse than the panic propagating; a poisoned `ch` must stay poisoned.
 fn write_through(
     ch: &Mutex<crate::wire::WireChannel>,
-    death: &AtomicBool,
+    severance: &OnceLock<Severed>,
     frame: &Frame,
 ) -> io::Result<()> {
-    let outcome = {
-        let mut guard = ch.lock().unwrap();
-        let outcome = guard.write_frame(frame);
-        if outcome.is_err() {
-            guard.shutdown();
-        }
-        outcome
-    };
+    let mut guard = ch.lock().unwrap();
+    let outcome = guard.write_frame(frame);
     if let Err(e) = &outcome {
-        death.store(true, Ordering::SeqCst);
-        eprintln!("wire: engine process died ({e})");
+        sever(severance, Severed::Closed(e.to_string()));
+        guard.shutdown();
     }
     outcome
 }
@@ -1542,12 +1651,11 @@ pub struct WireTransport {
     /// Never joined: the thread exits when the channel closes. `Mutex` only
     /// for `Sync`.
     _reader: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Set when the peer dies — a write error, a read EOF, or the ticker's
-    /// deadline elapsing. Reader and ticker both check it to break early, and
-    /// it is what [`WireTransport::dead`] reports.
-    death: Arc<AtomicBool>,
-    /// Shared with the published `ControlSender` so `cancel_current` names the
-    /// dispatch it means.
+    /// Set once, first cause wins — a write error, a read EOF, a refused
+    /// `Attach`, or the ticker's silence deadline. Reader and ticker both
+    /// check it to break early, and it is what [`WireTransport::severed`]
+    /// reports.
+    severance: Arc<OnceLock<Severed>>,
     current_dispatch: Arc<std::sync::atomic::AtomicU64>,
     /// The instant of the last frame read — what the ticker measures silence
     /// against.
@@ -1566,27 +1674,57 @@ pub struct WireTransport {
     /// `write_tx`'s lock, so tearing the transport down never parks behind a
     /// write some other thread holds the lock over.
     shutdown: crate::wire::WireChannel,
+    /// Set true by the reader on `SessionEvent::Attached`; awaited by
+    /// [`WireTransport::await_attached`].
+    attached: Arc<(Mutex<bool>, Condvar)>,
+    /// How long [`WireTransport::await_attached`] waits for the verdict before
+    /// declaring the engine [`Severed::Silent`].
+    patience: Duration,
 }
 
 /// The reader loop shared by both constructors. `last_seen` records *every*
 /// frame read, not just `Pong`s — any frame is proof of life. On EOF, a read
-/// error, or an already-set flag it sets `death` before exiting, so `dead()` is
+/// error, or a refused `Attach` it severs before exiting, so `severed()` is
 /// honest under every teardown path and the dropped `event_tx` closes the
-/// channel whose `recv` is what fails the in-flight dispatch.
+/// channel whose `recv` is what fails the in-flight dispatch — the reader
+/// severs *before* it drops `event_tx`, on every exit path.
 ///
 /// `Frame::Event` goes onto the per-run channel; `Frame::Session` goes to
 /// whichever sink `deferred_sink` holds at the moment it arrives, or is
-/// dropped if none is installed.
+/// dropped if none is installed; `SessionEvent::Attached` wakes
+/// [`WireTransport::await_attached`].
 fn spawn_wire_reader(
     mut reader_ch: crate::wire::WireChannel,
     event_tx: mpsc::Sender<(DispatchId, Event)>,
     deferred_sink: Arc<Mutex<Option<Arc<dyn DeferredSink>>>>,
-    death: Arc<AtomicBool>,
+    severance: Arc<OnceLock<Severed>>,
     last_seen: Arc<Mutex<Instant>>,
+    attached: Arc<(Mutex<bool>, Condvar)>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // Severs on every exit, panics included (e.g. from `DeferredSink::deliver`),
+        // so `dispatch_to_report`'s `expect` always finds a cause. Declared first so
+        // it drops after the loop's own locals but before the captured `event_tx`.
+        struct SeverOnExit<'a> {
+            severance: &'a OnceLock<Severed>,
+            attached: &'a (Mutex<bool>, Condvar),
+        }
+        impl Drop for SeverOnExit<'_> {
+            fn drop(&mut self) {
+                sever(
+                    self.severance,
+                    Severed::Closed("the reader thread ended".into()),
+                );
+                self.attached.1.notify_all();
+            }
+        }
+        let _sever_on_exit = SeverOnExit {
+            severance: &severance,
+            attached: &attached,
+        };
+
         loop {
-            if death.load(Ordering::SeqCst) {
+            if severance.get().is_some() {
                 break;
             }
             match reader_ch.read_frame() {
@@ -1600,17 +1738,35 @@ fn spawn_wire_reader(
                             }
                         }
                         Frame::Session(SessionEvent::DeferredSurface(batch)) => {
-                            if let Some(sink) = deferred_sink.lock_ignore_poison().as_ref() {
+                            let sink = deferred_sink.lock_ignore_poison().clone();
+                            if let Some(sink) = sink {
                                 sink.deliver(batch);
                             }
+                        }
+                        Frame::Session(SessionEvent::Attached) => {
+                            *attached.0.lock_ignore_poison() = true;
+                            attached.1.notify_all();
+                        }
+                        Frame::Session(SessionEvent::Refused(msg)) => {
+                            sever(&severance, Severed::Refused(msg));
+                            break;
                         }
                         _ => {}
                     }
                 }
-                Ok(None) | Err(_) => break,
+                Ok(None) => {
+                    sever(
+                        &severance,
+                        Severed::Closed("the engine closed the connection".into()),
+                    );
+                    break;
+                }
+                Err(e) => {
+                    sever(&severance, Severed::Closed(e.to_string()));
+                    break;
+                }
             }
         }
-        death.store(true, Ordering::SeqCst);
     })
 }
 
@@ -1621,14 +1777,14 @@ fn spawn_wire_reader(
 /// the wire down too, waking the parked reader so the event channel closes.
 /// Never joined.
 ///
-/// The deadline arm never takes `write_tx`'s lock: declaring death from
-/// silence must not itself be capable of parking behind a write some other
-/// thread is stalled on, so `dead()==true` always implies `shutdown` runs in
+/// The deadline arm never takes `write_tx`'s lock: severing from silence must
+/// not itself be capable of parking behind a write some other thread is
+/// stalled on, so a severed transport always implies `shutdown` runs in
 /// bounded time. The `Ping` arm goes through [`write_through`], which severs
 /// on failure the same way any other front-end write does.
 fn spawn_heartbeat(
     write_tx: Arc<Mutex<crate::wire::WireChannel>>,
-    death: Arc<AtomicBool>,
+    severance: Arc<OnceLock<Severed>>,
     last_seen: Arc<Mutex<Instant>>,
     liveness: Liveness,
     shutdown: crate::wire::WireChannel,
@@ -1637,16 +1793,16 @@ fn spawn_heartbeat(
         let mut seq: u64 = 0;
         loop {
             std::thread::sleep(liveness.interval);
-            if death.load(Ordering::SeqCst) {
+            if severance.get().is_some() {
                 break;
             }
             if last_seen.lock_ignore_poison().elapsed() >= liveness.deadline {
-                death.store(true, Ordering::SeqCst);
+                sever(&severance, Severed::Silent(liveness.deadline));
                 shutdown.shutdown();
                 break;
             }
             seq += 1;
-            if write_through(&write_tx, &death, &Frame::Ping(seq)).is_err() {
+            if write_through(&write_tx, &severance, &Frame::Ping(seq)).is_err() {
                 break;
             }
         }
@@ -1704,23 +1860,28 @@ impl WireTransport {
         // would never read as EOF.
         drop(engine);
 
-        let death = Arc::new(AtomicBool::new(false));
+        let severance = Arc::new(OnceLock::new());
         let (event_tx, event_rx) = mpsc::channel();
         // No ticker here, but the shared reader keeps `last_seen` anyway.
         let last_seen = Arc::new(Mutex::new(Instant::now()));
         let deferred_sink = Arc::new(Mutex::new(None));
+        let attached = Arc::new((Mutex::new(false), Condvar::new()));
         let reader = spawn_wire_reader(
             frontend,
             event_tx,
             deferred_sink.clone(),
-            death.clone(),
+            severance.clone(),
             last_seen.clone(),
+            attached.clone(),
         );
 
         let write_tx = Arc::new(Mutex::new(writer));
         let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let control =
-            ControlSender::new_wire(write_tx.clone(), death.clone(), current_dispatch.clone());
+        let control = ControlSender::new_wire(
+            write_tx.clone(),
+            severance.clone(),
+            current_dispatch.clone(),
+        );
 
         Ok(Self {
             events_recv: EventReceiver::new(event_rx),
@@ -1728,12 +1889,14 @@ impl WireTransport {
             write_tx,
             child: Some(ChildHandle::from_std(child)),
             _reader: Mutex::new(Some(reader)),
-            death,
+            severance,
             current_dispatch,
             last_seen,
             pending_heartbeat: Mutex::new(None),
             deferred_sink,
             shutdown,
+            attached,
+            patience: DEFAULT_PEER_PATIENCE,
         })
     }
 
@@ -1764,22 +1927,27 @@ impl WireTransport {
         // progress.
         let shutdown = writer.try_clone()?;
 
-        let death = Arc::new(AtomicBool::new(false));
+        let severance = Arc::new(OnceLock::new());
         let last_seen = Arc::new(Mutex::new(Instant::now()));
         let (event_tx, event_rx) = mpsc::channel();
         let deferred_sink = Arc::new(Mutex::new(None));
+        let attached = Arc::new((Mutex::new(false), Condvar::new()));
         let reader = spawn_wire_reader(
             reader_ch,
             event_tx,
             deferred_sink.clone(),
-            death.clone(),
+            severance.clone(),
             last_seen.clone(),
+            attached.clone(),
         );
 
         let write_tx = Arc::new(Mutex::new(writer));
         let current_dispatch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let control =
-            ControlSender::new_wire(write_tx.clone(), death.clone(), current_dispatch.clone());
+        let control = ControlSender::new_wire(
+            write_tx.clone(),
+            severance.clone(),
+            current_dispatch.clone(),
+        );
 
         Ok(Self {
             events_recv: EventReceiver::new(event_rx),
@@ -1788,27 +1956,76 @@ impl WireTransport {
             #[cfg(unix)]
             child: None,
             _reader: Mutex::new(Some(reader)),
-            death,
+            severance,
             current_dispatch,
             last_seen,
             pending_heartbeat: Mutex::new(Some(liveness)),
             deferred_sink,
             shutdown,
+            attached,
+            patience: liveness.deadline,
         })
     }
 
-    /// Whether the peer has been declared dead — a write error, a read EOF, or
-    /// the heartbeat deadline. This is how a front-end tells *detached* from
-    /// merely failed: no further frame will ever cross.
-    pub fn dead(&self) -> bool {
-        self.death.load(Ordering::SeqCst)
+    /// Why no further frame will cross the protocol, if that has happened — a
+    /// write error, a read EOF, a refused `Attach`, or the heartbeat's silence
+    /// deadline. This is how a front-end tells *detached* from merely failed:
+    /// once severed, no further frame will ever cross.
+    pub fn severed(&self) -> Option<Severed> {
+        self.severance.get().cloned()
+    }
+
+    /// Declare the peer dead for a reason the front-end observed itself, and
+    /// shut the connection so the engine sees EOF.
+    pub fn sever(&self, cause: Severed) {
+        sever(&self.severance, cause);
+        self.shutdown.shutdown();
+    }
+
+    /// Block until the engine answers the `Attach` this transport wrote.
+    /// `Transport::attach` only writes the frame; the verdict is awaited here,
+    /// so a refusal is learnt at construction, not at the first dispatch.
+    ///
+    /// # Errors
+    /// The transport's severance — a refused `Attach`, a closed connection, or
+    /// [`Severed::Silent`] once no verdict arrives within `self.patience`.
+    ///
+    /// # Panics
+    /// Never: the `expect` fires only after this call has just severed the
+    /// transport itself, on the same line above it.
+    pub fn await_attached(&self) -> Result<(), Severed> {
+        let deadline = Instant::now() + self.patience;
+        let mut guard = self.attached.0.lock_ignore_poison();
+        loop {
+            // Severance first: an `Attached` that raced a death must not grant
+            // a seat on a transport already known dead.
+            if let Some(cause) = self.severed() {
+                return Err(cause);
+            }
+            if *guard {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                sever(&self.severance, Severed::Silent(self.patience));
+                self.shutdown.shutdown();
+                return Err(self
+                    .severed()
+                    .expect("sever just recorded the cause this call names"));
+            }
+            guard = self
+                .attached
+                .1
+                .wait_timeout(guard, Duration::from_millis(100))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
     }
 
     /// Any write error is fatal, `ECONNRESET` no less than `BrokenPipe`: a
     /// dropped frame means no `Report` will ever arrive, so the host's `recv`
-    /// must learn of the death rather than block forever.
+    /// must learn of the severance rather than block forever.
     fn write(&self, frame: &Frame) {
-        let _ = write_through(&self.write_tx, &self.death, frame);
+        let _ = write_through(&self.write_tx, &self.severance, frame);
     }
 }
 
@@ -1817,7 +2034,10 @@ impl Drop for WireTransport {
         // `self.shutdown` never takes `write_tx`'s lock, so this wakes the
         // reader and (under `adopt`) the ticker — which share the one socket —
         // without ever parking behind a write in progress.
-        self.death.store(true, Ordering::SeqCst);
+        sever(
+            &self.severance,
+            Severed::Closed("the front-end dropped the transport".into()),
+        );
         self.shutdown.shutdown();
         // An adopted stream owns no child — its far end is a guest VM the
         // session manager reaps — so only `new`'s child is reaped here.
@@ -1830,19 +2050,27 @@ impl Drop for WireTransport {
 }
 
 impl Transport for WireTransport {
-    fn dispatch(&self, id: DispatchId, run: Run) {
+    fn dispatch(&self, id: DispatchId, run: Run, _host: &Arc<dyn Host>) {
+        // The host is consulted by the drain loop, not here: an enquiry
+        // crossing a wire is a frame on `events()`, answered by whoever drains
+        // it — `dispatch_to_report`.
         self.current_dispatch
             .store(id.0, std::sync::atomic::Ordering::Relaxed);
         self.write(&Frame::Dispatch(id, Box::new(run)));
     }
 
-    fn probe(&self, reading: FOValue) -> Result<FOValue, String> {
+    fn probe(&self, reading: FOValue) -> Result<FOValue, ProbeError> {
         let id = mint_dispatch_id();
         self.write(&Frame::Probe(id, reading));
-        loop {
+        // Foreign events read past on the way to this probe's own Report are
+        // held here rather than restashed mid-loop: `recv`'s stash-first law
+        // would hand a mid-loop stash straight back on the next iteration,
+        // spinning forever on a foreign event.
+        let mut carried = std::collections::VecDeque::new();
+        let outcome = loop {
             match self.events_recv.recv() {
                 Some((did, Event::Report(report))) if did == id => {
-                    return match report {
+                    break match report {
                         Report::Ran {
                             ending: Ending::Settled { value, .. },
                             ..
@@ -1851,23 +2079,34 @@ impl Transport for WireTransport {
                             ending:
                                 Ending::Raised { rendered, .. } | Ending::Walled { rendered, .. },
                             ..
-                        } => Err(rendered),
-                        Report::Ran { ending, .. } => {
-                            Err(format!("probe answered abnormally: {ending:?}"))
+                        } => Err(ProbeError::Rejected(rendered)),
+                        Report::Ran { ending, .. } => Err(ProbeError::Rejected(format!(
+                            "probe answered abnormally: {ending:?}"
+                        ))),
+                        Report::Static { diagnostics } => {
+                            Err(ProbeError::Rejected(match diagnostics {
+                                Diagnostics::Host(msg) | Diagnostics::Parse(msg) => msg,
+                                Diagnostics::Types(errs) => errs.join("\n"),
+                            }))
                         }
-                        Report::Static { diagnostics } => Err(match diagnostics {
-                            Diagnostics::Host(msg) | Diagnostics::Parse(msg) => msg,
-                            Diagnostics::Types(errs) => errs.join("\n"),
-                        }),
                     };
                 }
-                // Anything that is not this probe's Report — another
-                // dispatch's, a worker's batch settling mid-probe — is stashed
-                // for the ordinary drain rather than dropped.
-                Some(item) => self.events_recv.stash.lock_ignore_poison().push_back(item),
-                None => return Err("engine connection closed".into()),
+                Some(item) => carried.push_back(item),
+                None => {
+                    break Err(ProbeError::Severed(
+                        self.severed()
+                            .expect("the reader severs before it closes the event stream"),
+                    ));
+                }
             }
-        }
+        };
+        // Anything that was not this probe's Report — another dispatch's, a
+        // worker's batch settling mid-probe — is stashed for the ordinary
+        // drain rather than dropped.
+        let mut stash = self.events_recv.stash.lock_ignore_poison();
+        stash.extend(carried);
+        drop(stash);
+        outcome
     }
 
     fn control(&self) -> &ControlSender {
@@ -1876,6 +2115,10 @@ impl Transport for WireTransport {
 
     fn events(&self) -> &EventReceiver {
         &self.events_recv
+    }
+
+    fn severed(&self) -> Option<Severed> {
+        self.severance.get().cloned()
     }
 
     /// The endpoint's lease does not survive encoding, so the engine attaches
@@ -1900,9 +2143,13 @@ impl Transport for WireTransport {
         // start: no Ping may precede the handshake.
         let pending = self.pending_heartbeat.lock_ignore_poison().take();
         if let Some(liveness) = pending {
+            // Silence is measured from here, not from `adopt`: a front-end that
+            // adopted long before attaching must not find its booting engine
+            // already declared `Silent` on the heartbeat's first tick.
+            *self.last_seen.lock_ignore_poison() = Instant::now();
             spawn_heartbeat(
                 self.write_tx.clone(),
-                self.death.clone(),
+                self.severance.clone(),
                 self.last_seen.clone(),
                 liveness,
                 self.shutdown
@@ -1941,7 +2188,7 @@ mod enquiry_tests {
     use crate::run::{
         RequestedTerminalAccess, RunIo, RunLifecycle, RunReport, RunRequest, RunStdin,
     };
-    use crate::types::{Capabilities, Desk, EnquiryDesk, Error, Mooring, Shell};
+    use crate::types::{Capabilities, Desk, Fork, Mooring, Shell};
     use std::sync::Mutex;
 
     /// The minimal capturing request under the ⊤ ceiling, mirroring `run.rs`'s
@@ -1978,18 +2225,24 @@ mod enquiry_tests {
         assert_eq!(err.message, crate::types::NO_DESK);
     }
 
-    /// A stub desk that maps `Int{n}` to `Int{n+1}`, otherwise echoes.
-    struct IncrementDesk;
-    impl EnquiryDesk for IncrementDesk {
-        fn enquire(
-            &self,
-            req: FOValue,
-            _cancel: &crate::process::CancelScope,
-        ) -> Result<FOValue, Error> {
+    /// A no-op receiver, for a desk built without a real dispatch behind it.
+    fn no_events() -> Arc<EventReceiver> {
+        let (_tx, rx) = mpsc::channel();
+        Arc::new(EventReceiver::new(rx))
+    }
+
+    /// A stub host that maps `Int{n}` to `Int{n+1}`, otherwise echoes.
+    struct IncrementSeam;
+    impl Host for IncrementSeam {
+        fn surface(&self, _val: FOValue) {}
+        fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
             match req {
                 FOValue::Int { value } => Ok(FOValue::Int { value: value + 1 }),
                 other => Ok(other),
             }
+        }
+        fn fork(&self) -> Option<Fork> {
+            None
         }
     }
 
@@ -1998,7 +2251,7 @@ mod enquiry_tests {
     #[derive(Clone)]
     struct AskDuringRun {
         req: FOValue,
-        answer: std::sync::Arc<Mutex<Option<Result<FOValue, Error>>>>,
+        answer: std::sync::Arc<Mutex<Option<Result<FOValue, crate::types::Error>>>>,
     }
     impl RunLifecycle for AskDuringRun {
         fn pre_exec(&mut self, mooring: &Mooring, shell: &mut Shell, _src: &str) {
@@ -2006,7 +2259,7 @@ mod enquiry_tests {
         }
     }
 
-    /// The desk's transform reaches `enquire`'s caller, not just the desk.
+    /// The host's transform reaches `enquire`'s caller, not just `IdentityDesk`.
     #[test]
     fn enquire_round_trips_through_a_stub_desk() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
@@ -2015,9 +2268,13 @@ mod enquiry_tests {
             req: FOValue::Int { value: 41 },
             answer: answer.clone(),
         };
+        let desk: Desk = Arc::new(IdentityDesk {
+            host: Arc::new(IncrementSeam),
+            events: no_events(),
+        });
 
         match shell.run(RunRequest {
-            desk: Some(std::sync::Arc::new(IncrementDesk) as Desk),
+            desk: Some(desk),
             lifecycle: Box::new(lifecycle),
             ..capture_req("$[1 + 1]")
         }) {
@@ -2030,7 +2287,7 @@ mod enquiry_tests {
             Ok(v) => assert_eq!(
                 v,
                 FOValue::Int { value: 42 },
-                "enquire must return the desk's transformed answer"
+                "enquire must return the host's transformed answer"
             ),
             Err(e) => panic!("enquire must succeed through the stub desk, got {e:?}"),
         }
@@ -2039,15 +2296,15 @@ mod enquiry_tests {
     /// A handler reaching back into `shell_mut` would take the session lock its
     /// own stack already holds. Lacking a core builtin that enquires, the test
     /// sets `dispatch`'s thread stamp by hand and exercises the same guard.
-    struct ReentrantShellMutDesk(std::sync::Arc<IdentityTransport>);
-    impl EnquiryDesk for ReentrantShellMutDesk {
-        fn enquire(
-            &self,
-            req: FOValue,
-            _cancel: &crate::process::CancelScope,
-        ) -> Result<FOValue, Error> {
+    struct ReentrantShellMutSeam(std::sync::Arc<IdentityTransport>);
+    impl Host for ReentrantShellMutSeam {
+        fn surface(&self, _val: FOValue) {}
+        fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
             let _guard = self.0.shell_mut();
             Ok(req)
+        }
+        fn fork(&self) -> Option<Fork> {
+            None
         }
     }
 
@@ -2060,18 +2317,18 @@ mod enquiry_tests {
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
         let shell = Shell::new(crate::io::TerminalState::default());
         let mut mooring = Mooring::adrift();
-        mooring.desk = Some(std::sync::Arc::new(ReentrantShellMutDesk(transport)) as Desk);
+        mooring.desk = Some(Arc::new(IdentityDesk {
+            host: Arc::new(ReentrantShellMutSeam(transport)),
+            events: no_events(),
+        }) as Desk);
         let _ = shell.enquire(&mooring, FOValue::Unit);
     }
 
     /// The same guard on the other door.
-    struct ReentrantDispatchDesk(std::sync::Arc<IdentityTransport>);
-    impl EnquiryDesk for ReentrantDispatchDesk {
-        fn enquire(
-            &self,
-            req: FOValue,
-            _cancel: &crate::process::CancelScope,
-        ) -> Result<FOValue, Error> {
+    struct ReentrantDispatchSeam(std::sync::Arc<IdentityTransport>);
+    impl Host for ReentrantDispatchSeam {
+        fn surface(&self, _val: FOValue) {}
+        fn enquire(&self, req: FOValue) -> Result<FOValue, EnquiryError> {
             self.0.dispatch(
                 DispatchId(0),
                 Run {
@@ -2086,8 +2343,12 @@ mod enquiry_tests {
                     stdin: RunStdin::Empty,
                     trail: None,
                 },
+                &(Arc::new(()) as Arc<dyn Host>),
             );
             Ok(req)
+        }
+        fn fork(&self) -> Option<Fork> {
+            None
         }
     }
 
@@ -2100,50 +2361,15 @@ mod enquiry_tests {
         *transport.dispatch_thread.lock().unwrap() = Some(std::thread::current().id());
         let shell = Shell::new(crate::io::TerminalState::default());
         let mut mooring = Mooring::adrift();
-        mooring.desk = Some(std::sync::Arc::new(ReentrantDispatchDesk(transport)) as Desk);
+        mooring.desk = Some(Arc::new(IdentityDesk {
+            host: Arc::new(ReentrantDispatchSeam(transport)),
+            events: no_events(),
+        }) as Desk);
         let _ = shell.enquire(&mooring, FOValue::Unit);
-    }
-
-    /// The same `Arc` `set_desk` was given is the one `dispatch` would hand
-    /// onto its `RunRequest`.
-    #[test]
-    fn set_desk_installs_onto_engine_inner() {
-        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        let desk: Desk = std::sync::Arc::new(IncrementDesk);
-        transport.set_desk(desk.clone());
-        let installed = transport
-            .shell_mut()
-            .desk
-            .clone()
-            .expect("set_desk must install a desk");
-        assert!(
-            std::sync::Arc::ptr_eq(&desk, &installed),
-            "the installed desk must be the same Arc set_desk was given"
-        );
-    }
-
-    /// Reverting `engine.fork` to `None` is what makes a later dispatch's
-    /// `fork_into_nursery` answer absence rather than find a stale nursery.
-    #[test]
-    fn clear_fork_uninstalls_from_engine_inner() {
-        use crate::types::{Fork, Nursery};
-
-        let transport = IdentityTransport::new(Shell::new(crate::io::TerminalState::default()));
-        transport.set_fork(Fork::Park(Nursery::default()));
-        assert!(
-            transport.shell_mut().fork.is_some(),
-            "set_fork must install onto engine.fork"
-        );
-
-        transport.clear_fork();
-        assert!(
-            transport.shell_mut().fork.is_none(),
-            "clear_fork must uninstall it, mirroring set_desk's retirement"
-        );
     }
 }
 
-// ── Run-door durability, seen through the seam ───────────────────────
+// ── Run-door durability, seen through the protocol ────────────────────
 #[cfg(test)]
 mod durability_tests {
     use super::*;
@@ -2163,7 +2389,7 @@ mod durability_tests {
     }
 
     static PANIC_BUILTINS_ARR: [crate::types::BuiltinEntry; 1] = [crate::types::BuiltinEntry::new(
-        std::borrow::Cow::Borrowed("seam-panic-now"),
+        std::borrow::Cow::Borrowed("protocol-panic-now"),
         scheme_panic_now,
         "test-only: panic the evaluator mid-run.",
         crate::types::BuiltinBody::Static(builtin_panic_now),
@@ -2195,18 +2421,8 @@ mod durability_tests {
         shell.install_builtins(PANIC_BUILTINS);
         let transport = IdentityTransport::new(shell);
 
-        let report = dispatch_to_report(
-            &transport,
-            run("seam-panic-now"),
-            |_| {},
-            |_| {
-                Err(EnquiryError {
-                    message: "no desk".into(),
-                    status: 1,
-                })
-            },
-        )
-        .expect("the identity transport sends the Report synchronously");
+        let report = dispatch_to_report(&transport, run("protocol-panic-now"), Arc::new(()))
+            .expect("the identity transport sends the Report synchronously");
         match report {
             Report::Static {
                 diagnostics: Diagnostics::Host(msg),
@@ -2214,18 +2430,8 @@ mod durability_tests {
             other => panic!("a panicking run must report Static Host, got {other:?}"),
         }
 
-        let report = dispatch_to_report(
-            &transport,
-            run("$[1 + 1]"),
-            |_| {},
-            |_| {
-                Err(EnquiryError {
-                    message: "no desk".into(),
-                    status: 1,
-                })
-            },
-        )
-        .expect("the next dispatch must still answer");
+        let report = dispatch_to_report(&transport, run("$[1 + 1]"), Arc::new(()))
+            .expect("the next dispatch must still answer");
         match report {
             Report::Ran { ending, .. } => assert!(matches!(ending, Ending::Settled { .. })),
             Report::Static { .. } => panic!("the healed session must evaluate"),
@@ -2393,9 +2599,12 @@ mod probe_tests {
                 payload: None,
             })
             .expect_err("an unrecognised class must not answer Ok");
+        let ProbeError::Rejected(msg) = err else {
+            panic!("an unrecognised class is a rejection, not a severance: {err:?}");
+        };
         assert!(
-            err.contains("not-a-real-class"),
-            "error must name the unrecognised class, got: {err}"
+            msg.contains("not-a-real-class"),
+            "error must name the unrecognised class, got: {msg}"
         );
     }
 
@@ -2406,13 +2615,16 @@ mod probe_tests {
         let err = transport
             .probe(FOValue::Unit)
             .expect_err("a non-variant probe request must not answer Ok");
-        assert!(err.contains("variant"));
+        let ProbeError::Rejected(msg) = err else {
+            panic!("a malformed request is a rejection, not a severance: {err:?}");
+        };
+        assert!(msg.contains("variant"));
     }
 }
 
-// ── Runtime-error seam tests ──────────────────────────────────────────
+// ── Runtime-error protocol tests ───────────────────────────────────────
 //
-// Rendering at the seam is what gives every front-end, the REPL included,
+// Rendering at the protocol is what gives every front-end, the REPL included,
 // batch-host parity: it prints the string verbatim and renders nothing itself.
 #[cfg(test)]
 mod runtime_error_seam_tests {
@@ -2445,7 +2657,7 @@ mod runtime_error_seam_tests {
         );
         assert!(
             rendered.ends_with('\n'),
-            "the seam must supply the trailing newline the host prints verbatim: {rendered:?}"
+            "the protocol must supply the trailing newline the host prints verbatim: {rendered:?}"
         );
     }
 }
@@ -2548,7 +2760,7 @@ mod wire_liveness_tests {
 
         std::thread::sleep(Duration::from_secs(2));
         assert!(
-            !transport.dead(),
+            transport.severed().is_none(),
             "a ponging peer must keep the session alive well past the deadline"
         );
 
@@ -2570,13 +2782,16 @@ mod wire_liveness_tests {
             transport.events().recv().is_none(),
             "a silent peer past the deadline must close the event stream"
         );
-        assert!(transport.dead(), "silence past the deadline is death");
+        assert!(
+            transport.severed().is_some(),
+            "silence past the deadline is death"
+        );
 
         drop(back);
     }
 
-    /// The reader sets the flag before dropping its sender, so `dead()` is
-    /// honest the instant `recv` unblocks on a hangup.
+    /// The reader severs before dropping its sender, so `severed()` is honest
+    /// the instant `recv` unblocks on a hangup.
     #[test]
     fn a_hangup_closes_the_event_stream_and_marks_death() {
         let (front, back) = UnixStream::pair().unwrap();
@@ -2589,7 +2804,7 @@ mod wire_liveness_tests {
             "a hangup must close the event stream"
         );
         assert!(
-            transport.dead(),
+            transport.severed().is_some(),
             "a hangup is death under every teardown path"
         );
     }
@@ -2609,7 +2824,7 @@ mod wire_liveness_tests {
         transport.control().send(Control::Cancel(DispatchId(1)));
 
         assert!(
-            transport.dead(),
+            transport.severed().is_some(),
             "a cancel that cannot be written is death, not silence"
         );
         drop(back);
@@ -2688,6 +2903,7 @@ mod wire_liveness_tests {
                 stdin: crate::run::RunStdin::Empty,
                 trail: None,
             },
+            &(Arc::new(()) as Arc<dyn Host>),
         );
 
         match peer

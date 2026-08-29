@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fcf36a94
-generated_at_date: 2026-08-27
+generated_at_commit: 50388d83
+generated_at_date: 2026-08-29
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -27,9 +27,9 @@ agent's birth), a strong `parent: Option<Arc<Agent>>`, and a weak
 behind an `IdentityTransport` (plus the session `Scratch`, the re-seed cwd,
 and the interrupt target `EvalReach` interrupts through), or `Seat::Wire`, a
 `WireTransport` driving a remote engine, one process per session
-([[decisions/260722_session-is-a-process|session-is-a-process]]) — the
+([[map/core/engine-protocol|engine-protocol]]) — the
 canonical run and probe vocabulary either way
-([[decisions/260706_enquiry-channel|enquiry-channel]]) — plus the `inbox`,
+([[map/core/engine-protocol|engine-protocol]]) — plus the `inbox`,
 the nudge `Registry`, the schedule `ScheduleRegistry`, and every other field
 only the attend thread touches, beside the `Arc<Agent>` it embodies
 (`.agent`, `pub(crate)` so a caller outside `agent` reaches identity and
@@ -198,8 +198,11 @@ Three nested loops, the same for trunk and child alike:
   the engine's own run door (`Shell::run`) checkpoints `env` / `context` /
   `last_status` at entry, rolls them back, and reports the failed run,
   durability being engine-owned ([[decisions/260612_exarch-panic-recovery|panic-recovery]]).
-  The per-call desk install retires on *every* exit, panic included, via
-  `seat::RunGuard`.
+  The per-call host — `RunHost`, wrapping the desk and applier
+  ([[map/exarch/shell-eval|shell-eval]]) — is never installed as shared
+  state: it is a plain `Arc` `Avatar::run_shell` builds and holds on its own
+  stack, so a panic unwinding through `deliberate` drops it with everything
+  else there, with nothing separate to retire.
 - `deliberate` — one prompt stepped to quiescence over the agent's *own* provider
   (`self.provider.current()`, read once at the top by `take_up` so a `/model` swap
   lands next item, never mid-deliberation): render the transcript, stream a reply through
@@ -242,7 +245,7 @@ Three nested loops, the same for trunk and child alike:
 Worker-reap and large-binding notices need no drain at `attend`'s top:
 core's own engine pushes both as `` `notice `` surface classes at the ready
 boundary of the run that produced them
-([[decisions/260706_enquiry-channel|enquiry-channel]]), decoded by
+([[map/core/engine-protocol|engine-protocol]]), decoded by
 [[map/exarch/shell-eval|shell-eval]]'s `decode_surface` into `Surface::Notice`
 and recorded/rendered from there. A reap notice names a worker removed by policy — the lease
 chain's idle or backstop bound on a running worker, or the retention sweep
@@ -290,7 +293,7 @@ the TUI's `Control` against the agent the attend loop owns —
 registry's running/settled split with the nearest time-to-reap and the
 binding-ledger figures read as *data* through the transport's Enquiry desk
 (`probe_workers` and its sibling probes,
-[[decisions/260706_enquiry-channel|enquiry-channel]]), plus inbox depth per
+[[map/core/engine-protocol|engine-protocol]]), plus inbox depth per
 source, the event ledger's logical length and history bytes, log-dir and scratch
 disk walked at invocation, and the sub-agent idle lease as two rows (nearest
 time-to-reap, and the demote threshold) — and
@@ -695,7 +698,7 @@ The desk's wire arm dials that port through its **`Dial`** capability
 (`exarch/src/agent/dial.rs` — `vm_manager`-free by construction, a capability
 object `RootConfig` carries, `None` on every identity trunk), writes the eight
 token bytes little-endian, and blocks on **one acknowledgement byte**
-(`ral_core::transport::HATCH_ACK`) under the transport's own deadline. The
+(`ral_core::protocol::HATCH_ACK`) under the transport's own deadline. The
 listener thread accepts and compares the eight bytes, polling the wake pipe
 before every partial read — a dial that does not know them is dropped and the
 accept loop resumes, while one that sends only a prefix cannot pin shutdown.
@@ -771,7 +774,7 @@ fleet doors, and the two frontends), [[map/exarch/provider|provider]],
 [[map/exarch/policy|policy]], [[map/exarch|exarch]],
 [[design/residency|residency]] (the resident ledger this cascade and the
 worker/schedule teardown edge are chapters of),
-[[decisions/260722_session-is-a-process|session-is-a-process]] (why a wire
+[[map/core/engine-protocol|engine-protocol]] (why a wire
 seat is one engine process, one connection),
 [[decisions/260827_agent-and-avatar|agent-and-avatar]] (why `Agent` and
 `Avatar` split this way, what the three-copy shape it replaced deleted),

@@ -14,12 +14,12 @@ than a purely mechanical one. It does *not* decide to make the move; it argues
 that the move is possible and states what it would take.
 
 > **Amended 2026-07-06.** The seam this ADR left open is decided: it is the
-> **enquiry channel** of [[decisions/260706_enquiry-channel|enquiry-channel]]
+> **enquiry channel** of the [[design/engine-protocol|engine protocol]]
 > (`Enquiry → Answer`, an `EnquiryDesk` on `TurnRequest`), not a turn-local
 > spawn context — and the scope widens from the spawn family to every
 > remaining stateful tool except `reply`. The full migration plan lives in
 > the amendment at the end of this ADR. The move itself remains deferred: the
-> rail lands first (enquiry-channel Phase A), the migration follows on its
+> rail lands first (the engine protocol's Phase A), the migration follows on its
 > own bench-gated schedule.
 
 > **Landed 2026-07-16.** The migration plan below is fully implemented: all
@@ -139,10 +139,9 @@ today — the builtin only launches it.
 
 ## Proposed shape
 
-> Superseded by the 2026-07-06 amendment below: the turn-local spawn context
-> becomes the enquiry desk of
-> [[decisions/260706_enquiry-channel|enquiry-channel]]. Kept for the record —
-> and the `Agent::fork` decomposition survives unchanged.
+> The turn-local spawn context below never shipped: the seam is the
+> [[design/engine-protocol|engine protocol]]'s enquiry desk instead. Kept for the record —
+> the `Agent::fork` decomposition survives unchanged.
 
 - **A turn-local spawn seam.** `run_shell` populates, for the extent of the
   turn, a spawn context carrying the parent-snapshot pieces — `Emitter`, parent
@@ -153,7 +152,7 @@ today — the builtin only launches it.
   extension of the existing `ReplScratch`-style host scratch or a purpose-built
   slot; either keeps core from inspecting exarch shapes
   ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]];
-  [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
+  [[design/engine-protocol|engine-protocol]]).
 
 - **`Agent::fork` decomposes** into `snapshot()` (produces the spawn context,
   `&self`) and child assembly from a snapshot plus a forked shell, leaving the
@@ -265,21 +264,20 @@ today — the builtin only launches it.
   context and a decision on what the enclosing call renders.
 - **Where the seam lives.** Reusing `ReplScratch` versus a purpose-built
   turn-local slot on `Shell` — a naming and layering choice with no correctness
-  difference, to be settled against
-  [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]].
+  difference, to be settled against the [[design/engine-protocol|engine protocol]].
 
 ## Amendment (2026-07-06): the seam is the enquiry desk; the migration plan
 
-*Written alongside [[decisions/260706_enquiry-channel|enquiry-channel]], which
-builds the rail this plan rides. The stance of the original ADR stands — the
-move is possible, deliberately not yet decided, and gated on measurement —
-but the mechanism, the scope, and the plan are updated here.*
+*This amendment specifies the migration plan riding the [[design/engine-protocol|engine
+protocol]]'s enquiry channel. The stance of the original ADR stands — the move is
+possible, deliberately not yet decided, and gated on measurement — but the
+mechanism, the scope, and the plan are updated here.*
 
 ### The seam is decided, and it is not the spawn context
 
 The "Proposed shape" above reached host state through a turn-local spawn
 context read by `BuiltinBody::Captured` closures. That shape is superseded,
-for the reason enquiry-channel argues in full: a captured closure welds the
+for the reason the engine protocol argues in full: a captured closure welds the
 engine to the front-end process. Under `WireTransport` the shell lives in the
 `--engine` child, where a closure over front-end `Arc`s cannot be
 constructed — the engine's vocabulary would silently depend on which
@@ -297,7 +295,7 @@ Two pieces of the original analysis survive verbatim:
 - **The `Agent::fork` decomposition — and the shell fork moves engine-side.**
   The desk handler runs on the dispatching thread, inside `Agent::run_shell`'s
   own stack frame, so it can hold shared handles but never `&mut Agent` — and,
-  by enquiry-channel's reentrancy law, never the session lock, which rules out
+  by the engine protocol's reentrancy law, never the session lock, which rules out
   reaching the parent shell from the handler at all (under identity that is a
   self-deadlock on the lock the handler's own stack holds). The shell fork
   therefore happens in the *builtin body* — the one place that lawfully holds
@@ -309,7 +307,7 @@ Two pieces of the original analysis survive verbatim:
   under the wire, a child engine
   process the parent spawns guest-side, the snapshot crossing same-binary
   over an inherited fd and the child dialling the host on its own connection
-  ([[decisions/260722_session-is-a-process|session-is-a-process]] — unbuilt
+  ([[design/engine-protocol|engine-protocol]] — unbuilt
   until exarch rides the wire at all). The
   *host half* — registry entry, mailbox, provider loop — is assembled in the
   handler from `HostServices` plus the adopted session.
@@ -331,7 +329,7 @@ cost clean loop-termination semantics. It stays a provider tool. The end
 state of the full migration is therefore a **two-tool provider surface:
 `ral` + `reply`**.
 
-The litmus for anything future, inherited from enquiry-channel: *surface*
+The litmus for anything future, inherited from the engine protocol: *surface*
 says "the host may look at this"; an *enquiry* says "this script cannot take
 its next step without the host's answer"; "I want it eventually" is the
 inbox. Only promote a tool whose caller genuinely consumes the answer.
@@ -344,8 +342,8 @@ inbox. Only promote a tool whose caller genuinely consumes the answer.
 > relocating the verb relocates nothing about ending a run. The litmus that
 > justified the carve-out was itself too narrow: "the caller genuinely
 > consumes the answer" named a special case, not the law. The corrected
-> wording, folded into [[decisions/260706_enquiry-channel|enquiry-channel]]
-> §3: promote a verb only when the caller can observe and act on the host's
+> wording is now the [[design/engine-protocol|engine protocol]]'s own litmus: promote a
+> verb only when the caller can observe and act on the host's
 > answer — value or refusal — within the turn. `reply` satisfies it through
 > the refusal arm: a non-returning agent must observe the refusal to
 > proceed correctly, and a non-first-order payload must fail the call, not
@@ -431,7 +429,7 @@ from.
 
 ### Sequencing and gating
 
-1. **Prerequisite**: enquiry-channel Phase A (the rail) is landed and tested.
+1. **Prerequisite**: the engine protocol's Phase A (the rail) is landed and tested.
    Nothing here starts before it.
 2. **`agent` first** — the verb that motivated the design. The
    `amnemon`/`mnemon` JSON tools *stay installed beside it* during
@@ -457,7 +455,7 @@ configuration exists to answer.
 
 ## See also
 
-[[decisions/260706_enquiry-channel|enquiry-channel]] (the rail this plan
+[[design/engine-protocol|engine-protocol]] (the rail this plan
 rides: the `EnquiryDesk` seam, `FOValue` payloads, and the wire encoding),
 [[decisions/260617_async-agent-tool|async-agent-tool]] (the affordance this
 relocates, and the "No ral surface" position it revisits),

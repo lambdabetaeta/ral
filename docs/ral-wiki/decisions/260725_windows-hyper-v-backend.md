@@ -181,7 +181,7 @@ networkless machine.
 
 ## Consequences
 
-- **The host seam stops being Unix-shaped.** `ral_core::wire::WireStream` is
+- **The engine protocol stops being Unix-shaped.** `ral_core::wire::WireStream` is
   `UnixStream` on Unix and `TcpStream` on Windows, and neither name is a claim
   about the address family: under a real guest they own an `AF_VSOCK`
   descriptor and an `AF_HYPERV` socket respectively. Both are legitimate as
@@ -191,12 +191,12 @@ networkless machine.
   `Transport` impl lose their platform condition; only the same-host engine
   *child* over an inherited socketpair stays Unix
   ([[map/core/transport|core / transport]],
-  [[decisions/260628_host-seam-transport-parametric|host-seam-transport-parametric]]).
+  [[design/engine-protocol|engine-protocol]]).
 - **Synod's control seat becomes one function with no platform condition at
   all.** `Machine::take_control` hands back each platform's own owned handle and
   `WireTransport::adopt` takes either, so the seat is assembled the same way on
   both — which is the observable form of "one guest, two lifecycle backends"
-  ([[decisions/260722_session-is-a-process|session-is-a-process]]).
+  ([[design/engine-protocol|engine-protocol]]).
 - **The guest gained one command-line word and lost one hardcoded device.**
   `ral.plan9` names the vsock port the host's 9p server listens on, and its
   presence is the whole of what tells a guest it is under Hyper-V; the
@@ -259,9 +259,9 @@ product this machine serves, and the no-speculative-generality principle applied
 here to VHDX and to WMI),
 [[decisions/260715_vm-workspaces-cross-by-copy|vm-workspaces-cross-by-copy]] (the
 opposite workspace position, for a hostile workload),
-[[decisions/260722_session-is-a-process|session-is-a-process]] (one engine, one
+[[design/engine-protocol|engine-protocol]] (one engine, one
 connection, whichever socket family carries it),
-[[map/core/transport|core / transport]] (the framed seam),
+[[map/core/transport|core / transport]] (the framed protocol),
 [[design/two-enforcers|two-enforcers]] (the machine is the outer ceiling; ral's
 own gate and per-spawn jail stand inside it),
 [[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]] (the same
