@@ -708,7 +708,6 @@ mod tests {
             return Some(Arc::clone(comp));
         }
         match &comp.item {
-            CompKind::Chain(parts) => parts.iter().find_map(find_lam_node),
             CompKind::Pipeline { stages, .. } => stages.iter().find_map(find_lam_node),
             CompKind::Bind {
                 comp: rhs, rest, ..
@@ -730,7 +729,6 @@ mod tests {
         visit(comp);
         let mut sub = |c: &Arc<Comp>| walk_comp(c, visit);
         match &comp.item {
-            CompKind::Chain(parts) => parts.iter().for_each(&mut sub),
             CompKind::Pipeline { stages, .. } => stages.iter().for_each(&mut sub),
             CompKind::Lam { body, .. } => sub(body),
             CompKind::Bind {

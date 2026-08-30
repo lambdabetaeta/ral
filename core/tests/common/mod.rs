@@ -50,7 +50,6 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
     visit(comp);
     let mut sub = |c: &Arc<Comp>| walk_comp(c, visit);
     match &comp.item {
-        CompKind::Chain(parts) => parts.iter().for_each(&mut sub),
         CompKind::Pipeline { stages, .. } => stages.iter().for_each(&mut sub),
         CompKind::Lam { body, .. } => sub(body),
         CompKind::Bind {
@@ -74,6 +73,17 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
         | CompKind::Return(Val::Thunk(c))
         | CompKind::Capture(c)
         | CompKind::Redirect { body: c, .. } => walk_comp(c, visit),
+        CompKind::Try { body: a, handler: b }
+        | CompKind::Guard { body: a, cleanup: b }
+        | CompKind::Within { opts: a, body: b }
+        | CompKind::Grant { caps: a, body: b } => [a, b].into_iter().for_each(|v| walk_val(v, visit)),
+        CompKind::Audit { body } => walk_val(body, visit),
         _ => {}
+    }
+}
+
+fn walk_val(val: &ral_core::ir::Val, visit: &mut impl FnMut(&Comp)) {
+    if let ral_core::ir::Val::Thunk(c) = val {
+        walk_comp(c, visit);
     }
 }

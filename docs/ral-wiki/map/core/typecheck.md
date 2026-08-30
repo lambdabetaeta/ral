@@ -238,14 +238,14 @@ value side; any arm still open defers, even beside a ground
 `Value`-at-non-`Unit` arm, because that open arm may yet ground `Bytes` and the
 resulting conduit mismatch must be the join's own verdict.
 
-The two sides fail differently, so each speaks in its own words. The four join
-reasons — `IfBranches`, `ChainBranches`, `CaseArms`, `TryArms` — belong to the
-byte side, where a route really is in dispute and the remedy is a decoder tail.
-`conclude_value_side` unifies the arms' values under the value-side twin
-(`IfBranchValues`, `ChainBranchValues`, `CaseArmValues`, `TryArmValues`, mapped
-by `route_solver.rs`'s `value_side`), whose text says the arms agree on where
-the payload lives and disagree on its type — and counsels no decoder, since
-there is no route there for one to move.
+The two sides fail differently, so each speaks in its own words. The three join
+reasons — `IfBranches`, `CaseArms`, `TryArms` (shared by `try` and `?`, which
+elaborates to nested `try`) — belong to the byte side, where a route really is
+in dispute and the remedy is a decoder tail. `conclude_value_side` unifies the
+arms' values under the value-side twin (`IfBranchValues`, `CaseArmValues`,
+`TryArmValues`, mapped by `route_solver.rs`'s `value_side`), whose text says
+the arms agree on where the payload lives and disagree on its type — and
+counsels no decoder, since there is no route there for one to move.
 
 The store drains through two entry points, and ownership is the difference.
 `InferCtx::solve_at_boundary` runs at every in-inference point that produces a
@@ -302,7 +302,7 @@ propagation, through the one constructor `captured_string`, which builds
 is resolved and the binder is invisible where the checker composes them
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
 A `Demand` is `Value` or `Discard`. It reaches a `Bind`/`Phrase::Define`/
-`Phrase::Source`'s right-hand side, each arm of an `If`, `Chain`, `Try`, or
+`Phrase::Source`'s right-hand side, each arm of an `If`, `Try`, or
 `Case`, and the body of a force of a syntactic thunk.
 Where a `Value` demand meets a node whose recorded route grounds `Bytes`,
 `annotate_demand` wraps it. `ArmWalk` (`Plain`, `Descend`, `Wrap`)

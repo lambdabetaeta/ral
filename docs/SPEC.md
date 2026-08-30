@@ -4217,7 +4217,7 @@ M ::= return v
     | letrec {xi = vi}
     | scope op
     | capture M
-    | decode M
+    | decode v
 
 op ::= try v1 v2 | guard v1 v2 | within v1 v2 | grant v1 v2 | audit v
      | redirect M redirects
@@ -4457,18 +4457,18 @@ its two products the binder receives:
 Γ ⊢c M to p . N : C
 ```
 
-`Bind-Bytes` is implemented by inserting `decode (capture M)`, the composition
-of the two operations that turn a byte payload into a returned value. Both are
-syntax the checker writes, never a command a program can name:
+`Bind-Bytes` is implemented by inserting `capture M to x . decode x`, the two
+operations that turn a byte payload into a returned value. Both are syntax the
+checker writes, never a command a program can name:
 
 ```text
 Γ ⊢c M : F[μ] Unit
 ------------------------------------ Capture
 Γ ⊢c capture M : F[value] Bytes
 
-Γ ⊢c M : F[value] Bytes
+Γ ⊢v v : Bytes
 ------------------------------------ Decode
-Γ ⊢c decode M : F[value] String
+Γ ⊢c decode v : F[value] String
 ```
 
 `Capture` asks nothing of its operand's route, and the `Unit` is what carries
@@ -4693,13 +4693,14 @@ frame stands for the running group, since nothing runs beneath it. No frame ever
 by the wiring of §7.1, and the bindings a stage's `Γ` starts from cross the
 same way, as store rather than continuation.
 
-For `M ? N`, a value from `M` wins; an ordinary error from `M` evaluates `N`;
-an escape from `M` propagates. A longer chain repeats this rule and reports the
-last error when all arms fail.
-
 For `try body handler`, a body value is returned unchanged. A body error is
 converted to `E` and passed to the handler. An escape bypasses the handler.
 Standard output and standard error remain live; `try` does not capture them.
+
+`M ? N` elaborates to `try M { |_| N }` (§8.4), so a value from `M` wins, an
+ordinary error from `M` runs `N`, and an escape from `M` propagates. A longer
+chain `M1 ? ... ? Mn` nests the same way, right-associated, so it reports the
+last error when every arm fails.
 
 For `guard body cleanup`, cleanup runs after every body value or ordinary body
 error. A cleanup value leaves the body outcome intact. A cleanup error and a

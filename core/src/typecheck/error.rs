@@ -62,11 +62,9 @@ pub enum Reason {
     IfBranches,
     /// The `if` branches' values, where both branches already route `Value`.
     IfBranchValues,
-    ChainBranches,
-    /// The `?` chain's arm values, where every arm already routes `Value`.
-    ChainBranchValues,
+    /// Shared by `try` and `?`, which elaborates to nested `try`.
     TryArms,
-    /// The `try` outcomes' values, where both already route `Value`.
+    /// The outcomes' values, where both already route `Value`.
     TryArmValues,
     /// A `try` handler against the one-argument function shape it must have.
     TryHandler,

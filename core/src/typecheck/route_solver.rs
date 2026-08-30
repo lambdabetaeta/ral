@@ -42,12 +42,11 @@ pub(super) struct ArmResults {
 
 /// The value-side twin of an arm join's reason: the same form, but explained
 /// as a disagreement about what the payload *is* rather than about where it
-/// lives. Each of the four join sites has one; any other reason, having no
+/// lives. Each of the three join sites has one; any other reason, having no
 /// route side to be mistaken for, stands as it is.
 fn value_side(why: &Reason) -> Reason {
     match why {
         Reason::IfBranches => Reason::IfBranchValues,
-        Reason::ChainBranches => Reason::ChainBranchValues,
         Reason::CaseArms => Reason::CaseArmValues,
         Reason::TryArms => Reason::TryArmValues,
         other => other.clone(),

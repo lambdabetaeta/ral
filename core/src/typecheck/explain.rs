@@ -470,34 +470,21 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
              return a tagged value and `case` on it downstream"
                 .to_string(),
         ),
-        Reason::ChainBranches => Some(
-            "every arm of a `?` chain must agree on where their payload lives: \
-             either every arm returns a value of the same type, or every arm \
-             is captured from stdout — a mix of the two cannot join, so pipe \
-             the stdout-routed arm through a decoder (`| from-string`) to \
-             bring it onto the value side"
-                .to_string(),
-        ),
-        Reason::ChainBranchValues => Some(
-            "every arm of a `?` chain returns a value and the chain yields \
-             whichever arm succeeds, so the chain has a single type that every \
-             arm must produce — convert the odd arm to that type, or have every \
-             arm return a tagged value and `case` on it downstream"
-                .to_string(),
-        ),
         Reason::TryArms => Some(
-            "both outcomes of a `try` must agree on where their payload lives: \
-             either both return a value of the same type, or both are \
-             captured from stdout — a mix of the two cannot join, so pipe \
-             the stdout-routed outcome through a decoder (`| from-string`) to \
-             bring it onto the value side"
+            "the outcomes of a `try` — or the arms of a `?` chain — must agree \
+             on where their payload lives: either every one returns a value \
+             of the same type, or every one is captured from stdout — a mix \
+             of the two cannot join, so pipe the stdout-routed outcome \
+             through a decoder (`| from-string`) to bring it onto the value \
+             side"
                 .to_string(),
         ),
         Reason::TryArmValues => Some(
-            "both outcomes of a `try` return a value and exactly one of them \
-             happens, so the `try` has a single type that the body and the \
-             handler must both produce — convert one to the other's type, or \
-             have both return a tagged value and `case` on it downstream"
+            "the outcomes of a `try` — or the arms of a `?` chain — each \
+             return a value, and exactly one of them happens, so there is a \
+             single type that every one must produce — convert the odd one \
+             to that type, or have every one return a tagged value and \
+             `case` on it downstream"
                 .to_string(),
         ),
         Reason::RoutePin => Some(

@@ -210,15 +210,6 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -
             };
             return Spanned::with_span(comp.span, item);
         }
-        CompKind::Chain(parts) => {
-            let item = CompKind::Chain(
-                parts
-                    .iter()
-                    .map(|p| Arc::new(annotate_join_arm(comp, p, ctx, eta, demand)))
-                    .collect(),
-            );
-            return Spanned::with_span(comp.span, item);
-        }
         CompKind::Case { scrutinee, arms } => {
             let item = CompKind::Case {
                 scrutinee: annotate_spanned_val(scrutinee, ctx),
@@ -351,7 +342,6 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
         | CompKind::Bind { .. }
         | CompKind::Source { .. }
         | CompKind::If { .. }
-        | CompKind::Chain(_)
         | CompKind::Case { .. }
         | CompKind::Try { .. }
         | CompKind::Guard { .. }
@@ -362,7 +352,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
     }
 }
 
-/// One arm of an `If`/`Case`/`Chain` join under `demand`: a byte-side join
+/// One arm of an `If`/`Case` join under `demand`: a byte-side join
 /// walks a byte-payload arm at `Value` and wraps a subsumed (`∅`-`Unit`) arm
 /// whole; otherwise `demand` simply inherits into the arm.
 fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {

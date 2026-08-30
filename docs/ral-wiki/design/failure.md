@@ -76,6 +76,6 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (failure is an ope
 [[design/control-operators|control-operators]], [[design/types|types]],
 [[design/cbpv|cbpv]].
 Cite: RATIONALE §"Failure is not truth", §"Pipelines follow their edges";
-`docs/SPEC.md` §2.5, §8, §8.6–§8.7; the `Chain` / `Try` / `Guard` arms and
-frames in `core/src/evaluator/machine.rs`, `try` / `guard` typing in
-`core/src/typecheck/scope.rs`.
+`docs/SPEC.md` §2.5, §8, §8.6–§8.7; the `Try` / `Guard` arms and frames in
+`core/src/evaluator/machine.rs` (`?` elaborates to nested `try`, no frame of
+its own), `try` / `guard` typing in `core/src/typecheck/scope.rs`.

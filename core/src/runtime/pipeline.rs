@@ -57,7 +57,7 @@ impl PipeNode {
         shell: &mut Shell,
     ) -> Settled<Self> {
         // The first signal-checked seam, since a top-level pipeline sits under
-        // no Bind/Chain/Seq.  An earlier SIGINT cancelled the foreground scope
+        // no Bind.  An earlier SIGINT cancelled the foreground scope
         // but claimed no relay pgid, so without this the pipeline would launch
         // anyway and collect would block on a child that never saw the signal.
         crate::process::check(mooring)?;

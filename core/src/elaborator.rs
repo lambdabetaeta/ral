@@ -699,20 +699,37 @@ impl Elaborator {
             }
 
             Ast::Chain(parts) => {
-                // Every arm but the first runs only when its predecessors
-                // failed, so each needs the fresh binds vector `elab_guarded`
-                // gives it.
-                comp!(
-                    self,
-                    CompKind::Chain(
-                        parts
-                            .iter()
-                            .map(|a| Arc::new(
-                                self.with_span(a.span, |this| { this.elab_guarded(&a.item) })
-                            ))
-                            .collect()
-                    )
-                )
+                // `a ? b ? c` is `try a { |_| try b { |_| c } }`, right-nested
+                // so the last arm stays in tail position.  Every arm but the
+                // first runs only when its predecessors failed, so each needs
+                // the fresh binds vector `elab_guarded` gives it.
+                let mut arms: Vec<(Option<Span>, Comp)> = parts
+                    .iter()
+                    .map(|a| (a.span, self.with_span(a.span, |this| this.elab_guarded(&a.item))))
+                    .collect();
+                match arms.pop() {
+                    None => comp!(self, CompKind::Return(Val::Unit)),
+                    Some((_, last)) => {
+                        arms.into_iter().rev().fold(last, |handler_body, (span, arm)| {
+                            self.with_span(span, |this| {
+                                let handler = Val::Thunk(Arc::new(comp!(
+                                    this,
+                                    CompKind::Lam {
+                                        param: IrPattern::Wildcard,
+                                        body: Arc::new(handler_body),
+                                    }
+                                )));
+                                comp!(
+                                    this,
+                                    CompKind::Try {
+                                        body: Val::Thunk(Arc::new(arm)),
+                                        handler,
+                                    }
+                                )
+                            })
+                        })
+                    }
+                }
             }
 
             Ast::List(elems) => comp!(
@@ -1454,15 +1471,15 @@ mod tests {
     }
 
     /// A `?`-chain arm is guarded, so the interpolation's `!{…}` hoist must
-    /// live inside the arm: the statement elaborates to a bare `Chain`, never
+    /// live inside the arm: the statement elaborates to a bare `Try`, never
     /// to a `Bind` that would run the hoist before the chain.
     #[test]
     fn chain_arm_hoist_stays_inside_the_arm() {
         let ast = parse(r#"return ok ? echo "fallback: !{hostname}""#).expect("parse");
         let comp = elaborate_one(&ast, HashSet::new(), "");
         assert!(
-            matches!(comp.item, CompKind::Chain(_)),
-            "chain arm hoist leaked into the caller: expected a bare Chain, got {:?}",
+            matches!(comp.item, CompKind::Try { .. }),
+            "chain arm hoist leaked into the caller: expected a bare Try, got {:?}",
             comp.item
         );
     }

@@ -312,11 +312,6 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
                 walk_val(&key.item, out);
             }
         }
-        CompKind::Chain(comps) => {
-            for c in comps {
-                walk_comp(c, out);
-            }
-        }
         CompKind::Interpolation(vals) => {
             for v in vals {
                 walk_val(v, out);
@@ -521,8 +516,6 @@ pub enum CompKind {
         target: Val,
         keys: Vec<Spanned<Val>>,
     },
-    /// Fallback chain (`a ? b ? c`) — the first computation that succeeds.
-    Chain(Vec<Arc<Comp>>),
     /// String interpolation, effectful because a lookup can fail.
     Interpolation(Vec<Val>),
     /// The `index`-th member of a recursive group: `x⃗ : U C⃗ ⊢ Mᵢ : Cᵢ`, and the
@@ -707,10 +700,10 @@ mod tests {
         Arc::new(Spanned::synthetic(CompKind::Return(var(name))))
     }
 
-    /// One synthetic `Comp` touching every `CompKind` and `Val`
-    /// variant: `r_*` labels what it references, `*_bound` what it merely
-    /// binds.  The harvest is asserted *exactly* — a subset would hide a
-    /// wildcard-arm regression, a superset a bound name over-renewing.
+    /// One synthetic `Comp` per `CompKind` and `Val` variant: `r_*` labels
+    /// what it references, `*_bound` what it merely binds.  The harvest is
+    /// asserted *exactly* — a subset would hide a wildcard-arm regression, a
+    /// superset a bound name over-renewing.
     #[test]
     fn referenced_names_walks_every_variant() {
         let lam_param = IrPattern::Map(vec![crate::syntax::ast::MapPatternEntry {
@@ -792,7 +785,6 @@ mod tests {
             target: var("r_index_target"),
             keys: vec![Spanned::synthetic(var("r_index_key"))],
         });
-        let chain = Spanned::synthetic(CompKind::Chain(vec![ret("r_chain_a"), ret("r_chain_b")]));
         let interpolation = Spanned::synthetic(CompKind::Interpolation(vec![
             var("r_interp_a"),
             var("r_interp_b"),
@@ -887,7 +879,10 @@ mod tests {
         let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
         let decode = Spanned::synthetic(CompKind::Decode(var("r_decode_body")));
 
-        let whole = Spanned::synthetic(CompKind::Chain(vec![
+        // No single `CompKind` holds an arbitrary list of sub-`Comp`s to
+        // wrap all of the above in one tree, so each is walked on its own
+        // and the harvests are unioned.
+        let nodes: Vec<Arc<Comp>> = vec![
             Arc::new(Spanned::synthetic(CompKind::Force(var("r_force")))),
             Arc::new(Spanned::synthetic(CompKind::Return(var("r_return")))),
             Arc::new(lam),
@@ -899,7 +894,6 @@ mod tests {
             Arc::new(binary),
             Arc::new(not),
             Arc::new(index),
-            Arc::new(chain),
             Arc::new(interpolation),
             Arc::new(rec),
             Arc::new(source),
@@ -919,9 +913,10 @@ mod tests {
             Arc::new(val_thunk),
             Arc::new(capture),
             Arc::new(decode),
-        ]));
+        ];
 
-        let found: std::collections::HashSet<&str> = referenced_names(&whole).into_iter().collect();
+        let found: std::collections::HashSet<&str> =
+            nodes.iter().flat_map(|c| referenced_names(c)).collect();
 
         let expected = [
             "r_force",
@@ -945,8 +940,6 @@ mod tests {
             "r_not",
             "r_index_target",
             "r_index_key",
-            "r_chain_a",
-            "r_chain_b",
             "r_interp_a",
             "r_interp_b",
             "r_rec_member",

@@ -3050,11 +3050,6 @@ fn elaborator_never_wraps_exec_in_redirect() {
                     walk(s, saw_exec_with_redirects);
                 }
             }
-            CompKind::Chain(alts) => {
-                for a in alts {
-                    walk(a, saw_exec_with_redirects);
-                }
-            }
             CompKind::If { then, else_, .. } => {
                 walk(then, saw_exec_with_redirects);
                 walk(else_, saw_exec_with_redirects);

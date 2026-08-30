@@ -154,9 +154,11 @@ A cancel is a *request*; nothing stops until the evaluator next polls. The poll 
 `process::check(mooring)`, called at:
 
 - the **machine's step arms** (`evaluator/machine.rs`) — the β-step, `Bind`,
-  `App`, `Rec`, `Source`, the exec step, and the `Chain` frame each poll, so
-  any loop of `ral` calls is preemptible (the original
+  `App`, `Rec`, `Source`, and the exec step each poll, so any loop of `ral`
+  calls is preemptible (the original
   [[decisions/260504_hot-path-cancellation|hot-path-cancellation]] insight);
+  a `?` chain's advance from one arm to the next is nested `try` applying a
+  handler thunk, so it polls at the same β-step;
 - the **iterating builtins** (`builtins/collections.rs`, `builtins/concurrency.rs`)
   — `map`/`filter`/`each` and the worker-join loops poll between elements;
 - **pipeline launch** (`runtime/pipeline.rs`, `runtime/pipeline/launch.rs`) —

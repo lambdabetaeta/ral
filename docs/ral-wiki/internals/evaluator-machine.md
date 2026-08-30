@@ -22,7 +22,7 @@ the stack. A terminal has two shapes, `Terminal::Value(v)` and
 `Terminal::Lambda(closure)` — a λ is canonical at `A → C` and is never a
 value, so a `Lam` in focus returns as `Lambda` and the frame above decides:
 `Apply` consumes it by β, a computation-holed frame (`Redirect`, `Unmask`,
-`Within`, `Grant`, `Try`, `Chain`) passes it through, a value-holed frame
+`Within`, `Grant`, `Try`) passes it through, a value-holed frame
 (`To`, `Capture`, `Source`, `Guard`, `Cleanup`, `Audit`) halts with the
 bare-lambda error — unreachable for a checked program, since the checker
 η-expands every arrow-typed computation into a thunked λ (SPEC §17.8, S3).
@@ -50,14 +50,20 @@ stamps the span of the node that pushed the frame.
 **Frames hold environments, which is what makes extent structural.** `M to
 x. N` pushes `To { bind, env: E, prev_stdout }` *before* M runs; when M
 returns a value, `E[x ↦ v]` is built from the frame's own `E`, so `x`
-scopes over `N` and nothing else whatever M did. `Chain`, `Apply`, `Source`,
-`Try` and `Guard` likewise carry the `Env` they resume under. Frames hold
+scopes over `N` and nothing else whatever M did. `Apply`, `Source`,
+`Try` and `Guard` likewise carry the `Env` they resume under. `Cleanup` is
+the kernel's `to _` with a settled rest: it drops the cleanup's value and
+resumes the outcome it holds (`βguard-val`). Frames hold
 `Arc`s into the IR, never cloned IR, and undo tokens, never a `Context`
 clone: `Redirect(Box<RedirectState>)` tears down and settles its writes,
 `Within(WithinUndo)` restores env overrides, dir and handlers, `Grant` pops
 the capability stack, `Unmask` restores the masked handler, `Try`/`Audit`
 close their trail scope. `Frame` is at most 128 bytes (asserted at compile
 time; `Redirect`, `Unmask` and the `Env` of `Try`/`Guard` are boxed).
+
+`a ? b ? c` has no frame of its own: it elaborates to nested `try` (kernel
+`_؟_`, `Core.Derived`), right-associated so the last arm stays in tail
+position.
 
 **Tail calls push nothing.** β binds the parameter into the closure's
 environment and puts the body in focus; an `Apply` frame is pushed only when
@@ -72,7 +78,7 @@ name to the thunk of its own projection and runs the chosen member; a
 recursive reference forces its name, which re-enters `Rec` and re-extends
 from the outer environment. Bodies are never rewritten; a group of one is
 Levy's `rec f. M`. Cancellation is polled here and at `Bind`, `App`, `Exec`,
-`Source`, `Chain` advance and β, so `let f = { !f }; !f` is interruptible.
+`Source` advance and β, so `let f = { !f }; !f` is interruptible.
 
 **The environment is a map, and it is not the store.** `Env`
 (`core/src/types/env.rs`) is three tiers — the language natives, the frozen

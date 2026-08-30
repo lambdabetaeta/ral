@@ -1108,15 +1108,6 @@ impl Inferencer<'_> {
         }
     }
 
-    /// `a ? b ? c` yields whichever arm succeeds, so every arm must agree on
-    /// one payload route and value — exactly the discipline
-    /// [`Self::merge_branches`] already applies to `if`'s two arms, here
-    /// folded over the whole chain.
-    fn infer_chain(&mut self, parts: &[Arc<Comp>]) -> CompTy {
-        let arms: Vec<CompTy> = parts.iter().map(|part| self.infer_comp(part)).collect();
-        self.merge_branches(arms, &Reason::ChainBranches)
-    }
-
     fn infer_map_val(&mut self, entries: &[ValMapEntry]) -> Ty {
         let all_literal_keys = entries.iter().all(|entry| match entry {
             ValMapEntry::Entry(Val::String(_), _) | ValMapEntry::Spread(_) => true,
@@ -1715,7 +1706,6 @@ impl Inferencer<'_> {
                 ) => self.external_exec_comp_ty(&path.written(), &e.args),
             },
             CompKind::Pipeline { stages, .. } => self.infer_pipeline(comp, stages),
-            CompKind::Chain(parts) => self.infer_chain(parts),
             CompKind::Binary(op, lhs, rhs) => CompTy::pure(self.infer_binary(*op, lhs, rhs)),
             // The operand's own type, unconstrained — `Arith` below leaves
             // numeric-ness to the evaluator too, so `-` agrees with `-`.

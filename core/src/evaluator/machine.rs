@@ -61,12 +61,6 @@ enum Frame {
         env: Env,
         prev_stdout: Sink,
     },
-    /// `a ? b ? c`: `node` is the `Chain` node, read for its parts.
-    Chain {
-        node: Arc<Comp>,
-        next: usize,
-        env: Env,
-    },
     Apply {
         args: Vec<Value>,
         env: Env,
@@ -521,30 +515,6 @@ impl Machine {
                 })
             }
 
-            CompKind::Chain(parts) => {
-                if parts.is_empty() {
-                    Focus::Return(Terminal::Value(Value::Unit))
-                } else if parts.len() == 1 {
-                    // One arm, nothing to fall back to: a true tail position,
-                    // no frame to catch a failure and retry.
-                    Focus::Eval(Closure {
-                        comp: Arc::clone(&parts[0]),
-                        env,
-                    })
-                } else if let Err(b) = self.reserve(shell) {
-                    Focus::Halt(b)
-                } else {
-                    self.push(Frame::Chain {
-                        node: Arc::clone(&comp),
-                        next: 1,
-                        env: env.clone(),
-                    });
-                    Focus::Eval(Closure {
-                        comp: Arc::clone(&parts[0]),
-                        env,
-                    })
-                }
-            }
 
             CompKind::If { cond, then, else_ } => match close(&cond.item, &env) {
                 Ok(Value::Bool(b)) => {
@@ -931,8 +901,6 @@ impl Machine {
                 }
             }
 
-            Frame::Chain { .. } => Focus::Return(t),
-
             Frame::Apply { args, env, span } => match t {
                 Terminal::Lambda(c) => stamp_focus(self.beta(c, args, env, span, mooring, shell), span),
                 Terminal::Value(v) => {
@@ -1087,29 +1055,6 @@ impl Machine {
                 Focus::Halt(s)
             }
 
-            Frame::Chain { node, next, env } => match s {
-                Break::Error(e) => {
-                    let CompKind::Chain(parts) = &node.item else {
-                        unreachable!("a Chain frame's node is always a Chain comp")
-                    };
-                    if next < parts.len() {
-                        let part = Arc::clone(&parts[next]);
-                        if let Err(b) = crate::process::check(mooring) {
-                            return Focus::Halt(b);
-                        }
-                        // The last arm has no further fallback, so it is a
-                        // true tail position: no frame to catch its failure.
-                        if next + 1 < parts.len() {
-                            self.push(Frame::Chain { node, next: next + 1, env: env.clone() });
-                        }
-                        Focus::Eval(Closure { comp: part, env })
-                    } else {
-                        Focus::Halt(Break::Error(e))
-                    }
-                }
-                Break::Escape(esc) => Focus::Halt(Break::Escape(esc)),
-            },
-
             Frame::Capture { prev, buf, .. } => {
                 shell.io.stdout = prev;
                 let bytes = io::take_buffer(&buf);
@@ -1196,7 +1141,7 @@ impl Frame {
     /// files, audit scopes (§2.6). `To`/`Capture` restore `io.stdout`;
     /// `Redirect` as its own rule; `Unmask` restores; `Try`/`Audit`
     /// `audit.close(scope)` then `set_capture(saved)`; `Within` applies its
-    /// undo; `Grant` pops. `Chain`, `Apply`, `Source`, `Guard`, `Cleanup` do
+    /// undo; `Grant` pops. `Apply`, `Source`, `Guard`, `Cleanup` do
     /// nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
@@ -1213,8 +1158,7 @@ impl Frame {
             Self::Grant => {
                 shell.context.grants.pop();
             }
-            Self::Chain { .. }
-            | Self::Apply { .. }
+            Self::Apply { .. }
             | Self::Source { .. }
             | Self::Guard { .. }
             | Self::Cleanup { .. } => {}
