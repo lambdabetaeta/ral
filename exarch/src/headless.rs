@@ -31,8 +31,10 @@ use std::time::{Duration, Instant};
 /// What the root agent's output looks like on stdout in headless mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum OutputFormat {
+    /// Write the agent's final reply as readable ral text. This is the default.
     Text,
-    /// Stdout carries one result object at the end, not assistant narration.
+    /// Write one JSON result object after the run ends. It contains the reply,
+    /// stop reason, step count, duration, token use and cost.
     Json,
 }
 
