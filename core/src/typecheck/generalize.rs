@@ -193,16 +193,28 @@ pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     // and binding lets `instantiate` rebuild the cycle in a fresh slot.  Roots
     // free in the env are excluded, as from the quantifier sets above: they are
     // monomorphic and must stay anchored so one use's constraint reaches all.
-    let env_comp_roots: std::collections::HashSet<u32> =
-        env_fvs.comps.iter().map(|v| v.0).collect();
-    let env_ty_roots: std::collections::HashSet<u32> = env_fvs.tys.iter().map(|v| v.0).collect();
-    let comp_ty_bindings: Vec<(u32, CompTy)> = snapshot_cyclic_comp_bindings(u, &applied)
+    // Each binding is itself applied, cycle-aware: re-binding a fresh root in
+    // `instantiate` detaches the copy.
+    let (comp_roots, ty_roots) = u.cyclic_roots_in_ty(&applied);
+    let comp_ty_bindings: Vec<(u32, CompTy)> = comp_roots
         .into_iter()
-        .filter(|(r, _)| !env_comp_roots.contains(r))
+        .filter(|r| !env_fvs.comps.contains(&CompTyVar(*r)))
+        .map(|root| {
+            let binding = u
+                .resolved_comp_root_binding(root)
+                .unwrap_or(CompTy::Var(CompTyVar(root)));
+            (root, binding)
+        })
         .collect();
-    let ty_bindings: Vec<(u32, Ty)> = snapshot_cyclic_ty_bindings(u, &applied)
+    let ty_bindings: Vec<(u32, Ty)> = ty_roots
         .into_iter()
-        .filter(|(r, _)| !env_ty_roots.contains(r))
+        .filter(|r| !env_fvs.tys.contains(&TyVar(*r)))
+        .map(|root| {
+            let binding = u
+                .resolved_ty_root_binding(root)
+                .unwrap_or(Ty::Var(TyVar(root)));
+            (root, binding)
+        })
         .collect();
 
     // Cyclic roots already appear in `*_bindings`; drop them from the plain
@@ -328,34 +340,6 @@ pub fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
         u.bind_ty_root(fresh_root, substituted);
     }
     sm.ty(&scheme.ty)
-}
-
-/// Each cyclic comp-var root in `applied` with its binding.  The bindings are
-/// themselves applied, cycle-aware, so re-binding fresh roots detaches the copy.
-fn snapshot_cyclic_comp_bindings(u: &mut Unifier, applied: &Ty) -> Vec<(u32, CompTy)> {
-    u.cyclic_comp_roots_in_ty(applied)
-        .into_iter()
-        .map(|root| {
-            let binding = u
-                .resolved_comp_root_binding(root)
-                .unwrap_or(CompTy::Var(CompTyVar(root)));
-            (root, binding)
-        })
-        .collect()
-}
-
-/// Mirror of `snapshot_cyclic_comp_bindings` for value-type cycles — the
-/// streaming consumer `α := Variant {more {head, tail: Thunk(α)}, done | ρ}`.
-fn snapshot_cyclic_ty_bindings(u: &mut Unifier, applied: &Ty) -> Vec<(u32, Ty)> {
-    u.cyclic_ty_roots_in_ty(applied)
-        .into_iter()
-        .map(|root| {
-            let binding = u
-                .resolved_ty_root_binding(root)
-                .unwrap_or(Ty::Var(TyVar(root)));
-            (root, binding)
-        })
-        .collect()
 }
 
 /// Simultaneous substitution over all four variable kinds.  `cm` and `tcm`

@@ -353,24 +353,18 @@ impl Unifier {
         }
     }
 
-    /// Comp-var roots on some cycle reachable from `ty`.  Reads the traversal's
-    /// tags, not its output: a mid-cycle root is tagged on detection but need
-    /// not surface as a back-edge.
-    pub fn cyclic_comp_roots_in_ty(&mut self, ty: &Ty) -> Vec<u32> {
+    /// The comp-var and ty-var roots on some cycle reachable from `ty`.  Reads
+    /// the traversal's tags, not its output: a mid-cycle root is tagged on
+    /// detection but need not surface as a back-edge.  One walk populates both
+    /// tag sets, so `generalize` asks once and reads both.
+    pub(super) fn cyclic_roots_in_ty(&mut self, ty: &Ty) -> (Vec<u32>, Vec<u32>) {
         let mut visited = Visited::default();
         let _applied = self.apply_ty_inner(ty, &mut visited);
-        let mut out: Vec<u32> = visited.cyclic_comps.into_iter().collect();
-        out.sort_unstable();
-        out
-    }
-
-    /// Mirror of `cyclic_comp_roots_in_ty` for ty-var roots.
-    pub fn cyclic_ty_roots_in_ty(&mut self, ty: &Ty) -> Vec<u32> {
-        let mut visited = Visited::default();
-        let _applied = self.apply_ty_inner(ty, &mut visited);
-        let mut out: Vec<u32> = visited.cyclic_tys.into_iter().collect();
-        out.sort_unstable();
-        out
+        let mut comps: Vec<u32> = visited.cyclic_comps.into_iter().collect();
+        let mut tys: Vec<u32> = visited.cyclic_tys.into_iter().collect();
+        comps.sort_unstable();
+        tys.sort_unstable();
+        (comps, tys)
     }
 
     pub fn resolve_ty(&mut self, ty: &Ty) -> Ty {
