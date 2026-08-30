@@ -29,10 +29,11 @@ there is nothing left to discriminate.
   to a fresh `Sink::Buffer` for the run of its operand.
 - On success, `Frame::Capture`'s return rule takes the buffer exactly, as
   `Value::Bytes`. The text a value boundary reads comes from the `Decode`
-  node the checker composes over it, met by `Frame::Decode` beside it: one
-  trailing terminator stripped, then `decode_utf8_strict`, over the buffer it
-  moves out of the capture's value. A decode failure names `| from-bytes` as
-  the route for output that is not valid UTF-8.
+  node the checker binds over it — no frame of its own, since the kernel's
+  `decode` takes a value and `step_eval` reads it inline: one trailing
+  terminator stripped, then `decode_utf8_strict`, over the bytes closing the
+  bound variable gives back. A decode failure names `| from-bytes` as the
+  route for output that is not valid UTF-8.
 - On failure, `Frame::Capture`'s halt rule releases whatever bytes the
   operand already wrote to the outer stream, before the error propagates. A
   failed operand's partial output is therefore not silently lost.

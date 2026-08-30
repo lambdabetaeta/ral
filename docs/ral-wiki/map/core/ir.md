@@ -58,13 +58,15 @@ representable state.
   faulted as an *arm*.
 - `CompKind::Capture(Arc<Comp>)` is the kernel half of the checker's one
   payload coercion: run the body, capture its stdout, return those bytes
-  exactly — total and lossless. `CompKind::Decode(Arc<Comp>)` is the other
-  half: read those bytes as text, one trailing terminator dropped and a strict
-  UTF-8 decode, which is the partial, lossy step. Neither has surface syntax;
-  [[map/core/typecheck|typecheck]]'s `annotate` pass composes them as
-  `Decode(Capture(body))` by demand propagation, and `referenced_names`'s walk
-  descends into both. The reading is a node and not a command so that its
-  meaning is fixed where the checker writes it
+  exactly — total and lossless. `CompKind::Decode(Val)` is the other half:
+  read that `Bytes` value as text, one trailing terminator dropped and a
+  strict UTF-8 decode, which is the partial, lossy step — the kernel's
+  `decode` takes a value, so it reads a bound variable rather than nesting a
+  `Comp`. Neither has surface syntax; [[map/core/typecheck|typecheck]]'s
+  `annotate` pass composes them as `Capture(body) to x. Decode(x)` by demand
+  propagation, and `referenced_names`'s walk descends into the `Capture` and
+  the `Bind`. The reading is a node and not a command so that its meaning is
+  fixed where the checker writes it
   ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]).
 

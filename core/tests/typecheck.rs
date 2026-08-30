@@ -1558,17 +1558,18 @@ fn pipeline_inside_thunk_body_is_annotated() {
 #[test]
 fn a_byte_routed_bind_rhs_is_wrapped_in_capture() {
     // A byte-routed RHS (`echo`) is wrapped in the capture coercion — the
-    // kernel node for the exact bytes, wrapped in a `Decode` node for the
-    // text; a value-routed one (`return 42`) is left alone.  This is the whole
-    // observable content of the route at a value boundary.
+    // kernel node for the exact bytes, bound and handed to a `Decode` node
+    // for the text; a value-routed one (`return 42`) is left alone.  This is
+    // the whole observable content of the route at a value boundary.
     let top = annotated(r"let x = echo hi; let y = return 42; return ()");
     let mut binds = Vec::new();
     for phrase in &top.phrases {
         if let Phrase::Define { pattern, comp, .. } = &phrase.item
             && let IrPattern::Name(name) = pattern.as_ref()
         {
-            let coerced = matches!(&comp.item, CompKind::Decode(inner)
-                if matches!(inner.item, CompKind::Capture(_)));
+            let coerced = matches!(&comp.item, CompKind::Bind { comp: rhs, rest, .. }
+                if matches!(rhs.item, CompKind::Capture(_))
+                    && matches!(rest.item, CompKind::Decode(_)));
             binds.push((name.clone(), coerced));
         }
     }

@@ -85,21 +85,23 @@ fn byte_side_join(join: &Comp, ctx: &mut InferCtx, demand: Demand) -> bool {
     demand == Demand::Value && bytes_result(ctx, comp_key(join))
 }
 
-/// The whole of the byte-to-value coercion: `Decode(Capture(body))`.  The
-/// capture yields the handler's bytes exactly; the one lossy, partial step
-/// that reads them as text sits above it, visible in the IR as its own node.
-/// Both halves take `body`'s span, so a decode failure still names the
-/// expression the user wrote.
+/// The whole of the byte-to-value coercion: `Capture(body) to x. Decode(x)`.
+/// The kernel's `decode` takes a value, so the lossy, partial step that reads
+/// the capture's bytes as text needs a bind to reach it. Both nodes take
+/// `body`'s span, so a decode failure still names the expression the user
+/// wrote.
 ///
-/// Two nodes and no command: what the checker composes here means the same
-/// thing in every environment, because there is no name for user code to
-/// rebind and no binder for it to observe.
-fn captured_string(body: Comp) -> CompKind {
+/// No command: what the checker composes here means the same thing in every
+/// environment, because the bind's name is synthetic — nothing user code can
+/// rebind or observe.
+fn captured_string(body: Comp, ctx: &mut InferCtx) -> CompKind {
     let span = body.span;
-    CompKind::Decode(Arc::new(Spanned::with_span(
-        span,
-        CompKind::Capture(Arc::new(body)),
-    )))
+    let name = ctx.fresh_name("decode");
+    CompKind::Bind {
+        comp: Arc::new(Spanned::with_span(span, CompKind::Capture(Arc::new(body)))),
+        pattern: Arc::new(IrPattern::Name(name.clone())),
+        rest: Arc::new(Spanned::with_span(span, CompKind::Decode(Val::Variable(name)))),
+    }
 }
 
 /// Rebuild `comp` under `Demand::Discard` — the general recursive walk a
@@ -143,7 +145,7 @@ fn eta_expand_arrow(rhs: Comp, ctx: &mut InferCtx, arity: usize) -> Comp {
         CompKind::App { head, args } => (head, args),
         other => (Arc::new(Spanned::with_span(span, other)), Vec::new()),
     };
-    let params: Vec<String> = (0..arity).map(|_| ctx.fresh_eta_name()).collect();
+    let params: Vec<String> = (0..arity).map(|_| ctx.fresh_name("eta")).collect();
     for param in &params {
         args.push(Spanned::synthetic(ValListElem::Single(Val::Variable(
             param.clone(),
@@ -248,7 +250,7 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -
 
     let item = annotate_plain(comp, ctx, eta);
     let wrapped = if demand == Demand::Value && bytes_result(ctx, comp_key(comp)) {
-        captured_string(Spanned::with_span(comp.span, item))
+        captured_string(Spanned::with_span(comp.span, item), ctx)
     } else {
         item
     };
@@ -370,7 +372,7 @@ fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, eta: bool, dem
         }
         return Spanned::with_span(
             arm.span,
-            captured_string(annotate_demand(arm, ctx, eta, Demand::Discard)),
+            captured_string(annotate_demand(arm, ctx, eta, Demand::Discard), ctx),
         );
     }
     annotate_demand(arm, ctx, eta, demand)
@@ -419,7 +421,7 @@ fn arm_body(body: &Arc<Comp>, ctx: &mut InferCtx, walk: ArmWalk) -> Arc<Comp> {
         ArmWalk::Descend => Arc::new(annotate_demand(body, ctx, false, Demand::Value)),
         ArmWalk::Wrap => Arc::new(Spanned::with_span(
             body.span,
-            captured_string(annotate_demand(body, ctx, false, Demand::Discard)),
+            captured_string(annotate_demand(body, ctx, false, Demand::Discard), ctx),
         )),
         ArmWalk::Plain => unreachable!("arm_body is only called under Descend/Wrap"),
     }
@@ -431,7 +433,7 @@ fn arm_body(body: &Arc<Comp>, ctx: &mut InferCtx, walk: ArmWalk) -> Arc<Comp> {
 fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
     let forced = Spanned::synthetic(CompKind::Force(annotate_val(val, ctx)));
     if !handler {
-        let captured = Spanned::synthetic(captured_string(forced));
+        let captured = Spanned::synthetic(captured_string(forced, ctx));
         return Val::Thunk(Arc::new(captured));
     }
     let param = "__capture_e".to_string();
@@ -441,7 +443,7 @@ fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
             param.clone(),
         )))],
     });
-    let captured = Spanned::synthetic(captured_string(app));
+    let captured = Spanned::synthetic(captured_string(app, ctx));
     Val::Thunk(Arc::new(Spanned::synthetic(CompKind::Lam {
         param: IrPattern::Name(param),
         body: Arc::new(captured),

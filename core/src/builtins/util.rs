@@ -260,12 +260,10 @@ pub(crate) fn value_ordering(a: &Value, b: &Value, op: &str) -> Settled<std::cmp
 
 pub(crate) fn order_cmp(
     args: &[Value],
-    shell: &mut Shell,
     name: &str,
     want: fn(std::cmp::Ordering) -> bool,
 ) -> Settled<Value> {
     let r = want(value_ordering(&args[0], &args[1], name)?);
-    shell.set_status_from_bool(r);
     Ok(Value::Bool(r))
 }
 

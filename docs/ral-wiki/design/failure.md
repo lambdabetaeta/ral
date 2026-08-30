@@ -7,9 +7,9 @@ automatically until some form decides what to do with it. *Truth* is an ordinary
 `if` branches on truth; the two axes never cross.**
 
 A `Bool` is data, not a verdict. A ral predicate returns a `Bool`, and returning
-`false` is a *successful* command: the value is recorded in the `$status`
-register for inspection but raises nothing, so `false` never becomes a failure
-and never drives `?` or `try`. Branching on a `Bool` is `if`'s job — it rejects a
+`false` is a *successful* command: the value is simply the command's value and
+raises nothing, so `false` never becomes a failure and never drives `?` or
+`try`. Branching on a `Bool` is `if`'s job — it rejects a
 non-`Bool` condition as a type error; branching on *success* is `try`'s.
 
 **`?` is a fallback chain: the first success wins.** `a ? b ? c` tries each arm

@@ -135,7 +135,7 @@ module's framed scaffold:
   funnel through — a `Run.trail: Some` holds a `TrailScope`
   *outside* the `catch_unwind` that recovers a mid-run panic, opened before
   `dispatch` runs and closed once it returns, on every exit. That placement is
-  load-bearing: the `(env, context, last_status)` checkpoint the panic arm
+  load-bearing: the `(env, context)` checkpoint the panic arm
   rolls back does not cover `local.audit`, so only a scope the panic itself cannot skip keeps
   the trail's close law true at dispatch granularity. A clean exit's
   observations land in `RunReport::Ran.trail`; a caught panic's are drained

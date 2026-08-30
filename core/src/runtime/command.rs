@@ -181,9 +181,8 @@ pub(crate) fn run(
     };
     let outcome = waited.outcome;
 
-    // Held rather than `?`-propagated: the bookkeeping below (drain, set
-    // `$?`) must still run for a command that did run, even when its
-    // commit failed.
+    // Held rather than `?`-propagated: the drain below must still run for a
+    // command that did run, even when its commit failed.
     let commit_result = if let Some(commit) = atomic_commit.take() {
         let (path, mode) = plan
             .stdout_file
@@ -244,8 +243,6 @@ pub(crate) fn run(
     // Only joins the pump threads: under audit the bytes are already
     // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
     waited.drain();
-    let code = outcome.to_user_exit_code();
-    shell.last_status = code;
     commit_result?;
     // A command inside a helper stage can no longer take SIGPIPE from an
     // interior edge — the parent holds that edge's read end — so any SIGPIPE

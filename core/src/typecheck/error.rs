@@ -96,8 +96,8 @@ pub enum Reason {
     /// `Capture`'s operand against the `Unit` value WF-2 demands, at
     /// whichever route the operand's own boundary chose.
     CaptureOperand,
-    /// `Decode`'s operand against the `Value`-routed `Bytes` shape it reads —
-    /// always a `Capture`, whose own rule already guarantees it.
+    /// `Decode`'s operand against `Bytes` — the value the bind above it
+    /// captured, whose own rule already guarantees the shape.
     DecodeOperand,
     NotOperand,
     BinaryOperands(BinaryOpKind),

@@ -521,19 +521,17 @@ fn stop_handle(handle: &HandleInner) {
 }
 
 /// `cancel <handle>` -- mark a running concurrent block as cancelled.
-pub(super) fn builtin_cancel(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_cancel(args: &[Value], shell: &Shell) -> Settled<Value> {
     let handle = expect_handle(&args[0], "cancel")?;
     stop_handle(handle);
     shell.local.workers.remove(handle);
-    shell.last_status = 0;
     Ok(Value::Unit)
 }
 
 /// The pre-check `await` and `poll` share: a cancelled handle has no result to
 /// wait for or sample, so observing one is an error.
-fn ensure_live(handle: &HandleInner, shell: &mut Shell) -> Settled<()> {
+fn ensure_live(handle: &HandleInner) -> Settled<()> {
     if *handle.state.lock().unwrap() == HandleState::Cancelled {
-        shell.last_status = 1;
         return Err(Break::Error(
             Error::new("handle is cancelled", 1)
                 .with_hint("use try around await to handle cancellation"),
@@ -551,10 +549,9 @@ fn ensure_live(handle: &HandleInner, shell: &mut Shell) -> Settled<()> {
     clippy::significant_drop_tightening,
     reason = "the result guard must span the cached re-check, try_recv, and cache write; releasing early lets a second awaiter observe a bare Disconnected"
 )]
-fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle> {
+fn try_settle(handle: &HandleInner) -> Option<CompletedHandle> {
     let cached = handle.cached.lock().unwrap().clone();
     if let Some(completed) = cached {
-        set_status_from_outcome(&completed.outcome, shell);
         return Some(completed);
     }
     // Settling is once-only: hold `result` across the re-check, the receive,
@@ -563,7 +560,6 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
     let mut rx_guard = handle.result.lock().unwrap();
     let cached = handle.cached.lock().unwrap().clone();
     if let Some(completed) = cached {
-        set_status_from_outcome(&completed.outcome, shell);
         return Some(completed);
     }
     let rx = rx_guard.as_ref()?;
@@ -573,7 +569,7 @@ fn try_settle(handle: &HandleInner, shell: &mut Shell) -> Option<CompletedHandle
         Err(TryRecvError::Empty) => return None,
     };
     rx_guard.take();
-    Some(complete_handle(handle, result, shell))
+    Some(complete_handle(handle, result))
 }
 
 /// Replay a finished detached worker's buffered surface events through the
@@ -596,7 +592,7 @@ fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, mo
 }
 
 /// Project a finished block's outcome to the `await`/`race` record, re-raising
-/// an `Err` verbatim.  `$status` was already set when the outcome was cached.
+/// an `Err` verbatim.
 fn project_completed(completed: CompletedHandle) -> Settled<Value> {
     let value = completed.outcome?;
     Ok(Value::map(vec![
@@ -613,7 +609,6 @@ fn project_completed(completed: CompletedHandle) -> Settled<Value> {
 fn wait_first_settled<'a>(
     handles: &[&'a HandleInner],
     mooring: &Mooring,
-    shell: &mut Shell,
 ) -> Settled<(&'a HandleInner, CompletedHandle)> {
     loop {
         let mut saw_running = false;
@@ -627,7 +622,7 @@ fn wait_first_settled<'a>(
                 HandleState::Running => saw_running = true,
                 HandleState::Completed => {}
             }
-            if let Some(completed) = try_settle(handle, shell) {
+            if let Some(completed) = try_settle(handle) {
                 return Ok((handle, completed));
             }
         }
@@ -644,10 +639,10 @@ fn wait_first_settled<'a>(
 pub(super) fn await_handle(
     handle: &HandleInner,
     mooring: &Mooring,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Settled<Value> {
-    ensure_live(handle, shell)?;
-    let (_, completed) = wait_first_settled(&[handle], mooring, shell)?;
+    ensure_live(handle)?;
+    let (_, completed) = wait_first_settled(&[handle], mooring)?;
     shell.local.workers.remove(handle);
     replay_deferred_surface(handle, &completed, mooring);
     project_completed(completed)
@@ -657,7 +652,7 @@ pub(super) fn await_handle(
 pub(super) fn builtin_await(
     args: &[Value],
     mooring: &Mooring,
-    shell: &mut Shell,
+    shell: &Shell,
 ) -> Settled<Value> {
     let handle = expect_handle(&args[0], "await")?;
     await_handle(handle, mooring, shell)
@@ -674,11 +669,11 @@ pub(super) fn builtin_await(
 /// buffers stay empty, so a pending poll on one reports nothing.
 ///
 /// Errors only on a cancelled handle ([`ensure_live`]).  A failed block is
-/// reported as data, not re-raised, so a successful `poll` leaves `$status` at
-/// 0 whatever the block's own status — that lives in `outcome.err.status`.
-pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+/// reported as data, not re-raised: `poll` never re-raises, whatever the
+/// block's own status — that lives in `outcome.err.status`.
+pub(super) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
     let handle = expect_handle(&args[0], "poll")?;
-    ensure_live(handle, shell)?;
+    ensure_live(handle)?;
     // Both arms are observations, so the touch lands once at entry, before the
     // settle attempt decides which arm it is.
     *handle.last_observed.lock().unwrap() = std::time::Instant::now();
@@ -686,7 +681,7 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         label: label.into(),
         payload,
     };
-    let result = if let Some(completed) = try_settle(handle, shell) {
+    let result = if let Some(completed) = try_settle(handle) {
         // A settled poll observes as `await` does, so it removes the entry too.
         shell.local.workers.remove(handle);
         let outcome = match completed.outcome {
@@ -712,13 +707,12 @@ pub(super) fn builtin_poll(args: &[Value], shell: &mut Shell) -> Settled<Value> 
         ]);
         variant("pending", Some(Box::new(pending)))
     };
-    shell.last_status = 0;
     Ok(result)
 }
 
 /// `race <handles>` -- wait for the first of several blocks to finish, stopping
 /// the rest, then project the winner's outcome as `await` does.
-pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     if args.is_empty() {
         return Err(sig("race requires 1 argument (list of handles)"));
     }
@@ -728,7 +722,7 @@ pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell)
         handles.push(expect_handle(v, "race")?);
     }
 
-    let (winner, completed) = wait_first_settled(&handles, mooring, shell)?;
+    let (winner, completed) = wait_first_settled(&handles, mooring)?;
     shell.local.workers.remove(winner);
     for &h in &handles {
         if !Arc::ptr_eq(&h.result, &winner.result) {
@@ -738,15 +732,6 @@ pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &mut Shell)
     }
     replay_deferred_surface(winner, &completed, mooring);
     project_completed(completed)
-}
-
-/// The exit code a settled error carries — an `exit 42` carries 42, not a
-/// flattened 1.  Shared by [`set_status_from_outcome`] and [`break_record`].
-fn error_exit_code(e: &Break) -> i32 {
-    match e {
-        Break::Error(e) => e.exit_code(),
-        Break::Escape(esc) => escape_exit_code(esc),
-    }
 }
 
 /// An `Escape`'s exit code: `exit code`'s own, or 1 for a job-control stop.
@@ -785,28 +770,16 @@ fn break_record(e: &Break, shell: &Shell) -> Value {
     }
 }
 
-fn set_status_from_outcome(outcome: &Settled<Value>, shell: &mut Shell) {
-    shell.last_status = match outcome {
-        Ok(_) => 0,
-        Err(e) => error_exit_code(e),
-    };
-}
-
 /// Transition a handle to `Completed`, drain both byte buffers exactly once
-/// into a cached [`CompletedHandle`], and set `$status`.  Draining on the error
-/// path too captures a failed block's bytes; the cache serves every repeat.
-fn complete_handle(
-    handle: &HandleInner,
-    result: Settled<Value>,
-    shell: &mut Shell,
-) -> CompletedHandle {
+/// into a cached [`CompletedHandle`].  Draining on the error path too
+/// captures a failed block's bytes; the cache serves every repeat.
+fn complete_handle(handle: &HandleInner, result: Settled<Value>) -> CompletedHandle {
     {
         let mut state = handle.state.lock().unwrap();
         if *state == HandleState::Running {
             *state = HandleState::Completed;
         }
     }
-    set_status_from_outcome(&result, shell);
     let completed = CompletedHandle {
         stdout: take_buffer(&handle.stdout_buf),
         stderr: take_buffer(&handle.stderr_buf),
@@ -907,15 +880,13 @@ mod tests {
     /// not `None` — else `poll` reads `pending` forever and `race` spins.
     #[test]
     fn try_settle_reports_disconnected_worker_as_failed() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
         let handle = handle_with_disconnected_worker(b"", b"");
-        match try_settle(&handle, &mut shell) {
+        match try_settle(&handle) {
             Some(CompletedHandle {
                 outcome: Err(Break::Error(e)),
                 ..
             }) => {
                 assert_eq!(e.exit_code(), 1);
-                assert_eq!(shell.last_status, 1);
             }
             other => panic!("expected Some(failed outcome), got {other:?}"),
         }
@@ -925,11 +896,10 @@ mod tests {
     /// buffered before panicking and an `` `err `` outcome, never re-raising.
     #[test]
     fn poll_reports_disconnected_worker_as_settled_err() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let handle = handle_with_disconnected_worker(b"out", b"err");
         let args = [Value::Handle(Box::new(handle))];
-        let poll1 = builtin_poll(&args, &mut shell).expect("poll must not re-raise a panic");
-        assert_eq!(shell.last_status, 0, "poll itself succeeded");
+        let poll1 = builtin_poll(&args, &shell).expect("poll must not re-raise a panic");
 
         let settled = expect_variant(&poll1, "settled");
         let fields = expect_map(settled);
@@ -939,7 +909,7 @@ mod tests {
         let err_fields = expect_map(err);
         assert_eq!(err_fields.get("status"), Some(&Value::Int(1)));
 
-        let poll2 = builtin_poll(&args, &mut shell).expect("repeat poll must not re-raise");
+        let poll2 = builtin_poll(&args, &shell).expect("repeat poll must not re-raise");
         assert_eq!(poll1, poll2);
     }
 
@@ -1034,7 +1004,7 @@ mod tests {
     /// bare `recv`, yet the root-parented worker it awaited stays awaitable.
     #[test]
     fn await_unwinds_on_foreground_cancel_sparing_the_worker() {
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
 
         // A still-running worker, root-parented as a real `spawn`'s is.  Its
         // `Sender` stays alive, so the receiver reports `Empty`, not `Disconnected`.
@@ -1059,7 +1029,7 @@ mod tests {
         let m = Mooring::adrift();
         m.cancel.cancel(crate::process::CancelCause::Interrupt);
 
-        let err = await_handle(&handle, &m, &mut shell)
+        let err = await_handle(&handle, &m, &shell)
             .expect_err("await must unwind on a foreground cancel, not block");
         assert!(matches!(err, Break::Error(_)));
         assert!(
@@ -1287,7 +1257,7 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
         while std::time::Instant::now() < deadline {
-            builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &mut shell).expect("poll a live handle");
+            builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell).expect("poll a live handle");
             assert!(
                 !scope.is_cancelled(),
                 "a polled worker must never be idle-reaped"
@@ -1297,7 +1267,7 @@ mod tests {
         assert_eq!(shell.local.workers.count(), 1, "the babysat entry stays");
 
         gate_tx.send(()).unwrap();
-        await_handle(&handle, &m, &mut shell).expect("await after the gate opens");
+        await_handle(&handle, &m, &shell).expect("await after the gate opens");
         assert!(!scope.is_cancelled(), "the worker finished by itself");
     }
 
@@ -1329,7 +1299,7 @@ mod tests {
             );
             // A poll may race the reap and see the cancelled body settle as
             // an error; only the touch matters here.
-            let _ = builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &mut shell);
+            let _ = builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell);
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert_eq!(scope.cause(), Some(crate::process::CancelCause::Deadline));
@@ -1502,7 +1472,7 @@ mod tests {
         )
         .expect("durable spawn must succeed");
 
-        builtin_cancel(&[Value::Handle(Box::new(handle.clone()))], &mut shell)
+        builtin_cancel(&[Value::Handle(Box::new(handle.clone()))], &shell)
             .expect("cancel must succeed on a durable worker");
 
         assert!(
@@ -1808,7 +1778,6 @@ mod tests {
             Some(&Value::String("the greeter".into()))
         );
         assert!(matches!(fields.get("pid"), Some(Value::Int(p)) if *p > 0));
-        assert_eq!(shell.last_status, 0);
     }
 
     /// A detached worker's `surface` events replay through the *awaiting* run
@@ -1822,7 +1791,7 @@ mod tests {
             }
         }
 
-        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let shell = Shell::new(crate::io::TerminalState::default());
         let log = Arc::new(Mutex::new(Vec::new()));
         let mut m = Mooring::adrift();
         m.surface = Some(Arc::new(Rec(log.clone())));
@@ -1850,17 +1819,17 @@ mod tests {
             cancel: crate::process::CancelScope::default(),
         };
 
-        builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &mut shell).expect("poll ok");
+        builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell).expect("poll ok");
         assert_eq!(log.lock().unwrap().len(), 0, "poll must not replay surface");
 
-        await_handle(&handle, &m, &mut shell).expect("await ok");
+        await_handle(&handle, &m, &shell).expect("await ok");
         assert_eq!(
             log.lock().unwrap().len(),
             1,
             "await replays the deferred card"
         );
 
-        await_handle(&handle, &m, &mut shell).expect("await ok");
+        await_handle(&handle, &m, &shell).expect("await ok");
         assert_eq!(
             log.lock().unwrap().len(),
             1,
@@ -1993,7 +1962,7 @@ mod tests {
         );
         assert_eq!(done_outcome_label(&batch[1]), "panic");
 
-        match try_settle(&handle, &mut shell) {
+        match try_settle(&handle) {
             Some(CompletedHandle {
                 outcome: Err(Break::Error(_)),
                 ..
@@ -2039,7 +2008,7 @@ mod tests {
             }
         }
         m.surface = Some(Arc::new(Rec(log.clone())));
-        await_handle(&handle, &m, &mut shell).expect("await ok");
+        await_handle(&handle, &m, &shell).expect("await ok");
         let replayed = log.lock().unwrap().clone();
         assert_eq!(
             replayed.as_slice(),
@@ -2095,7 +2064,7 @@ mod tests {
             }
         }
         m.surface = Some(Arc::new(Rec(log.clone())));
-        await_handle(&handle, &m, &mut shell).expect("await still returns the result record");
+        await_handle(&handle, &m, &shell).expect("await still returns the result record");
         assert_eq!(
             log.lock().unwrap().len(),
             0,
@@ -2157,7 +2126,7 @@ mod tests {
             |_, _c| Ok(Value::Unit),
         )
         .unwrap();
-        await_handle(&h1, &m, &mut shell).expect("await ok");
+        await_handle(&h1, &m, &shell).expect("await ok");
         assert_eq!(shell.local.workers.count(), 0, "await removes its entry");
 
         // `cancel` removes.
@@ -2173,7 +2142,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shell.local.workers.count(), 1);
-        builtin_cancel(&[Value::Handle(Box::new(h2))], &mut shell).expect("cancel ok");
+        builtin_cancel(&[Value::Handle(Box::new(h2))], &shell).expect("cancel ok");
         assert_eq!(shell.local.workers.count(), 0, "cancel removes its entry");
 
         // A settled `poll` removes.
@@ -2189,7 +2158,7 @@ mod tests {
         )
         .unwrap();
         loop {
-            let polled = builtin_poll(&[Value::Handle(Box::new(h3.clone()))], &mut shell).unwrap();
+            let polled = builtin_poll(&[Value::Handle(Box::new(h3.clone()))], &shell).unwrap();
             if matches!(&polled, Value::Variant { label, .. } if label == "settled") {
                 break;
             }
@@ -2219,7 +2188,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shell.local.workers.count(), 1);
-        let pending = builtin_poll(&[Value::Handle(Box::new(h4.clone()))], &mut shell).unwrap();
+        let pending = builtin_poll(&[Value::Handle(Box::new(h4.clone()))], &shell).unwrap();
         assert!(
             matches!(&pending, Value::Variant { label, .. } if label == "pending"),
             "the worker is blocked, so poll must observe it pending: got {pending:?}"
@@ -2230,7 +2199,7 @@ mod tests {
             "a pending poll must not touch the registry"
         );
         unblock_tx.send(()).unwrap();
-        await_handle(&h4, &m, &mut shell).expect("await ok");
+        await_handle(&h4, &m, &shell).expect("await ok");
     }
 
     /// `race` removes the winner and every cancelled loser: nothing lingers in
@@ -2290,7 +2259,7 @@ mod tests {
             Value::Handle(Box::new(loser1)),
             Value::Handle(Box::new(loser2)),
         ])];
-        builtin_race(&args, &m, &mut shell).expect("race must succeed");
+        builtin_race(&args, &m, &shell).expect("race must succeed");
         assert_eq!(
             shell.local.workers.count(),
             0,
@@ -2505,7 +2474,7 @@ mod tests {
         shell.local.workers.sweep_retention();
         assert_eq!(shell.local.workers.snapshot()[0].settled_epoch, Some(1));
 
-        builtin_poll(&[Value::Handle(Box::new(handle))], &mut shell).expect("poll ok");
+        builtin_poll(&[Value::Handle(Box::new(handle))], &shell).expect("poll ok");
         assert_eq!(
             shell.local.workers.count(),
             0,
@@ -2555,7 +2524,7 @@ mod tests {
         assert!(shell.take_worker_reap_notices().is_empty());
 
         gate_tx.send(()).unwrap();
-        await_handle(&handle, &m, &mut shell).expect("await after the gate opens");
+        await_handle(&handle, &m, &shell).expect("await after the gate opens");
     }
 
     // ── the admission cap ────────────────────────────────────────────────
@@ -2616,7 +2585,7 @@ mod tests {
             "a refused birth registers nothing"
         );
 
-        builtin_cancel(&[Value::Handle(Box::new(handles[0].clone()))], &mut shell).expect("cancel ok");
+        builtin_cancel(&[Value::Handle(Box::new(handles[0].clone()))], &shell).expect("cancel ok");
         spawn_child(
             Arc::new(shell.env.clone()),
             &m,

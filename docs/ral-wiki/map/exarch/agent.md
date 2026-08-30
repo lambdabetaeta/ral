@@ -195,8 +195,8 @@ Three nested loops, the same for trunk and child alike:
   `deliberate` call is a
   *host-side* fault (provider transport, surface decode, render, digest),
   recorded as `AgentOutcome::Failed`; an eval-side panic never unwinds this far —
-  the engine's own run door (`Shell::run`) checkpoints `env` / `context` /
-  `last_status` at entry, rolls them back, and reports the failed run,
+  the engine's own run door (`Shell::run`) checkpoints `env` / `context`
+  at entry, rolls them back, and reports the failed run,
   durability being engine-owned ([[decisions/260612_exarch-panic-recovery|panic-recovery]]).
   The per-call host — `RunHost`, wrapping the desk and applier
   ([[map/exarch/shell-eval|shell-eval]]) — is never installed as shared

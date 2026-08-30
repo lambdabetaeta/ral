@@ -1,12 +1,10 @@
 //! Map and value predicates: `keys`, `has`, `is-empty`, `equal`, `lt`, `gt`.
 //! The filesystem probes (`exists`, `is-file`, …) live in [`super::fs`].
 //!
-//! Each Bool also lands in the shell's `last_status` (true → 0), which is what
-//! a bare predicate at the end of a script exits with.  Comparison belongs to
-//! [`super::util`], shared with the `$[…]` operators in
+//! Comparison belongs to [`super::util`], shared with the `$[…]` operators in
 //! [`crate::evaluator::expr`], so the two cannot drift.
 
-use crate::types::{Break, Error, Settled, Shell, Value, as_map_ref};
+use crate::types::{Break, Error, Settled, Value, as_map_ref};
 
 use super::util::{order_cmp, values_equal};
 
@@ -17,14 +15,13 @@ pub(super) fn builtin_keys(args: &[Value]) -> Settled<Value> {
     ))
 }
 
-pub(super) fn builtin_has(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_has(args: &[Value]) -> Settled<Value> {
     let m = as_map_ref(&args[0], "has")?;
     let found = m.contains_key(&args[1].to_string());
-    shell.set_status_from_bool(found);
     Ok(Value::Bool(found))
 }
 
-pub(super) fn builtin_is_empty(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_is_empty(args: &[Value]) -> Settled<Value> {
     let val = &args[0];
     let r = match val {
         Value::List(items) => items.is_empty(),
@@ -44,20 +41,18 @@ pub(super) fn builtin_is_empty(args: &[Value], shell: &mut Shell) -> Settled<Val
             ));
         }
     };
-    shell.set_status_from_bool(r);
     Ok(Value::Bool(r))
 }
 
-pub(super) fn builtin_equal(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_equal(args: &[Value]) -> Settled<Value> {
     let r = values_equal(&args[0], &args[1])?;
-    shell.set_status_from_bool(r);
     Ok(Value::Bool(r))
 }
 
-pub(super) fn builtin_lt(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    order_cmp(args, shell, "lt", std::cmp::Ordering::is_lt)
+pub(super) fn builtin_lt(args: &[Value]) -> Settled<Value> {
+    order_cmp(args, "lt", std::cmp::Ordering::is_lt)
 }
 
-pub(super) fn builtin_gt(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    order_cmp(args, shell, "gt", std::cmp::Ordering::is_gt)
+pub(super) fn builtin_gt(args: &[Value]) -> Settled<Value> {
+    order_cmp(args, "gt", std::cmp::Ordering::is_gt)
 }

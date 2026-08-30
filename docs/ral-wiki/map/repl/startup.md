@@ -111,7 +111,7 @@ rather than evaluating it directly**
   the authority to hand the controlling terminal to a child is a held value,
   not an inferred predicate ([[decisions/260619_terminal-lease|terminal-lease]]).
 - **The verdict.** The `Settled` result is scored into an exit code: `Ok`
-  reports the shell's `last_status`; `Escape::Exit(code)` clamps and returns it
+  reports 0; `Escape::Exit(code)` clamps and returns it
   (`platform::exit_byte`); `Error` prints a runtime diagnostic (unless
   `--audit` will carry it) and returns the error's exit code; on Unix a
   `Stopped` escape exits 1.

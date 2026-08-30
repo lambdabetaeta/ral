@@ -123,17 +123,17 @@ fn case_arm_naming_a_handler_is_captured_like_an_inline_one() {
 }
 
 /// An arm is a branch, not a function the runtime applies: it runs in the
-/// ambient control context rather than a frame of its own, so the status the
-/// arm leaves is the `case`'s own — and, at the end of a script, the
-/// process's.  A lambda's status would stay inside its frame.
+/// ambient control context rather than a frame of its own.  A script that
+/// returns exits 0 whatever it returned — a `Bool` is data, not a verdict —
+/// so a `case` whose last arm answers `false` still exits clean.
 #[test]
-fn case_arm_leaves_its_status_as_the_cases_own() {
+fn case_arm_returning_a_bool_exits_zero() {
     let out = common::run(
         "case_arm_leaves_status",
         "true\n\
          case `go () [`go: { |_| false }]\n",
     );
-    assert_eq!(out.status, 1, "stderr: {}", out.stderr);
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
 }
 
 // ─── Stream (demand-driven streams, Stream) ────────────────────────────────────

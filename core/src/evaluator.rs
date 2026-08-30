@@ -151,7 +151,6 @@ fn run_phrase_define(
     }
     let closure = crate::types::Closure { comp: Arc::clone(comp), env: env.clone() };
     let v = capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))?;
-    machine::set_status(&v, shell);
     let is_session = matches!(mode, Mode::Session);
     *env = pattern::bind_pattern_staged(
         pattern,

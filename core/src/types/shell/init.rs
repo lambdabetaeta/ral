@@ -20,7 +20,6 @@ impl Shell {
                 grants: GrantStack::root(),
                 ..Context::default()
             },
-            last_status: 0,
             io: crate::io::Io {
                 terminal,
                 ..Default::default()

@@ -92,7 +92,6 @@ impl Shell {
         let new_str = resolved.to_string_lossy().into_owned();
         self.context.cwd.previous = Some(old);
         self.context.cwd.current = Some(resolved);
-        self.last_status = 0;
 
         Ok((old_str, new_str))
     }

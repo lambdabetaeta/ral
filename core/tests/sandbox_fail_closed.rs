@@ -218,10 +218,9 @@ fn external_write_outside_grant_denied_in_block_body() {
     let _ = std::fs::remove_file(&denied);
 }
 
-/// When the confined external fails, the top-level run installs the
-/// child's failing status into the parent's mobile, not the previous
-/// run's value. Pins `run_phrases`' direct mutation of `shell.mobile`: the
-/// parent's `$?` reports the confined failure.
+/// When the confined external fails, its status is the failure's own exit
+/// code, not the previous run's value: a denied write fails closed, and the
+/// outcome's status reports it.
 #[test]
 fn denied_external_installs_failing_status_into_mobile() {
     let work = unique_workdir("stat");
@@ -240,9 +239,9 @@ fn denied_external_installs_failing_status_into_mobile() {
         "expected the confined external to fail closed, got Ok"
     );
     assert_ne!(
-        shell.last_status(),
+        ral_core::run::status(&result),
         0,
-        "a denied confined external must install a non-zero last_status into the mobile"
+        "a denied confined external must report a non-zero status"
     );
     assert!(!denied.exists());
     let _ = std::fs::remove_dir_all(&work);

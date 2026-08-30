@@ -164,8 +164,9 @@ pub struct InferCtx {
     /// its inferred type resolved to `Fun` — keyed by the RHS node's own
     /// address, read back by `annotate`'s η-expansion (S3).
     pub rhs_arrow_arity: HashMap<usize, usize>,
-    /// Fresh-name counter for η-expansion's synthetic parameters.
-    eta_counter: usize,
+    /// Fresh-name counter for compiler-synthesized binders (η-expansion's
+    /// parameters, the decode coercion's bind).
+    synth_counter: usize,
 }
 
 impl Default for InferCtx {
@@ -189,16 +190,16 @@ impl InferCtx {
             route_constraints: Vec::new(),
             rec_groups: HashMap::new(),
             rhs_arrow_arity: HashMap::new(),
-            eta_counter: 0,
+            synth_counter: 0,
         }
     }
 
-    /// A fresh, distinctive parameter name for an η-expansion's synthetic λ
-    /// (S3) — never written by any surface program, so no collision guard
-    /// is needed beyond the counter itself.
-    pub fn fresh_eta_name(&mut self) -> String {
-        self.eta_counter += 1;
-        format!("__eta{}", self.eta_counter)
+    /// A fresh, distinctive name for a compiler-synthesized binder, tagged
+    /// with `purpose` (`"eta"`, `"decode"`) — never written by any surface
+    /// program, so no collision guard is needed beyond the counter itself.
+    pub fn fresh_name(&mut self, purpose: &str) -> String {
+        self.synth_counter += 1;
+        format!("__{purpose}{}", self.synth_counter)
     }
 
     /// Ground a route; a still-unresolved variable defaults to `Value`.

@@ -236,9 +236,8 @@ impl Shell {
     /// Completion is *this call returning*, never a channel disconnecting: a
     /// worker may hold a clone of the surface sink forever without keeping the
     /// run alive. It is also the durability boundary — a panic anywhere in the
-    /// run restores the `env`/`context`/`last_status` checkpointed at entry,
-    /// so the shell rolls itself back and no snapshot crosses the engine
-    /// protocol.
+    /// run restores the `env`/`context` checkpointed at entry, so the shell
+    /// rolls itself back and no snapshot crosses the engine protocol.
     pub fn run(&mut self, req: RunRequest<'_>) -> RunReport {
         let anchor = self.session.anchor.clone();
         self.run_under(&anchor, req)
@@ -280,7 +279,7 @@ impl Shell {
     /// granularity. A panic reports `Static` by declaration — the trail
     /// closes and is discarded, never attached.
     fn enter(&mut self, under: &ForegroundScope, req: RunRequest<'_>) -> RunReport {
-        let checkpoint = (self.env.clone(), self.context.clone(), self.last_status);
+        let checkpoint = (self.env.clone(), self.context.clone());
         let saved_capture = self.local.audit.capture_policy();
         let scope: Option<TrailScope> = req.run.trail.map(|policy| {
             self.local
@@ -309,7 +308,7 @@ impl Shell {
                 report
             }
             Err(payload) => {
-                (self.env, self.context, self.last_status) = checkpoint;
+                (self.env, self.context) = checkpoint;
                 RunReport::Static {
                     diagnostics: StaticDiagnostics::Host(crate::types::Error::new(
                         format!("run panicked: {}", panic_text(payload.as_ref())),
@@ -533,10 +532,11 @@ fn classify_ending(
 
 // ── The spine behind the door: compile, build, install, classify ────────────
 
-/// The transport status of one settled run, computed once.
-fn eval_status(result: &Settled<Value>, shell: &Shell) -> i32 {
-    match result {
-        Ok(_) => shell.last_status,
+/// A run's status is a pure function of its settled outcome, computed once:
+/// `Ok` exits 0 whatever it returned; an error or escape carries its own.
+pub fn status(outcome: &Settled<Value>) -> i32 {
+    match outcome {
+        Ok(_) => 0,
         Err(Break::Error(e)) => e.exit_code(),
         Err(Break::Escape(Escape::Exit(code))) => *code,
         #[cfg(unix)]
@@ -694,7 +694,7 @@ pub(crate) fn run_framed<'a>(
     // successful settle; an error or escape already carries its own.
     let result = result.and_then(|value| crate::process::check(mooring).map(|()| value));
 
-    let status = eval_status(&result, shell);
+    let status = status(&result);
 
     lifecycle.post_exec(mooring, shell, src, status);
 
@@ -1021,9 +1021,10 @@ mod tests {
     }
 
     /// `try` classifies a cancellation like any recoverable error, so a handler
-    /// that settles cleanly resets `last_status` to 0 — the run boundary must
-    /// re-poll the monotone scope before the status is read, or a final
-    /// `try { … } { |_| return () }` suppresses the interrupt entirely.
+    /// that settles cleanly makes the outcome `Ok`, whose status is 0 — the
+    /// run boundary must re-poll the monotone scope before the status is
+    /// read, or a final `try { … } { |_| return () }` suppresses the
+    /// interrupt entirely.
     #[test]
     fn a_try_handler_cannot_settle_a_cancelled_run() {
         let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();

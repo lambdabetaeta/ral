@@ -1,6 +1,6 @@
 //! String, regex, shell-word, and value-coercion builtins.
 
-use crate::types::{Settled, Shell, Value, as_list, sig, sig_hint};
+use crate::types::{Settled, Value, as_list, sig, sig_hint};
 use std::borrow::Cow;
 
 use super::util::regex_err;
@@ -192,10 +192,9 @@ pub(super) fn builtin_split(args: &[Value]) -> Settled<Value> {
     })
 }
 
-pub(super) fn builtin_match(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_match(args: &[Value]) -> Settled<Value> {
     with_regex("re-match", args, |re, args| {
         let matched = re.is_match(&args[1].to_string());
-        shell.set_status_from_bool(matched);
         Ok(Value::Bool(matched))
     })
 }

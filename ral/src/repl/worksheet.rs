@@ -142,8 +142,8 @@ fn top_level_let(ast: &Ast) -> Option<(&str, &Ast)> {
 /// pairs, reading the checker's verdict off the IR.  A binding is effectful
 /// when its RHS compiles to a [`CompKind::Exec`] or one of the effect-frame
 /// forms (`Try`, `Guard`, `Audit`, `Within`, `Grant`, `Redirect`), or
-/// when the checker wrapped it in the byte-to-value coercion — a
-/// [`CompKind::Decode`] over a capture, which is the annotation pass's own
+/// when the checker wrapped it in the byte-to-value coercion — a `Bind`
+/// whose rest is [`CompKind::Decode`], which is the annotation pass's own
 /// verdict that the RHS is a byte-payload computation.
 ///
 /// Reads each phrase's own `Define`; it does not descend into nested
@@ -167,8 +167,8 @@ fn bind_effects(top: &Toplevel) -> Vec<(String, bool)> {
                     | CompKind::Within { .. }
                     | CompKind::Grant { .. }
                     | CompKind::Redirect { .. }
-                    | CompKind::Decode(_)
-            );
+            ) || matches!(&comp.item, CompKind::Bind { rest, .. }
+                if matches!(rest.item, CompKind::Decode(_)));
             Some((name.clone(), effectful))
         })
         .collect()

@@ -177,7 +177,6 @@ pub(super) fn builtin_help(_args: &[Value], _env: &Env, shell: &mut Shell) -> Va
     );
 
     let _ = shell.write_stdout(out.as_bytes());
-    shell.last_status = 0;
     Value::Unit
 }
 
@@ -187,7 +186,6 @@ pub(super) fn builtin_explain(args: &[Value], env: &Env, shell: &mut Shell) -> V
         None => "explain: expected a name, e.g. `explain map`\n".to_string(),
     };
     let _ = shell.write_stdout(out.as_bytes());
-    shell.last_status = 0;
     Value::Unit
 }
 

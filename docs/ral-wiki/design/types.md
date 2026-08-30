@@ -207,7 +207,8 @@ are flushed to the nearest visible stream rather than lost
 **`decode : F[Value] Bytes → F[Value] String` owns everything lossy.** One
 trailing terminator goes, and the rest must decode as strict UTF-8 or the step
 fails, naming `| from-bytes` as the way to keep output that is not text. It is
-its own node (`CompKind::Decode`, stepped by `Frame::Decode`) rather than a step
+its own node (`CompKind::Decode`, taking the `Bytes` value directly — `decode`
+has no frame, since `step_eval` closes and reads it inline) rather than a step
 folded into `capture`, so every partial or lossy step on the way from bytes to
 `String` is syntax the operational semantics reads.
 

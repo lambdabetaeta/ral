@@ -97,8 +97,8 @@ Bodies are grouped by concern, one submodule each:
   `try` hands its handler) or `` `pending `` `{stdout, stderr}` (a *cumulative,
   non-destructive* `peek_buffer` snapshot of the running worker's output — the
   buffers are left for the one-shot completion `take_buffer`, so a partial poll
-  never steals bytes), and leaving `last_status` at 0 since the block's status is
-  data. `await` and `poll` gate first on `ensure_live`, the cancelled pre-check
+  never steals bytes) — the block's outcome is data, not a status. `await`
+  and `poll` gate first on `ensure_live`, the cancelled pre-check
   ([[decisions/260615_poll-total-failed-arm|the settle decision]],
   [[decisions/260702_partial-poll-pending-output|partial-poll-pending-output]]).
   A detached worker hangs under the durable session root, not the run's

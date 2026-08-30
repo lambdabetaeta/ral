@@ -26,7 +26,7 @@ crate-private.** Two reach outside the module:
   `Shell::run` door and the run spine behind it, both in `core/src/run.rs`,
   the sole way into evaluation — its `Run` (`core/src/transport.rs`) carries
   a `Program` of source text or a registered hook. The run door checkpoints
-  and rolls back `(env, context, last_status)` around every run, so a
+  and rolls back `(env, context)` around every run, so a
   panicking run reports as a failed run instead of corrupting the store.
 - `machine::apply(f, args, mooring, shell)` (`pub(crate)`) — the same, from a
   closed value meeting arguments (`Machine::applying` sets the first state).
@@ -49,11 +49,9 @@ A **same-thread β-step** — forcing a block or applying a lambda — evaluates
 in place on the caller's `Shell`, no snapshot or restore: `force`/`beta` in
 `machine.rs` step the body's `Closure` directly, so `io`, `session`, and
 `local` state are simply the one `Shell`'s and the caller's `&Mooring` is
-passed along. `beta` resets `$?` to 0 before a lambda's body runs; `force`
-does not, so a block sees the caller's `$?`. Beyond that one reset, block and
-lambda are uniform: an unbracketed store write in either body (`cd`,
-`alias`, a hook registration) persists to the caller, no snapshot standing
-between the body and the store
+passed along. Block and lambda entry are uniform: an unbracketed store write
+in either body (`cd`, `alias`, a hook registration) persists to the caller,
+no snapshot standing between the body and the store
 ([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]).
 The `Value`-level force/block split stays intact
 ([[decisions/260616_force-eliminates-blocks|force-eliminates-blocks]]); only
@@ -67,10 +65,11 @@ Internals:
   `step_return` and `step_halt` (one arm per `Frame` each — the two frame-table
   columns). `CompKind::Capture(body)` installs a buffer through
   `evaluator::capture`'s `with_capture` and returns the collected bytes
-  exactly, as `Value::Bytes`, under `Frame::Capture`; the checker composes a
-  `Decode` node over it, evaluated under `Frame::Decode`, which moves those
-  bytes out and reads them as the text a value boundary wants — no name, no
-  binder, nothing a session can intercept
+  exactly, as `Value::Bytes`, under `Frame::Capture`; the checker binds that
+  value to a fresh name and composes a `Decode` node over it, which — since
+  the kernel's `decode` takes a value, not a computation — has no frame of
+  its own: `step_eval` closes the bound variable and reads it as the text a
+  value boundary wants inline, no name and no frame a session can intercept
   ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]],
   [[design/types|types]]). `CompKind::Bind` swaps `shell.io.stdout` to the
   ambient sink before its left computation runs (`Frame::To` carries the prior

@@ -9,13 +9,11 @@ const RESET_SEQ: &[u8] = b"\x1bc";
 
 pub(super) fn builtin_clear(_args: &[Value], shell: &mut Shell) -> Value {
     let _ = shell.write_stdout(CLEAR_SEQ);
-    shell.last_status = 0;
     Value::Unit
 }
 
 pub(super) fn builtin_reset(_args: &[Value], shell: &mut Shell) -> Value {
     let _ = shell.write_stdout(RESET_SEQ);
-    shell.last_status = 0;
     Value::Unit
 }
 
@@ -97,9 +95,6 @@ pub(super) fn builtin_warn(args: &[Value], shell: &mut Shell) -> Settled<Value> 
     shell
         .write_stderr(line.as_bytes())
         .map_err(|e| sig(format!("warn: {e}")))?;
-    // A writer sets its own exit status rather than leaving whatever the
-    // previous command left.
-    shell.last_status = 0;
     Ok(Value::Unit)
 }
 

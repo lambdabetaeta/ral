@@ -233,7 +233,7 @@ impl Comp {
 /// about a failure: exactly one phrase, `Run(c)`, with `c` an `Exec` under
 /// its hoisted temporaries and the checker's byte-to-value coercion — the
 /// tail `Run`'s value is reported now, so a byte-routed external gets
-/// wrapped in `Decode(Capture(_))`.
+/// wrapped in `Bind(Capture(_), x, Decode(x))`.
 pub fn is_single_command(top: &Toplevel) -> bool {
     let [phrase] = top.phrases.as_slice() else {
         return false;
@@ -244,7 +244,8 @@ pub fn is_single_command(top: &Toplevel) -> bool {
     let mut c = comp.as_ref();
     loop {
         c = match &c.item {
-            CompKind::Decode(body) | CompKind::Capture(body) => body,
+            CompKind::Capture(body) => body,
+            CompKind::Bind { comp, rest, .. } if matches!(rest.item, CompKind::Decode(_)) => comp,
             _ => break,
         };
     }
@@ -368,9 +369,8 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
             walk_comp(body, out);
             walk_redirects(redirects, out);
         }
-        CompKind::Capture(body) | CompKind::Decode(body) => {
-            walk_comp(body, out);
-        }
+        CompKind::Capture(body) => walk_comp(body, out),
+        CompKind::Decode(val) => walk_val(val, out),
     }
 }
 
@@ -576,16 +576,17 @@ pub enum CompKind {
     /// captured and hand those bytes over exactly, as `Bytes`. Total, and
     /// lossless. No surface syntax.
     Capture(Arc<Comp>),
-    /// Checker-inserted coercion: read the `Bytes` `body` returns as text —
-    /// one trailing line terminator dropped, then a strict UTF-8 decode. The
+    /// Checker-inserted coercion: read the `Bytes` value as text — one
+    /// trailing line terminator dropped, then a strict UTF-8 decode. The
     /// partial, lossy half of the value boundary, kept its own node so that
-    /// [`CompKind::Capture`] stays exact.
+    /// [`CompKind::Capture`] stays exact. The kernel's `decode` takes a
+    /// value, so the checker reaches it through a bind: `Bind(Capture(M), x,
+    /// Decode(x))`.
     ///
     /// It is syntax and not a command because its meaning is fixed where the
-    /// checker writes it: no name is looked up, no binder is installed, and no
-    /// frame the user can install stands between the bytes and their reading.
-    /// No surface syntax.
-    Decode(Arc<Comp>),
+    /// checker writes it: no name is looked up, and no frame the user can
+    /// install stands between the bytes and their reading. No surface syntax.
+    Decode(Val),
 }
 
 /// One arm of a [`CompKind::Case`]: a tag, the pattern its payload binds,
@@ -884,7 +885,7 @@ mod tests {
             Spanned::synthetic(CompKind::Return(var("r_thunk_body"))),
         ))));
         let capture = Spanned::synthetic(CompKind::Capture(ret("r_capture_body")));
-        let decode = Spanned::synthetic(CompKind::Decode(ret("r_decode_body")));
+        let decode = Spanned::synthetic(CompKind::Decode(var("r_decode_body")));
 
         let whole = Spanned::synthetic(CompKind::Chain(vec![
             Arc::new(Spanned::synthetic(CompKind::Force(var("r_force")))),

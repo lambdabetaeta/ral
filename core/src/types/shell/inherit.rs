@@ -186,7 +186,6 @@ impl Shell {
     /// `cd` in a stage persists like every other shell.  A spawned thread
     /// never runs this, so its own `cd`s stay private.
     pub fn return_to(&mut self, parent: &mut Self) {
-        parent.last_status = self.last_status;
         self.local.audit.return_to(&mut parent.local.audit);
         self.local.repl.return_to(&mut parent.local.repl);
         self.io.return_to(&mut parent.io);
@@ -230,8 +229,7 @@ mod tests {
 
     /// An rc `recursion_limit:` key or a `--recursion-limit` flag configures
     /// the session as `session.stack_limit`, so a `spawn` / `par` / `watch`
-    /// body must not silently fall back to the compile-time default — though
-    /// `last_status` does start fresh.
+    /// body must not silently fall back to the compile-time default.
     #[test]
     fn spawned_worker_inherits_the_stack_limit() {
         let mut parent = Shell::default();
@@ -239,11 +237,10 @@ mod tests {
         let scopes = Arc::new(parent.env.clone());
         let (join, _cancel) =
             parent.spawn_thread(&Mooring::adrift(), Arc::new(()), scopes, |_, child| {
-                (child.session.stack_limit, child.last_status)
+                child.session.stack_limit
             });
 
-        let (stack_limit, last_status) = join.join().expect("worker thread");
+        let stack_limit = join.join().expect("worker thread");
         assert_eq!(stack_limit, DEFAULT_STACK_LIMIT + 7);
-        assert_eq!(last_status, 0, "a worker starts with a fresh `$?`");
     }
 }

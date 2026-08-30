@@ -69,12 +69,11 @@ permissions remain sticky vetoes.
 field name *is* the invariant — joined by `Shell`
 ([[decisions/260617_turn-local-state|turn-local-state]],
 [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]):
-`env` (the session environment, extended by every `Define` that lands),
-`context` (dynamic context — `cd`, aliases, hooks), and `last_status` (`$?`)
-— three flat fields, since a step's focus carries its own environment and
-there is no ambient `scope` for a bundle to snapshot — plus `Io`,
-`SessionState`, and `LocalState` below. The run door checkpoints and rolls
-back the `(env, context, last_status)` tuple around every run
+`env` (the session environment, extended by every `Define` that lands) and
+`context` (dynamic context — `cd`, aliases, hooks) — two flat fields, since a
+step's focus carries its own environment and there is no ambient `scope` for
+a bundle to snapshot — plus `Io`, `SessionState`, and `LocalState` below. The
+run door checkpoints and rolls back the `(env, context)` pair around every run
 (`Shell::enter`), so a panicking run reports as a failed run instead of
 corrupting the store.
 - **`Io`** — the run's *byte streams*, and the only part of the frame the
@@ -327,9 +326,7 @@ The `io`, `session`, and `local` state are simply the one `Shell`'s, and the
 caller's `&Mooring` is passed along, so the body observes the caller's audit
 trail, byte sinks, builtin table, cancel scope, and terminal lease without any
 of them being copied — there is no second store to drift from the first.
-Entry still differs by one rule: `beta` resets `$?` to 0 before a lambda's
-body runs; `force` does not, so a block sees the caller's `$?`. Beyond that
-one reset, block and lambda are uniform: an unbracketed store write in either
+Block and lambda entry are uniform: an unbracketed store write in either
 body (`cd`, `alias`, a hook registration) persists to the caller, no snapshot
 standing between the body and the store
 ([[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]]);

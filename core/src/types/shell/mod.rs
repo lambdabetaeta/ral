@@ -57,10 +57,9 @@ pub const DEFAULT_STACK_LIMIT: usize = 100_000;
 /// body, a spawned thread (`spawn`, `par`, pipeline stage), a REPL aside.
 ///
 /// It clones wholesale into a child, so what is *not* here is the point: the
-/// lexical environment and `last_status` each flow by their own rule, the
-/// run's own frame is installed afresh, and call site and builtin table stay
-/// run and session state — so a clone carries no render registry and no host
-/// dispatch.
+/// lexical environment flows by its own rule, the run's own frame is
+/// installed afresh, and call site and builtin table stay run and session
+/// state — so a clone carries no render registry and no host dispatch.
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     // ── attenuable by within / grant ─────────────────────────────────────
@@ -205,23 +204,20 @@ impl Drop for LocalState {
 }
 
 /// The runtime: a field changes within a run (`io`), survives a run
-/// ([`SessionState`]), crosses evaluation boundaries (`env`, `context`,
-/// `last_status`), or is host scratch ([`LocalState`]).
+/// ([`SessionState`]), crosses evaluation boundaries (`env`, `context`), or
+/// is host scratch ([`LocalState`]).
 ///
 /// Every field is `pub(crate)`, because the partition encodes run safety,
 /// capability attenuation, and wire framing — core's invariant, not an API a
 /// host may reach past.  Hosts drive a session through the intent verbs
 /// ([`mod@host`], plus the scope and context verbs), and the run door
-/// ([`Shell::run`]) checkpoints and rolls back `env`, `context` and
-/// `last_status` around each run.
+/// ([`Shell::run`]) checkpoints and rolls back `env` and `context` around
+/// each run.
 pub struct Shell {
     /// The session environment (§1.3 of the CEK plan): the machine's focus
     /// environment between runs, extended by every `Define` that lands.
     pub(crate) env: Env,
     pub(crate) context: Context,
-    /// `$?` — the one register control flow folds back across a boundary
-    /// that discards everything else (S1, §7).
-    pub(crate) last_status: i32,
     pub(crate) io: Io,
     pub(crate) session: SessionState,
     pub(crate) local: LocalState,
@@ -352,12 +348,6 @@ impl Shell {
         self.session
             .sources
             .register_at(file, Source::from_text(name, text));
-    }
-
-    /// Set `last_status` from a boolean (`true` → 0, `false` → 1).
-    #[inline]
-    pub fn set_status_from_bool(&mut self, ok: bool) {
-        self.last_status = i32::from(!ok);
     }
 
     /// Write `bytes` to the current stdout sink.

@@ -1796,19 +1796,16 @@ impl Inferencer<'_> {
                 self.ctx.unify_ty(&value, &Ty::Unit, Reason::CaptureOperand);
                 CompTy::pure(Ty::Bytes)
             }
-            // The reading half of the same boundary, written by `annotate`
-            // directly over that `Capture`: bytes in, text out.  It is syntax
-            // rather than a command exactly so that this type is the whole
-            // story — nothing a session installs can make the value anything
-            // but a `String`.  The operand is always a `Capture`, whose own
-            // rule already fixes its shape to `Value`-routed `Bytes`, so both
-            // halves of that shape are demanded here rather than assumed.
-            CompKind::Decode(body) => {
-                let body_ty = self.infer_comp(body);
-                let (value, route) = self.extract_return(&body_ty);
-                self.ctx.unify_ty(&value, &Ty::Bytes, Reason::DecodeOperand);
-                self.ctx
-                    .unify_route(&route, &PayloadRoute::Value, Reason::DecodeOperand);
+            // The reading half of the same boundary: bytes in, text out. It
+            // is syntax rather than a command exactly so that this type is
+            // the whole story — nothing a session installs can make the
+            // value anything but a `String`. The kernel's `decode` takes a
+            // value, so `annotate` reaches it through a bind over `Capture`
+            // rather than nesting the two; the operand here is just the
+            // bound variable.
+            CompKind::Decode(val) => {
+                let ty = self.infer_val(val);
+                self.ctx.unify_ty(&ty, &Ty::Bytes, Reason::DecodeOperand);
                 CompTy::pure(Ty::String)
             }
         };

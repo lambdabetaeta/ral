@@ -66,10 +66,8 @@ impl HelperStageHandle {
         if let Some(report) = report_result {
             let DecodedResponse {
                 value,
-                last_status,
                 audit_observations,
                 signal,
-                ..
             } = decode_response(report, shell)?;
             let audit = AuditFragment::from_observations(audit_observations);
             if let Some(sig) = signal {
@@ -86,7 +84,8 @@ impl HelperStageHandle {
                 return Ok(StageObservation::failure(err).with_audit(audit));
             }
             let final_value = if is_last { value } else { None };
-            return Ok(StageObservation::ok(last_status)
+            // A body that returns exits 0, whatever it returned.
+            return Ok(StageObservation::ok()
                 .with_value(final_value)
                 .with_audit(audit));
         }
@@ -101,7 +100,7 @@ impl HelperStageHandle {
             let err = super::augment_stage_failure(err, shell, started);
             return Ok(StageObservation::failure(err));
         }
-        Ok(StageObservation::ok(0))
+        Ok(StageObservation::ok())
     }
 }
 

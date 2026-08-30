@@ -47,7 +47,7 @@ fn observe_external_stage(
         let err = super::augment_stage_failure(err, shell, started);
         Ok(StageObservation::failure(err).with_audit(audit))
     } else {
-        Ok(StageObservation::ok(effective).with_audit(audit))
+        Ok(StageObservation::ok().with_audit(audit))
     }
 }
 
@@ -96,19 +96,16 @@ pub(super) enum StageOutcome {
 }
 
 /// One stage's observation, normalized across external children and ral
-/// helpers.  `status` is the effective exit code for `last_status`, and
-/// `final_value` is set only by the final value-typed ral stage.
+/// helpers.  `final_value` is set only by the final value-typed ral stage.
 pub(super) struct StageObservation {
-    pub(super) status: i32,
     pub(super) outcome: StageOutcome,
     pub(super) final_value: Option<Value>,
     pub(super) audit: AuditFragment,
 }
 
 impl StageObservation {
-    pub(super) fn ok(status: i32) -> Self {
+    pub(super) fn ok() -> Self {
         Self {
-            status,
             outcome: StageOutcome::Ok,
             final_value: None,
             audit: AuditFragment::empty(),
@@ -117,17 +114,14 @@ impl StageObservation {
 
     pub(super) fn failure(error: Error) -> Self {
         Self {
-            status: error.exit_code(),
             outcome: StageOutcome::Failure(error),
             final_value: None,
             audit: AuditFragment::empty(),
         }
     }
 
-    /// The zero `status` is never read: `fold` returns before the status branch.
     pub(super) fn control(escape: Escape) -> Self {
         Self {
-            status: 0,
             outcome: StageOutcome::Control(escape),
             final_value: None,
             audit: AuditFragment::empty(),
@@ -245,19 +239,15 @@ impl PipelineCollector {
             }
         }
         if is_pipeline_final {
-            shell.last_status = obs.status;
             self.final_value = obs.final_value;
         }
     }
 
-    pub(super) fn finish(self, shell: &mut Shell, yields: crate::ir::PipeYield) -> Settled<Value> {
+    pub(super) fn finish(self, yields: crate::ir::PipeYield) -> Settled<Value> {
         if let Some(br) = self.break_ {
             return Err(match br {
                 PipelineBreak::Control(esc) => Break::Escape(esc),
-                PipelineBreak::Failure(error) => {
-                    shell.last_status = error.exit_code();
-                    Break::Error(error)
-                }
+                PipelineBreak::Failure(error) => Break::Error(error),
             });
         }
         match yields {
@@ -502,46 +492,14 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn final_status_recorded_on_success() {
-        let mut c = PipelineCollector::new();
-        let mut shell = Shell::default();
-        c.fold(
-            &Mooring::adrift(),
-            &mut shell,
-            true,
-            StageObservation::ok(42),
-        );
-        assert_eq!(shell.last_status, 42);
-        assert!(c.break_.is_none());
-    }
-
-    #[test]
-    fn final_status_not_recorded_when_control_preempts() {
-        let mut c = PipelineCollector::new();
-        let mut shell = Shell {
-            last_status: 0,
-            ..Shell::default()
-        };
-        c.fold(
-            &Mooring::adrift(),
-            &mut shell,
-            true,
-            StageObservation {
-                status: 99,
-                outcome: StageOutcome::Control(Escape::Exit(3)),
-                final_value: None,
-                audit: AuditFragment::empty(),
-            },
-        );
-        assert_eq!(shell.last_status, 0);
-    }
 
     #[test]
     fn from_break_classifies_error_as_failure() {
         let obs = StageObservation::from_break(Break::Error(make_error(4, "report pipe: boom")));
-        assert_eq!(obs.status, 4);
-        assert!(matches!(obs.outcome, StageOutcome::Failure(_)));
+        match obs.outcome {
+            StageOutcome::Failure(err) => assert_eq!(err.exit_code(), 4),
+            _ => panic!("expected a Failure carrying status 4"),
+        }
     }
 
     #[test]

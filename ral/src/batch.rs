@@ -224,7 +224,7 @@ pub(crate) fn run_batch(
     };
 
     let exit_code = match &result {
-        Ok(_) => shell.last_status().clamp(0, 255),
+        Ok(_) => 0,
         Err(Break::Escape(Escape::Exit(code))) => (*code).clamp(0, 255),
         Err(Break::Error(e)) => {
             if audit {

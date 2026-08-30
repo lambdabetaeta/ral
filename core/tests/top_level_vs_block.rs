@@ -181,12 +181,10 @@ fn top_level_partial_destructure_binds_nothing() {
 }
 
 /// A `try` that recovers clears the failure's status: the run's transport
-/// status is 0 and `$?` reads 0 in the next run.  The baseline half proves
-/// the failing command really does set the register, so the recovered half
-/// is a genuine reset rather than a status that was never written.
+/// status is 0, since a run that returns exits 0 whatever it returned.
 #[cfg(unix)]
 #[test]
-fn recovered_try_clears_the_status_register() {
+fn recovered_try_reports_a_clean_transport_status() {
     let status = |shell: &mut Shell, source: &str| match shell.run(RunRequest {
         run: Run {
             program: Program::Source(source.into()),
@@ -217,18 +215,12 @@ fn recovered_try_clears_the_status_register() {
         0,
         "the baseline failure must report a non-zero status"
     );
-    assert_ne!(shell.last_status(), 0, "the baseline failure must set `$?`");
 
     let recovered = format!("try {{ {failing} }} {{ |_e| return () }}");
     assert_eq!(
         status(&mut shell, &recovered),
         0,
         "a recovered `try` must report success to the transport"
-    );
-    assert_eq!(
-        shell.last_status(),
-        0,
-        "`$?` must not see past the recovery"
     );
 }
 
@@ -822,79 +814,6 @@ fn sandbox_parity_top_level_cd() {
     assert!(
         got == tmp_disp || got == canon,
         "cwd after cd under projection: expected {tmp_disp:?} or {canon:?}, got {got:?}"
-    );
-}
-
-// ── (9) Same-thread β-step flow matrix: lambda vs forced block ───────────
-//
-// A forced block (`!{ … }`) and an applied lambda (`f x`) both run their
-// body in place on the caller's shell, sharing run / session / local
-// state by identity
-// (`decisions/260620_same-thread-body-shares-the-session`).  They differ in
-// exactly two observable places — the entry `$?` and the fold-back set —
-// which these tests pin.
-
-/// A lambda body enters with a *fresh* `$?`, not the caller's: define a
-/// function whose body sets no status, prime the caller's `$?` to a
-/// non-zero sentinel, call it, and observe `$?` come back 0 — the lambda
-/// reset it on entry and folded the (untouched) 0 back.
-#[test]
-fn lambda_enters_with_fresh_status() {
-    let mut shell = fresh_shell();
-    top_level(&mut shell, "let f = { |_| return () }").expect("define f");
-    shell.set_last_status(7);
-    top_level(&mut shell, "f ()").expect("call f");
-    assert_eq!(
-        shell.last_status(),
-        0,
-        "a lambda body enters with a fresh $? (0), not the caller's 7; its \
-         body set none, so 0 folds back"
-    );
-}
-
-/// A forced block, by contrast, inherits the caller's `$?` (it clones the
-/// caller's mobile) and — with a body that sets none — folds it back
-/// unchanged.  Same body shape as the lambda above, opposite outcome.
-#[test]
-fn forced_block_keeps_caller_status_when_body_sets_none() {
-    let mut shell = fresh_shell();
-    shell.set_last_status(7);
-    top_level(&mut shell, "!{ return () }").expect("forced block");
-    assert_eq!(
-        shell.last_status(),
-        7,
-        "a forced block keeps the caller's $? when its body sets none"
-    );
-}
-
-/// A lambda folds its body's final status back to the caller, replacing
-/// whatever the caller held.  `return $[1 == 2]` returns a false Bool,
-/// which the evaluator records as `$? = 1`.
-#[test]
-fn lambda_folds_back_body_status() {
-    let mut shell = fresh_shell();
-    top_level(&mut shell, "let gg = { |_| return $[1 == 2] }").expect("define gg");
-    shell.set_last_status(5);
-    top_level(&mut shell, "gg ()").expect("call gg");
-    assert_eq!(
-        shell.last_status(),
-        1,
-        "the lambda body's status (1, from a false comparison) folds back, \
-         replacing the caller's 5"
-    );
-}
-
-/// A forced block likewise folds its body's final status back.
-#[test]
-fn forced_block_folds_back_body_status() {
-    let mut shell = fresh_shell();
-    shell.set_last_status(5);
-    top_level(&mut shell, "!{ $[1 == 2] }").expect("forced block");
-    assert_eq!(
-        shell.last_status(),
-        1,
-        "the block body's status (1, from a false comparison) folds back, \
-         replacing the caller's 5"
     );
 }
 

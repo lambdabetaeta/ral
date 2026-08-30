@@ -287,18 +287,19 @@ grounds `Value`, its value type is `Bytes` — and `body`'s extracted value
 unifies with `Unit`, WF-2 as a rule rather than the `eval_capture` assert it
 used to be. `body`'s route is left free: a join arm subsumed at `Value Unit`
 reaches `Capture` too (`Wrap`, below), and constraining the route would refuse
-it. `CompKind::Decode(body)` is the reading step over it, and its value type is
-`String`; `body` is always a `Capture`, so its extracted value and route unify
-with `Bytes` and `Value` respectively — the shape `Capture`'s own rule already
-guarantees, demanded rather than assumed. Both rules fire only when
-re-inferring a tree that already carries `annotate`-inserted nodes — a stored
-handler or thunk re-checked at a later install.
+it. `CompKind::Decode(val)` is the reading step, and its value type is
+`String`; the kernel's `decode` takes a value, so `val` is the variable the
+enclosing bind captured from `Capture`, and its type unifies with `Bytes` —
+the shape `Capture`'s own rule already guarantees, demanded rather than
+assumed. Both rules fire only when re-inferring a tree that already carries
+`annotate`-inserted nodes — a stored handler or thunk re-checked at a later
+install.
 
 `annotate.rs` inserts the coercion during its write-back walk, as demand
 propagation, through the one constructor `captured_string`, which builds
-`Decode(Capture(body))` with the captured node's span on both halves — two
-nodes of syntax, so no name is resolved and no binder installed where the
-checker composes them
+`Capture(body) to x. Decode(x)` — `x` a fresh name from `InferCtx::fresh_name`
+— with the captured node's span on both the bind and the decode, so no name
+is resolved and the binder is invisible where the checker composes them
 ([[decisions/260811_a-coercion-is-syntax|a-coercion-is-syntax]]).
 A `Demand` is `Value` or `Discard`. It reaches a `Bind`/`Phrase::Define`/
 `Phrase::Source`'s right-hand side, each arm of an `If`, `Chain`, `Try`, or

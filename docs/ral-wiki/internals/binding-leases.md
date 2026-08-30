@@ -56,8 +56,8 @@ past the bound is examined: a name whose value still structurally reaches a
 deliberately never looks inside a closure's captured environment);
 everything else is unset — value and type-scheme seed
 in one act — and one dim transcript card names what fell. A pruned name cannot
-come back through a panic rollback: `Shell::run` checkpoints `env` / `context` /
-`last_status` at *run entry*, after any earlier prune, so the rollback target
+come back through a panic rollback: `Shell::run` checkpoints `env` / `context`
+at *run entry*, after any earlier prune, so the rollback target
 already excludes what fell. Pruning is the ready boundary's own door — reached
 only between runs, on the session scope by construction — so a mid-frame caller
 such as a lifecycle hook is refused rather than allowed to unset from a

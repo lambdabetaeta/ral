@@ -114,7 +114,7 @@ fn finish_command(
         return;
     }
     let (status, value, error) = match result {
-        Ok(v) => (shell.last_status, v.clone(), None),
+        Ok(v) => (0, v.clone(), None),
         Err(Break::Error(e)) => (e.exit_code(), Value::Unit, Some(e.message.clone())),
         Err(_) => return,
     };

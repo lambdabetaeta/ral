@@ -395,21 +395,6 @@ impl Shell {
         }
     }
 
-    /// Status of the last command.  No program can read it — the register has
-    /// no surface spelling, since a failure is an `Err` carrying its own
-    /// status — so this is a host's own exit code and nothing else.
-    pub fn last_status(&self) -> i32 {
-        self.last_status
-    }
-
-    /// Plant the status explicitly.  It is the run's own result, so core writes
-    /// it directly and a host only reads: this exists for the integration
-    /// tests, which prime a sentinel to prove what evaluation resets and cannot
-    /// reach a `#[cfg(test)]` item to do it.
-    pub fn set_last_status(&mut self, status: i32) {
-        self.last_status = status;
-    }
-
     /// The active stack cap (§2.1, §6.3 of the CEK plan): frames, not host
     /// stack frames.
     pub fn stack_limit(&self) -> usize {

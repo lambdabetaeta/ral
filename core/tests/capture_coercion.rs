@@ -3,10 +3,12 @@
 //! The byte-to-value coercion is a translation, not a call: what the checker
 //! composes onto a byte-routed `let` means the same thing in every session.
 //!
-//! `let x = echo hi` compiles to `Decode(Capture(echo hi))`, two nodes of
-//! syntax. Nothing here is a name, so there is nothing for an alias, a
-//! binding, or a handler frame to stand in for; and nothing is bound, so a
-//! session cannot see the bytes on their way to becoming a `String`.
+//! `let x = echo hi` compiles to `Capture(echo hi) to y. Decode(y)`, syntax
+//! with one checker-synthesized binder that never escapes those two nodes.
+//! Nothing here is a name a session can intercept, so there is nothing for
+//! an alias, a binding, or a handler frame to stand in for; and the binder
+//! itself is invisible outside the coercion, so a session cannot see the
+//! bytes on their way to becoming a `String`.
 //!
 //! Drives the public `run` door, so each test is the session a user has.
 
@@ -147,9 +149,9 @@ fn a_handler_frame_cannot_stand_in_for_the_coercion() {
     );
 }
 
-/// The coercion binds nothing, so a user binding of the name it once
-/// synthesized keeps its value across a byte-routed `let` — which once
-/// overwrote it with the captured bytes.
+/// The coercion's own binder is invisible outside it, so a user binding of
+/// the name it once synthesized keeps its value across a byte-routed `let`
+/// — which once overwrote it with the captured bytes.
 #[test]
 fn a_binding_named_like_the_old_synthesized_binder_survives() {
     let mut shell = fresh_shell();

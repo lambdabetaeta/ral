@@ -1,4 +1,4 @@
-//! Serialisable mirror of the wire half of a shell — `env`, `last_status`,
+//! Serialisable mirror of the wire half of a shell — `env`,
 //! `session.stack_limit`, `context` — what crosses to a re-exec'd child.
 //! `serial.rs` transports the values and closures inside;
 //! this module is the envelope around them.
@@ -74,8 +74,8 @@ impl WireHandlerFrame {
     }
 }
 
-/// Serialisable mirror of a shell's wire state (`env`, `last_status`,
-/// `session.stack_limit`, `context`).
+/// Serialisable mirror of a shell's wire state (`env`, `session.stack_limit`,
+/// `context`).
 ///
 /// The inverses are total modulo handle-bearing values, which the serial
 /// layer drops with a clean error.
@@ -83,8 +83,6 @@ impl WireHandlerFrame {
 pub(crate) struct WireShell {
     /// Interned through the enclosing request envelope's scope table.
     pub env: SerialEnvSnapshot,
-    /// `$?`.
-    pub last_status: i32,
     /// The cap rides so the child continues the parent's rc / CLI-configured
     /// ceiling rather than the compile-time default.
     pub stack_limit: usize,
@@ -107,11 +105,10 @@ pub(crate) struct WireContext {
     pub cwd: crate::types::Cwd,
 }
 
-/// A decoded [`WireShell`], as the four fields `install_wire_shell`'s
+/// A decoded [`WireShell`], as the three fields `install_wire_shell`'s
 /// caller needs to write onto a `Shell`.
 pub(crate) struct DecodedShell {
     pub env: Env,
-    pub last_status: i32,
     pub stack_limit: usize,
     pub context: Context,
 }
@@ -120,14 +117,12 @@ impl WireShell {
     /// Inverse of [`Self::into_runtime`].
     pub(crate) fn from_runtime(
         env: &Env,
-        last_status: i32,
         stack_limit: usize,
         context: &Context,
         ctx: &mut InternCtx,
     ) -> Result<Self, Error> {
         Ok(Self {
             env: SerialEnvSnapshot::from_runtime(env, ctx),
-            last_status,
             stack_limit,
             context: WireContext::from_runtime(context, ctx)?,
         })
@@ -136,7 +131,6 @@ impl WireShell {
     pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<DecodedShell, Error> {
         Ok(DecodedShell {
             env: self.env.into_runtime(dec)?,
-            last_status: self.last_status,
             stack_limit: self.stack_limit,
             context: self.context.into_runtime(dec)?,
         })
@@ -193,7 +187,6 @@ pub(crate) fn install_wire_shell(
 ) -> Result<(), Error> {
     let DecodedShell {
         env,
-        last_status,
         stack_limit,
         mut context,
     } = state.into_runtime(dec)?;
@@ -203,7 +196,6 @@ pub(crate) fn install_wire_shell(
         context.handlers.push_frame(frame);
     }
     shell.env = env;
-    shell.last_status = last_status;
     shell.session.stack_limit = stack_limit;
     shell.context = context;
     Ok(())

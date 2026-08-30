@@ -215,13 +215,11 @@ pub(super) fn builtin_to_csv(args: &[Value], shell: &mut Shell) -> Settled<Value
     write_encoded("to-csv", &bytes, shell)
 }
 
-/// Write `bytes` to stdout and claim success: an encoder sets its own exit
-/// status rather than leaving whatever the previous command left.
+/// Write `bytes` to stdout.
 fn write_stdout_ok(name: &str, bytes: &[u8], shell: &mut Shell) -> Settled<()> {
     shell
         .write_stdout(bytes)
         .map_err(|e| sig(format!("{name}: {e}")))?;
-    shell.last_status = 0;
     Ok(())
 }
 

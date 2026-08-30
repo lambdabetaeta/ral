@@ -334,16 +334,14 @@ mod tests {
     }
 
     /// A panic mid-run rolls back to the checkpoint `Shell::enter` takes at
-    /// the top of the run: `env`, `context` (cwd included), and
-    /// `last_status` all read exactly as they did before the run started,
-    /// even though the panicking phrase's own `let` and `cd` ran first.
-    /// Only a panic restores this way — an ordinary error leaves whatever
-    /// `let`s landed before it (S12).
+    /// the top of the run: `env` and `context` (cwd included) read exactly as
+    /// they did before the run started, even though the panicking phrase's
+    /// own `let` and `cd` ran first.  Only a panic restores this way — an
+    /// ordinary error leaves whatever `let`s landed before it (S12).
     #[test]
     fn panic_mid_run_restores_the_pre_run_checkpoint() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
-        shell.set_last_status(5);
         let before_cwd = shell.cwd();
         let tmp = std::env::temp_dir().display().to_string();
 
@@ -363,10 +361,6 @@ mod tests {
             shell.cwd(),
             before_cwd,
             "a panic must roll back a cd made before it"
-        );
-        assert_eq!(
-            shell.last_status, 5,
-            "a panic must roll back last_status"
         );
     }
 

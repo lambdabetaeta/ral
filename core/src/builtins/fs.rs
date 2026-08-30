@@ -3,9 +3,8 @@
 //!
 //! Every path routes through [`super::util::checked_read_path`], so a probe
 //! answers about the `within [dir: …]` cwd, not the OS cwd — bare
-//! `Path::exists` would miss a file a redirect just wrote there.  Predicates
-//! also set `last_status`, so `?` and `if` see an exit code beside the
-//! `Bool`.  `absolute-path` is exempt: lexical, with no filesystem to gate.
+//! `Path::exists` would miss a file a redirect just wrote there.
+//! `absolute-path` is exempt: lexical, with no filesystem to gate.
 
 use crate::types::{Break, Settled, Shell, Value, sig};
 use std::fs;
@@ -255,7 +254,6 @@ fn fs_probe_with(
     let rp = checked_read_path(shell, &args[0].to_string())?;
     let meta = read_meta(rp.as_path()).ok();
     let r = probe(meta);
-    shell.set_status_from_bool(r);
     Ok(Value::Bool(r))
 }
 
@@ -319,7 +317,6 @@ fn fs_probe_path(
 ) -> Settled<Value> {
     let rp = checked_read_path(shell, &args[0].to_string())?;
     let r = probe(rp.as_path());
-    shell.set_status_from_bool(r);
     Ok(Value::Bool(r))
 }
 

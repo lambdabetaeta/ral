@@ -77,9 +77,6 @@ enum Frame {
         buf: io::ByteBuffer,
         span: Option<Span>,
     },
-    Decode {
-        span: Option<Span>,
-    },
     Source {
         rest: Arc<Comp>,
         env: Env,
@@ -139,14 +136,6 @@ impl Default for Machine {
 pub(crate) const NESTED_MACHINE_LIMIT: usize = 24;
 
 // ── Small pure helpers, named in §2.2/§2.3 ─────────────────────────────
-
-/// A Bool result becomes `last_status` (true → 0); any other value leaves it
-/// untouched.
-pub(crate) fn set_status(v: &Value, shell: &mut Shell) {
-    if let Value::Bool(b) = v {
-        shell.set_status_from_bool(*b);
-    }
-}
 
 /// Stamp an unspanned error's span with `span`, the innermost node or frame
 /// that raised it — applied at each raising point instead of once at the end
@@ -309,7 +298,6 @@ impl Machine {
             Ok(e) => e,
             Err(b) => return Focus::Halt(b),
         };
-        shell.last_status = 0;
         if let Err(b) = crate::process::check(mooring) {
             return Focus::Halt(b);
         }
@@ -387,10 +375,7 @@ impl Machine {
             Value::Thunk(c) => Focus::Eval(c),
             Value::Native { entry, applied } if entry.fixed_arity() == 0 => {
                 match super::audit::run_native(&entry, &applied, env, mooring, shell) {
-                    Ok(v) => {
-                        set_status(&v, shell);
-                        Focus::Return(Terminal::Value(v))
-                    }
+                    Ok(v) => Focus::Return(Terminal::Value(v)),
                     Err(b) => Focus::Halt(b),
                 }
             }
@@ -426,10 +411,7 @@ impl Machine {
         let (comp, env) = closure.into_parts();
         let focus = match &comp.item {
             CompKind::Return(val) => match close(val, &env) {
-                Ok(v) => {
-                    set_status(&v, shell);
-                    Focus::Return(Terminal::Value(v))
-                }
+                Ok(v) => Focus::Return(Terminal::Value(v)),
                 Err(e) => Focus::Halt(Break::Error(e)),
             },
 
@@ -490,24 +472,15 @@ impl Machine {
             }
 
             CompKind::Binary(op, lhs, rhs) => match expr::eval_binary(*op, lhs, rhs, &env) {
-                Ok(v) => {
-                    set_status(&v, shell);
-                    Focus::Return(Terminal::Value(v))
-                }
+                Ok(v) => Focus::Return(Terminal::Value(v)),
                 Err(b) => Focus::Halt(b),
             },
             CompKind::Negate(v) => match expr::eval_negate(v, &env) {
-                Ok(val) => {
-                    set_status(&val, shell);
-                    Focus::Return(Terminal::Value(val))
-                }
+                Ok(val) => Focus::Return(Terminal::Value(val)),
                 Err(e) => Focus::Halt(Break::Error(e)),
             },
             CompKind::Not(v) => match expr::eval_not(v, &env) {
-                Ok(val) => {
-                    set_status(&val, shell);
-                    Focus::Return(Terminal::Value(val))
-                }
+                Ok(val) => Focus::Return(Terminal::Value(val)),
                 Err(e) => Focus::Halt(Break::Error(e)),
             },
 
@@ -575,7 +548,6 @@ impl Machine {
 
             CompKind::If { cond, then, else_ } => match close(&cond.item, &env) {
                 Ok(Value::Bool(b)) => {
-                    shell.set_status_from_bool(b);
                     let branch = if b { then } else { else_ };
                     Focus::Eval(Closure {
                         comp: Arc::clone(branch),
@@ -651,15 +623,38 @@ impl Machine {
                 })
             }
 
-            CompKind::Decode(body) => 'arm: {
-                if let Err(b) = self.reserve(shell) {
-                    break 'arm Focus::Halt(b);
+            CompKind::Decode(val) => 'arm: {
+                let v = match close(val, &env) {
+                    Ok(v) => v,
+                    Err(e) => break 'arm Focus::Halt(Break::Error(e)),
+                };
+                let Value::Bytes(mut bytes) = v else {
+                    break 'arm Focus::Halt(stamp(
+                        Break::Error(
+                            Error::new(
+                                format!(
+                                    "the value boundary was handed {} where a captured byte payload belongs",
+                                    v.type_name()
+                                ),
+                                1,
+                            )
+                            .with_hint(
+                                "only the type checker writes this step, so this is a fault in ral \
+                                 rather than in your program — please report the source that produced it",
+                            ),
+                        ),
+                        comp.span,
+                    ));
+                };
+                io::strip_trailing_newline(&mut bytes);
+                match crate::builtins::util::decode_utf8_strict(
+                    bytes,
+                    "captured output is not valid UTF-8",
+                    "bind with `| from-bytes` to keep raw output",
+                ) {
+                    Ok(text) => Focus::Return(Terminal::Value(Value::String(text))),
+                    Err(b) => Focus::Halt(stamp(b, comp.span)),
                 }
-                self.push(Frame::Decode { span: comp.span });
-                Focus::Eval(Closure {
-                    comp: Arc::clone(body),
-                    env,
-                })
             }
 
             CompKind::Source { path, rest } => 'arm: {
@@ -924,7 +919,6 @@ impl Machine {
                     Ok(v) => v,
                     Err(b) => return Focus::Halt(b),
                 };
-                set_status(&v, shell);
                 let CompKind::Bind { pattern, rest, .. } = &bind.item else {
                     unreachable!("a To frame's `bind` is always a Bind comp")
                 };
@@ -983,40 +977,6 @@ impl Machine {
                 Focus::Return(Terminal::Value(Value::Bytes(bytes)))
             }
 
-            Frame::Decode { span } => {
-                let v = match as_value(t) {
-                    Ok(v) => v,
-                    Err(b) => return Focus::Halt(stamp(b, span)),
-                };
-                let Value::Bytes(mut bytes) = v else {
-                    return Focus::Halt(stamp(
-                        Break::Error(
-                            Error::new(
-                                format!(
-                                    "the value boundary was handed {} where a captured byte payload belongs",
-                                    v.type_name()
-                                ),
-                                1,
-                            )
-                            .with_hint(
-                                "only the type checker writes this step, so this is a fault in ral \
-                                 rather than in your program — please report the source that produced it",
-                            ),
-                        ),
-                        span,
-                    ));
-                };
-                io::strip_trailing_newline(&mut bytes);
-                match crate::builtins::util::decode_utf8_strict(
-                    bytes,
-                    "captured output is not valid UTF-8",
-                    "bind with `| from-bytes` to keep raw output",
-                ) {
-                    Ok(text) => Focus::Return(Terminal::Value(Value::String(text))),
-                    Err(b) => Focus::Halt(stamp(b, span)),
-                }
-            }
-
             Frame::Source { rest, env, span } => {
                 let v = match as_value(t) {
                     Ok(v) => v,
@@ -1064,7 +1024,6 @@ impl Machine {
             Frame::Try { scope, saved, .. } => {
                 let _children = shell.local.audit.close(scope);
                 shell.local.audit.set_capture(saved);
-                shell.last_status = 0;
                 Focus::Return(t)
             }
 
@@ -1098,7 +1057,8 @@ impl Machine {
             Frame::Audit { scope, saved } => {
                 let children = shell.local.audit.close(scope);
                 shell.local.audit.set_capture(saved);
-                let status = shell.last_status;
+                // A body that returns exits 0, whatever it returned.
+                let status = 0;
                 let v = match as_value(t) {
                     Ok(v) => v,
                     Err(b) => return Focus::Halt(b),
@@ -1129,7 +1089,6 @@ impl Machine {
 
             Frame::Chain { node, next, env } => match s {
                 Break::Error(e) => {
-                    shell.last_status = e.exit_code();
                     let CompKind::Chain(parts) = &node.item else {
                         unreachable!("a Chain frame's node is always a Chain comp")
                     };
@@ -1162,9 +1121,7 @@ impl Machine {
                 Focus::Halt(s)
             }
 
-            Frame::Apply { .. } | Frame::Decode { .. } | Frame::Source { .. } | Frame::Cleanup { .. } => {
-                Focus::Halt(s)
-            }
+            Frame::Apply { .. } | Frame::Source { .. } | Frame::Cleanup { .. } => Focus::Halt(s),
 
             Frame::Redirect(state) => {
                 let mut state = *state;
@@ -1186,7 +1143,6 @@ impl Machine {
                     shell.local.audit.set_capture(saved);
                     let outcome = classify(&e, &children, shell);
                     let record = error_record(&outcome.cmd, outcome.status, &outcome.message, outcome.line, outcome.col);
-                    shell.last_status = 0;
                     self.apply_rule(handler, vec![record], &env, None, mooring, shell)
                 }
                 Break::Escape(esc) => {
@@ -1218,7 +1174,6 @@ impl Machine {
                 Break::Error(e) => {
                     let children = shell.local.audit.close(scope);
                     shell.local.audit.set_capture(saved);
-                    shell.last_status = e.exit_code();
                     Focus::Return(Terminal::Value(tree_value(
                         e.exit_code(),
                         Value::Unit,
@@ -1241,8 +1196,8 @@ impl Frame {
     /// files, audit scopes (§2.6). `To`/`Capture` restore `io.stdout`;
     /// `Redirect` as its own rule; `Unmask` restores; `Try`/`Audit`
     /// `audit.close(scope)` then `set_capture(saved)`; `Within` applies its
-    /// undo; `Grant` pops. `Chain`, `Apply`, `Decode`, `Source`, `Guard`,
-    /// `Cleanup` do nothing.
+    /// undo; `Grant` pops. `Chain`, `Apply`, `Source`, `Guard`, `Cleanup` do
+    /// nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
             Self::To { prev_stdout, .. } | Self::Capture { prev: prev_stdout, .. } => {
@@ -1260,7 +1215,6 @@ impl Frame {
             }
             Self::Chain { .. }
             | Self::Apply { .. }
-            | Self::Decode { .. }
             | Self::Source { .. }
             | Self::Guard { .. }
             | Self::Cleanup { .. } => {}

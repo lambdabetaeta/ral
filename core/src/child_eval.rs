@@ -2,9 +2,9 @@
 //!
 //! A process-staged stage (`runtime/pipeline/`) packs a [`Comp`] body plus a
 //! [`WireShell`] snapshot, re-execs, and gets one response back: outcome,
-//! `last_status`, audit.  Strictly one frame each way — the child drains its
-//! audit fragment after eval rather than streaming it live, so no per-node
-//! frame loop exists.
+//! audit.  Strictly one frame each way — the child drains its audit fragment
+//! after eval rather than streaming it live, so no per-node frame loop
+//! exists.
 
 use crate::evaluator::machine;
 use crate::io::TerminalState;
@@ -100,7 +100,6 @@ pub(crate) fn pack_seed(shell: &Shell, grant: String) -> Settled<EngineSeed> {
     let captured = SerialEnvSnapshot::from_runtime(&shell.env, &mut ctx);
     let wire_shell = WireShell::from_runtime(
         &shell.env,
-        shell.last_status,
         shell.session.stack_limit,
         &shell.context,
         &mut ctx,
@@ -190,7 +189,6 @@ pub(crate) struct WireAuditObservation {
 pub(crate) struct ChildEvalResponse {
     pub scope_table: ScopeTable,
     pub outcome: WireOutcome,
-    pub last_status: i32,
     pub audit_observations: Vec<WireAuditObservation>,
 }
 
@@ -200,7 +198,6 @@ pub(crate) struct ChildEvalResponse {
 /// failure.
 pub(crate) struct DecodedResponse {
     pub value: Option<Value>,
-    pub last_status: i32,
     pub audit_observations: Vec<Observation>,
     pub signal: Option<Break>,
 }
@@ -237,7 +234,6 @@ pub(crate) fn pack_request(
     let captured = captured.map(|env| SerialEnvSnapshot::from_runtime(env, &mut ctx));
     let wire_shell = WireShell::from_runtime(
         &shell.env,
-        shell.last_status,
         shell.session.stack_limit,
         &shell.context,
         &mut ctx,
@@ -259,7 +255,6 @@ pub(crate) fn pack_request(
 struct EvalOutcome {
     result: Settled<Value>,
     audit_observations: Vec<Observation>,
-    last_status: i32,
 }
 
 /// Evaluate one stage in a freshly hydrated child shell.  The stage's value
@@ -318,11 +313,9 @@ fn eval_request(request: ChildEvalRequest, prelude: &crate::boot::BakedPrelude) 
         result.is_ok(),
         audit_observations.len()
     );
-    let last_status = shell.last_status;
     Ok(EvalOutcome {
         result,
         audit_observations,
-        last_status,
     })
 }
 
@@ -386,7 +379,6 @@ pub(crate) fn run_child_eval(
     let EvalOutcome {
         result,
         audit_observations,
-        last_status,
     } = outcome;
 
     let audit_observations = match pack_audit_observations(audit_observations) {
@@ -403,7 +395,7 @@ pub(crate) fn run_child_eval(
                     Ok(serial) => Some(serial),
                     Err(e) => {
                         let outcome = break_to_outcome(Break::Error(transfer_error(&e)));
-                        return finish(ctx, outcome, last_status, audit_observations);
+                        return finish(ctx, outcome, audit_observations);
                     }
                 }
             } else {
@@ -414,7 +406,7 @@ pub(crate) fn run_child_eval(
         Err(b) => break_to_outcome(b),
     };
 
-    finish(ctx, outcome, last_status, audit_observations)
+    finish(ctx, outcome, audit_observations)
 }
 
 /// Assemble the response from its fully-packed parts.  A scope table that
@@ -423,7 +415,6 @@ pub(crate) fn run_child_eval(
 fn finish(
     ctx: InternCtx,
     outcome: WireOutcome,
-    last_status: i32,
     audit_observations: Vec<WireAuditObservation>,
 ) -> ChildEvalResponse {
     let (scope_table, outcome) = match ctx.finish() {
@@ -436,7 +427,6 @@ fn finish(
     ChildEvalResponse {
         scope_table,
         outcome,
-        last_status,
         audit_observations,
     }
 }
@@ -444,15 +434,9 @@ fn finish(
 /// A response for a failure that fires before, or instead of, a real eval:
 /// empty audit, the signal projected onto the outcome.
 pub(crate) fn break_response(signal: Break) -> ChildEvalResponse {
-    // `$?` reports what the body would have set; other signals fall back to 1.
-    let last_status = match &signal {
-        Break::Error(err) => err.exit_code(),
-        Break::Escape(_) => 1,
-    };
     ChildEvalResponse {
         scope_table: ScopeTable::default(),
         outcome: break_to_outcome(signal),
-        last_status,
         audit_observations: Vec::new(),
     }
 }
@@ -512,7 +496,6 @@ pub(crate) fn decode_response(
     };
     Ok(DecodedResponse {
         value,
-        last_status: response.last_status,
         audit_observations,
         signal,
     })
@@ -594,7 +577,6 @@ mod tests {
                 hint: None,
                 span: None,
             },
-            last_status: 1,
             audit_observations: vec![WireAuditObservation {
                 scope_table: ctx.finish().expect("finish"),
                 observation,
@@ -628,7 +610,6 @@ mod tests {
         let mut ctx = InternCtx::new();
         let wire = WireShell::from_runtime(
             &parent.env,
-            parent.last_status,
             parent.session.stack_limit,
             &parent.context,
             &mut ctx,
@@ -877,7 +858,6 @@ mod tests {
                     applied: Vec::new(),
                 },
             )))),
-            last_status: 0,
             audit_observations: Vec::new(),
         };
 

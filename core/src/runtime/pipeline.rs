@@ -79,7 +79,7 @@ impl PipeNode {
     /// so it outlives both calls — drops with `self` once `finish` returns.
     pub(crate) fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
         let Self { group: _group, running, yields, started } = self;
-        running.collect(mooring, shell, started).finish(shell, yields)
+        running.collect(mooring, shell, started).finish(yields)
     }
 }
 

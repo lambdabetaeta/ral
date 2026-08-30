@@ -8,7 +8,7 @@ covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_c
 
 The wire layer that carries a shell across a process boundary. When a pipeline
 stage runs in a re-exec'd helper, the shell's mobile state — `env`,
-`last_status`, `context`, the relevant parent state — is serialised to JSON,
+`context`, the relevant parent state — is serialised to JSON,
 framed, and reconstituted on the other side of a re-exec of this
 [[invariants/single-binary|same binary]] ([[map/core/shell-state|shell-state]]).
 (A [[design/grant|grant]] does
@@ -72,7 +72,7 @@ silently treated as handle-free or dependency-free:
 ## The mirrored shell state — `core/src/subprocess.rs`
 
 `serial.rs` owns value and closure transport; this module owns the surrounding
-envelope — the wire mirror of the `env`/`last_status`/`context` fields that
+envelope — the wire mirror of the `env`/`context` fields that
 cross an evaluation boundary ([[map/core/shell-state|shell-state]]). No frame
 ever crosses: a stage's [[internals/evaluator-machine|machine]] starts over
 the empty stack, so what rides the wire is store, never continuation. Each
@@ -80,7 +80,7 @@ the empty stack, so what rides the wire is store, never continuation. Each
 compose strictly (a parent's `from_X` calls its children's, never reaching
 past them):
 
-- `WireShell { env, last_status, stack_limit, context: WireContext }` — the
+- `WireShell { env, stack_limit, context: WireContext }` — the
   top, a serialisable mirror of a shell's mobile state. `env`'s wire row is
   only the bindings tier of one [[design/scoping|`Env`]] — the persistent map
   of everything bound since the prelude — interned by the identity of its
@@ -134,6 +134,6 @@ followed by the `serde_json` body). One codec carries the
 `WireChannel` frames (`core/src/wire.rs`).
 
 This layer is the mechanism behind the mobile/local split — `env` /
-`last_status` / `context` cross a re-exec boundary, `io` / `session` / `local`
+`context` cross a re-exec boundary, `io` / `session` / `local`
 do not ([[map/core/shell-state|shell-state]]) — that the pipeline-stage helper
 relies on for out-of-process stage evaluation.
