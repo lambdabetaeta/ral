@@ -44,10 +44,10 @@ reference going with it is what a parent's `children` or the fleet's
 `is_root`: every distinction reduces to **position in the tree**, read from
 `Agent::parent` together with `interactive` and the agent's own exchange
 clock. What every node *shares* for identity resolution and the idle lease
-— the by-name and by-id doors — lives on the thin [[#The Fleet|`Fleet`]],
+— the by-name door — lives on the thin [[#The Fleet|`Fleet`]],
 not on the node; the one [[map/exarch/frontend|`FleetBus`]] and the
-transport `Engine` are session-level handles the frontend builds and holds
-alongside its own `Arc<Fleet>`, not fields of `Fleet` itself. Output caps
+transport `Engine` are session-level handles the frontend builds and holds,
+not fields of `Fleet` itself. Output caps
 are fixed `agent/digest.rs` constants, not per-agent state.
 
 ## Status, the exchange clock, and the lock rule
@@ -419,9 +419,11 @@ idle-lease bound they share, fixed at construction, nothing else. It is not the 
 cascade, the scope check — runs there. `names` is the by-name door a spawn
 claims identity at and `` agents `message ``/`` `cancel ``/`` `read ``
 resolve through (`Fleet::resolve`); `roots` holds the trunk and every
-`/branch` — a root reports to nobody, so a walk from `roots` (`by_id`,
-`nearest_reap`) is how a frontend command or the idle-lease scan reaches
-every live agent in the run. Both are `Weak`, and a lookup prunes what has
+`/branch` — a root reports to nobody, so a walk from `roots`
+(`nearest_reap`) is how the idle-lease scan reaches every live agent in the
+run.  The frontend arrives through no fleet door at all: each tab was handed
+its agent's `Weak` on the birth notice
+([[map/exarch/frontend|frontend]]). Both are `Weak`, and a lookup prunes what has
 settled as it walks. `FleetBus` and the `Arc<provider::Engine>` are not
 fields of `Fleet` — the frontend builds its own (`FleetBus::session`) over
 the trunk's inbox and holds the engine handle separately; what every node
@@ -507,8 +509,8 @@ ambient foreground cause, which only the trunk's session is minted facing
 [[decisions/260704_per-agent-eval-cancel|per-agent-eval-cancel]],
 [[internals/cancellation|cancellation]]). `Esc` / Ctrl-C, by contrast, are a
 **per-tab exchange interrupt**, not a cascade: they stop only the *focused* agent's
-current exchange (`Agent::interrupt`, reached by id through `Fleet::by_id`,
-plus `cancel::raise_interrupt`
+current exchange (`Agent::interrupt`, reached through the focused tab's own
+`Weak`, plus `cancel::raise_interrupt`
 on the trunk), leaving its descendants running
 ([[decisions/260705_cancel-per-tab|cancel-per-tab]]); the focused agent's
 sticky token is cleared at each exchange boundary (`Token::reset`).

@@ -412,9 +412,10 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
 /// re-login upserts the very cell the focused tab already reads through.
 fn apply_login(tui: &Tui, ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
     let (account, credential) = ctx.store.add_oauth(token);
-    let already_active = ctx
-        .agents
-        .by_id(tui.app.tabs.focused())
+    let already_active = tui
+        .app
+        .tabs
+        .focused_agent()
         .is_some_and(|agent| agent.current_provider().account().id == account.id);
     let action = if replaced {
         "Updated the login for"

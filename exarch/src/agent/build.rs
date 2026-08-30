@@ -41,8 +41,9 @@ fn seed_id_counter(sessions_root: &std::path::Path) -> io::Result<()> {
     Ok(())
 }
 
-/// The trunk's fleet name. Never shown — the trunk lists its descendants,
-/// not itself — but the agent carries its mailbox and provider for the frontend.
+/// The trunk's fleet name, and so the label its tab carries: the frontend reads
+/// the root tab's name off the agent, which is what lets `/focus` resolve the
+/// trunk by the same name every other agent answers to.
 const TRUNK_NAME: &str = "main";
 
 /// What `Avatar::assemble` needs.  Fields are `pub(crate)` because a desk

@@ -1,40 +1,93 @@
-//! Session/view lifecycle — viewports, tab order and names, the parent chain
-//! focus falls back along, and the linger clock.  [`super::App`]'s `tabs` field.
+//! Session/view lifecycle — one [`Tab`] per agent the stream has announced,
+//! in birth order, root first.  [`super::App`]'s `tabs` field.
 
-use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+use crate::agent::Agent;
+use crate::agent::resources::ViewFigures;
 use crate::bus::AgentId;
 
 use super::block::{AgentSlot, Reveal};
 use super::viewport::Viewport;
-use super::{LINGER, ROOT_NAME};
+use super::{DEMOTE_IDLE, LINGER};
 
-/// One [`Viewport`] per session, plus the tab bar that orders them.
+/// One session's view, and the frontend's whole handle on the agent behind it.
+pub(super) struct Tab {
+    /// Wire identity: what every `Signal` names, so what a lookup matches on.
+    id: AgentId,
+    /// Reach.  Upgraded for the duration of one handler and never stored
+    /// strong: the frontend must not hold an agent past its avatar.
+    agent: Weak<Agent>,
+    /// Birth facts, off the `Born` notice; immutable, like `Agent::parent`, and
+    /// still readable once the `Weak` is dead — which is what a lingering row's
+    /// label and indentation need.
+    name: String,
+    /// The spawning agent, so focus can climb toward the trunk when the focused
+    /// agent ends.  `None` for root and for a `/branch`, which roots its own
+    /// tree.
+    parent: Option<AgentId>,
+    /// Retained past death and past bar expiry — tombstoned, not dropped — so
+    /// `App::flush_logs` can still write this session's `user.log`.
+    viewport: Viewport,
+    /// The linger clock: the stream position of `Died`, or the `/clear`
+    /// keystroke.  In the bar while `None` or younger than [`LINGER`].
+    retired: Option<Instant>,
+}
+
+impl Tab {
+    /// Whether the bar still shows this row: read off the viewport, which
+    /// [`Tabs::tick`] tombstones at the very moment the row goes.
+    fn in_bar(&self) -> bool {
+        !self.viewport.tombstoned()
+    }
+
+    /// Frozen: still drawing its final frame, but no further event belongs in
+    /// it.
+    fn lingering(&self) -> bool {
+        self.retired.is_some() && self.in_bar()
+    }
+
+    fn live(&self) -> Option<Arc<Agent>> {
+        self.agent.upgrade()
+    }
+
+    /// Idle span if this tab is due out of the `TAB` cycle — parked and idle
+    /// past the mark — else `None`.  Root and the focused tab never are, which
+    /// is what makes [`Tabs::focus_next`]'s walk terminate.
+    fn demotion(&self, focused: AgentId, root: AgentId) -> Option<Duration> {
+        if self.id == root || self.id == focused {
+            return None;
+        }
+        let agent = self.live()?;
+        let idle = agent.idle();
+        (agent.mailbox().waiting_for_input() && idle >= DEMOTE_IDLE).then_some(idle)
+    }
+}
+
+/// One bar row as the matrix reads it — a tab projected for a single frame,
+/// nothing retained.
+pub(super) struct TabRow<'a> {
+    pub id: AgentId,
+    pub name: &'a str,
+    pub parent: Option<AgentId>,
+    pub vp: &'a Viewport,
+    pub lingering: bool,
+    pub demoted: Option<Duration>,
+}
+
+/// Every tab the stream has announced, in birth order.
 ///
 /// Focus is purely presentational: `TAB` and `/focus` write it, rendering reads
 /// it, and no agent-side lifecycle depends on it.  Reads route through
 /// [`Self::focused`], which resolves a stale id — a tab that aged out — to root.
 #[allow(clippy::struct_field_names)] // `tabs` is the natural name for the tab list.
 pub(super) struct Tabs {
-    /// Retained past `Died` and past tab-bar expiry so `App::flush_logs` can
-    /// still write each session's `user.log`.
-    viewports: HashMap<AgentId, Viewport>,
     /// Birth order, root first — stable per-session log paths across runs.
-    dispatch_order: Vec<AgentId>,
-    /// Root is always a member, which is what makes [`Self::focus_next`]'s walk
-    /// terminate.
-    tabs: Vec<AgentId>,
-    names: HashMap<AgentId, String>,
-    /// Death stamps for lingering subagents: the tab drops after [`LINGER`],
-    /// the viewport does not.
-    dying: HashMap<AgentId, Instant>,
-    root: AgentId,
+    /// Root is `tabs[0]` and is never retired.
+    tabs: Vec<Tab>,
     focus: AgentId,
-    /// Each tab's spawning agent, so focus can climb toward the trunk when the
-    /// focused agent ends.  A `/branch` has no entry: it roots its own tree.
-    parents: HashMap<AgentId, AgentId>,
     /// The rung thinking traces read at across every view — `/thinking`'s
     /// datum, kept here because it outlives any one viewport: a tab born after
     /// the command was typed inherits it.
@@ -43,110 +96,137 @@ pub(super) struct Tabs {
 }
 
 impl Tabs {
-    pub fn new(root_id: AgentId, root_log_dir: &Path, append: bool) -> Self {
+    pub fn new(root: &Arc<Agent>, append: bool) -> Self {
         let traces = Reveal::Full;
-        let mut viewports = HashMap::new();
-        viewports.insert(
-            root_id,
-            Viewport::new(
-                root_log_dir.join("user.log"),
-                AgentSlot::default(),
-                append,
-                traces,
-            ),
-        );
-        let mut names = HashMap::new();
-        names.insert(root_id, ROOT_NAME.to_string());
         Self {
-            viewports,
-            dispatch_order: vec![root_id],
-            tabs: vec![root_id],
-            names,
-            dying: HashMap::new(),
-            root: root_id,
-            focus: root_id,
-            parents: HashMap::new(),
+            tabs: vec![Tab {
+                id: root.id,
+                agent: Arc::downgrade(root),
+                name: root.name().to_string(),
+                parent: None,
+                viewport: Viewport::new(
+                    root.log_dir().join("user.log"),
+                    AgentSlot::default(),
+                    append,
+                    traces,
+                ),
+                retired: None,
+            }],
+            focus: root.id,
             traces,
             title_frame: 0,
         }
     }
 
+    fn tab(&self, id: AgentId) -> Option<&Tab> {
+        self.tabs.iter().find(|t| t.id == id)
+    }
+
+    fn tab_mut(&mut self, id: AgentId) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|t| t.id == id)
+    }
+
+    pub(super) fn root(&self) -> AgentId {
+        self.tabs[0].id
+    }
+
     /// The focused tab, resolving a stale focus — a subagent that aged out of
     /// the bar — to root.
     pub(super) fn focused(&self) -> AgentId {
-        if self.tabs.contains(&self.focus) {
-            self.focus
-        } else {
-            self.root
+        match self.tab(self.focus) {
+            Some(tab) if tab.in_bar() => self.focus,
+            _ => self.root(),
         }
     }
 
-    /// Nearest still-live ancestor tab of `id`, else root: where focus lands
-    /// when the focused agent ends.
+    /// The focused tab's label, for the watch-only prompt hint.
+    pub(super) fn focused_name(&self) -> &str {
+        self.tab(self.focused()).map_or("?", |tab| tab.name.as_str())
+    }
+
+    /// The live agent behind `id`, for one handler's duration — the frontend's
+    /// one door onto an agent, and never held past the statement that opens it.
+    pub(super) fn agent(&self, id: AgentId) -> Option<Arc<Agent>> {
+        self.tab(id)?.live()
+    }
+
+    pub(super) fn focused_agent(&self) -> Option<Arc<Agent>> {
+        self.agent(self.focused())
+    }
+
+    /// The live tab named `name` — `/focus`'s target, and the only way onto a
+    /// demoted tab.  `Fleet::enrol` keeps names unique among the live, so a
+    /// lingering tab sharing its name with a newborn is ruled out by the
+    /// liveness test rather than by luck.
+    pub(super) fn by_name(&self, name: &str) -> Option<AgentId> {
+        self.tabs
+            .iter()
+            .find(|t| t.name == name && t.in_bar() && t.live().is_some())
+            .map(|t| t.id)
+    }
+
+    /// Nearest still-attended ancestor tab of `id`, else root: where focus lands
+    /// when the focused agent ends.  A lingering intermediate is climbed past,
+    /// not landed on.
     pub(super) fn parent_focus(&self, id: AgentId) -> AgentId {
         let mut cur = id;
-        while let Some(&p) = self.parents.get(&cur) {
-            if self.tabs.contains(&p) && !self.dying.contains_key(&p) {
-                return p;
+        while let Some(parent) = self.tab(cur).and_then(|t| t.parent) {
+            if self.tab(parent).is_some_and(|t| t.in_bar() && !t.lingering()) {
+                return parent;
             }
-            cur = p;
+            cur = parent;
         }
-        self.root
+        self.root()
     }
 
-    /// Age `dying` entries out past [`LINGER`], once per frame.  An expired view
-    /// is evicted to a tombstone rather than dropped from `viewports`: the entry
-    /// must survive for the `/resources` dead-view count and `flush_logs`'s
-    /// log-path listing.  Returns whether a tab went — the cue to repaint.
+    /// Age retired tabs out past [`LINGER`], once per frame.  An expired view is
+    /// evicted to a tombstone rather than dropped: the tab must survive for the
+    /// `/resources` dead-view count and `App::flush_logs`'s log-path listing.
+    /// Returns whether a tab went — the cue to repaint.
     pub fn tick(&mut self) -> bool {
         let now = Instant::now();
         let expired: Vec<AgentId> = self
-            .dying
+            .tabs
             .iter()
-            .filter(|&(_, &t)| now.duration_since(t) >= LINGER)
-            .map(|(&id, _)| id)
+            .filter(|t| t.in_bar())
+            .filter_map(|t| (now.duration_since(t.retired?) >= LINGER).then_some(t.id))
             .collect();
         let changed = !expired.is_empty();
         for id in expired {
-            self.dying.remove(&id);
-            self.tabs.retain(|&t| t != id);
-            self.names.remove(&id);
+            if let Some(tab) = self.tab_mut(id) {
+                tab.viewport.evict_to_tombstone();
+            }
             if self.focus == id {
                 self.focus = self.parent_focus(id);
-            }
-            self.parents.remove(&id);
-            if let Some(vp) = self.viewports.get_mut(&id) {
-                vp.evict_to_tombstone();
             }
         }
         self.title_frame += 1;
         changed
     }
 
+    /// Open a tab for an agent the stream has just announced.  A second `Born`
+    /// for an id already listed is ignored: a tab is opened once, and its birth
+    /// facts never change.
     pub(super) fn born(
         &mut self,
         id: AgentId,
+        agent: Weak<Agent>,
         log_dir: &Path,
         name: String,
         parent: Option<AgentId>,
-        agent_slot: AgentSlot,
+        slot: AgentSlot,
     ) {
-        if let std::collections::hash_map::Entry::Vacant(slot) = self.viewports.entry(id) {
-            slot.insert(Viewport::new(
-                log_dir.join("user.log"),
-                agent_slot,
-                false,
-                self.traces,
-            ));
-            self.dispatch_order.push(id);
+        if self.tab(id).is_some() {
+            return;
         }
-        self.names.insert(id, name);
-        if let Some(parent) = parent {
-            self.parents.insert(id, parent);
-        }
-        if !self.tabs.contains(&id) {
-            self.tabs.push(id);
-        }
+        self.tabs.push(Tab {
+            id,
+            agent,
+            name,
+            parent,
+            viewport: Viewport::new(log_dir.join("user.log"), slot, false, self.traces),
+            retired: None,
+        });
     }
 
     /// Flip the standing rung for thinking traces and apply it to every view at
@@ -157,131 +237,132 @@ impl Tabs {
             Reveal::Full => Reveal::Summary,
             _ => Reveal::Full,
         };
-        for vp in self.viewports.values_mut() {
-            vp.set_traces_level(self.traces);
+        for tab in &mut self.tabs {
+            tab.viewport.set_traces_level(self.traces);
         }
         self.traces
     }
 
-    /// Whether `id` is a `/branch` tab — the only kind `/close` may kill.  A
-    /// branch is exactly a spawned tab that roots its own tree.
-    pub(super) fn is_branch(&self, id: AgentId) -> bool {
-        id != self.root && !self.parents.contains_key(&id)
-    }
-
+    /// Start the linger clock at this `Died`'s position in the stream.  Root
+    /// never enters the window; it outlives the session.
     pub(super) fn died(&mut self, id: AgentId) {
-        if id != self.root {
-            self.dying.insert(id, Instant::now());
-            if self.focus == id {
-                self.focus = self.parent_focus(id);
-            }
+        if id == self.root() {
+            return;
         }
-    }
-
-    /// Retire every non-root tab into the linger window — `/clear`.
-    pub(super) fn retire_all(&mut self) {
         let now = Instant::now();
-        let retiring: Vec<AgentId> = self
-            .tabs
-            .iter()
-            .copied()
-            .filter(|&id| id != self.root)
-            .collect();
-        for id in retiring {
-            self.dying.entry(id).or_insert(now);
+        if let Some(tab) = self.tab_mut(id) {
+            tab.retired = Some(now);
         }
-        self.focus = self.root;
+        if self.focus == id {
+            self.focus = self.parent_focus(id);
+        }
     }
 
-    /// Cycle `TAB` focus past any tab in `demoted`.  Root is never demoted, so
-    /// one pass around `tabs` always finds a landing spot.
-    pub(super) fn focus_next(&mut self, demoted: &HashMap<AgentId, Duration>) {
-        let current = self.focused();
-        let pos = self.tabs.iter().position(|&id| id == current).unwrap_or(0);
-        let n = self.tabs.len();
-        for step in 1..=n {
-            let next = self.tabs[(pos + step) % n];
-            if !demoted.contains_key(&next) {
-                self.focus = next;
-                return;
+    /// Retire every non-root tab into the linger window — `/clear`.  A tab
+    /// already retired keeps its earlier stamp, so a child that died just before
+    /// the clear is not given a fresh full window.
+    pub(super) fn retire_all(&mut self) {
+        let (now, root) = (Instant::now(), self.root());
+        for tab in self.tabs.iter_mut().filter(|t| t.id != root && t.in_bar()) {
+            if tab.retired.is_none() {
+                tab.retired = Some(now);
             }
+        }
+        self.focus = root;
+    }
+
+    /// Cycle `TAB` focus past any demoted tab.  Root is never demoted, so one
+    /// pass around the bar always finds a landing spot.
+    pub(super) fn focus_next(&mut self) {
+        let (current, root) = (self.focused(), self.root());
+        let bar: Vec<&Tab> = self.tabs.iter().filter(|t| t.in_bar()).collect();
+        let pos = bar.iter().position(|t| t.id == current).unwrap_or(0);
+        let next = (1..=bar.len())
+            .map(|step| bar[(pos + step) % bar.len()])
+            .find(|t| t.demotion(current, root).is_none())
+            .map(|t| t.id);
+        if let Some(id) = next {
+            self.focus = id;
         }
     }
 
     /// Land focus on `id` — `/focus`, the only way to reach a demoted tab.  No
-    /// validation: the caller has already checked [`Self::is_tab`].
+    /// validation: [`Self::by_name`] resolved it against the live tabs.
     pub(super) fn set_focus(&mut self, id: AgentId) {
         self.focus = id;
     }
 
-    /// Whether `id` has a tab yet.  `/focus` checks it so a name whose `Born`
-    /// has not reached the frontend is refused, not silently focused.
-    pub(super) fn is_tab(&self, id: AgentId) -> bool {
-        self.tabs.contains(&id)
+    /// Whether `id` is a `/branch` tab — the only kind `/close` may kill.  A
+    /// branch is exactly a spawned tab that roots its own tree, which is a
+    /// birth fact and so still answerable once the agent has gone.
+    pub(super) fn is_branch(&self, id: AgentId) -> bool {
+        id != self.root() && self.tab(id).is_some_and(|t| t.parent.is_none())
+    }
+
+    /// Whether `id`'s tab is frozen in its linger window, so no further event
+    /// belongs in it.
+    pub(super) fn lingering(&self, id: AgentId) -> bool {
+        self.tab(id).is_some_and(Tab::lingering)
     }
 
     pub(super) fn viewport(&self, id: AgentId) -> Option<&Viewport> {
-        self.viewports.get(&id)
+        self.tab(id).map(|t| &t.viewport)
     }
 
     pub(super) fn viewport_mut(&mut self, id: AgentId) -> Option<&mut Viewport> {
-        self.viewports.get_mut(&id)
+        self.tab_mut(id).map(|t| &mut t.viewport)
     }
 
     pub(super) fn focused_viewport(&self) -> Option<&Viewport> {
         self.viewport(self.focused())
     }
 
-    pub(super) fn root(&self) -> AgentId {
-        self.root
+    /// Every view, tombstones included, in birth order — `App::flush_logs`'s
+    /// stable log-path order.
+    pub(super) fn views_mut(&mut self) -> impl Iterator<Item = &mut Viewport> {
+        self.tabs.iter_mut().map(|t| &mut t.viewport)
     }
 
-    /// Tabs in the bar — not the viewport count, which outlives them.
+    /// Rows in the bar — not the tab count, which outlives them.
     pub(super) fn len(&self) -> usize {
-        self.tabs.len()
+        self.tabs.iter().filter(|t| t.in_bar()).count()
     }
 
-    pub(super) fn is_dying(&self, id: AgentId) -> bool {
-        self.dying.contains_key(&id)
-    }
-
-    /// Rows for the matrix: each visible tab paired with its viewport.
-    pub(super) fn matrix_rows(&self) -> Vec<(AgentId, &Viewport)> {
+    /// This frame's bar rows, each tab projected as the matrix reads it.
+    pub(super) fn rows(&self) -> Vec<TabRow<'_>> {
+        let (focused, root) = (self.focused(), self.root());
         self.tabs
             .iter()
-            .filter_map(|&id| self.viewports.get(&id).map(|vp| (id, vp)))
+            .filter(|t| t.in_bar())
+            .map(|t| TabRow {
+                id: t.id,
+                name: &t.name,
+                parent: t.parent,
+                vp: &t.viewport,
+                lingering: t.lingering(),
+                demoted: t.demotion(focused, root),
+            })
             .collect()
     }
 
-    pub(super) fn dispatch_order(&self) -> &[AgentId] {
-        &self.dispatch_order
+    /// The `/resources` view census.  A retired tab is dead whether it is still
+    /// lingering in the bar or already tombstoned — `retired` is never cleared,
+    /// and nothing but a retired tab is ever tombstoned.
+    pub(super) fn census(&self) -> ViewFigures {
+        let dead = self.tabs.iter().filter(|t| t.retired.is_some()).count() as u64;
+        let live = self.tabs.len() as u64 - dead;
+        ViewFigures {
+            live,
+            dead,
+            agents: live,
+        }
     }
 
-    pub(super) fn names(&self) -> &HashMap<AgentId, String> {
-        &self.names
-    }
-
-    pub(super) fn dying_map(&self) -> &HashMap<AgentId, Instant> {
-        &self.dying
-    }
-
-    pub(super) fn parents(&self) -> &HashMap<AgentId, AgentId> {
-        &self.parents
-    }
-
-    pub(super) fn viewports(&self) -> &HashMap<AgentId, Viewport> {
-        &self.viewports
-    }
-
-    pub(super) fn viewports_mut(&mut self) -> &mut HashMap<AgentId, Viewport> {
-        &mut self.viewports
-    }
-
-    /// The ids a viewport event can legitimately name — read only by the
-    /// trace that reports a dropped one.
+    /// The ids a viewport event can legitimately name — read only by the trace
+    /// that reports a dropped one.
     #[cfg(debug_assertions)]
-    pub(super) fn viewport_keys(&self) -> Vec<AgentId> {
-        self.viewports.keys().copied().collect()
+    pub(super) fn ids(&self) -> Vec<AgentId> {
+        self.tabs.iter().map(|t| t.id).collect()
     }
 
     /// Frame counter driving the terminal tab-title spinner.
@@ -294,53 +375,72 @@ impl Tabs {
 mod tests {
     use super::super::block::ChromeKind;
     use super::*;
+    use crate::agent::testkit::{TestAgentSpec, test_agent};
+    use crate::fleet::Fleet;
     use ratatui::text::Line;
-    use std::time::{Duration, Instant};
+
+    /// A trunk whose `Weak` upgrades for as long as the returned `Arc` lives,
+    /// which is the whole of each test.
+    fn trunk(idle: Duration) -> Arc<Agent> {
+        let fleet = Fleet::new();
+        test_agent(
+            &fleet,
+            TestAgentSpec {
+                idle,
+                ..TestAgentSpec::new("main")
+            },
+        )
+        .expect("a fresh trunk")
+    }
+
+    /// A subagent tab whose agent has already settled — the ordinary state of a
+    /// tab the frontend still draws.
+    fn born(tabs: &mut Tabs, id: AgentId, name: &str, parent: Option<AgentId>) {
+        tabs.born(
+            id,
+            Weak::new(),
+            Path::new("/tmp/exarch-tabs-test"),
+            name.into(),
+            parent,
+            AgentSlot(1),
+        );
+    }
 
     #[test]
-    fn parent_focus_skips_dying_ancestor() {
-        let root = 1;
-        let child = 2;
-        let grandchild = 3;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test"), false);
-        tabs.parents.insert(child, root);
-        tabs.parents.insert(grandchild, child);
-        tabs.dying.insert(child, Instant::now());
-        tabs.tabs.push(child);
-        tabs.tabs.push(grandchild);
-        assert_eq!(tabs.parent_focus(grandchild), root);
+    fn parent_focus_climbs_past_a_lingering_ancestor() {
+        let root = trunk(Duration::ZERO);
+        let mut tabs = Tabs::new(&root, false);
+        let (child, grandchild) = (root.id + 1, root.id + 2);
+        born(&mut tabs, child, "child", Some(root.id));
+        born(&mut tabs, grandchild, "grandchild", Some(child));
+        tabs.died(child);
+
+        assert_eq!(
+            tabs.parent_focus(grandchild),
+            root.id,
+            "focus climbs past the lingering parent to the nearest attended ancestor"
+        );
     }
 
     /// Killing one agent is never paid for out of a sibling's scrollback:
     /// tombstoning frees only the expired view.
     #[test]
     fn tick_tombstones_only_the_expired_view_leaving_a_live_sibling_untouched() {
-        let root = 1;
-        let child = 2;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-root"), false);
-        tabs.born(
-            child,
-            std::path::Path::new("/tmp/test-child"),
-            "child".into(),
-            Some(root),
-            AgentSlot(1),
-        );
-        if let Some(vp) = tabs.viewport_mut(child) {
-            vp.push_chrome(ChromeKind::Plain, vec![Line::from("child says hi")]);
-        }
-        if let Some(vp) = tabs.viewport_mut(root) {
-            vp.push_chrome(ChromeKind::Plain, vec![Line::from("root says hi")]);
+        let root = trunk(Duration::ZERO);
+        let mut tabs = Tabs::new(&root, false);
+        let child = root.id + 1;
+        born(&mut tabs, child, "child", Some(root.id));
+        for (id, text) in [(child, "child says hi"), (root.id, "root says hi")] {
+            tabs.viewport_mut(id)
+                .expect("both tabs have a viewport")
+                .push_chrome(ChromeKind::Plain, vec![Line::from(text)]);
         }
         tabs.died(child);
         // Backdate rather than wait LINGER out in a test.
-        tabs.dying.insert(
-            child,
-            Instant::now()
-                .checked_sub(LINGER + Duration::from_secs(1))
-                .unwrap(),
-        );
+        tabs.tab_mut(child).expect("the child has a tab").retired =
+            Instant::now().checked_sub(LINGER + Duration::from_secs(1));
 
-        tabs.tick();
+        assert!(tabs.tick(), "the expiry is a repaint cue");
 
         assert_eq!(
             tabs.viewport(child).unwrap().probe_figures().0,
@@ -348,37 +448,43 @@ mod tests {
             "the dead child is tombstoned once past LINGER, its scrollback gone"
         );
         assert_eq!(
-            tabs.viewport(root).unwrap().probe_figures().0,
+            tabs.viewport(root.id).unwrap().probe_figures().0,
             1,
             "the live root's own block survives the sibling's tombstoning untouched"
         );
+        assert_eq!(tabs.len(), 1, "and the bar is back to root alone");
     }
 
     /// Root is never demoted, so `TAB` wraps back to it rather than sticking on
     /// the demoted tab it skips.
     #[test]
-    fn focus_next_skips_demoted_tabs() {
-        let root = 1;
-        let promoted = 2;
-        let demoted = 3;
-        let mut tabs = Tabs::new(root, std::path::Path::new("/tmp/test-focus-next"), false);
-        tabs.tabs.push(promoted);
-        tabs.tabs.push(demoted);
+    fn focus_next_skips_a_demoted_tab() {
+        let root = trunk(Duration::ZERO);
+        // Idle past the mark and parked on a fresh mailbox: demoted on sight.
+        let parked = trunk(DEMOTE_IDLE + Duration::from_secs(1));
+        let mut tabs = Tabs::new(&root, false);
+        let promoted = parked.id + 1;
+        born(&mut tabs, promoted, "promoted", Some(root.id));
+        tabs.born(
+            parked.id,
+            Arc::downgrade(&parked),
+            Path::new("/tmp/exarch-tabs-test"),
+            "parked".into(),
+            Some(root.id),
+            AgentSlot(2),
+        );
 
-        let mut demoted_set = HashMap::new();
-        demoted_set.insert(demoted, Duration::from_mins(10));
-
-        tabs.focus_next(&demoted_set);
+        tabs.focus_next();
         assert_eq!(
             tabs.focused(),
             promoted,
             "TAB skips straight past the demoted tab"
         );
 
-        tabs.focus_next(&demoted_set);
+        tabs.focus_next();
         assert_eq!(
             tabs.focused(),
-            root,
+            root.id,
             "TAB skips the demoted tab again, wrapping back to root"
         );
     }

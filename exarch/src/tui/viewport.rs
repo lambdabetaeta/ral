@@ -460,6 +460,12 @@ impl Viewport {
         self.context_window = context_window;
     }
 
+    /// Whether this view has been evicted — the one bit that says its tab has
+    /// left the bar, since the two happen together.
+    pub(super) fn tombstoned(&self) -> bool {
+        self.tombstoned
+    }
+
     /// Drop this view's heap state once its sub-agent has died and lingered
     /// out.  Idempotent: a second call finds the view already clean.
     ///

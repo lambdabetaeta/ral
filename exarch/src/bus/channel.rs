@@ -448,6 +448,7 @@ mod tests {
         tx.send_signal(Signal::Transient(
             1,
             Transient::Born {
+                agent: std::sync::Weak::new(),
                 log_dir: std::path::PathBuf::new(),
                 name: "a".into(),
                 parent: Some(0),

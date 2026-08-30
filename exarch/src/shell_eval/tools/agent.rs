@@ -6,6 +6,7 @@
 use crate::agent::Avatar;
 use crate::bus::{AgentOutcome, Emitter};
 use crate::record::Transient;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
@@ -110,6 +111,7 @@ pub(crate) fn spawn_async(
             let recorder = child.recorder();
             child.couple(&child_emit);
             recorder.transient(Transient::Born {
+                agent: Arc::downgrade(&child.agent),
                 log_dir: log_dir.clone(),
                 name: born_name,
                 parent: spawner,

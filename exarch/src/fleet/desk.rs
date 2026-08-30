@@ -3705,7 +3705,6 @@ mod tests {
             ..crate::agent::TestTrunk::new("system")
         })
         .unwrap();
-        let fleet = parent.fleet.clone();
         let child = parent
             .fork_named(parent.caps().clone(), "child-a")
             .expect("fork child a");
@@ -3717,7 +3716,6 @@ mod tests {
             .provider_handle()
             .swap(Arc::new(Provider::scripted("test-model", long_script)));
         child.seed("go".into());
-        let id = child.agent.id;
         let handle = attend_and_deliver(child);
 
         match wait_for_settle(&parent.inbox()) {
@@ -3731,7 +3729,10 @@ mod tests {
             other => panic!("expected an Agent result item, got {other:?}"),
         }
         handle.join().expect("worker thread must not panic");
-        assert!(fleet.by_id(id).is_none(), "the reaped child settles");
+        assert!(
+            crate::fleet::roster::listing(&parent.agent).is_empty(),
+            "the reaped child settles, and the walk that looked for it pruned it"
+        );
     }
 
     #[test]

@@ -42,5 +42,9 @@ pub use tui_loop::run;
 /// How long a dead subagent's tab survives in the bar, so its last frame is
 /// still readable before `tabs` ages it out.
 pub(super) const LINGER: Duration = Duration::from_secs(90);
-/// Tab-bar label for the root session.
-pub(super) const ROOT_NAME: &str = "main";
+/// How long a leased child may sit idle-and-parked before its tab leaves the
+/// `TAB` cycle for the matrix strip.
+///
+/// A frontend rule read off the agent's own exchange clock: nothing agent-side
+/// acts at the mark.
+pub(crate) const DEMOTE_IDLE: Duration = Duration::from_mins(5);

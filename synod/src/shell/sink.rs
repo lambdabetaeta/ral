@@ -740,6 +740,7 @@ mod tests {
         router.route_transient(0, &Transient::State(AgentState::Ready));
 
         let born = |id: AgentId| Transient::Born {
+            agent: std::sync::Weak::new(),
             log_dir: PathBuf::new(),
             name: format!("helper-{id}"),
             parent: Some(0),

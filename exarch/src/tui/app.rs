@@ -16,9 +16,9 @@ use super::render::draw;
 use super::tabs::Tabs;
 use super::terminal::{Term, osc52_copy};
 use super::viewport::Viewport;
-use crate::agent::resources::{BusFigures, ViewFigures, ViewportFigures};
+use crate::agent::Agent;
+use crate::agent::resources::{BusFigures, ViewportFigures};
 use crate::bus::{AgentId, AgentState, BusReceiver, Inbox};
-use crate::fleet::{AGENT_DEMOTE_IDLE, Fleet};
 use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
 use crate::record::{Display, Forensic, Printer as _, Record, Recorded, Transient};
@@ -30,9 +30,8 @@ use ratatui::{
     text::{Line, Span},
 };
 use std::{
-    collections::HashMap,
     io::{self},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -56,9 +55,6 @@ pub(crate) struct App {
     /// mid-turn (`Avatar::run_batch`) and the rest at the exchange boundary
     /// (`Inbox::next_or_idle`).
     pub(super) inbox: Inbox,
-    /// A clone of the handle the worker and every fork mutate, so steerability
-    /// and waiting-for-input are looked up rather than pushed in each frame.
-    agents: Arc<Fleet>,
     pub(super) total_usage: Usage,
     /// Last turn's prompt size — genai's `prompt_tokens`, which already folds
     /// the cache counts in. Overwritten, not accumulated.
@@ -83,15 +79,8 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub fn new(
-        root_id: AgentId,
-        root_log_dir: &Path,
-        vi: bool,
-        append_log: bool,
-        inbox: Inbox,
-        agents: Arc<Fleet>,
-    ) -> Self {
-        let tabs = Tabs::new(root_id, root_log_dir, append_log);
+    pub fn new(root: &Arc<Agent>, vi: bool, append_log: bool, inbox: Inbox) -> Self {
+        let tabs = Tabs::new(root, append_log);
         let cwd_basename = std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -100,7 +89,6 @@ impl App {
             tabs,
             prompt_state: PromptState::new(vi),
             inbox,
-            agents,
             total_usage: Usage::default(),
             last_input: 0,
             context_window: None,
@@ -137,45 +125,24 @@ impl App {
         self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
         // Feeds `Viewport::sync`'s own fidelity recomputation once the live
         // seam drives it as a `record::Printer`; harmless to set today.
-        for vp in self.tabs.viewports_mut().values_mut() {
+        for vp in self.tabs.views_mut() {
             vp.set_context_window(self.context_window);
         }
     }
 
-    /// Root and any sub-agent still live; a dead or lingering tab is not.
+    /// Whether the focused tab has an agent to steer.  Root's own handle
+    /// upgrades for exactly as long as the trunk attends, which is exactly as
+    /// long as steering means anything.
     pub(super) fn is_steerable(&self) -> bool {
-        let focused = self.tabs.focused();
-        focused == self.tabs.root() || self.agents.by_id(focused).is_some()
+        self.tabs.focused_agent().is_some()
     }
 
     /// A dead or lingering tab has no mailbox to be busy on, so it reads as
     /// waiting.
     pub(super) fn focused_waiting(&self) -> bool {
-        self.agents
-            .by_id(self.tabs.focused())
-            .is_none_or(|agent| agent.mailbox().waiting_for_input())
-    }
-
-    /// Idle-and-parked sub-agent tabs due to leave the TAB cycle for the matrix
-    /// strip, with their idle spans — projected per frame off each agent's own
-    /// exchange clock, never stored. Excluding the focused id means a tab leaves
-    /// the cycle only the frame after `TAB` moves off it; root never leaves.
-    pub(super) fn demoted(&self) -> HashMap<AgentId, Duration> {
-        let root = self.tabs.root();
-        let focused = self.tabs.focused();
         self.tabs
-            .matrix_rows()
-            .into_iter()
-            .filter_map(|(id, _)| {
-                if id == root || id == focused {
-                    return None;
-                }
-                let agent = self.agents.by_id(id)?;
-                let idle = agent.idle();
-                (agent.mailbox().waiting_for_input() && idle >= AGENT_DEMOTE_IDLE)
-                    .then_some((id, idle))
-            })
-            .collect()
+            .focused_agent()
+            .is_none_or(|agent| agent.mailbox().waiting_for_input())
     }
 
     /// Mutable access to the active `/model` picker, for `drive_picker`.
@@ -251,7 +218,7 @@ impl App {
     /// a fresh prompt arriving as a `Display::Prompt` fact when the ack itself
     /// was lost).
     fn admits(&mut self, id: AgentId, disarm: bool) -> bool {
-        if self.tabs.is_dying(id) {
+        if self.tabs.lingering(id) {
             return false;
         }
         if id == self.tabs.root() && self.root_clear_drain {
@@ -315,6 +282,7 @@ impl App {
         }
         match t {
             Transient::Born {
+                agent,
                 log_dir,
                 name,
                 parent,
@@ -324,7 +292,7 @@ impl App {
                     reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
                 )]
                 let agent_slot = AgentSlot((self.tabs.len() % AGENT_HUES.len()) as u8);
-                self.tabs.born(id, &log_dir, name, parent, agent_slot);
+                self.tabs.born(id, agent, &log_dir, name, parent, agent_slot);
             }
             // Root never enters the linger window; it outlives the session.
             Transient::Died => self.tabs.died(id),
@@ -347,9 +315,6 @@ impl App {
             .tabs
             .viewport(id)
             .map_or((0, 0, 0), super::viewport::Viewport::probe_figures);
-        let lingering = self.tabs.dying_map().len() as u64;
-        let live_views = (self.tabs.len() as u64).saturating_sub(lingering);
-        let dead_views = (self.tabs.viewports().len() as u64).saturating_sub(live_views);
         let frontend = crate::agent::resources::frontend_rows(
             ViewportFigures {
                 blocks,
@@ -358,11 +323,7 @@ impl App {
                 blocks_cap: super::viewport::VIEWPORT_MAX_BLOCKS as u64,
                 rows_cap: super::viewport::VIEWPORT_MAX_ROWS as u64,
             },
-            ViewFigures {
-                live: live_views,
-                dead: dead_views,
-                agents: live_views,
-            },
+            self.tabs.census(),
             BusFigures {
                 depth: bus.depth() as u64,
                 bytes: bus.bytes() as u64,
@@ -386,7 +347,7 @@ impl App {
                 ral_core::dbg_trace!(
                     "tui",
                     "viewport event DROPPED — no viewport for id={id}; known={:?}",
-                    self.tabs.viewport_keys()
+                    self.tabs.ids()
                 );
             }
         }
@@ -451,8 +412,7 @@ impl App {
             #[allow(clippy::collapsible_match)]
             KeyCode::Tab => {
                 if self.tabs.len() > 1 {
-                    let demoted = self.demoted();
-                    self.tabs.focus_next(&demoted);
+                    self.tabs.focus_next();
                 }
             }
             // Up/Down walk history only from the prompt's edge rows; mid-text in
@@ -534,14 +494,10 @@ impl App {
     /// `user.log`. Returns the paths root first, then subagents in dispatch
     /// order, stable across runs.
     pub fn flush_logs(&mut self) -> io::Result<Vec<PathBuf>> {
-        let mut paths = Vec::with_capacity(self.tabs.dispatch_order().len());
-        let order = self.tabs.dispatch_order().to_vec();
-        for &id in &order {
-            if let Some(vp) = self.tabs.viewport_mut(id) {
-                paths.push(vp.flush_log()?.to_path_buf());
-            }
-        }
-        Ok(paths)
+        self.tabs
+            .views_mut()
+            .map(|vp| Ok(vp.flush_log()?.to_path_buf()))
+            .collect()
     }
 
     /// The focused tab's latest reply as raw markdown, for `/copy`. Empty when
@@ -591,21 +547,20 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::testkit::{TestAgentSpec, test_agent};
     use crate::bus::card::{Card, Mark};
+    use crate::fleet::Fleet;
     use crate::tui::row::Row;
     use ral_core::types::{CallSite, Observation, Observed};
 
-    fn app() -> (App, BusReceiver) {
+    /// The trunk is returned alongside its `App` because the frontend holds it
+    /// only weakly: dropping it here would settle the agent mid-test.
+    fn app() -> (App, BusReceiver, Arc<Agent>) {
         let (_tx, rx) = crate::bus::channel();
-        let app = App::new(
-            1,
-            &std::env::temp_dir(),
-            false,
-            false,
-            Inbox::new(),
-            Fleet::new(),
-        );
-        (app, rx)
+        let fleet = Fleet::new();
+        let root = test_agent(&fleet, TestAgentSpec::new("main")).expect("a fresh trunk");
+        let app = App::new(&root, false, false, Inbox::new());
+        (app, rx, root)
     }
 
     fn text(app: &mut App, id: AgentId) -> String {
@@ -632,7 +587,7 @@ mod tests {
         use crate::record::commit::SurfaceBuffer;
         use crate::record::{Blocks, Emitter as RecordEmitter, FleetSink, Fold, Printer, View};
 
-        let (mut app, _rx) = app();
+        let (mut app, _rx, root) = app();
         let path = std::env::temp_dir().join(format!(
             "exarch-pin-coalesce-test-{}-{:?}.jsonl",
             std::process::id(),
@@ -641,7 +596,7 @@ mod tests {
         let recorder = RecordEmitter::create(&path).expect("temp record log");
         let (tx, brx) = crate::bus::channel();
         recorder.attach(FleetSink {
-            id: 1,
+            id: root.id,
             tx: tx.downgrade(),
             meter: crate::bus::UsageMeter::default(),
         });
@@ -661,13 +616,13 @@ mod tests {
             )
         };
         let mut buf = SurfaceBuffer::new();
-        buf.absorb_observation(&recorder, 1, read_at("a.rs"))
+        buf.absorb_observation(&recorder, root.id, read_at("a.rs"))
             .unwrap();
         // The pin lands directly in the viewport's own register — it is
         // ambient state like usage, never routed through the buffer that
         // groups reads — so it cannot stand between the two below.
         app.tabs
-            .viewport_mut(1)
+            .viewport_mut(root.id)
             .expect("root has a viewport")
             .set_pin(
                 "tasks".into(),
@@ -675,7 +630,7 @@ mod tests {
                     bytes: b"one left".to_vec(),
                 }]),
             );
-        buf.absorb_observation(&recorder, 1, read_at("b.rs"))
+        buf.absorb_observation(&recorder, root.id, read_at("b.rs"))
             .unwrap();
         buf.flush_surfaces(&recorder).unwrap();
 
@@ -685,10 +640,10 @@ mod tests {
                 View::step(&mut blocks, &rec).expect("every commit here is a Display record");
             }
         }
-        let vp = app.tabs.viewport_mut(1).expect("root has a viewport");
+        let vp = app.tabs.viewport_mut(root.id).expect("root has a viewport");
         vp.sync(&blocks);
 
-        let vp = app.tabs.viewport(1).expect("root has a viewport");
+        let vp = app.tabs.viewport(root.id).expect("root has a viewport");
         assert_eq!(
             vp.probe_figures().0,
             2,
@@ -702,7 +657,7 @@ mod tests {
             ["tasks"],
             "the pin lands in the register, never in scrollback"
         );
-        let all = text(&mut app, 1);
+        let all = text(&mut app, root.id);
         assert!(
             all.contains("a.rs") && all.contains("b.rs"),
             "both reads render in the one block: {all:?}"
@@ -715,19 +670,21 @@ mod tests {
     fn a_dying_tab_admits_no_straggler() {
         use crate::record::{Display, Record, Recorded, Seq, Stamp};
 
-        let (mut app, rx) = app();
+        let (mut app, rx, root) = app();
+        let helper = root.id + 1;
         app.transient(
-            2,
+            helper,
             Transient::Born {
+                agent: std::sync::Weak::new(),
                 log_dir: std::env::temp_dir(),
                 name: "helper".into(),
-                parent: Some(1),
+                parent: Some(root.id),
             },
             &rx,
         );
         let stamp = Stamp::new(Seq::new(1), 0..0);
         app.fact(
-            2,
+            helper,
             &Recorded::new(
                 stamp,
                 Record::Display(Display::Answer {
@@ -735,17 +692,17 @@ mod tests {
                 }),
             ),
         );
-        app.transient(2, Transient::Died, &rx);
+        app.transient(helper, Transient::Died, &rx);
         let blocks = app
             .tabs
-            .viewport(2)
+            .viewport(helper)
             .expect("the child keeps its viewport through the linger window")
             .probe_figures()
             .0;
 
         let stamp = Stamp::new(Seq::new(2), 0..0);
         app.fact(
-            2,
+            helper,
             &Recorded::new(
                 stamp,
                 Record::Display(Display::Answer {
@@ -754,14 +711,14 @@ mod tests {
             ),
         );
 
-        let all = text(&mut app, 2);
+        let all = text(&mut app, helper);
         assert!(all.contains("alive"), "the final frame survives: {all:?}");
         assert!(
             !all.contains("straggler"),
             "a dying tab admits no post-mortem text: {all:?}"
         );
         assert_eq!(
-            app.tabs.viewport(2).expect("viewport").probe_figures().0,
+            app.tabs.viewport(helper).expect("viewport").probe_figures().0,
             blocks,
             "and gains no block from the events it dropped"
         );

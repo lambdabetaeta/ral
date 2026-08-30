@@ -25,6 +25,7 @@ use ral_core::types::{BuiltinBody, BuiltinEntry, Mooring, Settled};
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub(crate) fn scripted(model: &str, script: Script) -> Arc<Provider> {
     Arc::new(Provider::scripted(model, script))
@@ -40,6 +41,10 @@ pub(crate) struct TestAgentSpec {
     pub(crate) mailbox: Mailbox,
     /// `None` builds a root, `Some` a reporting child of that agent.
     pub(crate) parent: Option<Arc<Agent>>,
+    /// How long this agent has already been idle at birth: `started` is
+    /// backdated by it, so a test can stand past an idle threshold without
+    /// waiting the threshold out.
+    pub(crate) idle: Duration,
     pub(crate) caps: ral_core::types::Capabilities,
     pub(crate) fuel: u32,
     pub(crate) returns: bool,
@@ -66,6 +71,7 @@ impl TestAgentSpec {
             },
             mailbox: crate::bus::Inbox::new().mailbox(),
             parent: None,
+            idle: Duration::ZERO,
             caps: ral_core::types::Capabilities::default(),
             fuel: 0,
             returns: false,
@@ -98,6 +104,7 @@ pub(crate) fn test_agent(
         reach,
         mailbox,
         parent,
+        idle,
         caps,
         fuel,
         returns,
@@ -115,7 +122,9 @@ pub(crate) fn test_agent(
         id,
         name,
         log_dir: PathBuf::from("/nonexistent/test-agent"),
-        started: std::time::Instant::now(),
+        started: std::time::Instant::now()
+            .checked_sub(idle)
+            .expect("a test's backdated birth stays inside the monotonic clock"),
         system: Arc::from(""),
         system_base: system_base.into(),
         index,

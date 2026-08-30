@@ -12,7 +12,8 @@ use crate::agent::Avatar;
 use crate::agent::digest::{COMPACT_THRESHOLD, compaction_trigger};
 use crate::agent::seat::engine_gone;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
-use crate::fleet::{AGENT_DEMOTE_IDLE, AGENT_LEASE_IDLE};
+use crate::fleet::AGENT_LEASE_IDLE;
+use crate::tui::DEMOTE_IDLE;
 use crate::shell_eval;
 use ral_core::serial::FOValue;
 use ral_core::protocol::{ProbeError, Severed};
@@ -503,7 +504,7 @@ impl Avatar {
         ));
         rows.push(ProbeRow::new(
             "agents.demote",
-            AGENT_DEMOTE_IDLE.as_secs(),
+            DEMOTE_IDLE.as_secs(),
             None,
             "warn",
             Some("idle threshold after which a child leaves the tab cycle".to_string()),

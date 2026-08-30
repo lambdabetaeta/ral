@@ -1,19 +1,17 @@
-//! The fleet: the by-name door a spawn claims its identity at, the by-id door
-//! a frontend command arrives through, and the idle lease every reporting
-//! child is bounded by.
+//! The fleet: the by-name door a spawn claims its identity at, and the idle
+//! lease every reporting child is bounded by.
 //!
 //! It is not the tree.  The tree is [`Agent::parent`](crate::agent::Agent)
 //! and [`Agent::children`](crate::agent::Agent), and every walk over it — the
 //! roster, the cancel cascade, the scope check — runs there.  What lives here
-//! is what only the fleet can answer: whether a name is free, and where an id
-//! resolves.
+//! is what only the fleet can answer: whether a name is free.
 //!
 //! A [`Fleet`] is shared behind one `Arc`, held by every agent it enrolled
-//! and by the frontend: the trunk, each fork, and the frontend all reach the
-//! same one, so no node can disagree about what is live.  `names` is a lookup
-//! index; `roots` holds the trunk and every `/branch` — a root reports to
-//! nobody, so a walk over it is how `by_id` and `nearest_reap` reach every
-//! live agent in the run.  Both hold [`Weak`], so an agent leaves the fleet by
+//! by every agent it enrolled: the trunk and each fork reach the same one, so
+//! no node can disagree about what is live.  `names` is a lookup index;
+//! `roots` holds the trunk and every `/branch` — a root reports to nobody, so
+//! a walk over it is how `nearest_reap` reaches every live agent in the
+//! run.  Both hold [`Weak`], so an agent leaves the fleet by
 //! its avatar being dropped and nothing else, and a lookup prunes.
 //!
 //! Each agent carries a generation counter, bumped by its own `/clear`, and
@@ -28,7 +26,6 @@ pub mod roster;
 pub mod schedule;
 
 use crate::agent::Agent;
-use crate::bus::AgentId;
 use crate::sync::LockExt;
 use ral_core::process::{self, CancelCause};
 use std::collections::HashMap;
@@ -42,11 +39,6 @@ use std::time::Duration;
 /// Only a human message renews the clock, so a never-renewed lease fires
 /// exactly this long after birth.
 pub const AGENT_LEASE_IDLE: Duration = Duration::from_hours(1);
-
-/// How long a leased child may sit idle-and-parked before the frontend demotes
-/// its tab out of the TAB cycle.  The fleet owns the clock this measures
-/// against but takes no action of its own at the mark.
-pub const AGENT_DEMOTE_IDLE: Duration = Duration::from_mins(5);
 
 /// The tab-bar contract every agent name must meet.
 ///
@@ -162,18 +154,6 @@ impl Fleet {
             *roots = live.iter().map(Arc::downgrade).collect();
         }
         live
-    }
-
-    /// The live agent behind `id`, or `None` once its avatar has gone — how a
-    /// frontend command, which travels as an id, reaches its target.  A
-    /// pruning walk from [`Self::roots`], since nothing here is keyed by id.
-    pub fn by_id(&self, id: AgentId) -> Option<Arc<Agent>> {
-        self.roots().into_iter().find_map(|root| {
-            if root.id == id {
-                return Some(root);
-            }
-            root.walk().into_iter().find(|node| node.id == id)
-        })
     }
 
     /// At most one agent can match, since [`Self::enrol`] keeps names unique
@@ -613,10 +593,8 @@ mod tests {
         let fleet = Fleet::new();
         let trunk = agent(&fleet, "trunk", None);
         let child = agent(&fleet, "child", Some(&trunk));
-        let id = child.id;
 
-        assert!(fleet.by_id(id).is_some(), "a live agent resolves by id");
-        assert!(fleet.name_live("child"), "and by name");
+        assert!(fleet.name_live("child"), "a live agent resolves by name");
         assert_eq!(
             roster::listing(&trunk).len(),
             1,
@@ -626,10 +604,9 @@ mod tests {
         drop(child);
 
         assert!(
-            fleet.by_id(id).is_none(),
-            "a settled agent resolves nowhere"
+            !fleet.name_live("child"),
+            "a settled agent resolves nowhere, and frees its name"
         );
-        assert!(!fleet.name_live("child"), "and frees its name");
         assert!(
             roster::listing(&trunk).is_empty(),
             "and the walk that looked for it pruned it"

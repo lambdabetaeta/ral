@@ -287,6 +287,23 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the same either way, so no field shifts. The `StateSpan` (state, entry instant,
  characters streamed since) lives on `Viewport`, not `App`, so each tab times
  its own.
+ A tab is a `Weak<Agent>` for reach, the birth facts off its `Born` notice
+ (name, parent, log path) for the record, and a linger clock — one `Tab` per
+ agent the stream has announced, in a single `Vec` in birth order, root first.
+ The frontend holds no `Fleet` and no `Arc<Agent>`: reach is
+ `Tabs::agent(id)`, an upgrade held for one handler and never stored, so the
+ avatar alone decides how long an agent lives. Liveness and death are
+ different questions asked of different things — a failed upgrade says the
+ agent is gone *now*, while `Transient::Died` sits at a *position* in the bus
+ queue, and only that position can say which buffered events preceded it, so
+ `Died` (and `/clear`'s `retire_all`, the frontend declaring death ahead of
+ the fact) remains the death cue and `App::admits` refuses everything after
+ it. The birth facts ride the notice rather than being read back off the
+ agent, so a child that settles before the frontend drains its `Born` still
+ gets a properly labelled, properly indented tab. Demotion — a child idle and
+ parked past `DEMOTE_IDLE` (`tui.rs`, beside `LINGER`) leaving the `TAB`
+ cycle for the matrix strip — is one such projection off the agent's own
+ exchange clock, computed per row per frame and never stored.
  Sub-agent sessions get matrix rows/tabs that linger for 90 seconds
  (`LINGER`, `tui.rs`) after `Died`, each keeping its own scroll position; dead
  rows dim and keep their final step cells without a countdown. The conversing
@@ -409,7 +426,7 @@ Ctrl-C interrupt the *focused tab's* current exchange — never a cascade, never
 subtree kill ([[decisions/260705_cancel-per-tab|cancel-per-tab]]): on the trunk
 they route through `raise_interrupt`, which cancels the trunk's published token
 and asks ral to cancel the current exchange's foreground scope; on any other
-focused tab, the fleet resolves the id (`Fleet::by_id`) and `Agent::interrupt`
+focused tab, the tab's own `Weak` upgrades (`Tabs::agent`) and `Agent::interrupt`
 unwinds that agent's exchange and eval root. Only the trunk `publish`es its token's flag into the
 lock-free process-global slot for the OS signal handler (a handler must not
 lock), so the provider's mid-stream cancel race observes the same cancellation.
@@ -443,7 +460,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/app.rs` — the `App` orchestrator: event routing, the `root_clear_drain` guard, per-kind push methods
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
-        - `tui/tabs.rs` — session/view lifecycle: `Tabs`, viewports, dispatch order, tabs, titles, dying linger, parent chain, focus management, `tick`'s tombstone eviction past `LINGER`
+        - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Viewport`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, focus management and the parent climb, `tick`'s tombstone eviction past `LINGER`
         - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, incremental `Printer::sync` (`rebuild_floor`, `evicted_through`), the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first, retired to `user.log` on the way out), the `Log` transcript writer, `Tombstone`
         - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)

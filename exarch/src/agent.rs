@@ -245,9 +245,9 @@ pub struct Avatar {
     /// [`Self::deliberate`] clears it on entry, so a cancelled or panicking
     /// deliberation cannot poison the next.
     reply: Option<FOValue>,
-    /// The fleet itself, `Arc`-shared with every other node: the name a
-    /// spawn claims and the by-id door a frontend command arrives through.
-    /// Not the tree — that is [`Agent::parent`] and [`Agent::children`].
+    /// The fleet itself, `Arc`-shared with every other node: the name a spawn
+    /// claims, and the lease scan.  Not the tree — that is [`Agent::parent`]
+    /// and [`Agent::children`].
     pub(crate) fleet: Arc<Fleet>,
     /// Input tokens and the event-log position at which that measurement
     /// landed — the numerator for the compaction trigger and pressure nudge.

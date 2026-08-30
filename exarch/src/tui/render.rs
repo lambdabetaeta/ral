@@ -1,7 +1,6 @@
 //! Frame drawing: [`strips`] lays the frame out as a value, [`draw`] paints it
 //! into a [`Term`].
 
-use std::collections::HashMap;
 use std::io::{self, Write};
 
 use crossterm::{
@@ -59,16 +58,11 @@ struct Strips {
     footer: Rect,
 }
 
-/// Lay out `area`.  `queued_h` and `show_tabs` are the two strips whose
-/// presence the caller has already settled from `app`.
-fn strips(app: &App, area: Rect, queued_h: u16, show_tabs: bool) -> Strips {
+/// Lay out `area`.  `queued_h` and `tab_h` are the two strips whose height the
+/// caller has already settled from this frame's rows.
+fn strips(app: &App, area: Rect, queued_h: u16, tab_h: u16) -> Strips {
     let prompt_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
     let prompt_h = app.prompt_state.height_hint(prompt_w, area.height);
-    let tab_h = if show_tabs {
-        u16::try_from(app.tabs.len()).unwrap_or(u16::MAX)
-    } else {
-        0
-    };
     // Settled before the layout: the vertical split keeps full width, so
     // `area.width` stands in for the content row's width.
     let has_pins = app
@@ -119,18 +113,27 @@ fn indent(r: Rect) -> Rect {
 /// Paint one frame into `term`.
 pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     let area = Rect::from((Position::ORIGIN, term.size()?));
+    let focused = app.tabs.focused();
+    let root = app.tabs.root();
+    // Both strips are owned lines, so this frame's rows are read here and
+    // dropped before the transcript's own `&mut` borrow of the focused view.
+    let rows = app.tabs.rows();
     // A lone root gets no tab row at all; a second tab of either kind brings
     // up the matrix, one row per tab, so a demoted agent is never invisible.
-    let demoted = app.demoted();
-    let show_tabs = !demoted.is_empty() || app.tabs.len() - demoted.len() > 1;
+    let tab_h = if rows.len() > 1 {
+        u16::try_from(rows.len()).unwrap_or(u16::MAX)
+    } else {
+        0
+    };
+    let matrix_lines = (tab_h > 0).then(|| matrix_bar(&rows, focused, root, app.matrix_sort));
+    let prompt_hint = prompt_hint(root, app.is_steerable(), app.tabs.focused_name(), focused);
     let queued_lines = queued_lines(app, area);
     let s = strips(
         app,
         area,
         u16::try_from(queued_lines.len()).unwrap_or(u16::MAX),
-        show_tabs,
+        tab_h,
     );
-    let focused = app.tabs.focused();
     // Built before the `viewport_mut` borrow that `render_window` needs.
     let register_lines: Vec<Line<'static>> = match (app.tabs.viewport(focused), s.register) {
         (Some(vp), Some(reg)) => {
@@ -159,29 +162,11 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         offset,
     });
 
-    app.prompt_state.style_prompt(focused == app.tabs.root());
+    app.prompt_state.style_prompt(focused == root);
     let state = app
         .tabs
         .viewport(focused)
         .map_or_else(|| StateSpan::new(AgentState::Ready), Viewport::state);
-    let matrix_lines = show_tabs.then(|| {
-        matrix_bar(
-            &app.tabs.matrix_rows(),
-            app.tabs.names(),
-            app.tabs.parents(),
-            focused,
-            app.tabs.root(),
-            app.tabs.dying_map(),
-            &demoted,
-            app.matrix_sort,
-        )
-    });
-    let prompt_hint = prompt_hint(
-        app.tabs.root(),
-        app.is_steerable(),
-        app.tabs.names(),
-        focused,
-    );
     // Field-wise from here: the editor draws through `&mut prompt_state` while
     // the rest of the frame reads its siblings.
     let App {
@@ -360,13 +345,12 @@ fn paint_hover(app: &App, rows: &mut [Row], offset: usize) {
 fn prompt_hint(
     root: AgentId,
     focused_steerable: bool,
-    names: &HashMap<AgentId, String>,
+    name: &str,
     focused: AgentId,
 ) -> Option<Line<'static>> {
     if focused == root || focused_steerable {
         return None;
     }
-    let name = names.get(&focused).map_or("?", String::as_str);
     Some(Line::from(Span::styled(
         format!(" watching {name} — tab to main to steer "),
         Style::default()

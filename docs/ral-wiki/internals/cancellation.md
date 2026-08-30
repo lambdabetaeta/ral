@@ -198,7 +198,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker, latching if idle; the REPL loop observes the sticky root and exits |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_foreground_cancel(Interrupt)` + ladder `+1`; third press `_exit`s |
 | **SIGTERM / SIGHUP** | any ral host | `handler` (term disposition) | `request_root_cancel(Terminate)` — foreground and detached workers unwind, externals torn down SIGTERM-first, exit 143; ladder `+1`, third delivery `_exit`s |
-| **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent (resolved by id through `Fleet::by_id`); the trunk also `cancel::raise_interrupt` | cancels the focused agent's `Token` and the scope its interrupt target holds; on the trunk, additionally the published `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
+| **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent (reached through that tab's own `Weak`); the trunk also `cancel::raise_interrupt` | cancels the focused agent's `Token` and the scope its interrupt target holds; on the trunk, additionally the published `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
 | **async SIGINT** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's non-escalating `sigint_relay` |

@@ -34,6 +34,8 @@ pub(crate) use emitter::dummy_emitter;
 
 /// The identity of an agent node — the trunk and every forked child alike.
 ///
-/// Opaque, and what crosses the wire: every `agents` tag and frontend command
-/// names a node by this, and the fleet resolves it by a walk from the roots.
+/// Opaque, and what crosses the wire: every `agents` tag and every `Signal`
+/// names a node by this.  It is a routing key, not a door — an `agents` tag
+/// resolves by name through the fleet, and the frontend matches an arriving
+/// id against the tab it was handed at that agent's birth.
 pub type AgentId = u64;

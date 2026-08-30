@@ -26,9 +26,10 @@ pub(super) fn pick_model(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
     let available = store.available();
     // Open on the focused agent's live tuning; a settled one falls back to the
     // defaults.
-    let initial_tuning = ctx
-        .agents
-        .by_id(tui.app.tabs.focused())
+    let initial_tuning = tui
+        .app
+        .tabs
+        .focused_agent()
         .map(|agent| agent.current_provider().tuning().clone())
         .unwrap_or_default();
     let mut picker = Picker::new(
@@ -169,7 +170,7 @@ fn apply_model_switch(
         return;
     };
     // A tab that settled while the picker was open has no handle to swap.
-    let Some(agent) = ctx.agents.by_id(focused) else {
+    let Some(agent) = tui.app.tabs.agent(focused) else {
         tui.app
             .push_error(focused, "the focused agent is no longer live");
         return;

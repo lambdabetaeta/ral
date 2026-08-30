@@ -6,7 +6,7 @@ one agent from another is its *position* — whether it has a parent.** A sub-ag
 is not a different machine: it is an `Agent` ([[map/exarch/agent|agent]]) forked
 from a value-snapshot of its parent's shell, with a narrowed capability ceiling
 and a strong `Arc<Agent>` parent edge. The thin `Fleet` holds what every node
-shares — the by-name and by-id doors, the idle lease, the one event bus, and
+shares — the by-name door, the idle lease, the one event bus, and
 the transport engine ([[decisions/260827_agent-and-avatar|agent-and-avatar]]).
 
 ## One predicate, fixed at construction

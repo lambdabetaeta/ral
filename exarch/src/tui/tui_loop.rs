@@ -17,9 +17,8 @@ use crossterm::event::{
 };
 
 use crate::{
-    agent::{Avatar, Control, Verdict, cancel},
-    bus::{AgentId, BusReceiver, Emitter, FleetBus, Inbox, Pass, Post, Signal},
-    fleet::Fleet,
+    agent::{Agent, Avatar, Control, Verdict, cancel},
+    bus::{BusReceiver, Emitter, FleetBus, Inbox, Pass, Post, Signal},
     provider::{
         self, Provider,
         credential::CredentialStore,
@@ -46,16 +45,14 @@ pub(super) struct Tui {
 
 impl Tui {
     pub fn new(
-        root_id: AgentId,
-        root_log_dir: &Path,
+        root: &Arc<Agent>,
         stderr_log: &Path,
         vi: bool,
         append_log: bool,
         inbox: Inbox,
-        agents: Arc<Fleet>,
     ) -> io::Result<Self> {
         let guard = TerminalGuard::enter(stderr_log)?;
-        let app = App::new(root_id, root_log_dir, vi, append_log, inbox, agents);
+        let app = App::new(root, vi, append_log, inbox);
         Ok(Self { guard, app })
     }
 }
@@ -164,22 +161,17 @@ pub fn run(
 ) -> Result<(), String> {
     let stderr_log = run_dir.join("stderr.log");
     let mut tui = Tui::new(
-        session.agent.id,
-        &session.log_dir(),
+        &session.agent,
         &stderr_log,
         vi,
         session.is_resumed(),
         session.inbox(),
-        session.fleet.clone(),
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
     tui.app.update_live_model(provider, &store.available());
     // A *session*-lived bus, not per-exchange: a detached async child keeps
     // streaming to its tab after the exchange that spawned it ends.
     let bus = FleetBus::session(&session.inbox());
-    // Owned, not borrowed off `session`: the worker below moves `session`
-    // into its closure, so `CommandCtx` cannot hold a borrow across that.
-    let fleet = session.fleet.clone();
     if let Some(s) = seed {
         session.seed(s);
     }
@@ -236,7 +228,6 @@ pub fn run(
     // would deadlock whenever the UI loop dies first.
     let quit_mailbox = session.inbox().mailbox();
     let mut cmd_ctx = CommandCtx {
-        agents: &fleet,
         store,
         catalog,
         info,
@@ -289,10 +280,8 @@ pub fn run(
 
 /// The handles a submitted line is serviced against, bundled so the command
 /// path — `route_submit` into `pick_model` / `login` — threads one context.
-/// `agents` is the same shared map the worker mutates, so an agent it registers
-/// is steerable at once.
+/// Every agent-side reach is the tabs' own, so no fleet handle rides here.
 pub struct CommandCtx<'a> {
-    pub(super) agents: &'a Fleet,
     pub(super) store: &'a mut CredentialStore,
     pub(super) catalog: &'a mut ModelCatalog<LiveSource>,
     pub(super) info: &'a SessionInfo<'a>,
@@ -435,7 +424,7 @@ fn ui_loop(
                         // foreground external child and stamps the ambient
                         // foreground cause, which needs no dispatch to name.
                         KeyAction::Cancel | KeyAction::Interrupt => {
-                            if let Some(agent) = ctx.agents.by_id(focused) {
+                            if let Some(agent) = tui.app.tabs.agent(focused) {
                                 agent.interrupt();
                             }
                             if focused == tui.app.tabs.root() {
@@ -478,7 +467,7 @@ fn ui_loop(
         let now_focus = tui.app.tabs.focused();
         if now_focus != prev_focus {
             dirty = true;
-            if let Some(agent) = ctx.agents.by_id(now_focus) {
+            if let Some(agent) = tui.app.tabs.agent(now_focus) {
                 tui.app
                     .update_live_model(&agent.current_provider(), &ctx.store.available());
             }

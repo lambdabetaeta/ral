@@ -6,13 +6,14 @@
 use super::line;
 use super::palette::{AGENT_HUES, SLATE};
 use super::rail;
+use super::tabs::TabRow;
 use super::viewport::Viewport;
 use crate::bus::AgentId;
 use crate::provider;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Row order for the matrix: `Spawn` leaves the spawn tree alone (roots first,
 /// each one's descendants depth-first, in birth order); `Cost` keeps that same
@@ -51,21 +52,13 @@ fn focus_label(name: &str, hue: Color, focused: bool, dying: bool) -> (String, S
 /// One row per live session, columns `label  steps  tokens  sizebar`, each row in
 /// its agent's rail hue so matrix and rail name the same agent the same colour.
 ///
-/// `demoted` maps an idle, parked tab to its idle span; such a row renders
+/// A row the tabs report demoted — idle and parked past the mark — renders
 /// compact and sinks into a block below every promoted row whatever `sort` says,
 /// so a live agent is demoted but never dropped.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one frame's worth of render-time projection inputs; a parameter object would only rename this list, not shorten it"
-)]
 pub(super) fn matrix_bar(
-    rows: &[(AgentId, &Viewport)],
-    names: &HashMap<AgentId, String>,
-    parents: &HashMap<AgentId, AgentId>,
+    rows: &[TabRow<'_>],
     focused: AgentId,
     root: AgentId,
-    dying: &HashMap<AgentId, Instant>,
-    demoted: &HashMap<AgentId, Duration>,
     sort: MatrixSort,
 ) -> Vec<Line<'static>> {
     // The ramp is relative to this frame's heaviest spender, because token
@@ -74,47 +67,30 @@ pub(super) fn matrix_bar(
     // ramp for everyone else.
     let max_tokens = rows
         .iter()
-        .filter(|(id, _)| *id != root)
-        .map(|(_, vp)| {
-            let u = vp.usage();
-            u.input + u.output
-        })
+        .filter(|row| row.id != root)
+        .map(token_spend)
         .max()
         .unwrap_or(0);
     // A demoted tab has no place in the tree: it sinks into a flat block below
     // every promoted row, whatever `sort` and parentage say.
     let mut demoted_idx: Vec<usize> = (0..rows.len())
-        .filter(|&i| demoted.contains_key(&rows[i].0))
+        .filter(|&i| rows[i].demoted.is_some())
         .collect();
     if sort == MatrixSort::Cost {
-        demoted_idx.sort_by_key(|&i| std::cmp::Reverse(token_spend(rows, i)));
+        demoted_idx.sort_by_key(|&i| std::cmp::Reverse(token_spend(&rows[i])));
     }
     let promoted_idx: Vec<usize> = (0..rows.len())
-        .filter(|&i| !demoted.contains_key(&rows[i].0))
+        .filter(|&i| rows[i].demoted.is_none())
         .collect();
-    let mut display_rows: Vec<MatrixRow> = forest_order(&promoted_idx, rows, parents, sort)
+    let mut display_rows: Vec<MatrixRow> = forest_order(&promoted_idx, rows, sort)
         .into_iter()
-        .map(|(i, depth)| {
-            let id = rows[i].0;
-            MatrixRow::new(
-                id, rows[i].1, names, focused, root, dying, None, max_tokens, depth,
-            )
-        })
+        .map(|(i, depth)| MatrixRow::new(&rows[i], focused, root, max_tokens, depth))
         .collect();
-    display_rows.extend(demoted_idx.into_iter().map(|i| {
-        let id = rows[i].0;
-        MatrixRow::new(
-            id,
-            rows[i].1,
-            names,
-            focused,
-            root,
-            dying,
-            demoted.get(&id).copied(),
-            max_tokens,
-            0,
-        )
-    }));
+    display_rows.extend(
+        demoted_idx
+            .into_iter()
+            .map(|i| MatrixRow::new(&rows[i], focused, root, max_tokens, 0)),
+    );
     let widths = MatrixWidths::measure(&display_rows);
     display_rows
         .into_iter()
@@ -122,41 +98,36 @@ pub(super) fn matrix_bar(
         .collect()
 }
 
-fn token_spend(rows: &[(AgentId, &Viewport)], i: usize) -> u64 {
-    let u = rows[i].1.usage();
+fn token_spend(row: &TabRow<'_>) -> u64 {
+    let u = row.vp.usage();
     u.input + u.output
 }
 
-/// Depth-first walk of the forest `parents` describes over `idx`, each index
-/// paired with its depth.  A root is an id `parents` does not name, or whose
-/// parent is not itself in `idx`.  [`MatrixSort::Cost`] reorders each sibling
-/// group alone, so the tree survives the sort.
-fn forest_order(
-    idx: &[usize],
-    rows: &[(AgentId, &Viewport)],
-    parents: &HashMap<AgentId, AgentId>,
-    sort: MatrixSort,
-) -> Vec<(usize, usize)> {
-    let live: HashSet<AgentId> = idx.iter().map(|&i| rows[i].0).collect();
+/// Depth-first walk of the forest the rows' parents describe over `idx`, each
+/// index paired with its depth.  A root is a row with no parent, or whose parent
+/// is not itself in `idx`.  [`MatrixSort::Cost`] reorders each sibling group
+/// alone, so the tree survives the sort.
+fn forest_order(idx: &[usize], rows: &[TabRow<'_>], sort: MatrixSort) -> Vec<(usize, usize)> {
+    let live: HashSet<AgentId> = idx.iter().map(|&i| rows[i].id).collect();
     let mut children: HashMap<AgentId, Vec<usize>> = HashMap::new();
     let mut roots: Vec<usize> = Vec::new();
     for &i in idx {
-        match parents.get(&rows[i].0) {
-            Some(p) if live.contains(p) => children.entry(*p).or_default().push(i),
+        match rows[i].parent {
+            Some(p) if live.contains(&p) => children.entry(p).or_default().push(i),
             _ => roots.push(i),
         }
     }
     if sort == MatrixSort::Cost {
-        roots.sort_by_key(|&i| std::cmp::Reverse(token_spend(rows, i)));
+        roots.sort_by_key(|&i| std::cmp::Reverse(token_spend(&rows[i])));
         for kids in children.values_mut() {
-            kids.sort_by_key(|&i| std::cmp::Reverse(token_spend(rows, i)));
+            kids.sort_by_key(|&i| std::cmp::Reverse(token_spend(&rows[i])));
         }
     }
     let mut out = Vec::with_capacity(idx.len());
     let mut stack: Vec<(usize, usize)> = roots.into_iter().rev().map(|i| (i, 0)).collect();
     while let Some((i, depth)) = stack.pop() {
         out.push((i, depth));
-        if let Some(kids) = children.get(&rows[i].0) {
+        if let Some(kids) = children.get(&rows[i].id) {
             stack.extend(kids.iter().rev().map(|&k| (k, depth + 1)));
         }
     }
@@ -205,30 +176,23 @@ struct MatrixRow {
 }
 
 impl MatrixRow {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one row's worth of render-time projection inputs; a parameter object would only rename this list, not shorten it"
-    )]
     fn new(
-        id: AgentId,
-        vp: &Viewport,
-        names: &HashMap<AgentId, String>,
+        row: &TabRow<'_>,
         focused: AgentId,
         root: AgentId,
-        dying: &HashMap<AgentId, Instant>,
-        idle: Option<Duration>,
         max_tokens: u64,
         depth: usize,
     ) -> Self {
+        let (id, vp) = (row.id, row.vp);
         let hue = AGENT_HUES
             .get(vp.agent().0 as usize)
             .copied()
             .unwrap_or(AGENT_HUES[0]);
-        let dim = dying.contains_key(&id);
+        let dim = row.lingering;
+        let idle = row.demoted;
         let demoted = idle.is_some();
 
-        let name = names.get(&id).map_or("?", String::as_str);
-        let truncated: String = name.chars().take(MATRIX_LABEL_W).collect();
+        let truncated: String = row.name.chars().take(MATRIX_LABEL_W).collect();
         let (bracketed, label_style) = if demoted {
             (format!(" {truncated} "), Style::default().fg(SLATE))
         } else {
@@ -238,10 +202,7 @@ impl MatrixRow {
         // reads `[name]` and `MATRIX_LABEL_W` truncates only the name.
         let label = format!("{}{bracketed}", "  ".repeat(depth));
 
-        let tokens = {
-            let u = vp.usage();
-            u.input + u.output
-        };
+        let tokens = token_spend(row);
         let value = relative_value_step(tokens, max_tokens);
         let token_style = Style::default()
             .fg(rail::lighten(hue, value))

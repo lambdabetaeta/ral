@@ -27,6 +27,7 @@ pub use view::{Block, BlockKind, View};
 pub(crate) use log::FleetSink;
 
 use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord, ToolResult, UsageDelta};
+use crate::agent::Agent;
 use crate::bus::card::Card;
 use crate::bus::{AgentId, AgentState};
 use crate::provider::Tuning;
@@ -35,6 +36,7 @@ use ral_core::serial::FOValue;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Weak;
 
 /// One fact a session recorded, in one of three classes.
 ///
@@ -380,7 +382,13 @@ pub enum Transient {
     /// whatever line each lane still has open, since no record will cover it.
     Boundary,
     Born {
+        /// The frontend's one handle on the agent, weak: a failed upgrade is a
+        /// settled agent, and nothing but its avatar may keep it alive.
+        agent: Weak<Agent>,
         log_dir: PathBuf,
+        /// Carried rather than read back off `agent`, because these are what
+        /// the frontend must still know once the `Weak` is dead: a lingering
+        /// row's label and indentation, the tombstone's log path.
         name: String,
         /// `None` for a `/branch` child: it roots its own tab tree, and that
         /// is what `/close` reads to know what it may kill.
