@@ -23,9 +23,12 @@ the stack. A terminal has two shapes, `Terminal::Value(v)` and
 value, so a `Lam` in focus returns as `Lambda` and the frame above decides:
 `Apply` consumes it by β, a computation-holed frame (`Redirect`, `Unmask`,
 `Within`, `Grant`, `Try`, `Chain`) passes it through, a value-holed frame
-(`To`, `Decode`, `Capture`, `Source`, `Guard`, `Cleanup`, `Audit`) halts with
-the bare-lambda error — unreachable for a checked program, since the checker
+(`To`, `Capture`, `Source`, `Guard`, `Cleanup`, `Audit`) halts with the
+bare-lambda error — unreachable for a checked program, since the checker
 η-expands every arrow-typed computation into a thunked λ (SPEC §17.8, S3).
+`Decode` has no frame: the kernel's `decode` takes a value, so it closes and
+reads it inline in `step_eval`, and the checker reaches it through a bind
+over `Capture` rather than nesting the two.
 
 **One thunk value.** `Value::Thunk(Closure)` is a computation closure held
 as data; `force` of it puts the closure in focus and pushes nothing, so
@@ -75,7 +78,7 @@ Levy's `rec f. M`. Cancellation is polled here and at `Bind`, `App`, `Exec`,
 (`core/src/types/env.rs`) is three tiers — the language natives, the frozen
 prelude, and a persistent `imbl::HashMap` of everything bound since. `bind`
 is an insert that disturbs no environment a closure captured; `clone` is
-O(1). The **store** is everything else on `Shell`: sinks, `$?`, the dynamic
+O(1). The **store** is everything else on `Shell`: sinks, the dynamic
 `Context` (grants, handlers, env overrides, cwd, args, modules, hooks), the
 trail, workers, leases. `Context` is read in O(1) by capability checks and
 command dispatch and changed only by frames holding their own undo; it is
@@ -111,7 +114,7 @@ rule holds a `PipeNode` — the process group, the running stages, the yield
 mode — which it `launch`es and `join`s (collect, then finish) in one step:
 no frame, because nothing runs beneath the node; the outcome climbs the
 parent's frames like any other rule's terminal. What crosses to a stage
-is `WireShell { env, last_status, stack_limit, context }`: the bindings tier
+is `WireShell { env, stack_limit, context }`: the bindings tier
 of one environment, interned by the identity of its root, seated under the
 receiver's own natives and prelude — the two constant tiers never cross —
 and **no frame ever crosses**: a stage's stack is empty by construction.
@@ -119,7 +122,7 @@ and **no frame ever crosses**: a stage's stack is empty by construction.
 **Panics and cancellation.** `evaluate`/`apply` wrap the step loop in
 `catch_unwind`; on a panic every frame is `abandon`ed top-down — sinks
 restored, redirects torn down, trail scopes closed, undo applied — and the
-run door restores its checkpoint `(env, context, last_status)`, so a panic
+run door restores its checkpoint `(env, context)`, so a panic
 commits nothing. The depth counter is lowered on both paths.
 
 See also [[design/cbpv|cbpv]], [[design/scoping|scoping]],
@@ -127,5 +130,6 @@ See also [[design/cbpv|cbpv]], [[design/scoping|scoping]],
 [[decisions/260826_the-evaluator-steps-closures|the-evaluator-steps-closures]];
 code maps [[map/core/evaluator|evaluator]],
 [[map/core/shell-state|shell-state]], [[map/core/runtime|runtime]]. The
-formal account is `docs/SPEC.md` §17.8; the kernel in
-`dev/abstract-machines` is due to be rewritten as this machine.
+formal account is `docs/SPEC.md` §17.8. The Agda kernel (`dev/agda`) is a
+substitution-based CK machine and stays one: a closure machine is a
+refinement to be proved against it, not its foundation.

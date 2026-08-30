@@ -862,8 +862,7 @@ announce
 A block captures lexical bindings when the block is created. Its body runs in
 a fresh local scope. Bindings created by the body do not escape. Changes to
 the current directory and other block-local shell state also do not escape.
-The block's output, result, failure, audit records, and final status remain
-observable.
+The block's output, result, failure, and audit records remain observable.
 
 ```ral
 let outside = 'outer'
@@ -1634,8 +1633,8 @@ The scrutinee must be a variant. `case` runs the arm whose tag matches it,
 binding the variant's payload to that arm's pattern; a nullary variant binds
 `()`. The arm has a fresh lexical scope for that binding, but it is a branch
 and not a function applied to the payload: it runs in the surrounding shell
-context, so the arm's own changes — the recorded status among them — remain in
-place after the `case`, as an `if` body's do.
+context, so the arm's own changes remain in place after the `case`, as an
+`if` body's do.
 
 An arm's body is an ordinary computation, and either spelling reaches it. A
 block with one binder writes the branch out. Any other atom names the
@@ -1982,15 +1981,15 @@ Redirects apply to handler dispatch just as they do to other command calls. Byte
 
 ### 9.7. State flow and containment
 
-The body of `within` is a block. It runs with a fresh lexical frame and discards its mobile program state when it closes. Bindings, aliases, module registrations, handler changes, cwd changes, and similar mutations made inside do not escape. The final command status does escape and becomes the caller’s recorded status.
+The body of `within` is a block. It runs with a fresh lexical frame and discards its mobile program state when it closes. Bindings, aliases, module registrations, handler changes, cwd changes, and similar mutations made inside do not escape.
 
 Boundary rules are deliberately specific:
 
-- A forced block enters with the caller’s current status and returns only its final status; cwd and bindings remain private.
-- An ordinary lambda call enters with status 0. Its final status and logical cwd flow back to its caller, while its lexical locals remain private. Inside a surrounding `within dir`, that dynamic directory override still wins, and the enclosing block ultimately contains the cwd change.
+- A forced block returns only its value; cwd and bindings remain private.
+- An ordinary lambda call returns its value, and its logical cwd flows back to its caller, while its lexical locals remain private. Inside a surrounding `within dir`, that dynamic directory override still wins, and the enclosing block ultimately contains the cwd change.
 - Ordinary application and bind run sequentially in the evaluator, so they follow the ordinary function and block rules and do not create pipeline stages.
-- Each stage of a process-staged pipeline runs in a child process with a snapshot of the active lexical and dynamic context. Stage-local bindings, cwd changes, environment changes, aliases, and handlers do not return. If every stage succeeds, the final stage determines the pipeline status. Otherwise the first stage failure observed in launch order is propagated; a control escape takes priority over an ordinary failure. Returned values and audit data cross only through their defined channels.
-- A spawned worker receives the closure’s lexical capture and a snapshot of the dynamic context, including directory, environment, handlers, arguments, and grants. It starts with status 0. Its cwd, bindings, and later dynamic changes remain private, while its result returns through the handle.
+- Each stage of a process-staged pipeline runs in a child process with a snapshot of the active lexical and dynamic context. Stage-local bindings, cwd changes, environment changes, aliases, and handlers do not return. If every stage succeeds, the pipeline's value is the final stage's. Otherwise the first stage failure observed in launch order is propagated; a control escape takes priority over an ordinary failure. Returned values and audit data cross only through their defined channels.
+- A spawned worker receives the closure’s lexical capture and a snapshot of the dynamic context, including directory, environment, handlers, arguments, and grants. Its cwd, bindings, and later dynamic changes remain private, while its result returns through the handle.
 - An external process receives the effective cwd and environment at launch. It cannot mutate ral’s shell state.
 
 These containment rules are the same on every supported host. Host differences affect executable lookup, path syntax, and the implementation of process-staged pipelines and process control, not lexical scope, handler precedence, or dynamic restoration.
@@ -2034,7 +2033,7 @@ Only real script files have this identity. Using `$SCRIPT` in the REPL, `-c`, st
 
 Without an explicit script or `-c`, ral starts the REPL when standard input is a terminal and reads a batch program otherwise. `-i` forces the REPL; `-s` forces a standard-input program and takes precedence over `-i`. An explicit script path takes precedence over both.
 
-A successful batch program exits with its final recorded status. `exit n` exits with `n`. Parse errors, type errors, runtime errors, and failed external commands produce a nonzero status and an explanatory diagnostic. Process exit statuses are reduced to the range 0 through 255.
+A successful batch program exits with status 0. `exit n` exits with `n`. Parse errors, type errors, runtime errors, and failed external commands produce a nonzero status and an explanatory diagnostic. Process exit statuses are reduced to the range 0 through 255.
 
 ### 10.2. Ambient program values
 
@@ -2070,7 +2069,7 @@ Environment overrides are dynamically scoped. They affect `$ENV`, `$USER`, home 
 
 `cd path` changes the session’s logical working directory. Relative paths, file operations, module loads without a containing file, command lookup, and child processes all use it. A top-level `cd` persists into later runs. A `within [dir: path]` override lasts only for its body.
 
-A function call carries its `cd` result back to its caller. A forced block is a local computation boundary: its bindings and working-directory changes are discarded when it finishes, while its final status is retained.
+A function call carries its `cd` result back to its caller. A forced block is a local computation boundary: its bindings and working-directory changes are discarded when it finishes; only its value remains.
 
 ### 10.3. Loading a file with `source`
 
@@ -2995,7 +2994,7 @@ Batch-mode exit status distinguishes static phases:
 | type checking | 1 |
 | runtime error or explicit `exit` | the resulting status, clamped to 0–255 |
 
-Successful execution returns the shell's final status. Diagnostics go to
+Successful execution exits 0. Diagnostics go to
 standard error; they are never a payload and never pipeline traffic.
 
 ### 13.3. The audit trail
@@ -3061,7 +3060,7 @@ A `command` observation — a builtin, external, or bundled call — adds:
 | Field | Type | Meaning |
 |---|---|---|
 | `argv` | `[String]` | the shown name first, then its evaluated arguments |
-| `status` | `Int` | the exit status observed |
+| `status` | `Int` | the outcome's status: 0 for a command that returned, otherwise its error's exit code |
 | `origin` | `String` | `builtin`, `external`, or `detached` |
 | `stdout` | `Bytes` | raw bytes observed on fd 1 |
 | `stderr` | `Bytes` | raw bytes observed on fd 2 |
@@ -3954,7 +3953,7 @@ Parse and elaboration failures print source-labelled diagnostics and exit 2. Typ
 
 At runtime:
 
-- a normal completion returns the shell’s last command status;
+- a normal completion exits 0;
 - `exit N` returns `N`;
 - a raised runtime error prints a source-labelled diagnostic and returns that error’s status;
 - on Unix, an escaped stopped job returns 1.
@@ -4651,9 +4650,7 @@ The central rules are:
 
 ⟨M to p.N, Γ⟩ / κ, Σ  ⟶  ⟨M, Γ⟩ / (to p.N, Γ) :: κ, Σ      To-push
 value v / (to p.N, Γ) :: κ, Σ  ⟶  ⟨N, Γ[p ↦ v]⟩ / κ, Σ      To-return
-
-value v / (·;N, Γ) :: κ, Σ  ⟶  ⟨N, Γ⟩ / κ, Σ
-error e / (·;N, Γ) :: κ, Σ  ⟶  error e / κ, Σ                Propagate
+error e / (to p.N, Γ) :: κ, Σ  ⟶  error e / κ, Σ             Propagate
 ```
 
 `M to p.N` pushes its frame *before* `M` runs, carrying the environment `N`
@@ -4665,9 +4662,8 @@ branch, closed over the same `Γ`. `case` evaluates the scrutinee, selects the
 arm carrying its tag, and runs that arm's body closed over `Γ[p ↦ payload]` —
 `()` for a nullary tag. The body is a branch and not an applied function: it
 runs in the `case`'s own tail position and in the ambient shell context, so a
-tail call in an arm costs no frame just as one in an `if` body does not, the
-recorded status enters the arm as the scrutinee left it, and the arm's own
-effects on the shell outlive the `case`.
+tail call in an arm costs no frame just as one in an `if` body does not, and
+the arm's own effects on the shell outlive the `case`.
 
 Recursion is one frame form, `Rec`, n-ary: `letrec {xi = vi}` binds every
 group member's name to the thunk of its own projection and puts the chosen

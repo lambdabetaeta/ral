@@ -73,6 +73,9 @@ The kernel's term formers are now `_to_`, `_؛_`, `_∣_`, `exec`, `capture`,
 `decode`, `rec`. `decode : F[Value] Bytes → F[Value] String` is the one partial
 former, and it is where the Agda model carries the failure clause.
 
+> **2026-08-30.** `_؛_` is no longer a former: the kernel has one bind,
+> `_to_`, at either route, and `M ؛ N` is `M to shift N` (`Core.Derived`).
+>
 > **Superseded in its facts, not its decision (2026-08-19).** The decision above
 > stands: the coercion is syntax, and `Decode(Capture(M))` is what the checker
 > writes. What has moved is everything this page says about the *model* below.
