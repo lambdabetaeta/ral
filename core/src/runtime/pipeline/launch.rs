@@ -5,7 +5,7 @@
 //! gates — so a leaked pipe end is a borrow error.
 
 use super::super::command;
-use super::collect::Running;
+use super::collect::{Running, StageObservation, observe_external_stage};
 use super::group::PipelineGroup;
 use super::protocol::DeferredFrame;
 use super::resolve::{ExternalStage, PipelinePlan, StageLaunch, StageSpec};
@@ -13,6 +13,7 @@ use super::route::{ByteIn, ByteOut, FinalValue, StageRoute, open_stage_routes};
 use super::stage::{HelperStageHandle, launch_helper_stage};
 use crate::child_eval::pack_request;
 use crate::io::Sink;
+use crate::process::StageKill;
 use crate::types::{Break, Env, Mooring, Settled, Shell};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -21,17 +22,83 @@ use std::sync::Arc;
 /// duplicate of its outbound edge's read end, in the collector's care until
 /// this stage's observation completes.
 pub(super) struct StageHandle {
-    pub(super) kind: StageKind,
-    pub(super) held_edge: Option<os_pipe::PipeReader>,
+    kind: StageKind,
+    held_edge: Option<os_pipe::PipeReader>,
     /// Mirrors `StageSpec::feeds_pipe`: whether this stage's stdout can
     /// still reach the interior edge, so the collector knows when a dead
     /// reader downstream is none of this stage's business at all.
-    pub(super) feeds_pipe: bool,
+    feeds_pipe: bool,
+    /// Private to this module and reachable only through
+    /// [`StageHandle::kill_for_dead_reader`], so no stage can be forgiven a
+    /// death nothing sent it.
+    kill: StageKill,
 }
 
-pub(super) enum StageKind {
+enum StageKind {
     External(command::RunningChild),
     Helper(HelperStageHandle),
+}
+
+impl StageHandle {
+    /// End a stage that now writes for nobody — its reader stage has already
+    /// been observed — and record the kill in the same breath: this is the
+    /// only way to reach `StageKill::Sent`.  Idempotent, and a no-op for a
+    /// stage whose stdout never reached the interior edge, since the collector
+    /// reaches this on every pass until the stage settles.
+    pub(super) fn kill_for_dead_reader(&mut self) {
+        if self.kill == StageKill::Sent || !self.feeds_pipe {
+            return;
+        }
+        match &mut self.kind {
+            StageKind::External(c) => c.kill_for_dead_reader(),
+            StageKind::Helper(h) => h.running.kill_for_dead_reader(),
+        }
+        self.kill = StageKill::Sent;
+    }
+
+    /// One non-blocking probe: whether this stage is ready to observe.
+    pub(super) fn try_settle(&mut self) -> bool {
+        match &mut self.kind {
+            StageKind::External(c) => c.try_settle(),
+            StageKind::Helper(h) => h.running.try_settle(),
+        }
+    }
+
+    /// Reduce a settled stage to its observation, then release the held-open
+    /// read end — only now that the writer is reaped, so any descendant of that
+    /// edge still blocked writing into it is freed.
+    pub(super) fn observe(
+        self,
+        shell: &Shell,
+        is_last: bool,
+        started: std::time::Instant,
+    ) -> StageObservation {
+        let Self {
+            kind,
+            held_edge,
+            kill,
+            ..
+        } = self;
+        let obs = match kind {
+            StageKind::External(c) => observe_external_stage(c, kill, shell, started),
+            StageKind::Helper(h) => h
+                .observe(shell, kill, is_last, started)
+                .unwrap_or_else(StageObservation::from_break),
+        };
+        drop(held_edge);
+        obs
+    }
+
+    /// Let a stage go without killing or reaping it, for a pipeline a sibling's
+    /// stop has parked.  `held_edge` drops with it: a resumed producer whose
+    /// reader has died must take an ordinary EPIPE, since resume reaps only the
+    /// leader and sends no reader-gone kill.
+    pub(super) fn abandon(self) {
+        match self.kind {
+            StageKind::External(c) => c.abandon(),
+            StageKind::Helper(h) => h.abandon(),
+        }
+    }
 }
 
 /// Route stdin for the stage on the pipeline's input boundary, consuming
@@ -200,6 +267,7 @@ fn spawn_stage(
                     kind: StageKind::External(handle),
                     held_edge,
                     feeds_pipe: spec.feeds_pipe,
+                    kill: StageKill::NotSent,
                 },
                 gate: None,
             });
@@ -232,6 +300,7 @@ fn spawn_stage(
             kind: StageKind::Helper(handle),
             held_edge,
             feeds_pipe: spec.feeds_pipe,
+            kill: StageKill::NotSent,
         },
         gate: Some(deferred),
     })

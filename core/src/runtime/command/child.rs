@@ -474,22 +474,23 @@ impl RunningChild {
 }
 
 impl RunningChild {
-    /// Wait, classify, and join the drainers: the user-visible exit code
-    /// paired with whatever failure the outcome maps to.  `kill` says whether
-    /// the pipeline collector itself sent this stage its kill because its
-    /// reader was already reaped — the one death `CommandFailure::from_outcome`
-    /// forgives.  The pipeline collector and the helper stage in
+    /// Wait, classify, and join the drainers: the failure the outcome amounts
+    /// to, or `None` for success.  `kill` says whether the pipeline collector
+    /// itself sent this stage its kill because its reader was already reaped —
+    /// the one death `CommandFailure::from_outcome` forgives, and the reason
+    /// the raw status does not come back beside the verdict: a caller holding
+    /// both can branch on the un-forgiven one.  Where a status still means
+    /// something it is `failure.to_user_exit_code()`, reachable only inside
+    /// `Some`.  The pipeline collector and the helper stage in
     /// `runtime::pipeline` both reduce a child this way, so it lives here once.
     pub(crate) fn observe(
         self,
         kill: crate::process::StageKill,
-    ) -> Settled<(i32, Option<crate::process::CommandFailure>)> {
+    ) -> Settled<Option<crate::process::CommandFailure>> {
         let waited = self.wait()?;
-        let outcome = waited.outcome;
-        let code = outcome.to_user_exit_code();
-        let failure = crate::process::CommandFailure::from_outcome(outcome, kill);
+        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, kill);
         waited.drain();
-        Ok((code, failure))
+        Ok(failure)
     }
 
     /// One non-blocking probe: note the child's end or stop if it has one,
@@ -535,7 +536,6 @@ impl RunningChild {
     /// stage has parked the pipeline pgid: the kernel holds every stage stopped,
     /// and the pumps exit when a later `fg` runs the pipeline out.  Disarms
     /// `Drop`, group release included — that stays with `PipelineGroup`.
-    #[cfg(unix)]
     pub(crate) fn abandon(mut self) {
         let _ = self.child.take();
         let _ = self.pump.take();
@@ -655,13 +655,17 @@ mod tests {
             scope.cancel(CancelCause::Deadline);
         });
 
-        let (code, failure) = running
+        let failure = running
             .observe(crate::process::StageKill::NotSent)
-            .expect("wait should not error");
+            .expect("wait should not error")
+            .expect("a torn-down child is a failure");
         canceller.join().expect("canceller thread");
 
-        assert_eq!(code, 128 + libc::SIGTERM, "the status must not shift");
-        let failure = failure.expect("a torn-down child is a failure");
+        assert_eq!(
+            failure.to_user_exit_code(),
+            128 + libc::SIGTERM,
+            "the status must not shift"
+        );
         assert_eq!(
             failure.message("sleep"),
             "sleep: stopped because the call's time limit expired"

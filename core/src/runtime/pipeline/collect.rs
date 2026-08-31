@@ -11,62 +11,48 @@
 //! order, over observations buffered during the walk.
 
 use super::super::command;
-use super::launch::{StageHandle, StageKind};
+use super::launch::StageHandle;
 use crate::evaluator::audit::observe_stamped;
 use crate::process::StageKill;
 use crate::types::{
-    AuditFragment, AuditIo, Break, CommandOrigin, Error, Escape, Mooring, Observation, Observed,
-    Settled, Shell, Value, epoch_us,
+    AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Observed, Settled,
+    Shell, Value, epoch_us,
 };
+/// Only the park has a use for the escape's payload, and only Unix parks.
+#[cfg(unix)]
+use crate::types::Escape;
 
 /// Wait on a direct-spawn external stage and reduce it to a [`StageObservation`].
 ///
 /// Such a stage has no audit-emitting evaluator behind it, so its one command
 /// node is synthesised here to keep it level with helper-routed stages.
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "sibling of `HelperStageHandle::observe` in the collect match; both arms must yield the same `Settled<StageObservation>` so the fold can `unwrap_or_else` uniformly."
-)]
-fn observe_external_stage(
+pub(super) fn observe_external_stage(
     running: command::RunningChild,
     kill: StageKill,
     shell: &Shell,
     started: std::time::Instant,
-) -> Settled<StageObservation> {
+) -> StageObservation {
     let name = running.name.clone();
-    let (code, failure) = match running.observe(kill) {
-        Ok(pair) => pair,
-        Err(br) => return Ok(StageObservation::from_break(br)),
+    let failure = match running.observe(kill) {
+        Ok(failure) => failure,
+        Err(br) => return StageObservation::from_break(br),
     };
-    let effective = if failure.is_none() { 0 } else { code };
-
     let err = failure.map(|f| Error::from_command_failure(&name, f, shell));
-    let audit = synth_external_stage_audit(shell, &name, err.as_ref(), effective);
-
-    if let Some(err) = err {
-        let err = super::augment_stage_failure(err, shell, started);
-        Ok(StageObservation::failure(err).with_audit(audit))
-    } else {
-        Ok(StageObservation::ok().with_audit(audit))
+    let audit = synth_external_stage_audit(shell, &name, err.as_ref());
+    match err {
+        Some(err) => StageObservation::failure(super::augment_stage_failure(err, shell, started))
+            .with_audit(audit),
+        None => StageObservation::ok().with_audit(audit),
     }
 }
 
 /// The fragment is empty when audit is inactive at the parent.
-fn synth_external_stage_audit(
-    shell: &Shell,
-    name: &str,
-    err: Option<&Error>,
-    status: i32,
-) -> AuditFragment {
+fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) -> AuditFragment {
     if !shell.local.audit.active() {
         return AuditFragment::empty();
     }
     let site = shell.call_site();
     let principal = shell.context.principal();
-    let (status, value, error) = match err {
-        Some(e) => (e.exit_code(), Value::Unit, Some(e.message.clone())),
-        None => (status, Value::Unit, None),
-    };
     let now = epoch_us();
     let obs = Observation::spanning(
         site,
@@ -75,65 +61,48 @@ fn synth_external_stage_audit(
         principal,
         Observed::Command {
             argv: vec![name.to_string()],
-            status,
+            status: err.map_or(0, Error::exit_code),
             origin: CommandOrigin::External,
             io: AuditIo::default(),
-            error,
-            value,
+            error: err.map(|e| e.message.clone()),
+            value: Value::Unit,
         },
     );
     AuditFragment::from_observations(vec![obs])
 }
 
-/// Semantic outcome for one stage.
-///
-/// `Control` carries an [`Escape`], not a [`Break`], so no error — semantic
-/// or protocol-layer — can be read as a control signal.
-pub(super) enum StageOutcome {
-    Ok,
-    Failure(Error),
-    Control(Escape),
-}
-
 /// One stage's observation, normalized across external children and ral
-/// helpers.  `final_value` is set only by the final value-typed ral stage.
+/// helpers.  `final_value` is set only by the final value-typed ral stage,
+/// so a stage that broke carries none.
+///
+/// The break is a [`Break`], whose own two constructors are already the
+/// classification the fold needs: a protocol-layer failure (report pipe,
+/// frame decode, waitpid) arrives as `Error` like any other, and only an
+/// `Escape` is control flow.
 pub(super) struct StageObservation {
-    pub(super) outcome: StageOutcome,
-    pub(super) final_value: Option<Value>,
-    pub(super) audit: AuditFragment,
+    pub(super) break_: Option<Break>,
+    final_value: Option<Value>,
+    audit: AuditFragment,
 }
 
 impl StageObservation {
     pub(super) fn ok() -> Self {
         Self {
-            outcome: StageOutcome::Ok,
+            break_: None,
             final_value: None,
             audit: AuditFragment::empty(),
         }
     }
 
     pub(super) fn failure(error: Error) -> Self {
-        Self {
-            outcome: StageOutcome::Failure(error),
-            final_value: None,
-            audit: AuditFragment::empty(),
-        }
+        Self::from_break(Break::Error(error))
     }
 
-    pub(super) fn control(escape: Escape) -> Self {
-        Self {
-            outcome: StageOutcome::Control(escape),
-            final_value: None,
-            audit: AuditFragment::empty(),
-        }
-    }
-
-    /// A protocol-layer break (report pipe, frame decode, waitpid) lands here
-    /// as an ordinary failure; only an escape is control flow.
     pub(super) fn from_break(br: Break) -> Self {
-        match br {
-            Break::Error(err) => Self::failure(err),
-            Break::Escape(esc) => Self::control(esc),
+        Self {
+            break_: Some(br),
+            final_value: None,
+            audit: AuditFragment::empty(),
         }
     }
 
@@ -148,19 +117,9 @@ impl StageObservation {
     }
 }
 
-/// The one break `finish` surfaces once every stage has been observed.
-enum PipelineBreak {
-    Failure(Error),
-    Control(Escape),
-}
-
 pub(super) struct PipelineCollector {
-    break_: Option<PipelineBreak>,
+    break_: Option<Break>,
     final_value: Option<Value>,
-    /// Set when a stage's stop wins launch-order precedence; the physical
-    /// park happened eagerly in `Running::collect`.
-    #[cfg(unix)]
-    stopped_pgid: Option<crate::process::Pgid>,
 }
 
 impl PipelineCollector {
@@ -168,51 +127,27 @@ impl PipelineCollector {
         Self {
             break_: None,
             final_value: None,
-            #[cfg(unix)]
-            stopped_pgid: None,
         }
     }
 
-    /// First failure wins.  A prior control blocks this one too, harmlessly:
-    /// control outranks failure anyway.
-    fn note_failure(&mut self, error: Error) {
-        if self.break_.is_none() {
-            self.break_ = Some(PipelineBreak::Failure(error));
+    /// Breaks join by rank — an escape outranks an error outranks success —
+    /// and ties go to the earlier stage, the fold being launch-ordered.  So a
+    /// Ctrl-Z on stage 2 displaces stage 1's nonzero exit, while a second
+    /// failure never displaces the first.
+    fn note(&mut self, br: Break) {
+        if matches!(
+            (&self.break_, &br),
+            (None, _) | (Some(Break::Error(_)), Break::Escape(_))
+        ) {
+            self.break_ = Some(br);
         }
     }
 
-    /// First control wins, but any control displaces a prior failure: a Ctrl-Z
-    /// on stage 2 must not hide behind stage 1's nonzero exit.
-    fn note_control(&mut self, sig: Escape) {
-        match self.break_ {
-            Some(PipelineBreak::Control(_)) => {}
-            _ => self.break_ = Some(PipelineBreak::Control(sig)),
-        }
-    }
-
-    /// Park the whole group, but only when this stop will be the surfaced
-    /// control: not once the pipeline is already parked, and not when an
-    /// earlier escape holds the break — that escape wins in `finish`, so
-    /// parking would stop a pipeline that is really exiting.
-    #[cfg(unix)]
-    fn note_stop(&mut self, signal: Escape) {
-        let already_controlled = matches!(self.break_, Some(PipelineBreak::Control(_)));
-        if self.stopped_pgid.is_none()
-            && !already_controlled
-            && let Escape::Stopped { pgid, .. } = &signal
-        {
-            self.stopped_pgid = Some(*pgid);
-            // A no-op for the siblings the Ctrl-Z already stopped.
-            pgid.signal_group(crate::process::Signal::new(libc::SIGSTOP));
-        }
-        self.note_control(signal);
-    }
-
-    /// The audit observations broadcast before the outcome is classified, so
-    /// a stage that fails or escapes still contributes what it observed.
-    /// Reporting each rather than merging them in puts a helper stage's writes
-    /// and execs on the rail — though only where the parent already holds a
-    /// trail, since that is what makes a stage collect at all.
+    /// The audit observations broadcast before the break is ranked, so a stage
+    /// that fails or escapes still contributes what it observed.  Reporting
+    /// each rather than merging them in puts a helper stage's writes and execs
+    /// on the rail — though only where the parent already holds a trail, since
+    /// that is what makes a stage collect at all.
     fn fold(
         &mut self,
         mooring: &Mooring,
@@ -223,21 +158,10 @@ impl PipelineCollector {
         for observation in obs.audit.into_observations() {
             observe_stamped(shell, mooring, observation);
         }
-        match obs.outcome {
-            StageOutcome::Ok => {}
-            StageOutcome::Failure(err) => {
-                self.note_failure(err);
-            }
-            #[cfg(unix)]
-            StageOutcome::Control(esc @ Escape::Stopped { .. }) => {
-                self.note_stop(esc);
-                return;
-            }
-            StageOutcome::Control(esc) => {
-                self.note_control(esc);
-                return;
-            }
+        if let Some(br) = obs.break_ {
+            self.note(br);
         }
+        // A stage that broke carries no value, so this needs no guard.
         if is_pipeline_final {
             self.final_value = obs.final_value;
         }
@@ -245,10 +169,7 @@ impl PipelineCollector {
 
     pub(super) fn finish(self, yields: crate::ir::PipeYield) -> Settled<Value> {
         if let Some(br) = self.break_ {
-            return Err(match br {
-                PipelineBreak::Control(esc) => Break::Escape(esc),
-                PipelineBreak::Failure(error) => Break::Error(error),
-            });
+            return Err(br);
         }
         match yields {
             crate::ir::PipeYield::Unit => Ok(Value::Unit),
@@ -289,7 +210,6 @@ impl Running {
         let handles = std::mem::take(&mut self.handles);
         let n = handles.len();
         let mut stages: Vec<Option<StageHandle>> = handles.into_iter().map(Some).collect();
-        let mut kills = vec![StageKill::NotSent; n];
         let mut observed: Vec<Option<StageObservation>> = (0..n).map(|_| None).collect();
         #[cfg(unix)]
         let mut parked = false;
@@ -297,24 +217,6 @@ impl Running {
         let cap = std::time::Duration::from_millis(100);
 
         while stages.iter().any(Option::is_some) {
-            #[cfg(unix)]
-            if parked {
-                // `wait` on a stopped child would block, and `Drop` would SIGKILL
-                // the parked pgid, so abandon everything still pending.  `held_edge`
-                // drops with each handle: a resumed producer whose reader has died
-                // must take an ordinary EPIPE, since resume reaps only the leader
-                // and sends no reader-gone kill.
-                for slot in &mut stages {
-                    if let Some(handle) = slot.take() {
-                        let StageHandle { kind, .. } = handle;
-                        match kind {
-                            StageKind::External(h) => h.abandon(),
-                            StageKind::Helper(h) => h.abandon(),
-                        }
-                    }
-                }
-                break;
-            }
             // On cancellation, stop probing and observe everything blocking,
             // tail-first: the first `wait` performs the group teardown and
             // attribution, and the rest reap what it felled.
@@ -324,40 +226,19 @@ impl Running {
                 let Some(handle) = stages[ix].as_mut() else {
                     continue;
                 };
-                if kills[ix] == StageKill::NotSent
-                    && handle.feeds_pipe
-                    && observed.get(ix + 1).is_some_and(Option::is_some)
-                {
-                    match &mut handle.kind {
-                        StageKind::External(h) => h.kill_for_dead_reader(),
-                        StageKind::Helper(h) => h.running.kill_for_dead_reader(),
-                    }
-                    kills[ix] = StageKill::Sent;
+                if observed.get(ix + 1).is_some_and(Option::is_some) {
+                    handle.kill_for_dead_reader();
                 }
-                let ready = cancelled
-                    || match &mut handle.kind {
-                        StageKind::External(h) => h.try_settle(),
-                        StageKind::Helper(h) => h.running.try_settle(),
-                    };
-                if !ready {
+                if !cancelled && !handle.try_settle() {
                     continue;
                 }
-                let StageHandle {
-                    kind, held_edge, ..
-                } = stages[ix].take().expect("probed above");
-                let is_pipeline_final = ix + 1 == n;
-                let result = match kind {
-                    StageKind::External(h) => observe_external_stage(h, kills[ix], shell, started),
-                    StageKind::Helper(h) => h.observe(shell, kills[ix], is_pipeline_final, started),
-                };
-                let obs = result.unwrap_or_else(StageObservation::from_break);
-                // Only now that the writer is reaped: releasing the edge frees any
-                // of its descendants still blocked writing to it.
-                drop(held_edge);
+                let obs = stages[ix]
+                    .take()
+                    .expect("probed above")
+                    .observe(shell, ix + 1 == n, started);
                 #[cfg(unix)]
-                if let StageOutcome::Control(Escape::Stopped { pgid, .. }) = &obs.outcome {
+                if let Some(Break::Escape(Escape::Stopped { pgid, .. })) = &obs.break_ {
                     parked = true;
-                    // `note_stop` repeats this on replay; both sends are idempotent.
                     pgid.signal_group(crate::process::Signal::new(libc::SIGSTOP));
                 }
                 observed[ix] = Some(obs);
@@ -367,12 +248,23 @@ impl Running {
                     break;
                 }
             }
+            // `wait` on a stopped child would block, so stop probing at once.
+            #[cfg(unix)]
+            if parked {
+                break;
+            }
             if progress {
                 interval = std::time::Duration::from_millis(5);
             } else if !cancelled {
                 std::thread::sleep(interval);
                 interval = (interval * 2).min(cap);
             }
+        }
+
+        // Only a parked pipeline leaves a stage unobserved, and `Drop` would
+        // SIGKILL the pgid the kernel is holding stopped.
+        for handle in stages.into_iter().flatten() {
+            handle.abandon();
         }
 
         let mut collector = PipelineCollector::new();
@@ -385,130 +277,48 @@ impl Running {
     }
 }
 
-#[cfg(all(unix, test))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::{Pgid, Signal};
-
-    /// `note_stop` does a real `kill(-pgid, SIGSTOP)` on the way through, so
-    /// this must match no live process group and earn an ESRCH.
-    const FAKE_PGID: i32 = 999_999_991;
-
-    fn stopped_escape(pgid: i32) -> Escape {
-        Escape::Stopped {
-            pgid: Pgid::from_raw(pgid).expect("a child pid is positive"),
-            signal: Signal::new(libc::SIGTSTP),
-            cmd: "test-stage".into(),
-            pending: Vec::new(),
-        }
-    }
+    use crate::types::Escape;
 
     fn make_error(status: i32, msg: &str) -> Error {
         Error::new(msg.to_string(), status)
     }
 
+    /// The four laws of the join, one per pair of ranks.  An escape outranks
+    /// an error; within a rank the earlier stage wins, the fold being
+    /// launch-ordered.
     #[test]
-    fn note_stop_records_pgid_and_marks_break() {
-        let mut c = PipelineCollector::new();
-        c.note_stop(stopped_escape(FAKE_PGID));
-        assert_eq!(
-            c.stopped_pgid,
-            Some(Pgid::from_raw(FAKE_PGID).expect("the fake pgid is positive"))
-        );
-        assert!(matches!(
-            c.break_,
-            Some(PipelineBreak::Control(Escape::Stopped { .. }))
-        ));
-    }
-
-    #[test]
-    fn note_stop_is_idempotent_first_stop_wins() {
-        let mut c = PipelineCollector::new();
-        c.note_stop(stopped_escape(FAKE_PGID));
-        c.note_stop(stopped_escape(FAKE_PGID + 1));
-        assert_eq!(
-            c.stopped_pgid,
-            Some(Pgid::from_raw(FAKE_PGID).expect("the fake pgid is positive"))
-        );
-    }
-
-    #[test]
-    fn note_stop_skips_park_when_control_already_held() {
-        let mut c = PipelineCollector::new();
-        c.note_control(Escape::Exit(3));
-        c.note_stop(stopped_escape(FAKE_PGID));
-        assert!(c.stopped_pgid.is_none());
-        assert!(matches!(
-            c.break_,
-            Some(PipelineBreak::Control(Escape::Exit(3)))
-        ));
-    }
-
-    #[test]
-    fn note_stop_ignores_non_stopped_signals() {
-        let mut c = PipelineCollector::new();
-        c.note_stop(Escape::Exit(0));
-        // The control bookkeeping still runs; only the parking is skipped.
-        assert!(c.stopped_pgid.is_none());
-        assert!(matches!(
-            c.break_,
-            Some(PipelineBreak::Control(Escape::Exit(0)))
-        ));
-    }
-
-    #[test]
-    fn first_failure_wins_among_failures() {
-        let mut c = PipelineCollector::new();
-        c.note_failure(make_error(7, "first"));
-        c.note_failure(make_error(9, "second"));
-        match c.break_ {
-            Some(PipelineBreak::Failure(error)) => {
-                assert_eq!(error.exit_code(), 7);
-                assert_eq!(error.message, "first");
-            }
-            _ => panic!("expected Failure(7,'first'); got {:?}", c.break_.is_some()),
+    fn breaks_join_by_rank_earlier_stage_breaking_ties() {
+        let mut errors = PipelineCollector::new();
+        errors.note(Break::Error(make_error(7, "first")));
+        errors.note(Break::Error(make_error(9, "second")));
+        match errors.break_ {
+            Some(Break::Error(error)) => assert_eq!(error.message, "first"),
+            _ => panic!("an error must not displace an earlier error"),
         }
-    }
 
-    #[test]
-    fn control_supersedes_prior_failure() {
-        let mut c = PipelineCollector::new();
-        c.note_failure(make_error(7, "early failure"));
-        c.note_control(Escape::Exit(3));
+        let mut escapes = PipelineCollector::new();
+        escapes.note(Break::Escape(Escape::Exit(1)));
+        escapes.note(Break::Escape(Escape::Exit(2)));
         assert!(matches!(
-            c.break_,
-            Some(PipelineBreak::Control(Escape::Exit(3)))
+            escapes.break_,
+            Some(Break::Escape(Escape::Exit(1)))
         ));
-    }
 
-    #[test]
-    fn first_control_wins_among_controls() {
-        let mut c = PipelineCollector::new();
-        c.note_control(Escape::Exit(1));
-        c.note_control(Escape::Exit(2));
+        let mut displaced = PipelineCollector::new();
+        displaced.note(Break::Error(make_error(7, "early failure")));
+        displaced.note(Break::Escape(Escape::Exit(3)));
         assert!(matches!(
-            c.break_,
-            Some(PipelineBreak::Control(Escape::Exit(1)))
+            displaced.break_,
+            Some(Break::Escape(Escape::Exit(3)))
         ));
-    }
 
-
-    #[test]
-    fn from_break_classifies_error_as_failure() {
-        let obs = StageObservation::from_break(Break::Error(make_error(4, "report pipe: boom")));
-        match obs.outcome {
-            StageOutcome::Failure(err) => assert_eq!(err.exit_code(), 4),
-            _ => panic!("expected a Failure carrying status 4"),
-        }
-    }
-
-    #[test]
-    fn from_break_classifies_escape_as_control() {
-        let obs = StageObservation::from_break(Break::Escape(Escape::Exit(3)));
-        assert!(matches!(
-            obs.outcome,
-            StageOutcome::Control(Escape::Exit(3))
-        ));
+        let mut held = PipelineCollector::new();
+        held.note(Break::Escape(Escape::Exit(3)));
+        held.note(Break::Error(make_error(7, "later failure")));
+        assert!(matches!(held.break_, Some(Break::Escape(Escape::Exit(3)))));
     }
 
     #[test]
@@ -528,7 +338,7 @@ mod tests {
             StageObservation::from_break(Break::Error(make_error(1, "report pipe: broken"))),
         );
         match c.break_ {
-            Some(PipelineBreak::Failure(error)) => assert_eq!(error.message, "stage one boom"),
+            Some(Break::Error(error)) => assert_eq!(error.message, "stage one boom"),
             _ => panic!("expected the first stage failure to win"),
         }
     }

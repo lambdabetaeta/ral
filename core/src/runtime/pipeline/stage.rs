@@ -30,7 +30,6 @@ impl HelperStageHandle {
     /// sibling's stop has parked.  Dropping the `FrameReader` detaches its
     /// thread rather than stopping it; the thread sees EOF once a later `fg`
     /// runs the helper out.
-    #[cfg(unix)]
     pub(super) fn abandon(self) {
         self.running.abandon();
     }
@@ -51,8 +50,8 @@ impl HelperStageHandle {
             span,
             report,
         } = self;
-        let (helper_exit, failure) = match running.observe(kill) {
-            Ok(pair) => pair,
+        let failure = match running.observe(kill) {
+            Ok(failure) => failure,
             Err(br) => return Ok(StageObservation::from_break(br)),
         };
 
@@ -73,13 +72,13 @@ impl HelperStageHandle {
             if let Some(sig) = signal {
                 return Ok(StageObservation::from_break(sig).with_audit(audit));
             }
-            if helper_exit != 0 {
-                let mut err = Error::new(
-                    format!(
-                        "pipeline helper exited with status {helper_exit} after reporting success"
-                    ),
-                    helper_exit,
-                );
+            // The collector's kill for a dead reader can land between the
+            // report and the exit, and that is the one death forgiven.  Any
+            // other reads as the helper's own death, message and hint alike:
+            // "killed by signal SIGSEGV" says more than the status it maps to.
+            if let Some(failure) = failure {
+                let mut err = Error::from_command_failure("ral pipeline stage", failure, shell);
+                err.message = format!("{} after reporting success", err.message);
                 err.span = span;
                 return Ok(StageObservation::failure(err).with_audit(audit));
             }

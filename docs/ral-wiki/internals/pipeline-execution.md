@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 6d48e9af
-verified_at_date: 2026-08-26
+verified_at_commit: d05cdb89
+verified_at_date: 2026-08-31
 anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, FinalValue::Report, run_child_eval, PipelineGroup, Launch, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, park_on_stop, PipeYield, Capture, infer_pipeline]
 ---
 
@@ -172,10 +172,10 @@ legacy kill-and-reap). `RunningChild::wait` (`runtime/command/child.rs`) turns
 that outcome into `Err(Break::Escape(Escape::Stopped { pgid, signal, cmd }))`
 and *detaches* its pump threads — they keep draining the stopped child's pipes
 and finish on their own once a later `fg` runs it to completion. For a pipeline,
-`PipelineCollector::note_stop` (`pipeline/collect.rs`) records the stopped pgid
-and `SIGSTOP`s the whole `-pgid` so any still-running siblings park together,
-then the collect loop `abandon()`s the remaining stage handles so their `Drop`
-does not `SIGKILL` the parked group. As `PipeNode::join` returns, `PipelineGroup`'s
+the collect walk (`pipeline/collect.rs`) `SIGSTOP`s the whole `-pgid` the
+moment it observes a stop, so any still-running siblings park together, and
+stops probing; every stage it never observed is then `abandon()`ed so their
+`Drop` does not `SIGKILL` the parked group. As `PipeNode::join` returns, `PipelineGroup`'s
 drop has the `ForegroundGuard` restore the terminal to the shell and
 `AnchorProcess::finish` `SIGCONT` *just the anchor's own pid* (not `-pgid`), so
 the anchor wakes, sees EOF on its release fd, and exits without disturbing the

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 68f1964e
-generated_at_date: 2026-08-26
+generated_at_commit: d05cdb89
+generated_at_date: 2026-08-31
 covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 ---
 
@@ -106,9 +106,10 @@ recursion is irreducible; the evaluator reaches it at
   steps through a `PipeNode`: `PipeNode::launch` resolves the
   plan and spawns every stage into one process group, and `join`
   (`collect` then `finish`), called in the same rule, is what the arm
-  meets, while `abandon` kills the group on the panic-unwind path; `group`
-  (the pgid anchor, foreground guard, SIGINT relay) stays alive across both
-  `collect` and `finish` rather than dropped early
+  meets; no frame is pushed, so an unwinding panic tears the group down
+  through `PipelineGroup`'s `Drop` rather than through any undo of the
+  machine's.  `group` (the pgid anchor, foreground guard, SIGINT relay)
+  stays alive across both `collect` and `finish` rather than dropped early
   ([[map/core/evaluator|evaluator]]). `resolve.rs` freezes each stage's launch decision once as
   `StageLaunch` (`Direct` | `HelperEval`) from the head's resolution, redirects,
   terminal ownership, and audit state, so launch reads a decision rather than
