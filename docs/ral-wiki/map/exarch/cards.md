@@ -139,8 +139,10 @@ mark, see [[map/exarch/frontend|frontend]]).
 sits is a property of the placement that asks for it: `CARD_INDENT` (4) for the
 transcript, `banner::OPENING_INDENT` for the session card, which shares the
 constant with the wordmark so the two align by construction rather than by a pad
-baked into `data/banner.txt`. `render_pin` is the third placement, framing in its
-agent's hue at the register's own margin.
+baked into `data/banner.txt`. The opening uses `render_filled_card` at the
+wordmark-and-eagle's measured width, so its two edges form one block; both
+opening pieces use rail-free `ChromeKind::Opening`. `render_pin` is the third
+placement, framing in its agent's hue at the register's own margin.
 
 ## Block — derived disclosure and aggregation
 

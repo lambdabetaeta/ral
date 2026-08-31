@@ -32,7 +32,6 @@ pub struct SessionInfo<'a> {
     pub base: &'a str,
     pub extend_base: Option<&'a Path>,
     pub restrict_files: &'a [PathBuf],
-    pub scratch: &'a Path,
     pub cwd: &'a str,
 }
 
@@ -83,11 +82,6 @@ pub(super) fn session_card(s: &SessionInfo<'_>) -> Card {
         sys_val.push(CardSpan::new(Role::Path, join_paths(s.system_files)));
     }
     rows.push(meta_field("system prompt", sys_val));
-
-    rows.push(meta_field(
-        "scratch",
-        vec![CardSpan::new(Role::Path, s.scratch.display().to_string())],
-    ));
 
     Card(vec![Mark::Fields { rows }])
 }
@@ -277,9 +271,8 @@ mod tests {
     use super::{SessionInfo, legend_panel, session_card};
     use crate::bus::card::{FieldVal, Mark, Role};
     use crate::tui::{line, rail};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
-    #[allow(clippy::disallowed_methods)] // a literal scratch path; no path semantics at stake
     fn sample(base: &'static str) -> SessionInfo<'static> {
         SessionInfo {
             system_size: 4096,
@@ -287,7 +280,6 @@ mod tests {
             base,
             extend_base: None,
             restrict_files: &[],
-            scratch: Path::new("/tmp/scratch"),
             cwd: "/Users/me/projects/ral",
         }
     }
@@ -324,7 +316,6 @@ mod tests {
                 "extend-base",
                 "restrict",
                 "system prompt",
-                "scratch",
             ]
         );
         let role = |label: &str| lead_role(&rs.iter().find(|(l, _)| l == label).unwrap().1);
@@ -334,7 +325,6 @@ mod tests {
             "version names the binary"
         );
         assert_eq!(role("cwd"), Some(Role::Path), "cwd is a path");
-        assert_eq!(role("scratch"), Some(Role::Path), "scratch is a path");
     }
 
     #[test]

@@ -272,7 +272,6 @@ pub fn run() -> Result<(), String> {
         base: &c.base,
         extend_base: c.extend_base.as_deref(),
         restrict_files: &restrict_files,
-        scratch: scratch.path(),
         cwd: &cwd,
     };
     if c.headless {

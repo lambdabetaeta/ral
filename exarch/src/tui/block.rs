@@ -48,6 +48,8 @@ pub(super) enum ChromeKind {
     /// rather than a navigable block.
     #[default]
     Plain,
+    /// The startup wordmark and metadata card. Their content is their mark.
+    Opening,
     /// The human's turn, tinted [`super::palette::PROMPT_INK`] and ruled
     /// full-width by the flatten.  No band — background is the machine's.
     Prompt,
@@ -742,6 +744,7 @@ impl Block {
                 ChromeKind::Spawned => Some(RailKind::FleetAct),
                 ChromeKind::Error | ChromeKind::Cancelled => Some(RailKind::Error),
                 ChromeKind::Plain => Some(RailKind::Note),
+                ChromeKind::Opening => None,
                 ChromeKind::Prompt => Some(RailKind::Prompt),
             },
         }
@@ -944,5 +947,11 @@ mod tests {
                 assert_eq!(block.rail_kind(level), Some(shape), "`{verb}` at {level:?}");
             }
         }
+    }
+
+    #[test]
+    fn opening_chrome_has_no_rail() {
+        let block = Block::chrome(ChromeKind::Opening, vec![Line::from("EXARCH")]);
+        assert_eq!(block.rail_kind(Reveal::Full), None);
     }
 }

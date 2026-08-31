@@ -349,7 +349,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the next safe tool boundary, and the rest lands at the exchange
  boundary — a coalesced human run, or a wakeup / settled agent as its own
  marked item. A committed human prompt echoes on the `ChromeKind::Prompt` band;
- a wakeup stays dim, ambient chrome with no rail glyph (`ChromeKind::Plain`).
+ a wakeup stays dim as note chrome (`ChromeKind::Plain`).
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
@@ -467,7 +467,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Viewport`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a viewport or touches the terminal
         - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten
         - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `seat`/`wrap`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
-        - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version), `legend_panel`, ART/EAGLE constants
+        - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version, omitting the disposable scratch path), `legend_panel`, ART/EAGLE constants; the wordmark and width-matched card use rail-free `ChromeKind::Opening`
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
         - `tui/matrix.rs` — agent matrix and tab bar: `MatrixSort`, `matrix_bar`, justified row projection, `step_cells`

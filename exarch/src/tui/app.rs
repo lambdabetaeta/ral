@@ -532,12 +532,24 @@ impl App {
                 bold(e.to_string(), BANNER_GOLD),
             ]));
         }
+        let opening_width = splash
+            .iter()
+            .map(Line::width)
+            .max()
+            .unwrap_or_default()
+            .min(usize::from(READ_W));
+        let opening_width = u16::try_from(opening_width).expect("READ_W fits u16");
 
         if let Some(vp) = self.tabs.viewport_mut(self.tabs.root()) {
-            vp.push_chrome(ChromeKind::Plain, splash);
+            vp.push_chrome(ChromeKind::Opening, splash);
             vp.push_chrome(
-                ChromeKind::Plain,
-                line::render_card(&banner::session_card(s), banner::OPENING_INDENT, READ_W, 3),
+                ChromeKind::Opening,
+                line::render_filled_card(
+                    &banner::session_card(s),
+                    banner::OPENING_INDENT,
+                    opening_width,
+                    3,
+                ),
             );
         }
         draw(self, term)

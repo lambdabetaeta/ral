@@ -657,6 +657,23 @@ pub(super) fn render_card(
     )
 }
 
+/// A card whose frame fills its placement's width.
+pub(super) fn render_filled_card(
+    card: &Card,
+    indent_w: usize,
+    width: u16,
+    level: u8,
+) -> Vec<Line<'static>> {
+    render_framed(
+        card,
+        indent_w,
+        Style::default().fg(SLATE),
+        width.min(READ_CONTENT_W),
+        true,
+        level,
+    )
+}
+
 const REGISTER_CARD_MARGIN: usize = 2;
 
 /// A pinned register card, framed in its producing agent's `hue` and filling

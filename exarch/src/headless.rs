@@ -1079,7 +1079,6 @@ mod tests {
                 base: "dangerous",
                 extend_base: None,
                 restrict_files: &[],
-                scratch: std::path::Path::new("/tmp/scratch"),
                 cwd: "/tmp",
             },
             &Provider::scripted("test-model", Script::new()),
