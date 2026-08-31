@@ -183,6 +183,7 @@ fn build_client(service: &Service, model: &str, credential: &Credential) -> (Cli
             .with_reqwest(super::tls::client())
             .with_service_target_resolver(resolver)
             .build()
+            .expect("with_reqwest supplies the client, so build() cannot fail")
     } else {
         let auth = AuthResolver::from_resolver_fn(move |identity: ModelIden| {
             if identity.adapter_kind == adapter {
@@ -196,6 +197,7 @@ fn build_client(service: &Service, model: &str, credential: &Credential) -> (Cli
             .with_adapter_kind(adapter)
             .with_auth_resolver(auth)
             .build()
+            .expect("with_reqwest supplies the client, so build() cannot fail")
     };
     (client, adapter)
 }
@@ -219,6 +221,7 @@ fn build_oauth_client(cell: Arc<Mutex<oauth::OAuthToken>>) -> Client {
         .with_adapter_kind(AdapterKind::OpenAIResp)
         .with_auth_resolver(auth)
         .build()
+        .expect("with_reqwest supplies the client, so build() cannot fail")
 }
 
 /// Fill the pricing cache up front so the first usage lookup never pays the fetch.

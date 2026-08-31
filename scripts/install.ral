@@ -10,9 +10,9 @@ if $[not !{is-file "$repo_root/ral/Cargo.toml"}] {
     fail [status: 1, message: 'ral/Cargo.toml not found — repository may be incomplete']
 }
 
-cargo +stable install --force --path ral
-cargo +stable install --force --path exarch
-cargo +stable install --force --path ral-sh
+cargo +stable install --force --locked --path ral
+cargo +stable install --force --locked --path exarch
+cargo +stable install --force --locked --path ral-sh
 
 let cargo_home = try { return $ENV[CARGO_HOME] } { |_| return "$ENV[HOME]/.cargo" }
 let ral_bin    = "$cargo_home/bin/ral"

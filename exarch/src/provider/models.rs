@@ -76,6 +76,8 @@ pub struct LiveSource {
 }
 
 impl LiveSource {
+    /// # Panics
+    /// Never: `with_reqwest` supplies the client, so genai's `build()` cannot fail.
     pub fn new(store: &CredentialStore) -> Self {
         let accounts = store.available();
         let credentials = accounts
@@ -92,7 +94,8 @@ impl LiveSource {
             credentials,
             client: Client::builder()
                 .with_reqwest(crate::provider::tls::client())
-                .build(),
+                .build()
+                .expect("with_reqwest supplies the client, so build() cannot fail"),
         }
     }
 
