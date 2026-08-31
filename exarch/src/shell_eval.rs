@@ -2114,10 +2114,10 @@ return !{{length $hits}}"
         );
     }
 
-    /// A write shows its opening ten lines and an `…`, never the file. The
-    /// header's size bar is the magnitude; the body is a sample.
+    /// A write retains every diff row; disclosure is a renderer concern, not a
+    /// mutation of the card that also reaches the record and resumed sessions.
     #[test]
-    fn a_long_write_is_cut_to_ten_lines_and_an_ellipsis() {
+    fn a_long_write_retains_its_complete_diff() {
         let mut shell = fresh_shell();
         let dir = scratch_dir("cov-write-long");
         let path = display_no_trailing_sep(&dir.path().join("long.txt"));
@@ -2135,10 +2135,10 @@ return !{{length $hits}}"
             panic!("a committed write opens what landed, got {card:?}")
         };
         let rows: Vec<String> = hunks.iter().flat_map(|h| &h.rows).map(Row::text).collect();
-        assert_eq!(rows.len(), 11, "ten lines and the ellipsis, got {rows:?}");
-        assert_eq!(rows[0], "line 1");
-        assert_eq!(rows[9], "line 10");
-        assert_eq!(rows[10], "…", "the cut says it is a cut");
+        assert_eq!(rows.len(), 25, "the complete write must survive, got {rows:?}");
+        assert_eq!(rows.first().map(String::as_str), Some("line 1"));
+        assert_eq!(rows.last().map(String::as_str), Some("line 25"));
+        assert!(!rows.iter().any(|row| row == "…"), "no synthetic row belongs in the card");
     }
 
     /// The EXEC door end to end: a bare external raises exactly one `Command`

@@ -335,7 +335,7 @@ impl App {
         self.push_chrome(
             id,
             ChromeKind::Plain,
-            line::render_card(&card, line::CARD_INDENT, READ_W, 3),
+            line::render_card_framed(&card, line::CARD_INDENT, READ_W, 3),
         );
     }
 

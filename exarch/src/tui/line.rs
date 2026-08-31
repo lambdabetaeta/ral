@@ -415,15 +415,15 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
     ]
 }
 
-/// A [`Mark::Diff`]'s body: L1 the header alone, anything above it the header
-/// and every hunk.  There is no middle rung to draw, the mark itself being cut
-/// to `DIFF_ROWS` where it was composed.  No leading blank —
-/// [`render_card`] owns the one blank that opens the card.  The densest object
-/// on screen: size in the header bar, grain in the addition ratio, value in the
-/// rail's lightness, shape in its `▎` glyph.
+/// A [`Mark::Diff`]'s body, graded by disclosure: L1 the header alone, L2 the
+/// first hunk, L3 every hunk. No leading blank — the unframed card renderer owns
+/// the one blank that opens the block. The densest object on screen: size in the
+/// header bar, grain in the addition ratio, value in the rail's lightness, shape
+/// in its `▎` glyph.
 fn diff_body(path: &str, hunks: &[Hunk], level: u8) -> Vec<Line<'static>> {
     match level {
         1 => vec![patch_header(path, hunks)],
+        2 => diff_capped(path, hunks, Some(1)),
         _ => diff_capped(path, hunks, None),
     }
 }
@@ -609,7 +609,7 @@ fn span_style(role: Option<Role>) -> Style {
 }
 
 /// The one dispatch every [`Mark`] variant routes through, shared by
-/// [`render_effect_lines`] and [`render_framed`], so a new variant cannot be
+/// [`render_card_unframed`] and [`render_framed`], so a new variant cannot be
 /// wired into one interpreter and forgotten in the other.
 fn render_mark(mark: &Mark, level: u8) -> Vec<Line<'static>> {
     match mark {
@@ -621,11 +621,10 @@ fn render_mark(mark: &Mark, level: u8) -> Vec<Line<'static>> {
     }
 }
 
-/// Render an Observation-origin card's marks unframed, for folding as plain
-/// rows under its call's intent in a coalesced group: the fold applies its
-/// own wrapping and indent, so a card frame here would nest inside another.
-/// The one spot that does not go through [`render_card`].
-pub(super) fn render_effect_lines(card: &Card, level: u8) -> Vec<Line<'static>> {
+/// Render a card's marks without a box. Diff cards already carry the patch rail
+/// and line gutters; observation cards fold under their call's intent, where a
+/// nested frame would be redundant.
+pub(super) fn render_card_unframed(card: &Card, level: u8) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     for mark in card.marks() {
         ls.extend(render_mark(mark, level));
@@ -633,15 +632,13 @@ pub(super) fn render_effect_lines(card: &Card, level: u8) -> Vec<Line<'static>> 
     ls
 }
 
-/// Left indent of a card in the transcript, in columns — pushed right of the
-/// flow so it reads as a composed object, set apart.  The opening card is the
-/// one card placed elsewhere, and names its own inset.
+/// Left indent of a framed card in the transcript. Diff cards render unframed
+/// and therefore do not pay this inset.
 pub(super) const CARD_INDENT: usize = 4;
 
-/// Every card as a framed object at `indent_w` — the one path a `Card` renders
-/// through, save [`render_effect_lines`]'s inline fold.  The frame wears
-/// neutral ink, since identity lives in the matrix.
-pub(super) fn render_card(
+/// A deliberately bounded card at `indent_w`. General surfaced cards and
+/// fixed placements use this path; transcript diffs use [`render_card_unframed`].
+pub(super) fn render_card_framed(
     card: &Card,
     indent_w: usize,
     width: u16,
@@ -696,7 +693,7 @@ pub(super) fn render_pin(card: &Card, width: u16, hue: Color) -> Vec<Line<'stati
     )
 }
 
-/// The framed-card renderer behind both [`render_card`] and [`render_pin`]: a
+/// The framed-card renderer behind [`render_card_framed`] and [`render_pin`]: a
 /// box `indent_w` columns in, drawn in `border`, content wrapped to a budget
 /// from `width` — which the caller has already capped. `level` reaches only
 /// a `diff` mark; every other mark ignores it.

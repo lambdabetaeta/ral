@@ -13,7 +13,7 @@ use ral_core::types::{
     CommandOrigin, Decision, LeaseClass, Map, Observation, Observed, WorkerId, WriteOutcome,
 };
 
-use super::diff::{clip_hunks, whole_file_hunks};
+use super::diff::whole_file_hunks;
 use super::{Card, Mark, Role, Span};
 
 /// `committed`/`aborted`/`stopped`/`failed`, styled
@@ -274,15 +274,14 @@ fn capability_fields(fields: &Map) -> String {
         .join(" ")
 }
 
-/// What a committed write shows of itself: the opening of what landed, read as
-/// a change against the empty side and cut to ten lines.
+/// What a committed write shows of itself: what landed, read as a complete
+/// change against the empty side.
 ///
-/// A write is *reported*, not reproduced. It is shown against nothing rather
-/// than against the file it replaced, because a redirect says what now stands
-/// there — and the head of that is the whole of what a card owes a reader.
-/// [`clip_hunks`] closes it with the `…` that says there is more.
+/// A write is shown against nothing rather than against the file it replaced,
+/// because a redirect says what now stands there. Disclosure belongs to the
+/// renderer; the card and record retain every hunk.
 ///
-/// Nothing at all when there is nothing to open: no bytes (a write past the
+/// Nothing at all when there is nothing to show: no bytes (a write past the
 /// door's read cap), empty bytes, or content that is not text.
 fn write_preview(path: &str, new: Option<&[u8]>) -> Vec<Mark> {
     let Some(new) = new.filter(|b| !b.is_empty()) else {
@@ -291,7 +290,7 @@ fn write_preview(path: &str, new: Option<&[u8]>) -> Vec<Mark> {
     let Ok(text) = std::str::from_utf8(new) else {
         return Vec::new();
     };
-    match clip_hunks(whole_file_hunks("", text)) {
+    match whole_file_hunks("", text) {
         hunks if hunks.is_empty() => Vec::new(),
         hunks => vec![Mark::Diff {
             path: path.to_string(),

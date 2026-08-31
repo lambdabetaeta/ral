@@ -119,7 +119,7 @@ recorded ([[map/exarch/agent|agent]]).
 
 ## Render — one interpreter, one binding table
 
-`render_card(&Card, level)` (`tui/line.rs`) walks the marks; `role_style(Role)`
+`render_card_unframed(&Card, level)` (`tui/line.rs`) walks the marks; `role_style(Role)`
 (over the palette constants in `tui/palette.rs`) is the **single place hue
 lives** for kit content, so the kit can name a role but never a colour, and
 magnitude can never land on hue — the encoding is correct by construction. The quantitative encoders are reused, not duplicated: `measure`
@@ -129,13 +129,13 @@ both feed the shared `render_field_rows`/`push_field` matrix primitive — so
 `provider_error` is one internal caller of the `fields` path, not a duplicate
 label-column. The diff header label reads `diff`.
 
-`render_card` opens with the single leading blank every block wears; the
+`render_card_unframed` opens with the single leading blank every block wears; the
 data-encoding rail span is prepended by the [[map/exarch/frontend|block]] to the
 first content row. A diff-less card the model *surfaced* deliberately renders as
 a box with its heading lifted into the top rule, no rail glyph (the frame is its
 mark, see [[map/exarch/frontend|frontend]]).
 
-`render_card` takes the box's left indent rather than owning one, so where a card
+`render_card_framed` takes the box's left indent rather than owning one, so where a card
 sits is a property of the placement that asks for it: `CARD_INDENT` (4) for the
 transcript, `banner::OPENING_INDENT` for the session card, which shares the
 constant with the wordmark so the two align by construction rather than by a pad
@@ -199,12 +199,10 @@ and `edit-hash`/`edit-replace` are Rust host builtins
 ([[map/exarch/io-surface|io-surface]]), their file I/O sunk below the redirect
 frame so each is one logical surface. An edit builds its own whole-file diff
 card (one canonical original-vs-final diff grouped into hunks by `similar`) at
-the edit, where both texts are already in hand; a committed `>` opens the head of what
-landed against the empty side instead, an all-adds sample rather than a shape
-of its own. Both are cut to ten rows and an `…` by `clip_hunks` where they are
-composed, so a card is a report of a change and never a copy of the file — and
-the renderer stays dumb: L1 is the header alone, every rung above it draws
-what the mark holds. The read
+the edit, where both texts are already in hand; a committed `>` reads what
+landed against the empty side instead, an all-adds diff rather than a shape of
+its own. Both cards retain every hunk; disclosure belongs to the renderer, so
+L1 is the header, L2 the first hunk, and L3 the complete diff. The read
 redirect and exec cards are likewise composed from core's I/O events. `agent.ral` now carries
 only the `-around` readers, the tasks kit, and the goal pins
 ([[map/exarch/builtins|builtins]]).

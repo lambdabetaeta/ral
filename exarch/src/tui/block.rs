@@ -442,7 +442,7 @@ impl Block {
             BlockKind::Card {
                 card,
                 origin: CardOrigin::Observation { .. },
-            } => line::render_effect_lines(card, 3),
+            } => line::render_card_unframed(card, 3),
             _ => Vec::new(),
         }
     }
@@ -675,16 +675,20 @@ impl Block {
                 }
                 ls
             }
-            // Every card frames as a bounded object; only `diff` marks read
-            // `level`, and census never reaches a card, so it folds onto the
-            // summary.
-            BlockKind::Card { card, .. } => {
+            // A surfaced general card is a deliberate bounded artifact. Diffs
+            // already carry the patch rail and gutters; effect cards belong in their
+            // surrounding group, so both render unframed.
+            BlockKind::Card { card, origin } => {
                 let diff_level = match level {
                     Reveal::Context => 2,
                     Reveal::Full => 3,
                     Reveal::Census | Reveal::Summary => 1,
                 };
-                line::render_card(card, line::CARD_INDENT, width, diff_level)
+                if !card.has_diff() && *origin == CardOrigin::Surfaced {
+                    line::render_card_framed(card, line::CARD_INDENT, width, diff_level)
+                } else {
+                    line::render_card_unframed(card, diff_level)
+                }
             }
             // Only the log tee renders a query alone; on screen the flatten
             // coalesces a run of these into one `tool : …` line instead.

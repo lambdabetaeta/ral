@@ -73,40 +73,6 @@ impl Row {
     }
 }
 
-/// Rows a diff carries before it stops.
-///
-/// A card reports a change; it is not a copy of the file. Ten rows and an `…`
-/// say what happened and how much of it there was — the header's size bar and
-/// grain run carry the rest — and nothing downstream, on the rail or in the
-/// record, holds more than a reader would look at.
-pub(crate) const DIFF_ROWS: usize = 10;
-
-/// `hunks` cut to the first [`DIFF_ROWS`] rows, closed by an `…` row when
-/// anything was dropped.
-///
-/// The `…` is a context row: it stands for lines the card is not showing, not
-/// for a line that was added or removed, and must not be inked as one.
-pub(crate) fn clip_hunks(mut hunks: Vec<Hunk>) -> Vec<Hunk> {
-    let mut budget = DIFF_ROWS;
-    let mut clipped = false;
-    for (i, h) in hunks.iter_mut().enumerate() {
-        if h.rows.len() > budget {
-            h.rows.truncate(budget);
-            clipped = true;
-        }
-        budget -= h.rows.len();
-        if budget == 0 {
-            clipped |= i + 1 < hunks.len();
-            hunks.truncate(i + 1);
-            break;
-        }
-    }
-    if clipped && let Some(last) = hunks.last_mut() {
-        last.rows.push(Row::Context(vec![Seg::plain("…")]));
-    }
-    hunks
-}
-
 /// The whole-file line diff of `old` vs `new`, grouped into hunks with ±2
 /// lines of context.
 ///

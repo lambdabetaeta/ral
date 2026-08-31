@@ -162,11 +162,10 @@ reads `write <path> <outcome>` whatever its mode (the mode rides the recorded
 observation): `committed` uses the `ok` role, `aborted` and `deferred` use
 `warn`, and `failed` uses `bad`
 — and a *committed* write previews its content below the heading
-(`write_preview`): a `diff` mark of the opening of what landed, read against
-the empty side so every row is an addition, and cut by `clip_hunks` to ten
-rows closed by an `…` — the header's size bar and grain run carry the
-magnitude, the body is a sample. No mark at all when the door could not read
-the staged side whole or it is not text, leaving the heading to report a write
+(`write_preview`): a complete `diff` mark of what landed, read against the
+empty side so every row is an addition. The card retains every hunk and the
+TUI's disclosure ladder decides how much to show. No mark at all when the door
+could not read the staged side whole or it is not text, leaving the heading to report a write
 it cannot open; a command keeps the conventional `$` prompt, the program as
 `path`, each arg as plain ink, and a `→ status` tail roled `ok`/`bad` off the
 observation's own `status`; grep is the pattern as `code` `in` the cwd scope
