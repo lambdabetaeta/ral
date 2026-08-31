@@ -23,7 +23,9 @@ Bound variables are **AVAILABLE IN EVERY TURN, FOR THE REST OF THE SESSION**. **
     echo "notes.txt now has !{line-count notes.txt} while it had $n before"
 </critical>
 
-Captured output is a `String`: split it with `lines`, parse it with `int`/`float`, or decode it by putting it back on the byte channel (`to-string $s | from-json`).
+Captured stdout from an external command is a `String`; ral heads may instead return structured values. For example, `let text = git log --oneline` binds a `String`, while `let n = line-count $file` binds an `Int` and `let files = list-dir #'.'#` binds a list. Split captured text explicitly with `lines $text`, and parse numeric text with `int $text` or `float $text`.
+
+Top-level value names may not collide with commands reachable on `PATH`. Avoid names such as `head`, `tail`, `test`, and `date`; prefer descriptive names such as `commit-sha`, `tag-lines`, and `release-date`.
 
 A turn ending in `let` returns nothing; end with what you mean to see as `VALUE`.
 
@@ -72,7 +74,12 @@ There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that 
 
 Decoders read from the byte channel.  To decode bytes in a definition, use `bytes-to-string $r[stdout]`.
 
-`from-lines` yields a lazy stream, which no function iterates implicitly. A decoder ends its pipeline, so bind the stream and eliminate it explicitly — `stream-each { |l| … } !{git log | from-lines}`, or `stream-to-list`/`stream-map`/`stream-fold` — or skip streams: `lines` splits a String into a materialised list, and `from-lines-list PATH` reads a file as a materialised list of lines:
+`from-lines` yields a lazy stream, which no function iterates implicitly. A decoder ends the byte pipeline, so its resulting stream is a value: bind or force it, then pass it to a stream eliminator:
+
+    let stream  = !{git log | from-lines}
+    let commits = stream-to-list $stream
+
+Do not write `git log | from-lines | stream-to-list`: the second pipe expects bytes, but `from-lines` has already produced a ral value. For small finite output, prefer `lines`; `from-lines-list PATH` reads a file directly as a materialised list of lines:
 
     let commits = lines !{git log --oneline -5 | from-string}
     let src     = from-lines-list #'src/main.rs'#
