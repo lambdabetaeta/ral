@@ -1819,7 +1819,7 @@ mod tests {
         // Its own row is three columns, not an intent line under a run's head.
         assert_eq!(
             w.lines[act[0]].plain(),
-            "message    hunter              focus on the renderer first"
+            "message      hunter              focus on the renderer first"
         );
     }
 
@@ -1871,7 +1871,7 @@ mod tests {
 
         let w = vp.render_window(READ_W, 40);
         let act = rail_rows(&w.lines, "↗ ");
-        assert_eq!(w.lines[act[0]].plain(), "cancel     hunter");
+        assert_eq!(w.lines[act[0]].plain(), "cancel       hunter");
         let run = w.lines[rail_rows(&w.lines, "▸ ")[0]].plain();
         assert!(
             run.ends_with(crate::tui::line::spark_glyph(Some(40))),

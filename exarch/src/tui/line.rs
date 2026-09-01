@@ -293,10 +293,10 @@ pub(super) fn tool_call_static(cmd: &str) -> Vec<Line<'static>> {
     ls
 }
 
-/// The verb column of an act row, pinned to the longest verb (`unschedule`)
+/// The verb column of an act row, pinned to the longest verb (`context-read`)
 /// plus a space so verbs align across blocks.  [`render_field_rows`] cannot
 /// supply it: it sizes from the rows it is handed, and an act block is one row.
-pub(super) const ACT_VERB_W: usize = 11;
+pub(super) const ACT_VERB_W: usize = 13;
 /// The subject column of an act row, truncated into rather than allowed to
 /// shift the payload column.  Wide enough that a name never has to be cut: a
 /// subject is an identity, and a cut identity names nothing.

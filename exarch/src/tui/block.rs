@@ -814,20 +814,20 @@ mod tests {
                 Some("hunter"),
                 "audit every unwrap() in exarch/src"
             ),
-            "spawn      hunter              audit every unwrap() in exarch/src"
+            "spawn        hunter              audit every unwrap() in exarch/src"
         );
         assert_eq!(
             rendered("unschedule", Some("nightly"), ""),
-            "unschedule nightly",
+            "unschedule   nightly",
             "a landed act with no argument leaves the payload cell empty"
         );
         assert_eq!(
             rendered("schedule", Some("nightly"), "0 9 * * 1-5"),
-            "schedule   nightly             0 9 * * 1-5"
+            "schedule     nightly             0 9 * * 1-5"
         );
         assert_eq!(
             rendered("reply", None, "[status: \"clean\", findings: 0]"),
-            "reply                          [status: \"clean\", findings: 0]",
+            "reply                            [status: \"clean\", findings: 0]",
             "a subject-less act leaves the cell blank, not the column"
         );
     }
@@ -868,7 +868,7 @@ mod tests {
         let row = lines.last().expect("an act renders one content row");
         assert_eq!(
             line::text(row),
-            "cancel     hunter              refused: not a descendant"
+            "cancel       hunter              refused: not a descendant"
         );
         let outcome = row.spans.last().expect("the payload span");
         assert_eq!(outcome.style.fg, Some(super::super::palette::RED_HOT));
