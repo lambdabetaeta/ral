@@ -7,9 +7,23 @@ source of truth for the next request; once a malformed or empty message is
 committed, it is re-serialised on every subsequent round-trip, so a
 single bad commit can wedge the whole run on a strict backend (Anthropic 400s,
 the run dies — misclassified as fatal). The protocol state machine
-([[map/exarch/agent|`agent/event.rs`]]) enforces *role alternation*; this invariant
-enforces *per-message admissibility* at the one place messages enter the log:
-the `deliberate` commit boundary in [[map/exarch/agent|agent]].
+([[map/exarch/agent|`agent/event.rs`]]) enforces *sequencing* — above all that a
+`tool_use` block is answered; this invariant enforces *per-message
+admissibility* at the one place messages enter the log: the `deliberate` commit
+boundary in [[map/exarch/agent|agent]].
+
+Sequencing is **not** strict user/assistant alternation, and never was.
+Consecutive same-role messages are routine: a compacted session sends the
+digest as a user message immediately before the next span's user prompt, an
+inherited import span can end on a user message with the child's launch prompt
+behind it, and an abandoned exchange's note is a user message before the prompt
+that replaced it ([[invariants/turn-ends-ready|exchange-ends-ready]]). genai's
+Anthropic adapter pushes one JSON object per `ChatMessage` and merges nothing,
+so those reach the provider as written. What the wire actually constrains is
+the tool-call *pairing* — a structural relation between content blocks — which
+is why `AwaitingToolResults` and `validate_result_ids` exist, and why a closed
+span that never settles is dropped rather than sent: it would carry a dangling
+`tool_use`.
 
 Three commit-time obligations, all in `Agent::deliberate` (the deep-review X-tags):
 
@@ -48,6 +62,6 @@ exarch analogue of the wire-hop discipline
 ([[map/core/transport|exhaustive maps]]): the seam admits only validated,
 complete values.
 
-See also [[invariants/turn-ends-ready|exchange-ends-ready]] (the role-alternation
+See also [[invariants/turn-ends-ready|exchange-ends-ready]] (the sequencing
 half), [[map/exarch/agent|agent]] (`deliberate`, `admit_assistant`, `compact`),
 [[map/exarch/provider|provider]] (`from_genai`, `json_status_code`).

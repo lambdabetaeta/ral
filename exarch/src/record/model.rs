@@ -275,8 +275,13 @@ impl Memo {
         self.ledger.source = Some(path);
     }
 
+    /// Whether a record that opens a span — a fresh [`Protocol::UserPrompt`],
+    /// an imported [`Protocol::ContextMessage`] — is admissible here. Weaker
+    /// than [`State::ReadyForUser`]: an exchange that never reached a reply is
+    /// abandoned by the next prompt rather than closed by a fabricated one, so
+    /// only outstanding tool calls hold the log.
     pub fn is_ready(&self) -> bool {
-        matches!(self.state, State::ReadyForUser)
+        admits_new_span(&self.state)
     }
 
     pub fn can_compact(&self) -> bool {
@@ -304,8 +309,12 @@ impl Memo {
         self.newest_edit.is_some_and(|index| index >= measured_at)
     }
 
+    /// The exchange still owed a reply — one in flight, or one abandoned
+    /// without ever getting there. Keyed to [`State::ReadyForUser`] rather
+    /// than [`Self::is_ready`], so a context edit can never land on the
+    /// exchange a deliberation is still driving.
     pub fn is_live_exchange(&self, id: u64) -> bool {
-        !self.is_ready() && self.max_exchange == id
+        !matches!(self.state, State::ReadyForUser) && self.max_exchange == id
     }
 
     pub(crate) fn is_awaiting_assistant(&self) -> bool {
@@ -343,11 +352,11 @@ impl Memo {
         }
     }
 
-    /// The stub records a [`QuiesceReason`] quiesce needs to drive the state
-    /// back to ready, for the caller to record through the seam itself —
-    /// this fold only knows how to compute them, never to author them.
-    pub(crate) fn quiesce_stubs(&self, reason: QuiesceReason) -> Vec<Protocol> {
-        stubs_to_ready(&self.state, reason)
+    /// The records a [`QuiesceReason`] quiesce still owes, for the caller to
+    /// record through the seam itself — this fold only knows how to compute
+    /// them, never to author them.
+    pub(crate) fn quiesce_records(&self, reason: QuiesceReason) -> Vec<Protocol> {
+        quiesce_records(&self.state, reason)
     }
 
     /// The parent context a `mnemon` child inherits, materialised whole: the
@@ -414,44 +423,41 @@ impl Memo {
         self.render.get(&span.id).expect("just ensured present")
     }
 
-    /// The last span only — the two retroactive flags live here and nowhere
-    /// else, and the result is never cached.
+    /// The last span only, never cached and never dropped: the tail is the
+    /// exchange in flight, so it renders whatever state it rests in.
     fn render_tail(&self, span: &Span, omit_tail_assistant: bool) -> Vec<ChatMessage> {
         self.span_messages(span, omit_tail_assistant, false)
     }
 
+    /// A span's messages — or, when a `closed` span's own fold never settles,
+    /// the one note standing for the exchange it abandoned. None of that
+    /// exchange's own content reaches the model; `record.jsonl` keeps every
+    /// record of it regardless, this being the projection, not the log.
+    ///
+    /// An imported span settles on its own, [`Protocol::ContextMessage`] being
+    /// neutral in [`advance`], so inherited context always renders.
     fn span_messages(
         &self,
         span: &Span,
         omit_tail_assistant: bool,
-        repair_end: bool,
+        closed: bool,
     ) -> Vec<ChatMessage> {
         let end = span.events.end - usize::from(omit_tail_assistant);
         let events = self
             .ledger
             .resident_events(span.events.start..end)
             .expect("view spans are resident in the ledger");
-        if matches!(events.first(), Some(Protocol::ContextMessage { .. })) {
-            return events
-                .into_iter()
-                .cloned()
-                .flat_map(into_chat_messages)
-                .collect();
+        let settles = events
+            .iter()
+            .fold(State::default(), |state, event| advance(&state, event));
+        if closed && !matches!(settles, State::ReadyForUser) {
+            return vec![ChatMessage::user(abandoned_note(&events))];
         }
-
-        let mut state = State::default();
-        let mut messages = Vec::new();
-        for event in events {
-            if !admissible(&state, event) && stub_repairable(event) {
-                append_aborted_stubs(&mut state, &mut messages);
-            }
-            messages.extend(into_chat_messages(event.clone()));
-            state = advance(&state, event);
-        }
-        if repair_end && !matches!(state, State::ReadyForUser) {
-            append_aborted_stubs(&mut state, &mut messages);
-        }
-        messages
+        events
+            .into_iter()
+            .cloned()
+            .flat_map(into_chat_messages)
+            .collect()
     }
 
     fn messages_for_spans(&mut self, spans: &[Span]) -> Transcript {
@@ -663,9 +669,9 @@ impl Memo {
     }
 
     /// Plan-compaction only ever runs at a ready boundary
-    /// ([`Self::can_compact`]), so every span it weighs — including the one
-    /// last in `view.spans` — is already closed and safe to cache through
-    /// [`Self::render_closed_entry`].
+    /// ([`Self::can_compact`]), so no span it weighs — the one last in
+    /// `view.spans` included — is still growing, and every one is safe to
+    /// cache through [`Self::render_closed_entry`].
     pub(crate) fn plan_compaction(
         &mut self,
         keep_budget_bytes: usize,
@@ -906,15 +912,11 @@ fn record_exchange(protocol: &Protocol) -> Option<u64> {
 
 /// Protocol sequencing legality — a runtime guard for data read off disk,
 /// never consulted by [`Fold::step`] itself: live authorship is already
-/// typestate-correct, so the only place this can fail is [`validate_resume`],
+/// typestate-correct, so the only place this can fail is [`Admission`],
 /// walking a file this process did not just write.
 fn admissible(state: &State, protocol: &Protocol) -> bool {
     match protocol {
-        Protocol::UserPrompt { .. } => matches!(
-            state,
-            State::ReadyForUser | State::AwaitingAssistantAfterToolResults,
-        ),
-        Protocol::ContextMessage { .. } => matches!(state, State::ReadyForUser),
+        Protocol::UserPrompt { .. } | Protocol::ContextMessage { .. } => admits_new_span(state),
         Protocol::AssistantMessage { message, .. } => {
             message.role == ChatRole::Assistant
                 && matches!(
@@ -937,6 +939,15 @@ fn admissible(state: &State, protocol: &Protocol) -> bool {
     }
 }
 
+/// Whether a record that opens a span may follow. Only outstanding tool calls
+/// forbid it: an exchange the model never replied to is abandoned by the next
+/// prompt, not closed by a fabricated reply.
+fn admits_new_span(state: &State) -> bool {
+    !matches!(state, State::AwaitingToolResults { .. })
+}
+
+/// Whether a record inadmissible at `state` is one [`quiesce_records`] can
+/// still make way for, rather than foreign data no live door could produce.
 fn stub_repairable(protocol: &Protocol) -> bool {
     matches!(
         protocol,
@@ -944,56 +955,75 @@ fn stub_repairable(protocol: &Protocol) -> bool {
     )
 }
 
-/// The stub records role alternation needs to drive `state` back to
-/// [`State::ReadyForUser`] — the one remedy a crash-truncated tail gets on
-/// resume, mirroring what a live `quiesce` would have recorded.
-fn stubs_to_ready(state: &State, reason: QuiesceReason) -> Vec<Protocol> {
-    let (tool_stub, assistant_stub, stop_label) = match reason {
-        QuiesceReason::Cancelled => (
-            "cancelled before tool execution",
-            "(cancelled by user)",
-            "cancelled",
-        ),
-        QuiesceReason::Aborted => (
-            "no result: exchange aborted before tool execution",
-            "(no reply: exchange aborted)",
-            "aborted",
-        ),
-        QuiesceReason::Replied => (
-            "no result: exchange ended on reply",
-            "(exchange ended: replied to parent)",
-            "replied",
-        ),
+/// What the model reads in place of an exchange that never reached a reply.
+///
+/// In the user's voice, never the assistant's: the harness may state a fact
+/// about the conversation, but must not put words in the model's mouth — a
+/// placeholder in the assistant's own voice is read back as something it chose
+/// to say, and imitated. It is cause-neutral because it has to be: a cancel
+/// and an abort are told apart only by a `Forensic` record, and this fold
+/// projects the protocol subsequence alone.
+///
+/// Whether tools were called is the fact that changes what to do next, since
+/// their effects outlive the context the exchange lost. "Had been called" and
+/// "any effects" are both hedged deliberately: a batch answered wholly by
+/// [`UNRUN_TOOL_CALL`] is a call made and not run.
+fn abandoned_note(events: &[&Protocol]) -> String {
+    let effects = if events
+        .iter()
+        .any(|event| matches!(event, Protocol::ToolResults { .. }))
+    {
+        "Tools had been called, so any effects on the shell and filesystem stand."
+    } else {
+        "No tool had been called."
     };
-    let mut stubs = Vec::new();
+    format!(
+        "[EXARCH // An exchange here was interrupted before any reply; its content is not in your context. {effects}]"
+    )
+}
+
+/// The answer a tool call that never ran is given.  It does not name what
+/// ended the exchange, because it cannot vary on it: a cancel and a `reply`
+/// each answer their own batch before they quiesce, so only
+/// [`QuiesceReason::Aborted`] ever reaches this.  The cause is
+/// `Forensic::Cancelled`'s or `Forensic::ProviderError`'s to carry.
+const UNRUN_TOOL_CALL: &str = "[EXARCH // No result: the exchange ended before this call ran.]";
+
+/// The records a quiesce still owes.
+///
+/// A tool call that never ran is owed an answer whatever ended the exchange:
+/// the calls were really made, "not executed" is really the answer, and a
+/// dangling tool-call block is not a legal request. A [`QuiesceReason::Replied`]
+/// exchange is owed a capstone besides — it ended, and only a record can say
+/// so, the fold being unable to tell a reply from an interruption at the
+/// resting state the two share.
+///
+/// Nothing else is synthesised. An exchange that stopped before any reply is
+/// left exactly as it lies, and [`Memo::span_messages`] drops it from the
+/// model's view once it closes, so the model never reads a turn it never took.
+fn quiesce_records(state: &State, reason: QuiesceReason) -> Vec<Protocol> {
+    let mut records = Vec::new();
     let mut state = state.clone();
     if let State::AwaitingToolResults { pending_ids } = &state {
         let results = pending_ids
             .iter()
             .map(|id| ToolResult {
                 id: id.clone(),
-                content: tool_stub.into(),
+                content: UNRUN_TOOL_CALL.into(),
             })
             .collect();
-        let stub = Protocol::ToolResults { results };
-        state = advance(&state, &stub);
-        stubs.push(stub);
+        let record = Protocol::ToolResults { results };
+        state = advance(&state, &record);
+        records.push(record);
     }
-    if !matches!(state, State::ReadyForUser) {
-        stubs.push(Protocol::AssistantMessage {
-            message: ChatMessage::assistant(assistant_stub),
+    if matches!(reason, QuiesceReason::Replied) && !matches!(state, State::ReadyForUser) {
+        records.push(Protocol::AssistantMessage {
+            message: ChatMessage::assistant("[EXARCH // Exchange ended: replied to parent.]"),
             pending_tool_ids: Vec::new(),
-            stop_reason: Some(stop_label.into()),
+            stop_reason: Some("replied".into()),
         });
     }
-    stubs
-}
-
-fn append_aborted_stubs(state: &mut State, messages: &mut Vec<ChatMessage>) {
-    for stub in stubs_to_ready(state, QuiesceReason::Aborted) {
-        *state = advance(state, &stub);
-        messages.extend(into_chat_messages(stub));
-    }
+    records
 }
 
 /// One step of the fold: append to the ledger, advance the view, and free
@@ -1135,9 +1165,10 @@ fn refold(ledger: &Ledger) -> io::Result<(State, View, u64)> {
 }
 
 /// The protocol sequencing law, replayed record by record beside the fold that
-/// [`resume`] is building: interposing the stub records a live `quiesce` would
-/// have written wherever a record is inadmissible but repairable, and refusing
-/// outright wherever it is not — foreign data no live door could have produced.
+/// [`resume`] is building: interposing the records a live `quiesce` would have
+/// written wherever a record is inadmissible but repairable — a tool-result
+/// batch lost from the file — and refusing outright wherever it is not:
+/// foreign data no live door could have produced.
 ///
 /// Its `state` and `view` are its own, never the fold's, so admission stays an
 /// independent judgement on the file rather than a self-agreement of the memo.
@@ -1166,8 +1197,8 @@ impl Admission {
                     ),
                 });
             }
-            for stub in stubs_to_ready(&self.state, QuiesceReason::Aborted) {
-                self.state = advance(&self.state, &stub);
+            for record in quiesce_records(&self.state, QuiesceReason::Aborted) {
+                self.state = advance(&self.state, &record);
             }
         }
         self.state = advance(&self.state, protocol);

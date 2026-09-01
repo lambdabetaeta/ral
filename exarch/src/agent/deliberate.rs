@@ -2,8 +2,8 @@
 //!
 //! [`Avatar::deliberate`] steps the provider until it stops calling tools,
 //! bounded by [`MAX_STEPS`] since a headless run has no Esc to hand.
-//! Auto-compaction is checked once, at entry — the sole boundary guaranteed
-//! `ReadyForUser` — against the policy in [`digest`](crate::agent::digest).
+//! Auto-compaction is checked once, at entry — the sole boundary with no
+//! exchange in flight — against the policy in [`digest`](crate::agent::digest).
 //! [`Avatar::attend`] is the loop around this, one call per inbox item.
 
 use crate::agent::Avatar;
@@ -76,9 +76,9 @@ impl Avatar {
         // or an error lands between `invoke` and the post-batch drain; entry is
         // the one point every route into a deliberation is guaranteed to cross.
         self.reply = None;
-        // Entry is `ReadyForUser`, before the prompt is committed: the only
-        // place `can_compact()` is guaranteed to hold, and every exchange and
-        // nudge alike crosses it.
+        // Entry, before the prompt is committed, is the one place
+        // `can_compact()` is guaranteed to hold, and every exchange and nudge
+        // alike crosses it.
         self.compact(provider, false, token, continues);
         if let Some(p) = prompt {
             self.log
@@ -463,7 +463,7 @@ impl Avatar {
 fn cancelled_result(id: String) -> SessionToolResult {
     SessionToolResult {
         id,
-        content: "cancelled before tool execution".into(),
+        content: "[EXARCH // Request interrupted by user, before tool execution.]".into(),
     }
 }
 

@@ -173,8 +173,9 @@ impl From<&ProviderError> for ProviderErrorRecord {
     }
 }
 
-/// Why an exchange is being wound back to ready with no real assistant
-/// reply; picks the stub text recorded in its place.
+/// Why an exchange is ending with no real assistant reply: decides whether it
+/// is owed a capstone, and whether it earns a `Forensic::Cancelled`
+/// breadcrumb.
 #[derive(Clone, Copy)]
 pub enum QuiesceReason {
     Cancelled,
@@ -702,19 +703,18 @@ impl AgentLog {
             .map_err(|e| e.to_string())
     }
 
-    /// Drive the session back to a ready boundary, synthesising whatever
-    /// records role alternation needs, whenever an exchange ends without a
-    /// real assistant reply.
+    /// End an exchange that produced no real assistant reply, recording only
+    /// what the log still owes: an answer to tool calls that never ran, and a
+    /// capstone for an exchange that ended on `reply`.  An exchange abandoned
+    /// short of a reply is left as it lies — the model reads no trace of it,
+    /// and the next prompt opens a fresh one over the top.
     pub fn quiesce(&mut self, reason: QuiesceReason) {
-        let stubs = self.model_memo.quiesce_stubs(reason);
-        let quiesced = !stubs.is_empty();
-        for stub in stubs {
-            self.record_protocol_lossy(stub);
+        for record in self.model_memo.quiesce_records(reason) {
+            self.record_protocol_lossy(record);
         }
         // Only a cancellation earns its own breadcrumb; an abort's marker is
         // the `ProviderError` already on disk.
-        if quiesced
-            && matches!(reason, QuiesceReason::Cancelled)
+        if matches!(reason, QuiesceReason::Cancelled)
             && let Err(error) = self.record_forensic(Forensic::Cancelled)
         {
             eprintln!("exarch: the cancellation breadcrumb was not recorded: {error}");
@@ -994,7 +994,7 @@ impl AgentLog {
 
     /// [`Self::record_protocol`] with the emit made best-effort: its remit is
     /// exactly the harness-synthesized records where refusing would wedge the
-    /// session — [`Self::quiesce`]'s stubs, and the `SessionStarted` bookends
+    /// session — what [`Self::quiesce`] owes, and the `SessionStarted` bookends
     /// of a mirror-only session, which a `--no-logs` seam never actually fails
     /// to accept.  A genuine append failure here still leaves the model fold
     /// unadvanced for this one record, since there is no witnessed result to
@@ -1427,13 +1427,130 @@ mod tests {
         );
     }
 
+    /// An exchange abandoned before any reply is closed by the next prompt,
+    /// not by a fabricated one: nothing is recorded in its place, and none of
+    /// its content reaches the model — only a user-voice note that it happened.
     #[test]
-    fn quiesce_after_abort_admits_next_prompt() {
+    fn an_abandoned_exchange_is_kept_whole_and_read_as_a_note() {
         let mut s = fresh_root();
-        s.append_user("p".into(), None).unwrap();
+        s.append_user("interrupted".into(), None).unwrap();
+        s.quiesce(QuiesceReason::Cancelled);
+        assert!(s.is_ready());
+        assert!(
+            !records(&s).iter().any(|record| matches!(
+                record,
+                Record::Protocol(Protocol::AssistantMessage { .. })
+            )),
+            "no assistant turn the model never took may enter the log"
+        );
+        complete_exchange(&mut s, "next", "answer");
+        let transcript = s.history_transcript();
+        let read: Vec<&str> = transcript
+            .messages()
+            .filter_map(|message| message.content.first_text())
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                "[EXARCH // An exchange here was interrupted before any reply; \
+                 its content is not in your context. No tool had been called.]",
+                "next",
+                "answer"
+            ]
+        );
+        assert!(
+            transcript
+                .messages()
+                .all(|message| message.role == ChatRole::User
+                    || message.content.first_text() == Some("answer")),
+            "the note speaks as the user, never as the assistant"
+        );
+        assert!(
+            records(&s).iter().any(|record| matches!(
+                record,
+                Record::Protocol(Protocol::UserPrompt { text, .. }) if text == "interrupted"
+            )),
+            "record.jsonl keeps the abandoned exchange unabridged"
+        );
+    }
+
+    /// The note names the one fact that outlives the context the exchange
+    /// lost: whether tools had run, and so whether the world was touched.
+    #[test]
+    fn an_abandoned_exchange_that_ran_tools_says_so() {
+        let mut s = fresh_root();
+        s.append_user("run the tool".into(), None).unwrap();
+        s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
+        s.append_tool_results(vec![ToolResult {
+            id: "call".into(),
+            content: "result".into(),
+        }])
+        .unwrap();
+        s.quiesce(QuiesceReason::Cancelled);
+        complete_exchange(&mut s, "next", "answer");
+        assert!(
+            s.history_transcript().messages().any(|message| {
+                message
+                    .content
+                    .first_text()
+                    .is_some_and(|text| text.contains("any effects on the shell and filesystem"))
+            }),
+            "an exchange that touched the world must say so"
+        );
+    }
+
+    /// Tool calls that never ran are the one thing a quiesce still owes: the
+    /// calls were really made, and a dangling tool-call block is not a legal
+    /// request.
+    #[test]
+    fn quiesce_answers_tool_calls_that_never_ran_and_nothing_else() {
+        let mut s = fresh_root();
+        s.append_user("run the tool".into(), None).unwrap();
+        s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
+        assert!(!s.is_ready(), "outstanding tool calls hold the log");
         s.quiesce(QuiesceReason::Aborted);
         assert!(s.is_ready());
+        assert!(records(&s).iter().any(|record| matches!(
+            record,
+            Record::Protocol(Protocol::ToolResults { results })
+                if results.iter().any(|result| result.id == "call")
+        )));
+        assert!(
+            !records(&s).iter().any(|record| matches!(
+                record,
+                Record::Protocol(Protocol::AssistantMessage { stop_reason: Some(r), .. })
+                    if r == "aborted"
+            )),
+            "the answer is owed; a closing assistant turn is not"
+        );
         s.append_user("next".into(), None).unwrap();
+    }
+
+    /// A `reply` ends a complete exchange, so its capstone is earned — and
+    /// without one the fold could not tell it from an interrupted exchange,
+    /// and would drop the whole turn from the child's own view.
+    #[test]
+    fn a_replied_exchange_keeps_its_capstone_and_stays_visible() {
+        let mut s = fresh_root();
+        s.append_user("do the work".into(), None).unwrap();
+        s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
+        s.append_tool_results(vec![ToolResult {
+            id: "call".into(),
+            content: "done".into(),
+        }])
+        .unwrap();
+        s.quiesce(QuiesceReason::Replied);
+        complete_exchange(&mut s, "follow-up", "answer");
+        assert!(
+            s.history_transcript().messages().any(|message| {
+                message.content.first_text()
+                    == Some("[EXARCH // Exchange ended: replied to parent.]")
+            }),
+            "a replied exchange stays whole in the child's own view"
+        );
     }
 
     #[test]
@@ -1561,13 +1678,6 @@ mod tests {
                 .iter()
                 .any(|record| matches!(record, Record::Protocol(Protocol::ToolResults { .. })))
         );
-        assert!(recorded.iter().any(|record| matches!(
-            record,
-            Record::Protocol(Protocol::AssistantMessage {
-                stop_reason: Some(reason),
-                ..
-            }) if reason == "aborted"
-        )));
         resumed.append_user("continue".into(), None).unwrap();
         let recorded = records(&resumed);
         assert!(matches!(
@@ -1735,7 +1845,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_repairs_an_interior_stub_lost_from_disk() {
+    fn resume_repairs_an_interior_tool_answer_lost_from_disk() {
         let sessions = sessions_root("resume-interior-seam");
         let mut live = AgentLog::root(
             sessions.path(),
@@ -1746,6 +1856,8 @@ mod tests {
         )
         .unwrap();
         live.append_user("first".into(), None).unwrap();
+        live.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
         live.quiesce(QuiesceReason::Aborted);
         complete_exchange(&mut live, "second", "answer");
         let path = sessions.path().join("0/record.jsonl");
@@ -1755,13 +1867,7 @@ mod tests {
         let mut repaired = Vec::with_capacity(data.len());
         for fragment in data.split_inclusive(|byte| *byte == b'\n') {
             let record = crate::record::record_from_line(&fragment[..fragment.len() - 1]).unwrap();
-            if matches!(
-                record,
-                Record::Protocol(Protocol::AssistantMessage {
-                    stop_reason: Some(ref reason),
-                    ..
-                }) if reason == "aborted"
-            ) {
+            if matches!(record, Record::Protocol(Protocol::ToolResults { .. })) {
                 continue;
             }
             repaired.extend_from_slice(fragment);
@@ -1770,9 +1876,22 @@ mod tests {
 
         let mut resumed = AgentLog::resume(sessions.path(), 0).expect("interior seam repair");
         assert!(resumed.is_ready());
-        assert!(resumed.history_transcript().messages().any(|message| {
-            message.content.first_text() == Some("(no reply: exchange aborted)")
-        }));
+        let transcript = resumed.history_transcript();
+        assert!(
+            transcript.messages().any(|message| {
+                message
+                    .content
+                    .first_text()
+                    .is_some_and(|text| text.starts_with("[EXARCH // An exchange here"))
+            }),
+            "the repaired seam admits the log; the abandoned exchange reads as its note"
+        );
+        assert!(
+            !transcript
+                .messages()
+                .any(|message| message.content.first_text() == Some("first")),
+            "none of the abandoned exchange's own content reaches the model"
+        );
         resumed.append_user("next".into(), None).unwrap();
     }
 

@@ -88,7 +88,7 @@ A guided path through the system, *why* before *how*:
 - [[invariants/single-binary|single-binary]] — ral ships as one executable; no sibling helpers.
 - [[invariants/ir-pure-cbpv|ir-pure-cbpv]] — the IR carries no surface sugar; conveniences unfold at elaboration.
 - [[invariants/optionality-via-variants|optionality-via-variants]] — no Option/null; optionality is open variants.
-- [[invariants/turn-ends-ready|exchange-ends-ready]] — an exchange leaves the session `ReadyForUser` however it ends; the loop never strands a prompt mid-protocol.
+- [[invariants/turn-ends-ready|exchange-ends-ready]] — an exchange leaves a fresh prompt admissible however it ends; only outstanding tool calls hold the log, and an exchange abandoned short of a reply is left as it lies rather than closed by a fabricated one.
 - [[invariants/schemes-leave-closed|schemes-leave-closed]] — a `Scheme` leaves its minting unifier only if closed; quantification is nominal-by-listing, so a residual id aliases a foreign unifier's variables.
 - [[invariants/exec-argv-is-words|exec-argv-is-words]] — an argv the shell renders is total, an argv crossing into `execve(2)` is words; the shapes that are not words are declared once (`RefusedArg`) and read at both moments a call can be refused — the checker before the run, the spawn at it.
 - [[invariants/probe-convention|probe-convention]] — every session-lived resident or accumulator exposes a non-renewing resource probe whose policy names its bound; `/resources` is the fold over those probes.
