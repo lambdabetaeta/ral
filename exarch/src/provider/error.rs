@@ -109,7 +109,7 @@ impl ProviderError {
                 body: None,
                 status: None,
             },
-            Fault::Terminal => Self::Other(msg),
+            Fault::Terminal(inner) => Self::Other(inner.unwrap_or(msg)),
         }
     }
 }
@@ -134,7 +134,9 @@ enum Fault<'a> {
     Transport,
     /// Neither status nor transport: a request built wrong, an auth gap, a 2xx
     /// whose body was not the JSON genai required.  Retrying only re-loses.
-    Terminal,
+    /// The payload is the unwrapped cause's own message, when one was found,
+    /// so `Other` skips genai's wrapper text.
+    Terminal(Option<String>),
 }
 
 impl<'a> Fault<'a> {
@@ -151,12 +153,12 @@ impl<'a> Fault<'a> {
             genai::Error::WebStream { error, .. } => Self::of_boxed(error.as_ref()),
             genai::Error::ChatResponse { body, .. } => json_status_code(body)
                 .and_then(|code| StatusCode::from_u16(code).ok())
-                .map_or(Fault::Terminal, |status| Fault::Status {
+                .map_or(Fault::Terminal(None), |status| Fault::Status {
                     status,
                     headers: None,
                     body: Some(Box::new(body.clone())),
                 }),
-            _ => Fault::Terminal,
+            _ => Fault::Terminal(None),
         }
     }
 
@@ -168,12 +170,12 @@ impl<'a> Fault<'a> {
                 body,
             } => Self::status(*status, Some(headers), body),
             genai::webc::Error::Reqwest(e) => Self::of_reqwest(e),
-            _ => Fault::Terminal,
+            _ => Fault::Terminal(None),
         }
     }
 
     /// A `WebStream` boxes its cause: a `genai::Error`, walked in turn, or a
-    /// bare `reqwest::Error`.  Anything else — a UTF-8 corruption — is terminal.
+    /// bare `reqwest::Error`.  Anything else is terminal, its own message kept.
     fn of_boxed(err: &'a (dyn std::error::Error + 'static)) -> Self {
         if let Some(genai) = err.downcast_ref::<genai::Error>() {
             return Fault::of(genai);
@@ -181,7 +183,7 @@ impl<'a> Fault<'a> {
         if let Some(reqwest) = err.downcast_ref::<reqwest::Error>() {
             return Self::of_reqwest(reqwest);
         }
-        Fault::Terminal
+        Fault::Terminal(Some(err.to_string()))
     }
 
     /// Only the fault classes a re-issue can plausibly clear count as
@@ -195,7 +197,7 @@ impl<'a> Fault<'a> {
         {
             Fault::Transport
         } else {
-            Fault::Terminal
+            Fault::Terminal(None)
         }
     }
 
