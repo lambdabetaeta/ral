@@ -11,7 +11,7 @@
 use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
 use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
-use crate::bus::{AgentId, Emitter};
+use crate::bus::{AgentId, Emitter, Stamp};
 use crate::fleet::schedule::{CronSchedule, Trigger, parse_duration};
 use crate::fleet::{Fleet, check_name, roster::listing};
 use crate::record::commit::SurfaceBuffer;
@@ -220,9 +220,9 @@ pub(crate) struct HostServices {
     /// The adoption end of the body's own [`ral_core::Shell::fork_into_nursery`];
     /// `` `start `` redeems a [`NurseryId`] here.
     pub nursery: Nursery,
-    /// The calling agent's own generation, read at install, so a desk older
+    /// The calling agent's own envelope, minted at install, so a desk older
     /// than *its* `/clear` refuses to spawn.
-    pub generation: u64,
+    pub stamp: Stamp,
     /// What this call has committed so far: minted per `ral` call, and read
     /// back by [`crate::shell_eval::report::render`] when a raise discards
     /// the bindings but not the acts.
@@ -708,9 +708,9 @@ impl ExarchDesk {
         let s = &self.services;
 
         // The captured fuel, caps, and grant are only as fresh as the
-        // generation they were snapshotted under — this caller's own, so a
+        // envelope they were snapshotted under — this caller's own, so a
         // `/clear` in another tab does not refuse a spawn here.
-        if s.generation != s.agent.generation() {
+        if s.stamp.is_stale() {
             return Err(Error::new(
                 "`agents `start` refused: the agent tree was cleared while this call was still in \
                  flight, so the fuel and permissions snapshot it captured are now stale — \
@@ -1884,7 +1884,7 @@ mod tests {
                     .expect("scratch dir"),
                 ),
             },
-            generation: agent.generation(),
+            stamp: agent.mailbox().stamp(),
             agent,
             emit,
             cwd: PathBuf::from("/"),
@@ -3130,18 +3130,18 @@ mod tests {
         }
     }
 
-    /// The capture went stale the instant the *calling* session's generation
-    /// moved past what was snapshotted at install.
+    /// The capture went stale the instant the *calling* session's inbox
+    /// epoch moved past what was snapshotted at install.
     #[test]
     fn agent_start_refuses_after_clear() {
-        let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
-        desk.services.agent.clear_subtree(); // the /clear gesture, on this caller
+        let (desk, _fleet, parent_inbox) = spawnable_desk(3);
+        parent_inbox.clear(); // the /clear gesture, on this caller
         let root = root_shell();
         let shell = forkable_child_shell(&root);
         let session = desk.services.nursery.park(shell);
         let err = desk
             .handle(start_req(session, "hi", "helper", "confined", true))
-            .expect_err("a stale generation must refuse");
+            .expect_err("a stale epoch must refuse");
         assert!(
             err.message.contains("cleared"),
             "must name the /clear cause, got: {}",
@@ -3984,7 +3984,7 @@ mod wire_tests {
             services: HostServices {
                 fleet: fleet.clone(),
                 kind: SeatKind::Wire,
-                generation: agent.generation(),
+                stamp: agent.mailbox().stamp(),
                 agent,
                 emit,
                 cwd: PathBuf::from("/work"),
@@ -4195,7 +4195,7 @@ mod wire_tests {
                 // Neither peer's transport matters to `message`, which
                 // touches only the tree and a mailbox.
                 kind: SeatKind::Wire,
-                generation: parent.generation(),
+                stamp: parent.mailbox().stamp(),
                 agent: parent,
                 emit,
                 cwd: PathBuf::from("/"),

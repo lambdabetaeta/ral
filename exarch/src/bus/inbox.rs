@@ -10,7 +10,7 @@
 //! changes only *after* a delivery into this queue (a child dies after posting
 //! its result) — so a delivery can never lose to the verdict it should wake.
 
-use super::post::{Boundary, Source, is_slash};
+use super::post::{Boundary, Minted, Source, Stamped, is_slash};
 use super::{Item, Post};
 use crate::agent::cancel;
 use crate::sync::LockExt;
@@ -53,12 +53,16 @@ struct Shared {
     /// waking the consumer, so a frontend can tell "prompt is editable" from
     /// "the root is still working" without minting a presentation event.
     waiting_for_input: AtomicBool,
-    /// Bumped by [`Inbox::clear`] under the queue mutex.  A `ScheduledWakeup`
-    /// is composed on the reaper thread and pushed as a second step, with a
-    /// `/clear` free to fall between, so it stamps [`Mailbox::epoch`] at
-    /// compose time and [`pop_item`] compares that against this counter under
-    /// the lock `clear` holds: a push landing before the bump is swept with the
-    /// queue, one landing after is refused as stale.
+    /// Bumped by [`Inbox::clear`] under the queue mutex.  A [`Stamped`]
+    /// message — one whose producer cannot judge its own staleness — is
+    /// composed elsewhere and pushed as a second step, with a `/clear` free
+    /// to fall between, so it arrives through a [`Stamp`] minted at
+    /// composition and [`pop_item`] compares that against this counter under
+    /// the lock `clear` holds: a push landing before the bump is swept with
+    /// the queue, one landing after is refused as stale.  A single `/clear`
+    /// gesture may bump this more than once — the TUI's pre-drain
+    /// `App::clear` and `Avatar::clear`'s own drain both run on the same
+    /// inbox — which only widens refusal, never narrows it.
     epoch: AtomicU64,
 }
 
@@ -117,7 +121,7 @@ impl Shared {
     }
 }
 
-/// The push rule.  The idempotent sources coalesce: a `ScheduledWakeup`
+/// The push rule.  The idempotent sources coalesce: a wakeup
 /// replaces a still-queued one for the same schedule id, a `Nudge` replaces a
 /// still-queued nudge (a second means a fresher continuation superseded the
 /// first, not that both are owed), and `UserSteering` joins a non-slash tail
@@ -127,11 +131,15 @@ impl Shared {
 /// keystroke, so the fuel and admission caps that bound those already bound
 /// the queue.
 fn enqueue(q: &mut VecDeque<Post>, msg: Post) {
+    let queued_wakeup_for = |m: &Post, id| {
+        matches!(m, Post::Stamped { kind: Stamped::Wakeup { id: eid, .. }, .. } if *eid == id)
+    };
     match msg {
-            Post::ScheduledWakeup { id, .. } => {
-                let existing = q
-                    .iter()
-                    .position(|m| matches!(m, Post::ScheduledWakeup { id: eid, .. } if *eid == id));
+            Post::Stamped {
+                kind: Stamped::Wakeup { id, .. },
+                ..
+            } => {
+                let existing = q.iter().position(|m| queued_wakeup_for(m, id));
                 match existing {
                     Some(pos) => q[pos] = msg,
                     None => q.push_back(msg),
@@ -222,6 +230,50 @@ impl Mailbox {
     /// This inbox's clear-epoch — the race is [`Shared::epoch`]'s doc.
     pub(crate) fn epoch(&self) -> u64 {
         self.shared.epoch.load(Ordering::Acquire)
+    }
+
+    /// Mint the addressed envelope for a message composed now but pushed
+    /// later — the only way to send a [`Stamped`] message.
+    pub(crate) fn stamp(&self) -> Stamp {
+        Stamp {
+            epoch: self.epoch(),
+            mailbox: self.clone(),
+        }
+    }
+}
+
+/// An addressed envelope: the destination mailbox and its clear-epoch,
+/// captured together at composition ([`Mailbox::stamp`]).  Because the pair
+/// travels as one value, a stamp can be neither forgotten ([`Stamped`] is
+/// unsendable without one), taken from a different inbox than the one that
+/// judges it, nor refreshed at push time.
+#[derive(Clone)]
+pub(crate) struct Stamp {
+    mailbox: Mailbox,
+    epoch: u64,
+}
+
+impl Stamp {
+    /// Deliver to the minting mailbox, judged against the minted epoch at
+    /// that inbox's own pop ([`pop_item`]).
+    pub(crate) fn post(&self, kind: Stamped) {
+        self.mailbox.push(Post::Stamped {
+            epoch: Minted(self.epoch),
+            kind,
+        });
+    }
+
+    /// Whether the minting inbox has cleared since — the desk's spawn
+    /// refusal, with no second epoch read to get wrong.
+    pub(crate) fn is_stale(&self) -> bool {
+        self.mailbox.epoch() != self.epoch
+    }
+
+    /// The minted epoch; test assertions only — production judges
+    /// staleness at the pop or through [`Self::is_stale`].
+    #[cfg(test)]
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
@@ -507,35 +559,33 @@ fn coalesce_steering(q: &mut VecDeque<Post>) -> Item {
 }
 
 /// Convert one non-steering message into the [`Item`] it delivers, running its
-/// [`Post::on_drain`] — or `None` for a `ScheduledWakeup` whose stamped epoch
-/// has fallen behind `epoch`, refused rather than converted.
+/// [`Post::on_drain`] — or `None` for a [`Stamped`] message whose minted epoch
+/// has since fallen behind `epoch`, refused rather than converted.  The one
+/// fence, stated once, over the one variant that can carry a stamp.
 fn to_item(msg: Post, epoch: u64) -> Option<Item> {
     msg.on_drain();
-    if let Post::ScheduledWakeup { epoch: fired, .. } = &msg
-        && *fired != epoch
-    {
-        return None;
-    }
     Some(match msg {
-        Post::ScheduledWakeup {
-            label,
-            trigger,
-            prompt,
-            ..
-        } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
-        Post::AgentResult(r) => Item::Agent(r),
+        Post::Stamped {
+            epoch: Minted(stamped),
+            kind,
+        } => {
+            if stamped != epoch {
+                return None;
+            }
+            match kind {
+                Stamped::Wakeup {
+                    label,
+                    trigger,
+                    prompt,
+                    ..
+                } => Item::Wakeup(format!("[scheduled '{label}' · {trigger}] {prompt}")),
+                Stamped::AgentResult(line) => Item::Agent(line),
+                Stamped::Surface { id, values } => Item::Surface { id, values },
+            }
+        }
         Post::AgentMessage(m) => Item::Message(m),
         Post::Nudge { exchange, text } => Item::Nudge { exchange, text },
         Post::Command(s) | Post::Barrier(s) => Item::Command(s),
-        Post::Surface {
-            id,
-            values,
-            generation,
-        } => Item::Surface {
-            id,
-            values,
-            generation,
-        },
         Post::UserSteering(_) => {
             unreachable!("user steering coalesced by the caller")
         }
@@ -544,9 +594,9 @@ fn to_item(msg: Post, epoch: u64) -> Option<Item> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Boundary, Inbox, Item, ParkMode, Post, Source};
+    use super::{Boundary, Inbox, Item, Minted, ParkMode, Post, Source, Stamped};
     use crate::agent::cancel;
-    use crate::bus::AgentMessage;
+    use crate::bus::{AgentMessage, AgentOutcome, AgentResult};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -557,14 +607,18 @@ mod tests {
     }
 
     /// [`wakeup`] with an explicit epoch, for the stale-admission tests.
+    /// Forging a [`Minted`] is possible only here inside `bus`; everyone
+    /// else sends through a [`Stamp`].
     fn wakeup_at(id: u64, label: &str, trigger: &str, prompt: &str, epoch: u64) -> Post {
-        Post::ScheduledWakeup {
-            id,
-            label: label.into(),
-            trigger: trigger.into(),
-            prompt: prompt.into(),
-            pending: Arc::new(AtomicBool::new(true)),
-            epoch,
+        Post::Stamped {
+            epoch: Minted(epoch),
+            kind: Stamped::Wakeup {
+                id,
+                label: label.into(),
+                trigger: trigger.into(),
+                prompt: prompt.into(),
+                pending: Arc::new(AtomicBool::new(true)),
+            },
         }
     }
 
@@ -966,8 +1020,10 @@ mod tests {
         assert!(inbox.is_empty());
     }
 
-    /// A `spawn` worker's batch, terminated by the `` `done `` event core appends.
-    fn surface() -> Post {
+    /// A `spawn` worker's batch, terminated by the `` `done `` event core
+    /// appends, stamped with `epoch` — a live one for the ordinary path, a
+    /// stale one to exercise the pop-time fence.
+    fn surface(epoch: u64) -> Post {
         use ral_core::Value;
         let done = Value::Variant {
             label: "done".into(),
@@ -982,10 +1038,12 @@ mod tests {
                 ),
             ]))),
         };
-        Post::Surface {
-            id: 0,
-            values: vec![done],
-            generation: 0,
+        Post::Stamped {
+            epoch: Minted(epoch),
+            kind: Stamped::Surface {
+                id: 0,
+                values: vec![done],
+            },
         }
     }
 
@@ -993,16 +1051,16 @@ mod tests {
     #[test]
     fn inbox_surface_drains_at_tool_boundary_and_cleared() {
         let inbox = Inbox::new();
-        assert_eq!(surface().boundary(), Boundary::Tool);
+        assert_eq!(surface(0).boundary(), Boundary::Tool);
 
-        inbox.push(surface());
+        inbox.push(surface(inbox.mailbox().epoch()));
         inbox.clear();
         assert!(
             inbox.drain_steering().is_empty(),
             "a /clear drops the queued batch"
         );
 
-        inbox.push(surface());
+        inbox.push(surface(inbox.mailbox().epoch()));
         assert!(matches!(
             inbox.drain_steering().as_slice(),
             [Item::Surface { id, .. }] if *id == 0
@@ -1014,15 +1072,13 @@ mod tests {
     fn inbox_wakeup_clears_its_pending_flag_on_drain() {
         let pending = Arc::new(AtomicBool::new(true));
         let inbox = Inbox::new();
-        inbox
-            .push(Post::ScheduledWakeup {
-                id: 1,
-                label: "n".into(),
-                trigger: "* * * * *".into(),
-                prompt: "go".into(),
-                pending: pending.clone(),
-                epoch: 0,
-            });
+        inbox.mailbox().stamp().post(Stamped::Wakeup {
+            id: 1,
+            label: "n".into(),
+            trigger: "* * * * *".into(),
+            prompt: "go".into(),
+            pending: pending.clone(),
+        });
         assert!(pending.load(std::sync::atomic::Ordering::Acquire));
         let _ = inbox.next_item();
         assert!(
@@ -1039,15 +1095,13 @@ mod tests {
     fn inbox_clear_runs_the_drain_side_effect_on_a_stranded_wakeup() {
         let pending = Arc::new(AtomicBool::new(true));
         let inbox = Inbox::new();
-        inbox
-            .push(Post::ScheduledWakeup {
-                id: 1,
-                label: "n".into(),
-                trigger: "* * * * *".into(),
-                prompt: "go".into(),
-                pending: pending.clone(),
-                epoch: 0,
-            });
+        inbox.mailbox().stamp().post(Stamped::Wakeup {
+            id: 1,
+            label: "n".into(),
+            trigger: "* * * * *".into(),
+            prompt: "go".into(),
+            pending: pending.clone(),
+        });
         inbox.clear();
         assert!(
             !pending.load(std::sync::atomic::Ordering::Acquire),
@@ -1078,6 +1132,59 @@ mod tests {
         let live = inbox.mailbox().epoch();
         inbox.push(wakeup_at(1, "n", "@", "go", live));
         assert!(matches!(inbox.next_item(), Some(Item::Wakeup(_))));
+    }
+
+    /// The same one-rule fence, over an `AgentResult` instead of a wakeup.
+    #[test]
+    fn stale_epoch_agent_result_is_refused_at_pop() {
+        let inbox = Inbox::new();
+        let stamp = inbox.mailbox().stamp();
+        inbox.clear();
+        stamp.post(Stamped::AgentResult(AgentResult {
+            id: 1,
+            name: "worker".into(),
+            outcome: AgentOutcome::Stopped("done".into()),
+            elapsed: Duration::ZERO,
+        }));
+        assert!(
+            inbox.next_item().is_none(),
+            "an agent result stamped with an epoch older than the inbox's own is dropped"
+        );
+    }
+
+    /// The positive half: a live-epoch `AgentResult` is delivered.
+    #[test]
+    fn current_epoch_agent_result_is_delivered() {
+        let inbox = Inbox::new();
+        inbox.mailbox().stamp().post(Stamped::AgentResult(AgentResult {
+            id: 1,
+            name: "worker".into(),
+            outcome: AgentOutcome::Stopped("done".into()),
+            elapsed: Duration::ZERO,
+        }));
+        assert!(matches!(inbox.next_item(), Some(Item::Agent(_))));
+    }
+
+    /// The same one-rule fence, over a `Surface` batch instead of a wakeup.
+    #[test]
+    fn stale_epoch_surface_batch_is_refused_at_pop() {
+        let inbox = Inbox::new();
+        let stale = inbox.mailbox().epoch();
+        inbox.clear();
+        inbox.push(surface(stale));
+        assert!(
+            inbox.next_item().is_none(),
+            "a surface batch stamped with an epoch older than the inbox's own is dropped"
+        );
+    }
+
+    /// The positive half: a live-epoch `Surface` batch is delivered.
+    #[test]
+    fn current_epoch_surface_batch_is_delivered() {
+        let inbox = Inbox::new();
+        let live = inbox.mailbox().epoch();
+        inbox.push(surface(live));
+        assert!(matches!(inbox.next_item(), Some(Item::Surface { .. })));
     }
 
     // ── inbox quotas without silent loss ───────────────────────────────────

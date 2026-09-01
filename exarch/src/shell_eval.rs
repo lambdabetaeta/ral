@@ -13,7 +13,7 @@ pub mod skill;
 pub mod tools;
 
 use crate::bus::card::{landing, value_to_card, value_to_done, value_to_pin};
-use crate::bus::{AgentId, Emitter, Mailbox, Post};
+use crate::bus::{AgentId, Emitter, Stamp, Stamped};
 use base64::Engine;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -200,19 +200,17 @@ pub(crate) fn unknown_surface_note(shape: impl std::fmt::Display) -> crate::reco
 /// The deferred half of `surface`: the session-lived [`DeferredSink`] a
 /// detached `spawn` worker flushes its buffered batch to at completion.  Not a
 /// second channel — the live sink's own vocabulary, posted through the
-/// session's [`Mailbox`] as a [`Post::Surface`] to render at the next boundary.
+/// session's envelope as a [`Stamped::Surface`] to render at the next boundary.
 ///
 /// A worker settling mid-`/clear` cannot decide its own staleness, since
 /// composing the batch and pushing it are two steps a `/clear` can fall
-/// between; so the sink stamps every batch with the root session's own
-/// generation as captured at construction and always pushes, leaving
-/// `Avatar::admits` to reject a stale one at the consuming edge.
+/// between; so the sink holds a [`Stamp`] minted at construction and always
+/// posts, leaving the pop to reject a stale one at the consuming edge.
 struct InboxDeferred {
-    mailbox: Mailbox,
+    stamp: Stamp,
     /// The **root** session's id: a spawn worker registers no tab of its own,
     /// so its cards must land in the root viewport.
     root: AgentId,
-    generation: u64,
 }
 
 impl DeferredSink for InboxDeferred {
@@ -220,10 +218,9 @@ impl DeferredSink for InboxDeferred {
         // Decode once, totally, at this door: the batch crosses as first-order
         // values, the inbox renders `Value`s.
         let values = batch.into_iter().map(RalValue::from).collect();
-        self.mailbox.push(Post::Surface {
+        self.stamp.post(Stamped::Surface {
             id: self.root,
             values,
-            generation: self.generation,
         });
     }
 }
@@ -231,14 +228,10 @@ impl DeferredSink for InboxDeferred {
 /// Build the [`DeferredSink`] a tool run installs, over `emit`'s session inbox.
 /// Core clones it into each worker's run state, so a nested `spawn` inherits it
 /// and flushes at its own completion.
-pub(crate) fn deferred_sink(
-    emit: &Emitter,
-    session: &crate::agent::Agent,
-) -> Arc<dyn DeferredSink> {
+pub(crate) fn deferred_sink(emit: &Emitter, root: AgentId) -> Arc<dyn DeferredSink> {
     Arc::new(InboxDeferred {
-        mailbox: emit.mailbox(),
-        root: session.id,
-        generation: session.generation(),
+        stamp: emit.mailbox().stamp(),
+        root,
     })
 }
 
@@ -1209,11 +1202,11 @@ keep-bottom
     }
 
     /// The sink always posts, stamped with the root id and its birth
-    /// generation — even after a `/clear` advanced the session past it.
-    /// Staleness is `Avatar::admits`'s call at the consuming edge, so the sink
-    /// itself neither checks nor withholds.
+    /// epoch — even after a `/clear` advanced the inbox past it.  Staleness
+    /// is the inbox's own pop that rejects it; the sink itself neither
+    /// checks nor withholds.
     #[test]
-    fn inbox_deferred_always_pushes_stamped_with_its_birth_generation() {
+    fn inbox_deferred_always_pushes_stamped_with_its_birth_epoch() {
         use crate::agent::testkit::{TestAgentSpec, test_agent};
 
         let fleet = crate::fleet::Fleet::new();
@@ -1223,33 +1216,30 @@ keep-bottom
         let agent = test_agent(&fleet, spec).expect("a fresh trunk");
         let (tx, _rx) = channel();
         let emit = Emitter::with_mailbox(tx, agent.id, inbox.mailbox());
-        let deferred = deferred_sink(&emit, &agent);
-        let born = agent.generation();
+        let deferred = deferred_sink(&emit, agent.id);
 
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {
-            Some(crate::bus::Item::Surface { id, generation, .. }) => {
+            Some(crate::bus::Item::Surface { id, .. }) => {
                 assert_eq!(
                     id, agent.id,
                     "the batch is stamped with the root session id"
                 );
-                assert_eq!(generation, born, "stamped with the sink's birth generation");
             }
             other => panic!("a delivered batch surfaces as Item::Surface, got {other:?}"),
         }
 
-        // A `/clear` bumps this root past the sink's captured generation.
-        agent.clear_subtree();
+        // A `/clear` bumps this inbox past the sink's captured epoch.
+        inbox.clear();
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
-        match inbox.next_item() {
-            Some(crate::bus::Item::Surface { generation, .. }) => {
-                assert_eq!(
-                    generation, born,
-                    "the post-clear flush still carries its stale birth generation"
-                );
-            }
-            other => panic!("a post-clear flush still reaches the inbox, got {other:?}"),
-        }
+        assert!(
+            !inbox.is_empty(),
+            "the post-clear flush still posts — the sink neither checks nor withholds"
+        );
+        assert!(
+            inbox.next_item().is_none(),
+            "its stale birth epoch is refused at the pop"
+        );
     }
 
     /// `bootstrap::seed_no_color`'s suppression reaches spawned commands

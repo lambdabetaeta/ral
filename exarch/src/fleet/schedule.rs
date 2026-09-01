@@ -9,7 +9,7 @@
 //! delta to it, so DST shifts, clock steps, and suspends are absorbed rather
 //! than accumulated.
 
-use crate::bus::{Mailbox, Post};
+use crate::bus::{Mailbox, Stamped};
 use crate::sync::LockExt;
 use jiff::civil::DateTime;
 use jiff::{ToSpan, Zoned};
@@ -493,8 +493,8 @@ impl ScheduleRegistry {
     /// re-arming here is safe; the push waits for this guard to drop, since a
     /// park verdict reads `armed()` under the inbox mutex and the lock order
     /// is inbox → registry.  Composing and pushing straddle that drop, so a
-    /// `/clear` can fall between them: the message carries the epoch read at
-    /// composition and the inbox's pop-time check settles the two orderings.
+    /// `/clear` can fall between them: the envelope is minted at composition
+    /// and the inbox's pop-time check settles the two orderings.
     fn fire(&self, id: ScheduleId, mailbox: &Mailbox) {
         let mut g = self.lock();
         let Some(entry) = g.entries.get_mut(&id) else {
@@ -505,14 +505,16 @@ impl ScheduleRegistry {
             None
         } else {
             entry.fires += 1;
-            Some(Post::ScheduledWakeup {
-                id,
-                label: entry.label.clone(),
-                trigger: entry.trigger.describe(),
-                prompt: entry.prompt.clone(),
-                pending: entry.pending.clone(),
-                epoch: mailbox.epoch(),
-            })
+            Some((
+                mailbox.stamp(),
+                Stamped::Wakeup {
+                    id,
+                    label: entry.label.clone(),
+                    trigger: entry.trigger.describe(),
+                    prompt: entry.prompt.clone(),
+                    pending: entry.pending.clone(),
+                },
+            ))
         };
         if recurring {
             if let Some(delay) = entry.trigger.next_delay() {
@@ -524,8 +526,8 @@ impl ScheduleRegistry {
             g.entries.remove(&id);
         }
         drop(g);
-        if let Some(msg) = msg {
-            mailbox.push(msg);
+        if let Some((stamp, kind)) = msg {
+            stamp.post(kind);
         }
     }
 

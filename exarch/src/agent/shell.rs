@@ -134,7 +134,7 @@ impl Avatar {
             reply,
             log: self.log.clone(),
             nursery,
-            generation: self.agent.generation(),
+            stamp: self.agent.mailbox().stamp(),
             // Minted here, once per `ral` call: this is the one place a call's
             // whole desk capture is built, so the fragment's extent is the call's.
             acts: desk::ActFragment::default(),
@@ -178,10 +178,10 @@ impl Avatar {
                 surface: Mutex::new(crate::record::commit::SurfaceBuffer::new()),
             },
         });
-        // Stamped with this session's generation as read now, so a batch
+        // Stamped with this session's inbox epoch as read now, so a batch
         // from a worker that settles after a `/clear` is dropped.
         self.seat
-            .install_deferred(shell_eval::deferred_sink(emit, &self.agent));
+            .install_deferred(shell_eval::deferred_sink(emit, self.agent.id));
         self.recorder()
             .transient(crate::record::Transient::State(AgentState::Evaluating));
         let outcome = shell_eval::run_shell(

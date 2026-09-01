@@ -63,7 +63,9 @@ pub(crate) use shell::{LogCell, ReplyCell};
 
 use crate::agent::cancel::EvalReach;
 use crate::agent::seat::Seat;
-use crate::bus::{AgentId, AgentMessage, AgentOutcome, AgentResult, Inbox, Mailbox, Post};
+use crate::bus::{
+    AgentId, AgentMessage, AgentOutcome, AgentResult, Inbox, Mailbox, Post, Stamp, Stamped,
+};
 use crate::fleet::Fleet;
 use crate::provider::Provider;
 use crate::shell_eval;
@@ -182,20 +184,15 @@ pub struct Agent {
     /// mutex buys atomicity, nothing more — and a writer drops its guard before
     /// pushing to any inbox, since a park verdict reads this under one.
     status: Mutex<Status>,
-    /// The parent's own generation at this agent's birth: the fence a result
-    /// addressed upward must survive, since the parent is who reads it.  0 for
-    /// a root, which reports to nobody.
-    consumer: u64,
+    /// The parent's envelope, minted at this agent's birth: the context a
+    /// line posted upward is addressed to, since the parent is who reads it.
+    /// `None` for a root, which reports to nobody.
+    consumer: Option<Stamp>,
 }
 
 /// [`Agent`]'s single-writer register — see [`Agent::status`]'s doc for who
 /// writes what.
 struct Status {
-    /// How many times this session has rebuilt its context
-    /// ([`Agent::clear_subtree`]).  Work bound for this session is stamped
-    /// with the value current at its birth, so a `/clear` here invalidates it
-    /// — and a `/clear` anywhere else leaves it alone.
-    generation: u64,
     /// When this agent parked waiting for a message, or `None` while it is
     /// working.  The roster's `idle-s`, and the whole of "not busy".
     rest: Option<Instant>,
@@ -376,13 +373,12 @@ impl Agent {
         &self.mailbox
     }
 
-    /// The parent's own generation at this agent's birth — the fence a result
-    /// addressed upward must survive.  Production reads `self.consumer`
-    /// directly; this is test-only convenience for asserting on it from
-    /// outside the module.
+    /// The epoch of the parent's envelope as minted at this agent's birth —
+    /// test-only convenience for asserting on the fence from outside the
+    /// module; production posts through the envelope itself ([`Self::report`]).
     #[cfg(test)]
-    pub(crate) fn consumer(&self) -> u64 {
-        self.consumer
+    pub(crate) fn consumer(&self) -> Option<u64> {
+        self.consumer.as_ref().map(Stamp::epoch)
     }
 
     /// Whom this agent reports to, `None` for a root.
@@ -394,10 +390,6 @@ impl Agent {
     /// from.
     pub(crate) fn parent_id(&self) -> Option<AgentId> {
         self.parent.as_ref().map(|p| p.id)
-    }
-
-    pub(crate) fn generation(&self) -> u64 {
-        self.status.lock_ignore_poison().generation
     }
 
     pub(crate) fn rest(&self) -> Option<Instant> {
@@ -435,13 +427,12 @@ impl Agent {
     /// Deliver `outcome` to the parent's inbox as this agent's result.  A root
     /// has no parent and reports to nobody.
     pub(crate) fn report(&self, outcome: AgentOutcome) {
-        let Some(parent) = &self.parent else { return };
-        parent.mailbox.push(Post::AgentResult(AgentResult {
+        let Some(consumer) = &self.consumer else { return };
+        consumer.post(Stamped::AgentResult(AgentResult {
             id: self.id,
             name: self.name.clone(),
             outcome,
             elapsed: self.elapsed(),
-            generation: self.consumer,
         }));
     }
 
@@ -573,14 +564,11 @@ impl Agent {
     }
 
     /// `/clear`: abandon the subtree the rebuilt context no longer owns, and
-    /// bump *this* agent's own generation so any late result addressed to it
-    /// is rejected.  Bumping only this agent is what keeps one tab's `/clear`
-    /// from dropping work another tab is still waiting on.
+    /// forget what it was awaiting.  The fence is no longer here — the drain
+    /// in `Avatar::clear` bumps it.
     pub(crate) fn clear_subtree(&self) {
         self.cancel_descendants(CancelCause::Explicit);
-        let mut status = self.status.lock_ignore_poison();
-        status.generation += 1;
-        status.awaiting.clear();
+        self.status.lock_ignore_poison().awaiting.clear();
     }
 }
 

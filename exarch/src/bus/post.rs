@@ -82,9 +82,6 @@ pub(crate) struct AgentResult {
     pub name: String,
     pub outcome: AgentOutcome,
     pub elapsed: Duration,
-    /// The parent's, read at the child's birth; `admits` refuses a line that
-    /// arrives into a context rebuilt by a `/clear` since.
-    pub generation: u64,
 }
 
 impl AgentResult {
@@ -121,27 +118,13 @@ pub(crate) enum Post {
     /// as ordinary prompt text ([`Item::Human`]), never interpreted: only
     /// [`Self::Command`] reaches [`Control`](crate::agent::Control).
     UserSteering(String),
-    /// A cron or `after` wakeup fired, delivered as a marked injection.
-    ScheduledWakeup {
-        /// The firing schedule's id, and the inbox's dedupe key: a newer wakeup
-        /// replaces a still-queued one for the same schedule — the inbox's own
-        /// guarantee of what `pending` below already gives producer-side.
-        id: ScheduleId,
-        /// The schedule's own label, always caller-named.
-        label: String,
-        /// The trigger as text — a cron expression or `after <dur>`.
-        trigger: String,
-        prompt: String,
-        /// Set when this message is posted, cleared when it drains: the next
-        /// occurrence reads it and skips, so a tick arriving while the previous
-        /// wakeup still waits is dropped rather than stacked.
-        pending: Arc<AtomicBool>,
-        /// The inbox's clear-epoch as the reaper read it when composing this.
-        /// Composing and pushing are two steps a `/clear` can fall between, so
-        /// pop-time admission refuses a wakeup whose epoch has fallen behind.
-        epoch: u64,
-    },
-    AgentResult(AgentResult),
+    /// A message whose producer cannot judge its own staleness — composing
+    /// and pushing are two steps a `/clear` can fall between.  Only
+    /// [`Stamp::post`](super::Stamp) constructs this ([`Minted`] is
+    /// unforgeable outside `bus`), so the destination's clear-epoch is
+    /// captured together with its mailbox at composition and judged at that
+    /// same inbox's own pop.
+    Stamped { epoch: Minted, kind: Stamped },
     AgentMessage(AgentMessage),
     /// The synthetic continuation the agent posts to *itself* when the nudge
     /// registry turns an attempt back — the same exchange continuing, pushed
@@ -160,17 +143,53 @@ pub(crate) enum Post {
     /// `/compact`, `/rewind`, `/quit`), raw — otherwise its sibling above in
     /// every respect but the one [`Boundary::Barrier`] names.
     Barrier(String),
+}
+
+/// Proof an epoch was minted by the destination ([`super::Mailbox::stamp`]):
+/// the field is `bus`-private, so a [`Post::Stamped`] can be built nowhere
+/// else — no fresh read at push time, no epoch from a different inbox.
+#[derive(Clone, Debug)]
+pub(crate) struct Minted(pub(super) u64);
+
+/// The messages that cannot judge their own staleness, each sent only
+/// through a [`Stamp`](super::Stamp) and fenced at the destination's pop.
+/// All drain at [`Boundary::Tool`].
+#[derive(Clone, Debug)]
+pub(crate) enum Stamped {
+    /// A cron or `after` wakeup fired, delivered as a marked injection.
+    Wakeup {
+        /// The firing schedule's id, and the inbox's dedupe key: a newer wakeup
+        /// replaces a still-queued one for the same schedule — the inbox's own
+        /// guarantee of what `pending` below already gives producer-side.
+        id: ScheduleId,
+        /// The schedule's own label, always caller-named.
+        label: String,
+        /// The trigger as text — a cron expression or `after <dur>`.
+        trigger: String,
+        prompt: String,
+        /// Set when this message is posted, cleared when it drains: the next
+        /// occurrence reads it and skips, so a tick arriving while the previous
+        /// wakeup still waits is dropped rather than stacked.
+        pending: Arc<AtomicBool>,
+    },
+    /// The one line a child posts to its parent, through the envelope minted
+    /// at the child's birth.
+    AgentResult(AgentResult),
     /// A deferred `spawn` worker's `surface` batch, delivered at settlement —
-    /// the un-awaited path.  Stamped with the *root* session id, since a spawn
+    /// the un-awaited path.  Carries the *root* session id, since a spawn
     /// worker registers no tab of its own.  Already once-only when posted:
     /// core's completion path wins the worker's deliver-once latch first.
-    Surface {
-        id: AgentId,
-        values: Vec<Value>,
-        /// The root session's, captured at the sink's construction; `admits`
-        /// drops the batch if that root has cleared since.
-        generation: u64,
-    },
+    Surface { id: AgentId, values: Vec<Value> },
+}
+
+impl Stamped {
+    pub(super) fn source(&self) -> Source {
+        match self {
+            Self::Wakeup { .. } => Source::Schedule,
+            Self::AgentResult(_) => Source::Agent,
+            Self::Surface { .. } => Source::Surface,
+        }
+    }
 }
 
 impl Post {
@@ -186,7 +205,11 @@ impl Post {
     /// The side effect of draining.  Only a wakeup has one: clearing `pending`
     /// re-opens its schedule, so the overlap-skip holds exactly until taken.
     pub(super) fn on_drain(&self) {
-        if let Self::ScheduledWakeup { pending, .. } = self {
+        if let Self::Stamped {
+            kind: Stamped::Wakeup { pending, .. },
+            ..
+        } = self
+        {
             pending.store(false, Ordering::Release);
         }
     }
@@ -245,12 +268,10 @@ impl Post {
     pub(super) fn source(&self) -> Source {
         match self {
             Self::UserSteering(_) => Source::User,
-            Self::ScheduledWakeup { .. } => Source::Schedule,
-            Self::AgentResult(_) => Source::Agent,
+            Self::Stamped { kind, .. } => kind.source(),
             Self::AgentMessage(_) => Source::Message,
             Self::Nudge { .. } => Source::Nudge,
             Self::Command(_) | Self::Barrier(_) => Source::Command,
-            Self::Surface { .. } => Source::Surface,
         }
     }
 }
@@ -290,17 +311,16 @@ pub(crate) enum Item {
     Nudge { exchange: u64, text: String },
     /// A raw slash command for the attend loop's [`Control`](crate::agent::Control).
     Command(String),
-    /// A detached `spawn` worker's deferred `surface` batch.
-    /// `agent::attend::announce` decodes `values` into the *root* viewport
-    /// exactly as a live tool run would; [`Self::text`] wakes the model.
+    /// A detached `spawn` worker's deferred `surface` batch.  Staleness is
+    /// already settled at the pop; `agent::attend::announce` decodes `values`
+    /// into the *root* viewport exactly as a live tool run would, and
+    /// [`Self::text`] wakes the model.
     Surface {
-        /// The stamped session id.  `Avatar::admits` asserts it matches the
-        /// draining session's, so a misrouted batch trips there rather than
-        /// rendering silently into the wrong viewport.
+        /// The stamped session id.  `Avatar::heard`'s debug assertion checks
+        /// it matches the draining session's, so a misrouted batch trips
+        /// there rather than rendering silently into the wrong viewport.
         id: AgentId,
         values: Vec<Value>,
-        /// Carried through unchanged from [`Post::Surface`].
-        generation: u64,
     },
 }
 

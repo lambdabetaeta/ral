@@ -334,8 +334,9 @@ per-agent idle-lease reaper, and `/clear`. They share one cascade over the
 agent tree itself (`Agent::parent`/`Agent::children`), so terminating a
 mid-tree agent (`Agent::cancel_tree`) reaps everything below it
 (`Agent::cancel_descendants`, a walk over `children`); `/clear`
-(`Agent::clear_subtree`) additionally bumps the generation, dropping a late
-result or deferred surface batch from a cleared generation. A `reply` still
+(`Agent::clear_subtree`) additionally drains this agent's own inbox, whose
+clear-epoch bump drops a late result or deferred surface batch addressed
+into the rebuilt context. A `reply` still
 cancels only the replier's proper descendants — a
 parent may abandon unfinished children, but never leave live agents registered
 beneath a node that has answered. This refines

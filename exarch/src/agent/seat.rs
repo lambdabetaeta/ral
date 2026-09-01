@@ -376,7 +376,7 @@ mod tests {
         HostServices {
             fleet: Fleet::new(),
             kind: SeatKind::Wire,
-            generation: parent.generation(),
+            stamp: parent.mailbox().stamp(),
             agent: parent.clone(),
             emit: emit.clone(),
             cwd: std::env::temp_dir(),
@@ -498,7 +498,7 @@ mod tests {
         let root_id = trunk.id;
         let emit = Emitter::with_mailbox(tx, root_id, inbox.mailbox());
 
-        seat.install_deferred(crate::shell_eval::deferred_sink(&emit, &trunk));
+        seat.install_deferred(crate::shell_eval::deferred_sink(&emit, root_id));
         let host: Arc<dyn Host> = Arc::new(RunHost {
             desk: ExarchDesk {
                 services: wire_host_services(&emit, &trunk),

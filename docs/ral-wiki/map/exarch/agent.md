@@ -16,9 +16,16 @@ and the eval-layer `reach: EvalReach`), the sender half of its own
 config (`caps`, `fuel`, `returns`, `search`, `interactive`,
 `allow_schedule`, `egress`, `dial`, `index`, the resolved `system` prompt,
 `disk_warn_bytes`), the single-writer `status: Mutex<Status>` — `{
-generation, rest, reply, awaiting }` — `consumer` (the parent's generation at this
-agent's birth), a strong `parent: Option<Arc<Agent>>`, and a weak
-`children: Mutex<Vec<Weak<Agent>>>`.
+rest, reply, awaiting }` — `consumer` (the parent's `Stamp`, minted at this
+agent's birth; `None` for a root), a strong `parent: Option<Arc<Agent>>`,
+and a weak `children: Mutex<Vec<Weak<Agent>>>`.  There is one fence, the
+inbox's own clear-epoch
+([[decisions/260827_agent-and-avatar|agent-and-avatar]]), and it is carried
+only inside `bus::Stamp` — the addressed envelope `Mailbox::stamp` mints,
+pairing the destination mailbox with its epoch at composition — so a
+message that cannot judge its own staleness (`bus::Stamped`) is unsendable
+with a stamp forgotten, skewed to another inbox, or refreshed at push time;
+the destination judges it at its own pop.
 
 **`Avatar` is the private half**: the canonical
 [[internals/session-record|model projection]] (`AgentLog`), a **seat**
@@ -177,7 +184,8 @@ Three nested loops, the same for trunk and child alike:
   on every `Condvar` wake** — so the idle lease's terminate-cause cancel, or the
   last live child settling, is seen on the very next wake — and hands it to
   `take_up`, the per-item step shared with `attend`'s bounded
-  twin `attend_backlog` (converse's per-exchange drain): generation admission, the
+  twin `attend_backlog` (converse's per-exchange drain): every item reaching
+  here already survived the inbox's own pop-time fence, so what is left is the
   exchange-boundary latch reset, a session command's dispatch to `Control`, the
   `deliberate` call itself, and the nudge reaction. A genuine
   exchange boundary resets the nudge budget and clears the sticky cancel token
@@ -478,12 +486,15 @@ resolve descendants by, through `Fleet::resolve` and then the scope climb
 (`Agent::descendant`). Every `Agent` carries a strong `parent`, so the tree
 is the spawn tree directly: `Agent::cancel_tree` cancels an agent and its
 whole subtree, `Agent::cancel_descendants` abandons a returning agent's
-children without touching any generation, and `Agent::clear_subtree` reaps
-a subtree and bumps that agent's *own* `status.generation`, so a late
-result or deferred surface batch addressed to it is still dropped. The
-counter is per agent, not per fleet, and the number a worker carries is its
-*reader's* — a `/clear` in one tab must not throw away work another tab is
-still waiting on. Each cancelled node is stopped **across both layers**:
+children, and `Agent::clear_subtree` reaps a subtree and forgets what it
+was `awaiting`. The fence a late result or deferred surface batch must
+survive is no longer here: `Avatar::clear` drains this agent's own inbox,
+and that drain is what bumps the clear-epoch a `bus::Stamp`-borne message
+is judged against at its own pop. The epoch is per inbox, not per fleet,
+and the envelope a worker carries is its *reader's* by construction — a
+`/clear` in one tab must not throw away work another tab is still waiting
+on. Each cancelled node is
+stopped **across both layers**:
 its cooperative `Token` (read by `deliberate` between steps and raced by
 the provider's mid-stream cancel) *and* the eval layer through its own
 `reach: EvalReach` (fixed at construction — every agent carries one, the
@@ -564,10 +575,10 @@ every worker still registered on it — explicit destruction outranks every
 lease, the durable class included, with no host call site to forget
 ([[map/core/shell-state|shell-state]]). A worker settling after the cancel still tries to flush
 its deferred `done` batch through the boundary it captured before the clear;
-the same generation guard (`deferred_sink`'s admission check,
-[[map/exarch/shell-eval|shell-eval]]) that already drops a stale agent result
-drops that flush too, so no pre-clear worker output survives into the rebuilt
-context. It is the focused agent's, not a fleet-wide reset.
+the same pop-time epoch fence ([[map/exarch/shell-eval|shell-eval]]) that
+already drops a stale agent result drops that flush too, so no pre-clear
+worker output survives into the rebuilt context. It is the focused agent's,
+not a fleet-wide reset.
 
 `--resume` is a trunk-only lifecycle: it validates and replays session 0's
 `record.jsonl`, quarantining only an unterminated crash fragment, then reopens

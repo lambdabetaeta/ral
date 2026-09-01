@@ -14,11 +14,13 @@
 //! run.  Both hold [`Weak`], so an agent leaves the fleet by
 //! its avatar being dropped and nothing else, and a lookup prunes.
 //!
-//! Each agent carries a generation counter, bumped by its own `/clear`, and
-//! that is the fleet's late-settle fence: an async agent's result
-//! (`Avatar::admits`) and a detached worker's deferred batch (`InboxDeferred`)
-//! both admit against the generation of the session that will *consume*
-//! them.  Per session, not per fleet — a `/clear` in one tab must not drop
+//! There is one late-settle fence, and it lives on the inbox, not the agent:
+//! each session's own [`crate::bus::inbox`] counts its clears as a
+//! clear-epoch, and
+//! a `Post` that cannot judge its own staleness — an async agent's result, a
+//! detached worker's deferred batch (`InboxDeferred`) — is stamped with that
+//! epoch at composition and refused at the inbox's own pop if it has since
+//! moved on.  Per inbox, not per fleet — a `/clear` in one tab must not drop
 //! work another tab is still waiting on.
 
 pub(crate) mod desk;
@@ -245,7 +247,7 @@ mod tests {
     use crate::agent::cancel::Token;
     use crate::agent::cancel::{EvalReach, InterruptTarget};
     use crate::agent::testkit::{TestAgentSpec, test_agent};
-    use crate::bus::{AgentOutcome, AgentResult, Inbox, Item, ParkMode, Post};
+    use crate::bus::{AgentOutcome, AgentResult, Inbox, Item, ParkMode, Post, Stamped};
     use ral_core::process::DurableRoot;
     use std::time::Instant;
 
@@ -313,25 +315,22 @@ mod tests {
         );
     }
 
-    /// Both layers, so an abandoned child's in-flight eval unwinds instead of
-    /// grinding on as an orphan whose result nobody will collect.
+    /// The fence itself now lives on the inbox ([`bus::inbox`]'s epoch
+    /// tests); an `Agent` no longer bumps anything of its own on `/clear`.
+    /// What is left here is the cascade: an abandoned child's in-flight eval
+    /// unwinds instead of grinding on as an orphan whose result nobody will
+    /// collect.
     #[test]
-    fn clear_subtree_bumps_the_generation_and_cancels_the_subtree() {
+    fn clear_subtree_cancels_the_subtree() {
         let fleet = Fleet::new();
         let trunk = agent(&fleet, "trunk", None);
         let child_root = DurableRoot::default();
         let mut child = spec("child", Some(&trunk));
         child.reach = reach_into(&child_root);
         let child = born(&fleet, child).expect("a fresh child of a live trunk");
-        let born_under = child.consumer();
 
         trunk.clear_subtree();
 
-        assert_ne!(
-            born_under,
-            trunk.generation(),
-            "the generation advanced on clear, so a result from before it is rejected"
-        );
         assert!(
             child.cancel_token().terminated(),
             "the abandoned child's token is terminate-stamped"
@@ -339,25 +338,6 @@ mod tests {
         assert!(
             child_root.as_scope().is_cancelled(),
             "the reap cancels the child's eval layer, not just its token"
-        );
-    }
-
-    /// The fence is per session, so a `/clear` on one root must leave another
-    /// root's in-flight result alone.  `/clear` in a `/branch` tab reaches this
-    /// through `Avatar::admits`, which reads the *consuming* session's counter.
-    #[test]
-    fn a_clear_on_one_root_does_not_reject_another_roots_late_result() {
-        let fleet = Fleet::new();
-        let trunk = agent(&fleet, "trunk", None);
-        let branch = agent(&fleet, "branch", None);
-        let worker = agent(&fleet, "worker", Some(&trunk));
-
-        branch.clear_subtree();
-
-        assert_eq!(
-            worker.consumer(),
-            trunk.generation(),
-            "the branch's /clear must not poison the trunk's outstanding result"
         );
     }
 
@@ -862,7 +842,6 @@ mod tests {
         let fleet = Fleet::new();
         let trunk = agent(&fleet, "trunk", None);
         let child = agent(&fleet, "child", Some(&trunk));
-        let generation = child.consumer();
         let inbox = Inbox::new();
         let park = |_engaged| {
             if trunk.has_busy_children() {
@@ -878,12 +857,11 @@ mod tests {
         );
 
         // The worker epilogue in production order: deliver, then retire.
-        inbox.mailbox().push(Post::AgentResult(AgentResult {
+        inbox.mailbox().stamp().post(Stamped::AgentResult(AgentResult {
             id: child.id,
-                name: "child".into(),
+            name: "child".into(),
             outcome: AgentOutcome::Stopped("done".into()),
             elapsed: Duration::ZERO,
-            generation,
         }));
         drop(child);
         assert_eq!(

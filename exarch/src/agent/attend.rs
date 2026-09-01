@@ -187,8 +187,9 @@ impl Avatar {
     /// Take up one item already drawn from the inbox — the per-item step
     /// [`Self::attend`] and [`Self::attend_backlog`] share.  `final_outcome`
     /// is the running `(outcome, payload)` the caller reports once its own
-    /// loop ends; an item that never reaches the deliberation (an inadmissible
-    /// generation, a command) leaves it as it was.
+    /// loop ends; an item that never reaches the deliberation (a command)
+    /// leaves it as it was.  A drawn item is always admissible: staleness is
+    /// settled at the inbox's own pop, against that inbox's clear-epoch.
     fn take_up(
         &mut self,
         item: &Item,
@@ -196,10 +197,6 @@ impl Avatar {
         emit: &Emitter,
         final_outcome: &mut (AgentOutcome, Option<FOValue>),
     ) -> Flow {
-        // Refused before it can reset the latches below or enter the log.
-        if !self.admits(item) {
-            return Flow::Continue;
-        }
         self.heard(item);
         // Only a genuine boundary clears the latches and a prior exchange's
         // Esc; a self-nudge is the same exchange continuing.
@@ -315,36 +312,21 @@ impl Avatar {
         }
     }
 
-    /// Whether a drawn item still belongs to the live context.  [`Avatar::settle`]
-    /// makes deliver-then-retire structural, so a parked parent never sees
-    /// "no live child" without the result already queued, and a deferred
-    /// `spawn`'s surface batch composes and pushes in two steps a `/clear`
-    /// can fall between: neither can judge its
-    /// own staleness, so both stamp this consuming session's generation to
-    /// check against.  A `ScheduledWakeup` is settled earlier, at the inbox's own
-    /// pop boundary against that inbox's clear-epoch; every other source is
-    /// generation-free.  The `Surface` id is a debug assertion, not an
-    /// admission rule — the deferred sink stamps and posts to the very session
-    /// that drains it, so a mismatch could only be a routing bug.
-    /// Book an admitted item against the park verdict: a direct child's result
-    /// means it is no longer awaited.
+    /// Book a drawn item against the park verdict: a direct child's
+    /// result means it is no longer awaited.  [`Avatar::settle`] makes
+    /// deliver-then-retire structural, so a parked parent never sees "no live
+    /// child" without the result already queued.  Every item reaching here
+    /// already survived the inbox's own pop-time fence against a `/clear`
+    /// ([`crate::bus::inbox`]'s clear-epoch), so there is nothing left to
+    /// admit — the `Surface` arm is a routing tripwire, not an admission.
     pub(super) fn heard(&self, item: &Item) {
-        if let Item::Agent(r) = item {
-            self.agent.heard(r.id);
-        }
-    }
-
-    pub(super) fn admits(&self, item: &Item) -> bool {
         match item {
-            Item::Agent(r) => r.generation == self.agent.generation(),
-            Item::Surface { id, generation, .. } => {
-                debug_assert_eq!(
-                    *id, self.agent.id,
-                    "a spawn's surface batch always drains in the session it was stamped with"
-                );
-                *generation == self.agent.generation()
-            }
-            _ => true,
+            Item::Agent(r) => self.agent.heard(r.id),
+            Item::Surface { id, .. } => debug_assert_eq!(
+                *id, self.agent.id,
+                "a spawn's surface batch always drains in the session it was stamped with"
+            ),
+            _ => {}
         }
     }
 
@@ -618,7 +600,6 @@ mod tests {
                 name: "helper".into(),
                 outcome: AgentOutcome::Failed("boom".into()),
                 elapsed: std::time::Duration::from_millis(1500),
-                generation: 0,
             }),
             &recorder,
         );

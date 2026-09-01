@@ -399,12 +399,12 @@ impl Avatar {
         }
         // The tool-boundary drain, each message tagged with its source; a slash
         // command is the lone exception, held for the exchange boundary.  A
-        // result that settled across a `/clear` is dropped, not injected.
+        // result that settled across a `/clear` is dropped at the inbox's own
+        // pop, before it ever reaches here.
         let injected = self
             .inbox
             .drain_steering()
             .into_iter()
-            .filter(|t| self.admits(t))
             .inspect(|t| self.heard(t))
             .collect();
         (results, injected)
@@ -548,7 +548,7 @@ mod tests {
     use crate::agent::NoControl;
     use crate::agent::cancel::{EvalReach, InterruptTarget};
     use crate::agent::testkit::*;
-    use crate::bus::{AgentOutcome, Post};
+    use crate::bus::{AgentOutcome, Post, Stamped};
     use crate::provider::scripted::{Reply, Script};
     use genai::chat::ChatRole;
     use ral_core::Shell;
@@ -650,8 +650,8 @@ mod tests {
         );
         assert_eq!(
             sibling.consumer(),
-            parent.agent.generation(),
-            "reply must not bump the global generation and poison siblings"
+            Some(parent.agent.mailbox().epoch()),
+            "reply must not bump the global epoch and poison siblings"
         );
 
         // The abandoned subtree leaves the tree as its holders drop, which in
@@ -899,21 +899,19 @@ mod tests {
     }
 
     /// A worker delivers before it retires, so a result that settled across a
-    /// `/clear` still reaches the inbox and must be dropped here.
+    /// `/clear` still reaches the inbox — and its stale epoch must keep it
+    /// out of the attend loop entirely.
     #[test]
-    fn stale_agent_result_is_dropped_by_generation_admission() {
+    fn stale_epoch_agent_result_never_reaches_the_model() {
         let mut session = Avatar::for_test("system").unwrap();
-        let stale = session.agent.generation();
-        session.agent.clear_subtree();
-        session
-            .inbox
-            .push(Post::AgentResult(crate::bus::AgentResult {
-                id: 7,
-                name: "late".into(),
-                outcome: AgentOutcome::Stopped("done".into()),
-                elapsed: std::time::Duration::ZERO,
-                generation: stale,
-            }));
+        let stamp = session.agent.mailbox().stamp();
+        session.inbox.clear();
+        stamp.post(Stamped::AgentResult(crate::bus::AgentResult {
+            id: 7,
+            name: "late".into(),
+            outcome: AgentOutcome::Stopped("done".into()),
+            elapsed: std::time::Duration::ZERO,
+        }));
         session
             .agent
             .provider
@@ -929,19 +927,20 @@ mod tests {
         assert!(session.is_ready());
     }
 
-    /// The positive half: a live-generation result is delivered and drives the
+    /// The positive half: a live-epoch result is delivered and drives the
     /// provider.
     #[test]
-    fn current_generation_agent_result_is_delivered() {
+    fn current_epoch_agent_result_reaches_the_model() {
         let mut session = Avatar::for_test("system").unwrap();
         session
-            .inbox
-            .push(Post::AgentResult(crate::bus::AgentResult {
+            .agent
+            .mailbox()
+            .stamp()
+            .post(Stamped::AgentResult(crate::bus::AgentResult {
                 id: 7,
                 name: "worker".into(),
                 outcome: AgentOutcome::Stopped("found it".into()),
                 elapsed: std::time::Duration::ZERO,
-                generation: session.agent.generation(),
             }));
         session.agent.provider.swap(scripted(
             "test-model",
@@ -955,7 +954,7 @@ mod tests {
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Replied),
-            "a live-generation result must be delivered; got {outcome:?}"
+            "a live-epoch result must be delivered; got {outcome:?}"
         );
         assert_eq!(
             payload,
@@ -965,17 +964,16 @@ mod tests {
         );
     }
 
-    /// The same admission over a deferred `spawn` batch: composed off the
+    /// The same fence over a deferred `spawn` batch: composed off the
     /// attend thread, so the producer cannot judge its own staleness.
     #[test]
-    fn stale_surface_batch_is_dropped_by_generation_admission() {
+    fn stale_epoch_surface_batch_never_reaches_the_model() {
         let mut session = Avatar::for_test("system").unwrap();
-        let stale = session.agent.generation();
-        session.agent.clear_subtree();
-        session.inbox.push(Post::Surface {
+        let stamp = session.agent.mailbox().stamp();
+        session.inbox.clear();
+        stamp.post(Stamped::Surface {
             id: session.agent.id,
             values: Vec::new(),
-            generation: stale,
         });
         session
             .agent
@@ -992,15 +990,14 @@ mod tests {
         assert!(session.is_ready());
     }
 
-    /// The positive half: a live-generation surface batch is delivered and
+    /// The positive half: a live-epoch surface batch is delivered and
     /// drives the provider.
     #[test]
-    fn current_generation_surface_batch_is_delivered() {
+    fn current_epoch_surface_batch_reaches_the_model() {
         let mut session = Avatar::for_test("system").unwrap();
-        session.inbox.push(Post::Surface {
+        session.agent.mailbox().stamp().post(Stamped::Surface {
             id: session.agent.id,
             values: Vec::new(),
-            generation: session.agent.generation(),
         });
         session.agent.provider.swap(scripted(
             "test-model",
@@ -1014,7 +1011,7 @@ mod tests {
         let (outcome, payload) = session.attend(&mut NoControl, &emit);
         assert!(
             matches!(outcome, AgentOutcome::Replied),
-            "a live-generation surface batch must be delivered; got {outcome:?}"
+            "a live-epoch surface batch must be delivered; got {outcome:?}"
         );
         assert_eq!(
             payload,

@@ -22,8 +22,8 @@ pub use sink::Sink;
 
 pub(crate) use channel::{MERGE_TEXT_CAP, WeakSender};
 pub(crate) use emitter::{FleetBus, UsageMeter};
-pub(crate) use inbox::{Inbox, ParkMode};
-pub(crate) use post::{AgentMessage, AgentResult, Item, Post};
+pub(crate) use inbox::{Inbox, ParkMode, Stamp};
+pub(crate) use post::{AgentMessage, AgentResult, Item, Post, Stamped};
 pub(crate) use signal::WORKER_PANIC_PREFIX;
 #[cfg(test)]
 pub(crate) use sink::drain_records;

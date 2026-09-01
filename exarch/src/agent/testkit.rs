@@ -117,7 +117,7 @@ pub(crate) fn test_agent(
         index,
     } = spec;
     let id = crate::agent::fresh_id();
-    let consumer = parent.as_ref().map_or(0, |p| p.generation());
+    let consumer = parent.as_ref().map(|p| p.mailbox().stamp());
     let agent = Arc::new(Agent {
         id,
         name,
@@ -147,7 +147,6 @@ pub(crate) fn test_agent(
         schedules: crate::fleet::schedule::ScheduleRegistry::new(),
         pins: Arc::default(),
         status: Mutex::new(crate::agent::Status {
-            generation: 0,
             rest: None,
             reply: None,
             awaiting: std::collections::BTreeSet::new(),

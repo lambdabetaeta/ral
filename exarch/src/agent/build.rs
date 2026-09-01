@@ -251,11 +251,10 @@ impl Avatar {
         let log_dir = log.dir().to_path_buf();
         let inbox = Inbox::new();
         let mailbox = inbox.mailbox();
-        // The parent's generation as it stands right now.  Its own avatar is
-        // the only writer, and that avatar is the thread running this
-        // construction, so nothing can bump it between here and the enrolment
-        // below.
-        let consumer = parent.as_ref().map_or(0, |p| p.generation());
+        // The parent's envelope as minted right now.  A `/clear` racing this
+        // construction only widens refusal — the child's stamp would simply
+        // fall one epoch further behind — so minting it unlocked here is safe.
+        let consumer = parent.as_ref().map(|p| p.mailbox().stamp());
         let agent = Arc::new(Agent {
             id: log.id(),
             name,
@@ -283,7 +282,6 @@ impl Avatar {
             schedules: crate::fleet::schedule::ScheduleRegistry::new(),
             pins: Arc::default(),
             status: Mutex::new(super::Status {
-                generation: 0,
                 rest: None,
                 reply: None,
                 awaiting: std::collections::BTreeSet::new(),
@@ -514,9 +512,8 @@ impl Avatar {
             *nudges = nudge::Nudges::new();
         }
         // Abandon the subtree — this agent itself stays live — and disarm the
-        // schedules.  A straggler that composed its message before this call
-        // carries its own stamp and is rejected at a consuming edge, so
-        // neither order is load-bearing.
+        // schedules.  The one fence bump is the inbox drain above, which
+        // already ran first, so nothing here is load-bearing for a straggler.
         self.agent.clear_subtree();
         self.agent.schedules.clear();
         // The frontend wipes its pin register on `/clear`, so the session's
@@ -1066,7 +1063,7 @@ mod tests {
     /// `/clear` cancels every registered worker, the durable class included,
     /// and the rebuilt shell starts empty.  A worker settling *after* the
     /// clear still flushes its batch to the inbox, stamped with its birth
-    /// generation, and `Avatar::admits` is the edge that rejects it.  The
+    /// epoch, and the inbox's own pop is the edge that rejects it.  The
     /// workers stay deaf until `CLEAR_RELEASE` so they settle past the inbox
     /// drop; settling inside the clear would have `Inbox::clear` eat the
     /// batch instead, leaving this straggler path unexercised.
@@ -1143,17 +1140,56 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
-        let late = session
-            .inbox
-            .next_item()
-            .expect("a worker settling after /clear still posts its late surface batch");
         assert!(
-            matches!(late, Item::Surface { .. }),
-            "expected the late post to surface as an Item::Surface, got {late:?}"
+            !session.inbox.is_empty(),
+            "the settling worker still posts its late batch — the sink never withholds"
         );
         assert!(
-            !session.admits(&late),
-            "the late batch's birth generation must be rejected by the rebuilt session"
+            session.inbox.next_item().is_none(),
+            "the late batch's birth epoch must be rejected at the inbox's own pop"
+        );
+    }
+
+    /// The `/clear` gesture end to end for an agent child: a worker born
+    /// under the old context reports after the clear, its result reaches the
+    /// inbox stamped with the consumer epoch of that old context, and the
+    /// inbox's own pop refuses it.
+    #[test]
+    fn late_child_result_after_clear_is_refused_at_the_pop() {
+        let mut session = Avatar::for_test("system").unwrap();
+        let mut spec = TestAgentSpec::new("worker");
+        spec.parent = Some(session.agent.clone());
+        let worker = test_agent(&session.fleet, spec).expect("a fresh child of a live session");
+
+        session.clear().expect("clear must succeed");
+        worker.report(crate::bus::AgentOutcome::Stopped("late".into()));
+
+        assert!(
+            !session.inbox.is_empty(),
+            "the late result is posted, never withheld — deliver-then-retire is structural"
+        );
+        assert!(
+            session.inbox.next_item().is_none(),
+            "and refused at the inbox's own pop"
+        );
+    }
+
+    /// The fence is addressed, not global: a `/clear` in one tab must leave
+    /// a result another tab is still waiting on untouched.
+    #[test]
+    fn a_clear_in_one_tab_leaves_another_tabs_late_result_alone() {
+        let trunk = Avatar::for_test("system").unwrap();
+        let mut branch = Avatar::for_test("system").unwrap();
+        let mut spec = TestAgentSpec::new("worker");
+        spec.parent = Some(trunk.agent.clone());
+        let worker = test_agent(&trunk.fleet, spec).expect("a fresh child of the trunk");
+
+        branch.clear().expect("clear must succeed");
+        worker.report(crate::bus::AgentOutcome::Stopped("done".into()));
+
+        assert!(
+            matches!(trunk.inbox.next_item(), Some(Item::Agent(_))),
+            "the branch's /clear must not poison the trunk's delivery"
         );
     }
 

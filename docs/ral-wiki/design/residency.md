@@ -6,7 +6,7 @@ and a resident has exactly four facets: an identity in the session's
 ownership tree, a typed capability that reaches it, a lease, and a probe.**
 The session keeps one *ledger* of residents, in chapters that keep their own
 representations, and every management surface — listing, the exit story,
-cancellation cascade, `/clear` generations, `/resources` — is a fold over
+cancellation cascade, `/clear`'s clear-epoch, `/resources` — is a fold over
 that ledger, written once. Lifetime moves along one order of residency
 grades, and the two halves of the system are its two traversal disciplines:
 interactive work *discovers* its lifetime after the fact, agent work
@@ -112,14 +112,17 @@ written against it:
   worker's cancel scope is a child of that root, so cancelling it walks the
   ancestor chain with no extra edge), and reaches its schedules and
   children through the tree itself (`Agent::parent`/`Agent::children`).
-- **generation** — every session counts its own clears, and `/clear` bumps
-  only that session's count. Anything settling across it is rejected —
-  whether by checking the generation directly (an async agent's result, a
-  worker's deferred surface batch) or by the stronger route of unconditional
-  removal (a schedule, disarmed and dropped rather than tagged). What a
-  worker carries is the count of the session that will *read* it, so the
-  rejection is addressed, not global: one tab's `/clear` leaves another
-  tab's outstanding work alone.
+- **clear-epoch** — every session's inbox counts its own clears, bumped
+  under the same lock the drain runs, and `/clear` bumps only that inbox's
+  count. Anything settling across it is rejected at the inbox's own pop —
+  whether by arriving through a `bus::Stamp` (an async agent's result, a
+  worker's deferred surface batch, a scheduled wakeup) or by the stronger
+  route of unconditional removal (a schedule, disarmed and dropped rather
+  than tagged). The stamp is the addressed envelope `Mailbox::stamp` mints
+  — destination and epoch captured as one value at composition — so what a
+  worker carries is structurally the envelope of the inbox that will *read*
+  it, and the rejection is addressed, not global: one tab's `/clear` leaves
+  another tab's outstanding work alone.
 - **probe** — the `/resources` projection, over residents and accumulators
   alike.
 

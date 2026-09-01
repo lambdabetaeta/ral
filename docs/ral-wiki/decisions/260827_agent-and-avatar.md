@@ -140,6 +140,20 @@ open with.
 - **The wire.** Nothing on it changed; only how an id is resolved on
   arrival — a pruning walk from `Fleet::roots` rather than a map lookup.
 
+*Amended 2026-09-01: the strong `parent: Arc<Agent>` this decision landed
+raised a follow-on question — could the generation stamp become a
+structural check on the tree? It could not: `/clear` rebuilds a context
+without changing the tree, so no edge distinguishes before it from after.
+`Status::generation` and `Avatar::admits` are gone; the one clock is
+`bus::inbox`'s own clear-epoch, stamped at composition and judged at that
+inbox's own pop. The stamp is carried only by `bus::Stamp`, the addressed
+envelope `Mailbox::stamp` mints — destination and epoch as one value — so a
+message that cannot judge its own staleness (`bus::Stamped`) cannot be sent
+unstamped, stamped from another inbox, or stamped fresh at push time.
+`HostServices::generation` above became `::stamp`, not removed — the
+bullet's point, that it must stay a snapshot read at install rather than a
+live read at refusal, is now `Stamp::is_stale` and structural.*
+
 ## Supersession
 
 [[decisions/260826_reply-parks|reply-parks]] is **superseded only in the
