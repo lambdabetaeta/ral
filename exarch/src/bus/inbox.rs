@@ -13,6 +13,7 @@
 use super::post::{Boundary, Minted, Source, Stamped, is_slash};
 use super::{Item, Post};
 use crate::agent::cancel;
+use crate::fleet::schedule::ScheduleId;
 use crate::sync::LockExt;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -131,41 +132,40 @@ impl Shared {
 /// keystroke, so the fuel and admission caps that bound those already bound
 /// the queue.
 fn enqueue(q: &mut VecDeque<Post>, msg: Post) {
-    let queued_wakeup_for = |m: &Post, id| {
-        matches!(m, Post::Stamped { kind: Stamped::Wakeup { id: eid, .. }, .. } if *eid == id)
-    };
     match msg {
-            Post::Stamped {
-                kind: Stamped::Wakeup { id, .. },
-                ..
-            } => {
-                let existing = q.iter().position(|m| queued_wakeup_for(m, id));
-                match existing {
-                    Some(pos) => q[pos] = msg,
-                    None => q.push_back(msg),
+        Post::Stamped {
+            kind: Stamped::Wakeup { id, .. },
+            ..
+        } => replace_or_push(q, msg, |m| queued_wakeup_for(m, id)),
+        Post::UserSteering(text) => {
+            let merge = !is_slash(&text)
+                && matches!(q.back(), Some(Post::UserSteering(s)) if !is_slash(s));
+            if merge {
+                if let Some(Post::UserSteering(s)) = q.back_mut() {
+                    s.push('\n');
+                    s.push_str(&text);
                 }
+            } else {
+                q.push_back(Post::UserSteering(text));
             }
-            Post::UserSteering(text) => {
-                let merge = !is_slash(&text)
-                    && matches!(q.back(), Some(Post::UserSteering(s)) if !is_slash(s));
-                if merge {
-                    if let Some(Post::UserSteering(s)) = q.back_mut() {
-                        s.push('\n');
-                        s.push_str(&text);
-                    }
-                } else {
-                    q.push_back(Post::UserSteering(text));
-                }
-            }
-            Post::Nudge { .. } => {
-                let existing = q.iter().position(|m| matches!(m, Post::Nudge { .. }));
-                match existing {
-                    Some(pos) => q[pos] = msg,
-                    None => q.push_back(msg),
-                }
-            }
-            other => q.push_back(other),
         }
+        Post::Nudge { .. } => replace_or_push(q, msg, |m| matches!(m, Post::Nudge { .. })),
+        other => q.push_back(other),
+    }
+}
+
+/// Coalesce: overwrite the queued entry matching `pred` in place, else push.
+fn replace_or_push(q: &mut VecDeque<Post>, msg: Post, pred: impl Fn(&Post) -> bool) {
+    match q.iter().position(pred) {
+        Some(pos) => q[pos] = msg,
+        None => q.push_back(msg),
+    }
+}
+
+/// Whether `m` is a still-queued wakeup for `id` — the predicate [`enqueue`]'s
+/// dedupe and [`Mailbox::has_queued_wakeup`] both read.
+fn queued_wakeup_for(m: &Post, id: ScheduleId) -> bool {
+    matches!(m, Post::Stamped { kind: Stamped::Wakeup { id: eid, .. }, .. } if *eid == id)
 }
 
 /// How long a parked [`Inbox::next_or_idle`] sleeps between condvar wakes.  A
@@ -230,6 +230,17 @@ impl Mailbox {
     /// This inbox's clear-epoch — the race is [`Shared::epoch`]'s doc.
     pub(crate) fn epoch(&self) -> u64 {
         self.shared.epoch.load(Ordering::Acquire)
+    }
+
+    /// Whether a wakeup for `id` is still queued, unconsumed — the reaper's
+    /// overlap check: a fire finding one still here skips, since the queue's
+    /// own dedupe ([`enqueue`]) means at most one is ever waiting.
+    pub(crate) fn has_queued_wakeup(&self, id: ScheduleId) -> bool {
+        self.shared
+            .lock()
+            .posts
+            .iter()
+            .any(|m| queued_wakeup_for(m, id))
     }
 
     /// Mint the addressed envelope for a message composed now but pushed
@@ -488,15 +499,13 @@ impl Inbox {
     }
 
     /// Drop every pending message — `/clear` rebuilds the agent, so nothing
-    /// queued carries across — running each one's [`Post::on_drain`] first, so
-    /// a queued-but-unconsumed `ScheduledWakeup` still clears its `pending` flag
-    /// rather than stranding a schedule that could never fire again.  Bumps the
-    /// clear-epoch under the same lock as the drain ([`Shared::epoch`]).
+    /// queued carries across.  A queued-but-unconsumed wakeup needs no
+    /// separate release: dropping it from the queue is itself what
+    /// [`Mailbox::has_queued_wakeup`] will see.  Bumps the clear-epoch under
+    /// the same lock as the drain ([`Shared::epoch`]).
     pub(crate) fn clear(&self) {
         let mut q = self.shared.lock();
-        for msg in q.posts.drain(..) {
-            msg.on_drain();
-        }
+        q.posts.clear();
         self.shared.epoch.fetch_add(1, Ordering::Release);
         drop(q);
     }
@@ -558,12 +567,11 @@ fn coalesce_steering(q: &mut VecDeque<Post>) -> Item {
     Item::Human(text)
 }
 
-/// Convert one non-steering message into the [`Item`] it delivers, running its
-/// [`Post::on_drain`] — or `None` for a [`Stamped`] message whose minted epoch
-/// has since fallen behind `epoch`, refused rather than converted.  The one
-/// fence, stated once, over the one variant that can carry a stamp.
+/// Convert one non-steering message into the [`Item`] it delivers — or `None`
+/// for a [`Stamped`] message whose minted epoch has since fallen behind
+/// `epoch`, refused rather than converted.  The one fence, stated once, over
+/// the one variant that can carry a stamp.
 fn to_item(msg: Post, epoch: u64) -> Option<Item> {
-    msg.on_drain();
     Some(match msg {
         Post::Stamped {
             epoch: Minted(stamped),
@@ -617,7 +625,6 @@ mod tests {
                 label: label.into(),
                 trigger: trigger.into(),
                 prompt: prompt.into(),
-                pending: Arc::new(AtomicBool::new(true)),
             },
         }
     }
@@ -1067,45 +1074,45 @@ mod tests {
         ));
     }
 
-    /// Draining a wakeup re-opens its schedule for the next occurrence.
+    /// Draining a wakeup re-opens its schedule for the next occurrence: the
+    /// queue itself is the overlap-check's source of truth, so popping the
+    /// item is all `has_queued_wakeup` needs to flip.
     #[test]
-    fn inbox_wakeup_clears_its_pending_flag_on_drain() {
-        let pending = Arc::new(AtomicBool::new(true));
+    fn inbox_wakeup_leaves_the_queue_once_drained() {
         let inbox = Inbox::new();
-        inbox.mailbox().stamp().post(Stamped::Wakeup {
+        let mailbox = inbox.mailbox();
+        mailbox.stamp().post(Stamped::Wakeup {
             id: 1,
             label: "n".into(),
             trigger: "* * * * *".into(),
             prompt: "go".into(),
-            pending: pending.clone(),
         });
-        assert!(pending.load(std::sync::atomic::Ordering::Acquire));
+        assert!(mailbox.has_queued_wakeup(1));
         let _ = inbox.next_item();
         assert!(
-            !pending.load(std::sync::atomic::Ordering::Acquire),
+            !mailbox.has_queued_wakeup(1),
             "draining the wakeup re-opens its schedule"
         );
     }
 
-    /// `clear` runs the same drain side effect a real drain would, so an
-    /// unconsumed wakeup's `pending` flag is not stranded `true` forever.
-    /// `Avatar::clear` disarms the schedule registry alongside, but the TUI's
-    /// `App::clear` reaches only the inbox, so this must hold on its own.
+    /// `clear` drops the queue outright, so an unconsumed wakeup is not
+    /// stranded as "still queued" forever.  `Avatar::clear` disarms the
+    /// schedule registry alongside, but the TUI's `App::clear` reaches only
+    /// the inbox, so this must hold on its own.
     #[test]
-    fn inbox_clear_runs_the_drain_side_effect_on_a_stranded_wakeup() {
-        let pending = Arc::new(AtomicBool::new(true));
+    fn inbox_clear_leaves_no_wakeup_stranded_as_queued() {
         let inbox = Inbox::new();
-        inbox.mailbox().stamp().post(Stamped::Wakeup {
+        let mailbox = inbox.mailbox();
+        mailbox.stamp().post(Stamped::Wakeup {
             id: 1,
             label: "n".into(),
             trigger: "* * * * *".into(),
             prompt: "go".into(),
-            pending: pending.clone(),
         });
         inbox.clear();
         assert!(
-            !pending.load(std::sync::atomic::Ordering::Acquire),
-            "clear must not strand a wakeup's pending flag at true"
+            !mailbox.has_queued_wakeup(1),
+            "clear must not strand a wakeup as still queued"
         );
         assert!(inbox.is_empty());
     }

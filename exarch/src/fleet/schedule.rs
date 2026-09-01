@@ -15,7 +15,6 @@ use jiff::civil::DateTime;
 use jiff::{ToSpan, Zoned};
 use ral_core::process::{Deadline, arm_callback};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -360,9 +359,6 @@ struct Entry {
     trigger: Trigger,
     prompt: String,
     label: String,
-    /// Shared with the in-flight wakeup: set on post, cleared when the inbox
-    /// drains it, read for the overlap-skip.
-    pending: Arc<AtomicBool>,
     fires: u64,
     /// The next occurrence, armed on the reaper; dropping it disarms.
     deadline: Deadline,
@@ -416,7 +412,6 @@ impl ScheduleRegistry {
                 trigger,
                 prompt,
                 label: label.clone(),
-                pending: Arc::new(AtomicBool::new(false)),
                 fires: 0,
                 deadline,
             },
@@ -488,20 +483,22 @@ impl ScheduleRegistry {
     }
 
     /// The reaper fired this schedule: post a wakeup unless a previous one is
-    /// still pending (the overlap-skip), then re-arm, or drop a spent
-    /// one-shot.  Runs on the reaper thread outside its heap lock, so
-    /// re-arming here is safe; the push waits for this guard to drop, since a
-    /// park verdict reads `armed()` under the inbox mutex and the lock order
-    /// is inbox → registry.  Composing and pushing straddle that drop, so a
-    /// `/clear` can fall between them: the envelope is minted at composition
-    /// and the inbox's pop-time check settles the two orderings.
+    /// still queued (the overlap-skip — the inbox already dedupes by id, so
+    /// asking it is the only source of truth this needs), then re-arm, or
+    /// drop a spent one-shot.  The overlap check runs before the registry
+    /// lock is taken, never under it: a park verdict reads `armed()` under
+    /// the inbox mutex, so the lock order is inbox → registry, and this must
+    /// not invert it.  Composing and pushing straddle the registry guard's
+    /// drop, so a `/clear` can fall between them: the envelope is minted at
+    /// composition and the inbox's pop-time check settles the two orderings.
     fn fire(&self, id: ScheduleId, mailbox: &Mailbox) {
+        let already_queued = mailbox.has_queued_wakeup(id);
         let mut g = self.lock();
         let Some(entry) = g.entries.get_mut(&id) else {
             return; // unscheduled or cleared between arming and firing
         };
         let recurring = entry.trigger.is_recurring();
-        let msg = if entry.pending.swap(true, Ordering::AcqRel) {
+        let msg = if already_queued {
             None
         } else {
             entry.fires += 1;
@@ -512,7 +509,6 @@ impl ScheduleRegistry {
                     label: entry.label.clone(),
                     trigger: entry.trigger.describe(),
                     prompt: entry.prompt.clone(),
-                    pending: entry.pending.clone(),
                 },
             ))
         };

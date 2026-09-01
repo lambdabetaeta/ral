@@ -4,8 +4,6 @@
 
 use crate::fleet::schedule::ScheduleId;
 use ral_core::Value;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::AgentId;
@@ -159,18 +157,16 @@ pub(crate) enum Stamped {
     /// A cron or `after` wakeup fired, delivered as a marked injection.
     Wakeup {
         /// The firing schedule's id, and the inbox's dedupe key: a newer wakeup
-        /// replaces a still-queued one for the same schedule — the inbox's own
-        /// guarantee of what `pending` below already gives producer-side.
+        /// replaces a still-queued one for the same schedule.  It also answers
+        /// the reaper's overlap check (`Mailbox::has_queued_wakeup`) — the
+        /// queue is the single source of truth for "a fire for this schedule
+        /// is still owed."
         id: ScheduleId,
         /// The schedule's own label, always caller-named.
         label: String,
         /// The trigger as text — a cron expression or `after <dur>`.
         trigger: String,
         prompt: String,
-        /// Set when this message is posted, cleared when it drains: the next
-        /// occurrence reads it and skips, so a tick arriving while the previous
-        /// wakeup still waits is dropped rather than stacked.
-        pending: Arc<AtomicBool>,
     },
     /// The one line a child posts to its parent, through the envelope minted
     /// at the child's birth.
@@ -199,18 +195,6 @@ impl Post {
             Self::Command(_) => Boundary::Exchange,
             Self::UserSteering(s) if is_slash(s) => Boundary::Barrier,
             _ => Boundary::Tool,
-        }
-    }
-
-    /// The side effect of draining.  Only a wakeup has one: clearing `pending`
-    /// re-opens its schedule, so the overlap-skip holds exactly until taken.
-    pub(super) fn on_drain(&self) {
-        if let Self::Stamped {
-            kind: Stamped::Wakeup { pending, .. },
-            ..
-        } = self
-        {
-            pending.store(false, Ordering::Release);
         }
     }
 }
