@@ -53,9 +53,8 @@ impl Tab {
         self.agent.upgrade()
     }
 
-    /// Idle span if this tab is due out of the `TAB` cycle — parked and idle
-    /// past the mark — else `None`.  Root and the focused tab never are, which
-    /// is what makes [`Tabs::focus_next`]'s walk terminate.
+    /// Idle span if this tab is parked past the compact-row threshold. Root
+    /// and the focused tab never demote.
     fn demotion(&self, focused: AgentId, root: AgentId) -> Option<Duration> {
         if self.id == root || self.id == focused {
             return None;
@@ -79,9 +78,9 @@ pub(super) struct TabRow<'a> {
 
 /// Every tab the stream has announced, in birth order.
 ///
-/// Focus is purely presentational: `TAB` and `/focus` write it, rendering reads
-/// it, and no agent-side lifecycle depends on it.  Reads route through
-/// [`Self::focused`], which resolves a stale id — a tab that aged out — to root.
+/// Focus is purely presentational: matrix `Enter` and `/focus` write it, and
+/// no agent-side lifecycle reads it. [`Self::focused`] resolves a stale id —
+/// a tab that aged out — to root.
 #[allow(clippy::struct_field_names)] // `tabs` is the natural name for the tab list.
 pub(super) struct Tabs {
     /// Birth order, root first — stable per-session log paths across runs.
@@ -154,10 +153,9 @@ impl Tabs {
         self.agent(self.focused())
     }
 
-    /// The live tab named `name` — `/focus`'s target, and the only way onto a
-    /// demoted tab.  `Fleet::enrol` keeps names unique among the live, so a
-    /// lingering tab sharing its name with a newborn is ruled out by the
-    /// liveness test rather than by luck.
+    /// The live tab named `name` — `/focus`'s target. `Fleet::enrol` keeps
+    /// names unique among the live, so a lingering tab sharing its name with
+    /// a newborn is ruled out by the liveness test rather than by luck.
     pub(super) fn by_name(&self, name: &str) -> Option<AgentId> {
         self.tabs
             .iter()
@@ -271,23 +269,8 @@ impl Tabs {
         self.focus = root;
     }
 
-    /// Cycle `TAB` focus past any demoted tab.  Root is never demoted, so one
-    /// pass around the bar always finds a landing spot.
-    pub(super) fn focus_next(&mut self) {
-        let (current, root) = (self.focused(), self.root());
-        let bar: Vec<&Tab> = self.tabs.iter().filter(|t| t.in_bar()).collect();
-        let pos = bar.iter().position(|t| t.id == current).unwrap_or(0);
-        let next = (1..=bar.len())
-            .map(|step| bar[(pos + step) % bar.len()])
-            .find(|t| t.demotion(current, root).is_none())
-            .map(|t| t.id);
-        if let Some(id) = next {
-            self.focus = id;
-        }
-    }
-
-    /// Land focus on `id` — `/focus`, the only way to reach a demoted tab.  No
-    /// validation: [`Self::by_name`] resolved it against the live tabs.
+    /// Attach to `id`. Matrix navigation selects any displayed row; `/focus`
+    /// first resolves a name against the live tabs.
     pub(super) fn set_focus(&mut self, id: AgentId) {
         self.focus = id;
     }
@@ -453,39 +436,5 @@ mod tests {
             "the live root's own block survives the sibling's tombstoning untouched"
         );
         assert_eq!(tabs.len(), 1, "and the bar is back to root alone");
-    }
-
-    /// Root is never demoted, so `TAB` wraps back to it rather than sticking on
-    /// the demoted tab it skips.
-    #[test]
-    fn focus_next_skips_a_demoted_tab() {
-        let root = trunk(Duration::ZERO);
-        // Idle past the mark and parked on a fresh mailbox: demoted on sight.
-        let parked = trunk(DEMOTE_IDLE + Duration::from_secs(1));
-        let mut tabs = Tabs::new(&root, false);
-        let promoted = parked.id + 1;
-        born(&mut tabs, promoted, "promoted", Some(root.id));
-        tabs.born(
-            parked.id,
-            Arc::downgrade(&parked),
-            Path::new("/tmp/exarch-tabs-test"),
-            "parked".into(),
-            Some(root.id),
-            AgentSlot(2),
-        );
-
-        tabs.focus_next();
-        assert_eq!(
-            tabs.focused(),
-            promoted,
-            "TAB skips straight past the demoted tab"
-        );
-
-        tabs.focus_next();
-        assert_eq!(
-            tabs.focused(),
-            root.id,
-            "TAB skips the demoted tab again, wrapping back to root"
-        );
     }
 }

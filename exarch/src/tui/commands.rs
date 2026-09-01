@@ -129,7 +129,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         arg: Some("<name>"),
         rewrites: false,
         any_tab: true,
-        help: "Jump focus to a tab by name — reaches one TAB skips (demoted).",
+        help: "Attach to a live agent by name.",
     },
     SlashCommand {
         name: "/compact",
@@ -356,9 +356,8 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     }
 }
 
-/// Jump focus to the live tab named `arg` — the only way onto a demoted tab,
-/// which `TAB` skips.  The name resolves, but nothing is renewed: attention
-/// alone must not keep a child alive.
+/// Attach to the live tab named `arg`. The name resolves, but nothing is
+/// renewed: attention alone must not keep a child alive.
 pub(super) fn cmd_focus(app: &mut App, arg: &str) {
     let id = app.tabs.focused();
     if arg.is_empty() {

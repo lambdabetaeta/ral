@@ -507,7 +507,7 @@ impl Avatar {
             DEMOTE_IDLE.as_secs(),
             None,
             "warn",
-            Some("idle threshold after which a child leaves the tab cycle".to_string()),
+            Some("a parked child demotes to a compact matrix row at this idle age".to_string()),
         ));
 
         Ok(rows)

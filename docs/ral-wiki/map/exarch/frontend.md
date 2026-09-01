@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3606091a
-generated_at_date: 2026-08-27
+generated_at_commit: c8a8a706
+generated_at_date: 2026-09-01
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -300,10 +300,21 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the fact) remains the death cue and `App::admits` refuses everything after
  it. The birth facts ride the notice rather than being read back off the
  agent, so a child that settles before the frontend drains its `Born` still
- gets a properly labelled, properly indented tab. Demotion — a child idle and
- parked past `DEMOTE_IDLE` (`tui.rs`, beside `LINGER`) leaving the `TAB`
- cycle for the matrix strip — is one such projection off the agent's own
- exchange clock, computed per row per frame and never stored.
+ gets a properly labelled tree row. `App`'s matrix navigation is modal, and
+ its whole retained state is `Matrix` — the agent identity the cursor names,
+ or nothing while the strip is a status display. `TAB` enters and leaves,
+ `↑`/`↓` and Shift-Tab move the cursor, `Enter` attaches to its row *and*
+ leaves navigation, so attach-and-type is one gesture, and `Esc` leaves the
+ surface without cancelling the focused exchange; a cursor whose agent has
+ gone reads as the attached tab. The drawn window is a pure function of that
+ cursor — it always holds the cursor's own row and spends one line on each
+ side it hides — and connectors are derived from the whole spawn forest before
+ the window clips it. While navigation owns the keyboard the strip is always
+ drawn, taking a row from the transcript if it must; otherwise it fits in
+ whatever the transcript's floor leaves over. Demotion — a child idle and
+ parked past `DEMOTE_IDLE` (`tui.rs`, beside `LINGER`) becoming a compact
+ slate row in place, keeping its position in the spawn tree — is read off the
+ agent's own exchange clock, computed per row per frame and never stored.
  Sub-agent sessions get matrix rows/tabs that linger for 90 seconds
  (`LINGER`, `tui.rs`) after `Died`, each keeping its own scroll position; dead
  rows dim and keep their final step cells without a countdown. The conversing
@@ -460,7 +471,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/app.rs` — the `App` orchestrator: event routing, the `root_clear_drain` guard, per-kind push methods
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
-        - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Viewport`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, focus management and the parent climb, `tick`'s tombstone eviction past `LINGER`
+        - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Viewport`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management and the parent climb, `tick`'s tombstone eviction past `LINGER`
         - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, incremental `Printer::sync` (`rebuild_floor`, `evicted_through`), the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first, retired to `user.log` on the way out), the `Log` transcript writer, `Tombstone`
         - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
@@ -470,7 +481,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version, omitting the disposable scratch path), `legend_panel`, ART/EAGLE constants; the wordmark and width-matched card use rail-free `ChromeKind::Opening`
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
-        - `tui/matrix.rs` — agent matrix and tab bar: `MatrixSort`, `matrix_bar`, justified row projection, `step_cells`
+        - `tui/matrix.rs` — bounded agent-tree matrix: `Matrix` (the one retained value, an agent identity), `Nav`/`nav` reading a key as a gesture, `MatrixSort`, `forest`/`TreeRow` and their connectors, the closed-form `window` and its boundary lines, `neighbour`, `strip`'s justified row projection, `step_cells`
         - `tui/palette.rs` — the TUI colour constants (`CODE_BG`, `SLATE`, `PROMPT_INK`, the agent hues)
         - `tui/model_picker.rs` — model switching: `pick_model`, `drive_picker`, `apply_model_switch`; list fetching rides [[map/exarch/provider|provider]]'s `Listing`/`Fetches` pumps
         - `tui/login.rs` — the `/login` overlay: `LoginOverlay`, `drive_login`, `apply_login`

@@ -409,47 +409,61 @@ fn ui_loop(
                     let action = key_action(&k, steerable);
                     let consumed =
                         action != KeyAction::Interrupt && tui.app.prompt_state.menu_key(k.code);
-                    match action {
-                        _ if consumed => {}
-                        // Every tab interrupts through its own agent, which
-                        // cancels the focused agent's token and its current
-                        // dispatch scope by handle — published ahead of the
-                        // engine lock, so the keypress cannot land on a run
-                        // that just ended — and never the durable root: the
-                        // exchange dies, its descendants do not, and the
-                        // agent lives to take a next run. The trunk alone
-                        // also raises the ambient interrupt, gated to it
-                        // because only the trunk publishes the process-wide
-                        // slot; that path alone re-creates the SIGINT for a
-                        // foreground external child and stamps the ambient
-                        // foreground cause, which needs no dispatch to name.
-                        KeyAction::Cancel | KeyAction::Interrupt => {
-                            if let Some(agent) = tui.app.tabs.agent(focused) {
-                                agent.interrupt();
+                    // Matrix navigation is modal: while it owns the keyboard
+                    // every key but the interrupt is a matrix gesture or is
+                    // swallowed, so Esc leaves the surface instead of
+                    // cancelling the focused turn, and nothing reaches the
+                    // draft.
+                    if !consumed && action != KeyAction::Interrupt && tui.app.matrix_navigating() {
+                        tui.app.key(k);
+                    } else {
+                        match action {
+                            _ if consumed => {}
+                            // Every tab interrupts through its own agent, which
+                            // cancels the focused agent's token and its current
+                            // dispatch scope by handle — published ahead of the
+                            // engine lock, so the keypress cannot land on a run
+                            // that just ended — and never the durable root: the
+                            // exchange dies, its descendants do not, and the
+                            // agent lives to take a next run. The trunk alone
+                            // also raises the ambient interrupt, gated to it
+                            // because only the trunk publishes the process-wide
+                            // slot; that path alone re-creates the SIGINT for a
+                            // foreground external child and stamps the ambient
+                            // foreground cause, which needs no dispatch to name.
+                            KeyAction::Cancel | KeyAction::Interrupt => {
+                                if let Some(agent) = tui.app.tabs.agent(focused) {
+                                    agent.interrupt();
+                                }
+                                if focused == tui.app.tabs.root() {
+                                    cancel::raise_interrupt();
+                                }
                             }
-                            if focused == tui.app.tabs.root() {
-                                cancel::raise_interrupt();
+                            KeyAction::Submit => {
+                                if let Some(text) = tui.app.prompt_state.submit() {
+                                    // Every tab funnels through the one path,
+                                    // which parses before it forks on the
+                                    // focused tab — so no slash line can be
+                                    // mailed to the model.
+                                    commands::route_submit(text, tui, &mailbox, ctx)?;
+                                }
                             }
-                        }
-                        KeyAction::Submit => {
-                            if let Some(text) = tui.app.prompt_state.submit() {
-                                // Every tab funnels through the one path, which
-                                // parses before it forks on the focused tab —
-                                // so no slash line can be mailed to the model.
-                                commands::route_submit(text, tui, &mailbox, ctx)?;
-                            }
-                        }
-                        KeyAction::Edit => {
-                            tui.app.key(k);
-                            if tui.app.prompt_state.take_editor_request() {
-                                terminal::compose_in_editor(tui)?;
+                            KeyAction::Edit => {
+                                tui.app.key(k);
+                                if tui.app.prompt_state.take_editor_request() {
+                                    terminal::compose_in_editor(tui)?;
+                                }
                             }
                         }
                     }
                 }
                 CtEvent::Paste(s) => {
                     dirty = true;
-                    tui.app.prompt_state.paste(&s);
+                    // A matrix cursor is a modal surface: pasted bytes must
+                    // never leak into the draft underneath it.
+                    if !tui.app.matrix_navigating() {
+                        tui.app.prompt_state.paste(&s);
+                    }
                 }
                 CtEvent::Mouse(m) => {
                     dirty = true;
@@ -461,8 +475,8 @@ fn ui_loop(
                 _ => {}
             }
         }
-        // A `TAB`, or a focused agent ending mid-drain, moves the banner and
-        // ctx% gauge onto the newly focused provider.  Purely presentational:
+        // A matrix Enter, or a focused agent ending mid-drain, moves the banner
+        // and ctx% gauge onto the newly focused provider. Purely presentational:
         // nothing agent-side reads focus, so there is nothing else to wake.
         let now_focus = tui.app.tabs.focused();
         if now_focus != prev_focus {

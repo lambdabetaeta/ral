@@ -464,12 +464,12 @@ shares through `Fleet` is only identity resolution and the lease.
   cancels the subtree with `CancelCause::Deadline`
   (`Agent::cancel_tree`) once it is not. The one thing that renews the
   clock is a delivered message — a human's (`Mailbox::steer`) or the
-  parent's (`Agent::message`); nothing else does — not the TUI's `TAB`
-  cursor, a plain, presentation-only `AgentId` local to the frontend
-  (`tui::tabs::Tabs::focus`) that neither the fleet nor `park_mode` ever
-  reads, not a `/resources` probe. A returning agent's `reply` cancels its
-  proper descendants and
-  parks it, regardless of which tab the human's cursor sits on.
+  parent's (`Agent::message`); nothing else does — not matrix navigation,
+  not the attachment its `Enter` sets (`tui::tabs::Tabs::focus`, a
+  presentation-only `AgentId` neither the fleet nor `park_mode` ever
+  reads), not a `/resources` probe. A returning agent's `reply` cancels its
+  proper descendants and parks it, regardless of which tab the human is
+  attached to.
 
 ## Cancellation cascades the subtree, across both layers
 

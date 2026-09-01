@@ -22,7 +22,7 @@ use super::app::Overlay;
 use super::block::queued_prompt_rows;
 use super::gesture::{FrameGeom, Toast};
 use super::line;
-use super::matrix::matrix_bar;
+use super::matrix::strip;
 use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
 use super::row::Row;
 use super::select::highlight_range;
@@ -31,6 +31,11 @@ use super::terminal::Term;
 use super::viewport::{StateSpan, Viewport};
 
 const PROMPT_PAD_H: u16 = 1;
+/// The matrix is a navigable window, not a second transcript.  Eight rows
+/// keeps it useful on ordinary terminals while leaving the focused transcript
+/// a readable floor.
+const MATRIX_MAX_ROWS: usize = 8;
+const TRANSCRIPT_MIN_ROWS: u16 = 6;
 
 /// Left gutter shared by the transcript, queued-prompt strip, and rule line,
 /// so the rail sits off the terminal edge.
@@ -61,8 +66,7 @@ struct Strips {
 /// Lay out `area`.  `queued_h` and `tab_h` are the two strips whose height the
 /// caller has already settled from this frame's rows.
 fn strips(app: &App, area: Rect, queued_h: u16, tab_h: u16) -> Strips {
-    let prompt_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
-    let prompt_h = app.prompt_state.height_hint(prompt_w, area.height);
+    let prompt_h = prompt_height(app, area);
     // Settled before the layout: the vertical split keeps full width, so
     // `area.width` stands in for the content row's width.
     let has_pins = app
@@ -71,6 +75,9 @@ fn strips(app: &App, area: Rect, queued_h: u16, tab_h: u16) -> Strips {
         .is_some_and(|vp| !vp.pins().is_empty());
     let register_w = area.width.saturating_sub(LEFT_MARGIN + READ_W);
     let show_register = has_pins && register_w >= REGISTER_MIN_W;
+    // The transcript's floor is a budget `matrix_height` spends, never a
+    // constraint: ratatui ranks `Min` above `Length`, so a floor here would
+    // outrank the prompt and crush the editor on a short frame.
     let [content, _breath, queued, tabs, prompt, status, footer] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
@@ -118,16 +125,21 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     // Both strips are owned lines, so this frame's rows are read here and
     // dropped before the transcript's own `&mut` borrow of the focused view.
     let rows = app.tabs.rows();
-    // A lone root gets no tab row at all; a second tab of either kind brings
-    // up the matrix, one row per tab, so a demoted agent is never invisible.
-    let tab_h = if rows.len() > 1 {
-        u16::try_from(rows.len()).unwrap_or(u16::MAX)
-    } else {
-        0
-    };
-    let matrix_lines = (tab_h > 0).then(|| matrix_bar(&rows, focused, root, app.matrix_sort));
     let prompt_hint = prompt_hint(root, app.is_steerable(), app.tabs.focused_name(), focused);
     let queued_lines = queued_lines(app, area);
+    let tab_h = matrix_height(app, area, queued_lines.len(), rows.len());
+    let cursor = app.matrix_cursor(&rows);
+    let matrix_lines = (tab_h > 0).then(|| {
+        strip(
+            &rows,
+            focused,
+            root,
+            app.matrix_sort,
+            cursor,
+            usize::from(tab_h),
+        )
+    });
+    let navigating = app.matrix_navigating();
     let s = strips(
         app,
         area,
@@ -218,6 +230,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
             // No native cursor while an overlay owns the keyboard, or it
             // peeks out from beneath it.
             if overlay.is_none()
+                && !navigating
                 && let Some((x, y)) = prompt_state.cursor_screen_position()
             {
                 f.set_cursor_position(Position::new(
@@ -242,7 +255,7 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
                 },
             );
         }
-        f.render_widget(Paragraph::new(footer_hint()), s.footer);
+        f.render_widget(Paragraph::new(footer_hint(navigating)), s.footer);
         if let Some(toast) = gesture.toast() {
             let msg = match toast {
                 Toast::Copied(n) => format!("[{n} characters copied]"),
@@ -267,6 +280,33 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     emit_tab_title(app);
     drawn?;
     Ok(())
+}
+
+fn prompt_height(app: &App, area: Rect) -> u16 {
+    let prompt_w = area.width.saturating_sub(2 + 2 * PROMPT_PAD_H);
+    app.prompt_state.height_hint(prompt_w, area.height)
+}
+
+/// The matrix's height this frame.  While navigation owns the keyboard the
+/// strip is always drawn — the surface a cursor moves through cannot be
+/// invisible — taking its row from the transcript if it must; otherwise it
+/// fits in whatever the transcript's floor leaves over.
+fn matrix_height(app: &App, area: Rect, queued_h: usize, row_count: usize) -> u16 {
+    let navigating = app.matrix_navigating();
+    let cap = u16::try_from(row_count.min(MATRIX_MAX_ROWS)).unwrap_or(u16::MAX);
+    if cap == 0 || (!navigating && row_count <= 1) {
+        return 0;
+    }
+    let fixed = 1u16 // breath
+        .saturating_add(u16::try_from(queued_h).unwrap_or(u16::MAX))
+        .saturating_add(prompt_height(app, area))
+        .saturating_add(2); // status + footer
+    let free = area.height.saturating_sub(fixed);
+    if navigating {
+        free.min(cap).max(1)
+    } else {
+        free.saturating_sub(TRANSCRIPT_MIN_ROWS).min(cap)
+    }
 }
 
 /// What the human typed mid-exchange and is still waiting on — prompts and
@@ -352,7 +392,7 @@ fn prompt_hint(
         return None;
     }
     Some(Line::from(Span::styled(
-        format!(" watching {name} — tab to main to steer "),
+        format!(" watching {name} — Tab to choose another agent "),
         Style::default()
             .fg(SLATE)
             .add_modifier(Modifier::DIM | Modifier::ITALIC),
@@ -369,11 +409,14 @@ fn prompt_block(border: Style) -> Block<'static> {
         .padding(Padding::horizontal(PROMPT_PAD_H))
 }
 
-fn footer_hint() -> Line<'static> {
+fn footer_hint(navigating: bool) -> Line<'static> {
     let st = Style::default()
         .fg(SLATE)
         .add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let hint =
-        " Tab pane | drag copy (⇧ native) | Ctrl-X Ctrl-E editor | Ctrl-C cancel | /quit to leave ";
+    let hint = if navigating {
+        " ↑↓ select | Enter attach | Esc leave "
+    } else {
+        " Tab agents | drag copy (⇧ native) | Ctrl-X Ctrl-E editor | Ctrl-C cancel | /quit to leave "
+    };
     Line::from(Span::styled(hint, st))
 }

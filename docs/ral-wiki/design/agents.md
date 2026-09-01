@@ -284,33 +284,48 @@ step cap, cancellation — settles the entry at once, with its one-line tag.
 
 ## Focus is presentation; the idle lease is lifecycle
 
-The human's `TAB` cursor is a plain `AgentId` the TUI moves — purely
-presentational, read by neither the fleet nor `park_mode`. `TAB`bing to a
-tab lets it receive the human's typed lines and own `Esc`, but looking at a
-tab keeps nothing alive. What keeps a non-conversing returning child alive
-past quiescence is a renewable **idle lease** the fleet arms at birth for
-every parented agent (`Fleet::enrol`; one hour, `AGENT_LEASE_IDLE`, a
-fleet-level bound rather than a per-agent field), not the human's attention:
-the one thing that renews it is a delivered *message* — a human's typed line
-(`Mailbox::steer`) or the parent's `` agents `message `` (`Agent::message`) —
-both of which stamp the recipient's own inbox exchange clock before the item
-is pushed, so a child that is being talked to, and a child parked on a
-deposited reply, keep their lease fresh (`Agent::idle`, read off that same
-clock), while a lease that is never renewed fires at exactly its birth-seeded
-hour. A `/branch` child and the trunk are roots — `Fleet::enrol` arms no
-lease for either — and so never idle-reap. Neither `TAB` nor a `/resources`
-probe touches the exchange clock — enumeration and attention alone can never
-immortalise a child.
+The human attachment is a presentational `AgentId` the frontend alone owns,
+read by neither the fleet nor `park_mode`. Matrix navigation is a second such
+value, and the matrix's only retained state: an agent identity, never a row
+number, so a cursor whose agent has gone reads as the attached tab rather than
+stranding off-list. `TAB` enters and leaves the surface, `↑`/`↓` (and
+Shift-Tab) move the cursor, and `Enter` attaches the human to the cursor's row
+*and* leaves navigation, so attach-and-type is one gesture. Navigation is
+modal: while it owns the keyboard `Esc` leaves the surface rather than
+cancelling the focused exchange — `Ctrl-C` alone still interrupts — and no
+other key reaches the draft. The attached tab receives typed lines; moving
+either cursor and looking at a tab keep nothing alive. What keeps a
+non-conversing returning child alive past quiescence is a renewable **idle
+lease** the fleet arms at birth for every parented agent (`Fleet::enrol`; one
+hour, `AGENT_LEASE_IDLE`, a fleet-level bound rather than a per-agent field),
+not the human's attention: the one thing that renews it is a delivered
+*message* — a human's typed line (`Mailbox::steer`) or the parent's
+`` agents `message `` (`Agent::message`) — both of which stamp the recipient's
+own inbox exchange clock before the item is pushed, so a child that is being
+talked to, and a child parked on a deposited reply, keep their lease fresh
+(`Agent::idle`, read off that same clock), while a lease that is never renewed
+fires at exactly its birth-seeded hour. A `/branch` child and the trunk are
+roots — `Fleet::enrol` arms no lease for either — and so never idle-reap.
+Neither matrix navigation nor a `/resources` probe touches the exchange
+clock — enumeration and attention alone can never immortalise a child.
 
 A leased child that is parked waiting for input and has sat idle for five
-minutes demotes out of the `TAB` cycle and the tab bar into a compact matrix
-strip, carrying its idle age — a per-frame projection off the inbox's own
-exchange clock, never stored state, and root is never a candidate. `/focus
-<name>` reaches a demoted tab directly and re-promotes it into the cycle; the
-gesture is presentation only and never touches the lease. When the lease
-itself runs out, the reaper cancels the whole subtree at the bound whether or
-not a human happens to be looking at it — mere focus was never immunity, and
-there is no `TAB`-driven reap to begin with.
+minutes demotes in place to a compact slate matrix row carrying its idle age —
+a per-frame projection off the inbox's own exchange clock, never stored state,
+and root is never a candidate. It keeps its position in the spawn tree: the
+matrix draws `├─`/`└─` branches from the complete forest before clipping its
+window, so an off-screen sibling cannot change a visible connector. The window
+itself is a total function of the cursor and the fleet: the same pair always
+draws the same strip, so no frame's height leaks into the next. It always
+contains the cursor's own row, and it spends one line on each side it hides,
+stating how many agents lie there. A surface a cursor moves through cannot be
+invisible, so while navigation owns the keyboard the strip is drawn whatever
+the frame's height, taking a row from the transcript if it must; watching, it
+fits in whatever the transcript's floor leaves over. `/focus <name>` remains
+the direct textual attachment. Every one of these gestures is presentation only
+and never touches the lease. When the lease itself runs out, the reaper cancels
+the whole subtree at the bound whether or not a human happens to be looking at
+it — mere focus was never immunity.
 
 ## Descendant messages: marked notes, not shared memory
 

@@ -8,12 +8,12 @@ use super::gesture::{Effect, GestureState};
 use super::line;
 use super::line::bold;
 use super::login::LoginOverlay;
-use super::matrix::MatrixSort;
+use super::matrix::{self, Matrix, MatrixSort, Nav};
 use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK, READ_W};
 use super::picker::Picker;
 use super::prompt::PromptState;
 use super::render::draw;
-use super::tabs::Tabs;
+use super::tabs::{TabRow, Tabs};
 use super::terminal::{Term, osc52_copy};
 use super::viewport::Viewport;
 use crate::agent::Agent;
@@ -68,6 +68,10 @@ pub(crate) struct App {
     pub(super) gesture: GestureState,
     /// A render-time projection over `tabs`, never a reshuffle of the model.
     pub(super) matrix_sort: MatrixSort,
+    /// The matrix's cursor, deliberately separate from [`Tabs::focus`]: moving
+    /// around the matrix must not retarget the prompt until the user presses
+    /// Enter.
+    pub(super) matrix: Matrix,
     /// Armed by [`Self::clear`]: drops root's straggler events — tokens the
     /// worker emitted before the streaming select noticed the cancel — until
     /// the clear acknowledgement. Sub-agent tabs are covered instead by the
@@ -96,6 +100,7 @@ impl App {
             overlay: None,
             gesture: GestureState::new(),
             matrix_sort: MatrixSort::default(),
+            matrix: Matrix::Watching,
             root_clear_drain: false,
             cwd_basename,
             last_title: String::new(),
@@ -143,6 +148,56 @@ impl App {
         self.tabs
             .focused_agent()
             .is_none_or(|agent| agent.mailbox().waiting_for_input())
+    }
+
+    /// Whether matrix navigation owns the keyboard.
+    pub(super) fn matrix_navigating(&self) -> bool {
+        matches!(self.matrix, Matrix::Navigating(_))
+    }
+
+    /// The cursor this frame draws: a cursor whose agent has gone reads as the
+    /// attached tab, the way a stale focus reads as root.  Resolved at every
+    /// use, so a dying child never strands the selection off-list and nothing
+    /// has to reconcile it.
+    pub(super) fn matrix_cursor(&self, rows: &[TabRow<'_>]) -> Option<AgentId> {
+        let Matrix::Navigating(cursor) = self.matrix else {
+            return None;
+        };
+        Some(if rows.iter().any(|row| row.id == cursor) {
+            cursor
+        } else {
+            self.tabs.focused()
+        })
+    }
+
+    /// Apply one gesture.  Entering needs more than one row; staying does not,
+    /// so a fleet that shrinks under the cursor leaves a one-row matrix the
+    /// user exits, never a mode that re-arms when a child is born.
+    fn matrix_nav(&mut self, nav: Nav) {
+        let rows = self.tabs.rows();
+        let (next, attach) = match (nav, self.matrix_cursor(&rows)) {
+            (Nav::Toggle, None) if self.tabs.len() > 1 => {
+                (Matrix::Navigating(self.tabs.focused()), None)
+            }
+            (Nav::Toggle | Nav::Leave, Some(_)) => (Matrix::Watching, None),
+            (Nav::Up | Nav::Down, Some(cursor)) => (
+                Matrix::Navigating(matrix::neighbour(
+                    &rows,
+                    self.matrix_sort,
+                    cursor,
+                    nav == Nav::Down,
+                )),
+                None,
+            ),
+            // Enter attaches and leaves, so attach-and-type is one gesture.
+            (Nav::Attach, Some(cursor)) => (Matrix::Watching, Some(cursor)),
+            _ => (self.matrix, None),
+        };
+        drop(rows);
+        self.matrix = next;
+        if let Some(id) = attach {
+            self.tabs.set_focus(id);
+        }
     }
 
     /// Mutable access to the active `/model` picker, for `drive_picker`.
@@ -382,6 +437,22 @@ impl App {
         if self.overlay.is_some() {
             return;
         }
+        // Matrix navigation is a modal keyboard surface of its own; Tab is
+        // global, so it enters and leaves even with an editor prefix armed.
+        if let Some(nav) = matrix::nav(&k, self.matrix_navigating()) {
+            self.matrix_nav(nav);
+            return;
+        }
+        if self.matrix_navigating() {
+            // Paging still reads the transcript under the matrix; every other
+            // key is swallowed so it cannot reach the draft.
+            match k.code {
+                KeyCode::PageUp => self.apply(self.gesture.scroll_page(-1)),
+                KeyCode::PageDown => self.apply(self.gesture.scroll_page(1)),
+                _ => {}
+            }
+            return;
+        }
         let can_edit = self.is_steerable();
         // Ctrl-X opens the editor-command prefix (emacs convention): Ctrl-E
         // composes the prompt in `$EDITOR` — drained by the UI loop, which owns
@@ -400,21 +471,13 @@ impl App {
             self.prompt_state.set_cx_pending();
             return;
         }
-        // Tab cycles regardless of focus; every other key reaches the textarea
-        // only on an editable tab, so a lingering subagent is watch-only and the
-        // global prompt stays pristine for when the user tabs home.
+        // Every key reaches the textarea only on an editable tab, so a lingering
+        // subagent is watch-only and the global prompt stays pristine until
+        // the user attaches to a live row.
         match k.code {
             // Paging scrolls any tab; bare Up/Down stay bound to history below.
             KeyCode::PageUp => self.apply(self.gesture.scroll_page(-1)),
             KeyCode::PageDown => self.apply(self.gesture.scroll_page(1)),
-            // Not collapsible into a guard: with <=1 tab, Tab must be a no-op,
-            // not fall through to the textarea arm below.
-            #[allow(clippy::collapsible_match)]
-            KeyCode::Tab => {
-                if self.tabs.len() > 1 {
-                    self.tabs.focus_next();
-                }
-            }
             // Up/Down walk history only from the prompt's edge rows; mid-text in
             // a multi-line draft they fall through and move the cursor. On an
             // empty prompt, Up dequeues the whole queued run back for revision.
@@ -586,6 +649,97 @@ mod tests {
             .map(Row::plain)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn matrix_cursor_does_not_change_focus_until_enter() {
+        let (mut app, rx, root) = app();
+        let child = root.id + 1;
+        app.transient(
+            child,
+            Transient::Born {
+                agent: std::sync::Weak::new(),
+                log_dir: std::env::temp_dir(),
+                name: "child".into(),
+                parent: Some(root.id),
+            },
+            &rx,
+        );
+
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.key(key(KeyCode::Tab));
+        assert!(app.matrix_navigating(), "Tab enters the matrix");
+        assert_eq!(
+            app.matrix_cursor(&app.tabs.rows()),
+            Some(root.id),
+            "the cursor starts on the attached agent"
+        );
+
+        app.key(key(KeyCode::Down));
+        assert_eq!(
+            app.matrix_cursor(&app.tabs.rows()),
+            Some(child),
+            "arrows move the matrix cursor"
+        );
+        assert_eq!(
+            app.tabs.focused(),
+            root.id,
+            "moving the cursor does not retarget the prompt"
+        );
+
+        app.key(key(KeyCode::Enter));
+        assert_eq!(app.tabs.focused(), child, "Enter attaches to the cursor");
+        assert!(!app.matrix_navigating(), "and leaves the matrix");
+    }
+
+    #[test]
+    fn esc_leaves_the_matrix_without_moving_focus() {
+        let (mut app, rx, root) = app();
+        app.transient(
+            root.id + 1,
+            Transient::Born {
+                agent: std::sync::Weak::new(),
+                log_dir: std::env::temp_dir(),
+                name: "child".into(),
+                parent: Some(root.id),
+            },
+            &rx,
+        );
+
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.key(key(KeyCode::Tab));
+        app.key(key(KeyCode::Down));
+        app.key(key(KeyCode::Esc));
+
+        assert!(!app.matrix_navigating(), "Esc leaves the surface");
+        assert_eq!(
+            app.tabs.focused(),
+            root.id,
+            "an abandoned cursor attaches to nothing"
+        );
+    }
+
+    #[test]
+    fn matrix_mode_swallows_prompt_editing() {
+        let (mut app, rx, root) = app();
+        app.transient(
+            root.id + 1,
+            Transient::Born {
+                agent: std::sync::Weak::new(),
+                log_dir: std::env::temp_dir(),
+                name: "child".into(),
+                parent: Some(root.id),
+            },
+            &rx,
+        );
+        app.prompt_state.set_prompt("draft");
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(
+            app.prompt_state.prompt_text(),
+            "draft",
+            "matrix keys cannot edit the prompt"
+        );
     }
 
     /// A pin is ambient register state, and the coalescing that used to be
