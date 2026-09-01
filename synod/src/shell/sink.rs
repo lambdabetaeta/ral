@@ -170,9 +170,10 @@ pub enum SynodEvent {
     Step {
         n: u32,
     },
-    /// The agent's whole state, not a passing label: the status bar names this
-    /// one until the next arrives, and `pending` says whether anything is
-    /// outstanding — the spinner's warrant.
+    /// The session's whole state, not a passing label: the status bar names
+    /// this one until the next arrives, and `pending` says whether anything is
+    /// outstanding — the spinner's warrant.  Mostly the agent's own states,
+    /// relayed; also the shell's, for the waits that precede any agent.
     State {
         label: &'static str,
         pending: bool,

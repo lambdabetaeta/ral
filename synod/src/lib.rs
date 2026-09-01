@@ -23,10 +23,6 @@
 //! nothing here is ever typed at directly.
 //!
 //! The design record is `dev/docs/VM/SYNOD.md`.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "synod is an application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline"
-)]
 
 pub mod accounts;
 pub mod boot;

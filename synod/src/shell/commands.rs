@@ -80,15 +80,30 @@ pub(crate) struct Emitter {
 }
 
 impl Emitter {
-    pub(crate) fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
-        if self
-            .slot
+    /// Whether this generation still occupies the slot: the gate every emit
+    /// passes, and the worker's own test for whether to stand down.
+    fn current(&self) -> bool {
+        self.slot
             .lock_ignore_poison()
             .as_ref()
             .is_some_and(|h| h.generation == self.generation)
-        {
+    }
+
+    pub(crate) fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
+        if self.current() {
             let _ = self.app.emit(event, payload);
         }
+    }
+
+    /// Name what the shell itself is doing in the status bar's one station,
+    /// before there is an agent whose states to relay.  The shell's own
+    /// narration runs from the worker's first breath to the opening, where
+    /// `ready` hands the station over.
+    fn state(&self, label: &'static str, pending: bool) {
+        self.emit(
+            "synod-event",
+            super::sink::SynodEvent::State { label, pending },
+        );
     }
 
     /// The one terminal emit: takes the slot itself and emits `synod-ended`
@@ -309,6 +324,11 @@ fn spawn_conversation(
 /// the conversation to whatever end it reaches and announce that end
 /// through the gated [`Emitter`].  A panicking conversation is reported the
 /// same as any other failure to start or run.
+///
+/// The join is narrated because it can outlast a person's patience: the
+/// superseded generation finishes booting its machine and shuts it down
+/// before it returns, and the window has already reset its transcript and
+/// is waiting on this one.
 fn run_conversation(
     app: AppHandle,
     slot: Arc<Mutex<Option<Handle>>>,
@@ -318,22 +338,20 @@ fn run_conversation(
     choice: Option<Choice>,
     receiver: mpsc::Receiver<String>,
 ) {
-    if let Some(old) = superseded {
-        let _ = old.join();
-    }
-    if slot
-        .lock_ignore_poison()
-        .as_ref()
-        .is_none_or(|h| h.generation != generation)
-    {
-        return;
-    }
-
     let emitter = Emitter {
         app,
         slot,
         generation,
     };
+
+    if let Some(old) = superseded {
+        emitter.state("finishing the previous session", true);
+        let _ = old.join();
+    }
+    if !emitter.current() {
+        return;
+    }
+    emitter.state("starting", true);
 
     let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         converse(&emitter, &folder, choice, &receiver)
@@ -369,7 +387,13 @@ fn converse(
         };
     };
 
-    let (mut conversation, opening) = match Conversation::begin(Path::new(folder), store, choice) {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "path: lifting the folder the user picked in the window's own dialog — the \
+                  user-input adapter site clippy.toml admits, not a path built from parts"
+    )]
+    let picked = Path::new(folder);
+    let (mut conversation, opening) = match Conversation::begin(picked, store, choice) {
         Ok(begun) => begun,
         Err(e) => {
             emitter.emit(
@@ -384,6 +408,7 @@ fn converse(
     };
 
     emitter.emit("synod-opening", opening);
+    emitter.state("ready", false);
 
     while let Ok(message) = receiver.recv() {
         if let Err(e) = conversation.exchange(message, &mut sink) {

@@ -7,6 +7,20 @@
 //! only reads — and `checkpoints/<id>.json` holds one [`Checkpoint`] per
 //! capture.  The user never sees any of this vocabulary; the GUI shows
 //! only "undo" and a history.
+//!
+//! # On the filesystem calls below
+//!
+//! Every one here is the history store keeping its own records: writing and
+//! reading checkpoints and object bytes under synod's state directory,
+//! locking and sweeping that directory, and the tests that exercise it by
+//! writing fixture files into a granted folder. None of it is the model's
+//! turn-time work on the user's documents — that runs inside the guest VM
+//! and is gated there — so none of it raises a card.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: the history store's own bookkeeping — checkpoints, \
+              object bytes, locks — never the model's turn-time I/O. See the module docs."
+)]
 
 use crate::workspace::manifest::{ContentHash, EntryKind, Manifest, Stop, hash_file};
 use serde::{Deserialize, Serialize};

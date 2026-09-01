@@ -186,6 +186,12 @@ pub fn undo_all(
 /// A plain sentence when there is no recorded earlier version, or the
 /// copy cannot be made or opened.
 #[tauri::command]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: setting out a recorded earlier version inside the history \
+              store's own scratch area, because the user asked to see it; the model is not \
+              in this loop and the folder itself is untouched"
+)]
 pub fn open_earlier(
     app: AppHandle,
     review: State<'_, Review>,

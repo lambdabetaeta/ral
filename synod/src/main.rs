@@ -40,10 +40,6 @@
     windows_subsystem = "windows"
 )]
 #![allow(
-    clippy::disallowed_methods,
-    reason = "synod's binary is a desktop application, not the ral shell; the clippy.toml invariants target ral-core's Shell path/cwd/fs discipline, which this crate is nowhere near"
-)]
-#![allow(
     clippy::needless_pass_by_value,
     reason = "a `#[tauri::command]` handler receives its deserialized arguments and its injected State/AppHandle by value — the command ABI does not admit borrowed parameters — so the pass-by-value is the framework's shape, not ours to tighten"
 )]

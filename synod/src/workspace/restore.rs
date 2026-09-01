@@ -6,6 +6,19 @@
 //! resolves, never a default.  And before a restore touches anything, the
 //! folder as it stands is checkpointed, so every byte an undo replaces or
 //! removes stays recoverable.
+//!
+//! # On the filesystem calls below
+//!
+//! Restoring a folder is the safety net itself: writing back kept bytes,
+//! removing what should not exist, and the tests that simulate a job by
+//! writing and rewriting fixture files. It runs only when the user asks to
+//! undo, never as the model's turn-time output, so none of it raises a
+//! card.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: the restore driver puts files back at the user's own \
+              request; it is not the model's turn-time I/O. See the module docs."
+)]
 
 use crate::workspace::history::{Checkpoint, HistoryStore, Moment};
 use crate::workspace::manifest::EntryKind;

@@ -187,6 +187,13 @@ impl Grant {
     /// intention.  Every refusal says what to pick instead.
     pub fn open(folder: &Path) -> Result<Self, String> {
         let shown = folder.display();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "path: strict canonicalisation of the folder the user just pointed at. \
+                      `canonicalise_strict` names exactly this shape but is pub(crate) in \
+                      ral_core, so the discipline's own helper does not cross the crate \
+                      boundary; the io::ErrorKind is what every refusal below is phrased from"
+        )]
         let root = std::fs::canonicalize(folder).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => format!(
                 "There is nothing at {shown}. Check the name, \
@@ -209,6 +216,11 @@ impl Grant {
         // Readability is a separate question from existence: a folder can
         // sit on a share the user can see but not list.  Ask now, plainly,
         // rather than let the first exchange fail halfway through the work.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "REASONED-SILENT: checking the folder is listable before minting \
+                      the grant, before any model runs"
+        )]
         std::fs::read_dir(&root).map_err(|e| {
             format!(
                 "Synod cannot see what is inside {} ({e}). \
@@ -390,7 +402,11 @@ impl Grant {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: test fixtures write and read scratch files; no model in \
+              the loop"
+)]
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;

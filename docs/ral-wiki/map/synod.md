@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f3e0f09b
-generated_at_date: 2026-09-01
+generated_at_commit: 53eb1950
+generated_at_date: 2026-09-02
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/protocol.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
@@ -204,7 +204,14 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
 ## synod/src/workspace/ — the safety net
 
 The module the product's guarantee lives in, all host-side, exercised under
-ordinary `cargo test`:
+ordinary `cargo test`. It states that host-side standing rather than assuming
+it: `history.rs`, `restore.rs`, `report.rs` and `manifest.rs` are each one kind
+of site — the history store's own bookkeeping, or the capture of the granted
+folder, never the model's turn-time I/O, which happens inside the guest — so
+each says so once, at module scope, in the shape `vm-manager/src/hcs/vhd.rs`
+uses. synod holds no crate-level exemption from the I/O-door and path
+disciplines in either of its two roots; every exception is named where it is
+taken:
 
 - `manifest.rs` — a folder's state at one moment: path, kind, size, blake3
   hash, `mtime_ns` beside it — the stat facts a capture checks before it
@@ -272,7 +279,15 @@ that decides when a refresh is worth asking for at all, `RefreshGate`, lives
 in `commands.rs`. `commands.rs` holds the folder picker, the
 conversation verbs (start, send, restart, end), the model listing (instant
 from the cache, one background refresh), and opening before/after versions
-with the user's own applications; `keys.rs` is the accounts screen's five
+with the user's own applications. The worker's `Emitter` is gated on the
+generation that owns the conversation slot, and it speaks the shell's own
+states into the status bar's one station before there is an agent whose
+states to relay: `starting`, or `finishing the previous session` while a
+restart waits for the generation it superseded to shut its machine down —
+a wait the window otherwise sits through in silence, since two stores must
+not walk one folder — through to `ready` at the opening, where the station
+passes to the agent. The window writes that station only for `Working…`;
+it never clears what the shell has said. `keys.rs` is the accounts screen's five
 commands — list, save or forget a key, declare or withdraw an endpoint — each
 returning the fresh list and ending in the same `models-refreshed` event a
 sign-in ends in, so the picker converges the same way whichever door a

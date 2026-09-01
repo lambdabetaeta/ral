@@ -2046,6 +2046,9 @@
       state.folder = folder;
       $("convo-folder").textContent = folder;
       setFacts(null);
+      // Nothing is outstanding until the shell says so; a restart must not
+      // inherit the superseded conversation's last word.
+      setStatus("");
       blocks = [];
       streamingProse = null;
       openDial = null;
@@ -2063,7 +2066,6 @@
     }
 
     async function startAssistant(folder, choice) {
-      setStatus("Starting…");
       try {
         await invoke("start_conversation", { folder, choice });
         state.alive = true;
@@ -2071,10 +2073,13 @@
         addSystemMessage(String(err));
         state.alive = false;
       }
-      // Not "busy": the input's own disabled state already follows
-      // `state.alive`, so a failed start leaves it correctly unusable
-      // without a stray "Working…" status.
-      setBusy(false);
+      // The shell narrates the start itself — "starting", or "finishing the
+      // previous session" while it waits for one, through to "ready" at the
+      // opening — so this only makes the composer usable again. Not "busy":
+      // the input's own disabled state already follows `state.alive`, so a
+      // failed start leaves it correctly unusable.
+      state.busy = false;
+      refreshComposer();
     }
 
     function setStatus(text) {
@@ -2089,9 +2094,16 @@
 
     function setBusy(busy) {
       state.busy = busy;
-      $("message").disabled = busy || !state.alive;
-      $("send").disabled = busy || !state.alive;
+      refreshComposer();
       setStatus(busy ? "Working…" : "");
+    }
+
+    // The composer's enabled state, with no word about the status bar: a start
+    // is narrated by the shell, and that sentence must survive the input
+    // becoming usable again.
+    function refreshComposer() {
+      $("message").disabled = state.busy || !state.alive;
+      $("send").disabled = state.busy || !state.alive;
     }
 
     // ---- The chat document ------------------------------------------------
@@ -2829,22 +2841,12 @@
       if (!confirm("Start again? This begins a fresh conversation; nothing already " +
         "changed in your folder is undone by this.")) return;
       $("start-again").disabled = true;
-      // `start_conversation` already supersedes any running assistant and
-      // starts a new one server-side; the window only ever resets its own
-      // view — calling `startAssistant` again here would start a second,
-      // orphaned one on top of the one this just started. It reuses the
-      // selection made on the start screen for this conversation.
+      // Restarting is the same act as starting: `start_conversation`
+      // supersedes whatever is running, over the selection this conversation
+      // was begun with.
       resetTranscript(state.folder);
-      try {
-        await invoke("start_conversation", { folder: state.folder, choice: state.choice });
-        state.alive = true;
-      } catch (err) {
-        state.alive = false;
-        addSystemMessage(String(err));
-      } finally {
-        setBusy(false);
-        $("start-again").disabled = false;
-      }
+      await startAssistant(state.folder, state.choice);
+      $("start-again").disabled = false;
     });
 
     // ---- The change-report panel ----------------------------------------

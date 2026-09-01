@@ -101,6 +101,11 @@ pub fn assemble(
     sections.push((Some("Network"), include_str!("../data/network.md").into()));
     sections.push((Some("Host"), host_section(caps, workspace)));
     let rules = config_dir.join(HOUSE_RULES);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "REASONED-SILENT: loading synod's own optional house-rules config file \
+                  while building the prompt; not the model's turn-time I/O"
+    )]
     match std::fs::read_to_string(&rules) {
         Ok(text) => sections.push((Some("House rules"), text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -140,7 +145,11 @@ fn host_section(caps: &Capabilities, workspace: &Path) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: test fixtures write and read scratch files; no model in \
+              the loop"
+)]
 mod tests {
     use super::*;
 

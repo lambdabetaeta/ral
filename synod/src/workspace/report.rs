@@ -128,6 +128,12 @@ fn last_job(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: fixtures writing, renaming and deleting files to stand in \
+              for a job, so there is something to report or undo; the production code in \
+              this file touches no filesystem at all"
+)]
 mod tests {
     use super::*;
     use crate::test_fixture::granted_workshop as workshop;

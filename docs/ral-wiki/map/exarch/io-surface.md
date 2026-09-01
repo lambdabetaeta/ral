@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cbeb5457
-generated_at_date: 2026-08-17
+generated_at_commit: 53eb1950
+generated_at_date: 2026-09-02
 covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
@@ -260,10 +260,20 @@ child-wait.
   metadata,symlink_metadata,read_link,remove_file,remove_dir_all,create_dir_all,
   rename,copy,set_permissions}`, `Command::new`, `CommandExt::exec`, and
   `ignore::WalkBuilder::build` (directory walks root at the one cancellable
-  grep door). Every call site is then a door or a lint failure. Enforcement rides the pre-existing
-  `[workspace.lints.clippy] disallowed_methods = "deny"` table (the four real
-  crates opt in via `[lints] workspace = true`); plain `cargo clippy --workspace
-  --all-targets` is the command CI runs. The ADR's literal `-D
+  grep door). Enforcement rides the pre-existing
+  `[workspace.lints.clippy] disallowed_methods = "deny"` table, which all ten
+  crates opt into via `[lints] workspace = true`; plain `cargo clippy --workspace
+  --all-targets` is the command CI runs. A call site is then a door or a lint
+  failure *in the crates that do not switch the lint off again at their own
+  root*: `exarch/src/lib.rs`, `ral-daemon/src/lib.rs` and
+  `ral-initramfs/src/lib.rs` each carry a crate-level
+  `#![allow(clippy::disallowed_methods, …)]` on the grounds of being an
+  application rather than the ral shell, so inside them the door set rests on
+  the meta-test's per-file check and on review, never on the compiler — 165
+  constructor calls, the crate that owns the model's own turn-time I/O among
+  them. synod carried two such allows, in both its crate roots, and now carries
+  none. Whether that boundary is the discipline's real edge or an artefact of
+  which crates existed when it was drawn is open. The ADR's literal `-D
   clippy::disallowed_methods` is *not* used: a command-line `-D` escalates the
   lint onto the vendored `ral-ripgrep-core`, which deliberately opts out, and
   would break the build on vendored code.

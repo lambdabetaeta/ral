@@ -7,6 +7,18 @@
 //! the first launch that needs it, into a writable cache beside synod's
 //! other state.  A signed bundle is read-only, so the rootfs can never
 //! live inside it; the cache is the only writable home it has.
+//!
+//! # On the filesystem calls below
+//!
+//! Every one here readies the rootfs before any guest exists: checking a
+//! prior inflate's marker, making the cache directory, and writing the
+//! marker back once the checksum verifies. Host-side one-time setup, the
+//! same standing as `vm_manager::hcs::vhd`'s own module-scoped allow.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: host-side rootfs-cache plumbing before any guest exists; \
+              no shell, no run, no card. See the module docs."
+)]
 
 use std::path::{Path, PathBuf};
 

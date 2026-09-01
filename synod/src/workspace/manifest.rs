@@ -1,4 +1,18 @@
 //! What a folder holds at one moment: paths, kinds, sizes, content hashes.
+//!
+//! # On the filesystem calls below
+//!
+//! Building a manifest means walking the granted folder and stat-ing,
+//! hashing, or reading every entry in it — [`Manifest::of_folder_via`]'s own
+//! walk, [`hash_file`], and the tests that write fixture files for it to
+//! read back. This is synod's own before/after bookkeeping, not the
+//! model's turn-time I/O, which runs inside the guest and is gated there.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "REASONED-SILENT: the manifest walk stats, hashes, and reads the granted \
+              folder to record its shape — synod's own bookkeeping, not the model's \
+              turn-time I/O. See the module docs."
+)]
 
 use crate::workspace::restore::covers;
 use serde::{Deserialize, Serialize};
