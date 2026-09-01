@@ -533,7 +533,7 @@ impl Avatar {
         {
             let mut log = self.log.lock();
             let exchanges = log.rewind_exchanges(anchor)?;
-            let _receipt = log.apply_edit(ContextOp::Drop { exchanges }, EditAuthority::User)?;
+            log.apply_edit(ContextOp::Drop { exchanges }, EditAuthority::User)?;
         }
         self.inbox.drop_nudges();
         if let Some(nudges) = &mut self.nudges {

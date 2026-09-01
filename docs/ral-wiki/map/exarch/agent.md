@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 50388d83
-generated_at_date: 2026-08-29
+generated_at_commit: 4d02e3bb
+generated_at_date: 2026-09-01
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -612,14 +612,14 @@ nothing and sheds nothing. The durable log is appended to, never rewritten.
 
 Auto-compaction is one authority over the same `Fold`/`Drop` edit
 ([[decisions/260812_context-is-a-projection|context-is-a-projection]]). The
-model reaches the other two: `context-read` and `context-drop` let it survey
-and shed closed exchanges of its own choosing, each recording `ContextEdited`
-with `EditAuthority::Model` rather than `Harness`. The user's own hand is
-`/rewind <exchange>`, which desugars to the same `Drop` at
-`EditAuthority::User`, sheds queued self-nudges, and rebuilds the nudge state;
-`/context` surveys the transcript without editing it, the read-only sibling
-`ReplControl::command` serves alongside `/clear`, `/compact`, `/branch`, and
-`/quit`.
+model reaches the other two: `` context `survey ``/`` `drop ``/`` `fold `` and
+`transcript` let it survey, read back, and shed closed exchanges of its own
+choosing, each edit recording `ContextEdited` with `EditAuthority::Model`
+rather than `Harness`. The user's own hand is `/rewind <exchange>`, which
+desugars to the same `Drop` at `EditAuthority::User`, sheds queued self-nudges,
+and rebuilds the nudge state; `/context` surveys the transcript without editing
+it, the read-only sibling `ReplControl::command` serves alongside `/clear`,
+`/compact`, `/branch`, and `/quit`.
 
 `Avatar::check_disk_warn` is the disk half of the same ADR ("Disk: report
 and warn only") — report-and-warn only, never rotation or deletion.

@@ -312,8 +312,8 @@ mod tests {
         let emit = Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
-            "context-read-no-echo".into(),
-            "let ctx = context-read [1]",
+            "transcript-no-echo".into(),
+            "let ctx = transcript [1]",
             5,
             &emit,
         );
@@ -332,7 +332,7 @@ mod tests {
                         verb,
                         failed: false,
                         ..
-                    }) if verb == "context-read"
+                    }) if verb == "transcript"
                 )),
             "the probe still records its harness call"
         );

@@ -188,15 +188,6 @@ pub enum QuiesceReason {
     Replied,
 }
 
-/// The result of a context edit, including its effect on the model-visible
-/// message budget.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EditReceipt {
-    pub op: ContextOp,
-    pub by: EditAuthority,
-    pub bytes_delta: i64,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextSpanKind {
@@ -283,11 +274,6 @@ pub(crate) struct ClearRecord {
 pub(crate) fn summary_prompt(summary: &str) -> String {
     format!("Summary of prior work in this session:\n\n{summary}")
 }
-
-/// The survey's standing caution to the model, beside the refusal sentences
-/// so every model-facing context sentence is minted here.
-pub const CACHE_SENTENCE: &str =
-    "editing before the cache watermark re-reads the prefix on the next request";
 
 impl AgentLog {
     /// Build a fresh root session log.  Wipes any prior directory with the
@@ -545,7 +531,7 @@ impl AgentLog {
     /// # Errors
     /// Refuses an empty list, a duplicate name, a missing or folded exchange,
     /// or the exchange still in progress.
-    pub fn read_context(&self, exchanges: &[u64]) -> Result<String, String> {
+    pub fn read_context(&self, exchanges: &[u64]) -> Result<Vec<String>, String> {
         self.model_memo.read_context(exchanges)
     }
 
@@ -736,23 +722,14 @@ impl AgentLog {
 
     /// # Errors
     /// Refuses an empty drop, an unknown or folded exchange, or a live exchange.
-    pub fn apply_edit(&mut self, op: ContextOp, by: EditAuthority) -> Result<EditReceipt, String> {
+    pub fn apply_edit(&mut self, op: ContextOp, by: EditAuthority) -> Result<(), String> {
         self.model_memo.validate_edit(&op)?;
-        let before = self.model_memo.history_bytes();
         self.record_protocol(Protocol::ContextEdited { op: op.clone(), by })
             .map_err(|e| e.to_string())?;
         // The display twin: the screen never derives from the protocol
         // record it duplicates a field of.
-        self.record_display(Display::ContextEdited { op: op.clone(), by })
-            .map_err(|e| e.to_string())?;
-        let after = self.model_memo.history_bytes();
-        let before = i64::try_from(before).unwrap_or(i64::MAX);
-        let after = i64::try_from(after).unwrap_or(i64::MAX);
-        Ok(EditReceipt {
-            op,
-            by,
-            bytes_delta: before.saturating_sub(after),
-        })
+        self.record_display(Display::ContextEdited { op, by })
+            .map_err(|e| e.to_string())
     }
 
     /// Resolve a user rewind into the whole visible suffix beginning at its
@@ -1271,8 +1248,10 @@ mod tests {
         );
     }
 
+    /// One string per named span, each opening with its own header: the
+    /// header is that element's address, since the order is the view's.
     #[test]
-    fn context_read_marks_roles_delimits_steps_and_addresses_digest_by_reach() {
+    fn transcript_marks_roles_delimits_steps_and_addresses_digest_by_reach() {
         let mut s = fresh_root();
         s.append_user("first prompt".into(), None).unwrap();
         s.record_step(1, Tuning::default()).unwrap();
@@ -1281,10 +1260,13 @@ mod tests {
         complete_exchange(&mut s, "second prompt", "second answer");
 
         let transcript = s.read_context(&[1]).expect("closed exchange is readable");
-        assert!(transcript.contains("=== exchange 1 ==="));
-        assert!(transcript.contains("[user]\nfirst prompt"));
-        assert!(transcript.contains("--- step 1 ---"));
-        assert!(transcript.contains("[assistant]\nfirst answer"));
+        let [exchange] = transcript.as_slice() else {
+            panic!("one named span answers one Str, got {transcript:?}")
+        };
+        assert!(exchange.starts_with("=== exchange 1 ===\n"));
+        assert!(exchange.contains("[user]\nfirst prompt"));
+        assert!(exchange.contains("--- step 1 ---"));
+        assert!(exchange.contains("[assistant]\nfirst answer"));
 
         s.apply_edit(
             ContextOp::Fold {
@@ -1297,6 +1279,10 @@ mod tests {
         let digest = s
             .read_context(&[2])
             .expect("the digest reach is addressable");
+        let [digest] = digest.as_slice() else {
+            panic!("the digest is one span, got {digest:?}")
+        };
+        assert!(digest.starts_with("=== digest through 2 ===\n"));
         assert!(digest.contains("the old work is complete"));
         assert!(!digest.contains("first prompt"));
         assert_eq!(

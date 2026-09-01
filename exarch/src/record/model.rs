@@ -508,6 +508,12 @@ impl Memo {
         self.transcript().byte_len()
     }
 
+    /// A span's `bytes` is measured exactly as [`Self::assemble`] measures
+    /// it — closed entries from the memo, the last span rendered fresh — so
+    /// `total_bytes` is [`Self::history_bytes`] and not a second opinion on
+    /// it. `live` reports which span the model is in; it does not decide how
+    /// one is weighed.
+    ///
     /// # Panics
     /// Panics if a view span is not resident in the ledger.
     pub(crate) fn context_survey(&mut self) -> ContextSurvey {
@@ -529,7 +535,8 @@ impl Memo {
             survey.add(item);
         }
         let spans = self.view.spans.clone();
-        for span in &spans {
+        let last = spans.len().saturating_sub(1);
+        for (index, span) in spans.iter().enumerate() {
             let (kind, opening, steps) = {
                 let events = self
                     .ledger
@@ -546,8 +553,7 @@ impl Memo {
                     .count();
                 (kind, opening, steps)
             };
-            let live = self.is_live_exchange(span.id);
-            let bytes = if live {
+            let bytes = if index == last {
                 message_bytes(&self.render_tail(span, false))
             } else {
                 self.render_closed_entry(span).bytes
@@ -558,21 +564,22 @@ impl Memo {
                 opening,
                 bytes,
                 steps,
-                live,
+                live: self.is_live_exchange(span.id),
             };
             survey.add(item);
         }
         survey
     }
 
-    /// Read named, closed spans in their model-view order.
+    /// Read named, closed spans in their model-view order — one string each,
+    /// so the order is the view's and not the argument's.
     ///
     /// # Errors
     /// Refuses an empty list, a duplicate name, a missing or folded exchange,
     /// or the exchange still in progress.
-    pub(crate) fn read_context(&self, exchanges: &[u64]) -> Result<String, String> {
+    pub(crate) fn read_context(&self, exchanges: &[u64]) -> Result<Vec<String>, String> {
         if exchanges.is_empty() {
-            return Err("context-read must name at least one exchange".into());
+            return Err("transcript must name at least one exchange".into());
         }
         self.validate_named_exchanges(exchanges)?;
         Ok(render_context_transcript(
@@ -741,46 +748,40 @@ fn opening_line_for_events(events: &[&Protocol]) -> String {
     String::new()
 }
 
-fn render_context_transcript(ledger: &Ledger, view: &View, named: &HashSet<u64>) -> String {
-    let mut transcript = String::new();
-    let mut first_section = true;
+/// One string per named span, each opening with its own `=== … ===` header:
+/// the header is the element's address, since the order is the view's rather
+/// than the caller's.
+fn render_context_transcript(ledger: &Ledger, view: &View, named: &HashSet<u64>) -> Vec<String> {
+    let mut sections = Vec::new();
     if let Some(digest) = &view.digest
         && named.contains(&digest.through_exchange)
     {
-        context_section(
-            &mut transcript,
-            &mut first_section,
-            &format!("digest through {}", digest.through_exchange),
-        );
-        render_role(&mut transcript, "user", &digest.text);
+        let mut section = context_section(&format!("digest through {}", digest.through_exchange));
+        render_role(&mut section, "user", &digest.text);
+        sections.push(section);
     }
     for span in &view.spans {
         if !named.contains(&span.id) {
             continue;
         }
-        context_section(
-            &mut transcript,
-            &mut first_section,
-            &format!("exchange {}", span.id),
-        );
+        let mut section = context_section(&format!("exchange {}", span.id));
         let events = ledger
             .resident_events(span.events.clone())
             .expect("view spans are resident in the ledger");
         for event in events {
             match event {
-                Protocol::UserPrompt { text, .. } => render_role(&mut transcript, "user", text),
+                Protocol::UserPrompt { text, .. } => render_role(&mut section, "user", text),
                 Protocol::ContextMessage { message, .. }
                 | Protocol::AssistantMessage { message, .. } => {
-                    render_chat_message(&mut transcript, message);
+                    render_chat_message(&mut section, message);
                 }
                 Protocol::StepStarted { n, .. } => {
-                    writeln!(transcript, "--- step {n} ---")
-                        .expect("writing to a String never fails");
+                    writeln!(section, "--- step {n} ---").expect("writing to a String never fails");
                 }
                 Protocol::ToolResults { results } => {
                     for result in results {
                         render_role(
-                            &mut transcript,
+                            &mut section,
                             "tool",
                             &format!("{}: {}", result.id, result.content),
                         );
@@ -792,16 +793,13 @@ fn render_context_transcript(ledger: &Ledger, view: &View, named: &HashSet<u64>)
                 | Protocol::ContextEdited { .. } => {}
             }
         }
+        sections.push(section);
     }
-    transcript
+    sections
 }
 
-fn context_section(output: &mut String, first: &mut bool, title: &str) {
-    if !*first {
-        output.push('\n');
-    }
-    writeln!(output, "=== {title} ===").expect("writing to a String never fails");
-    *first = false;
+fn context_section(title: &str) -> String {
+    format!("=== {title} ===\n")
 }
 
 fn render_chat_message(output: &mut String, message: &ChatMessage) {

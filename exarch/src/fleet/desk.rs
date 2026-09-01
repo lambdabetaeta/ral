@@ -8,7 +8,7 @@
 //! rides, so a handler's chrome can never outrun the run's earlier surface
 //! output.
 
-use crate::agent::event::{CACHE_SENTENCE, ContextOp, EditAuthority};
+use crate::agent::event::{ContextOp, ContextSurvey, EditAuthority};
 use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Stamp};
@@ -362,7 +362,7 @@ fn payload_exchanges(payload: Option<Box<FOValue>>, class: &str) -> Result<Vec<u
         .collect()
 }
 
-/// The rail subject `` `context-read ``/`` `context-drop `` both mint from an
+/// The rail subject `` `transcript ``/`` `context `drop `` both mint from an
 /// exchange list: `"exchanges [1, 2, 3]"`.
 fn exchanges_subject(exchanges: &[u64]) -> String {
     format!(
@@ -657,10 +657,8 @@ impl ExarchDesk {
             "schedules" => self.schedules(payload),
             "pin-read" => self.pin_read(payload),
             "pin-list" => Ok(self.pin_list()),
-            "context" => Ok(self.context()),
-            "context-read" => self.context_read(payload),
-            "context-drop" => self.context_drop(payload),
-            "context-fold" => self.context_fold(payload),
+            "context" => self.context(payload),
+            "transcript" => self.transcript(payload),
             other => Err(Error::new(
                 format!("unrecognised enquiry class `{other}`"),
                 1,
@@ -1428,98 +1426,54 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `context `` — a survey of this agent's own transcript: one span per
-    /// digest/import/exchange, plus the running byte and step totals. Silent,
-    /// like the roster: the answer is the survey.
-    fn context(&self) -> FOValue {
-        let survey = self.services.log.lock().context_survey();
-        let spans = survey
-            .items
-            .into_iter()
-            .map(|item| FOValue::Map {
-                entries: vec![
-                    (
-                        "exchange".to_string(),
-                        FOValue::Int {
-                            value: u64_to_i64(item.exchange),
-                        },
-                    ),
-                    (
-                        "kind".to_string(),
-                        FOValue::String {
-                            value: item.kind.as_str().to_string(),
-                        },
-                    ),
-                    (
-                        "prompt".to_string(),
-                        FOValue::String {
-                            value: item.opening,
-                        },
-                    ),
-                    (
-                        "bytes".to_string(),
-                        FOValue::Int {
-                            value: usize_to_i64(item.bytes),
-                        },
-                    ),
-                    (
-                        "steps".to_string(),
-                        FOValue::Int {
-                            value: usize_to_i64(item.steps),
-                        },
-                    ),
-                    ("live".to_string(), FOValue::Bool { value: item.live }),
-                ],
-            })
-            .collect();
-        FOValue::Map {
-            entries: vec![
-                ("spans".to_string(), FOValue::List { items: spans }),
-                (
-                    "total-bytes".to_string(),
-                    FOValue::Int {
-                        value: usize_to_i64(survey.total_bytes),
-                    },
-                ),
-                (
-                    "total-steps".to_string(),
-                    FOValue::Int {
-                        value: usize_to_i64(survey.total_steps),
-                    },
-                ),
-                (
-                    "cache".to_string(),
-                    FOValue::String {
-                        value: CACHE_SENTENCE.to_string(),
-                    },
-                ),
-            ],
+    /// `` `context `` — the model view, one class for the whole family.
+    /// Every tag answers the survey: an edit changes what is addressable, so
+    /// what the model reads back is what its next edit must be written
+    /// against, never a receipt for the one it just made.
+    fn context(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let (tag, payload) = family_tag(payload, "context")?;
+        match tag.as_str() {
+            "survey" => Ok(survey_answer(self.context_survey())),
+            "drop" => self.context_drop(payload),
+            "fold" => self.context_fold(payload),
+            other => Err(unknown_tag("context", other)),
         }
     }
 
-    /// `` `context-read `` — the rendered transcript of the named exchanges,
-    /// probing rather than acting: a read commits no act, so the verb string
-    /// below is a second mint outside [`DeskAct::verb`] on purpose.
-    fn context_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let exchanges = payload_exchanges(payload, "context-read")?;
+    /// The view as the log holds it. Silent, like the roster: a survey
+    /// commits no act, and every edit tag answers one of these too.
+    fn context_survey(&self) -> ContextSurvey {
+        self.services.log.lock().context_survey()
+    }
+
+    /// `` `transcript `` — the rendered transcript of the named exchanges, one
+    /// Str per span, probing rather than acting: a read commits no act, so the
+    /// verb string below is a second mint outside [`DeskAct::verb`] on purpose.
+    fn transcript(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let exchanges = payload_exchanges(payload, "transcript")?;
         let subject = exchanges_subject(&exchanges);
         let result = self.services.log.lock().read_context(&exchanges);
         self.services
             .record_display(crate::record::Display::HarnessCall {
-                verb: "context-read".to_string(),
+                verb: "transcript".to_string(),
                 subject: Some(subject.clone()),
                 payload: subject,
                 failed: result.is_err(),
             });
         result
-            .map(|value| FOValue::String { value })
+            .map(|sections| FOValue::List {
+                items: sections
+                    .into_iter()
+                    .map(|value| FOValue::String { value })
+                    .collect(),
+            })
             .map_err(|error| Error::new(error, 1))
     }
 
-    /// `` `context-drop `` — shed the named exchanges from the view, receipted
-    /// by [`Self::context_edit`] with the resulting byte delta.
+    /// `` `context `drop `` — shed the named exchanges from the view.
     fn context_drop(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let exchanges = payload_exchanges(payload, "context-drop")?;
+        const CLASS: &str = "context `drop";
+        let exchanges = payload_exchanges(payload, CLASS)?;
         let subject = exchanges_subject(&exchanges);
         self.context_edit(
             DeskAct::ContextDrop,
@@ -1529,13 +1483,24 @@ impl ExarchDesk {
         )
     }
 
-    /// `` `context-fold `` — collapse every exchange through `through` into
-    /// one digest, receipted by [`Self::context_edit`] with the resulting byte
-    /// delta.
+    /// `` `context `fold `` — collapse every exchange through `through` into
+    /// one digest.
     fn context_fold(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let [through, digest] = payload_list(payload, "context-fold", "[through, digest]")?;
-        let through = payload_exchange(through, "context-fold", "through")?;
-        let digest = payload_string(digest, "context-fold", "digest")?;
+        const CLASS: &str = "context `fold";
+        let mut spec = Fields::payload(payload, CLASS, "[through: …, digest: …]")?;
+        let through = payload_exchange(
+            spec.take("through", "the last exchange to fold")?,
+            CLASS,
+            "through",
+        )?;
+        let digest = payload_string(
+            spec.take(
+                "digest",
+                "the summary text standing in for what it replaces",
+            )?,
+            CLASS,
+            "digest",
+        )?;
         let subject = format!("through {through}");
         let payload = format!("{subject}, digest {digest}");
         self.context_edit(
@@ -1549,9 +1514,9 @@ impl ExarchDesk {
         )
     }
 
-    /// The `` `context-drop ``/`` `context-fold `` tail both share: apply the
-    /// edit, commit the act under `refused` on either outcome, and mirror the
-    /// receipt or the refusal onto the trace before answering.
+    /// The tail both edit tags share: apply the edit, commit the act under
+    /// `refused` on either outcome, and mirror the surviving weight or the
+    /// refusal onto the trace before answering the survey.
     fn context_edit(
         &self,
         act: DeskAct,
@@ -1568,22 +1533,13 @@ impl ExarchDesk {
             // `apply_edit` records `ContextEdited` through the seam, and the
             // live row derives from that published record: nothing separate
             // to emit here.
-            Ok(receipt) => {
+            Ok(()) => {
                 self.services.commit_act(act, subject, payload, false);
-                let text = format!(
-                    "context changed by {:+} serialized bytes",
-                    receipt.bytes_delta
-                );
+                let survey = self.context_survey();
+                let text = format!("context is now {} serialized bytes", survey.total_bytes);
                 self.services
                     .record_forensic(crate::record::Forensic::HarnessResult { text });
-                Ok(FOValue::Map {
-                    entries: vec![(
-                        "bytes-delta".to_string(),
-                        FOValue::Int {
-                            value: receipt.bytes_delta,
-                        },
-                    )],
-                })
+                Ok(survey_answer(survey))
             }
             Err(error) => {
                 self.services.commit_act(act, subject, payload, true);
@@ -1594,6 +1550,67 @@ impl ExarchDesk {
                 Err(Error::new(error, 1))
             }
         }
+    }
+}
+
+/// The `` `context `` family's one answer: the model view as it stands, spans
+/// first. A digest is a span like any other, addressed by its reach.
+fn survey_answer(survey: ContextSurvey) -> FOValue {
+    let spans = survey
+        .items
+        .into_iter()
+        .map(|item| FOValue::Map {
+            entries: vec![
+                (
+                    "exchange".to_string(),
+                    FOValue::Int {
+                        value: u64_to_i64(item.exchange),
+                    },
+                ),
+                (
+                    "kind".to_string(),
+                    FOValue::String {
+                        value: item.kind.as_str().to_string(),
+                    },
+                ),
+                (
+                    "prompt".to_string(),
+                    FOValue::String {
+                        value: item.opening,
+                    },
+                ),
+                (
+                    "bytes".to_string(),
+                    FOValue::Int {
+                        value: usize_to_i64(item.bytes),
+                    },
+                ),
+                (
+                    "steps".to_string(),
+                    FOValue::Int {
+                        value: usize_to_i64(item.steps),
+                    },
+                ),
+                ("live".to_string(), FOValue::Bool { value: item.live }),
+            ],
+        })
+        .collect();
+    FOValue::Map {
+        entries: vec![
+            ("spans".to_string(), FOValue::List { items: spans }),
+            (
+                "total-bytes".to_string(),
+                FOValue::Int {
+                    value: usize_to_i64(survey.total_bytes),
+                },
+            ),
+            (
+                "total-steps".to_string(),
+                FOValue::Int {
+                    value: usize_to_i64(survey.total_steps),
+                },
+            ),
+        ],
     }
 }
 
@@ -1920,9 +1937,10 @@ mod tests {
     }
 
     /// Every context-verb test request below goes through the same encoders
-    /// [`harness::builtin_context_drop`] and its siblings call, so a change to
-    /// an encoder breaks these tests instead of leaving them to hand-build a
-    /// payload that has quietly drifted from what the builtin actually sends.
+    /// [`harness::builtin_context`] and [`harness::builtin_transcript`] call,
+    /// so a change to an encoder breaks these tests instead of leaving them to
+    /// hand-build a payload that has quietly drifted from what the builtin
+    /// actually sends.
     fn exchanges_value(exchanges: &[i64]) -> RalValue {
         RalValue::list(
             exchanges
@@ -1934,12 +1952,9 @@ mod tests {
 
     fn context_drop_request(exchanges: &[i64]) -> FOValue {
         let payload =
-            harness::context_exchanges_payload(&exchanges_value(exchanges), "context-drop")
+            harness::context_exchanges_payload(&exchanges_value(exchanges), "context `drop")
                 .expect("valid exchange list");
-        FOValue::Variant {
-            label: "context-drop".to_string(),
-            payload: Some(Box::new(payload)),
-        }
+        family_req("context", "drop", Some(payload))
     }
 
     fn context_fold_request(through: i64, digest: &str) -> FOValue {
@@ -1948,27 +1963,20 @@ mod tests {
             ("digest".to_string(), RalValue::String(digest.to_string())),
         ]);
         let payload = harness::context_fold_payload(&spec).expect("valid fold spec");
-        FOValue::Variant {
-            label: "context-fold".to_string(),
-            payload: Some(Box::new(payload)),
-        }
+        family_req("context", "fold", Some(payload))
     }
 
-    /// The `` `context `` survey call, shaped exactly as `builtin_context`
-    /// sends it: no payload to encode, since the answer is the whole survey.
+    /// The `` `context `survey `` call, shaped exactly as `builtin_context`
+    /// sends it: a bare tag, since the answer is the whole survey.
     fn context_survey_request() -> FOValue {
-        FOValue::Variant {
-            label: "context".to_string(),
-            payload: None,
-        }
+        family_req("context", "survey", None)
     }
 
-    fn context_read_request(exchanges: &[i64]) -> FOValue {
-        let payload =
-            harness::context_exchanges_payload(&exchanges_value(exchanges), "context-read")
-                .expect("valid exchange list");
+    fn transcript_request(exchanges: &[i64]) -> FOValue {
+        let payload = harness::context_exchanges_payload(&exchanges_value(exchanges), "transcript")
+            .expect("valid exchange list");
         FOValue::Variant {
-            label: "context-read".to_string(),
+            label: "transcript".to_string(),
             payload: Some(Box::new(payload)),
         }
     }
@@ -2194,7 +2202,7 @@ mod tests {
     /// down: a tag extends a family the way a class extends the desk.
     #[test]
     fn unknown_tag_answers_the_extension_error_too() {
-        for family in ["agents", "schedules"] {
+        for family in ["agents", "schedules", "context"] {
             let err = desk()
                 .handle(family_req(family, "no-such-tag", None))
                 .expect_err("an unrecognised tag must not answer Ok");
@@ -2289,8 +2297,10 @@ mod tests {
         ));
     }
 
+    /// One Str per named span, not one concatenated blob: the list is the
+    /// shape the doc's own "read in slices" advice needs to be sayable.
     #[test]
-    fn context_read_returns_one_transcript_without_committing_an_act() {
+    fn transcript_answers_one_string_per_span_without_committing_an_act() {
         let mut desk = desk();
         {
             let mut log = desk.services.log.lock();
@@ -2304,12 +2314,14 @@ mod tests {
         });
         desk.services.emit = Emitter::new(tx, 0);
 
-        let FOValue::String { value } = desk
-            .handle(context_read_request(&[1]))
-            .expect("context-read")
+        let FOValue::List { items } = desk.handle(transcript_request(&[1])).expect("transcript")
         else {
-            panic!("context-read must answer one Str")
+            panic!("transcript must answer a list of spans")
         };
+        let [FOValue::String { value }] = items.as_slice() else {
+            panic!("one named span must answer exactly one Str, got {items:?}")
+        };
+        assert!(value.starts_with("=== exchange 1 ==="));
         assert!(value.contains("[user]\nfirst prompt"));
         assert!(value.contains("[assistant]\nfirst answer"));
         assert!(desk.services.acts.audit().is_none(), "a read has no act");
@@ -2324,16 +2336,13 @@ mod tests {
                 subject: Some(subject),
                 payload,
                 failed: false,
-            }) if verb == "context-read" && subject == "exchanges [1]" && payload == "exchanges [1]"
+            }) if verb == "transcript" && subject == "exchanges [1]" && payload == "exchanges [1]"
         ));
 
         let error = desk
-            .handle(context_read_request(&[]))
+            .handle(transcript_request(&[]))
             .expect_err("an empty read is not meaningful");
-        assert_eq!(
-            error.message,
-            "context-read must name at least one exchange"
-        );
+        assert_eq!(error.message, "transcript must name at least one exchange");
         let record = crate::bus::drain_records(&rx)
             .into_iter()
             .next()
@@ -2344,7 +2353,7 @@ mod tests {
                 verb,
                 failed: true,
                 ..
-            }) if verb == "context-read"
+            }) if verb == "transcript"
         ));
     }
 
@@ -2399,48 +2408,72 @@ mod tests {
         );
     }
 
+    /// The edit's answer is the survey the transition leaves behind, not a
+    /// receipt for the transition: the number that decides the next edit is
+    /// `total-bytes` now, against the budget.
     #[test]
-    fn context_drop_receipt_reports_the_view_byte_delta() {
-        let desk = desk();
-        let before = {
-            let mut log = desk.services.log.lock();
-            complete_exchange(&mut log, "one", "a longer answer");
-            complete_exchange(&mut log, "two", "another answer");
-            log.history_bytes()
-        };
-        let delta = int_field(
-            desk.handle(context_drop_request(&[1]))
-                .expect("context drop"),
-            "bytes-delta",
-        );
-        let after = desk.services.log.lock().history_bytes();
-        assert_eq!(
-            delta,
-            i64::try_from(before).unwrap() - i64::try_from(after).unwrap()
-        );
-        assert!(delta > 0, "dropping a visible exchange should shed bytes");
-    }
-
-    /// The fold counterpart to [`context_drop_receipt_reports_the_view_byte_delta`]:
-    /// a fold receipts its byte delta and commits [`DeskAct::ContextFold`], not
-    /// [`DeskAct::ContextDrop`] — the audit sentence names the act it actually
-    /// took, which nothing else in this suite pins.
-    #[test]
-    fn context_fold_receipt_commits_the_fold_act() {
+    fn context_drop_answers_the_survey_the_edit_leaves_behind() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
             complete_exchange(&mut log, "one", "a longer answer");
             complete_exchange(&mut log, "two", "another answer");
         }
-        let delta = int_field(
-            desk.handle(context_fold_request(2, "kept summary"))
-                .expect("context fold"),
-            "bytes-delta",
+        let answer = desk
+            .handle(context_drop_request(&[1]))
+            .expect("context drop");
+        assert_eq!(
+            int_field(answer.clone(), "total-bytes"),
+            i64::try_from(desk.services.log.lock().history_bytes()).unwrap(),
+            "the survey's total is the model view's own weight"
         );
-        assert_ne!(
-            delta, 0,
-            "folding two exchanges into a digest should change the byte count"
+        let FOValue::Map { entries } = answer else {
+            panic!("a drop must answer the survey record")
+        };
+        let spans = entries
+            .iter()
+            .find_map(|(key, value)| (key == "spans").then_some(value))
+            .expect("survey spans");
+        let FOValue::List { items } = spans else {
+            panic!("survey spans must be a list")
+        };
+        assert_eq!(items.len(), 1, "the dropped span is gone from the answer");
+        assert_eq!(int_field(items[0].clone(), "exchange"), 2);
+    }
+
+    /// The fold counterpart: a fold commits [`DeskAct::ContextFold`], not
+    /// [`DeskAct::ContextDrop`] — the audit sentence names the act it actually
+    /// took, which nothing else in this suite pins — and its answer stands the
+    /// new digest's own weight beside the spans that survive it.
+    #[test]
+    fn context_fold_commits_the_fold_act_and_answers_the_digest_span() {
+        let desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            complete_exchange(&mut log, "one", "a longer answer");
+            complete_exchange(&mut log, "two", "another answer");
+        }
+        let answer = desk
+            .handle(context_fold_request(2, "kept summary"))
+            .expect("context fold");
+        let FOValue::Map { entries } = answer else {
+            panic!("a fold must answer the survey record")
+        };
+        let spans = entries
+            .iter()
+            .find_map(|(key, value)| (key == "spans").then_some(value))
+            .expect("survey spans");
+        let FOValue::List { items } = spans else {
+            panic!("survey spans must be a list")
+        };
+        let [digest] = items.as_slice() else {
+            panic!("the fold leaves the digest alone in the view, got {items:?}")
+        };
+        assert_eq!(str_field(digest, "kind").as_deref(), Some("digest"));
+        assert_eq!(int_field(digest.clone(), "exchange"), 2);
+        assert!(
+            int_field(digest.clone(), "bytes") > 0,
+            "the digest's own weight is what diagnoses a bad fold"
         );
         let audit = desk
             .services

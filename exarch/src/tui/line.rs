@@ -293,7 +293,7 @@ pub(super) fn tool_call_static(cmd: &str) -> Vec<Line<'static>> {
     ls
 }
 
-/// The verb column of an act row, pinned to the longest verb (`context-read`)
+/// The verb column of an act row, pinned to the longest verb (`context-drop`)
 /// plus a space so verbs align across blocks.  [`render_field_rows`] cannot
 /// supply it: it sizes from the rows it is handed, and an act block is one row.
 pub(super) const ACT_VERB_W: usize = 13;

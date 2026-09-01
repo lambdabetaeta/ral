@@ -71,12 +71,12 @@ Edits address the model view by whole, closed exchange. The model may edit only
 at a protocol boundary; a live exchange, including a giant tool result still
 being assembled, is untouchable until quiescence. `ContextEdited` records
 `Fold` or `Drop` and its authority, then the fold changes the projection. There
-is no model-facing rewind operation: model rewind is `context-drop`, a range of
-closed exchanges. The user's `/rewind` command validates the ready-boundary
-anchor and desugars to the same `Drop`, sheds queued self-nudges (a user post,
-a command, or a worker result already queued survives), and resets the nudge
-budget. The shell does not resume with the model: `--resume` replays the
-event ledger while booting a fresh shell and imports a note describing the
+is no model-facing rewind operation: model rewind is `` context `drop ``, a
+range of closed exchanges. The user's `/rewind` command validates the
+ready-boundary anchor and desugars to the same `Drop`, sheds queued self-nudges
+(a user post, a command, or a worker result already queued survives), and resets
+the nudge budget. The shell does not resume with the model: `--resume` replays
+the event ledger while booting a fresh shell and imports a note describing the
 shell state that was not durable.
 
 ## The price per regime
@@ -91,9 +91,10 @@ would add a production read path for material the next request already needs.
 
 That bound is safe because two decisions meet:
 
-1. the context vocabulary addresses the **view** — `context` reports spans and
-   digests by exchange reach, and `context-read`/`context-drop` cannot name an
-   event which is merely forensic or an exchange swallowed by a digest; and
+1. the context vocabulary addresses the **view** — `` context `survey ``
+   reports spans and digests by exchange reach, and `transcript`/`` `drop ``
+   cannot name an event which is merely forensic or an exchange swallowed by a
+   digest; and
 2. the disk log is the **identity** — a spilled span is still an exact byte
    range in the append-only ledger, and the fold is the only operation allowed
    to read it.
@@ -160,14 +161,32 @@ them back as mirror-maintenance rules:
   the provider protocol valid, but a large result cannot be removed until the
   exchange reaches quiescence.
 - The vocabulary addresses the view, not the forensic log. Dropped and folded
-  spans are intentionally not a queryable history store; `context-read` before
-  a drop is the sanctioned handoff, not restoration or undo.
+  spans are intentionally not a queryable history store; `transcript` before a
+  drop is the sanctioned handoff, not restoration or undo.
 - The edit vocabulary is monotone: no un-edit, restore, or undo. A fold is a
   prefix operation with one digest, so mid-history folds and multiple digests
-  are deferred; imports inside the reach are swallowed by that digest.
-- User-side `context-drop` and `context-fold`, step-granularity edits, wire or
-  synod resume, resumed child logs, descendant cancellation on `/rewind`,
-  structured-frame handoff, and model-facing `context-rewind` are out of v1.
+  are deferred; imports inside the reach are swallowed by that digest. The
+  deferral is one-sided and known to be so: `` `drop `` addresses an arbitrary
+  set of exchanges while `` `fold `` addresses only a prefix, and nothing
+  justifies the asymmetry. Giving `` `fold `` a range would delete a special
+  case rather than add one — `View`'s privileged head digest is the last place
+  that still holds a digest to be a different kind of thing from a span, where
+  the survey has reported it as a span, addressed by its reach, all along. It
+  waits on its own landing because it edits the model fold's core state, which
+  carries the `fold == memo` obligation.
+- User-side `` `drop `` and `` `fold ``, step-granularity edits, wire or synod
+  resume, resumed child logs, descendant cancellation on `/rewind`,
+  structured-frame handoff, and a model-facing rewind are out of v1.
+- The **byte delta of an edit** is not recoverable from the surface. It was a
+  receipt, `history_bytes` before minus after; the difference of two surveys is
+  the edit *plus* whatever the live exchange gained in between, and the model is
+  always mid-exchange when it speaks. This is a genuine loss, not a subsumption,
+  and it is payable twice over: the decision-relevant number is `total-bytes`
+  now, against the budget, not the size of the step that got you here; and the
+  post-edit survey stands the digest's own `bytes` beside the spans it replaced,
+  which diagnoses a bad fold — the negative-delta case — better than a net
+  figure does, because it says *where* the weight is rather than merely that it
+  moved.
 
 The file's unbounded growth is also accepted. Segment rotation would preserve
 the law by sealing a segment and carrying its fold into a new one, but it adds

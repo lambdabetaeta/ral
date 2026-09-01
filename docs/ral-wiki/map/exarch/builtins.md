@@ -1,6 +1,6 @@
 ---
-generated_at_commit: fcf36a94
-generated_at_date: 2026-08-27
+generated_at_commit: 4d02e3bb
+generated_at_date: 2026-09-01
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -180,46 +180,61 @@ door instead of a closed variant type: an unknown label errors before any
 enquiry crosses, naming the legal set, rather than a static row-unification
 error with no room for a didactic message.
 
-**The desk answers nine classes: two families and seven singletons.**
-`` `agents `` and `` `schedules `` each carry a tag naming what to do
-(`family_tag`), and an unrecognised tag is as loud one level down as an
+**The desk answers six classes: three families and three singletons.**
+`` `agents ``, `` `schedules `` and `` `context `` each carry a tag naming what
+to do (`family_tag`), and an unrecognised tag is as loud one level down as an
 unrecognised class is at the top (`unknown_tag`) — never a silent default.
-The six singletons — `` `pin-read ``, `` `pin-list ``,
-`` `context ``, `` `context-read ``, `` `context-drop ``, `` `context-fold ``
-— are the only ones still read positionally (`payload_list` and the scalar
-accessors); a family tag's own record crosses **by field name**, through
-`FOValue::try_from(&Value)`. The desk's decode is not a duplicate of the
-builtin's door but the **trust boundary**: the door checks engine-side so a
-bad value reaches the model with the parser's own message, and the desk checks
-again because a guest can send whatever it likes — which is why
+The three singletons — `` `pin-read ``, `` `pin-list ``, `` `transcript `` —
+take a bare payload read positionally (`payload_list` and the scalar
+accessors); a family tag's own **record** crosses by field name, through
+`FOValue::try_from(&Value)` and out through `Fields`, `` `fold ``'s included. The desk's decode is not a
+duplicate of the builtin's door but the **trust boundary**: the door checks
+engine-side so a bad value reaches the model with the parser's own message, and
+the desk checks again because a guest can send whatever it likes — which is why
 `CronSchedule::parse` runs on both sides deliberately.
 
 ### Context stewardship
 
 The context verbs address the model view by the exchange and digest reaches
-reported by `context`; they do not expose the forensic event ledger as a
+reported by `` `survey ``; they do not expose the forensic event ledger as a
 queryable store.
 
-- **`context`** → `F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int,
-  steps: Int, live: Bool]], total-bytes: Int, total-steps: Int, cache: Str]`.
-  A silent survey of the finite view. A digest is named by the last exchange it
-  reaches; `cache` says whether editing before the provider cache watermark
-  will make the next request reread the prefix.
-- **`context-read <exchanges>`** → `F Str`. Reads named closed exchanges as a
-  role-marked, step-delimited transcript. It may name a digest by its reach,
-  but not an exchange swallowed by that digest. Binding the result is silent;
-  stdout and the final value of a shell call are model material, so large reads
-  should be sliced rather than printed whole.
-- **`context-drop <exchanges>`** → `F [bytes-delta: Int]`. Sheds whole closed
-  exchanges immediately and records a `ContextEdited` model event. The live,
-  unknown, folded, duplicate, or empty selection is refused with an explanation;
-  a user-shaped rewind is the same closed-range operation. A negative byte
-  delta is honest when the remaining digest is larger than what it replaced.
-- **`context-fold [through: Int, digest: Str]`** → `F [bytes-delta: Int]`.
-  Replaces the visible prefix through a closed exchange with the supplied
-  digest, recording the edit immediately. The reach may extend the current
-  digest but cannot cross the live exchange; folding is curation, not a promise
-  of compression, so the byte delta may be negative.
+- **`context <tag>`** → `∀ρ. <survey | drop [Int] | fold [through: Int, digest:
+  Str] | ρ> → F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int,
+  steps: Int, live: Bool]], total-bytes: Int, total-steps: Int]`. One verb per
+  addressable state: the tag selects the transition, and **every** tag answers
+  the survey afterwards. That is not a shared prefix collapsed but the rule the
+  registries already follow, and it fits the view better than either, because
+  an edit changes *what is addressable* — the swallowed exchanges stop being
+  nameable and the digest answers to its reach — so the edit is also the
+  resurvey the next edit must be written against.
+  - `` `survey `` describes the finite view, one span per exchange, import, or
+    digest, a digest named by the last exchange it reaches. It changes nothing.
+  - `` `drop <exchanges> `` sheds whole closed exchanges. The live, unknown,
+    folded, duplicate, or empty selection is refused with an explanation; a
+    user-shaped rewind is the same closed-range operation.
+  - `` `fold [through, digest] `` replaces the visible prefix through a closed
+    exchange with the supplied digest. The reach may extend the current digest
+    but cannot cross the live exchange.
+
+  Each edit records a `ContextEdited` model event at the desk immediately.
+  There is no byte-delta receipt: the decision-relevant number is `total-bytes`
+  now against the budget, and a bad fold is diagnosed better by the digest's own
+  `bytes` sitting beside the spans it replaced — that says *where* the weight
+  is, not merely that it moved
+  ([[decisions/260812_context-is-a-projection|context-is-a-projection]]).
+- **`transcript <exchanges>`** → `F [Str]`. Reads named closed exchanges back as
+  material: one role-marked, step-delimited string per span, ordered by the view
+  rather than by the argument, each opening with the `=== … ===` header that is
+  its address. It may name a digest by its reach, but not an exchange swallowed
+  by that digest. It is **not** a tag of `context`, because it is the one
+  harness verb whose answer is the size of the thing it describes: the survey
+  spends a few hundred bytes to describe a 200 KB view, and this returns the
+  200 KB. A distinct name is the cheapest safety mechanism available on a
+  model-facing surface, and the only one that acts before the call rather than
+  after. The list is what makes the doc's own advice sayable — a slice is
+  `$t[0]`, a count is `length $t` — where a concatenated `Str` left the header
+  load-bearing as a boundary the reader had to re-parse.
 
 - **`agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
   of six tags — `` `list ``, `` `start ``, `` `message ``, `` `cancel ``,

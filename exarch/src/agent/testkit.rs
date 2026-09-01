@@ -187,6 +187,21 @@ pub(crate) fn scope_has(session: &mut Avatar, name: &str) -> bool {
     false
 }
 
+/// Close one exchange on `session`'s own log — the closed span every context
+/// test needs before it has anything addressable to name. The log is private
+/// to this module, so a test outside it reaches an exchange through here.
+pub(crate) fn close_exchange(session: &Avatar, prompt: &str, answer: &str) {
+    let mut log = session.log.lock();
+    log.append_user(prompt.to_string(), None)
+        .expect("a test prompt");
+    log.append_assistant(
+        genai::chat::ChatMessage::assistant(answer),
+        Vec::new(),
+        None,
+    )
+    .expect("a test answer");
+}
+
 /// A directory for one test, deleted when the returned guard falls.  Hold the
 /// guard for as long as the test needs the directory: binding only its path
 /// deletes it on the spot.

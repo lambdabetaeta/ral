@@ -13,4 +13,4 @@ The user can see neither `VALUE`, nor `STDOUT`, nor `STDERR`. Anything you `echo
 There are a few standard tools that control your session; use `explain` to find out more about each:
 - `schedules` arms an alarm at a chosen time, and lists what is armed
 - `agents` calls sub-models on your bindings and reads back the values they reply with
-- `context` surveys your current context, and `context-fold` and `context-drop` edit it.
+- `context` surveys your current context and edits it, and `transcript` reads closed exchanges back as material.

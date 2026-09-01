@@ -1,7 +1,7 @@
 //! The harness builtins — `agents`, `schedules`, `pin-read`, `pin-list`,
-//! `context`, `context-read`, `context-drop`, `context-fold` — with the type
-//! schemes that gate them. A returning agent's reply is a tag of `agents`
-//! (`` `reply ``), not a builtin of its own — the fleet is one family.
+//! `context`, `transcript` — with the type schemes that gate them. A
+//! returning agent's reply is a tag of `agents` (`` `reply ``), not a builtin
+//! of its own — the fleet is one family.
 //!
 //! Each body validates at the door before it enquires, so a malformed call
 //! never reaches the host. `agents`'s `` `start `` tag forks this shell and
@@ -12,9 +12,12 @@
 //! is handed a guest port to dial, and dials it while it answers.
 //! [`crate::fleet::desk::ExarchDesk`] answers every enquiry on the other side.
 //!
-//! A registry is one enquiry class, named as the model names it: `agents` and
-//! `schedules` each carry the model's tag as a nested variant and its record
-//! verbatim, and each answers the registry's own state.
+//! One verb per addressable state, named as the model names it: `agents`,
+//! `schedules` and `context` each carry the model's tag as a nested variant
+//! and its record verbatim, the tag selects the transition, and the answer is
+//! always the state afterwards. `transcript` is no part of that family: it is
+//! the only harness verb whose answer is the size of the thing it describes,
+//! so it wears a name that says so before the call rather than after.
 
 use crate::fleet::schedule::{CronSchedule, parse_duration};
 use ral_core::serial::FOValue;
@@ -588,11 +591,11 @@ fn builtin_pin_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// The `` `context `` scheme (`context_receipt_ty`) is a closed four-field
+/// The `` `context `` scheme (`context_receipt_ty`) is a closed three-field
 /// record, so a survey missing any of them is host-side drift, not a call
 /// error — name what is missing rather than shrugging at the whole shape.
 fn context_receipt(answer: FOValue) -> Settled<Value> {
-    const FIELDS: [&str; 4] = ["spans", "total-bytes", "total-steps", "cache"];
+    const FIELDS: [&str; 3] = ["spans", "total-bytes", "total-steps"];
     let FOValue::Map { entries } = &answer else {
         return Err(sig(
             "context: host answered an unexpected shape for the survey",
@@ -607,25 +610,6 @@ fn context_receipt(answer: FOValue) -> Settled<Value> {
         )));
     }
     Ok(Value::from(answer))
-}
-
-fn edit_receipt(answer: FOValue, verb: &str) -> Settled<Value> {
-    let shape_error = || {
-        sig(format!(
-            "{verb}: host answered an unexpected shape for the receipt"
-        ))
-    };
-    let FOValue::Map { entries } = &answer else {
-        return Err(shape_error());
-    };
-    if entries
-        .iter()
-        .any(|(key, value)| key == "bytes-delta" && matches!(value, FOValue::Int { .. }))
-    {
-        Ok(Value::from(answer))
-    } else {
-        Err(shape_error())
-    }
 }
 
 pub(crate) fn context_exchanges_payload(value: &Value, verb: &str) -> Settled<FOValue> {
@@ -653,108 +637,99 @@ pub(crate) fn context_exchanges_payload(value: &Value, verb: &str) -> Settled<FO
     Ok(FOValue::List { items: exchanges })
 }
 
+/// The `` `fold `` spec, checked field by field and then sent verbatim: the
+/// record crosses to the desk by name, as every other family's does, so
+/// widening the reach later adds a field rather than shifting a position.
 pub(crate) fn context_fold_payload(value: &Value) -> Settled<FOValue> {
+    const VERB: &str = "context `fold";
     let Value::Map(spec) = value else {
         return Err(sig(format!(
-            "context-fold: expected [through: Int, digest: Str], got {}",
+            "{VERB}: expected [through: Int, digest: Str], got {}",
             value.type_name()
         )));
     };
     let Some(through) = spec.get("through") else {
-        return Err(sig(
-            "context-fold: the spec record needs a `through` field — the last exchange to fold",
-        ));
+        return Err(sig(format!(
+            "{VERB}: the spec record needs a `through` field — the last exchange to fold"
+        )));
     };
     let Value::Int(through) = through else {
         return Err(sig(format!(
-            "context-fold: `through` must be an Int, got {}",
+            "{VERB}: `through` must be an Int, got {}",
             through.type_name()
         )));
     };
     if *through < 0 {
         return Err(sig(format!(
-            "context-fold: `through` must be non-negative, got {through}"
+            "{VERB}: `through` must be non-negative, got {through}"
         )));
     }
     let Some(digest) = spec.get("digest") else {
-        return Err(sig(
-            "context-fold: the spec record needs a `digest` field — the model's summary text",
-        ));
-    };
-    let Value::String(digest) = digest else {
         return Err(sig(format!(
-            "context-fold: `digest` must be a Str, got {}",
-            digest.type_name()
+            "{VERB}: the spec record needs a `digest` field — the model's summary text"
         )));
     };
-    Ok(FOValue::List {
-        items: vec![
-            FOValue::Int { value: *through },
-            FOValue::String {
-                value: digest.clone(),
-            },
-        ],
-    })
+    if !matches!(digest, Value::String(_)) {
+        return Err(sig(format!(
+            "{VERB}: `digest` must be a Str, got {}",
+            digest.type_name()
+        )));
+    }
+    verbatim(value, VERB)
 }
 
-/// `context` — enquires `` `context ``; the answer is a survey of this
-/// agent's own transcript, so the call takes no argument.
-fn builtin_context(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+/// `context <tag>` — one enquiry, whose answer is the model view itself:
+/// `` `survey `` describes it, `` `drop `` and `` `fold `` edit it, and every
+/// tag answers the survey the transition leaves behind. The admissibility of
+/// an edit — live, unknown, folded, empty — is the desk's.
+fn builtin_context(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let Value::Variant { label, payload } = &args[0] else {
+        return Err(sig(format!(
+            "context: expected a `survey, `drop, or `fold tag, got {}",
+            args[0].type_name()
+        )));
+    };
+    let request = match (label.as_str(), payload) {
+        ("survey", None) => request("context", "survey", None),
+        ("drop", Some(exchanges)) => request(
+            "context",
+            "drop",
+            Some(context_exchanges_payload(exchanges, "context `drop")?),
+        ),
+        ("fold", Some(spec)) => request("context", "fold", Some(context_fold_payload(spec)?)),
+        _ => {
+            return Err(sig(format!(
+                "context: tag must be one of `survey, `drop, `fold — got {label}"
+            )));
+        }
+    };
+    context_receipt(shell.enquire(mooring, request)?)
+}
+
+/// `transcript` — enquires `` `transcript ``; the answer is the rendered
+/// transcript of the named exchanges, one Str per span in model-view order.
+fn builtin_transcript(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    let payload = context_exchanges_payload(&args[0], "transcript")?;
     let answer = shell.enquire(
         mooring,
         FOValue::Variant {
-            label: "context".to_string(),
-            payload: None,
-        },
-    )?;
-    context_receipt(answer)
-}
-
-/// `context-read` — enquires `` `context-read ``; the answer is the rendered
-/// transcript of the named exchanges, one Str.
-fn builtin_context_read(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let payload = context_exchanges_payload(&args[0], "context-read")?;
-    let answer = shell.enquire(
-        mooring,
-        FOValue::Variant {
-            label: "context-read".to_string(),
+            label: "transcript".to_string(),
             payload: Some(Box::new(payload)),
         },
     )?;
-    let FOValue::String { value } = answer else {
+    let FOValue::List { items } = answer else {
         return Err(sig(
-            "context-read: host answered an unexpected shape; expected a Str transcript",
+            "transcript: host answered an unexpected shape; expected one Str per span",
         ));
     };
-    Ok(Value::String(value))
-}
-
-/// `context-drop` — enquires `` `context-drop ``; the answer is the byte-delta
-/// receipt of the edit.
-fn builtin_context_drop(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let payload = context_exchanges_payload(&args[0], "context-drop")?;
-    let answer = shell.enquire(
-        mooring,
-        FOValue::Variant {
-            label: "context-drop".to_string(),
-            payload: Some(Box::new(payload)),
-        },
-    )?;
-    edit_receipt(answer, "context-drop")
-}
-
-/// `context-fold` — enquires `` `context-fold ``; the answer is the byte-delta
-/// receipt of the edit.
-fn builtin_context_fold(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let payload = context_fold_payload(&args[0])?;
-    let answer = shell.enquire(
-        mooring,
-        FOValue::Variant {
-            label: "context-fold".to_string(),
-            payload: Some(Box::new(payload)),
-        },
-    )?;
-    edit_receipt(answer, "context-fold")
+    items
+        .into_iter()
+        .map(|item| match item {
+            FOValue::String { value } => Ok(Value::String(value)),
+            _ => Err(sig("transcript: host answered a span that is not a Str")),
+        })
+        .collect::<Settled<Vec<_>>>()
+        .map(Value::list)
 }
 
 /// A variant over a row of tags with stated payloads, left open on `tail` so
@@ -907,55 +882,61 @@ fn context_receipt_ty() -> Ty {
         ("spans", Ty::List(Box::new(context_span_ty()))),
         ("total-bytes", Ty::Int),
         ("total-steps", Ty::Int),
-        ("cache", Ty::String),
     ])
 }
 
-fn edit_receipt_ty() -> Ty {
-    closed_record(&[("bytes-delta", Ty::Int)])
-}
-
-/// `context :: F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int, cache: Str]`
-fn scheme_context(_u: &mut Unifier) -> Scheme {
-    scheme(&[], &[], &[], thunk(pure(context_receipt_ty())))
-}
-
-/// `context-read :: [Int] → F Str`
-fn scheme_context_read(_u: &mut Unifier) -> Scheme {
+/// `context :: ∀ρ. <survey | drop [Int] | fold [through: Int, digest: Str] | ρ> → F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int]`
+///
+/// Same shape as [`scheme_agents`] and [`scheme_schedules`]: an open outer
+/// tag row so an unknown tag reaches the door naming the three legal ones,
+/// and a closed `fold` record row so a missing or misspelled field is
+/// static. `drop`'s payload is a bare `[Int]`, as `` `cancel ``'s is a bare
+/// `Str` — a list of exchange numbers has no shape left to name.
+///
+/// One answer for all three tags: an edit changes what is addressable, so
+/// the survey the transition leaves behind is what the next edit must be
+/// written against.
+fn scheme_context(u: &mut Unifier) -> Scheme {
+    let tag_row = u.fresh_row_var();
     scheme(
         &[],
         &[],
-        &[],
-        thunk(fun(Ty::List(Box::new(Ty::Int)), pure(Ty::String))),
+        &[tag_row],
+        thunk(fun(
+            open_variant(
+                &[
+                    ("survey", Ty::Unit),
+                    ("drop", Ty::List(Box::new(Ty::Int))),
+                    (
+                        "fold",
+                        closed_record(&[("through", Ty::Int), ("digest", Ty::String)]),
+                    ),
+                ],
+                tag_row,
+            ),
+            pure(context_receipt_ty()),
+        )),
     )
 }
 
-/// `context-drop :: [Int] → F [bytes-delta: Int]`
-fn scheme_context_drop(_u: &mut Unifier) -> Scheme {
-    scheme(
-        &[],
-        &[],
-        &[],
-        thunk(fun(Ty::List(Box::new(Ty::Int)), pure(edit_receipt_ty()))),
-    )
-}
-
-/// `context-fold :: [through: Int, digest: Str] → F [bytes-delta: Int]`
-fn scheme_context_fold(_u: &mut Unifier) -> Scheme {
+/// `transcript :: [Int] → F [Str]` — one string per span, in the view's own
+/// order rather than the argument's, so a slice is `$t[0]` and a count is
+/// `length $t`.
+fn scheme_transcript(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
         &[],
         &[],
         thunk(fun(
-            closed_record(&[("through", Ty::Int), ("digest", Ty::String)]),
-            pure(edit_receipt_ty()),
+            Ty::List(Box::new(Ty::Int)),
+            pure(Ty::List(Box::new(Ty::String))),
         )),
     )
 }
 
 // A named array, not a promoted temporary: rustc refuses promotion once an
 // entry carries `BuiltinEntry`'s interior-mutable arity cache.
-static HARNESS_BUILTINS_ARR: [BuiltinEntry; 8] = [
+static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::new(
         Cow::Borrowed("agents"),
         scheme_agents,
@@ -983,26 +964,14 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 8] = [
     BuiltinEntry::new(
         Cow::Borrowed("context"),
         scheme_context,
-        "context  — survey the finite, addressable model context. Returns [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int, cache: Str]. Each span is an exchange or import, and a digest is represented by its reach in `exchange`; `prompt` is its opening line, `bytes` its serialized weight, `steps` its provider-step count, and `live` marks the exchange currently in progress. The cache sentence explains that editing before the cache watermark re-reads the prefix on the next request. This is a survey: it does not edit context.",
+        "context <tag>  — the finite, addressable model context: `survey what is in it, `drop closed exchanges, `fold a prefix into a digest you write. Every tag answers with the survey afterwards, [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int], so what you read back is always the context as it stands rather than a receipt for what you just did. An edit changes what is addressable — folded exchanges stop being nameable, and the digest answers to its reach — so the answer is also the survey your next edit must be written against.\n\ncontext `survey  — one span per exchange, import, or digest, oldest first. `exchange` names the span, a digest by the last exchange it reaches; `kind` is exchange, import, or digest; `prompt` is its opening line, `bytes` its serialized weight, `steps` its provider-step count, and `live` marks the exchange you are in, which no edit may name. `total-bytes` against your context window is the number that decides whether to edit at all. This tag surveys: it changes nothing.\n\ncontext `drop <exchanges>  — shed whole closed exchanges, where <exchanges> is a list of non-negative exchange numbers read off `survey. The exchange you are in cannot be named, an unknown or already-folded exchange is refused with an explanation, and an empty list is not an edit. You are always mid-exchange when you speak, so a rewind-shaped request for a suffix of closed exchanges is this tag with a range; there is no rewind.\n\ncontext `fold [through: <Int>, digest: <Str>]  — replace the visible prefix through a closed exchange with the digest text you supply. `through` may name the current digest by its reach, folding further, but cannot cross the exchange you are in. A digest is curation, not a promise of compression: the answer shows the new digest's own `bytes` beside the spans that survive it, which is how you see whether the fold was worth making.\n\nEach tag is one exchange with the host, and the survey it answers is the model view as it stands once the transition has landed; an edit lands at the desk immediately and is recorded as a model context event. Editing before the provider's cache watermark re-reads the prefix on the next request, so an edit that sheds little can cost more than it saves. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_context),
     ),
     BuiltinEntry::new(
-        Cow::Borrowed("context-read"),
-        scheme_context_read,
-        "context-read <exchanges>  — read named closed exchanges as one transcript Str, with roles marked and steps delimited. The list must be non-empty; name a digest by its reach, and do not name an exchange folded strictly inside that digest. Only stdout echoes into a turn's tool result; a `let`-bound value prints nothing. Binding is silent, but both stdout and a tool call's final VALUE enter model context; read large bindings in slices — never bare-print a whole binding merely to inspect it, because the transcript is material, not a survey.",
-        BuiltinBody::Static(builtin_context_read),
-    ),
-    BuiltinEntry::new(
-        Cow::Borrowed("context-drop"),
-        scheme_context_drop,
-        "context-drop <exchanges>  — shed whole closed exchanges from the model context, where <exchanges> is a list of non-negative exchange numbers from `context`. The live exchange cannot be named, unknown or already-folded exchanges are refused with an explanation, and an empty list is not an edit. The model is always mid-exchange when it speaks, so a rewind-shaped request for a suffix of closed exchanges is this verb with a range; there is no context-rewind. Returns [bytes-delta: Int], the serialized model-view bytes before minus after (a negative value is honest when a digest is larger than what it replaces). Applied immediately at the desk; the edit is recorded as a model context event.",
-        BuiltinBody::Static(builtin_context_drop),
-    ),
-    BuiltinEntry::new(
-        Cow::Borrowed("context-fold"),
-        scheme_context_fold,
-        "context-fold [through: <Int>, digest: <Str>]  — replace the visible prefix through a closed exchange with the digest text you supply. `through` may extend the current digest by its reach, but cannot cross the live exchange; name the digest reach itself to fold further. Returns [bytes-delta: Int], the serialized model-view bytes before minus after, and records one model context event immediately. A digest is curation, not a promise of compression, so a negative delta is possible and meaningful.",
-        BuiltinBody::Static(builtin_context_fold),
+        Cow::Borrowed("transcript"),
+        scheme_transcript,
+        "transcript <exchanges>  — read named closed exchanges back as material: one Str per span, roles marked and steps delimited. The list must be non-empty; name a digest by its reach, and do not name an exchange folded strictly inside one. The answer is ordered by the context, not by your argument, so each element opens with its own === exchange n === header — that header is the element's address. Being a list, it reads in slices: $t[0] is one span and length $t is the count. Only stdout echoes into a turn's tool result; a `let`-bound value prints nothing. Both stdout and a turn's final VALUE enter your context, so never bare-print a whole binding merely to inspect it — the transcript is material, not a survey. It commits nothing and edits nothing; context `drop does that. Answered only on the run that calls it: inside spawn { … } this errors.",
+        BuiltinBody::Static(builtin_transcript),
     ),
 ];
 pub static HARNESS_BUILTINS: &[BuiltinEntry] = &HARNESS_BUILTINS_ARR;
@@ -2098,6 +2067,115 @@ mod tests {
                 .content
                 .contains("tasks: the card under the 'tasks' pin is not task-shaped"),
             "the didactic fail must name the expected shape, got: {}",
+            result.content
+        );
+    }
+
+    // ── context family door tests ────────────────────────────────────────
+
+    /// A trunk holding one closed exchange, which every context test needs
+    /// before it has anything addressable to name.
+    fn trunk_with_a_closed_exchange() -> crate::agent::Avatar {
+        let session = crate::agent::Avatar::for_test("system").unwrap();
+        crate::agent::testkit::close_exchange(&session, "first prompt", "first answer");
+        session
+    }
+
+    /// `scheme_context`'s outer tag row is open, so `` context `rewind `` — the
+    /// tag a model most plausibly invents — reaches the door naming the three
+    /// legal ones rather than dying as a row-unification mismatch.
+    #[test]
+    fn unknown_context_tag_reaches_the_door_naming_every_legal_tag() {
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+        let result = session.run_shell("call-1".to_string(), "context `rewind [3]", 5, &emit);
+        for tag in ["survey", "drop", "fold"] {
+            assert!(
+                result.content.contains(tag),
+                "must name `{tag}, got: {}",
+                result.content
+            );
+        }
+    }
+
+    /// Static, not a door error: `` `fold ``'s closed record row reports the
+    /// field, which is what makes widening its reach a one-line change.
+    #[test]
+    fn misspelled_fold_field_errors_statically_naming_the_field() {
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+        let result = session.run_shell(
+            "call-1".to_string(),
+            "context `fold [thru: 1, digest: 'summary']",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("no field named 'thru'"),
+            "the diagnostic must name the offending field, got: {}",
+            result.content
+        );
+    }
+
+    /// The whole family through the real shell: an edit answers the survey
+    /// the transition leaves behind, so the digest's own row — addressed by
+    /// its reach, like every other span — is there to read without a second
+    /// call.
+    #[test]
+    fn a_fold_answers_the_survey_it_leaves_behind() {
+        let mut session = trunk_with_a_closed_exchange();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+
+        let result = session.run_shell(
+            "call-1".to_string(),
+            "context `fold [through: 1, digest: 'the old work is done']",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("EXIT: 0"),
+            "a valid fold must succeed, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("digest") && result.content.contains("total-bytes"),
+            "the answer must be the survey afterwards, carrying the new digest span, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("bytes-delta"),
+            "the edit answers the state, never a receipt for the step, got: {}",
+            result.content
+        );
+    }
+
+    /// §2.1's shape, end to end: the answer is a list, so a slice is `$t[0]`,
+    /// and `Value::String` renders raw — one element prints as exactly that
+    /// span's own text, header and all.
+    #[test]
+    fn transcript_answers_a_list_whose_slice_prints_that_span_raw() {
+        let mut session = trunk_with_a_closed_exchange();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+
+        let result = session.run_shell(
+            "call-1".to_string(),
+            "let t = transcript [1]\necho !{length $t}\necho $t[0]",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("=== exchange 1 ===")
+                && result.content.contains("[user]\nfirst prompt"),
+            "a slice must print as that span's raw text, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("\n1\n"),
+            "the count of a list is `length`, got: {}",
             result.content
         );
     }
