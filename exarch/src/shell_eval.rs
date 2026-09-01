@@ -228,10 +228,10 @@ impl DeferredSink for InboxDeferred {
 /// Build the [`DeferredSink`] a tool run installs, over `emit`'s session inbox.
 /// Core clones it into each worker's run state, so a nested `spawn` inherits it
 /// and flushes at its own completion.
-pub(crate) fn deferred_sink(emit: &Emitter, root: AgentId) -> Arc<dyn DeferredSink> {
+pub(crate) fn deferred_sink(emit: &Emitter) -> Arc<dyn DeferredSink> {
     Arc::new(InboxDeferred {
         stamp: emit.mailbox().stamp(),
-        root,
+        root: emit.id(),
     })
 }
 
@@ -1216,7 +1216,7 @@ keep-bottom
         let agent = test_agent(&fleet, spec).expect("a fresh trunk");
         let (tx, _rx) = channel();
         let emit = Emitter::with_mailbox(tx, agent.id, inbox.mailbox());
-        let deferred = deferred_sink(&emit, agent.id);
+        let deferred = deferred_sink(&emit);
 
         deferred.deliver(vec![ral_core::serial::FOValue::Unit]);
         match inbox.next_item() {

@@ -180,8 +180,7 @@ impl Avatar {
         });
         // Stamped with this session's inbox epoch as read now, so a batch
         // from a worker that settles after a `/clear` is dropped.
-        self.seat
-            .install_deferred(shell_eval::deferred_sink(emit, self.agent.id));
+        self.seat.install_deferred(shell_eval::deferred_sink(emit));
         self.recorder()
             .transient(crate::record::Transient::State(AgentState::Evaluating));
         let outcome = shell_eval::run_shell(

@@ -106,6 +106,12 @@ impl Emitter {
         self.mailbox.clone()
     }
 
+    /// This emitter's own agent id, for `shell_eval::deferred_sink`, which
+    /// stamps a spawn worker's surface batch with the owning session's id.
+    pub(crate) fn id(&self) -> AgentId {
+        self.id
+    }
+
     /// Whether a detached worker may clone this emitter for a live tab —
     /// [`Children::Live`] off [`FleetBus::session`] and
     /// [`FleetBus::per_exchange_live`], read by `agent` to choose between

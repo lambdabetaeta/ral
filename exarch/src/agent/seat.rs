@@ -498,7 +498,7 @@ mod tests {
         let root_id = trunk.id;
         let emit = Emitter::with_mailbox(tx, root_id, inbox.mailbox());
 
-        seat.install_deferred(crate::shell_eval::deferred_sink(&emit, root_id));
+        seat.install_deferred(crate::shell_eval::deferred_sink(&emit));
         let host: Arc<dyn Host> = Arc::new(RunHost {
             desk: ExarchDesk {
                 services: wire_host_services(&emit, &trunk),
