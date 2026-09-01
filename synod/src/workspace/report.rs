@@ -5,7 +5,7 @@
 
 use crate::workspace::changes::{Change, ChangeSet};
 use crate::workspace::history::{Checkpoint, HistoryStore};
-use crate::workspace::manifest::Manifest;
+use crate::workspace::manifest::{Manifest, merge_unread};
 use crate::workspace::restore::{Resolution, RestoreOutcome, covers, restore};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -17,6 +17,9 @@ pub struct JobReport {
     /// died before taking it.
     pub finished_at_ms: Option<u64>,
     pub changes: ChangeSet,
+    /// Paths neither manifest could read, so nothing about them is shown
+    /// as a change.
+    pub unreadable: Vec<String>,
 }
 
 /// The report for `folder`'s most recent job.
@@ -34,6 +37,7 @@ pub fn job_report(store: &HistoryStore, folder: &Path) -> Result<JobReport, Stri
     };
     Ok(JobReport {
         finished_at_ms,
+        unreadable: merge_unread(&before.manifest.unread, &now.unread),
         changes: ChangeSet::between(&before.manifest, &now),
     })
 }

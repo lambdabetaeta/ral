@@ -1,19 +1,18 @@
 //! A human-driven proof that synod's fleet delegates inside a booted guest.
 //!
 //! Boots a real machine, seats a scripted-provider trunk on its control wire
-//! exactly as [`synod::session::Conversation::begin`] does, and drives one
+//! through [`synod::session::seat_machine`] — the same constructor
+//! [`synod::session::Conversation::begin`] calls — and drives one
 //! [`converse_settled`] exchange whose script has the model delegate: spawn
 //! a helper, have the helper write a file and reply, wait for the whole
-//! fleet to quiesce, then checkpoint and report — the same bracket
-//! [`synod::session::Conversation::exchange`] runs, assembled by hand here
-//! so the provider can be a canned script instead of a live account.
+//! fleet to quiesce, then checkpoint and report.
 //!
 //! It is the same program on both platforms, and that is the interesting
 //! part: nothing below is `#[cfg]`-ed except which backend is constructed —
 //! the control plane is an `AF_VSOCK` descriptor under Virtualization.framework
 //! and an `AF_HYPERV` socket under Hyper-V, and
-//! [`WireTransport::adopt`](ral_core::protocol::WireTransport::adopt) takes
-//! either, so the protocol never learns which hypervisor it is talking
+//! [`seat_machine`](synod::session::seat_machine) adopts either the same
+//! way, so the protocol never learns which hypervisor it is talking
 //! through.
 //!
 //! # What each platform asks of you first
@@ -41,25 +40,19 @@
 //!
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
-use exarch::agent::{Avatar, RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
+use exarch::agent::{RecordedAccount, RootConfig, SPAWN_FUEL};
 use exarch::bus::{AgentId, Sink};
 use exarch::egress::Egress;
 use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Provider, ToolCall};
 use exarch::record::{Display, Record, Transient};
-use ral_core::protocol::{Liveness, WireTransport};
 use ral_core::types::Capabilities;
 use std::path::PathBuf;
 use std::sync::Arc;
-use synod::machine_dial::MachineDial;
+use synod::session::{seat_machine, unseat_machine};
 use synod::workspace::{self, HistoryStore};
 use vm_manager::{BootArtifact, Hypervisor, MachineSpec};
-
-#[cfg(unix)]
-type NetStream = std::os::unix::net::UnixStream;
-#[cfg(windows)]
-type NetStream = std::net::TcpStream;
 
 /// The file the helper is asked to write, checked against the after-job
 /// report at the end.
@@ -93,7 +86,7 @@ fn main() {
     };
 
     println!("booting via {}...", hypervisor.name());
-    let mut machine = match hypervisor.boot(&MachineSpec::for_folder(&folder)) {
+    let machine = match hypervisor.boot(&MachineSpec::for_folder(&folder)) {
         Ok(machine) => machine,
         Err(err) => {
             eprintln!("boot failed: {err}");
@@ -101,25 +94,6 @@ fn main() {
         }
     };
     println!("booted: the agent can reach the granted folder and nothing else on this computer");
-
-    let workspace_path = machine.workspace_path().to_path_buf();
-    let wires = machine.take_wires();
-    // Held open only so its EOF ends the session; this example wants no
-    // guest network of its own.
-    let _net = NetStream::from(wires.net);
-
-    // The machine goes to the dialler now — the same handoff
-    // `Conversation::begin` makes, and the reason `end`'s ordering below
-    // recovers it from the dialler rather than from `machine` directly.
-    let dial = Arc::new(MachineDial::new(machine));
-
-    let transport = WireTransport::adopt(wires.control, Liveness::default())
-        .expect("adopt the guest's control plane");
-    let root_seat = RootSeat::Wire {
-        transport: Box::new(transport),
-        cwd: workspace_path,
-        home: PathBuf::from("/tmp"),
-    };
 
     let spawn_cmd = format!(
         "agent [prompt: #'write the text {HELPER_TEXT:?} into {HELPER_FILE}, then reply \
@@ -160,32 +134,32 @@ fn main() {
         reason = "[io-door:silent:boot-run-run-dir] Scratch setup before the trunk exists, in an example that is its own only caller — not model I/O."
     )]
     std::fs::create_dir_all(&run_dir).expect("make the run directory");
-    let mut agent = Avatar::root(
-        RootConfig {
-            system: "you are a helpful office assistant".to_string(),
-            caps: Capabilities::root(),
-            run_dir,
-            resume: None,
-            no_logs: false,
-            run_lock: None,
-            model: "test-model".to_string(),
-            account: RecordedAccount {
-                label: "test".to_string(),
-                service: "scripted".to_string(),
-                id: "test".to_string(),
-            },
-            allow_schedule: false,
-            interactive: true,
-            chat: false,
-            disk_warn_bytes: None,
-            fuel: SPAWN_FUEL,
-            egress: Egress::for_test(),
-            dial: Some(dial.clone()),
+    let config = RootConfig {
+        system: "you are a helpful office assistant".to_string(),
+        caps: Capabilities::root(),
+        run_dir,
+        resume: None,
+        no_logs: false,
+        run_lock: None,
+        model: "test-model".to_string(),
+        account: RecordedAccount {
+            label: "test".to_string(),
+            service: "scripted".to_string(),
+            id: "test".to_string(),
         },
-        root_seat,
-        provider,
-    )
-    .expect("start the trunk");
+        allow_schedule: false,
+        interactive: true,
+        chat: false,
+        disk_warn_bytes: None,
+        fuel: SPAWN_FUEL,
+        egress: Egress::for_test(),
+        // `seat_machine` overwrites this: the dialler cannot exist before
+        // the machine it wraps.
+        dial: None,
+    };
+    // `_net` is held open only so its EOF ends the session; this example
+    // wants no guest network of its own.
+    let (dial, mut agent, _net) = seat_machine(machine, config, provider).expect("start the trunk");
 
     let mut sink = PrintSink;
     let exchange = converse_settled(
@@ -194,14 +168,10 @@ fn main() {
         &mut sink,
     );
 
-    // Ending the agent before recovering the machine, and recovering the
-    // machine before shutting it down, is `Conversation::end`'s own order —
-    // reproduced here rather than borrowed, since this example has no
-    // `Conversation` to call it on.
-    drop(agent);
-    let machine = Arc::try_unwrap(dial)
-        .unwrap_or_else(|_| panic!("the dialler outlived the agent that was its only other owner"))
-        .into_machine();
+    // `unseat_machine` is `Conversation::end`'s own machine-recovery step —
+    // see its doc for why the agent must drop before the machine comes
+    // back.
+    let machine = unseat_machine(agent, dial);
 
     match &exchange {
         Ok(()) => println!("the exchange settled: the trunk parked and every helper finished"),

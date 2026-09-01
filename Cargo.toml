@@ -46,6 +46,11 @@ nucleo-matcher = "0.3"
 rustc-hash = "2"
 shlex      = "2.0"
 windows-sys = "0.61"
+sha2       = "0.11"
+ruzstd     = "0.9"
+blake3     = "1"
+tempfile   = "3.27"
+fs4        = { version = "1", default-features = false }
 
 [workspace.lints.clippy]
 complexity = { level = "warn", priority = -1 }

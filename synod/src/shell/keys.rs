@@ -17,7 +17,7 @@
 //! no account yet, only the name it is to be given.
 
 use synod::accounts::{self, AccountList};
-use tauri::{AppHandle, Emitter as _, Manager, State};
+use tauri::{AppHandle, State};
 
 /// Every service synod knows, with or without a key.
 ///
@@ -25,7 +25,7 @@ use tauri::{AppHandle, Emitter as _, Manager, State};
 /// Returns the credential resolution's own failure, if startup could not
 /// read this computer's accounts at all.
 #[tauri::command]
-pub fn list_accounts(accounts_state: State<'_, crate::Accounts>) -> Result<AccountList, String> {
+pub fn list_accounts(accounts_state: State<'_, super::Accounts>) -> Result<AccountList, String> {
     let (store, _) = accounts_state.resolved()?;
     Ok(accounts::list(store))
 }
@@ -38,7 +38,7 @@ pub fn list_accounts(accounts_state: State<'_, crate::Accounts>) -> Result<Accou
 #[tauri::command]
 pub fn save_key(
     app: AppHandle,
-    accounts_state: State<'_, crate::Accounts>,
+    accounts_state: State<'_, super::Accounts>,
     account: String,
     key: String,
 ) -> Result<AccountList, String> {
@@ -55,7 +55,7 @@ pub fn save_key(
 #[tauri::command]
 pub fn forget_key(
     app: AppHandle,
-    accounts_state: State<'_, crate::Accounts>,
+    accounts_state: State<'_, super::Accounts>,
     account: String,
 ) -> Result<AccountList, String> {
     let (store, _) = accounts_state.resolved()?;
@@ -72,7 +72,7 @@ pub fn forget_key(
 #[tauri::command]
 pub fn save_endpoint(
     app: AppHandle,
-    accounts_state: State<'_, crate::Accounts>,
+    accounts_state: State<'_, super::Accounts>,
     name: String,
     endpoint: String,
     protocol: String,
@@ -92,7 +92,7 @@ pub fn save_endpoint(
 #[tauri::command]
 pub fn forget_endpoint(
     app: AppHandle,
-    accounts_state: State<'_, crate::Accounts>,
+    accounts_state: State<'_, super::Accounts>,
     account: String,
 ) -> Result<AccountList, String> {
     let (store, _) = accounts_state.resolved()?;
@@ -112,16 +112,6 @@ fn settled(
     store: &std::sync::Mutex<exarch::provider::credential::CredentialStore>,
 ) -> AccountList {
     let list = accounts::list(store);
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let accounts_state = app.state::<crate::Accounts>();
-        let Ok((store, catalog)) = &accounts_state.0 else {
-            return;
-        };
-        let _ = app.emit(
-            "models-refreshed",
-            synod::session::refresh_menu(store, catalog),
-        );
-    });
+    super::refresh_menu_async(app);
     list
 }

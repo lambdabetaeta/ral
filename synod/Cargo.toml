@@ -33,9 +33,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde      = { workspace = true }
 serde_json = { workspace = true }
-blake3     = "1"
-sha2       = "0.11"
-tokio      = { version = "1", features = ["rt"] }
+blake3     = { workspace = true }
+fs4        = { workspace = true }
 
 # The guest's whole network: `session::net_seat` hands the net wire beside
 # the control wire `vm-manager` already returns straight to `guest_net::run`.
@@ -46,27 +45,6 @@ tokio      = { version = "1", features = ["rt"] }
 # makes for the control plane.
 guest-net  = { path = "../guest-net" }
 
-# `boot::inflate` decompresses the shipped rootfs into the cache. A pure-Rust
-# decoder, deliberately: only decompression is ever needed, and the C-backed
-# `zstd` cannot build under a cross-check with no C toolchain for the target.
-ruzstd     = "0.9"
-
-[target.'cfg(unix)'.dependencies]
-# `workspace::history`'s advisory file lock (flock) and its free-space probe
-# (statvfs) — neither has a std equivalent.
-libc = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-# `workspace::history::free_bytes`'s free-space probe (GetDiskFreeSpaceExW)
-# and `workspace::history::lock_imp`'s advisory file lock (LockFileEx, plus
-# the OVERLAPPED it takes and the ERROR_LOCK_VIOLATION a refused exclusive
-# probe reports).
-windows-sys = { workspace = true, features = [
-    "Win32_Storage_FileSystem",
-    "Win32_Foundation",
-    "Win32_System_IO",
-] }
-
 [dev-dependencies]
 # `test_fixture::workshop`'s per-test directory, which deletes itself.
-tempfile = "3.27"
+tempfile = { workspace = true }

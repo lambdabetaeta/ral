@@ -8,7 +8,7 @@
 //! capture.  The user never sees any of this vocabulary; the GUI shows
 //! only "undo" and a history.
 
-use crate::workspace::manifest::{ContentHash, EntryKind, Manifest, hash_file};
+use crate::workspace::manifest::{ContentHash, EntryKind, Manifest, Stop, hash_file};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -53,6 +53,9 @@ pub struct HistoryStore {
     /// lock, which a live shared hold refuses, so a store still open is a
     /// store the sweep leaves alone.
     lock: Lock,
+    /// Trips every capture this store takes, so a copy running on its own
+    /// thread can be ended by whoever holds a clone rather than waited out.
+    stop: Stop,
 }
 
 /// Orders captures taken within the same millisecond by one process.
@@ -64,11 +67,7 @@ impl HistoryStore {
     /// # Errors
     /// A plain sentence when the store's directories cannot be made.
     pub fn open_for(folder: &Path) -> Result<Self, String> {
-        Self::open_at(
-            &crate::session::SYNOD
-                .project_dir(&folder.to_string_lossy())
-                .join("history"),
-        )
+        Self::open_at(&store_dir_for(folder))
     }
 
     /// Open (creating if needed) a store at an explicit location.
@@ -88,7 +87,15 @@ impl HistoryStore {
         Ok(Self {
             dir: dir.to_path_buf(),
             lock,
+            stop: Stop::default(),
         })
+    }
+
+    /// This store's stop switch, for a caller that will hand the store off
+    /// to a thread of its own and may need that thread's capture to end
+    /// before it finishes.
+    pub fn stop_switch(&self) -> Stop {
+        self.stop.clone()
     }
 
     /// Remove this store from disk, ending its conversation's undo.
@@ -101,7 +108,7 @@ impl HistoryStore {
     /// # Errors
     /// A plain sentence when the directory cannot be removed.
     pub fn wipe(self) -> Result<(), String> {
-        let Self { dir, lock } = self;
+        let Self { dir, lock, .. } = self;
         drop(lock);
         std::fs::remove_dir_all(&dir).map_err(|e| {
             format!(
@@ -119,35 +126,38 @@ impl HistoryStore {
     /// the bytes behind it are already in the store.
     ///
     /// # Errors
-    /// A plain sentence when the folder cannot be read or the copy kept.
+    /// A plain sentence when the folder cannot be read or the copy kept, or
+    /// when [`HistoryStore::stop_switch`] was tripped part way through: a
+    /// copy that did not finish writes no checkpoint.
     pub fn capture(&self, root: &Path, moment: Moment) -> Result<Checkpoint, String> {
         // Stamped before the walk: the racy guard trusts an entry only when
         // its mtime predates this moment, so a file rewritten mid-walk fails
         // the trust and the next capture re-reads it.
         let taken_at_ms = now_ms();
         let reference = self.latest()?;
-        let manifest = Manifest::of_folder_via(root, &mut |key, path, size, mtime_ns| {
-            let reused = reference.as_ref().and_then(|reference| {
-                match reference.manifest.entries.get(key) {
-                    Some(EntryKind::File {
-                        size: ref_size,
-                        hash,
-                        mtime_ns: ref_mtime_ns,
-                        ..
-                    }) if size == *ref_size
-                        && mtime_ns == *ref_mtime_ns
-                        && mtime_ns < reference.taken_at_ms * 1_000_000 =>
-                    {
-                        Some(hash.clone())
+        let manifest =
+            Manifest::of_folder_via(root, &self.stop, &mut |key, path, size, mtime_ns| {
+                let reused = reference.as_ref().and_then(|reference| {
+                    match reference.manifest.entries.get(key) {
+                        Some(EntryKind::File {
+                            size: ref_size,
+                            hash,
+                            mtime_ns: ref_mtime_ns,
+                            ..
+                        }) if size == *ref_size
+                            && mtime_ns == *ref_mtime_ns
+                            && mtime_ns < reference.taken_at_ms * 1_000_000 =>
+                        {
+                            Some(hash.clone())
+                        }
+                        _ => None,
                     }
-                    _ => None,
+                });
+                match reused {
+                    Some(hash) => Ok(Some((size, hash))),
+                    None => self.ingest(path),
                 }
-            });
-            match reused {
-                Some(hash) => Ok(Some((size, hash))),
-                None => self.ingest(path),
-            }
-        })?;
+            })?;
         let id = format!(
             "{taken_at_ms:015}-{:010}-{:06}",
             std::process::id(),
@@ -271,6 +281,23 @@ impl HistoryStore {
             .map_err(|e| format!("Synod no longer has a saved copy of that version: {e}."))
     }
 
+    /// A directory under this store's own area for materialising a version
+    /// that has nowhere else to live — the review window's "open the older
+    /// one".  Wiped along with the rest of the store at [`Self::wipe`], so
+    /// nothing written here needs its own cleanup.
+    ///
+    /// # Errors
+    /// A plain sentence when the directory cannot be made.
+    pub fn scratch_dir(&self) -> Result<PathBuf, String> {
+        let dir = self.dir.join("earlier");
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!(
+                "Synod could not set out a place to open the older version from: {e}."
+            )
+        })?;
+        Ok(dir)
+    }
+
     /// Copy the kept bytes for `hash` to `dest`, and set its mode.
     ///
     /// # Errors
@@ -346,12 +373,6 @@ impl HistoryStore {
             let _ = std::fs::remove_file(&tmp);
         }
         result.map(Some)
-    }
-
-    /// This store's own directory on the host — the volume a free-space
-    /// check weighs a folder's bytes against.
-    pub(crate) fn dir(&self) -> &Path {
-        &self.dir
     }
 
     fn object_path(&self, hash: &ContentHash) -> PathBuf {
@@ -440,7 +461,7 @@ impl Write for Tee<'_> {
 /// all, refused means a live shared hold is out there). Dropping it
 /// releases the hold and closes the underlying handle — the field is never
 /// read, only kept alive.
-struct Lock(#[allow(dead_code)] lock_imp::Handle);
+struct Lock(#[allow(dead_code)] std::fs::File);
 
 impl Lock {
     /// Take `path` (creating it if needed) with a shared advisory lock,
@@ -448,162 +469,57 @@ impl Lock {
     /// never against another store's own shared hold, since shared holds
     /// never contend with each other.
     fn shared(path: &Path) -> Result<Self, String> {
-        lock_imp::Handle::shared(path).map(Self)
+        let file = open(path)?;
+        file.lock_shared()
+            .map_err(|e| format!("Synod could not lock {}: {e}.", path.display()))?;
+        Ok(Self(file))
     }
 
     /// Try `path` with a non-blocking exclusive lock. `Ok(None)` means a
     /// live shared hold refused it; `Ok(Some(_))` means nothing held it at
     /// all, and the returned guard now does, until dropped.
     fn try_exclusive(path: &Path) -> Result<Option<Self>, String> {
-        Ok(lock_imp::Handle::try_exclusive(path)?.map(Self))
-    }
-}
-
-#[cfg(unix)]
-mod lock_imp {
-    use std::io;
-    use std::os::unix::io::AsRawFd;
-    use std::path::Path;
-
-    pub struct Handle(#[allow(dead_code)] std::fs::File);
-
-    impl Handle {
-        pub fn shared(path: &Path) -> Result<Self, String> {
-            let file = open(path)?;
-            flock(&file, libc::LOCK_SH)
-                .map_err(|e| format!("Synod could not lock {}: {e}.", path.display()))?;
-            Ok(Self(file))
-        }
-
-        pub fn try_exclusive(path: &Path) -> Result<Option<Self>, String> {
-            let file = open(path)?;
-            match flock(&file, libc::LOCK_EX | libc::LOCK_NB) {
-                Ok(()) => Ok(Some(Self(file))),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
-                Err(e) => Err(format!("Synod could not lock {}: {e}.", path.display())),
+        let file = open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self(file))),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(format!("Synod could not lock {}: {e}.", path.display()))
             }
-        }
-    }
-
-    fn open(path: &Path) -> Result<std::fs::File, String> {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|e| format!("Synod could not open {}: {e}.", path.display()))
-    }
-
-    fn flock(file: &std::fs::File, op: i32) -> io::Result<()> {
-        // SAFETY: `file`'s descriptor is valid for the call's duration, and
-        // `flock` neither reads nor writes through it.
-        if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
         }
     }
 }
 
-#[cfg(windows)]
-mod lock_imp {
-    use std::os::windows::io::AsRawHandle;
-    use std::path::Path;
-    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
-    use windows_sys::Win32::Storage::FileSystem::{
-        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    };
-    use windows_sys::Win32::System::IO::OVERLAPPED;
+fn open(path: &Path) -> Result<std::fs::File, String> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("Synod could not open {}: {e}.", path.display()))
+}
 
-    pub struct Handle(#[allow(dead_code)] std::fs::File);
+/// Where `folder`'s store lives, whether or not it has been opened yet.
+fn store_dir_for(folder: &Path) -> PathBuf {
+    crate::session::SYNOD
+        .project_dir(&folder.to_string_lossy())
+        .join("history")
+}
 
-    impl Handle {
-        pub fn shared(path: &Path) -> Result<Self, String> {
-            let file = open(path)?;
-            lock(&file, 0).map_err(|e| format!("Synod could not lock {}: {e}.", path.display()))?;
-            Ok(Self(file))
-        }
-
-        pub fn try_exclusive(path: &Path) -> Result<Option<Self>, String> {
-            let file = open(path)?;
-            match lock(&file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY) {
-                Ok(()) => Ok(Some(Self(file))),
-                Err(e) if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) => Ok(None),
-                Err(e) => Err(format!("Synod could not lock {}: {e}.", path.display())),
-            }
-        }
-    }
-
-    fn open(path: &Path) -> Result<std::fs::File, String> {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|e| format!("Synod could not open {}: {e}.", path.display()))
-    }
-
-    fn lock(file: &std::fs::File, flags: u32) -> std::io::Result<()> {
-        // Whole-file range: `!0u32` on both halves is the largest region
-        // `LockFileEx` can name, wide enough to cover a lock file that is
-        // always empty in practice.
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        // SAFETY: `file`'s handle is valid for the call's duration, and
-        // `overlapped` is a plain (non-async) zeroed region descriptor.
-        let ok = unsafe {
-            LockFileEx(
-                file.as_raw_handle().cast(),
-                flags,
-                0,
-                !0u32,
-                !0u32,
-                &raw mut overlapped,
-            )
-        };
-        if ok != 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
+/// Free space where `folder`'s store would go, asked before any store
+/// exists: the answer belongs to the nearest ancestor that does exist, since
+/// a directory not yet made has no filesystem to ask.
+pub fn free_bytes_for(folder: &Path) -> Option<u64> {
+    store_dir_for(folder).ancestors().find_map(free_bytes)
 }
 
 /// Free space on the filesystem holding `path`, or `None` when it cannot be
 /// learned — never an error, since this only feeds a warning rather than a
-/// decision.
-#[cfg(unix)]
+/// decision. Bytes available to this user, not the filesystem's total free
+/// space (root-only reserve excluded).
+#[cfg(any(unix, windows))]
 pub(crate) fn free_bytes(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::statvfs(cpath.as_ptr(), &raw mut stat) };
-    if rc != 0 {
-        return None;
-    }
-    // `f_frsize` is already `u64` on every unix this crate targets; only
-    // `f_bavail` narrows on some (macOS's is 32 bits).
-    Some(u64::from(stat.f_bavail) * stat.f_frsize)
-}
-
-#[cfg(windows)]
-pub(crate) fn free_bytes(path: &Path) -> Option<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-
-    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-    wide.push(0);
-    let mut free_to_caller: u64 = 0;
-    // SAFETY: `wide` is a NUL-terminated UTF-16 buffer, and the two output
-    // pointers we do not need are null, which the API accepts.
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            &mut free_to_caller,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    (ok != 0).then_some(free_to_caller)
+    fs4::available_space(path).ok()
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -623,6 +539,19 @@ mod tests {
     use crate::test_fixture::granted_workshop as workshop;
     use crate::test_fixture::workshop as bare_workshop;
     use crate::workspace::manifest::EntryKind;
+
+    /// The pre-flight asks this before any store exists, so an answer that
+    /// needed the store's own directory would be no answer at all — and a
+    /// `None` here reads as "room enough", quietly taking the copy it was
+    /// meant to decline.
+    #[test]
+    fn free_space_is_known_before_the_store_is_made() {
+        let folder = bare_workshop("history-free-space");
+        assert!(
+            free_bytes_for(folder.path()).is_some(),
+            "a folder no conversation has opened must still yield a free figure"
+        );
+    }
 
     fn object_count(dir: &Path) -> usize {
         let mut count = 0;
@@ -674,6 +603,22 @@ mod tests {
             .capture(&folder, Moment::After)
             .expect("second capture");
         assert_eq!(object_count(dir.path()), 1, "a repeat capture adds nothing");
+    }
+
+    #[test]
+    fn a_stopped_capture_records_nothing() {
+        let (_dir, folder, store) = workshop("history-stopped");
+        std::fs::write(folder.join("letter.txt"), b"dear all").expect("fixture");
+
+        store.stop_switch().stop();
+        assert!(
+            store.capture(&folder, Moment::Before).is_err(),
+            "a copy that did not finish must not answer as though it had"
+        );
+        assert!(
+            store.latest().expect("reads").is_none(),
+            "a stopped copy leaves no checkpoint to be judged against"
+        );
     }
 
     #[test]

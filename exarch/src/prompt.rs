@@ -45,7 +45,14 @@ pub fn assemble(
             read_files(files)?
         },
     ));
-    sections.push((Some("Ral"), include_str!("../data/ral.md").into()));
+    sections.push((
+        Some("Ral"),
+        format!(
+            "{}\n{}",
+            include_str!("../data/ral.md"),
+            include_str!("../data/ral-examples.md")
+        ),
+    ));
     sections.push((
         Some("Editing"),
         match edit {

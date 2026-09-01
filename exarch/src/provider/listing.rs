@@ -151,7 +151,7 @@ impl Listing {
 mod tests {
     use super::*;
     use crate::provider::identity::{Account, ServiceName, built_in};
-    use crate::sync::LockExt;
+    use ral_core::sync::LockExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;

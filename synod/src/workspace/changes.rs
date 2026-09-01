@@ -1,6 +1,7 @@
 //! What a job changed: the difference between two manifests.
 
 use crate::workspace::manifest::{ContentHash, EntryKind, Manifest};
+use crate::workspace::restore::covers;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -48,12 +49,27 @@ pub struct ChangeSet {
 impl ChangeSet {
     /// Diff `after` against `before`.  A deleted and a created file with
     /// the same content hash pair up as a rename, in path order.
+    ///
+    /// A path covered by either manifest's `unread` is left out of the
+    /// diff entirely: a partial `before` cannot manufacture a creation, and
+    /// a partial `after` cannot manufacture a deletion.
     pub fn between(before: &Manifest, after: &Manifest) -> Self {
+        let unreadable = |path: &str| {
+            before
+                .unread
+                .iter()
+                .chain(&after.unread)
+                .any(|root| covers(path, root))
+        };
+
         let mut changes = Vec::new();
         let mut deleted: Vec<(&str, &EntryKind)> = Vec::new();
         let mut created: Vec<(&str, &EntryKind)> = Vec::new();
 
         for (path, kind) in &before.entries {
+            if unreadable(path) {
+                continue;
+            }
             match after.entries.get(path) {
                 None => deleted.push((path, kind)),
                 Some(now) if now != kind => changes.push(Change::Modified { path: path.clone() }),
@@ -61,7 +77,7 @@ impl ChangeSet {
             }
         }
         for (path, kind) in &after.entries {
-            if !before.entries.contains_key(path) {
+            if !before.entries.contains_key(path) && !unreadable(path) {
                 created.push((path, kind));
             }
         }
@@ -123,6 +139,7 @@ mod tests {
                 .iter()
                 .map(|(path, kind)| ((*path).to_string(), kind.clone()))
                 .collect(),
+            unread: Vec::new(),
         }
     }
 
@@ -169,6 +186,70 @@ mod tests {
             vec![Change::Renamed {
                 from: "drafts/offer.docx".into(),
                 to: "sent/offer.docx".into(),
+            }]
+        );
+    }
+
+    /// The invariant the whole change exists for: a `before` that could
+    /// not read a subtree must not turn that subtree's files, present in
+    /// `after`, into reported creations.
+    #[test]
+    fn a_subtree_unread_in_before_is_not_reported_created_in_after() {
+        let mut before = manifest(&[("kept.txt", file(b"same"))]);
+        before.unread = vec!["scans".to_string()];
+        let after = manifest(&[
+            ("kept.txt", file(b"same")),
+            ("scans", EntryKind::Folder),
+            ("scans/photo.jpg", file(b"a photo")),
+        ]);
+
+        let set = ChangeSet::between(&before, &after);
+        assert!(
+            set.changes.is_empty(),
+            "an unread subtree must not manufacture creations: {:?}",
+            set.changes
+        );
+    }
+
+    /// The mirror case: a subtree unread in `after` must not turn its
+    /// files, present in `before`, into reported deletions.
+    #[test]
+    fn a_subtree_unread_in_after_is_not_reported_deleted_in_before() {
+        let before = manifest(&[
+            ("kept.txt", file(b"same")),
+            ("scans", EntryKind::Folder),
+            ("scans/photo.jpg", file(b"a photo")),
+        ]);
+        let mut after = manifest(&[("kept.txt", file(b"same"))]);
+        after.unread = vec!["scans".to_string()];
+
+        let set = ChangeSet::between(&before, &after);
+        assert!(
+            set.changes.is_empty(),
+            "an unread subtree must not manufacture deletions: {:?}",
+            set.changes
+        );
+    }
+
+    /// Only the unread subtree is suppressed; an ordinary change elsewhere
+    /// in the same diff still reports.
+    #[test]
+    fn suppression_is_scoped_to_the_unread_key() {
+        let mut before = manifest(&[
+            ("edited.txt", file(b"old")),
+            ("scans/photo.jpg", file(b"a photo")),
+        ]);
+        before.unread = vec!["scans".to_string()];
+        let after = manifest(&[
+            ("edited.txt", file(b"new")),
+            ("scans/photo.jpg", file(b"a photo")),
+        ]);
+
+        let set = ChangeSet::between(&before, &after);
+        assert_eq!(
+            set.changes,
+            vec![Change::Modified {
+                path: "edited.txt".into(),
             }]
         );
     }

@@ -14,7 +14,7 @@ use super::post::{Boundary, Minted, Source, Stamped, is_slash};
 use super::{Item, Post};
 use crate::agent::cancel;
 use crate::fleet::schedule::ScheduleId;
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};

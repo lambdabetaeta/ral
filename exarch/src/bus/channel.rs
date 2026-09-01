@@ -18,7 +18,7 @@
 use super::AgentId;
 use crate::bus::signal::Signal;
 use crate::record::Transient;
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SendError, TryRecvError};

@@ -38,7 +38,8 @@ pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
 use crate::agent::cancel;
 use crate::record::model::Transcript;
-use credential::Credential;
+use credential::{Credential, CredentialStore};
+use models::{LiveSource, ModelCatalog};
 use std::sync::Arc;
 use transport::Transport;
 
@@ -188,6 +189,26 @@ impl Provider {
             Backend::Scripted(script) => script.summarize(&self.model),
         }
     }
+}
+
+/// Admit a freshly signed-in `ChatGPT` token to the live store and catalog.
+///
+/// Returns who it now is and what it is now called — the same order for every
+/// front-end, since which store an account lands in and its label are provider
+/// facts. The id comes back as well as the label because a label answers only
+/// *which of the accounts on offer*, and a caller asking whether this is the
+/// account it already holds is asking about identity, not about display.
+pub fn admit_login(
+    store: &mut CredentialStore,
+    catalog: &mut ModelCatalog<LiveSource>,
+    token: &oauth::OAuthToken,
+) -> (AccountId, String) {
+    let (account, credential) = store.add_oauth(token);
+    // The store's name for it, which says which account when two share an email.
+    let label = identity::label(&account, &store.available());
+    let id = account.id.clone();
+    catalog.add_credential(account, credential);
+    (id, label)
 }
 
 #[cfg(test)]

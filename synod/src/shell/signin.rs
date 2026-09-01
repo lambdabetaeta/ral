@@ -18,6 +18,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use ral_core::sync::LockExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager, State};
 
@@ -61,12 +62,12 @@ pub enum SignInDone {
 pub fn sign_in(
     app: AppHandle,
     state: State<'_, SignIn>,
-    accounts: State<'_, crate::Accounts>,
+    accounts: State<'_, super::Accounts>,
 ) -> Result<(), String> {
-    accounts.0.as_ref().map_err(Clone::clone)?;
+    accounts.resolved()?;
 
     let cancel = {
-        let mut held = guard(&state);
+        let mut held = state.0.lock_ignore_poison();
         if held.is_some() {
             return Err("A sign-in is already in progress.".to_string());
         }
@@ -76,8 +77,8 @@ pub fn sign_in(
     };
 
     std::thread::spawn(move || {
-        let accounts = app.state::<crate::Accounts>();
-        let Ok((store, catalog)) = &accounts.0 else {
+        let accounts = app.state::<super::Accounts>();
+        let Ok((store, catalog)) = accounts.resolved() else {
             // Refused above, before this thread was ever spawned.
             return;
         };
@@ -105,10 +106,7 @@ pub fn sign_in(
                 // fetched there is nothing the account could answer with.
                 // The window is told it is signed in once it is signed in
                 // *and* has something to say it with.
-                let _ = app.emit(
-                    "models-refreshed",
-                    synod::session::refresh_menu(store, catalog),
-                );
+                super::refresh_menu_now(&app);
                 SignInDone::SignedIn {
                     label: signed_in.label,
                     replaced: signed_in.replaced,
@@ -131,7 +129,7 @@ pub fn sign_in(
 /// lands is not an error.
 #[tauri::command]
 pub fn cancel_sign_in(state: State<'_, SignIn>) {
-    if let Some(cancel) = guard(&state).as_ref() {
+    if let Some(cancel) = state.0.lock_ignore_poison().as_ref() {
         cancel.store(true, Ordering::Release);
     }
 }
@@ -139,18 +137,8 @@ pub fn cancel_sign_in(state: State<'_, SignIn>) {
 /// Clear the in-flight marker, but only if it is still `cancel`'s own — a
 /// later attempt's flag is never cleared by an earlier attempt finishing.
 fn release(state: &SignIn, cancel: &Arc<AtomicBool>) {
-    let mut held = guard(state);
+    let mut held = state.0.lock_ignore_poison();
     if held.as_ref().is_some_and(|held| Arc::ptr_eq(held, cancel)) {
         *held = None;
     }
-}
-
-/// Lock the in-flight slot, recovering the guard even if a thread panicked
-/// while holding it — the same discipline the conversation slot keeps: a
-/// poisoned lock here must never leave the window unable to sign in.
-fn guard(state: &SignIn) -> std::sync::MutexGuard<'_, Option<Arc<AtomicBool>>> {
-    state
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

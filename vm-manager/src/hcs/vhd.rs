@@ -131,34 +131,50 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, S
         )
     })?;
 
-    // Written to a temporary name and renamed into place, so an interrupted
-    // launch never leaves a half-copied disk that a later one would attach.
-    let part = cache.join("rootfs.vhd.part");
     let bytes = if compressed {
-        inflate(image, &part)?
+        // No checksum verified here, and the reason is worth stating rather
+        // than leaving as an omission. The archive reaches this code from one
+        // of two places: an installation directory under `Program Files`,
+        // which only an administrator can write, or a checkout the
+        // maintainer built themselves. Windows Installer already validates
+        // its own cabinet at install time, so a download corrupted in
+        // transit fails the *install* rather than arriving here; and against
+        // someone who can rewrite `Program Files`, a hash shipped beside the
+        // file in the same directory proves nothing.
+        crate::media::inflate(image, &wrapped, None)?
     } else {
-        std::fs::copy(image, &part).map_err(|e| {
-            format!(
-                "the guest image could not be copied to {}: {e}",
-                part.display()
-            )
-        })?;
-        source.len()
+        // Written to a temporary name and renamed into place, so an
+        // interrupted launch never leaves a half-copied disk that a later
+        // one would attach.
+        let part = cache.join("rootfs.vhd.part");
+        let land = || -> Result<u64, String> {
+            std::fs::copy(image, &part).map_err(|e| {
+                format!(
+                    "the guest image could not be copied to {}: {e}",
+                    part.display()
+                )
+            })?;
+            std::fs::rename(&part, &wrapped).map_err(|e| {
+                format!(
+                    "the wrapped guest image could not be moved into place at {}: {e}",
+                    wrapped.display()
+                )
+            })?;
+            Ok(source.len())
+        };
+        land().inspect_err(|_| {
+            let _ = std::fs::remove_file(&part);
+        })?
     };
+
     let mut file = OpenOptions::new()
         .write(true)
-        .open(&part)
-        .map_err(|e| format!("{} could not be opened: {e}", part.display()))?;
+        .open(&wrapped)
+        .map_err(|e| format!("{} could not be opened: {e}", wrapped.display()))?;
     let disk = pad_to_sector(&file, bytes)?;
     append_footer(&mut file, disk)?;
     drop(file);
 
-    std::fs::rename(&part, &wrapped).map_err(|e| {
-        format!(
-            "the wrapped guest image could not be moved into place at {}: {e}",
-            wrapped.display()
-        )
-    })?;
     std::fs::write(&marker, &stamp).map_err(|e| {
         format!(
             "the guest image was wrapped but its marker {} could not be written: {e}",
@@ -166,57 +182,6 @@ pub(super) fn ensure_rootfs_vhd(image: &Path, cache: &Path) -> Result<PathBuf, S
         )
     })?;
     Ok(wrapped)
-}
-
-/// Decompress the zstd `archive` into `out`, returning how many bytes came out.
-///
-/// The inflated length is what the caller needs and what nothing else can
-/// supply: a zstd frame's header may carry the decompressed size but is not
-/// required to, so the only honest answer is the one counted while writing.
-/// That count then becomes the disk's size in the footer, which is why it is
-/// returned rather than measured afterwards.
-///
-/// No checksum is verified here, and the reason is worth stating rather than
-/// leaving as an omission.  The archive reaches this code from one of two
-/// places: an installation directory under `Program Files`, which only an
-/// administrator can write, or a checkout the maintainer built themselves.
-/// Windows Installer already validates its own cabinet at install time, so a
-/// download corrupted in transit fails the *install* rather than arriving here;
-/// and against someone who can rewrite `Program Files`, a hash shipped beside
-/// the file in the same directory proves nothing.
-///
-/// # Errors
-/// Returns a sentence naming the archive if it cannot be opened, is not a zstd
-/// stream, or cannot be written out.
-fn inflate(archive: &Path, out: &Path) -> Result<u64, String> {
-    let source = File::open(archive).map_err(|e| {
-        format!(
-            "the guest image {} could not be opened: {e}",
-            archive.display()
-        )
-    })?;
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(source))
-        .map_err(|e| format!("the guest image {} is not readable: {e}", archive.display()))?;
-    let file = File::create(out).map_err(|e| {
-        format!(
-            "the guest image could not be written to {}: {e}",
-            out.display()
-        )
-    })?;
-    let mut sink = std::io::BufWriter::new(file);
-    let bytes = std::io::copy(&mut decoder, &mut sink).map_err(|e| {
-        format!(
-            "the guest image {} could not be unpacked: {e}",
-            archive.display()
-        )
-    })?;
-    sink.flush().map_err(|e| {
-        format!(
-            "the guest image {} could not be written: {e}",
-            out.display()
-        )
-    })?;
-    Ok(bytes)
 }
 
 /// Make one session's empty read-write disk in `dir`.

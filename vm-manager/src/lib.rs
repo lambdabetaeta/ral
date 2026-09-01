@@ -54,6 +54,7 @@ use serde::{Deserialize, Serialize};
 pub mod broker;
 #[cfg(windows)]
 pub mod hcs;
+pub mod media;
 #[cfg(target_os = "macos")]
 pub mod vz;
 
@@ -156,6 +157,18 @@ impl MachineSpec {
         }
     }
 }
+
+/// The zstd window the shipped rootfs archive is written with, and so the
+/// largest a decoder of it must be willing to allocate.
+///
+/// `vm-image/build.sh` compresses with `--long=27`, and a decoder that will
+/// not allocate 128 MiB cannot read the result at all.  `ruzstd` defaults to
+/// a 100 MiB ceiling — a sound guard against a hostile stream naming a window
+/// far larger than it needs, and one that this archive, written by our own
+/// pipeline, sits just above.  So the ceiling is raised to exactly what the
+/// pipeline writes and no further: still a bound, but one that admits the
+/// only archive it is ever pointed at.
+pub const ROOTFS_WINDOW: u64 = 1 << 27;
 
 /// The kernel, initramfs, and rootfs image a hardware machine boots from.
 ///

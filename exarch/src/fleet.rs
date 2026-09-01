@@ -28,7 +28,7 @@ pub mod roster;
 pub mod schedule;
 
 use crate::agent::Agent;
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use ral_core::process::{self, CancelCause};
 use std::collections::HashMap;
 use std::fmt;

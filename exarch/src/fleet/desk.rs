@@ -16,7 +16,7 @@ use crate::fleet::schedule::{CronSchedule, Trigger, parse_duration};
 use crate::fleet::{Fleet, check_name, roster::listing};
 use crate::record::commit::SurfaceBuffer;
 use crate::shell_eval::{self, PinDigests, Surface};
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
 use ral_core::protocol::{EnquiryError, Host};

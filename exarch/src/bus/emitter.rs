@@ -5,7 +5,7 @@ use super::AgentId;
 use super::channel::{BusReceiver, BusSender, channel};
 use super::inbox::{Inbox, Mailbox};
 use crate::provider::Usage;
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use std::sync::{Arc, Mutex};
 
 /// A usage accumulator shared by every emitter of one run — where a

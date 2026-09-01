@@ -140,7 +140,7 @@ uu_tac       = { version = "0.10", optional = true }
 [target.'cfg(windows)'.dependencies]
 ctrlc        = "3"
 # Path -> capability-name digest for the sandbox's persistent DACL stamps.
-sha2         = "0.11"
+sha2         = { workspace = true }
 windows-sys  = { workspace = true, features = [
     "Win32_Foundation",
     # WSAPoll — the readability primitive `wire::WireChannel::poll_readable`

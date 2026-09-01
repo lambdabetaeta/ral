@@ -99,6 +99,18 @@ pub async fn ensure_loaded() {
         .await;
 }
 
+/// [`ensure_loaded`] for a caller with no async runtime of its own.
+///
+/// A throwaway current-thread one, on the same reasoning as
+/// [`super::models::blocking_runtime`]'s callers. Best effort: a runtime
+/// that fails to build just leaves the catalog unloaded, which every reader
+/// here already treats as a miss.
+pub fn ensure_loaded_blocking() {
+    if let Ok(runtime) = super::models::blocking_runtime("pricing") {
+        runtime.block_on(ensure_loaded());
+    }
+}
+
 /// Catalog pricing for `model`, `None` before [`ensure_loaded`] finishes or on
 /// a miss.  A caller that knows the wire adapter wants [`lookup_for`], which
 /// routes `DeepSeek` away from the catalog.

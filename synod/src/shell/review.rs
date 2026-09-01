@@ -15,9 +15,10 @@
 //! choice retries with [`Resolution::PutBack`].  The library keeps the
 //! newer bytes first either way, so no click here destroys anything.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use ral_core::sync::LockExt;
 use serde::Serialize;
 use synod::workspace::restore::covers;
 use synod::workspace::{self, Change, EntryKind, HistoryStore, Resolution, RestoreOutcome};
@@ -44,7 +45,6 @@ pub enum ChangeStatus {
 
 /// One changed file, as one card on the report screen.
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ChangeFile {
     /// The handle the undo commands name the card by — the path as the
     /// report shows it, which the library resolves even across a rename.
@@ -68,15 +68,28 @@ pub struct ChangeFile {
 
 /// The whole payload the report screen renders.
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct WindowReport {
     pub files: Vec<ChangeFile>,
+    /// Paths synod could not read while taking one of the two checkpoints
+    /// this report compares, so nothing about them could be shown above.
+    pub unreadable: Vec<String>,
+}
+
+/// What [`job_report`] last found, kept so undo outcomes can be folded
+/// into the card list without losing the report's other facts.
+struct Held {
+    /// The folder this report was taken from — checked against every later
+    /// call's own `folder`, so a stale or mismatched frontend can never
+    /// fold an undo into a report from a different job.
+    folder: PathBuf,
+    files: Vec<ChangeFile>,
+    unreadable: Vec<String>,
 }
 
 /// The card list the window is showing, kept so undo outcomes can be
 /// folded into it.
 #[derive(Default)]
-pub struct Review(Mutex<Option<Vec<ChangeFile>>>);
+pub struct Review(Mutex<Option<Held>>);
 
 /// What the folder's last job changed, as cards.
 ///
@@ -117,8 +130,13 @@ pub fn job_report(review: State<'_, Review>, folder: String) -> Result<WindowRep
         })
         .collect();
 
-    *lock(&review) = Some(files.clone());
-    Ok(WindowReport { files })
+    let unreadable = report.unreadable;
+    *review.0.lock_ignore_poison() = Some(Held {
+        folder,
+        files: files.clone(),
+        unreadable: unreadable.clone(),
+    });
+    Ok(WindowReport { files, unreadable })
 }
 
 /// Put one file — or, through a rename, its pair of names — back the way
@@ -135,6 +153,7 @@ pub fn undo_file(
     force: bool,
 ) -> Result<WindowReport, String> {
     let folder = PathBuf::from(folder);
+    check_folder(&review, &folder)?;
     let store = HistoryStore::open_for(&folder)?;
     let outcome = workspace::undo_file(&store, &folder, &id, resolution(force))?;
     absorb(&review, &outcome)
@@ -153,6 +172,7 @@ pub fn undo_all(
     force: bool,
 ) -> Result<WindowReport, String> {
     let folder = PathBuf::from(folder);
+    check_folder(&review, &folder)?;
     let store = HistoryStore::open_for(&folder)?;
     let outcome = workspace::undo_all(&store, &folder, resolution(force))?;
     absorb(&review, &outcome)
@@ -166,8 +186,14 @@ pub fn undo_all(
 /// A plain sentence when there is no recorded earlier version, or the
 /// copy cannot be made or opened.
 #[tauri::command]
-pub fn open_earlier(app: AppHandle, folder: String, path: String) -> Result<(), String> {
+pub fn open_earlier(
+    app: AppHandle,
+    review: State<'_, Review>,
+    folder: String,
+    path: String,
+) -> Result<(), String> {
     let folder = PathBuf::from(folder);
+    check_folder(&review, &folder)?;
     let store = HistoryStore::open_for(&folder)?;
     let Some((before, _)) = store.latest_job()? else {
         return Err("Synod has no record of this folder before the job.".to_string());
@@ -175,9 +201,7 @@ pub fn open_earlier(app: AppHandle, folder: String, path: String) -> Result<(), 
     match before.manifest.entries.get(&path) {
         Some(EntryKind::File { hash, .. }) => {
             let bytes = store.read_object(hash)?;
-            let dest = std::env::temp_dir()
-                .join(format!("synod-earlier-{}", std::process::id()))
-                .join(&path);
+            let dest = store.scratch_dir()?.join(&path);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Could not set out the earlier version: {e}"))?;
@@ -191,6 +215,24 @@ pub fn open_earlier(app: AppHandle, folder: String, path: String) -> Result<(), 
         )),
         None => Err(format!("There was nothing called {path} before the job.")),
     }
+}
+
+/// Refuse a call whose `folder` does not match the one [`job_report`] last
+/// held — the window always sends `state.folder`, so a mismatch means the
+/// window and the shell have drifted apart on which folder is live.
+fn check_folder(review: &Review, folder: &Path) -> Result<(), String> {
+    let guard = review.0.lock_ignore_poison();
+    let result = match guard.as_ref() {
+        None => Err("There is no job report open.".to_string()),
+        Some(held) if held.folder == folder => Ok(()),
+        Some(held) => Err(format!(
+            "The open report is for {}, not {} — refusing to act on a different folder.",
+            held.folder.display(),
+            folder.display()
+        )),
+    };
+    drop(guard);
+    result
 }
 
 fn resolution(force: bool) -> Resolution {
@@ -207,12 +249,12 @@ fn resolution(force: bool) -> Resolution {
 /// folder with the outcome's path inside it.  A conflict outranks being
 /// partly done: the card stays in place and asks.
 fn absorb(review: &Review, outcome: &RestoreOutcome) -> Result<WindowReport, String> {
-    let mut held = lock(review);
-    let files = held
+    let mut guard = review.0.lock_ignore_poison();
+    let held = guard
         .as_mut()
         .ok_or_else(|| "There is no job report open.".to_string())?;
 
-    for file in files.iter_mut() {
+    for file in &mut held.files {
         let mut names = vec![file.path.as_str()];
         if let Some(from) = &file.rename_from {
             names.push(from.as_str());
@@ -226,18 +268,9 @@ fn absorb(review: &Review, outcome: &RestoreOutcome) -> Result<WindowReport, Str
         }
     }
     let report = WindowReport {
-        files: files.clone(),
+        files: held.files.clone(),
+        unreadable: held.unreadable.clone(),
     };
-    drop(held);
+    drop(guard);
     Ok(report)
-}
-
-/// Lock the card list, recovering the guard even if a command thread
-/// panicked while holding it — the window should hear a sentence, not
-/// hang.
-fn lock(review: &Review) -> std::sync::MutexGuard<'_, Option<Vec<ChangeFile>>> {
-    review
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

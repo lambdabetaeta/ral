@@ -30,6 +30,7 @@ use exarch::provider::credential::{Credential, CredentialStore, NO_AUTH_PLACEHOL
 use exarch::provider::identity::{self, Auth, Service};
 use exarch::provider::keychain::Keychain;
 use exarch::provider::models::{LiveSource, ModelCatalog};
+use ral_core::sync::LockExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -75,7 +76,7 @@ pub fn prepare() -> Result<CredentialStore, String> {
 /// already carry on its face, since only the store knows which of its doors a
 /// key came through.
 #[derive(serde::Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
 pub enum Source {
     /// No credential at all — the row is known but keyless.
     None,
@@ -91,7 +92,6 @@ pub enum Source {
 
 /// One row of the accounts screen.
 #[derive(serde::Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct Account {
     /// The identifier command payloads name this row by — an `AccountId`
     /// rendering, resolved back through [`exarch::provider::accounts::find`].
@@ -120,7 +120,6 @@ pub struct Account {
 /// The accounts screen: every service, whether or not it has a key, and a
 /// plain sentence naming where a key typed here would be kept.
 #[derive(serde::Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct AccountList {
     pub accounts: Vec<Account>,
     /// "the macOS Keychain", "the Windows Credential Manager", or the
@@ -134,7 +133,7 @@ pub struct AccountList {
 /// signed-in `ChatGPT` accounts, then declared endpoints.
 pub fn list(store: &Mutex<CredentialStore>) -> AccountList {
     let accounts = {
-        let store = lock(store);
+        let store = store.lock_ignore_poison();
         let available = store.available();
         store
             .known()
@@ -232,7 +231,7 @@ pub fn set_key(
     key: &str,
 ) -> Result<(), String> {
     let (account, display) = {
-        let store = lock(store);
+        let store = store.lock_ignore_poison();
         let account = find(&store, id)?;
         let available = store.available();
         drop(store);
@@ -241,8 +240,8 @@ pub fn set_key(
     };
     let key = checked_key(&display, key)?;
     KEYCHAIN.store(account.id.as_str(), &key)?;
-    let credential = lock(store).admit_key(&account, key);
-    lock(catalog).add_credential(account, credential);
+    let credential = store.lock_ignore_poison().admit_key(&account, key);
+    catalog.lock_ignore_poison().add_credential(account, credential);
     Ok(())
 }
 
@@ -260,9 +259,9 @@ pub fn set_key(
 /// Returns a plain sentence if no such account is known, or if the
 /// credential manager would not give the key up.
 pub fn forget_key(store: &Mutex<CredentialStore>, id: &str) -> Result<(), String> {
-    let account = find(&lock(store), id)?;
+    let account = find(&store.lock_ignore_poison(), id)?;
     KEYCHAIN.forget(account.id.as_str())?;
-    lock(store).forget(&account.id);
+    store.lock_ignore_poison().forget(&account.id);
     Ok(())
 }
 
@@ -281,7 +280,7 @@ pub fn add_endpoint(
     protocol: &str,
     key: Option<&str>,
 ) -> Result<(), String> {
-    let service = declare_endpoint(&lock(store), name, endpoint, protocol, LABEL)?;
+    let service = declare_endpoint(&store.lock_ignore_poison(), name, endpoint, protocol, LABEL)?;
 
     // Checked before a line is written: a key refused after the declaration
     // was saved would leave the service in the file and unusable.
@@ -290,7 +289,7 @@ pub fn add_endpoint(
         None => None,
     };
 
-    let mut declared = declared_endpoints(&lock(store));
+    let mut declared = declared_endpoints(&store.lock_ignore_poison());
     declared.push(service.clone());
     declared.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
     config::save_declared(&declarations_path(), &declared, LABEL)?;
@@ -305,8 +304,8 @@ pub fn add_endpoint(
         }
         None => NO_AUTH_PLACEHOLDER.to_string(),
     };
-    let credential = lock(store).admit_key(&account, secret);
-    lock(catalog).add_credential(account, credential);
+    let credential = store.lock_ignore_poison().admit_key(&account, secret);
+    catalog.lock_ignore_poison().add_credential(account, credential);
     Ok(())
 }
 
@@ -320,7 +319,7 @@ pub fn add_endpoint(
 /// credential manager refused the write.
 pub fn forget_endpoint(store: &Mutex<CredentialStore>, id: &str) -> Result<(), String> {
     let declared = {
-        let mut store = lock(store);
+        let mut store = store.lock_ignore_poison();
         withdraw_endpoint(&mut store, id)?;
         declared_endpoints(&store)
     };
@@ -328,8 +327,4 @@ pub fn forget_endpoint(store: &Mutex<CredentialStore>, id: &str) -> Result<(), S
     // `id` is the account id's own rendering — `withdraw_endpoint` resolved
     // it — and the vault entry is named by exactly that string.
     KEYCHAIN.forget(id)
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }

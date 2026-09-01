@@ -4,7 +4,7 @@ Like every shell, `ral` runs commands:
     cat foo.txt | wc -l
     echo "hello" > /tmp/out
 
-Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failure aborts the whole script: `./configure; make` runs `make` only when configuration succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#` (there is no `||`). There is no trailing `&` either: background work is `defer { … }`, below.
+Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failure aborts the whole script: `mkdir out; cp notes.txt out/` runs `cp` only when `mkdir` succeeds. `?` runs the second command when the first failed: `cat VERSION ? #'unversioned'#` (there is no `||`). There is no trailing `&` either: background work is `defer { … }`, below.
 
 `ral` is essentially call-by-push-value with recursion, recursive types, and one effect: an exec call. Its value types are `Unit`, `Bool`, `Int`, `Float`, String, Bytes, lists, records, maps, variants, thread handles, and blocks (= parameterized, thunked commands). A command may not be used as a value. Should you wish to use one inline, you must make it into an anonymous block and force it: `!{cmd}`.
 
@@ -12,10 +12,10 @@ Commands are sequenced by newlines or `;` (there is no `&&`). An uncaught failur
 
 `let x = 42` defines `x` to be `42`. Use it as `$x`. When used with a command it captures stdout:
 
-    let branch = git branch --show-current
-    let body   = from-string < notes.txt
-    let n      = line-count notes.txt
-    echo "$branch has $n lines of notes"
+    let today = date +%F
+    let body  = from-string < notes.txt
+    let n     = line-count notes.txt
+    echo "notes.txt ($n lines) as of $today"
 
 <critical>
 Bound variables are **AVAILABLE IN EVERY TURN, FOR THE REST OF THE SESSION**. **YOU DO NOT NEED TO RE-DEFINE THEM IN THE NEXT TURN, JUST USE THEM AGAIN.** In the following turn do NOT re-bind `n`, just use it again:
@@ -23,7 +23,7 @@ Bound variables are **AVAILABLE IN EVERY TURN, FOR THE REST OF THE SESSION**. **
     echo "notes.txt now has !{line-count notes.txt} while it had $n before"
 </critical>
 
-Captured stdout from an external command is a `String`; ral heads may instead return structured values. For example, `let text = git log --oneline` binds a `String`, while `let n = line-count $file` binds an `Int` and `let files = list-dir #'.'#` binds a list. Split captured text explicitly with `lines $text`, and parse numeric text with `int $text` or `float $text`.
+Captured stdout from an external command is a `String`; ral heads may instead return structured values. For example, `let text = cat notes.txt` binds a `String`, while `let n = line-count $file` binds an `Int` and `let files = list-dir #'.'#` binds a list. Split captured text explicitly with `lines $text`, and parse numeric text with `int $text` or `float $text`.
 
 Top-level value names may not collide with commands reachable on `PATH`. Avoid names such as `head`, `tail`, `test`, and `date`; prefer descriptive names such as `commit-sha`, `tag-lines`, and `release-date`.
 
@@ -48,7 +48,7 @@ Blocks may take space-separated, lexically-scoped, curried parameters:
 
 Blocks can be used with higher-order functions, such as `map`, `filter`, `each`, `fold`, ...:
 
-    map { |f| line-count $f } !{glob #'src/**/*.rs'#}
+    map { |f| line-count $f } !{glob #'**/*.txt'#}
     filter { |h| re-match #'^src/'# $h[file] } $hits
     fold { |acc x| $[$acc + $x[size]] } 0 !{list-dir #'.'#}
     for $hits { |h| echo "$h[file]:$h[line]" }
@@ -67,8 +67,8 @@ Blocks support recursive definitions.
 
 Codecs bridge bytes to values: `from-line` takes `Bytes` to a `String` with no trailing `\n`, and `from-string` with it; `from-lines` gives a lazy stream of `String`; `from-json` turns JSON bytes into a `ral` value:
 
-    let cfg = curl -s https://api.example.com/cfg | from-json
-    let os  = !{uname -s | from-line}
+    let cfg   = curl -s https://api.example.com/cfg | from-json
+    let first = !{head -n1 notes.txt | from-line}
 
 There are also corresponding `to-line`, `to-string`, `to-lines`, `to-json` that take values to bytes. Text decoders require UTF-8; use `from-bytes` when bytes are not text. 
 
@@ -76,40 +76,40 @@ Decoders read from the byte channel.  To decode bytes in a definition, use `byte
 
 `from-lines` yields a lazy stream, which no function iterates implicitly. A decoder ends the byte pipeline, so its resulting stream is a value: bind or force it, then pass it to a stream eliminator:
 
-    let stream  = !{git log | from-lines}
-    let commits = stream-to-list $stream
+    let stream  = !{cat access.log | from-lines}
+    let entries = stream-to-list $stream
 
-Do not write `git log | from-lines | stream-to-list`: the second pipe expects bytes, but `from-lines` has already produced a ral value. For small finite output, prefer `lines`; `from-lines-list PATH` reads a file directly as a materialised list of lines:
+Do not write `cat access.log | from-lines | stream-to-list`: the second pipe expects bytes, but `from-lines` has already produced a ral value. For small finite output, prefer `lines`; `from-lines-list PATH` reads a file directly as a materialised list of lines:
 
-    let commits = lines !{git log --oneline -5 | from-string}
-    let src     = from-lines-list #'src/main.rs'#
+    let recent = lines !{tail -n5 access.log | from-string}
+    let src    = from-lines-list #'notes.txt'#
 
 ## Audit
 
-`audit { … }` evaluates its body and returns a report with four fields: exit `status`, the ral `value` the body returned, an `error` string, and `children`. `children` is a flat list of exec calls the body made, including its `argv`, exit `status`, `stdout` and `stderr`. `audit` turns any errors into record data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is data, e.g. `grep` exit 1 meaning no match, or a `valgrind --error-exitcode=77`:
+`audit { … }` evaluates its body and returns a report with four fields: exit `status`, the ral `value` the body returned, an `error` string, and `children`. `children` is a flat list of exec calls the body made, including its `argv`, exit `status`, `stdout` and `stderr`. `audit` turns any errors into record data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is data, e.g. `grep` exit 1 meaning no match:
 
-    let r      = audit { valgrind --error-exitcode=77 --leak-check=full ./a.out }
+    let r      = audit { grep -c ERROR app.log }
     let report = bytes-to-string $r[children][0][stdout]
-    if $[ $r[status] == 77 ] { "leaks:\n$report" } else { #'clean'# }
+    if $[ $r[status] == 1 ] { #'no matches'# } else { $report }
 
 ## Running several commands
 
-If an exec call in a script fails, it aborts the script. This may be stopped by wrapping a call in `audit { … }`. For example, to see if three binaries exist and what status they return:
+If an exec call in a script fails, it aborts the script. This may be stopped by wrapping a call in `audit { … }`. For example, to see if three tools exist and what status they return:
 
-    let probe = audit { attempt { git --version }; attempt { cmake --version }; attempt { nvcc --version } }
+    let probe = audit { attempt { cat --version }; attempt { sed --version }; attempt { python3 --version } }
     map { |c| [tool: $c[argv][0], status: $c[status]] } $probe[children]
 
 One row per command, each with its own `argv`, `status`, `stdout` and `stderr`; always prefer this to one blob of text you must re-parse. `succeeds` answers a bare true/false:
 
-    map { |t| [tool: $t, ok: !{succeeds { which $t > /dev/null }}] } [#'git'#, #'cmake'#]
+    let has_python = !{succeeds { python3 --version > /dev/null }}
 
 When what you want is the merged text of every step, put the block on the byte channel — a pipe or a redirect takes what *every* part writes:
 
-    let steps = { attempt { make }; attempt { make test } }
+    let steps = { attempt { sort in.txt > sorted.txt }; attempt { wc -l sorted.txt } }
     let text  = !$steps | from-string     # every step's stdout, as one String
-    !$steps > build.log                   # or straight to a file
+    !$steps > log.txt                     # or straight to a file
 
-Beware: `let text = !$steps` only binds the *final* command's stdout (i.e. `make test`), dropping the stdout of earlier steps. Reach for `| from-string` whenever a block has more than one part.
+Beware: `let text = !$steps` only binds the *final* command's stdout (i.e. `wc -l sorted.txt`), dropping the stdout of earlier steps. Reach for `| from-string` whenever a block has more than one part.
 
 In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallback, `2>` and `>` redirect, and `within [dir: …]` changes directory. Do not use `sh -c`, as e.g. `sh -c 'a; b; c'` payload throws away what `ral` would have told you — three commands collapse into one opaque child with one undifferentiated stdout, and a failure in the middle becomes invisible.
 
@@ -117,7 +117,7 @@ In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallbac
 
 - Double quotes may be used to interpolate variables, fields, and forces:
 
-      echo "hi $first-name $(last-name): $h[file] line $h[line], host !{hostname | from-line}, sum $[2 + 3]"
+      echo "hi $first-name $(last-name): $h[file] line $h[line], today !{date +%F | from-line}, sum $[2 + 3]"
 
   `$(name)` delimits variables from post-fixes that do not belong to them. A composite path must be one quoted word: `echo hi > "$dir/file"`.
 
@@ -126,7 +126,7 @@ In summary: `;` sequences, `attempt` tolerates a failure, `?` supplies a fallbac
 
   A raw string is also how an argument thick with metacharacters reaches an external tool: ral passes it through as one word, untouched, so a `sed` script needs no escaping at all and there is never a reason to hand it to a shell instead.
 
-      sed -i #'s|^INCLUDE_DIRS := $(PYTHON_INCLUDE)|INCLUDE_DIRS := /usr/include/opencv4|'# Makefile.config
+      sed -i #'s|^old_value$|new_value|'# config.txt
 
 - `dedent` strips the common leading indentation from a multiline string.
 - There are no `<<EOF` heredocs. `cmd << #'…'#` (space after `<<` required) feeds the string to `cmd`'s stdin (a stored string works too: `cmd << $body`). One newline at the very front of the string is dropped, so the body can start on the line under the command. Write a file with `echo #'…'# > path`.
@@ -198,17 +198,17 @@ A failed call ends a `ral` script, much like `set -euo pipefail` in `bash`.
 `try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `cmd`, `message`, `line`, `col`:
 
     let log =
-      try { make 2>&1 | from-string } { |err| 
-        "make failed: exited $err[status], $err[message]"
+      try { sort in.txt 2>&1 | from-string } { |err| 
+        "sort failed: exited $err[status], $err[message]"
       }
 
 The handler block must start on the same line as the body's closing brace — `} { |err| … }`. `$err[message]` is synthetic status text, not the failing command's stderr; wrap a failing call in `audit` when you need to see stdout.
 
-Do NOT use `try` for tools that report through their exit codes (`grep`, `diff`, `test`, `valgrind --error-exitcode`): wrap them in `audit` to read its output as data instead of raising, or `attempt { …  }` to merely suppress the error.
+Do NOT use `try` for tools that report through their exit codes (`grep`, `diff`, `test`): wrap them in `audit` to read its output as data instead of raising, or `attempt { …  }` to merely suppress the error.
 
 Prelude functions cover common cases:
 
-    if !{succeeds { cargo check -q }} { echo #'clean'# } else { echo ###'broken'### }
+    if !{succeeds { grep -q ERROR log.txt }} { echo #'clean'# } else { echo ###'broken'### }
     attempt { rm stale.lock }          # suppress any failure
     retry 3 { curl -s $url }           # up to 3 attempts
 
@@ -221,9 +221,9 @@ An error may be raised deliberately using e.g. `fail [status: 2, message: #'fail
 
 `defer { … }` runs its block on new thread, returning a handle at once. As a general rule you should `defer` all long work:
 
-    let b = { make } 
+    let b = { sort huge.txt > sorted.txt }
     let h = defer $b        # keep the handle!
-    ##'build started'##
+    ##'sort started'##
 
 If you truly have nothing else to do, `await` the handle with a long timeout.
 
@@ -241,7 +241,7 @@ Use `cancel $h` to stop a thread that is no longer required.
 
 `service` keeps work running for as long as this session lasts:
 
-    let h = service #'watch the test log'# { tail -f test.log }
+    let h = service #'watch the log file'# { tail -f app.log }
 
 The first argument is a description of the task; the second is a block to run as a server. `service-handle ID` can be used to acquire a durable worker's handle by its id, so you can `await` or `cancel` it if you have forgotten the binding.
 
@@ -249,7 +249,7 @@ Important: The lifetime of a `defer` or `service` ends when the session ends.
 
 Should you wish for a service that runs *after* the session is over, use `detach`: 
 
-    let d = within [dir: #'/app'#] { detach #'gRPC KV store on port 5328'# python server.py }
+    let d = within [dir: #'/data'#] { detach #'background export job'# python3 export.py }
 
 `detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling and killing can happen only through the OS. 
 
@@ -258,11 +258,11 @@ Should you wish for a service that runs *after* the session is over, use `detach
 `within` is an effect handler that runs a block with a changed directory, environment, or handling of a command call:
 
     within [dir: #'src'#] { grep-files ##'#TODO'## }
-    let h = defer { within [env: [RUST_LOG: #'debug'#]] { cargo run } }
+    let h = defer { within [env: [LOG_LEVEL: #'debug'#]] { convert-all } }
     within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| #'offline stub'# }]] { fetch-all }
     let all_blocked = { |name args| echo "blocked: $name ...$args" }
-    within [handler: $all_blocked ] { make deploy }
-    within [handlers: [ git: { |args| echo "git blocked" } ] ] { !$deploy }
+    within [handler: $all_blocked ] { run-all }
+    within [handlers: [ curl: { |args| echo "network blocked" } ] ] { !$job }
 
 A per-command `handlers:` entry is a one-arg function receiving argvs. The catch-all `handler:` is a two-arg function that intercepts EVERY external command.
 
@@ -290,9 +290,9 @@ Writing a multi-line file must use a raw string, ideally with many hashes:
 
 Use the following instead of `rg`/`find`/`ls` to search for files; all are `.gitignore` sensitive. 
 
-- `glob #'src/**/*.rs'#` — matching paths as a ral list; skips dot files. Spread into a command: `mv ...!{glob …} out/`.
+- `glob #'**/*.txt'#` — matching paths as a ral list; skips dot files. Spread into a command: `mv ...!{glob …} out/`.
 - `explore-dir n` — entries of the current directory to depth `n` as a `ral` list; `.gitignore`-aware
-- `grep-files #'fn \w+_test'#` — recursive grep of the current directory (Rust regex syntax); returns `ral` list of records `[file, line, text]`.
+- `grep-files #'TODO'#` — recursive grep of the current directory (Rust regex syntax); returns `ral` list of records `[file, line, text]`.
 - `fff #'query'#` — fuzzy file-name search (frecency-ranked) over the working tree, returning `[String]`. Use to find files by name without a glob pattern.
 - `list-dir`, `file-info`, `line-count`, `is-file`/`is-dir`/`exists` — structured metadata without parsing `ls`.
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 50388d83
-generated_at_date: 2026-08-29
+generated_at_commit: f3e0f09b
+generated_at_date: 2026-09-01
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/protocol.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
@@ -37,7 +37,10 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
 
 ## synod/ — the library
 
-- `lib.rs` — the crate doc names the five differences from exarch.
+- `lib.rs` — the crate doc names the five differences from exarch. Every
+  mutex here and in exarch is locked through `ral_core::sync::LockExt`, now
+  `pub` as the workspace's one poison policy — exarch's and synod's own
+  local copies of it are gone.
 - `build.rs` — the Tauri build, plus the one thing the bundle cannot check for
   itself: `boot_contract` reads `vm-image/out/boot/boot-manifest.txt` at the
   resource map's own path and puts it to `ral_daemon::boot::check_media`, so
@@ -53,7 +56,18 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   pipeline's `vm-image/out/`. `BootPlan::realise` inflates a shipped zstd
   rootfs into the XDG cache against its `sha256` sidecar — a signed bundle is
   read-only, so the cache is the only writable home the image has — and yields
-  a `vm_manager::BootArtifact`. What `session::begin` hands
+  a `vm_manager::BootArtifact`. The inflate is bounded by
+  `vm_manager::ROOTFS_WINDOW`, which is `vm-image/build.sh`'s `--long=27` read
+  from the other side: a decompressor unwilling to allocate the window the
+  compressor chose cannot read the archive at all, so the two must be raised
+  together. Both this inflate and the Windows broker's wrapping counterpart in
+  `hcs/vhd.rs` funnel through the one rootfs inflate,
+  `vm_manager::media::inflate(archive, out, verify: Option<&str>)` —
+  verification is a parameter rather than a second copy of the loop: this
+  caller passes the `sha256` sidecar as `verify`, `hcs/vhd.rs` passes `None`.
+  Both write to a `.part` renamed into place only on success, and remove it
+  on any failure, so a full disk is not left holding gigabytes it cannot
+  use. What `session::begin` hands
   `vm_manager::detect` is a `vm_manager::BootMedia` closure over `realise`,
   not the artifact itself.
 - `grant.rs` — the folder becomes a `ral_core::types::Capabilities`
@@ -62,29 +76,59 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
 - `prompt.rs` + `data/*.md` — the office persona and the office toolbox,
   assembled through exarch's own section renderer (`exarch::prompt::render`)
   and grant rendering (`exarch::prompt::grant_summary`), over a `host_section`
-  of synod's own that tells the agent guest truths only. Synod's base ends in
+  of synod's own that tells the agent guest truths only. The ral language
+  body itself is now exarch's shared `data/ral.md`, included verbatim
+  (`include_str!("../../exarch/data/ral.md")`), with synod's own
+  `data/ral-examples.md` supplying the per-product examples beside it —
+  exarch keeps its own `data/ral-examples.md` the same way for itself. One
+  set of rules, two sets of demonstrations. Synod's base ends in
   **Talking to the user** (`data/surface.md`); the shared exarch per-agent
   resolver then appends **Agent** to returning helpers, after that office
   guidance, while the conversing synod trunk receives no return section. The
   same resolver appends spawn guidance while the trunk or helper still has fuel,
   so synod's prompt composition stays on the shared construction rules.
 - `session.rs` — `Conversation`, one folder held open from first message to
-  last. `begin` opens the grant, boots the machine, and seats exarch's agent
-  on the wire the machine hands back (`exarch::agent::RootSeat::Wire` over
-  `Machine::take_wires`, attached at the guest's `/work`). `control_seat`
-  carries no platform condition at all: `take_wires` hands back each
-  platform's own owned handles and `ral_core::protocol::WireTransport::adopt`
-  takes either, so the protocol is one function
-  ([[design/engine-protocol|engine-protocol]]).
+  last, split by concern into `session.rs` itself plus
+  `session/{menu,signin,baseline,opening}.rs` (no `mod.rs`): `session.rs`
+  keeps `SYNOD`, `Choice`, `Conversation`, `seat_machine`, `unseat_machine`,
+  `select_account`, `control_seat`, `net_seat`, and `resolve_tuning`,
+  re-exporting the rest. `begin` opens the grant, boots the machine, and
+  seats exarch's agent on the wire the machine hands back
+  (`exarch::agent::RootSeat::Wire` over `Machine::take_wires`, attached at
+  the guest's `/work`) through `seat_machine` — the shared machine-seating
+  seam, with `unseat_machine` its inverse for `end`.
+  `synod/examples/boot-run.rs` calls both instead of reproducing them:
+  `unseat_machine(agent, dial) -> Box<dyn Machine>` enforces the
+  drop-agent → recover-machine → shutdown ordering by ownership, so the
+  wrong order is unrepresentable rather than merely discouraged.
+  `control_seat` carries no platform condition at all: `take_wires` hands
+  back each platform's own owned handles and
+  `ral_core::protocol::WireTransport::adopt` takes either, so the protocol
+  is one function ([[design/engine-protocol|engine-protocol]]).
   Before any of that, `begin` stat-measures the folder
-  (`workspace::manifest::measure`) and composes the large-folder warning —
-  including a free-space sentence off `workspace::history::free_bytes` —
-  before a single byte is read, then opens the store and spawns the
-  before-checkpoint on its own thread as a `Baseline`
-  (`Pending`/`Ready`/`Failed`/`Crashed`/`Settling`); `begin` never joins that
+  (`workspace::manifest::measure`) and asks, before a single byte is read,
+  whether the copy fits where the store would go
+  (`session/opening.rs`'s `no_room_for_copy`, off
+  `workspace::history::free_bytes_for`, which walks up to the nearest
+  directory that exists because no store is made yet). A copy that does not
+  fit is *not attempted*: the baseline is `Untaken`, no store is opened, and
+  `no_copy_line` tells the user in the opening that this conversation has no
+  undo — filling the disk to reach a safety net leaves the user worse off
+  than opening without one. A free figure this host cannot read counts as
+  room, so undo is never withheld on a number nobody could produce.
+  Otherwise `begin` opens the store and spawns the before-checkpoint on its
+  own thread as a `session/baseline.rs` `Baseline`
+  (`Pending`/`Ready`/`Failed`/`Crashed`/`Untaken`/`Settling`), with
+  `slow_copy_line` warning on size alone; `begin` never joins that
   thread itself, so the boot runs alongside the walk rather than after it and
   the conversation opens the moment the boot is done
   ([[decisions/260807_store-lives-as-long-as-the-conversation|store-lives-as-long-as-the-conversation]]).
+  A `Pending` baseline's capture thread is owned by a nested `PendingWalk`,
+  the one thing in `Baseline` that implements `Drop`: dropped unjoined —
+  `begin`'s error path, once `?` runs straight through rather than by way of
+  an explicit abandon — it stops and joins the walk itself and discards
+  whatever it produced, so no error path in `begin` can leave a capture
+  thread running past it.
   `exchange` settles the baseline first — joining the capture thread on its
   first call, every call after finding it already settled — before it drives
   anything, since the guest must never write into a folder whose baseline is
@@ -102,21 +146,30 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   promoted `pub` for exactly this reuse — and `RootConfig` carries a
   `Dial` implementation over `Machine::connect_guest` (below), so synod's
   office assistant may delegate to helpers that run concurrently in the
-  same guest, against the same folder, under the same safety net. The model
-  picker lives here too: `menu`/`refresh_menu` list what the computer's
-  credentials can reach (cached-instant and fetched-complete), and a
-  `Choice` names an `AccountId`, model, and effort — an id and never a
+  same guest, against the same folder, under the same safety net.
+- `session/menu.rs` — the model picker: `menu`/`refresh_menu` list what the
+  computer's credentials can reach (cached-instant and fetched-complete), and
+  a `Choice` names an `AccountId`, model, and effort — an id and never a
   display name, because a name that happened to match another account's would
   start a conversation on someone else's login. What flows the other way for
   display — the opening's and a finished sign-in's account name — is spelled
   `label` on the wire, so an id and a display string cannot be mistaken for
-  one another in either direction. `sign_in` drives exarch's
-  browser login flow (`exarch::provider::oauth::login_flow`) and admits the
-  fresh account to the live store and catalog, so a ChatGPT plan signed in
-  from the window is usable without a restart — the credential store is
-  behind a `Mutex` for exactly that reason, taken only for an account list
-  or an admission, never across a fetch or a boot. `prepare` itself only
-  delegates: where synod's accounts come from is `accounts.rs`.
+  one another in either direction.
+- `session/signin.rs` — `sign_in` drives exarch's browser login flow
+  (`exarch::provider::oauth::login_flow`) and admits the fresh account to the
+  live store and catalog through `exarch::provider::admit_login` — the same
+  call exarch's own front end uses — so a ChatGPT plan signed in from the
+  window is usable without a restart. The credential store is behind a
+  `Mutex` for exactly that reason, taken only for an account list or an
+  admission, never across a fetch or a boot. `admit_login` and
+  `pricing::ensure_loaded_blocking` (`session.rs`'s `resolve_tuning` calls
+  the latter) are the shared provider facts both front-ends now call;
+  synod's own `Cargo.toml` names no `tokio` dependency. `prepare` itself
+  only delegates: where synod's accounts come from is `accounts.rs`.
+- `session/opening.rs` — `Opening`, what the window shows before the first
+  message: who is answering, at what effort, and the folder line
+  (`no_room_for_copy`/`slow_copy_line`/`no_copy_line`, above) the folder
+  itself earns.
 - `accounts.rs` — **synod's own credential story**, and the one place it
   stops borrowing exarch's. A key reaches exarch through the environment
   because exarch is started from a shell; synod is double-clicked, inherits
@@ -128,7 +181,7 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   exarch, still run first because it is the step that must happen while the
   process is single-threaded. That order is now one call:
   `CredentialStore::admit_from` over a `SecretVault`, which `Keychain`
-  implements, in place of the two-step synod used to perform by hand.
+  implements — one call, not a two-step synod performs by hand.
   Which services *exist* is a third thing and no secret, and synod re-derives
   none of it: the table is `exarch::provider::identity::built_in_services`,
   and further endpoints are declared in
@@ -155,12 +208,24 @@ ordinary `cargo test`:
 
 - `manifest.rs` — a folder's state at one moment: path, kind, size, blake3
   hash, `mtime_ns` beside it — the stat facts a capture checks before it
-  reopens a file. A path that vanishes between listing and reading is a
-  deletion to record, never an error to raise (`WalkError::Vanished`
-  internally; `hash_file` itself answers `Ok(None)` for a file gone by the
-  time it is opened); empty folders and symlink targets recorded, links
-  never followed. A cheap `measure` — stat only, no bytes read — feeds the
-  large-folder warning (~2 GiB) before the real walk starts.
+  reopens a file. One `walk`, taking a visitor (`Visit<'a>`, an `FnMut` over
+  a key, a path, and its metadata) rather than a second walk per caller:
+  `of_folder_via`'s visitor builds a `Manifest`, `measure`'s counts bytes and
+  nothing else. A path the walk listed but could not record — a subtree
+  whose `read_dir` answers `NotFound`, a file gone before it could be read,
+  an entry gone between listing and `symlink_metadata` — goes into
+  `Manifest::unread`, the subtree root alone rather than every key beneath
+  it, and `changes.rs` suppresses anything it covers. Silence there was the
+  worse bug: a subtree missing from a baseline for an ordinary reason (a
+  share blipping, a cloud placeholder unhydrated) came back as *created by
+  the assistant*, one Revert per file, each deleting a document. A `root`
+  that is gone is an error, not an empty manifest, for the same reason at the
+  limit. Empty folders and symlink targets recorded, links never followed. A
+  `Stop` the walk reads once per entry ends a copy nobody is waiting for any
+  more; a stopped walk raises `WalkError::Stopped` and writes no checkpoint,
+  never a short manifest, since a truncated record reads as one where
+  everything unread had been deleted. A cheap `measure` — stat only, no bytes
+  read — feeds the pre-flight before the real walk starts.
 - `history.rs` — the per-folder store: content-addressed `objects/`
   (identical bytes kept once, ever) plus `checkpoints/<id>.json`, with
   `Before`, `After`, and `Undo` moments. `capture` is a stat walk once a
@@ -176,9 +241,13 @@ ordinary `cargo test`:
   any conversation can open its own store — probes every `<slug>/history`
   with a non-blocking exclusive lock and removes only the ones nothing
   holds, a crashed session's leavings; a live shared hold always refuses the
-  probe, so a running conversation is never swept. `free_bytes` (`statvfs`
-  on unix, `GetDiskFreeSpaceExW` on Windows) feeds the large-folder
-  warning's free-space sentence.
+  probe, so a running conversation is never swept. Every store carries the
+  `Stop` its captures read, so ending a conversation ends the copy it started
+  rather than waiting the copy out — which is what `Conversation::end` does
+  before it wipes, and why a restart no longer runs a second capture
+  alongside the first. `free_bytes` (`statvfs` on unix,
+  `GetDiskFreeSpaceExW` on Windows) answers the pre-flight, via
+  `free_bytes_for` for a store that does not exist yet.
 - `changes.rs` — the delta between two manifests: created, modified, deleted,
   renamed (a deleted and a created file with identical bytes, paired).
 - `restore.rs` — the conflict-checked driver: a path edited *after* the job
@@ -195,7 +264,12 @@ cargo) is the one process: it holds the `Conversation` in-process — no child
 binary, no stdin framing. One window, three states: choose a folder and a
 model (with a Thinking control beside the Assistant picker) and describe the
 job; watch the assistant work, its narration streamed in; then read what
-changed and put anything back. `commands.rs` holds the folder picker, the
+changed and put anything back. `mod.rs` owns `Accounts` — the credential
+scrub's outcome paired with the model catalog, a private field reached only
+through `resolved()` — and the two refresh entries, `refresh_menu_now`
+(synchronous) and `refresh_menu_async` (off the calling thread); the debounce
+that decides when a refresh is worth asking for at all, `RefreshGate`, lives
+in `commands.rs`. `commands.rs` holds the folder picker, the
 conversation verbs (start, send, restart, end), the model listing (instant
 from the cache, one background refresh), and opening before/after versions
 with the user's own applications; `keys.rs` is the accounts screen's five
@@ -218,7 +292,17 @@ stream, no animation, nothing entering the transcript. `SubagentDone` — which
 arrives on the *root's* emitter, since `announce` runs in the parent's own
 drain — becomes `SynodEvent::HelperDone { name, ok, elapsed_secs }`, rendered
 as one process line inside the dial's rung; `WaitingOnAgents` maps to a
-status-bar label. Plain register throughout: the window says *helpers*,
+status-bar label. `sink.rs` also folds `ProviderErrorRecord` at the seam:
+`SynodEvent::ProviderError`/`Stalled` carry `{ text, severity }` — the
+sentence composed once, where the module's deny reaches the fold — and
+`Transient::Boundary` is carried across as `SynodEvent::Boundary`, letting
+the window render the streaming bubble as plain text between flush
+boundaries. Every enum on this wire is `#[serde(rename_all = "snake_case")]`
+— the JSON seam speaks `snake_case` throughout, matching exarch, with no
+`camelCase` renaming anywhere on it — and `sink.rs`'s own `mod
+wire_vocabulary` test is the one check that reads both languages: it compares
+each enum's serde tag set against the `case` labels named in
+`synod/ui/index.html`. Plain register throughout: the window says *helpers*,
 never agent/session/model, and there is deliberately no tab strip — the
 assistant delegates onward, and the window reports the folder, not the org
 chart. `signin.rs` runs the opening screen's
@@ -228,7 +312,16 @@ the button, and the account it wins arriving as the same `models-refreshed`
 the picker already renders through; with no account set up the sign-in is the
 screen's primary button and the folder picker waits for it; `review.rs`
 translates the workspace vocabulary into cards and runs the
-gentle-then-explicit conflict flow; `synod/src/main.rs` runs exarch's
+gentle-then-explicit conflict flow, and carries `WindowReport::unreadable`
+beside the cards — what the copy could not read, so the panel can say what
+it is not answering for — held with the card list so an undo does not drop
+it. That holding type, `Held`, carries the report's own folder and refuses a
+later call whose `folder` argument does not match, so a stale or mismatched
+frontend can never fold an undo into a report from a different job;
+`open_earlier` materialises the before-version into the history store's own
+`scratch_dir` — wiped along with the rest of the store at `wipe`, never a
+system `temp_dir`, so nothing opened this way needs cleanup of its own.
+`synod/src/main.rs` runs exarch's
 `dispatch_pre_main` re-exec trampoline first, like every
 [[invariants/single-binary|multicall]] binary here.
 

@@ -12,6 +12,7 @@
 use std::sync::Mutex;
 
 use exarch::agent::Dial;
+use ral_core::sync::LockExt;
 use ral_core::wire::WireStream;
 use vm_manager::Machine;
 
@@ -45,8 +46,7 @@ impl MachineDial {
 impl Dial for MachineDial {
     fn dial(&self, port: u32) -> Result<WireStream, String> {
         self.machine
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lock_ignore_poison()
             .connect_guest(port)
             .map(WireStream::from)
             .map_err(|e| format!("could not dial the guest's listener on port {port}: {e}"))
@@ -77,10 +77,7 @@ mod tests {
         }
         fn connect_guest(&self, port: u32) -> std::io::Result<vm_manager::AgentDial> {
             let (guest, host) = UnixStream::pair()?;
-            self.guest_ends
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((port, guest));
+            self.guest_ends.lock_ignore_poison().push((port, guest));
             Ok(OwnedFd::from(host))
         }
         fn shutdown(self: Box<Self>) -> Result<(), vm_manager::Error> {
@@ -99,8 +96,7 @@ mod tests {
 
         let mut host = dialler.dial(1732).expect("the fake machine dials");
         let (port, mut guest) = guest_ends
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lock_ignore_poison()
             .pop()
             .expect("one dial was made");
         assert_eq!(port, 1732);

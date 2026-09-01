@@ -10,7 +10,7 @@
 //! than accumulated.
 
 use crate::bus::{Mailbox, Stamped};
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use jiff::civil::DateTime;
 use jiff::{ToSpan, Zoned};
 use ral_core::process::{Deadline, arm_callback};

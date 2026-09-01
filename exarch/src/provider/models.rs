@@ -13,7 +13,7 @@
 use crate::provider::credential::{Credential, CredentialStore};
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::oauth;
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use genai::Client;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
 use serde::{Deserialize, Serialize};
@@ -127,7 +127,7 @@ impl LiveSource {
 /// A runtime for one blocking listing call — listing happens a handful of
 /// times a session, so a runtime per call beats holding one open. `what` names
 /// the caller in the build-failure message.
-fn blocking_runtime(what: &str) -> Result<tokio::runtime::Runtime, String> {
+pub(super) fn blocking_runtime(what: &str) -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

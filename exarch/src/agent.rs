@@ -69,7 +69,7 @@ use crate::bus::{
 use crate::fleet::Fleet;
 use crate::provider::Provider;
 use crate::shell_eval;
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use ral_core::process::CancelCause;
 use ral_core::serial::FOValue;
 use std::collections::BTreeSet;

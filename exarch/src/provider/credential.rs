@@ -14,7 +14,7 @@
 //! `OPENAI_API_KEY` are two selectable accounts, not one.
 
 use crate::provider::identity::{self, Account, AccountId, Auth, Service};
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 

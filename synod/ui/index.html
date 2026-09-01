@@ -24,88 +24,45 @@
       --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
       --mono: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
 
-      /* Warm paper (light) */
-      --paper: #f4efe6;
-      --raised: #fffdf8;
-      --raised-2: #faf5ec;
-      --ink: #292420;
-      --ink-soft: #6d6459;
-      --ink-faint: #988d7e;
-      --line: #e5ddce;
-      --line-strong: #d5cab6;
+      color-scheme: light dark;
 
-      --accent: #2f6d5c;
-      --accent-hover: #275c4d;
-      --accent-ink: #fbf8f1;
+      /* Warm paper (light) / deep ink (dark) */
+      --paper: light-dark(#f4efe6, #1e1b18);
+      --raised: light-dark(#fffdf8, #2a2521);
+      --raised-2: light-dark(#faf5ec, #241f1c);
+      --ink: light-dark(#292420, #efe7db);
+      --ink-soft: light-dark(#6d6459, #aca194);
+      --ink-faint: light-dark(#988d7e, #7e7466);
+      --line: light-dark(#e5ddce, #38322c);
+      --line-strong: light-dark(#d5cab6, #48413a);
 
-      --accept: #2f6d5c;
-      --discard: #9a6a52;
-      --conflict: #a5641c;
-      --conflict-bg: #f7ecd9;
-      --conflict-line: #e6cfa6;
-      --danger: #a5401c;
-      --danger-bg: #f7ded9;
-      --danger-line: #e6b6a6;
+      --accent: light-dark(#2f6d5c, #74c3aa);
+      --accent-hover: light-dark(#275c4d, #86cfb8);
+      --accent-ink: light-dark(#fbf8f1, #17201c);
 
-      --diff-add-bg: #e9f2ec;
-      --diff-del-bg: #f9e9e2;
+      --discard: light-dark(#9a6a52, #c79a83);
+      --conflict: light-dark(#a5641c, #e0a85e);
+      --conflict-bg: light-dark(#f7ecd9, #34291a);
+      --conflict-line: light-dark(#e6cfa6, #5a4526);
+      --danger: light-dark(#a5401c, #e08a5e);
+      --danger-bg: light-dark(#f7ded9, #34211a);
+      --danger-line: light-dark(#e6b6a6, #5a3526);
+
+      --diff-add-bg: light-dark(#e9f2ec, #1f2c22);
+      --diff-del-bg: light-dark(#f9e9e2, #2e211b);
 
       --shadow-soft: 0 1px 2px rgba(60, 48, 32, 0.05);
-      --focus: var(--accent);
     }
 
     @media (prefers-color-scheme: dark) {
       :root {
-        --paper: #1e1b18;
-        --raised: #2a2521;
-        --raised-2: #241f1c;
-        --ink: #efe7db;
-        --ink-soft: #aca194;
-        --ink-faint: #7e7466;
-        --line: #38322c;
-        --line-strong: #48413a;
-
-        --accent: #74c3aa;
-        --accent-hover: #86cfb8;
-        --accent-ink: #17201c;
-
-        --accept: #74c3aa;
-        --discard: #c79a83;
-        --conflict: #e0a85e;
-        --conflict-bg: #34291a;
-        --conflict-line: #5a4526;
-        --danger: #e08a5e;
-        --danger-bg: #34211a;
-        --danger-line: #5a3526;
-
-        --diff-add-bg: #1f2c22;
-        --diff-del-bg: #2e211b;
-
         --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.25);
       }
     }
 
     /* The viewer's theme toggle wins in both directions. */
-    :root[data-theme="light"] {
-      --paper: #f4efe6; --raised: #fffdf8; --raised-2: #faf5ec;
-      --ink: #292420; --ink-soft: #6d6459; --ink-faint: #988d7e;
-      --line: #e5ddce; --line-strong: #d5cab6;
-      --accent: #2f6d5c; --accent-hover: #275c4d; --accent-ink: #fbf8f1;
-      --accept: #2f6d5c; --discard: #9a6a52;
-      --conflict: #a5641c; --conflict-bg: #f7ecd9; --conflict-line: #e6cfa6;
-      --danger: #a5401c; --danger-bg: #f7ded9; --danger-line: #e6b6a6;
-      --diff-add-bg: #e9f2ec; --diff-del-bg: #f9e9e2;
-    }
-    :root[data-theme="dark"] {
-      --paper: #1e1b18; --raised: #2a2521; --raised-2: #241f1c;
-      --ink: #efe7db; --ink-soft: #aca194; --ink-faint: #7e7466;
-      --line: #38322c; --line-strong: #48413a;
-      --accent: #74c3aa; --accent-hover: #86cfb8; --accent-ink: #17201c;
-      --accept: #74c3aa; --discard: #c79a83;
-      --conflict: #e0a85e; --conflict-bg: #34291a; --conflict-line: #5a4526;
-      --danger: #e08a5e; --danger-bg: #34211a; --danger-line: #5a3526;
-      --diff-add-bg: #1f2c22; --diff-del-bg: #2e211b;
-    }
+    :root[data-theme="light"] { color-scheme: light; }
+    :root[data-theme="dark"]  { color-scheme: dark; }
 
     * { box-sizing: border-box; }
 
@@ -328,7 +285,7 @@
     button:disabled { cursor: default; opacity: 0.5; }
 
     :focus-visible {
-      outline: 2.5px solid var(--focus);
+      outline: 2.5px solid var(--accent);
       outline-offset: 3px;
       border-radius: 8px;
     }
@@ -482,109 +439,104 @@
       color: var(--ink);
       border-bottom-left-radius: 4px;
       box-shadow: var(--shadow-soft);
-    }
-    .msg.assistant .bubble:empty::after {
-      content: "…";
-      color: var(--ink-faint);
-    }
 
-    /* Assistant prose is rendered markdown, not preformatted text: the
-       bubble wraps normally and its block elements carry the editorial
-       spacing the rest of the page keeps. The palette is the page's own —
-       code and quotes sit on the recessed paper, links wear the accent. */
-    .msg.assistant .bubble { white-space: normal; }
-    .msg.assistant .bubble > :first-child { margin-top: 0; }
-    .msg.assistant .bubble > :last-child { margin-bottom: 0; }
-    .msg.assistant .bubble p { margin: 0 0 0.7em; }
-    .msg.assistant .bubble h1,
-    .msg.assistant .bubble h2,
-    .msg.assistant .bubble h3,
-    .msg.assistant .bubble h4,
-    .msg.assistant .bubble h5,
-    .msg.assistant .bubble h6 {
-      font-family: var(--serif);
-      font-weight: 600;
-      line-height: 1.3;
-      margin: 1.1em 0 0.5em;
-    }
-    .msg.assistant .bubble h1 { font-size: 1.4em; }
-    .msg.assistant .bubble h2 { font-size: 1.25em; }
-    .msg.assistant .bubble h3 { font-size: 1.12em; }
-    .msg.assistant .bubble h4,
-    .msg.assistant .bubble h5,
-    .msg.assistant .bubble h6 { font-size: 1em; }
-    .msg.assistant .bubble ul,
-    .msg.assistant .bubble ol { margin: 0 0 0.7em; padding-left: 1.5em; }
-    .msg.assistant .bubble li { margin: 0.2em 0; }
-    .msg.assistant .bubble li > p { margin: 0; }
-    .msg.assistant .bubble code {
-      font-family: var(--mono);
-      font-size: 0.9em;
-      background: var(--raised-2);
-      border: 1px solid var(--line);
-      border-radius: 5px;
-      padding: 0.1em 0.35em;
-    }
-    .msg.assistant .bubble pre {
-      margin: 0 0 0.7em;
-      padding: 12px 14px;
-      background: var(--raised-2);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      overflow-x: auto;
-    }
-    .msg.assistant .bubble pre code {
-      background: none;
-      border: none;
-      border-radius: 0;
-      padding: 0;
-      font-size: 12.5px;
-      line-height: 1.5;
-    }
-    .msg.assistant .bubble a {
-      color: var(--accent);
-      text-decoration: underline;
-      text-underline-offset: 2px;
-    }
-    .msg.assistant .bubble a:hover { color: var(--accent-hover); }
-    .msg.assistant .bubble strong { font-weight: 650; }
-    .msg.assistant .bubble blockquote {
-      margin: 0 0 0.7em;
-      padding: 2px 0 2px 14px;
-      border-left: 3px solid var(--line-strong);
-      color: var(--ink-soft);
-    }
-    .msg.assistant .bubble hr {
-      border: none;
-      border-top: 1px solid var(--line-strong);
-      margin: 1em 0;
-    }
-    .msg.assistant .bubble table {
-      border-collapse: collapse;
-      margin: 0 0 0.7em;
-      font-size: 14px;
-    }
-    .msg.assistant .bubble th,
-    .msg.assistant .bubble td {
-      border: 1px solid var(--line);
-      padding: 5px 9px;
-      text-align: left;
-    }
-    .msg.assistant .bubble th { background: var(--raised-2); font-weight: 650; }
+      &:empty::after {
+        content: "…";
+        color: var(--ink-faint);
+      }
 
-    /* Mathematics, typeset by KaTeX. It is held to the prose's own size —
-       KaTeX's 1.21em default shouts beside 15.5px text — and never allowed
-       to widen the bubble: a formula too long for the line scrolls inside
-       its own box, and one inline is exempt from the bubble's break-anywhere
-       wrapping, which would otherwise snap it mid-symbol. */
-    .msg.assistant .bubble .katex { font-size: 1.06em; overflow-wrap: normal; word-break: normal; }
-    .msg.assistant .bubble .katex-display {
-      margin: 0.8em 0;
-      padding: 2px 0;   /* the room a scroll box would otherwise clip descenders from */
-      overflow-x: auto;
-      overflow-y: hidden;
+      /* Assistant prose is rendered markdown, not preformatted text: the
+         bubble wraps normally and its block elements carry the editorial
+         spacing the rest of the page keeps. The palette is the page's own —
+         code and quotes sit on the recessed paper, links wear the accent. */
+      white-space: normal;
+      > :first-child { margin-top: 0; }
+      > :last-child { margin-bottom: 0; }
+      p { margin: 0 0 0.7em; }
+      h1, h2, h3, h4, h5, h6 {
+        font-family: var(--serif);
+        font-weight: 600;
+        line-height: 1.3;
+        margin: 1.1em 0 0.5em;
+      }
+      h1 { font-size: 1.4em; }
+      h2 { font-size: 1.25em; }
+      h3 { font-size: 1.12em; }
+      h4, h5, h6 { font-size: 1em; }
+      ul, ol { margin: 0 0 0.7em; padding-left: 1.5em; }
+      li { margin: 0.2em 0; }
+      li > p { margin: 0; }
+      code {
+        font-family: var(--mono);
+        font-size: 0.9em;
+        background: var(--raised-2);
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 0.1em 0.35em;
+      }
+      pre {
+        margin: 0 0 0.7em;
+        padding: 12px 14px;
+        background: var(--raised-2);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow-x: auto;
+
+        code {
+          background: none;
+          border: none;
+          border-radius: 0;
+          padding: 0;
+          font-size: 12.5px;
+          line-height: 1.5;
+        }
+      }
+      a {
+        color: var(--accent);
+        text-decoration: underline;
+        text-underline-offset: 2px;
+
+        &:hover { color: var(--accent-hover); }
+      }
+      strong { font-weight: 650; }
+      blockquote {
+        margin: 0 0 0.7em;
+        padding: 2px 0 2px 14px;
+        border-left: 3px solid var(--line-strong);
+        color: var(--ink-soft);
+      }
+      hr {
+        border: none;
+        border-top: 1px solid var(--line-strong);
+        margin: 1em 0;
+      }
+      table {
+        border-collapse: collapse;
+        margin: 0 0 0.7em;
+        font-size: 14px;
+      }
+      th, td {
+        border: 1px solid var(--line);
+        padding: 5px 9px;
+        text-align: left;
+      }
+      th { background: var(--raised-2); font-weight: 650; }
+
+      /* Mathematics, typeset by KaTeX. It is held to the prose's own size —
+         KaTeX's 1.21em default shouts beside 15.5px text — and never allowed
+         to widen the bubble: a formula too long for the line scrolls inside
+         its own box, and one inline is exempt from the bubble's break-anywhere
+         wrapping, which would otherwise snap it mid-symbol. */
+      .katex { font-size: 1.06em; overflow-wrap: normal; word-break: normal; }
+      .katex-display {
+        margin: 0.8em 0;
+        padding: 2px 0;   /* the room a scroll box would otherwise clip descenders from */
+        overflow-x: auto;
+        overflow-y: hidden;
+
+        > .katex { font-size: 1.12em; }
+      }
     }
-    .msg.assistant .bubble .katex-display > .katex { font-size: 1.12em; }
 
     .msg.system .bubble {
       background: var(--danger-bg);
@@ -635,6 +587,11 @@
       padding: 9px 13px;
       cursor: pointer;
       user-select: none;
+      border: none;
+      background: none;
+      font: inherit;
+      text-align: left;
+      width: 100%;
     }
     .dial-head:hover { background: var(--raised); }
     .dial-mark {
@@ -739,9 +696,8 @@
        accent-tinted path invites a click that does nothing. */
     .mark-text { margin: 0; line-height: 1.55; }
     .role-plain { color: var(--ink); }
-    .role-path { font-family: var(--mono); color: var(--ink); }
-    .role-code { font-family: var(--mono); color: var(--ink); }
-    .role-ok { color: var(--accept); }
+    .role-path, .role-code { font-family: var(--mono); color: var(--ink); }
+    .role-ok { color: var(--accent); }
     .role-warn { color: var(--conflict); }
     .role-bad { color: var(--danger); }
     .role-muted { color: var(--ink-faint); }
@@ -841,19 +797,6 @@
       border-radius: 2px;
     }
 
-    .listing {
-      font-family: var(--mono);
-      font-size: 12px;
-      line-height: 1.6;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      overflow: hidden;
-      background: var(--raised);
-    }
-    .listing-row { display: flex; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .listing-row.muted { color: var(--ink-faint); }
-    .listing-row .gutter { border-right: 1px solid var(--line); }
-    .listing-text { flex: 1; padding: 0 10px; color: var(--ink); }
 
     .raw-mark {
       margin: 0;
@@ -930,6 +873,24 @@
       font-size: 14.5px;
       line-height: 1.6;
     }
+
+    /* The report column's quiet register: how far this report reaches, and
+       where it stopped. A standing fact, not an alarm — nothing like
+       .banner's. Worn by #report-gap (what the copy could not read) and by
+       #report-error (the report itself could not be taken). */
+    .report-gap {
+      display: none;
+      margin-top: 14px;
+      padding: 10px 12px;
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--ink-soft);
+    }
+    .report-gap.show { display: block; }
+    .report-gap code { font-family: var(--mono); font-size: 12px; }
 
     .bulk {
       display: flex; gap: 10px; align-items: center;
@@ -1035,7 +996,7 @@
     }
     .btn-mini:not(:disabled):hover { color: var(--accent); border-color: var(--accent); }
     .btn-mini.keep {
-      background: var(--accept);
+      background: var(--accent);
       border-color: transparent;
       color: var(--accent-ink);
     }
@@ -1281,6 +1242,9 @@
             <h2>What's changed</h2>
           </div>
           <p class="report-empty" id="report-empty">Nothing has changed in this folder yet.</p>
+
+          <p class="report-gap" id="report-gap"></p>
+          <p class="report-gap" id="report-error"></p>
 
           <div class="banner" id="review-banner"></div>
 
@@ -1707,7 +1671,7 @@
       } catch (err) {
         // The credential scrub's own failure — a config this computer cannot
         // read. No sign-in mends that, so it is shown rather than swallowed.
-        showStartError(String(err));
+        showError("start-error", String(err));
       }
       renderPicker(menu);
       listen("models-refreshed", (event) => renderPicker(event.payload));
@@ -1731,20 +1695,23 @@
       return { account: opt.key, model: opt.model, effort };
     }
 
-    // The start screen's one error line, shared by the folder picker and the
-    // sign-in — only ever one of them is being answered at a time.
-    function showStartError(text) {
-      $("start-error").textContent = text;
-      $("start-error").classList.add("show");
+    // One error line per screen, shown and cleared by element id.
+    function showError(id, text) {
+      $(id).textContent = text;
+      $(id).classList.add("show");
+    }
+
+    function clearError(id) {
+      $(id).classList.remove("show");
     }
 
     $("pick-folder").addEventListener("click", async () => {
-      $("start-error").classList.remove("show");
+      clearError("start-error");
       let chosen;
       try {
         chosen = await invoke("choose_folder");
       } catch (err) {
-        showStartError(String(err));
+        showError("start-error", String(err));
         return;
       }
       if (chosen) enterConversation(chosen, currentChoice());
@@ -1770,8 +1737,8 @@
 
     // An error belongs on whichever screen the user is looking at.
     function showSignInError(text) {
-      if (screens.accounts.classList.contains("active")) showAccountsError(text);
-      else showStartError(text);
+      if (screens.accounts.classList.contains("active")) showError("accounts-error", text);
+      else showError("start-error", text);
     }
 
     // The sign-in's own line: a sentence, and — only when the browser could
@@ -1801,8 +1768,8 @@
         invoke("cancel_sign_in").catch((err) => showSignInError(String(err)));
         return;
       }
-      $("start-error").classList.remove("show");
-      clearAccountsError();
+      clearError("start-error");
+      clearError("accounts-error");
       setSigningIn(true);
       saySignIn("Opening your browser…");
       try {
@@ -1846,20 +1813,11 @@
     // last four characters and where it is kept, so no stored key is ever
     // put into an input here.
 
-    function showAccountsError(text) {
-      $("accounts-error").textContent = text;
-      $("accounts-error").classList.add("show");
-    }
-
-    function clearAccountsError() {
-      $("accounts-error").classList.remove("show");
-    }
-
     async function loadAccounts() {
       try {
         renderAccounts(await invoke("list_accounts"));
       } catch (err) {
-        showAccountsError(String(err));
+        showError("accounts-error", String(err));
       }
     }
 
@@ -1867,12 +1825,12 @@
     // it now stands, so the screen redraws from what is true rather than
     // from what it hoped. `true` means the change went through.
     async function accountCommand(command, args) {
-      clearAccountsError();
+      clearError("accounts-error");
       try {
         renderAccounts(await invoke(command, args));
         return true;
       } catch (err) {
-        showAccountsError(String(err));
+        showError("accounts-error", String(err));
         return false;
       }
     }
@@ -1896,7 +1854,7 @@
 
       // The plan's card stands whether or not anyone is signed in; it says
       // which of the two rather than coming and going.
-      $("accounts-plan-note").textContent = accounts.some((a) => a.source === "signed-in")
+      $("accounts-plan-note").textContent = accounts.some((a) => a.source === "signed_in")
         ? "You are signed in with your ChatGPT plan. Signing in again replaces it."
         : "If you pay for ChatGPT, you can use that plan here instead of a key.";
 
@@ -1939,7 +1897,7 @@
       // Every account that authenticates with a key gets the key input —
       // a declared endpoint included, since a key rotated at the far end
       // has to be retypeable at this one.
-      if (account.source !== "signed-in" && account.source !== "no-key") {
+      if (account.source !== "signed_in" && account.source !== "no_key") {
         row.appendChild(keyForm(account, i));
       }
       if (account.withdrawable) {
@@ -1956,31 +1914,31 @@
     // inferred from a missing hint: a service that wants no key must not
     // be read as one still waiting for one.
     function keyState(account) {
-      if (account.source === "signed-in") return "Signed in";
-      if (account.source === "no-key") return "Used without a key";
+      if (account.source === "signed_in") return "Signed in";
+      if (account.source === "no_key") return "Used without a key";
       return account.hint ? "•••• " + account.hint : "No key yet";
     }
 
     function accountNotes(account) {
-      if (account.source === "signed-in") {
+      if (account.source === "signed_in") {
         return ["You are signed in with your ChatGPT plan, so this one needs no key."];
       }
       if (account.withdrawable) {
         const notes = [];
         if (account.endpoint) notes.push("Address: " + account.endpoint);
         if (account.protocol) notes.push("Way of speaking: " + account.protocol);
-        if (account.source === "no-key") {
+        if (account.source === "no_key") {
           notes.push("This one asks for no key, so there is none to type.");
         }
         return notes;
       }
-      if (account.source === "no-key") {
+      if (account.source === "no_key") {
         return ["This one asks for no key, so there is none to type."];
       }
       if (account.source === "environment") {
         return [
           "This key came from the environment synod was started in"
-            + (account.envVar ? ", as " + account.envVar : "")
+            + (account.env_var ? ", as " + account.env_var : "")
             + ". It cannot be changed or removed from this window, but a key typed"
             + " here is used instead of it.",
         ];
@@ -2056,7 +2014,7 @@
     });
 
     $("open-accounts").addEventListener("click", () => {
-      clearAccountsError();
+      clearError("accounts-error");
       show("accounts");
       loadAccounts();
     });
@@ -2093,6 +2051,7 @@
       openDial = null;
       render();
       report = { files: [] };
+      reportError = null;
       renderReport();
       show("conversation");
     }
@@ -2170,6 +2129,17 @@
       render();
     }
 
+    // The streaming bubble's stream has closed — a card, a dial, or the
+    // exchange itself — so this is its last word: flip it out of plain-text
+    // mode and bump once more, so it settles as markdown rather than
+    // freezing mid-stream in the cheap rendering.
+    function closeStreamingProse() {
+      if (!streamingProse) return;
+      streamingProse.plain = false;
+      bump(streamingProse);
+      streamingProse = null;
+    }
+
     function addUserMessage(text) {
       pushBlock({ kind: "user", text });
     }
@@ -2191,7 +2161,7 @@
     // dial, so blocks keep true temporal order.
     function addCardBlock(marks) {
       if (!marks.length) return; // an empty card would render as bare chrome
-      streamingProse = null;
+      closeStreamingProse();
       openDial = null;
       pushBlock({ kind: "card", marks });
     }
@@ -2216,7 +2186,7 @@
     // stream — the next token starts a new bubble below the dial.
     function ensureDial() {
       if (openDial) return openDial;
-      streamingProse = null;
+      closeStreamingProse();
       openDial = { kind: "dial", entries: [], notes: [], rung: 0, helpers: 0, rev: 0 };
       blocks.push(openDial);
       return openDial;
@@ -2242,18 +2212,11 @@
       el.className = "dial";
       el.dataset.rung = String(block.rung);
 
-      const head = document.createElement("div");
+      const head = document.createElement("button");
+      head.type = "button";
       head.className = "dial-head";
-      head.setAttribute("role", "button");
-      head.setAttribute("tabindex", "0");
       head.setAttribute("aria-expanded", String(block.rung > 0));
       head.addEventListener("click", () => rotateDial(block));
-      head.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          rotateDial(block);
-        }
-      });
 
       const mark = document.createElement("span");
       mark.className = "dial-mark";
@@ -2406,7 +2369,7 @@
         kind: "helper",
         ok: Boolean(p.ok),
         text: "helper \"" + p.name + "\" " + (p.ok ? "finished" : "did not finish")
-          + " (" + p.elapsedSecs.toFixed(1) + "s)",
+          + " (" + p.elapsed_secs.toFixed(1) + "s)",
       });
       bump(dial);
     }
@@ -2455,7 +2418,18 @@
     // line) is removed on sight, a wanted element missing at its position is
     // inserted, and trailing leftovers are trimmed. A surviving node is
     // never detached — detaching would restart its animation.
+    // Coalesced onto rAF: many `bump`s in one frame (a token burst) collapse
+    // to one reconciliation, and a render requested mid-frame still lands on
+    // the next one rather than being lost.
+    let renderScheduled = false;
     function render() {
+      if (renderScheduled) return;
+      renderScheduled = true;
+      requestAnimationFrame(renderNow);
+    }
+
+    function renderNow() {
+      renderScheduled = false;
       const desired = blocks.length ? blocks.map(projectBlock) : [welcomeEl];
       const wanted = new Set(desired);
       desired.forEach((el, i) => {
@@ -2479,9 +2453,19 @@
           bubble.textContent = block.text;
           return msg;
         }
+        // While tokens are still landing, plain text: a markdown re-parse of
+        // the whole accumulated message on every token is quadratic in the
+        // message length (measured: 3.3s of main-thread time by 8,000
+        // tokens). `block.plain` drops only at a streaming flush boundary or
+        // when the bubble's stream closes, so the expensive parse runs a
+        // handful of times per message rather than once per token.
         case "assistant": {
           const { msg, bubble } = messageShell("msg assistant");
-          bubble.innerHTML = renderAssistantMarkdown(block.raw);
+          if (block.plain) {
+            bubble.textContent = block.raw;
+          } else {
+            bubble.innerHTML = renderAssistantMarkdown(block.raw);
+          }
           return msg;
         }
         case "system": {
@@ -2520,67 +2504,23 @@
     // First paint: the empty document, i.e. the welcome line.
     render();
 
-    function capitalize(text) {
-      return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
-    }
-
+    // Not `Intl`'s compact notation: it renders a capital "1.5K", and the
+    // status line has always read in lowercase.
     function formatK(n) {
-      if (n === undefined || n === null) return "0";
       return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
     }
 
     function formatUsage(p) {
-      let s = formatK(p.input) + " in · " + formatK(p.output) + " out";
+      let s = formatK(p.input ?? 0) + " in · " + formatK(p.output ?? 0) + " out";
       if (!p.unmetered && p.dollars !== undefined && p.dollars !== null) {
         s += " · $" + Number(p.dollars).toFixed(2);
       }
       return s;
     }
 
-    // `record` is defensive: the boundary carries whatever fields serde put
-    // on that variant, and this renders the best available one-liner rather
-    // than assuming every field is present.
-    // `label` opens the note: the two events that carry a record — a failure
-    // that ended the exchange, and a stall the exchange survived — share every
-    // field and differ only in standing, so only the word differs.
-    function formatProviderError(record, label) {
-      const tag = "[" + label + ": ";
-      if (!record || typeof record !== "object") return tag + "error]";
-      const kind = record.kind || "error";
-      switch (kind) {
-        case "cancelled":
-          return tag + "cancelled" + (record.where ? " at " + record.where : "") + "]";
-        case "transient":
-          return tag + "transient" + (record.cause ? " — " + record.cause : "")
-            + (record.attempts !== undefined ? " (attempt " + record.attempts + ")" : "") + "]";
-        case "rate_limited":
-          return tag + "rate limited"
-            + (record.retry_after_secs != null ? " — retry in " + record.retry_after_secs + "s" : "")
-            + (record.cause ? " — " + record.cause : "") + "]";
-        case "api":
-          return tag + "api " + (record.status !== undefined ? record.status + " " : "")
-            + (record.model ? record.model + " " : "") + (record.message || "") + "]";
-        case "truncated":
-          return tag + "truncated" + (record.reason ? " — " + record.reason : "") + "]";
-        case "other":
-          return tag + (record.cause || "error") + "]";
-        default: {
-          const parts = Object.entries(record)
-            .filter(([k]) => k !== "kind")
-            .map(([k, v]) => k + "=" + v);
-          return tag + kind + (parts.length ? " " + parts.join(" ") : "") + "]";
-        }
-      }
-    }
-
-    function providerErrorClass(record) {
-      const kind = record && record.kind;
-      return kind === "api" || kind === "other" ? "bad" : "warn";
-    }
-
     function onOpening(p) {
       setFacts(p);
-      if (p.largeFolderLine) addNoticeMessage(p.largeFolderLine);
+      if (p.folder_line) addNoticeMessage(p.folder_line);
     }
 
     function onSynodEvent(p) {
@@ -2592,17 +2532,30 @@
           if (!streamingProse && !p.text.trim()) break;
           if (streamingProse) {
             streamingProse.raw += p.text;
+            // A token past a boundary flush resumes in plain text — the
+            // markdown re-parse that flush just paid for stays paid for
+            // until the next boundary, not redone on every token after it.
+            streamingProse.plain = true;
             bump(streamingProse);
           } else {
             openDial = null;
-            streamingProse = pushBlock({ kind: "assistant", raw: p.text });
+            streamingProse = pushBlock({ kind: "assistant", raw: p.text, plain: true });
+          }
+          break;
+        // The streaming flush boundary: a step of the reply has settled, so
+        // this is a cheap moment to pay the one markdown re-parse the plain
+        // text has been deferring. More tokens past it resume in plain text.
+        case "boundary":
+          if (streamingProse) {
+            streamingProse.plain = false;
+            bump(streamingProse);
           }
           break;
         // The agent's state is the status bar's only writer, so the label never
         // flickers back to a coarser word as tokens arrive; `ready` carries no
         // spinner, which is what an empty bar means here.
         case "state":
-          setStatus(p.pending ? capitalize(p.label) + "…" : "");
+          setStatus(p.pending ? (p.label ? p.label.charAt(0).toUpperCase() + p.label.slice(1) : p.label) + "…" : "");
           break;
         case "step":
           dialAddNote("[step " + p.n + "]", "muted");
@@ -2635,12 +2588,13 @@
           dialAddNote("error: " + p.message, "bad");
           break;
         case "provider_error":
-          dialAddNote(formatProviderError(p.record, "provider"), providerErrorClass(p.record));
+          dialAddNote(p.text, p.severity);
           break;
         // Always "warn", never "bad", whatever the cause: the exchange survived
-        // it and the partial reply above the note stands.
+        // it and the partial reply above the note stands. `sink.rs` pins this
+        // severity itself, rather than deriving it here from the record.
         case "stalled":
-          dialAddNote(formatProviderError(p.record, "stalled"), "warn");
+          dialAddNote(p.text, p.severity);
           break;
         case "failure":
           addSystemMessage(p.message);
@@ -2667,7 +2621,6 @@
         case "measure": return renderMeasureMark(m);
         case "fields": return renderFieldsMark(m);
         case "diff": return renderDiffMark(m);
-        case "listing": return renderListingMark(m);
         case "raw": return renderRawMark(m);
         default: {
           const el = document.createElement("pre");
@@ -2812,38 +2765,6 @@
       return container;
     }
 
-    function renderListingMark(m) {
-      const block = document.createElement("div");
-      block.className = "listing";
-      const lines = (m.text || "").split("\n");
-      lines.forEach((lineText, i) => {
-        const row = document.createElement("div");
-        row.className = "listing-row";
-        const gutter = document.createElement("span");
-        gutter.className = "gutter";
-        gutter.textContent = String(i + 1);
-        row.appendChild(gutter);
-        const text = document.createElement("span");
-        text.className = "listing-text";
-        text.textContent = lineText;
-        row.appendChild(text);
-        block.appendChild(row);
-      });
-      if (m.more) {
-        const row = document.createElement("div");
-        row.className = "listing-row muted";
-        const gutter = document.createElement("span");
-        gutter.className = "gutter";
-        row.appendChild(gutter);
-        const text = document.createElement("span");
-        text.className = "listing-text";
-        text.textContent = "⋮";
-        row.appendChild(text);
-        block.appendChild(row);
-      }
-      return block;
-    }
-
     function renderRawMark(m) {
       const pre = document.createElement("pre");
       pre.className = "raw-mark";
@@ -2868,19 +2789,19 @@
     listen("synod-event", (event) => onSynodEvent(event.payload || {}));
 
     listen("exchange-done", async () => {
-      streamingProse = null;
+      closeStreamingProse();
       openDial = null;
       setBusy(false);
       await refreshReport();
     });
 
     listen("synod-ended", (event) => {
-      const { stopped } = event.payload || {};
+      const { stopped, explained } = event.payload || {};
       state.alive = false;
-      streamingProse = null;
+      closeStreamingProse();
       openDial = null;
       setBusy(false); // input disables on `state.alive` alone; nothing is "working"
-      if (!stopped) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
+      if (!stopped && !explained) addSystemMessage("The assistant stopped unexpectedly. Choose Start again to continue.");
     });
 
     function submit() {
@@ -2942,6 +2863,11 @@
     // mutates this copy directly.
     let report = { files: [] };
 
+    // Set when `job_report` itself failed — the store or a checkpoint record
+    // could not be read — as opposed to succeeding with an empty change set.
+    // `renderReport` must never call the former "nothing has changed".
+    let reportError = null;
+
     // The rows already on screen: a revert rebuilds the whole list, and the
     // survivors flashing in again would read as fresh work.
     let shownRows = new Set();
@@ -2949,8 +2875,10 @@
     async function refreshReport() {
       try {
         report = await invoke("job_report", { folder: state.folder });
+        reportError = null;
       } catch (err) {
         report = { files: [] };
+        reportError = String(err);
       }
       renderReport();
     }
@@ -2961,6 +2889,25 @@
       b.classList.add("show");
     }
 
+    // Names the copy listed but could not read. Built as nodes, never as
+    // markup: these are names off the user's own disk.
+    function renderGap(names) {
+      const gap = $("report-gap");
+      gap.textContent = "";
+      gap.classList.toggle("show", names.length > 0);
+      if (names.length === 0) return;
+      gap.append("Synod could not read ");
+      names.forEach((name, i) => {
+        if (i > 0) gap.append(i === names.length - 1 ? " and " : ", ");
+        const code = document.createElement("code");
+        code.textContent = name;
+        gap.append(code);
+      });
+      gap.append(" while taking its copy, so anything in "
+        + (names.length === 1 ? "it" : "them")
+        + " is not shown here and cannot be put back.");
+    }
+
     // The column answers one question: what stands changed in the folder
     // right now. A reverted file is no longer changed, so its row leaves.
     function renderReport() {
@@ -2968,8 +2915,14 @@
       const files = report.files || [];
       const inPlace = files.filter((f) => f.status === "applied");
 
+      // A report that could not be taken is not an empty one: saying "nothing
+      // has changed" here would promise a safety net that is in fact broken.
       const empty = $("report-empty");
-      empty.style.display = inPlace.length === 0 ? "" : "none";
+      const failed = $("report-error");
+      failed.textContent = reportError ?? "";
+      failed.classList.toggle("show", reportError !== null);
+      renderGap(reportError ? [] : report.unreadable || []);
+      empty.style.display = reportError === null && inPlace.length === 0 ? "" : "none";
       empty.textContent = files.length === 0
         ? "Nothing has changed in this folder yet."
         : "Everything has been reverted.";
@@ -3015,8 +2968,8 @@
       const k = KINDS[file.kind] || UNKNOWN_KIND;
       const row = document.createElement("div");
       row.className = "card" + (file.conflict ? " conflict" : "") + (settled ? " settled" : "");
-      row.title = file.kind === "renamed" && file.renameFrom
-        ? "Renamed " + file.renameFrom + " to " + file.path
+      row.title = file.kind === "renamed" && file.rename_from
+        ? "Renamed " + file.rename_from + " to " + file.path
         : k.verb + " " + file.path;
 
       const glyph = document.createElement("span");
@@ -3035,11 +2988,11 @@
         row.appendChild(note);
       }
 
-      if (file.currentPath) row.appendChild(openButton("Open", "open_file", { path: file.currentPath }));
+      if (file.current_path) row.appendChild(openButton("Open", "open_file", { path: file.current_path }));
       if (file.conflict) {
-        if (file.beforePath) {
+        if (file.before_path) {
           row.appendChild(openButton("Open the older one", "open_earlier",
-            { folder: state.folder, path: file.beforePath }));
+            { folder: state.folder, path: file.before_path }));
         }
         row.appendChild(actionButton("Keep mine", "btn-mini keep", () => keepMine(file.id)));
         row.appendChild(actionButton("Revert anyway", "btn-mini", () => undo("undo_file", file.id, true)));
@@ -3055,10 +3008,10 @@
     function nameCell(file) {
       const cell = document.createElement("span");
       cell.className = "name";
-      if (file.kind === "renamed" && file.renameFrom) {
+      if (file.kind === "renamed" && file.rename_from) {
         const lead = document.createElement("span");
         lead.className = "lead";
-        lead.textContent = baseOf(file.renameFrom) + " → ";
+        lead.textContent = baseOf(file.rename_from) + " → ";
         cell.appendChild(lead);
       }
       const base = document.createElement("span");

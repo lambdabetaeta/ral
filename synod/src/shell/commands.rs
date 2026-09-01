@@ -10,7 +10,7 @@
 //! the user's default application through the opener plugin.
 //!
 //! The credential store is resolved once, at startup, before this module
-//! ever runs — see [`crate::Accounts`] — so every command here either
+//! ever runs — see [`super::Accounts`] — so every command here either
 //! finds it already settled or surfaces its one failure as a plain
 //! sentence.
 
@@ -18,10 +18,11 @@ use std::panic;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use ral_core::sync::LockExt;
 use serde::Serialize;
 use synod::session::{Choice, Conversation};
 use tauri::{AppHandle, Emitter as _, Manager, State};
@@ -60,6 +61,10 @@ struct ConversationEnded {
     /// True when the shell ended it on purpose rather than it failing on
     /// its own.
     stopped: bool,
+    /// True when a `synod-event` `Failure` already told the window its own
+    /// sentence for why — so the window's generic "stopped unexpectedly"
+    /// must stay silent instead of contradicting it.
+    explained: bool,
 }
 
 /// The worker thread's own gated seam onto the window: [`Self::emit`] reaches
@@ -76,7 +81,9 @@ pub(crate) struct Emitter {
 
 impl Emitter {
     pub(crate) fn emit<T: Serialize + Clone>(&self, event: &str, payload: T) {
-        if guard(&self.slot)
+        if self
+            .slot
+            .lock_ignore_poison()
             .as_ref()
             .is_some_and(|h| h.generation == self.generation)
         {
@@ -93,7 +100,7 @@ impl Emitter {
         reason = "the slot must stay held across the emit, not just the take, so a successor can never claim it between clearing and announcing"
     )]
     fn ended(&self, payload: ConversationEnded) {
-        let mut held = guard(&self.slot);
+        let mut held = self.slot.lock_ignore_poison();
         if held
             .as_ref()
             .is_some_and(|h| h.generation == self.generation)
@@ -127,17 +134,16 @@ pub async fn choose_folder(app: AppHandle) -> Option<String> {
 /// The provider/model menu the window offers before starting: one entry
 /// per account this computer has credentials for.
 ///
-/// Answers instantly from whatever [`crate::Accounts`] already has cached —
+/// Answers instantly from whatever [`super::Accounts`] already has cached —
 /// a fresh disk entry carried over from an earlier run, or nothing at all
-/// — and, the first time this run calls it, kicks off a background fetch
-/// of the complete listing: a `std::thread` that reaches the same managed
-/// state through `app` (the pattern [`converse`] already uses to reach
-/// [`crate::Accounts`] from its own worker thread), calls
-/// [`synod::session::refresh_menu`], and emits the result as
+/// — and, the first time this run calls it, kicks off
+/// [`super::refresh_menu_async`], which emits the result as
 /// `models-refreshed` unconditionally — even when it turns out to equal
 /// this instant menu — so the window is never left waiting on a refresh
-/// that silently agreed with what it already showed.  [`crate::RefreshGate`]
-/// makes sure at most one such fetch is ever in flight for the run.
+/// that silently agreed with what it already showed.  The managed
+/// [`Once`] makes sure at most one such fetch is ever in flight for the
+/// run: one refresh per run is all the catalog is worth, since its disk
+/// cache already carries its own day-long freshness window.
 ///
 /// # Errors
 /// Returns the credential scrub's own failure, if startup could not
@@ -145,22 +151,13 @@ pub async fn choose_folder(app: AppHandle) -> Option<String> {
 #[tauri::command]
 pub fn list_models(
     app: AppHandle,
-    accounts: State<'_, crate::Accounts>,
-    gate: State<'_, crate::RefreshGate>,
+    accounts: State<'_, super::Accounts>,
+    refresh_started: State<'_, Once>,
 ) -> Result<synod::session::ModelMenu, String> {
-    let (store, catalog) = accounts.0.as_ref().map_err(Clone::clone)?;
+    let (store, catalog) = accounts.resolved()?;
     let instant = synod::session::menu(store, catalog);
 
-    if !gate.0.swap(true, Ordering::SeqCst) {
-        std::thread::spawn(move || {
-            let accounts = app.state::<crate::Accounts>();
-            let Ok((store, catalog)) = &accounts.0 else {
-                return;
-            };
-            let menu = synod::session::refresh_menu(store, catalog);
-            let _ = app.emit("models-refreshed", menu);
-        });
-    }
+    refresh_started.call_once(|| super::refresh_menu_async(&app));
 
     Ok(instant)
 }
@@ -182,11 +179,11 @@ pub fn list_models(
 pub fn start_conversation(
     app: AppHandle,
     state: State<'_, Running>,
-    accounts: State<'_, crate::Accounts>,
+    accounts: State<'_, super::Accounts>,
     folder: String,
     choice: Option<Choice>,
 ) -> Result<(), String> {
-    accounts.0.as_ref().map_err(Clone::clone)?;
+    accounts.resolved()?;
     spawn_conversation(app, state.slot(), folder, choice);
     Ok(())
 }
@@ -203,7 +200,7 @@ pub fn start_conversation(
 )]
 pub fn send_message(state: State<'_, Running>, message: String) -> Result<(), String> {
     let slot = state.slot();
-    let held = guard(&slot);
+    let held = slot.lock_ignore_poison();
     let handle = held
         .as_ref()
         .ok_or_else(|| "There is no conversation running to send this to.".to_string())?;
@@ -244,7 +241,7 @@ pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
 /// wait, so a wedged conversation can never keep the window from closing.
 /// Called from the window's own close handler, never the frontend.
 pub(crate) fn end_conversation(slot: &Arc<Mutex<Option<Handle>>>) {
-    let Some(handle) = guard(slot).take() else {
+    let Some(handle) = slot.lock_ignore_poison().take() else {
         return;
     };
     drop(handle.sender);
@@ -278,7 +275,7 @@ fn spawn_conversation(
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
 
-    let mut held = guard(&slot);
+    let mut held = slot.lock_ignore_poison();
     let superseded = held.take().map(|handle| {
         drop(handle.sender);
         handle.join
@@ -324,7 +321,8 @@ fn run_conversation(
     if let Some(old) = superseded {
         let _ = old.join();
     }
-    if guard(&slot)
+    if slot
+        .lock_ignore_poison()
         .as_ref()
         .is_none_or(|h| h.generation != generation)
     {
@@ -340,7 +338,10 @@ fn run_conversation(
     let ended = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         converse(&emitter, &folder, choice, &receiver)
     }))
-    .unwrap_or(ConversationEnded { stopped: false });
+    .unwrap_or(ConversationEnded {
+        stopped: false,
+        explained: false,
+    });
 
     emitter.ended(ended);
 }
@@ -356,10 +357,17 @@ fn converse(
 ) -> ConversationEnded {
     let mut sink = super::sink::TauriSink::new(emitter.clone());
 
-    let accounts = emitter.app.state::<crate::Accounts>();
-    let (store, _) = accounts.0.as_ref().expect(
-        "start_conversation refuses before spawning this thread when the credential scrub failed",
-    );
+    let accounts = emitter.app.state::<super::Accounts>();
+    // start_conversation already checked this before spawning the thread;
+    // a failure here means the credential scrub's outcome flipped under us,
+    // which cannot happen — but a worker that finds no store stands down
+    // rather than panics.
+    let Ok((store, _)) = accounts.resolved() else {
+        return ConversationEnded {
+            stopped: false,
+            explained: false,
+        };
+    };
 
     let (mut conversation, opening) = match Conversation::begin(Path::new(folder), store, choice) {
         Ok(begun) => begun,
@@ -368,7 +376,10 @@ fn converse(
                 "synod-event",
                 super::sink::SynodEvent::Failure { message: e },
             );
-            return ConversationEnded { stopped: false };
+            return ConversationEnded {
+                stopped: false,
+                explained: true,
+            };
         }
     };
 
@@ -388,15 +399,10 @@ fn converse(
     }
 
     let _ = conversation.end();
-    ConversationEnded { stopped: true }
-}
-
-/// Lock the conversation slot, recovering the guard even if a thread
-/// panicked while holding it — a poisoned lock here means only that a
-/// reader thread unwound, which must not wedge the window.
-fn guard(slot: &Arc<Mutex<Option<Handle>>>) -> std::sync::MutexGuard<'_, Option<Handle>> {
-    slot.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    ConversationEnded {
+        stopped: true,
+        explained: false,
+    }
 }
 
 /// Hand `path` to the user's default application for that file.  Also the

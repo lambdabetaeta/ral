@@ -76,19 +76,97 @@ fn decode_card(marks: &serde_json::Value) -> Option<Card> {
     serde_json::from_value(marks.clone()).ok()
 }
 
+/// A provider-error note's severity, as the two CSS classes the dial's note
+/// row accepts — computed once here, at the seam, so the frontend never
+/// re-derives it from the record it no longer sees.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Warn,
+    Bad,
+}
+
+/// `text` beside `suffix` if `text` is non-empty, else nothing — the shared
+/// shape of every optional clause [`provider_error_text`] appends.
+fn suffix(prefix: &str, text: &str) -> String {
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}{text}")
+    }
+}
+
+/// A [`ProviderErrorRecord`] as the one-line bracketed sentence the dial
+/// shows, exhaustively over its six variants — `label` is the tag word
+/// ("provider" or "stalled") the two events that carry one prefix it with.
+fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
+    let body = match record {
+        ProviderErrorRecord::Cancelled { where_ } => format!("cancelled{}", suffix(" at ", where_)),
+        ProviderErrorRecord::Transient { cause, attempts, .. } => {
+            format!("transient{} (attempt {attempts})", suffix(" — ", cause))
+        }
+        ProviderErrorRecord::RateLimited {
+            retry_after_secs,
+            cause,
+            ..
+        } => format!(
+            "rate limited{}{}",
+            retry_after_secs.map_or_else(String::new, |secs| format!(" — retry in {secs}s")),
+            suffix(" — ", cause),
+        ),
+        ProviderErrorRecord::Api {
+            status,
+            model,
+            message,
+            ..
+        } => format!(
+            "api {}{}{message}",
+            status.map_or_else(String::new, |status| format!("{status} ")),
+            if model.is_empty() {
+                String::new()
+            } else {
+                format!("{model} ")
+            },
+        ),
+        ProviderErrorRecord::Truncated { reason } => format!("truncated{}", suffix(" — ", reason)),
+        ProviderErrorRecord::Other { cause } => {
+            if cause.is_empty() {
+                "error".to_string()
+            } else {
+                cause.clone()
+            }
+        }
+    };
+    format!("[{label}: {body}]")
+}
+
+/// [`providerErrorClass`]'s Rust twin: an API failure or an unclassified one
+/// reads as a failure the exchange cannot recover from; every other kind is a
+/// warning.
+fn provider_error_severity(record: &ProviderErrorRecord) -> Severity {
+    match record {
+        ProviderErrorRecord::Api { .. } | ProviderErrorRecord::Other { .. } => Severity::Bad,
+        ProviderErrorRecord::Cancelled { .. }
+        | ProviderErrorRecord::Transient { .. }
+        | ProviderErrorRecord::RateLimited { .. }
+        | ProviderErrorRecord::Truncated { .. } => Severity::Warn,
+    }
+}
+
 /// The wire shape of one exchange's worth of narration, as the window's own
 /// `synod-event` listener sees it — [`project`]'s codomain, plus
 /// [`Self::Failure`], which never comes from the bus.
 #[derive(Clone, Serialize)]
-#[serde(
-    tag = "type",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SynodEvent {
     Token {
         text: String,
     },
+    /// The streaming flush boundary — where the trunk's own reasoning fold
+    /// would have cut a block.  Carries no payload: the window's own use is
+    /// to know when to re-render the streaming bubble as markdown instead of
+    /// plain text, not to draw anything itself.
+    Boundary,
     Step {
         n: u32,
     },
@@ -146,14 +224,17 @@ pub enum SynodEvent {
         message: String,
     },
     ProviderError {
-        record: ProviderErrorRecord,
+        text: String,
+        severity: Severity,
     },
-    /// A stream that broke mid-turn.  Carries the same record as
+    /// A stream that broke mid-turn.  Carries the same sentence shape as
     /// [`Self::ProviderError`] and is deliberately a separate type: the window
     /// grades it below a failure that ended the exchange, because the partial
-    /// reply already on screen stands and the turn resumes from it.
+    /// reply already on screen stands and the turn resumes from it — so its
+    /// `severity` is always [`Severity::Warn`], whatever the record beneath.
     Stalled {
-        record: ProviderErrorRecord,
+        text: String,
+        severity: Severity,
     },
     /// A conversation failure, emitted directly by `commands.rs` — never by
     /// [`project`], since no [`Record`] carries this fact.  A
@@ -277,10 +358,12 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
             message: text.clone(),
         }),
         Forensic::ProviderError { error } => Some(SynodEvent::ProviderError {
-            record: error.clone(),
+            text: provider_error_text("provider", error),
+            severity: provider_error_severity(error),
         }),
         Forensic::Stalled { error } => Some(SynodEvent::Stalled {
-            record: error.clone(),
+            text: provider_error_text("stalled", error),
+            severity: Severity::Warn,
         }),
         // The harness minding itself, a forensic pairing whose act row
         // already said everything, a cancellation with nothing to pair
@@ -361,14 +444,13 @@ fn project_transient(t: &Transient) -> Option<SynodEvent> {
         Transient::Fault { text } => Some(SynodEvent::Error {
             message: text.clone(),
         }),
-        // A live reasoning chunk has no block of its own here, the streaming
-        // flush boundary and a cleared segment draw nothing on their own,
-        // and the live pin register is a slot the window does not have.
-        Transient::Thinking(_)
-        | Transient::Boundary
-        | Transient::Cleared
-        | Transient::Pin { .. }
-        | Transient::Unpin { .. } => None,
+        Transient::Boundary => Some(SynodEvent::Boundary),
+        // A live reasoning chunk has no block of its own here, a cleared
+        // segment draws nothing on its own, and the live pin register is a
+        // slot the window does not have.
+        Transient::Thinking(_) | Transient::Cleared | Transient::Pin { .. } | Transient::Unpin { .. } => {
+            None
+        }
         // Intercepted by `Router::route_transient` before this fold ever
         // runs — a helper's own lifecycle, folded into `Helpers` instead.
         Transient::Born { .. } | Transient::Died => None,
@@ -668,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_format_pins_camel_case_tool_call() {
+    fn wire_format_pins_the_tool_call_shape() {
         let call = SynodEvent::ToolCall {
             tool: "ral".to_string(),
             cmd: "ls".to_string(),
@@ -806,5 +888,204 @@ mod tests {
             panic!("a plumbing fault must still reach the window");
         };
         assert_eq!(message, "record.jsonl: permission denied");
+    }
+
+    /// The `SynodEvent`/`MarkDto` wire vocabulary against `index.html`'s own
+    /// `switch` statements — the only check that reads both languages, and so
+    /// the only one that can see a disagreement between them.
+    ///
+    /// This catches a window `case` with no Rust variant behind it — the bug
+    /// that shipped, for `Mark::Listing`: a `renderListingMark` function, its
+    /// `case "listing"` arm, and three CSS rules, all dead once exarch
+    /// deleted the variant, and invisible to any single-language tool. It
+    /// does *not* fully catch the opposite mistake: a new Rust variant is
+    /// only caught if whoever adds it also adds it to this test's own
+    /// `one_of_each_*` list — the exhaustive `match` beside each list forces
+    /// them to notice this test exists, but cannot force them to extend it.
+    mod wire_vocabulary {
+        use super::{MarkDto, Measure, Severity, SynodEvent};
+        use std::collections::BTreeSet;
+
+        const INDEX_HTML: &str = include_str!("../../ui/index.html");
+
+        /// The `case "..."` labels of the `switch` inside the function
+        /// starting at `start_marker` — sliced off at the next top-level
+        /// `function` declaration (or eof), since `index.html` holds other
+        /// switches this must not harvest from.
+        fn case_labels(start_marker: &str) -> BTreeSet<String> {
+            let start = INDEX_HTML
+                .find(start_marker)
+                .unwrap_or_else(|| panic!("index.html no longer contains {start_marker:?}"))
+                + start_marker.len();
+            let rest = &INDEX_HTML[start..];
+            let end = rest.find("\n    function ").unwrap_or(rest.len());
+            rest[..end]
+                .lines()
+                .filter_map(|line| {
+                    let label = line.trim_start().strip_prefix("case \"")?;
+                    let close = label.find('"')?;
+                    Some(label[..close].to_string())
+                })
+                .collect()
+        }
+
+        /// One value of every `SynodEvent` variant — kept beside
+        /// [`assert_synod_event_exhaustive`] so a variant this list forgets
+        /// still fails to compile once that match is extended for it.
+        fn one_of_each_synod_event() -> Vec<SynodEvent> {
+            vec![
+                SynodEvent::Token { text: String::new() },
+                SynodEvent::Boundary,
+                SynodEvent::Step { n: 0 },
+                SynodEvent::State {
+                    label: "ready",
+                    pending: false,
+                },
+                SynodEvent::ToolCall {
+                    tool: String::new(),
+                    cmd: String::new(),
+                    summary: None,
+                },
+                SynodEvent::HarnessCall {
+                    verb: String::new(),
+                    subject: None,
+                    payload: String::new(),
+                    failed: false,
+                },
+                SynodEvent::Card { marks: vec![] },
+                SynodEvent::ProcessCard { marks: vec![] },
+                SynodEvent::Helpers { live: 0 },
+                SynodEvent::HelperDone {
+                    name: String::new(),
+                    ok: true,
+                    elapsed_secs: 0.0,
+                },
+                SynodEvent::Usage {
+                    input: 0,
+                    output: 0,
+                    dollars: 0.0,
+                    unmetered: false,
+                },
+                SynodEvent::StopReason { reason: String::new() },
+                SynodEvent::Error { message: String::new() },
+                SynodEvent::ProviderError {
+                    text: String::new(),
+                    severity: Severity::Warn,
+                },
+                SynodEvent::Stalled {
+                    text: String::new(),
+                    severity: Severity::Warn,
+                },
+                SynodEvent::Failure { message: String::new() },
+            ]
+        }
+
+        /// Exhaustive so a new `SynodEvent` variant is a compile error here,
+        /// not a silently-stale [`one_of_each_synod_event`].
+        fn assert_synod_event_exhaustive(event: &SynodEvent) {
+            match event {
+                SynodEvent::Token { .. }
+                | SynodEvent::Boundary
+                | SynodEvent::Step { .. }
+                | SynodEvent::State { .. }
+                | SynodEvent::ToolCall { .. }
+                | SynodEvent::HarnessCall { .. }
+                | SynodEvent::Card { .. }
+                | SynodEvent::ProcessCard { .. }
+                | SynodEvent::Helpers { .. }
+                | SynodEvent::HelperDone { .. }
+                | SynodEvent::Usage { .. }
+                | SynodEvent::StopReason { .. }
+                | SynodEvent::Error { .. }
+                | SynodEvent::ProviderError { .. }
+                | SynodEvent::Stalled { .. }
+                | SynodEvent::Failure { .. } => {}
+            }
+        }
+
+        /// One value of every `MarkDto` variant — see
+        /// [`one_of_each_synod_event`] for why this is paired with an
+        /// exhaustive match rather than trusted alone.
+        fn one_of_each_mark_dto() -> Vec<MarkDto> {
+            vec![
+                MarkDto::Text { spans: vec![] },
+                MarkDto::Measure(Measure {
+                    label: String::new(),
+                    value: 0,
+                    max: None,
+                    unit: None,
+                }),
+                MarkDto::Fields { rows: vec![] },
+                MarkDto::Diff {
+                    path: String::new(),
+                    hunks: vec![],
+                },
+                MarkDto::Raw { text: String::new() },
+            ]
+        }
+
+        /// Exhaustive so a new `MarkDto` variant is a compile error here, not
+        /// a silently-stale [`one_of_each_mark_dto`].
+        fn assert_mark_dto_exhaustive(mark: &MarkDto) {
+            match mark {
+                MarkDto::Text { .. }
+                | MarkDto::Measure(_)
+                | MarkDto::Fields { .. }
+                | MarkDto::Diff { .. }
+                | MarkDto::Raw { .. } => {}
+            }
+        }
+
+        /// The tag serde actually writes at `key`, read back off the real
+        /// `Serialize` output rather than hand-copied — a `rename` or a
+        /// variant rename cannot make this test lie.
+        fn tag<T: serde::Serialize>(value: &T, key: &str) -> String {
+            let json = serde_json::to_value(value).expect("wire types always serialise");
+            json[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key:?} is always a string tag"))
+                .to_string()
+        }
+
+        /// Every constructed value's tag, refusing a list that names one
+        /// variant twice: a duplicate would quietly stand in for the variant
+        /// it was copied from, and a short list still matches a short switch.
+        fn tags_of<T: serde::Serialize>(values: &[T], key: &str) -> BTreeSet<String> {
+            let tags: BTreeSet<String> = values.iter().map(|value| tag(value, key)).collect();
+            assert_eq!(
+                tags.len(),
+                values.len(),
+                "one variant is constructed twice, so another is missing"
+            );
+            tags
+        }
+
+        fn assert_label_sets_match(rust_tags: &BTreeSet<String>, window_labels: &BTreeSet<String>) {
+            let in_window_never_emitted: Vec<_> = window_labels.difference(rust_tags).collect();
+            let emitted_window_ignores: Vec<_> = rust_tags.difference(window_labels).collect();
+            assert!(
+                in_window_never_emitted.is_empty() && emitted_window_ignores.is_empty(),
+                "wire tag mismatch — in the window but never emitted: {in_window_never_emitted:?}; \
+                 emitted but the window never handles: {emitted_window_ignores:?}"
+            );
+        }
+
+        #[test]
+        fn synod_event_tags_match_the_windows_dispatch_switch() {
+            let events = one_of_each_synod_event();
+            events.iter().for_each(assert_synod_event_exhaustive);
+            let rust_tags = tags_of(&events, "type");
+            let window_labels = case_labels("function onSynodEvent(p) {");
+            assert_label_sets_match(&rust_tags, &window_labels);
+        }
+
+        #[test]
+        fn mark_dto_tags_match_the_windows_render_mark_switch() {
+            let marks = one_of_each_mark_dto();
+            marks.iter().for_each(assert_mark_dto_exhaustive);
+            let rust_tags = tags_of(&marks, "mark");
+            let window_labels = case_labels("function renderMark(m) {");
+            assert_label_sets_match(&rust_tags, &window_labels);
+        }
     }
 }

@@ -196,6 +196,8 @@ echo ">> [container] snug image: $SIZE_BYTES bytes ($BLK x $BS blocks)"
 # --- 3. Download artifact, checksums, version-pin manifest ------------------
 # The hypervisor mounts the raw .img; users download the compressed .zst.
 echo ">> [container] compressing rootfs.img.zst (zstd -$ZSTD_LEVEL)"
+# --long=27 is `vm_manager::ROOTFS_WINDOW`: raise it there too, or no decoder
+# will allocate a window large enough to read what this writes.
 zstd -q -"$ZSTD_LEVEL" -T0 --long=27 -f /out/rootfs.img -o /out/rootfs.img.zst
 IMG_BYTES=$(stat -c%s /out/rootfs.img)
 ZST_BYTES=$(stat -c%s /out/rootfs.img.zst)

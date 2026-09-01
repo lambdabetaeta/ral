@@ -8,10 +8,7 @@
 //! other state.  A signed bundle is read-only, so the rootfs can never
 //! live inside it; the cache is the only writable home it has.
 
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-
-use sha2::{Digest, Sha256};
 
 use crate::session::SYNOD;
 
@@ -190,22 +187,8 @@ fn ensure_inflated(archive: &Path, checksum: &Path, target: &Path) -> Result<Pat
         )
     })?;
 
-    let tmp = target.with_extension("img.part");
-    let actual = inflate(archive, &tmp)?;
-    if actual != expected {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "the guest image unpacked from {} did not match its checksum — the download is corrupt",
-            archive.display()
-        ));
-    }
+    vm_manager::media::inflate(archive, target, Some(&expected))?;
 
-    std::fs::rename(&tmp, target).map_err(|e| {
-        format!(
-            "the unpacked guest image could not be moved into place at {}: {e}",
-            target.display()
-        )
-    })?;
     std::fs::write(&marker, &expected).map_err(|e| {
         format!(
             "the guest image was unpacked but its checksum marker {} could not be written: {e}",
@@ -213,58 +196,6 @@ fn ensure_inflated(archive: &Path, checksum: &Path, target: &Path) -> Result<Pat
         )
     })?;
     Ok(target.to_path_buf())
-}
-
-/// Decompress the zstd `archive` into `out`, returning the hex SHA-256 of
-/// the inflated bytes computed in the same pass.
-fn inflate(archive: &Path, out: &Path) -> Result<String, String> {
-    let source = std::fs::File::open(archive).map_err(|e| {
-        format!(
-            "the guest image {} could not be opened: {e}",
-            archive.display()
-        )
-    })?;
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(std::io::BufReader::new(source))
-        .map_err(|e| {
-            format!(
-                "the guest image {} could not be read: {e}",
-                archive.display()
-            )
-        })?;
-    let mut sink = std::io::BufWriter::new(std::fs::File::create(out).map_err(|e| {
-        format!(
-            "the guest image could not be written to {}: {e}",
-            out.display()
-        )
-    })?);
-
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = decoder.read(&mut buf).map_err(|e| {
-            format!(
-                "the guest image {} could not be unpacked: {e}",
-                archive.display()
-            )
-        })?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        sink.write_all(&buf[..n]).map_err(|e| {
-            format!(
-                "the guest image could not be written to {}: {e}",
-                out.display()
-            )
-        })?;
-    }
-    sink.flush().map_err(|e| {
-        format!(
-            "the guest image could not be written to {}: {e}",
-            out.display()
-        )
-    })?;
-    Ok(hex(&hasher.finalize()))
 }
 
 /// The hash from a `sha256sum` sidecar: the first whitespace-delimited token
@@ -280,14 +211,4 @@ fn read_checksum(path: &Path) -> Result<String, String> {
         .next()
         .map(str::to_string)
         .ok_or_else(|| format!("the guest image checksum {} is empty", path.display()))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
 }

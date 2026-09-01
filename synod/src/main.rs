@@ -50,53 +50,11 @@
 
 mod shell;
 
-use shell::{commands, keys, review, signin};
+use shell::{Accounts, commands, keys, review, signin};
 
-use exarch::provider::credential::CredentialStore;
 use exarch::provider::models::{LiveSource, ModelCatalog};
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
 use tauri::Manager;
-
-/// The credential scrub's outcome, resolved once here — while the process
-/// is still single-threaded, [`synod::session::prepare`] requires — paired
-/// with the model catalog built from it, and held as Tauri state for the
-/// app's whole life.  Every command that needs a working model account
-/// surfaces the `Err` as its own plain-sentence failure rather than
-/// re-running or second-guessing it; the pairing makes "no catalog without
-/// credentials" a type fact instead of a runtime invariant the two halves
-/// could drift out of sync on.
-///
-/// Both halves are behind a [`Mutex`] because both grow: a sign-in from the
-/// window ([`synod::session::sign_in`]) admits a fresh `ChatGPT` account to
-/// the store and its credential to the catalog, and the scrub that built
-/// them cannot be re-run in a process that is no longer single-threaded.
-/// Every holder in `synod::session` takes them locked only briefly — for an
-/// account list, a cached model list, an admission — never across a network
-/// call or a machine boot.
-struct Accounts(Result<(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String>);
-
-impl Accounts {
-    /// The store and catalog, or a fresh copy of the startup failure that
-    /// left this run with neither — every command answers with the same
-    /// sentence rather than each restating how to unwrap it.
-    fn resolved(
-        &self,
-    ) -> Result<&(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String> {
-        self.0.as_ref().map_err(Clone::clone)
-    }
-}
-
-/// Whether this run has already started its one background model refresh.
-///
-/// [`commands::list_models`] swaps this `false` → `true` and spawns the
-/// refresh only on the swap that lands it `true`, so calling the command
-/// again — a second picker open, a restart's own menu — can never race a
-/// second fetch against the first.  One refresh per run is all the catalog
-/// is worth: its disk cache already carries its own day-long freshness
-/// window, so a run that has fetched once has nothing left to gain from
-/// fetching again.
-struct RefreshGate(AtomicBool);
 
 fn main() {
     if let Some(code) = exarch::dispatch_pre_main() {
@@ -105,7 +63,7 @@ fn main() {
     // Before any conversation can open its own store: collect whatever a
     // crashed run left behind.
     synod::workspace::history::sweep_stale();
-    let accounts = Accounts(synod::session::prepare().map(|store| {
+    let accounts = Accounts::new(synod::session::prepare().map(|store| {
         let catalog = Mutex::new(ModelCatalog::new(
             LiveSource::new(&store),
             synod::session::SYNOD,
@@ -118,7 +76,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .manage(commands::Running::default())
         .manage(accounts)
-        .manage(RefreshGate(AtomicBool::new(false)))
+        .manage(std::sync::Once::new())
         .manage(review::Review::default())
         .manage(signin::SignIn::default())
         .invoke_handler(tauri::generate_handler![

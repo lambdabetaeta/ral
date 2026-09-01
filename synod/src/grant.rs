@@ -285,9 +285,9 @@ impl Grant {
     /// What to boot to hold this folder: the granted folder, writable, on a
     /// machine sized for the heaviest thing the toolbox does — converting a
     /// document with the office suite running headless — possibly several
-    /// times over.  A conversing assistant may now spread a batch of
-    /// documents across a few helpers, so "the heaviest thing" is no longer
-    /// singular; synod builds its own spec rather than taking
+    /// times over.  A conversing assistant spreads a batch of documents
+    /// across a few helpers, so "the heaviest thing" is several at once;
+    /// synod builds its own spec rather than taking
     /// [`MachineSpec::for_folder`](vm_manager::MachineSpec::for_folder)'s 4
     /// vcpus / 4096 MiB, sized for three of that heaviest thing at once.
     /// Each spawn's own jail still caps a single command's memory well

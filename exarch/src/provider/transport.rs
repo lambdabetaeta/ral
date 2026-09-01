@@ -3,7 +3,7 @@
 use super::credential::Credential;
 use super::identity::{Account, AccountId, Billing, Service, adapter_for_model};
 use super::oauth;
-use crate::sync::LockExt;
+use ral_core::sync::LockExt;
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, AuthResolver, Endpoint, ServiceTargetResolver};
 use genai::{Client, Headers, ModelIden, ServiceTarget};
