@@ -542,19 +542,59 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                   payload route; match the existing head's route or add a codec"
                 .to_string(),
         }),
-        Reason::AliasParam
-        | Reason::ReturnShape
-        | Reason::TryHandler
-        | Reason::ScopeBody
-        | Reason::CaseScrutinee
-        | Reason::ListElem
-        | Reason::MapElem
-        | Reason::MapSpread
+        Reason::ListElem => Some(
+            "a list is homogeneous — every element has the one type — so this \
+             element must be what its neighbours are; give it their shape, or make \
+             every element a tagged value and `case` on it downstream"
+                .to_string(),
+        ),
+        Reason::MapElem => Some(
+            "a map has computed keys, so every value must have the one type; if the \
+             values are genuinely different shapes, write the keys out as labels \
+             (`[a: 1, b: \"two\"]`) — that is a record, and a record's fields each \
+             keep their own type"
+                .to_string(),
+        ),
+        Reason::MapSpread => Some(
+            "a `...x` spread copies another record's fields — or another map's \
+             entries — into this position, so the value after `...` must itself be a \
+             record or a map"
+                .to_string(),
+        ),
+        Reason::ScopeBody => Some(
+            "`within`, `grant`, `try`, `guard` and `audit` each run a block — the body \
+             has to be a block value (something built with `{ ... }`), not data"
+                .to_string(),
+        ),
+        Reason::TryHandler => Some(
+            "a `try` handler is given the error the body raised, so it has to be a \
+             block of one argument: `try { … } { |e| … }`"
+                .to_string(),
+        ),
+        Reason::ReturnShape => Some(
+            "this position needs a computation that is ready to run, and this one is \
+             still waiting for an argument — apply it to what's missing (`f $x`), or \
+             write `$name` if you meant to hand over the function itself"
+                .to_string(),
+        ),
+        Reason::LetRecSelf => Some(
+            "a definition that calls itself is checked at one single type throughout \
+             its own body, so every call it makes to itself must use the same argument \
+             and result types as the rest of the definition"
+                .to_string(),
+        ),
+        Reason::AliasParam => Some(
+            "a handler or an alias is invoked as a command, so its one parameter is \
+             the argv: a list of strings. Write the arm `{ |args| … }` and read \
+             `$args[0]`, or call the function directly, as in `!{$f 1}`"
+                .to_string(),
+        ),
+        // These constraints cannot fail on user input, already have a complete
+        // diagnosis, or apply only to checker-inserted nodes.
+        Reason::CaseScrutinee
         | Reason::RecordFieldRead
         | Reason::DynamicIndexTarget
         | Reason::AutoderefHead
-        | Reason::LetRecSelf
-        | Reason::LinesStepSelf
         | Reason::CaptureOperand
         | Reason::DecodeOperand => None,
     }
@@ -574,6 +614,15 @@ fn argument_shape_hint(kind: &TypeErrorKind) -> Option<String> {
         return Some(
             "this position expects a block value: something built with \
              `{ ... }` or `|x| ...`"
+                .to_string(),
+        );
+    }
+    let is_variant = |t: &Ty| matches!(t, Ty::Variant(_));
+    if is_variant(expected) != is_variant(actual) {
+        return Some(
+            "one of these is a tagged value (something built with a backtick, like \
+             `` `ok 1 ``) and the other is not — tag the plain one, or take the tagged \
+             one apart with `case` first"
                 .to_string(),
         );
     }

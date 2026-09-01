@@ -107,8 +107,6 @@ pub enum Reason {
     /// A head still a bare variable, pinned to `Thunk` so application can unfold it.
     AutoderefHead,
     LetRecSelf,
-    /// `from-lines`' recursive Step tail against the stream it closes into.
-    LinesStepSelf,
     /// An undecided payload route pinned at a value boundary (a `Bind` RHS, a
     /// join's byte or value side) so a later grounding becomes an honest
     /// mismatch rather than silent divergence.

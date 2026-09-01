@@ -576,14 +576,15 @@ impl Elaborator {
                 // argument `f [...$xs]` stays one arg carrying its own spread.
                 let arg_vals: Args = args
                     .iter()
-                    .map(|a| {
-                        let elem = match &a.item {
-                            Ast::Spread(inner) => {
-                                ValListElem::Spread(self.to_val(&inner.item, binds))
-                            }
-                            other => ValListElem::Single(self.to_val(other, binds)),
-                        };
-                        Spanned::with_span(a.span, elem)
+                    .map(|a| match &a.item {
+                        Ast::Spread(inner) => ValListElem::Spread(Spanned::with_span(
+                            a.span,
+                            self.to_val(&inner.item, binds),
+                        )),
+                        other => ValListElem::Single(Spanned::with_span(
+                            a.span,
+                            self.to_val(other, binds),
+                        )),
                     })
                     .collect();
                 let redirect_vals = self.lower_redirects(redirects, binds);
@@ -738,12 +739,14 @@ impl Elaborator {
                     elems
                         .iter()
                         .map(|e| match e {
-                            ListElem::Single(a) => ValListElem::Single(
-                                self.with_span(a.span, |this| this.to_val(&a.item, binds),)
-                            ),
-                            ListElem::Spread(a) => ValListElem::Spread(
-                                self.with_span(a.span, |this| this.to_val(&a.item, binds),)
-                            ),
+                            ListElem::Single(a) => ValListElem::Single(Spanned::with_span(
+                                a.span,
+                                self.with_span(a.span, |this| this.to_val(&a.item, binds)),
+                            )),
+                            ListElem::Spread(a) => ValListElem::Spread(Spanned::with_span(
+                                a.span,
+                                self.with_span(a.span, |this| this.to_val(&a.item, binds)),
+                            )),
                         })
                         .collect(),
                 ))
@@ -757,15 +760,26 @@ impl Elaborator {
                         .map(|e| match e {
                             MapEntry::Entry { key, value } => ValMapEntry::Entry(
                                 Val::String(key.row_label()),
-                                self.with_span(value.span, |this| this.to_val(&value.item, binds)),
+                                Spanned::with_span(
+                                    value.span,
+                                    self.with_span(value.span, |this| {
+                                        this.to_val(&value.item, binds)
+                                    }),
+                                ),
                             ),
                             MapEntry::Deref { name, value } => ValMapEntry::Entry(
                                 self.variable_val(name),
-                                self.with_span(value.span, |this| this.to_val(&value.item, binds)),
+                                Spanned::with_span(
+                                    value.span,
+                                    self.with_span(value.span, |this| {
+                                        this.to_val(&value.item, binds)
+                                    }),
+                                ),
                             ),
-                            MapEntry::Spread(a) => ValMapEntry::Spread(
-                                self.with_span(a.span, |this| this.to_val(&a.item, binds),)
-                            ),
+                            MapEntry::Spread(a) => ValMapEntry::Spread(Spanned::with_span(
+                                a.span,
+                                self.with_span(a.span, |this| this.to_val(&a.item, binds)),
+                            )),
                         })
                         .collect(),
                 ))
@@ -1215,7 +1229,7 @@ fn reserved_register(name: &str) -> Option<(Register, &'static str)> {
 /// status here spares the typechecker a zero-arg special case.
 fn desugar_zero_arg_exit(name: &str, args: Args) -> Args {
     if args.is_empty() && (name == "exit" || name == "quit") {
-        vec![Spanned::synthetic(ValListElem::Single(Val::Int(0)))]
+        vec![ValListElem::Single(Spanned::synthetic(Val::Int(0)))]
     } else {
         args
     }
@@ -1286,9 +1300,39 @@ mod tests {
         (e.head.name(), &e.args, external_only)
     }
 
-    /// Strip spans so assertions match on shape alone.
+    /// Strip spans so assertions match on shape alone.  Only lists and maps
+    /// hold one; a thunk's inner `Comp` spans are out of reach, so no fixture
+    /// here compares a thunk.
+    fn strip_slot(elem: &ValListElem) -> ValListElem {
+        match elem {
+            ValListElem::Single(v) => ValListElem::Single(Spanned::synthetic(strip_val(&v.item))),
+            ValListElem::Spread(v) => ValListElem::Spread(Spanned::synthetic(strip_val(&v.item))),
+        }
+    }
+
+    fn strip_val(val: &Val) -> Val {
+        match val {
+            Val::List(elems) => Val::List(elems.iter().map(strip_slot).collect()),
+            Val::Map(entries) => Val::Map(
+                entries
+                    .iter()
+                    .map(|entry| match entry {
+                        ValMapEntry::Entry(k, v) => ValMapEntry::Entry(
+                            strip_val(k),
+                            Spanned::synthetic(strip_val(&v.item)),
+                        ),
+                        ValMapEntry::Spread(v) => {
+                            ValMapEntry::Spread(Spanned::synthetic(strip_val(&v.item)))
+                        }
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     fn arg_items(args: &Args) -> Vec<ValListElem> {
-        args.iter().map(|s| s.item.clone()).collect()
+        args.iter().map(strip_slot).collect()
     }
 
     /// Elaborate one statement, unwrapped from its sole `Run` phrase — for
@@ -1318,7 +1362,9 @@ mod tests {
         );
         assert_eq!(
             arg_items(args),
-            vec![ValListElem::Single(Val::String("update".into()))]
+            vec![ValListElem::Single(Spanned::synthetic(Val::String(
+                "update".into()
+            )))]
         );
     }
 
@@ -1354,7 +1400,9 @@ mod tests {
         assert_eq!(name, &CommandName::Bare("git".into()));
         assert_eq!(
             arg_items(args),
-            vec![ValListElem::Single(Val::String("status".into()))]
+            vec![ValListElem::Single(Spanned::synthetic(Val::String(
+                "status".into()
+            )))]
         );
         assert!(external_only);
     }
@@ -1376,10 +1424,10 @@ mod tests {
         assert_eq!(
             arg_items(args),
             vec![
-                ValListElem::Single(Val::Variable("upper".into())),
-                ValListElem::Single(Val::List(vec![ValListElem::Single(Val::String(
-                    "a".into()
-                ))])),
+                ValListElem::Single(Spanned::synthetic(Val::Variable("upper".into()))),
+                ValListElem::Single(Spanned::synthetic(Val::List(vec![ValListElem::Single(
+                    Spanned::synthetic(Val::String("a".into()))
+                )]))),
             ]
         );
     }

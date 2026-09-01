@@ -121,10 +121,31 @@ fn span_cases() -> Vec<SpanCase> {
             "$x",
             "case-on-non-variant",
         ),
-        // Return value: with `Spanned` on `Ast::Return`'s payload the
-        // caret narrows from the whole `return …` statement to just
-        // the value expression — `[1, hello]`, here.
-        c("return [1, hello]", "[1, hello]", "return-value-narrowing"),
+        // The caret now narrows past the literal to the offending element.
+        c("return [1, hello]", "hello", "list-elem-narrowing"),
+        c("let xs = [\"a\", 1]", "1", "list-elem-scalar"),
+        c("let n = 42\nreturn [...$n]", "$n", "list-spread-operand"),
+        c(
+            "surface `card [`text [spans: [\"plain\", [role: \"ok\", text: \"y\"]]]]",
+            "[role: \"ok\", text: \"y\"]",
+            "card-span-list-elem",
+        ),
+        c(
+            "surface `card [`text [spans: [[role: \"code\", text: \"x\"], [text: \"y\"]]]]",
+            "[text: \"y\"]",
+            "card-span-missing-role",
+        ),
+        c("within [dir: 7] { echo hi }", "7", "scope-option-value"),
+        c(
+            "let k = \"x\"\nlet m = [$k: 1, $k: \"two\"]",
+            "\"two\"",
+            "map-elem-value",
+        ),
+        c(
+            "let n = 42\nlet m = [a: 1, ...$n]",
+            "$n",
+            "map-spread-operand",
+        ),
         // A bad stage *early* in a 3-stage pipeline must underline that
         // stage, not the last one.  The lambda still wants an argument, so
         // it is not a computation that can run; the caret lands on it rather
@@ -243,6 +264,12 @@ fn span_is_well_formed_for_every_scenario() {
         "let x = $try\nreturn $x",
         "let [a, b] = 42\nreturn $a",
         "let n = 42\nreturn [...$n]",
+        "let xs = [\"a\", 1]",
+        "surface `card [`text [spans: [\"plain\", [role: \"ok\", text: \"y\"]]]]",
+        "surface `card [`text [spans: [[role: \"code\", text: \"x\"], [text: \"y\"]]]]",
+        "within [dir: 7] { echo hi }",
+        "let k = \"x\"\nlet m = [$k: 1, $k: \"two\"]",
+        "let n = 42\nlet m = [a: 1, ...$n]",
         "let n = 42\nkeys $n",
     ];
     for src in probes {

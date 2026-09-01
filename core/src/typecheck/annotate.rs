@@ -147,7 +147,7 @@ fn eta_expand_arrow(rhs: Comp, ctx: &mut InferCtx, arity: usize) -> Comp {
     };
     let params: Vec<String> = (0..arity).map(|_| ctx.fresh_name("eta")).collect();
     for param in &params {
-        args.push(Spanned::synthetic(ValListElem::Single(Val::Variable(
+        args.push(ValListElem::Single(Spanned::synthetic(Val::Variable(
             param.clone(),
         ))));
     }
@@ -429,7 +429,7 @@ fn eta_expand_captured(val: &Val, ctx: &mut InferCtx, handler: bool) -> Val {
     let param = "__capture_e".to_string();
     let app = Spanned::synthetic(CompKind::App {
         head: Arc::new(forced),
-        args: vec![Spanned::synthetic(ValListElem::Single(Val::Variable(
+        args: vec![ValListElem::Single(Spanned::synthetic(Val::Variable(
             param.clone(),
         )))],
     });
@@ -449,9 +449,11 @@ fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
                 .iter()
                 .map(|e| match e {
                     ValMapEntry::Entry(k, v) => {
-                        ValMapEntry::Entry(annotate_val(k, ctx), annotate_val(v, ctx))
+                        ValMapEntry::Entry(annotate_val(k, ctx), annotate_spanned_val(v, ctx))
                     }
-                    ValMapEntry::Spread(v) => ValMapEntry::Spread(annotate_val(v, ctx)),
+                    ValMapEntry::Spread(v) => {
+                        ValMapEntry::Spread(annotate_spanned_val(v, ctx))
+                    }
                 })
                 .collect(),
         ),
@@ -474,15 +476,13 @@ fn annotate_spanned_val(value: &Spanned<Val>, ctx: &mut InferCtx) -> Spanned<Val
 
 fn annotate_list_elem(elem: &ValListElem, ctx: &mut InferCtx) -> ValListElem {
     match elem {
-        ValListElem::Single(v) => ValListElem::Single(annotate_val(v, ctx)),
-        ValListElem::Spread(v) => ValListElem::Spread(annotate_val(v, ctx)),
+        ValListElem::Single(v) => ValListElem::Single(annotate_spanned_val(v, ctx)),
+        ValListElem::Spread(v) => ValListElem::Spread(annotate_spanned_val(v, ctx)),
     }
 }
 
 fn annotate_args(args: &crate::ir::Args, ctx: &mut InferCtx) -> crate::ir::Args {
-    args.iter()
-        .map(|e| Spanned::with_span(e.span, annotate_list_elem(&e.item, ctx)))
-        .collect()
+    args.iter().map(|e| annotate_list_elem(e, ctx)).collect()
 }
 
 fn annotate_redirect(redirect: &RedirectV, ctx: &mut InferCtx) -> RedirectV {

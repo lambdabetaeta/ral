@@ -147,19 +147,19 @@ pub fn fmt_ty_ctx(ty: &Ty, ctx: &FmtCtx) -> String {
     }
 }
 
-/// Variant rows, with `|` between the arms.  Records and variants both render
-/// inside `[…]`, so the separator is all that tells the two apart.
+/// Variant rows use `|` between arms and a backtick on every tag, including an
+/// open tail. Records and variants both render inside `[…]`.
 pub fn fmt_variant_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
-    fmt_row_with_sep(row, ctx, " | ")
+    fmt_row_with_sep(row, ctx, " | ", "`")
 }
 
 pub fn fmt_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
-    fmt_row_with_sep(row, ctx, ", ")
+    fmt_row_with_sep(row, ctx, ", ", "")
 }
 
-/// Shared body for record and variant rows.  An open tail prints as `...`
-/// (`...ρ` once named), so `[a: Int, ...]` reads "one known field, maybe more".
-fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str) -> String {
+/// Shared body for record and variant rows. `tail_sigil` marks an open tail as
+/// belonging to that row kind; a named tail appends its row variable.
+fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str, tail_sigil: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut tail: Option<String> = None;
@@ -169,8 +169,8 @@ fn fmt_row_with_sep(row: &Row, ctx: &FmtCtx, sep: &str) -> String {
             Row::Empty => break,
             Row::Var(v) => {
                 tail = Some(match ctx.row_name(*v) {
-                    Some(name) => format!("...{name}"),
-                    None => "...".into(),
+                    Some(name) => format!("{tail_sigil}...{name}"),
+                    None => format!("{tail_sigil}..."),
                 });
                 break;
             }
@@ -299,5 +299,19 @@ mod tests {
         };
         let rendered = fmt_scheme(&scheme);
         assert_eq!(rendered, "∀α. [α]");
+    }
+
+    #[test]
+    fn fmt_variant_row_tails_have_a_backtick() {
+        let row_var = RowVar(17);
+        let variant = Ty::Variant(Row::Var(row_var));
+        let record = Ty::Record(Row::Var(row_var));
+
+        assert_eq!(fmt_ty(&variant), "[`...]");
+        assert_eq!(fmt_ty(&record), "[...]");
+
+        let ctx = FmtCtx::for_value_types(&[&variant]);
+        assert_eq!(fmt_ty_ctx(&variant, &ctx), "[`...ρ]");
+        assert_eq!(fmt_ty_ctx(&record, &ctx), "[...ρ]");
     }
 }

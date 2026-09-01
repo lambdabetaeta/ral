@@ -92,44 +92,51 @@ impl Val {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValListElem {
-    Single(Val),
-    /// `...x`, spliced into the surrounding list.
-    Spread(Val),
+    Single(Spanned<Val>),
+    /// `...x`, spliced into the surrounding list, its `...` included in an argument span.
+    Spread(Spanned<Val>),
+}
+
+impl ValListElem {
+    /// The slot's value, whichever form the slot takes.
+    pub fn slot(&self) -> &Spanned<Val> {
+        match self {
+            Self::Single(v) | Self::Spread(v) => v,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValMapEntry {
-    Entry(Val, Val),
+    Entry(Val, Spanned<Val>),
     /// `...x`, merged into the surrounding map.
-    Spread(Val),
+    Spread(Spanned<Val>),
 }
 
-/// Positional arguments to a call ([`CompKind::App`] or [`CompKind::Exec`]).
-///
-/// Each span covers a whole argument slot, the `...` of a spread included,
-/// so a unification failure underlines one argument, not the whole call.
-pub type Args = Vec<Spanned<ValListElem>>;
+impl ValMapEntry {
+    /// The entry's value.  A key carries no span: the surface spells none.
+    pub fn value(&self) -> &Spanned<Val> {
+        match self {
+            Self::Entry(_, v) | Self::Spread(v) => v,
+        }
+    }
+}
+
+/// Positional arguments to a call — the same slots a list literal has.
+pub type Args = Vec<ValListElem>;
 
 /// Readers of an [`Args`].  Free functions, not methods — [`Args`] is a
 /// type alias.
 pub mod args {
     use super::{Args, Val, ValListElem};
 
-    /// Every sub-value in argument position, `Single` and `Spread` alike,
-    /// for the inference passes that type sub-expressions best-effort.
-    pub fn iter_subvals(args: &Args) -> impl Iterator<Item = &Val> {
-        args.iter().map(|e| match &e.item {
-            ValListElem::Single(v) | ValListElem::Spread(v) => v,
-        })
-    }
-
     /// The args as a literal positional list, or `None` if any element is a
     /// `Spread` — dynamic arity, so callers fall back to weaker checks.
     pub fn positional(args: &Args) -> Option<Vec<&Val>> {
         let mut out = Vec::with_capacity(args.len());
         for e in args {
-            match &e.item {
-                ValListElem::Single(v) => out.push(v),
+            match e {
+                ValListElem::Single(v) => out.push(&v.item),
                 ValListElem::Spread(_) => return None,
             }
         }
@@ -376,19 +383,17 @@ fn walk_val<'a>(val: &'a Val, out: &mut Vec<&'a str>) {
         Val::Thunk(comp) => walk_comp(comp, out),
         Val::List(elems) => {
             for elem in elems {
-                match elem {
-                    ValListElem::Single(v) | ValListElem::Spread(v) => walk_val(v, out),
-                }
+                walk_val(&elem.slot().item, out);
             }
         }
         Val::Map(entries) => {
             for entry in entries {
                 match entry {
-                    ValMapEntry::Entry(k, v) => {
-                        walk_val(k, out);
-                        walk_val(v, out);
+                    ValMapEntry::Entry(key, value) => {
+                        walk_val(key, out);
+                        walk_val(&value.item, out);
                     }
-                    ValMapEntry::Spread(v) => walk_val(v, out),
+                    ValMapEntry::Spread(value) => walk_val(&value.item, out),
                 }
             }
         }
@@ -401,10 +406,8 @@ fn walk_val<'a>(val: &'a Val, out: &mut Vec<&'a str>) {
 }
 
 fn walk_args<'a>(args: &'a Args, out: &mut Vec<&'a str>) {
-    for spanned in args {
-        match &spanned.item {
-            ValListElem::Single(v) | ValListElem::Spread(v) => walk_val(v, out),
-        }
+    for elem in args {
+        walk_val(&elem.slot().item, out);
     }
 }
 
@@ -696,6 +699,10 @@ mod tests {
         Val::Variable(name.to_string())
     }
 
+    fn svar(name: &str) -> Spanned<Val> {
+        Spanned::synthetic(var(name))
+    }
+
     fn ret(name: &str) -> Arc<Comp> {
         Arc::new(Spanned::synthetic(CompKind::Return(var(name))))
     }
@@ -737,14 +744,14 @@ mod tests {
         let app = Spanned::synthetic(CompKind::App {
             head: Arc::new(Spanned::synthetic(CompKind::Force(var("r_app_head")))),
             args: vec![
-                Spanned::synthetic(ValListElem::Single(var("r_app_arg_single"))),
-                Spanned::synthetic(ValListElem::Spread(var("r_app_arg_spread"))),
+                ValListElem::Single(svar("r_app_arg_single")),
+                ValListElem::Spread(svar("r_app_arg_spread")),
             ],
         });
 
         let exec_name = Spanned::synthetic(CompKind::Exec(Exec {
             head: CommandWord::Name(CommandName::Bare("r_exec_name_head".into())),
-            args: vec![Spanned::synthetic(ValListElem::Single(var("r_exec_arg")))],
+            args: vec![ValListElem::Single(svar("r_exec_arg"))],
             redirects: vec![RedirectV {
                 fd: 1,
                 mode: RedirectMode::Write,
@@ -853,17 +860,17 @@ mod tests {
             }],
         });
         let val_list = Spanned::synthetic(CompKind::Return(Val::List(vec![
-            ValListElem::Single(Val::Unit),
-            ValListElem::Single(Val::String("s".into())),
-            ValListElem::Single(Val::Int(1)),
-            ValListElem::Single(Val::Float(1.0)),
-            ValListElem::Single(Val::Bool(true)),
-            ValListElem::Single(var("r_list_single")),
-            ValListElem::Spread(var("r_list_spread")),
+            ValListElem::Single(Spanned::synthetic(Val::Unit)),
+            ValListElem::Single(Spanned::synthetic(Val::String("s".into()))),
+            ValListElem::Single(Spanned::synthetic(Val::Int(1))),
+            ValListElem::Single(Spanned::synthetic(Val::Float(1.0))),
+            ValListElem::Single(Spanned::synthetic(Val::Bool(true))),
+            ValListElem::Single(svar("r_list_single")),
+            ValListElem::Spread(svar("r_list_spread")),
         ])));
         let val_map = Spanned::synthetic(CompKind::Return(Val::Map(vec![
-            ValMapEntry::Entry(var("r_map_key"), var("r_map_value")),
-            ValMapEntry::Spread(var("r_map_spread")),
+            ValMapEntry::Entry(var("r_map_key"), svar("r_map_value")),
+            ValMapEntry::Spread(svar("r_map_spread")),
         ])));
         let val_variant = Spanned::synthetic(CompKind::Return(Val::Variant {
             label: "lbl".into(),

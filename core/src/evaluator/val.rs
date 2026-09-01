@@ -69,8 +69,8 @@ fn eval_list(elems: &[ValListElem], env: &Env) -> Result<Value, Error> {
     use ValListElem::{Single, Spread};
 
     if let [Single(sx), Spread(sxs)] = elems {
-        let x = close(sx, env)?;
-        let xs = close(sxs, env)?;
+        let x = close(&sx.item, env)?;
+        let xs = close(&sxs.item, env)?;
         let Value::List(mut v) = xs else {
             return Err(spread_type_err(&xs));
         };
@@ -79,8 +79,8 @@ fn eval_list(elems: &[ValListElem], env: &Env) -> Result<Value, Error> {
     }
 
     if let [Spread(sxs), Single(sx)] = elems {
-        let xs = close(sxs, env)?;
-        let x = close(sx, env)?;
+        let xs = close(&sxs.item, env)?;
+        let x = close(&sx.item, env)?;
         let Value::List(mut v) = xs else {
             return Err(spread_type_err(&xs));
         };
@@ -91,8 +91,8 @@ fn eval_list(elems: &[ValListElem], env: &Env) -> Result<Value, Error> {
     let mut items: List = List::new();
     for elem in elems {
         match elem {
-            Single(v) => items.push_back(close(v, env)?),
-            Spread(v) => match close(v, env)? {
+            Single(v) => items.push_back(close(&v.item, env)?),
+            Spread(v) => match close(&v.item, env)? {
                 Value::List(inner) => items.append(inner),
                 val => return Err(spread_type_err(&val)),
             },
@@ -135,12 +135,12 @@ fn eval_map(entries: &[ValMapEntry], env: &Env) -> Result<Value, Error> {
             if !seen.insert(key.clone()) {
                 diagnostic::shell_warning(&format!("duplicate key '{key}'"));
             }
-            pairs.push((key, close(v, env)?));
+            pairs.push((key, close(&v.item, env)?));
         }
     }
     for entry in entries {
         if let ValMapEntry::Spread(v) = entry {
-            match close(v, env)? {
+            match close(&v.item, env)? {
                 Value::Map(inner) => {
                     for (k, v) in inner {
                         if seen.insert(k.clone()) {

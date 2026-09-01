@@ -161,6 +161,24 @@ fn scenarios() -> Vec<Scenario> {
         // ─── Patterns ────────────────────────────────────────────────────
         s("let [a, b] = 42\nreturn $a", "list-pattern-on-int"),
         s("let [k: v] = 1\nreturn $v", "map-pattern-on-int"),
+        // ─── Actionable hint reasons ──────────────────────────────────────
+        s("let xs = [\"a\", 1]", "list-elem-hint"),
+        s(
+            "let k = \"x\"\nlet m = [$k: 1, $k: \"two\"]",
+            "map-elem-hint",
+        ),
+        s("let n = 42\nlet m = [a: 1, ...$n]", "map-spread-hint"),
+        s("within [dir: \"x\"] 5", "scope-body-hint"),
+        s("try { echo hi } 5", "try-handler-hint"),
+        s("within [dir: \"x\"] { |y| return $y }", "return-shape-hint"),
+        s(
+            "let rec = { |n| if $[$n == 0] { return 0 } else { rec \"s\" } }",
+            "let-rec-self-hint",
+        ),
+        s(
+            "let h = { |n| return $[$n + 1] }\nwithin [handlers: [g: { !$h }]] { g 1 }",
+            "alias-param-hint",
+        ),
         // ─── Adversarial inputs that should not crash ────────────────────
         s("return [`ok 1, `err 2, `ok hello]", "variant-row-clash"),
         s(
@@ -446,6 +464,31 @@ fn common_paths_carry_a_hint() {
         ("if-branch", "if true { return 1 } else { return hello }"),
         // Function arg of wrong type — parameter-vs-argument hint.
         ("wrong-arg", "let f = { |x| return $[$x + 1] }\n!{f hello}"),
+        // Heterogeneous list — homogeneous-element hint.
+        ("list-elem-hint", "let xs = [\"a\", 1]"),
+        // Heterogeneous computed-key map — homogeneous-value hint.
+        (
+            "map-elem-hint",
+            "let k = \"x\"\nlet m = [$k: 1, $k: \"two\"]",
+        ),
+        // Spread of a scalar into a map — record-or-map hint.
+        ("map-spread-hint", "let n = 42\nlet m = [a: 1, ...$n]"),
+        // Data used as a scope body — block-value hint.
+        ("scope-body-hint", "within [dir: \"x\"] 5"),
+        // Data used as a try handler — one-argument-block hint.
+        ("try-handler-hint", "try { echo hi } 5"),
+        // Unapplied function in a ready-to-run position — shape hint.
+        ("return-shape-hint", "within [dir: \"x\"] { |y| return $y }"),
+        // Recursive call at a different type — single-self-type hint.
+        (
+            "let-rec-self-hint",
+            "let rec = { |n| if $[$n == 0] { return 0 } else { rec \"s\" } }",
+        ),
+        // Function installed as a handler — argv-parameter hint.
+        (
+            "alias-param-hint",
+            "let h = { |n| return $[$n + 1] }\nwithin [handlers: [g: { !$h }]] { g 1 }",
+        ),
     ];
     for (tag, src) in hint_cases {
         let errs = raw_errors(src);

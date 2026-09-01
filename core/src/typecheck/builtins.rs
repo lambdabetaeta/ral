@@ -887,7 +887,10 @@ pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
             e,
             crate::ir::ValMapEntry::Entry(
                 crate::ir::Val::String(k),
-                crate::ir::Val::Int(0),
+                crate::source::Spanned {
+                    item: crate::ir::Val::Int(0),
+                    ..
+                },
             ) if k == "status"
         ))
     )

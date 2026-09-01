@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 68f1964e
-generated_at_date: 2026-08-26
+generated_at_commit: f8750c53
+generated_at_date: 2026-09-01
 covers_paths: [core/src/ir.rs]
 ---
 
@@ -20,7 +20,11 @@ sees. `Toplevel::referenced_names` is the phrase-level analogue of the
 The two categories:
 
 - `Val` — inert data: `Unit`, `String`, `Int`, `Float`, `Bool`, lists, maps,
-  thunks, variables. A value can never diverge or perform I/O.
+  thunks, variables. A value can never diverge or perform I/O. `Val` itself
+  stays unspanned; every position onto which the checker narrows while emitting
+  a constraint carries `Spanned<Val>`. `Args` and list literals are the same
+  `ValListElem` slots. A map entry carries its value's span, because the surface
+  captures no key span.
 - `Comp` — effectful, sequenced computation. `Comp` wraps a `CompKind` plus an
   optional `Span` for error reporting (synthetic nodes carry `span: None`).
   `CompKind::Bind` carries `scheme: Option<Box<Scheme>>` — the checker's verdict,

@@ -83,6 +83,99 @@ fn has_error(src: &str, fragment: &str) {
     );
 }
 
+// ─── Actionable mismatch guidance ─────────────────────────────────────────────
+
+#[test]
+fn list_element_mismatch_explains_homogeneity() {
+    let errs = raw_errors("let xs = [\"a\", 1]");
+    assert!(
+        has_hint(
+            &errs,
+            "a list is homogeneous — every element has the one type"
+        ),
+        "expected the list-element sentence, got: {errs:?}"
+    );
+}
+
+#[test]
+fn map_element_mismatch_explains_computed_key_homogeneity() {
+    let errs = raw_errors("let k = \"x\"\nlet m = [$k: 1, $k: \"two\"]");
+    assert!(
+        has_hint(
+            &errs,
+            "a map has computed keys, so every value must have the one type",
+        ),
+        "expected the map-element sentence, got: {errs:?}"
+    );
+}
+
+#[test]
+fn map_spread_explains_record_or_map_operand() {
+    let errs = raw_errors("let n = 42\nlet m = [a: 1, ...$n]");
+    assert!(
+        has_hint(&errs, "a `...x` spread copies another record's fields"),
+        "expected the map-spread sentence, got: {errs:?}"
+    );
+}
+
+#[test]
+fn scope_body_explains_block_requirement() {
+    let errs = raw_errors("within [dir: \"x\"] 5");
+    assert!(
+        has_hint(
+            &errs,
+            "`within`, `grant`, `try`, `guard` and `audit` each run a block",
+        ),
+        "expected the scope-body sentence, got: {errs:?}"
+    );
+}
+
+#[test]
+fn try_handler_explains_one_argument_block() {
+    let errs = raw_errors("try { echo hi } 5");
+    assert!(
+        has_hint(&errs, "a `try` handler is given the error the body raised"),
+        "expected the try-handler sentence, got: {errs:?}"
+    );
+}
+
+#[test]
+fn return_shape_explains_pending_argument() {
+    let errs = raw_errors("within [dir: \"x\"] { |y| return $y }");
+    assert!(
+        has_hint(
+            &errs,
+            "this position needs a computation that is ready to run",
+        ),
+        "expected the return-shape sentence, got: {errs:?}"
+    );
+}
+
+#[test]
+fn recursive_definition_explains_single_self_type() {
+    let errs = raw_errors("let rec = { |n| if $[$n == 0] { return 0 } else { rec \"s\" } }");
+    assert!(
+        has_hint(
+            &errs,
+            "a definition that calls itself is checked at one single type throughout its own body",
+        ),
+        "expected the recursive-definition sentence, got: {errs:?}"
+    );
+}
+
+#[test]
+fn alias_parameter_explains_argv_shape() {
+    let errs =
+        raw_errors("let h = { |n| return $[$n + 1] }\nwithin [handlers: [g: { !$h }]] { g 1 }");
+    assert!(
+        has_hint(
+            &errs,
+            "a handler or an alias is invoked as a command, so its one parameter is the argv",
+        ),
+        "expected the alias-parameter sentence, got: {errs:?}"
+    );
+}
+
 // ─── Primitives ───────────────────────────────────────────────────────────────
 
 #[test]

@@ -177,9 +177,9 @@ fn rec_node(group: &Arc<[(String, Arc<Comp>)]>, index: usize) -> Arc<Comp> {
 pub(crate) fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
     let mut out = Vec::with_capacity(args.len());
     for elem in args {
-        match &elem.item {
-            ValListElem::Single(v) => out.push(close(v, env)?),
-            ValListElem::Spread(v) => match close(v, env)? {
+        match elem {
+            ValListElem::Single(v) => out.push(close(&v.item, env)?),
+            ValListElem::Spread(v) => match close(&v.item, env)? {
                 Value::List(list) => out.extend(list),
                 other => return Err(spread_type_err(&other)),
             },
@@ -1409,10 +1409,10 @@ mod tests {
             Some(span),
             CompKind::Return(Val::Int(5)),
         ));
-        let args: Args = vec![Spanned::with_span(
+        let args: Args = vec![ValListElem::Single(Spanned::with_span(
             Some(span),
-            ValListElem::Single(Val::Int(1)),
-        )];
+            Val::Int(1),
+        ))];
         let app = Spanned::with_span(Some(span), CompKind::App { head, args });
         let closure = Closure {
             comp: Arc::new(app),

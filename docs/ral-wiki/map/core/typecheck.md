@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2470677a
-generated_at_date: 2026-08-30
+generated_at_commit: f8750c53
+generated_at_date: 2026-09-01
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -95,7 +95,9 @@ Internals:
   two ways an arm can fail to install under a head;
 - `explain.rs` — the single home of every user-facing type-checker sentence
   (hints and `TypeErrorKind::render_label`), a pure function of the error data
-  so each message is unit-testable;
+  so each message is unit-testable. Its wildcard-free `Reason` match gives each
+  reason prose or deliberately lists it as hintless: the constraint's other
+  side is fresh, or the error kind is already its own diagnosis;
 - `annotate.rs` — the write-back pass (`annotate`) that rebuilds the checked
   IR with schemes, pipeline yields, stage types, and `Capture` nodes;
 - `generalize.rs`;
@@ -184,8 +186,9 @@ the arm's actual type, both under `Reason::HandlerRoutePin`. `HandlerEntry::vet`
 
 `argv_ty` (`infer.rs`) is the one rule for every argv boundary — a handler arm, a
 base frame, an external — and yields `Ty::argv()`, `List String`: each element is
-inferred under its own span for the errors inside it and constrains the argv not
-at all, a `...` must still spread a list, and every element crosses rendered
+inferred under its own span for errors inside it — as is each list-literal
+element and each map-literal value — and constrains the argv not at all, a `...`
+must still spread a list, and every element crosses rendered
 ([[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
 
 It carries *which* boundary it is at — `ArgvBoundary::InShell` or
@@ -270,8 +273,10 @@ variables
 `fmt_comp_ty_ctx` (`fmt.rs`) renders `Return(Bytes, _)` as
 `Command captured from stdout` and every other `Return` as `Command A`, so a
 stdout-captured command and a command returning a first-class `Bytes` never
-differ by punctuation alone. An open route prints as nothing inside a `Command`
-type; `fmt_route` / `fmt_route_ctx` print one on its own, which the mismatch
+differ by punctuation alone. Open variant rows mark their tail with the same
+backtick as their arms (``[`...]`` / ``[`...ρ]``), while record tails stay
+`[...]` / `[...ρ]`. An open route prints as nothing inside a `Command` type;
+`fmt_route` / `fmt_route_ctx` print one on its own, which the mismatch
 renderer is the only caller of — and the reason `absorb_comp` absorbs the route
 into the shared variable-letter table, so two types sharing a route variable
 give it a consistent letter. `fmt_scheme` does not quantify routes.

@@ -504,11 +504,10 @@ impl Inferencer<'_> {
     /// rather than the whole call.  Only the first is named: the rest are the
     /// same mistake, and one fix answers them all.
     pub(super) fn refuse_spread(&mut self, args: &crate::ir::Args, head: super::error::SpreadHead) {
-        let Some(span) = args
-            .iter()
-            .find(|e| matches!(e.item, ValListElem::Spread(_)))
-            .map(|e| e.span)
-        else {
+        let Some(span) = args.iter().find_map(|e| match e {
+            ValListElem::Spread(v) => Some(v.span),
+            ValListElem::Single(_) => None,
+        }) else {
             return;
         };
         self.with_span(span, |this| {
@@ -540,8 +539,10 @@ impl Inferencer<'_> {
         // there is no such thing as an open-argv value for it to discriminate.
         // The subexpressions are still inferred, so errors inside them surface.
         let Some(positional) = crate::ir::args::positional(args) else {
-            for sub in crate::ir::args::iter_subvals(args) {
-                let _ = self.infer_val(sub);
+            for slot in args.iter().map(ValListElem::slot) {
+                self.with_span(slot.span, |this| {
+                    let _ = this.infer_val(&slot.item);
+                });
             }
             self.refuse_spread(args, super::error::SpreadHead::Applied);
             return (self.peel_curry_spine(cty), Vec::new());
@@ -555,7 +556,7 @@ impl Inferencer<'_> {
             cty = self.autoderef_thunk_return(cty);
             // Underline the offending argument, not the whole call.  A
             // synthetic entry carries no span, and `with_span` leaves pos alone.
-            let (result, arg_ty) = self.with_span(args[i].span, |this| {
+            let (result, arg_ty) = self.with_span(args[i].slot().span, |this| {
                 let arg_ty = this.infer_val(arg);
                 let result = this.ctx.unifier.fresh_comp_ty();
                 let expected = CompTy::Fun(Box::new(arg_ty.clone()), Box::new(result.clone()));
@@ -693,17 +694,19 @@ impl Inferencer<'_> {
                 ValMapEntry::Entry(_, v) | ValMapEntry::Spread(v) => (None, v),
             };
             let expected = key.and_then(|k| schema(k, &mut self.ctx.unifier));
-            let actual = self.infer_val(val);
-            if let (Some(key), Some(expected)) = (key, expected) {
-                self.ctx.unify_ty(
-                    &actual,
-                    &expected,
-                    Reason::OptionField {
-                        form,
-                        key: key.to_string(),
-                    },
-                );
-            }
+            self.with_span(val.span, |this| {
+                let actual = this.infer_val(&val.item);
+                if let (Some(key), Some(expected)) = (key, expected) {
+                    this.ctx.unify_ty(
+                        &actual,
+                        &expected,
+                        Reason::OptionField {
+                            form,
+                            key: key.to_string(),
+                        },
+                    );
+                }
+            });
         }
     }
 
@@ -712,20 +715,29 @@ impl Inferencer<'_> {
     /// mixed shape coexist.
     fn infer_plugins_list(&mut self, elems: &[ValListElem]) -> Ty {
         for elem in elems {
-            match elem {
-                ValListElem::Single(Val::Map(entries)) => {
-                    self.check_map_entry_fields(entries, "plugin entry", plugin_entry_field_ty);
-                }
-                ValListElem::Single(v) => {
-                    let _ = self.infer_val(v);
-                }
+            self.with_span(elem.slot().span, |this| match elem {
+                ValListElem::Single(v) => match &v.item {
+                    Val::Map(entries) => {
+                        this.check_map_entry_fields(
+                            entries,
+                            "plugin entry",
+                            plugin_entry_field_ty,
+                        );
+                    }
+                    value => {
+                        let _ = this.infer_val(value);
+                    }
+                },
                 ValListElem::Spread(v) => {
-                    let spread_ty = self.infer_val(v);
-                    let inner = self.ctx.unifier.fresh_ty();
-                    self.ctx
-                        .unify_ty(&spread_ty, &Ty::List(Box::new(inner)), Reason::ListSpread);
+                    let spread_ty = this.infer_val(&v.item);
+                    let inner = this.ctx.unifier.fresh_ty();
+                    this.ctx.unify_ty(
+                        &spread_ty,
+                        &Ty::List(Box::new(inner)),
+                        Reason::ListSpread,
+                    );
                 }
-            }
+            });
         }
         Ty::List(Box::new(self.ctx.unifier.fresh_ty()))
     }
@@ -958,9 +970,9 @@ impl Inferencer<'_> {
     /// spread a list: what its elements are is free, what it is is not.
     fn argv_ty(&mut self, args: &crate::ir::Args, boundary: ArgvBoundary<'_>) -> Ty {
         for entry in args {
-            self.with_span(entry.span, |this| match &entry.item {
+            self.with_span(entry.slot().span, |this| match entry {
                 ValListElem::Single(arg) => {
-                    let ty = this.infer_val(arg);
+                    let ty = this.infer_val(&arg.item);
                     this.gate_exec_arg(&ty, boundary);
                 }
                 // A spread contributes as many elements as the list holds, and
@@ -968,7 +980,7 @@ impl Inferencer<'_> {
                 // none, and refuses nothing.  So its elements are left to the
                 // spawn-time gate, which counts them.
                 ValListElem::Spread(arg) => {
-                    let spread_ty = this.infer_val(arg);
+                    let spread_ty = this.infer_val(&arg.item);
                     let elem = this.ctx.unifier.fresh_ty();
                     this.ctx
                         .unify_ty(&spread_ty, &Ty::List(Box::new(elem)), Reason::ListSpread);
@@ -1007,8 +1019,10 @@ impl Inferencer<'_> {
     /// Infer every argument for the errors inside it, constraining nothing —
     /// what a refused call still owes its subexpressions.
     pub(super) fn infer_refused_args(&mut self, args: &crate::ir::Args) {
-        for sub in crate::ir::args::iter_subvals(args) {
-            let _ = self.infer_val(sub);
+        for slot in args.iter().map(ValListElem::slot) {
+            self.with_span(slot.span, |this| {
+                let _ = this.infer_val(&slot.item);
+            });
         }
     }
 
@@ -1119,26 +1133,31 @@ impl Inferencer<'_> {
             let mut field_entries = Vec::new();
             for entry in entries {
                 match entry {
-                    ValMapEntry::Entry(Val::String(key), value)
-                        if key == "plugins" && matches!(value, Val::List(_)) =>
-                    {
-                        let Val::List(elems) = value else {
-                            unreachable!("guard restricts value to Val::List(_)")
-                        };
-                        let ty = self.infer_plugins_list(elems);
+                    ValMapEntry::Entry(
+                        Val::String(key),
+                        Spanned {
+                            span,
+                            item: Val::List(elems),
+                        },
+                    ) if key == "plugins" => {
+                        let ty = self.with_span(*span, |this| this.infer_plugins_list(elems));
                         field_entries.push((key.clone(), ty));
                     }
                     ValMapEntry::Entry(Val::String(key), value) => {
-                        field_entries.push((key.clone(), self.infer_val(value)));
+                        let ty = self.with_span(value.span, |this| this.infer_val(&value.item));
+                        field_entries.push((key.clone(), ty));
                     }
                     ValMapEntry::Spread(value) => {
-                        let spread_ty = self.infer_val(value);
-                        let row_var = self.ctx.unifier.fresh_row_var();
-                        self.ctx.unify_ty(
-                            &spread_ty,
-                            &Ty::Record(Row::Var(row_var)),
-                            Reason::MapSpread,
-                        );
+                        let row_var = self.with_span(value.span, |this| {
+                            let spread_ty = this.infer_val(&value.item);
+                            let row_var = this.ctx.unifier.fresh_row_var();
+                            this.ctx.unify_ty(
+                                &spread_ty,
+                                &Ty::Record(Row::Var(row_var)),
+                                Reason::MapSpread,
+                            );
+                            row_var
+                        });
                         spread_rows.push(row_var);
                     }
                     ValMapEntry::Entry(_, _) => {
@@ -1178,16 +1197,20 @@ impl Inferencer<'_> {
                     ValMapEntry::Entry(key, value) => {
                         let key_ty = self.infer_val(key);
                         self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
-                        let value_ty = self.infer_val(value);
-                        self.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
+                        self.with_span(value.span, |this| {
+                            let value_ty = this.infer_val(&value.item);
+                            this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
+                        });
                     }
                     ValMapEntry::Spread(value) => {
-                        let spread_ty = self.infer_val(value);
-                        self.ctx.unify_ty(
-                            &spread_ty,
-                            &Ty::Map(Box::new(elem.clone())),
-                            Reason::MapSpread,
-                        );
+                        self.with_span(value.span, |this| {
+                            let spread_ty = this.infer_val(&value.item);
+                            this.ctx.unify_ty(
+                                &spread_ty,
+                                &Ty::Map(Box::new(elem.clone())),
+                                Reason::MapSpread,
+                            );
+                        });
                     }
                 }
             }
@@ -1247,20 +1270,22 @@ impl Inferencer<'_> {
             Val::List(elems) => {
                 let elem = self.ctx.unifier.fresh_ty();
                 for entry in elems {
-                    let entry_ty = match entry {
-                        ValListElem::Single(value) => self.infer_val(value),
-                        ValListElem::Spread(value) => {
-                            let spread_ty = self.infer_val(value);
-                            let inner = self.ctx.unifier.fresh_ty();
-                            self.ctx.unify_ty(
-                                &spread_ty,
-                                &Ty::List(Box::new(inner.clone())),
-                                Reason::ListSpread,
-                            );
-                            inner
-                        }
-                    };
-                    self.ctx.unify_ty(&entry_ty, &elem, Reason::ListElem);
+                    self.with_span(entry.slot().span, |this| {
+                        let entry_ty = match entry {
+                            ValListElem::Single(v) => this.infer_val(&v.item),
+                            ValListElem::Spread(v) => {
+                                let spread_ty = this.infer_val(&v.item);
+                                let inner = this.ctx.unifier.fresh_ty();
+                                this.ctx.unify_ty(
+                                    &spread_ty,
+                                    &Ty::List(Box::new(inner.clone())),
+                                    Reason::ListSpread,
+                                );
+                                inner
+                            }
+                        };
+                        this.ctx.unify_ty(&entry_ty, &elem, Reason::ListElem);
+                    });
                 }
                 Ty::List(Box::new(elem))
             }
@@ -1686,8 +1711,10 @@ impl Inferencer<'_> {
                     }
                     // Check the args anyway, then hand the enclosing pipeline
                     // or chain a coherent fresh result.
-                    for sub in crate::ir::args::iter_subvals(args) {
-                        let _ = self.infer_val(sub);
+                    for slot in args.iter().map(ValListElem::slot) {
+                        self.with_span(slot.span, |this| {
+                            let _ = this.infer_val(&slot.item);
+                        });
                     }
                     return self.ctx.unifier.fresh_comp_ty();
                 }

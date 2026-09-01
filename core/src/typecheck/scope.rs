@@ -17,6 +17,7 @@ use super::scheme::Scheme;
 use super::ty::{CompTy, Ty};
 use super::unify::Unifier;
 use crate::ir::{Val, ValMapEntry};
+use crate::source::{Spanned, WithSpan};
 
 /// What a scope rule knows before its computation type exists: the value the
 /// scope produces and the route that carries it.
@@ -40,26 +41,45 @@ impl Inferencer<'_> {
 
         for outer_entry in outer_entries {
             match outer_entry {
-                ValMapEntry::Entry(Val::String(key), Val::Map(inner_entries))
-                    if key == "handlers" =>
-                {
+                ValMapEntry::Entry(
+                    Val::String(key),
+                    Spanned {
+                        item: Val::Map(inner_entries),
+                        ..
+                    },
+                ) if key == "handlers" => {
                     for inner_entry in inner_entries {
                         match inner_entry {
-                            ValMapEntry::Entry(Val::String(name), Val::Thunk(comp)) => {
-                                bindings.push((name.clone(), self.handler_comp_scheme(name, comp)));
+                            ValMapEntry::Entry(
+                                Val::String(name),
+                                value @ Spanned {
+                                    item: Val::Thunk(comp),
+                                    ..
+                                },
+                            ) => {
+                                let scheme = self.with_span(value.span, |this| {
+                                    this.handler_comp_scheme(name, comp)
+                                });
+                                bindings.push((name.clone(), scheme));
                             }
                             ValMapEntry::Entry(key_val, val_val) => {
                                 let _ = self.infer_val(key_val);
-                                let _ = self.infer_val(val_val);
+                                let _ = self.infer_val(&val_val.item);
                             }
                             ValMapEntry::Spread(val) => {
-                                let _ = self.infer_val(val);
+                                let _ = self.infer_val(&val.item);
                             }
                         }
                     }
                 }
 
-                ValMapEntry::Entry(Val::String(key), Val::Thunk(comp)) if key == "handler" => {
+                ValMapEntry::Entry(
+                    Val::String(key),
+                    Spanned {
+                        item: Val::Thunk(comp),
+                        ..
+                    },
+                ) if key == "handler" => {
                     let _ = self.with_scope(|this| this.infer_comp(comp));
                 }
 
