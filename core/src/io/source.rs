@@ -101,39 +101,14 @@ impl Read for SourceReader {
     }
 }
 
+/// A fired wake always reads as EOF, never as data.
 #[cfg(unix)]
 fn read_interruptible(fd: &mut Fd, wake: &Wake, buf: &mut [u8]) -> io::Result<usize> {
+    use crate::process::wake::Readiness;
     use std::os::fd::AsRawFd;
-    loop {
-        let mut fds = [
-            libc::pollfd {
-                fd: fd.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: wake.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        // SAFETY: `fds` is two fully initialised pollfds and `2` is their count.
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-        // A fired wake outranks data that arrived beside it, and always
-        // reads as EOF, never as data.
-        if fds[1].revents != 0 {
-            return Ok(0);
-        }
-        if fds[0].revents != 0 {
-            return fd.read(buf);
-        }
+    match wake.poll_beside(fd.as_raw_fd(), libc::POLLIN)? {
+        Readiness::Fired => Ok(0),
+        Readiness::Ready(_) => fd.read(buf),
     }
 }
 

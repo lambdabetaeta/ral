@@ -125,38 +125,18 @@ fn write_interruptible(
     wake: &crate::process::Wake,
     mut bytes: &[u8],
 ) -> io::Result<()> {
+    use crate::process::wake::Readiness;
     use std::os::fd::AsRawFd;
     while !bytes.is_empty() {
-        let mut fds = [
-            libc::pollfd {
-                fd: w.as_raw_fd(),
-                events: libc::POLLOUT,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: wake.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        // SAFETY: `fds` is two fully initialised pollfds and `2` is their count.
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
+        match wake.poll_beside(w.as_raw_fd(), libc::POLLOUT)? {
+            Readiness::Fired => return Ok(()),
+            Readiness::Ready(revents) if revents & (libc::POLLERR | libc::POLLHUP) != 0 => {
+                return Err(io::ErrorKind::BrokenPipe.into());
             }
-            return Err(err);
-        }
-        if fds[1].revents != 0 {
-            return Ok(());
-        }
-        if fds[0].revents & (libc::POLLERR | libc::POLLHUP) != 0 {
-            return Err(io::ErrorKind::BrokenPipe.into());
-        }
-        if fds[0].revents & libc::POLLOUT != 0 {
-            let n = (&*w).write(&bytes[..bytes.len().min(libc::PIPE_BUF)])?;
-            bytes = &bytes[n..];
+            Readiness::Ready(_) => {
+                let n = (&*w).write(&bytes[..bytes.len().min(libc::PIPE_BUF)])?;
+                bytes = &bytes[n..];
+            }
         }
     }
     Ok(())

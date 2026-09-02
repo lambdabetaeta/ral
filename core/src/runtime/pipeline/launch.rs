@@ -185,43 +185,28 @@ pub(super) fn route_stdin(
     }
 }
 
-/// Resolve a stage thread's stdin from its route: the upstream edge or the
-/// pipeline's input boundary, each wrapped so the thread's own wake ends a
-/// blocked read as EOF.
+/// A stage thread's stdin: the external's route, read in-process.  What a
+/// child would inherit is duplicated, except a tty — a thread cannot read
+/// the controlling terminal (SIGTTIN would stop the whole shell), so it sees
+/// the EOF a capture already gives it.  The thread's own wake ends a blocked
+/// read as EOF.
 pub(super) fn stage_stdin(
     route: ByteIn,
+    group: &PipelineGroup,
     shell: &Shell,
     wake: &Arc<crate::process::Wake>,
 ) -> Settled<Source> {
-    let reader = match route {
-        ByteIn::Upstream(r) => SourceReader::pipe(r),
-        ByteIn::Parent => match stage_stdin_parent(shell)? {
-            Some(r) => r,
-            None => return Ok(Source::Empty),
-        },
+    let reader = match route_stdin(route, group, shell)? {
+        command::StdinRoute::Reader(r) => r,
+        command::StdinRoute::Null => return Ok(Source::Empty),
+        command::StdinRoute::Inherit(_) if shell.io.terminal.startup_stdin_tty => {
+            return Ok(Source::Empty);
+        }
+        command::StdinRoute::Inherit(_) => SourceReader::file(dup_stdin_file().map_err(|e| {
+            Break::Error(Error::new(format!("could not duplicate stdin: {e}"), 1))
+        })?),
     };
     Ok(Source::Reader(reader.interruptible(Arc::clone(wake))))
-}
-
-fn stdin_dup_error(e: &std::io::Error) -> Break {
-    Break::Error(Error::new(format!("could not duplicate stdin: {e}"), 1))
-}
-
-/// `None` where the stage sees EOF: an `Empty` boundary, or a tty — a stage
-/// thread cannot read the controlling terminal (SIGTTIN would stop the whole
-/// shell process), so it sees the same EOF a capture already gives it.
-fn stage_stdin_parent(shell: &Shell) -> Settled<Option<SourceReader>> {
-    if matches!(shell.io.stdin, Source::Empty) {
-        return Ok(None);
-    }
-    if let Some(r) = shell.io.stdin.reader().map_err(|e| stdin_dup_error(&e))? {
-        return Ok(Some(r));
-    }
-    if shell.io.terminal.startup_stdin_tty {
-        return Ok(None);
-    }
-    let file = dup_stdin_file().map_err(|e| stdin_dup_error(&e))?;
-    Ok(Some(SourceReader::file(file)))
 }
 
 #[cfg(unix)]
@@ -409,10 +394,6 @@ impl PipelineResources {
             group,
         }
     }
-
-    fn signal_group(&mut self) {
-        self.group.signal(CancelCause::Terminate);
-    }
 }
 
 /// Linear accumulator: one [`PipelineBuild::step`] per stage, then
@@ -475,7 +456,7 @@ impl PipelineBuild {
     /// order does the rest.
     fn abort(self) {
         let Self { mut resources, .. } = self;
-        resources.signal_group();
+        resources.group.signal(CancelCause::Terminate);
         drop(resources);
     }
 

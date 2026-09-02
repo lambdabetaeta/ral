@@ -99,12 +99,13 @@ impl Drop for ThreadStage {
     /// pipeline unwinding past it — is cancelled, interrupted, and joined
     /// rather than abandoned.
     fn drop(&mut self) {
-        if self.join.is_some() {
-            self.cancel(CancelCause::Terminate);
-            self.interrupt();
-            if let Some(join) = self.join.take() {
-                let _ = join.join();
-            }
+        if self.join.is_none() {
+            return;
+        }
+        self.cancel(CancelCause::Terminate);
+        self.interrupt();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
         }
     }
 }
@@ -127,7 +128,7 @@ pub(super) fn launch_thread_stage(
         Break::Error(err)
     })?;
     let StageRoute { stdin, stdout, .. } = route;
-    let stdin = super::launch::stage_stdin(stdin, cx.shell, &wake)?;
+    let stdin = super::launch::stage_stdin(stdin, cx.group, cx.shell, &wake)?;
 
     let group = cx.group.leader_pgid();
 
@@ -154,9 +155,8 @@ pub(super) fn launch_thread_stage(
         launch_role: crate::io::LaunchRole::PipelineStage(group),
     };
 
-    let captured = Arc::new(cx.env.clone());
+    let env = cx.env.clone();
     let comp = Arc::clone(stage);
-    let env = (*captured).clone();
     let status = Arc::clone(&park.status);
     let thread_status = Arc::clone(&status);
     let span = spec.span;
@@ -164,7 +164,7 @@ pub(super) fn launch_thread_stage(
     let spawned = cx.shell.spawn_thread(
         mooring,
         "ral pipeline stage",
-        captured,
+        Arc::new(env.clone()),
         move |mooring, child| {
             child.io = io;
             child.local.audit.install_active_policy(policy);

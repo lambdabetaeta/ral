@@ -194,15 +194,6 @@ mod tests {
         let stack_limit = join.join().expect("worker thread");
         assert_eq!(stack_limit, DEFAULT_STACK_LIMIT + 7);
     }
-}
-
-// Not gated on unix: this exercises source-db propagation, not the terminal
-// lease.
-#[cfg(test)]
-mod spawn_thread_tests {
-    use super::*;
-    use crate::diagnostic::format_runtime_error_ariadne;
-    use crate::source::Span;
 
     /// `session.sources` must ride into a spawned worker's shell, else a
     /// `spawn` body's error span resolves against nothing and the diagnostic
@@ -211,11 +202,16 @@ mod spawn_thread_tests {
     fn spawned_worker_renders_errors_against_the_parents_source() {
         let mut parent = Shell::default();
         let file = parent.install_script_context("worker.ral", "one\ntwo\nbad\n");
-        let span = Span::new(file, 8, 11);
+        let span = crate::source::Span::new(file, 8, 11);
         let scopes = Arc::new(parent.env.clone());
         let (join, _cancel) = parent
             .spawn_thread(Mooring::adrift(), "test-worker", scopes, move |_, child| {
-                format_runtime_error_ariadne(&child.session.sources, Some(span), "boom", None)
+                crate::diagnostic::format_runtime_error_ariadne(
+                    &child.session.sources,
+                    Some(span),
+                    "boom",
+                    None,
+                )
             })
             .expect("spawn_thread");
 

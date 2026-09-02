@@ -26,9 +26,7 @@ pub(super) fn read_window(elapsed: Duration) -> Option<String> {
         last_arg.as_str(),
         "--style",
         "compact",
-    ])
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::null());
+    ]);
     let output = crate::process::output(&mut cmd).ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }

@@ -95,7 +95,7 @@ impl ParkedPipeline {
             Pass::Done => {
                 let completed = self
                     .collect
-                    .fold_mut(mooring, shell)
+                    .fold(mooring, shell)
                     .finish(self.yields)
                     .is_ok();
                 ParkedPoll::Finished { completed }

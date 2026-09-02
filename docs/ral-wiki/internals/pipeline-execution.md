@@ -182,8 +182,12 @@ the same; the collector's probe of the *anchor* sees it stopped. The anchor
 keeps the default `SIGTSTP` disposition specifically so it can serve as the
 group's stop witness — this is what makes `!{ a } | !{ b }`, a pipeline with no
 external at all, park exactly as one with externals does. Whichever fires
-first, the collector sets the pipeline's `StageGate` paused, `SIGSTOP`s the
-whole `-pgid` (idempotent for the ordinary Ctrl-Z case), and stops probing. A
+first, one rule answers it (`collect::on_stop`): a *tty-owning* group parks —
+the collector sets the pipeline's `StageGate` paused, `SIGSTOP`s the whole
+`-pgid` (idempotent for the ordinary Ctrl-Z case), and stops probing; any other
+owned group — batch mode, a pipeline inside a `spawn` worker — has no job table
+to resume it and is cancelled with `Terminate`, as `KillAndReap` ends a lone
+stopped external; a joining group forwards the stop to its owner (below). A
 stage thread notices at its own pace: `process::check` consults
 `mooring.park`'s gate behind an atomic fast path, so a stage blocked in a
 builtin finishes that call before parking, and a stage that was mid-write or

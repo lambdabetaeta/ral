@@ -315,7 +315,7 @@ impl JobTable {
     /// No live path populates `JobTable` on Windows — the only live
     /// [`Self::add`] caller is the Unix `Break::Stopped` arm in `repl/exec.rs`
     /// — so the Windows arm is exercised only by unit-test fixtures.
-    pub fn reap(&mut self, #[cfg(unix)] mooring: &Mooring, #[cfg(unix)] shell: &mut Shell) {
+    pub fn reap(&mut self, mooring: &Mooring, shell: &mut Shell) {
         #[cfg(unix)]
         {
             let parked_ids: Vec<usize> = self
@@ -389,6 +389,7 @@ impl JobTable {
         #[cfg(windows)]
         {
             use ral_core::process::{ReapStatus, release_win_group, try_reap_leader};
+            let _ = (mooring, &shell);
             let entries: Vec<(usize, Pgid)> =
                 self.jobs.iter().map(|(id, j)| (*id, j.pgid)).collect();
             for (id, pgid) in entries {
@@ -411,7 +412,7 @@ impl JobTable {
     /// `KILL_ON_JOB_CLOSE` is already a hard kill, so the grace window
     /// only buys time for jobs to finish naturally; survivors get
     /// `TerminateJobObject` via `kill_pipeline_group`.
-    pub fn cleanup(&mut self, #[cfg(unix)] mooring: &Mooring, #[cfg(unix)] shell: &mut Shell) {
+    pub fn cleanup(&mut self, mooring: &Mooring, shell: &mut Shell) {
         #[cfg(unix)]
         let empty = self.jobs.is_empty() && self.disowned.is_empty();
         #[cfg(not(unix))]
@@ -467,6 +468,7 @@ impl JobTable {
         #[cfg(windows)]
         {
             use ral_core::process::{break_pipeline_group, kill_pipeline_group, release_win_group};
+            let _ = (mooring, &shell);
 
             // Polite first pass: `CTRL_BREAK_EVENT` to every job, then a
             // 5s grace where natural exits are reaped — the Windows
@@ -477,7 +479,7 @@ impl JobTable {
 
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !self.jobs.is_empty() && std::time::Instant::now() < deadline {
-                self.reap();
+                self.reap(mooring, shell);
                 if !self.jobs.is_empty() {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }

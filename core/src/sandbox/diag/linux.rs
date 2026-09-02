@@ -17,28 +17,21 @@ pub(super) fn read_window(elapsed: Duration) -> Option<String> {
     let secs = elapsed.as_secs().saturating_add(1).to_string();
     let since = format!("{secs} seconds ago");
     let mut journal_cmd = std::process::Command::new("journalctl");
-    journal_cmd
-        .args([
-            "-k",
-            "--since",
-            since.as_str(),
-            "--no-pager",
-            "--output",
-            "short",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    let journal = crate::process::output(&mut journal_cmd);
-    if let Ok(out) = journal
+    journal_cmd.args([
+        "-k",
+        "--since",
+        since.as_str(),
+        "--no-pager",
+        "--output",
+        "short",
+    ]);
+    if let Ok(out) = crate::process::output(&mut journal_cmd)
         && out.status.success()
     {
         return Some(String::from_utf8_lossy(&out.stdout).into_owned());
     }
     let mut dmesg_cmd = std::process::Command::new("dmesg");
-    dmesg_cmd
-        .args(["--since", since.as_str()])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+    dmesg_cmd.args(["--since", since.as_str()]);
     let dmesg = crate::process::output(&mut dmesg_cmd).ok()?;
     Some(String::from_utf8_lossy(&dmesg.stdout).into_owned())
 }

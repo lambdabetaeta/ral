@@ -156,17 +156,12 @@ impl Session {
     /// returns an exit code, or the session's durable root has been
     /// cancelled.
     fn iterate(&mut self) -> Flow {
-        #[cfg(unix)]
         {
             let mut guard = self.transport.shell_mut();
             self.jobs
                 .lock()
                 .unwrap()
                 .reap(&ral_core::types::Mooring::adrift(), &mut guard.shell);
-        }
-        #[cfg(not(unix))]
-        {
-            self.jobs.lock().unwrap().reap();
         }
 
         // A cancelled durable root ends the session.  Cancellation is
@@ -267,20 +262,12 @@ impl Drop for Session {
         // A panic that poisons the JobTable still leaves it structurally
         // valid for a best-effort SIGTERM/SIGKILL sweep; recover the guard
         // rather than re-panicking into a process abort during unwind.
-        #[cfg(unix)]
         {
             let mut guard = self.transport.shell_mut();
             self.jobs
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .cleanup(&ral_core::types::Mooring::adrift(), &mut guard.shell);
-        }
-        #[cfg(not(unix))]
-        {
-            self.jobs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .cleanup();
         }
         // Windows-only, no-op elsewhere: reverts this session's AppContainer
         // grant ACEs and deletes its profile.

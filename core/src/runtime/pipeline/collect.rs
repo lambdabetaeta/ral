@@ -231,6 +231,28 @@ pub(super) struct CollectState {
     started: std::time::Instant,
 }
 
+/// What a stop does to this collector.  Only a tty-owning group has a job
+/// table to resume it, so only it parks; any other owned group is cancelled,
+/// as `StopPolicy::KillAndReap` does for a lone external; a joining collector
+/// forwards the stop into its own stage's status — the report its owner
+/// reads — and forgets it here, never parking, signalling, or escaping.
+#[derive(Debug, PartialEq, Eq)]
+enum OnStop {
+    Park,
+    Cancel,
+    Forward,
+}
+
+fn on_stop(group: &PipelineGroup) -> OnStop {
+    if group.owns_tty() {
+        OnStop::Park
+    } else if group.owned() {
+        OnStop::Cancel
+    } else {
+        OnStop::Forward
+    }
+}
+
 #[cfg(unix)]
 fn stop_the_group(group: &PipelineGroup, gate: &StageGate) {
     gate.pause();
@@ -256,10 +278,8 @@ impl CollectState {
 
     /// One non-blocking pass over every unobserved stage, tail-first: kill a
     /// stage whose reader has already settled, observe whichever finished,
-    /// and detect a stop.  A stop on an owning group pauses the gate and
-    /// `SIGSTOP`s the pgid; a stop reported to a *joining* collector is
-    /// forwarded into its own stage's status and forgotten here — it never
-    /// parks, signals, or escapes.
+    /// and detect a stop — through the anchor or a stage's own status — and
+    /// answer it per [`on_stop`].
     #[cfg_attr(
         not(unix),
         allow(unused_variables, reason = "the Ctrl-Z gate has no Windows use")
@@ -273,13 +293,14 @@ impl CollectState {
     ) -> Pass {
         #[cfg(unix)]
         let witnessed = match group.witness() {
-            Some(Witnessed::Stopped(sig)) if group.owns_tty() => {
-                stop_the_group(group, gate);
-                return Pass::Parked(sig);
-            }
-            // No job table will resume this pipeline: kill and reap, as
-            // `StopPolicy::KillAndReap` does for a lone external.
-            Some(Witnessed::Stopped(_)) => Some(CancelCause::Terminate),
+            Some(Witnessed::Stopped(sig)) => match on_stop(group) {
+                OnStop::Park => {
+                    stop_the_group(group, gate);
+                    return Pass::Parked(sig);
+                }
+                OnStop::Cancel => Some(CancelCause::Terminate),
+                OnStop::Forward => unreachable!("a joining group has no anchor to witness"),
+            },
             Some(Witnessed::Cancelled(cause)) => Some(cause),
             None => None,
         };
@@ -287,9 +308,7 @@ impl CollectState {
         let witnessed = None;
 
         if let Some(cause) = witnessed.or_else(|| scope_cancelled(mooring)) {
-            group.signal(cause);
-            self.observe_cancelled(cause, shell);
-            return Pass::Done;
+            return self.cancel_all(group, cause, shell);
         }
 
         let n = self.stages.len();
@@ -311,17 +330,24 @@ impl CollectState {
                     self.observed[ix] = Some(obs);
                     progress = true;
                 }
-                Probe::Stopped(sig) => {
+                Probe::Stopped(sig) => match on_stop(group) {
                     #[cfg(unix)]
-                    if group.owned() {
+                    OnStop::Park => {
                         stop_the_group(group, gate);
                         return Pass::Parked(sig);
                     }
-                    if let Some(park) = &mooring.park {
-                        park.status.set(StageState::Stopped(sig));
+                    #[cfg(not(unix))]
+                    OnStop::Park => unreachable!("nothing stops on Windows"),
+                    OnStop::Cancel => {
+                        return self.cancel_all(group, CancelCause::Terminate, shell);
                     }
-                    handle.resume();
-                }
+                    OnStop::Forward => {
+                        if let Some(park) = &mooring.park {
+                            park.status.set(StageState::Stopped(sig));
+                        }
+                        handle.resume();
+                    }
+                },
             }
         }
 
@@ -334,10 +360,12 @@ impl CollectState {
         }
     }
 
-    /// Cancel every stage, then observe them tail-first, blocking: the final
-    /// stage leaves first and drops its reader end, which `EPIPE`s the stage
-    /// before it, and so on up the pipeline.
-    fn observe_cancelled(&mut self, cause: CancelCause, shell: &Shell) {
+    /// Signal the group once, cancel every stage, then observe them
+    /// tail-first, blocking: the final stage leaves first and drops its
+    /// reader end, which `EPIPE`s the stage before it, and so on up the
+    /// pipeline.
+    fn cancel_all(&mut self, group: &mut PipelineGroup, cause: CancelCause, shell: &Shell) -> Pass {
+        group.signal(cause);
         self.cancel_stages(cause);
         let n = self.stages.len();
         for ix in (0..n).rev() {
@@ -346,6 +374,7 @@ impl CollectState {
                 self.observed[ix] = Some(obs);
             }
         }
+        Pass::Done
     }
 
     /// Pass until every stage is observed or a stop parks the group.
@@ -392,7 +421,7 @@ impl CollectState {
 
     /// The audit observations and verdict fold, in launch order, over
     /// whatever this walk observed.
-    fn fold_inner(&mut self, mooring: &Mooring, shell: &mut Shell) -> PipelineCollector {
+    pub(super) fn fold(&mut self, mooring: &Mooring, shell: &mut Shell) -> PipelineCollector {
         let n = self.observed.len();
         let mut collector = PipelineCollector::new();
         for (ix, obs) in std::mem::take(&mut self.observed).into_iter().enumerate() {
@@ -401,16 +430,6 @@ impl CollectState {
             }
         }
         collector
-    }
-
-    pub(super) fn fold(mut self, mooring: &Mooring, shell: &mut Shell) -> PipelineCollector {
-        self.fold_inner(mooring, shell)
-    }
-
-    /// [`Self::fold`] for `ParkedPipeline::poll`, which holds only `&mut`.
-    #[cfg(unix)]
-    pub(super) fn fold_mut(&mut self, mooring: &Mooring, shell: &mut Shell) -> PipelineCollector {
-        self.fold_inner(mooring, shell)
     }
 }
 
@@ -557,14 +576,32 @@ mod tests {
         )
     }
 
+    /// Only a group with a job table behind it parks; the rest is cancelled
+    /// or, in a joining collector, forwarded to the owner.
+    #[test]
+    fn a_stop_parks_only_a_tty_owning_group() {
+        use super::super::resolve::TerminalPlan;
+        let shell = Shell::default();
+        let tty = PipelineGroup::prepare(TerminalPlan::ForegroundExternalGroup, &shell)
+            .expect("anchor spawns");
+        let batch =
+            PipelineGroup::prepare(TerminalPlan::NoTerminal, &shell).expect("anchor spawns");
+        let joining = PipelineGroup::joining(tty.leader_pgid());
+        assert_eq!(on_stop(&tty), OnStop::Park);
+        assert_eq!(on_stop(&batch), OnStop::Cancel);
+        assert_eq!(on_stop(&joining), OnStop::Forward);
+    }
+
     #[cfg(unix)]
     #[test]
-    fn stopped_probe_on_an_owned_group_pauses_the_gate_and_parks() {
+    fn stopped_probe_on_a_tty_owning_group_pauses_the_gate_and_parks() {
         let shell = Shell::default();
-        let mut group =
-            PipelineGroup::prepare(super::super::resolve::TerminalPlan::NoTerminal, &shell)
-                .expect("anchor spawns");
-        assert!(group.owned());
+        let mut group = PipelineGroup::prepare(
+            super::super::resolve::TerminalPlan::ForegroundExternalGroup,
+            &shell,
+        )
+        .expect("anchor spawns");
+        assert!(group.owns_tty());
         let gate = StageGate::new();
         let mooring = Mooring::adrift();
 

@@ -73,7 +73,7 @@ pub(crate) fn self_reexec(flag: &str) -> std::io::Result<crate::process::Launch>
 pub fn try_run_pipeline_anchor() -> Option<u8> {
     let mut args = std::env::args_os();
     let _argv0 = args.next();
-    let mode = args.next()?.to_string_lossy().into_owned();
+    let mode = args.next()?;
     #[cfg(unix)]
     {
         crate::sandbox::register_self_for_helpers();
@@ -86,18 +86,8 @@ pub fn try_run_pipeline_anchor() -> Option<u8> {
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         }
-        if mode != ANCHOR_FLAG {
-            return None;
-        }
-        Some(serve_anchor())
     }
-    #[cfg(windows)]
-    {
-        if mode != ANCHOR_FLAG {
-            return None;
-        }
-        Some(serve_anchor())
-    }
+    (mode == ANCHOR_FLAG).then(serve_anchor)
 }
 
 /// Hidden bundled-tool dispatch from the binary entrypoint

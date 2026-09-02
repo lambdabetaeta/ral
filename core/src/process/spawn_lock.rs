@@ -67,11 +67,16 @@ pub fn spawn(cmd: &mut std::process::Command) -> std::io::Result<std::process::C
     cmd.spawn()
 }
 
-/// `Command::output`, with the wait for exit outside the fork lock.
+/// `Command::output`, with the wait for exit outside the fork lock: stdout
+/// and stderr captured, stdin closed, as `output` itself wires them.
 ///
 /// # Errors
 /// Returns `spawn`'s error, or the child's own wait error.
 pub fn output(cmd: &mut std::process::Command) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     spawn(cmd)?.wait_with_output()
 }
 
@@ -79,7 +84,10 @@ pub fn output(cmd: &mut std::process::Command) -> std::io::Result<std::process::
 ///
 /// # Errors
 /// Returns `spawn`'s error, or the child's own wait error.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "`Command::status`'s own wait: a child nobody parks, so a stop is not a case here"
+)]
 pub fn status(cmd: &mut std::process::Command) -> std::io::Result<std::process::ExitStatus> {
     spawn(cmd)?.wait()
 }

@@ -186,9 +186,7 @@ fn build_hint(denials: &[&str]) -> String {
 )]
 pub(crate) fn sample_descendants(root: u32) -> HashSet<u32> {
     let mut cmd = std::process::Command::new("/bin/ps");
-    cmd.args(["-axo", "pid=,ppid="])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+    cmd.args(["-axo", "pid=,ppid="]);
     let Ok(out) = crate::process::output(&mut cmd) else {
         return HashSet::new();
     };
