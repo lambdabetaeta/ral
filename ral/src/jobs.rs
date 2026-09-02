@@ -424,12 +424,13 @@ impl JobTable {
         #[cfg(unix)]
         {
             // A pipeline's anchor swallows SIGTERM, so the sweep below cannot
-            // end a parked or disowned pipeline: each is cancelled and dropped,
-            // which joins its stage threads and kills and reaps its anchor.
+            // end a parked or disowned pipeline: each gets the collector's own
+            // teardown — signal, grace, kill, observe — and its drop reaps the
+            // anchor.
             let mut terminating = std::mem::take(&mut self.disowned);
             terminating.extend(self.jobs.values_mut().filter_map(|job| job.parked.take()));
-            for mut parked in terminating {
-                parked.cancel(ral_core::process::CancelCause::Terminate);
+            for parked in terminating {
+                parked.cancel(ral_core::process::CancelCause::Terminate, shell);
             }
 
             for job in self.jobs.values() {

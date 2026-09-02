@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 6104758c
+verified_at_commit: 30ac8e07
 verified_at_date: 2026-09-02
 anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, GroupRole, Ending, AnchorProcess, StageGate, StagePark, StagePark::gate, StageStop, Mooring::park, StopPolicy, ParkedPipeline, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
 ---
@@ -227,9 +227,11 @@ takes it into the `Job`. `fg` re-acquires the terminal through the same
 the same collect loop to completion or the next stop) instead of a bare
 `waitpid`. `bg` opens the gate and `SIGCONT`s without touching the terminal;
 the sweep drives `ParkedPipeline::poll`, a single non-blocking pass; the
-REPL's exit `cleanup` drives `ParkedPipeline::cancel`, which signals the
-group, cancels every stage scope, fires every wake, opens the gate so
-cancelled threads can leave, and kills the group before the drop joins them.
+REPL's exit `cleanup` drives `ParkedPipeline::cancel`, which opens the gate
+and resumes every stage — so a remembered stop cannot read as live, and a
+thread at the gate can leave — and then runs the same `cancel_all` a Ctrl-C
+gets, giving a parked pipeline's stages the grace a plain stopped job
+already gets.
 There is no `kill` verb: a job is ended by `fg` and Ctrl-C, which the anchor
 witnesses for the collector.
 
@@ -255,30 +257,40 @@ which also releases any descendant of that edge still blocked writing into it.
 Verdicts fold in launch order regardless of settle order, so which stage the
 collector kills when never changes which failure the fold reports.
 
-**Teardown is kill-first.** Every path that ends a pipeline before its stages
-have all been observed — `CollectState::cancel_all` (a cancel, a witnessed
-signal, a stop with no job table), `PipelineBuild::abort` (a mid-launch
-failure), `ParkedPipeline::cancel` (the REPL's exit) and `PipelineGroup::drop`
-— is one order: (1) `signal` — the cause's catchable signal to `-pgid`, then
-`SIGCONT`, so a member that honours it exits with its own status; (2) a bounded
-grace of at most `TEARDOWN_GRACE` (500 ms, shared with a standalone child's
-`terminate_group`), during which the collector probes non-blockingly and
-leaves the moment every stage has settled — `abort` skips it, having no
-verdict to protect; (3) `kill` — `SIGKILL -pgid`, unconditional and
-idempotent; (4) only now the blocking joins — stage threads, pump drains,
-waits; (5) the anchor last, in `Drop`, after every stage handle has gone.
-Step 3 before step 4 is what makes the joins terminate: a stage's own kill
+**Teardown is kill-first.** A pipeline that ends before every stage has been
+observed ends by one of two mechanisms, and both put the group's death before
+anything that blocks. `CollectState::cancel_all` is the one that observes on
+purpose — a cancel, a witnessed signal, a stop with no job table, the REPL's
+exit — and spells the order out: (1) `signal` — the cause's catchable signal
+to `-pgid`, then `SIGCONT`, so a member that honours it exits with its own
+status; (2) a bounded grace of at most `TEARDOWN_GRACE` (500 ms, shared with a
+standalone child's `terminate_group`), during which the collector probes
+non-blockingly and leaves the moment every stage has settled; (3) `kill` —
+`SIGKILL -pgid`, unconditional and idempotent; (4) only now the observation,
+whose joins are blocking — stage threads, pump drains, waits; (5) the anchor
+last, in `Drop`, after every stage handle has gone.
+
+`CollectState::drop` is the other, and it covers every forced end that drops
+rather than observes: a launch that failed part-way, an unwind between launch
+and fold, a parked pipeline nobody resumed. It kills the owned pgid if and
+only if a stage is still unobserved — a condition derived from what the
+collector already knows, not a flag a caller must set — so the group dies
+before the handles beneath it join. Every stage observed is the ordinary end,
+which a `spawn` worker that joined the pgid outlives.
+
+Killing before joining is what makes the joins terminate: a stage's own kill
 reaches its pid alone, and a pumped descendant that survived it would hold the
 pump's pipe open forever. The two graces nest without adding — the group's
 `SIGKILL` ends whatever a stage's own `grace_poll` is waiting on. The group's
 whole verb set is `signal` and `kill`, both no-ops for a joining group, whose
 stages die of their own cancel and whose owner does the rest.
-`PipelineResources`' and `PipeNode`'s field orders carry the drop half of the
-invariant: routes, then stage handles, then the group — a stage thread parked
-on its own gate must be given the chance to leave before the anchor is waited,
-or the wait deadlocks. Windows has no polite signal and no grace: the Job
-Object kill is the whole of it, and `Drop` releases the group's `GROUPS` entry
-once the anchor is reaped.
+`PipelineResources`', `PipeNode`'s and `ParkedPipeline`'s field orders carry
+the drop half: routes, then the collector, then the group. The collector's
+kill must reach the pgid it named, and it is the live anchor that keeps that
+pgid from being reused; a stage thread parked on its own gate must also be
+given the chance to leave before the anchor is waited, or the wait deadlocks.
+Windows has no polite signal and no grace: the Job Object kill is the whole of
+it, and `Drop` releases the group's `GROUPS` entry once the anchor is reaped.
 
 **The terminal lease, and where it goes on park.** A foreground pipeline that
 takes `SIGTSTP` becomes a parked job rather than dying. On the way into

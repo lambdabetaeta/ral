@@ -15,9 +15,10 @@ use std::sync::Arc;
 /// job table to drive.  Fields `pub(super)`: `PipeNode::join` is the sole
 /// constructor.
 pub struct ParkedPipeline {
-    pub(super) group: PipelineGroup,
-    pub(super) gate: Arc<StageGate>,
+    /// Before `group`, as on `PipeNode`.
     pub(super) collect: CollectState,
+    pub(super) gate: Arc<StageGate>,
+    pub(super) group: PipelineGroup,
     pub(super) yields: PipeYield,
     pub(super) cmd: String,
 }
@@ -60,30 +61,13 @@ impl ParkedPipeline {
     /// `resume()`, then drive to `Done` (fold, drop `self`) or the next stop.
     pub fn resume_and_collect(mut self, mooring: &Mooring, shell: &mut Shell) -> Resumed {
         self.resume();
-        let Self {
-            mut group,
-            gate,
-            mut collect,
-            yields,
-            cmd,
-        } = self;
-        match collect.drive(&mut group, &gate, mooring, shell) {
-            Drive::Done => {
-                let completed = collect.fold(mooring, shell).finish(yields).is_ok();
-                Resumed::Finished { completed }
-            }
+        match self.collect.drive(&mut self.group, &self.gate, mooring, shell) {
+            Drive::Done => Resumed::Finished {
+                completed: self.collect.fold(mooring, shell).finish(self.yields).is_ok(),
+            },
             Drive::Parked(sig) => {
-                group.release_foreground_and_relay();
-                Resumed::Parked(
-                    Box::new(Self {
-                        group,
-                        gate,
-                        collect,
-                        yields,
-                        cmd,
-                    }),
-                    sig,
-                )
+                self.group.release_foreground_and_relay();
+                Resumed::Parked(Box::new(self), sig)
             }
         }
     }
@@ -105,13 +89,13 @@ impl ParkedPipeline {
         }
     }
 
-    /// Signal the group, cancel and wake every stage, open the gate so
-    /// cancelled threads can leave, then kill: the caller's drop joins them,
-    /// and a join before the kill can outlive the pipeline.
-    pub fn cancel(&mut self, cause: CancelCause) {
-        self.group.signal(cause);
-        self.collect.cancel_stages(cause);
+    /// The REPL's exit: the teardown a cancel gets — signal, grace, kill,
+    /// observe — once the park is undone, so a remembered stop cannot read
+    /// as live and a thread at the gate can leave.  Consumes the pipeline:
+    /// with every stage observed there is nothing left to drive.
+    pub fn cancel(mut self, cause: CancelCause, shell: &Shell) {
         self.gate.resume();
-        self.group.kill();
+        self.collect.resume_all();
+        self.collect.cancel_all(&self.group, cause, shell);
     }
 }

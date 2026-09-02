@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6104758c
+generated_at_commit: 30ac8e07
 generated_at_date: 2026-09-02
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
@@ -111,8 +111,9 @@ recursion is irreducible; the evaluator reaches it at
   machine's.  `group` (the pgid anchor, foreground guard, SIGINT relay)
   stays alive across both `collect` and `finish` rather than dropped early
   ([[map/core/evaluator|evaluator]]). `PipeNode`'s field order carries the same
-  teardown invariant as `PipelineResources`': the stage handles drop before the
-  group, so a stage parked on its gate can leave before the anchor is waited on. `resolve.rs` freezes each stage's launch decision once as
+  teardown invariant as `PipelineResources`' and `ParkedPipeline`'s: the
+  collector drops before the group, so its kill still reaches a live pgid and a
+  stage parked on its gate can leave before the anchor is waited on. `resolve.rs` freezes each stage's launch decision once as
   `StageLaunch` (`Direct(ExternalStage)` | `Thread`) from the head's resolution, redirects,
   terminal ownership, and audit state, so launch reads a decision rather than
   re-deriving a dispatch gate. **No route enters that classification**: a
@@ -139,7 +140,9 @@ recursion is irreducible; the evaluator reaches it at
     concern. The terminal-ownership decision (`resolve_terminal_plan`)
     likewise gates on a reachable terminal lease and a terminal-bound final
     sink, not on a `startup_foreground` predicate.
-  - `launch.rs` (`PipelineBuild` owns launch and abort teardown; `StageHandle`
+  - `launch.rs` (`PipelineBuild` owns launch; a failed launch is its drop, the
+    collector it carries killing the group before any stage handle joins;
+    `StageHandle`
     dispatches `probe`/`interrupt`/`resume`/`cancel`/`reader_gone`/
     `end_stopped`/`observe` over its two kinds, `External`/`Thread`, and
     carries the one `Ending` every later decision about that stage reads —
@@ -151,14 +154,17 @@ recursion is irreducible; the evaluator reaches it at
     stop of it means, while `holds_terminal` reports the handoff actually held
     rather than the plan it was launched under; `PipelineGroup::joining` is the
     no-anchor, no-relay, may-not-signal shape a nested pipeline inside a stage
-    thread gets instead. The group's whole verb set is `signal` and `kill`, and
-    every path that ends a pipeline — `CollectState::cancel_all`,
-    `PipelineBuild::abort`, `ParkedPipeline::cancel`, `Drop` — is one order:
-    signal, bounded grace, kill, and only then join), `thread.rs` (`launch_thread_stage` wires a `Thread`
+    thread gets instead. The group's whole verb set is `signal` and `kill`,
+    both `&self`, and both belong to the collector: `CollectState::cancel_all`
+    spells signal, bounded grace, kill, and only then observe, while
+    `CollectState::drop` kills whenever it is dropped with a stage still
+    unobserved), `thread.rs` (`launch_thread_stage` wires a `Thread`
     stage's `Io` from its `StageRoute` and hands the closure to
     `Shell::spawn_thread`; `ThreadStage` is the collector's handle onto the
-    running thread), `collect.rs` (the non-blocking probe loop that folds
-    every stage's `StageObservation` in launch order), and `parked.rs`
+    running thread), `collect.rs` (`CollectState` owns the stage handles from
+    the first one launched, the non-blocking probe loop that folds every
+    stage's `StageObservation` in launch order, and the forced-end kill in its
+    own `Drop`), and `parked.rs`
     (`cfg(unix)`; `ParkedPipeline` — the group with its foreground guard and
     relay released but its anchor kept, the Ctrl-Z gate, and the collector's
     unobserved state — is what `fg`/`bg`/`kill`/the job sweep drive instead of

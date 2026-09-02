@@ -1472,10 +1472,10 @@ fn pipeline_pgid_is_distinct_from_parent() {
 #[test]
 fn pipeline_mid_stage_launch_failure_does_not_hang() {
     // Stage 2 references a command that cannot be resolved, so its
-    // launch fails after stage 1 has already spawned.  The Drop chain
-    // on RunningPipeline / RunningChild must SIGKILL the pgid and reap
-    // every already-spawned child.  If any child leaks the wait()
-    // inside the harness will time out.
+    // launch fails after stage 1 has already spawned.  Dropping the
+    // launch's `PipelineResources` must SIGKILL the pgid before its
+    // stage handles join and reap every already-spawned child.  If any
+    // child leaks the wait() inside the harness will time out.
     let script = "/usr/bin/true | /no/such/binary_xyzzy | /usr/bin/cat";
     let o = run_with_timeout(&[], script, Duration::from_secs(5))
         .expect("pipeline hung after mid-stage launch failure — child leak?");
@@ -1485,9 +1485,9 @@ fn pipeline_mid_stage_launch_failure_does_not_hang() {
 #[test]
 fn pipeline_mid_stage_launch_failure_with_long_producer_kills_it() {
     // Stage 1 is a long-running producer (`yes`); stage 2 fails to launch.
-    // The producer must be killed (SIGKILL) on the abort path; otherwise
-    // it would keep writing to its now-orphaned pipe forever and the test
-    // would time out.  This is the canonical Drop-chain regression.
+    // The producer must be killed (SIGKILL) by the launch's `PipelineResources`
+    // drop; otherwise it would keep writing to its now-orphaned pipe forever
+    // and the test would time out.  This is the canonical Drop-chain regression.
     let script = "/usr/bin/yes | /no/such/binary_xyzzy";
     let o = run_with_timeout(&[], script, Duration::from_secs(5))
         .expect("pipeline hung — long producer not killed on abort?");
@@ -1868,6 +1868,22 @@ fn continue_process_group(pgid: i32) {
     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::CONT);
 }
 
+/// Poll until the REPL process itself has exited, or `timeout` elapses.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn wait_for_exit(session: &mut PtySession, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        session.read_available();
+        if matches!(session.child.try_wait(), Ok(Some(_))) {
+            return true;
+        }
+        if start.elapsed() > timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn park_returns_the_terminal_to_the_shell() {
@@ -1942,6 +1958,66 @@ fn fg_resumes_a_parked_pipeline_to_completion() {
         done,
         "fg did not resume the parked pipeline to completion; stderr: {}",
         out.stderr
+    );
+}
+
+/// REPL exit gives a parked pipeline's stages the same `SIGTERM` grace a
+/// plain stopped job gets: the trap runs, the marker lands, ral exits.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn exit_with_a_parked_pipeline_gives_its_stages_the_grace() {
+    // `TEARDOWN_GRACE` (core/src/process/cancel.rs) is 500ms and private to
+    // ral-core; this budget is that plus a margin for a loaded machine.
+    let budget = Duration::from_millis(3500);
+
+    let marker = fresh_tmp_path("ral_exit_parked_grace", "marker");
+    let script = format!(
+        r#"/bin/sh -c 'trap "echo bye > {m}; exit 0" TERM; sleep 30' | !{{ from-line }}"#,
+        m = marker.display(),
+    );
+
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session.send_line(&script).expect("send failed");
+    let pgid = session
+        .wait_for_lent_terminal(Duration::from_secs(8))
+        .expect("pipeline never took the terminal");
+    stop_process_group(pgid);
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("stopped")),
+        "pipeline never reported stopped; stderr: {}",
+        session.text()
+    );
+
+    session.send_line("exit").expect("send failed");
+    let started = std::time::Instant::now();
+    let mut exited = wait_for_exit(&mut session, Duration::from_secs(2));
+    if !exited {
+        // POSIX shells expect a second `exit` when a job is stopped; offer
+        // one in case the REPL's exit path does the same.
+        session.send_line("exit").ok();
+        exited = wait_for_exit(&mut session, Duration::from_secs(8));
+    }
+    let elapsed = started.elapsed();
+    // `signal` also sends `SIGCONT`, so this is cleanup rather than the fix —
+    // harmless either way.
+    continue_process_group(pgid);
+    if !exited {
+        let out = session.finish();
+        panic!(
+            "ral never exited with a parked pipeline outstanding; stderr: {}",
+            out.stderr
+        );
+    }
+    let out = session.finish();
+    assert!(
+        marker.exists(),
+        "the parked stage's TERM trap never ran; stderr: {}",
+        out.stderr
+    );
+    std::fs::remove_file(&marker).ok();
+    assert!(
+        elapsed < budget,
+        "REPL exit paid far more than one teardown grace: {elapsed:?}"
     );
 }
 

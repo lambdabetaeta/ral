@@ -286,6 +286,15 @@ impl Pgid {
         // SAFETY: every `Pgid` constructor admits only positive integers.
         unsafe { rustix::process::Pid::from_raw_unchecked(self.as_raw()) }
     }
+
+    /// `SIGKILL` every member — the Job Object's kill on Windows.  Idempotent,
+    /// and harmless on a group that has already left.
+    pub fn kill(self) {
+        #[cfg(unix)]
+        self.signal_group(Signal::new(libc::SIGKILL));
+        #[cfg(windows)]
+        windows::kill_pipeline_group(self);
+    }
 }
 
 impl std::fmt::Display for Pgid {

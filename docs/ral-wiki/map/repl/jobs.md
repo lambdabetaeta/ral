@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c8af3823
+generated_at_commit: 30ac8e07
 generated_at_date: 2026-09-02
 covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
@@ -40,11 +40,13 @@ On exit a job group is taken down in three steps:
 A parked job's pgid anchor ignores every termination signal by design
 ([[decisions/260902_stages-are-threads|stages-are-threads]]), so a bare
 `SIGTERM -pgid` at exit would never reach it: `cleanup` instead calls
-`ParkedPipeline::cancel(Terminate)` on every parked job, which signals the
-group, cancels every stage thread's scope, fires every wake, and opens the
-Ctrl-Z gate so a cancelled thread can leave — dropping the `ParkedPipeline`
-this way is what finishes the anchor (its release pipe closes, it reads EOF,
-`PipelineGroup::drop` reaps it). A stopped standalone external, which owns no
+`ParkedPipeline::cancel(Terminate, shell)` on every parked job, which opens the
+Ctrl-Z gate and resumes every stage — so a cancelled thread can leave and a
+remembered stop cannot read as live — and then runs the collector's own
+`cancel_all`: signal, grace, kill, observe. A parked pipeline's stages
+therefore get the same `SIGTERM` grace a plain stopped job gets, where they
+once got none. Consuming the `ParkedPipeline` this way is what finishes the
+anchor (its release pipe closes, it reads EOF, `PipelineGroup::drop` reaps it). A stopped standalone external, which owns no
 `ParkedPipeline`, still takes the plain SIGTERM/SIGCONT/SIGKILL ladder above.
 
 A job also owns whatever atomic writes its members staged but have not

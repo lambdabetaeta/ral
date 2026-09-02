@@ -1,10 +1,10 @@
 //! Process-staged pipeline orchestrator: every stage — a ral-written thread
 //! or a direct external — spawns into one process group, joined or owned.
-//! [`PipelineBuild`] owns every transient resource — group, stage handles,
+//! [`PipelineBuild`] owns every transient resource — group, collector,
 //! unconsumed routes — so a leaked pipe end is a borrow error.
 
 use super::super::command;
-use super::collect::{StageObservation, observe_external_stage};
+use super::collect::{CollectState, StageObservation, observe_external_stage};
 use super::group::PipelineGroup;
 use super::resolve::{ExternalStage, PipelinePlan, StageLaunch, StageSpec};
 use super::route::{ByteIn, ByteOut, StageRoute, open_stage_routes};
@@ -384,22 +384,13 @@ fn spawn_stage(
 
 /// Partial-launch resources in teardown order: Rust drops fields top to
 /// bottom, and that order is the invariant.  Unconsumed routes close first so
-/// half-wired neighbours see EOF, then the stages, then the pgid anchor,
-/// which outlives all of them.
+/// half-wired neighbours see EOF; then the collector, whose drop kills the
+/// group before its handles join; then the pgid anchor, which outlives all
+/// of them.
 struct PipelineResources {
     routes: VecDeque<StageRoute>,
-    running: Vec<StageHandle>,
+    collect: CollectState,
     group: PipelineGroup,
-}
-
-impl PipelineResources {
-    fn new(group: PipelineGroup, routes: VecDeque<StageRoute>) -> Self {
-        Self {
-            routes,
-            running: Vec::new(),
-            group,
-        }
-    }
 }
 
 /// Linear accumulator: one [`PipelineBuild::step`] per stage, then
@@ -419,10 +410,15 @@ impl PipelineBuild {
         routes: VecDeque<StageRoute>,
         shell: &Shell,
         mooring: &Mooring,
+        started: std::time::Instant,
     ) -> Self {
         group.claim_foreground(shell, mooring);
         Self {
-            resources: PipelineResources::new(group, routes),
+            resources: PipelineResources {
+                routes,
+                collect: CollectState::new(&group, started),
+                group,
+            },
             gate,
         }
     }
@@ -447,33 +443,22 @@ impl PipelineBuild {
             group: &mut self.resources.group,
         };
         let handle = spawn_stage(stage, spec, route, cx, &self.gate)?;
-        self.resources.running.push(handle);
+        self.resources.collect.push(handle);
         Ok(())
     }
 
-    /// Tear down a partially-launched pipeline in the one order signal, kill,
-    /// join — see `CollectState::cancel_all` — minus the grace: a launch that
-    /// failed has no verdict to protect, so nothing is waiting to exit
-    /// cleanly.  [`PipelineResources`]'s field order does the rest.
-    fn abort(self) {
-        let Self { mut resources, .. } = self;
-        resources.group.signal(CancelCause::Terminate);
-        resources.group.kill();
-        drop(resources);
-    }
-
-    /// Return the group alongside the running stages — its anchor and
-    /// guards must outlive collect.  The foreground was already claimed in
-    /// `new`, before any stage existed.
-    fn finish(self) -> (PipelineGroup, Vec<StageHandle>) {
+    /// Return the group alongside the collector — its anchor and guards must
+    /// outlive collect.  The foreground was already claimed in `new`, before
+    /// any stage existed.
+    fn finish(self) -> (PipelineGroup, CollectState) {
         let Self { resources, .. } = self;
         let PipelineResources {
             routes,
-            running,
+            collect,
             group,
         } = resources;
         debug_assert!(routes.is_empty());
-        (group, running)
+        (group, collect)
     }
 }
 
@@ -531,8 +516,12 @@ fn spawn_all_stages(
     Ok(())
 }
 
-/// Launch every stage into `group`; a mid-launch error goes to
-/// [`PipelineBuild::abort`] for the ordered teardown.
+/// Launch every stage into `group`.  A mid-launch error drops `build`, whose
+/// field order is the teardown.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one launch call per pipeline; splitting it would just scatter the same parameters across a builder"
+)]
 pub(super) fn launch_pipeline(
     stages: &[Arc<crate::ir::Comp>],
     plan: &PipelinePlan,
@@ -541,14 +530,10 @@ pub(super) fn launch_pipeline(
     shell: &mut Shell,
     group: PipelineGroup,
     gate: &Arc<StageGate>,
-) -> Result<(PipelineGroup, Vec<StageHandle>), Break> {
+    started: std::time::Instant,
+) -> Result<(PipelineGroup, CollectState), Break> {
     let routes = open_stage_routes(plan)?.into();
-    let mut build = PipelineBuild::new(group, Arc::clone(gate), routes, shell, mooring);
-    match spawn_all_stages(&mut build, stages, plan, env, mooring, shell) {
-        Ok(()) => Ok(build.finish()),
-        Err(e) => {
-            build.abort();
-            Err(e)
-        }
-    }
+    let mut build = PipelineBuild::new(group, Arc::clone(gate), routes, shell, mooring, started);
+    spawn_all_stages(&mut build, stages, plan, env, mooring, shell)?;
+    Ok(build.finish())
 }

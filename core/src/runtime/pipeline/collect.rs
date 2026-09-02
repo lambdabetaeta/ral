@@ -18,7 +18,7 @@ use super::launch::{Probe, StageHandle};
 use crate::evaluator::audit::observe_stamped;
 #[cfg(unix)]
 use crate::process::Signal;
-use crate::process::{CancelCause, StageGate};
+use crate::process::{CancelCause, Pgid, StageGate};
 use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Observed, Settled,
     Shell, Value, epoch_us,
@@ -217,6 +217,9 @@ pub(super) struct CollectState {
     stages: Vec<Option<StageHandle>>,
     observed: Vec<Option<StageObservation>>,
     started: std::time::Instant,
+    /// The pgid a forced end of this collector kills; `None` for a joining
+    /// collector, whose owner's teardown does it.
+    owned_group: Option<Pgid>,
 }
 
 #[cfg(unix)]
@@ -233,13 +236,18 @@ fn scope_cancelled(mooring: &Mooring) -> Option<CancelCause> {
 }
 
 impl CollectState {
-    pub(super) fn new(running: Vec<StageHandle>, started: std::time::Instant) -> Self {
-        let n = running.len();
+    pub(super) fn new(group: &PipelineGroup, started: std::time::Instant) -> Self {
         Self {
-            stages: running.into_iter().map(Some).collect(),
-            observed: (0..n).map(|_| None).collect(),
+            stages: Vec::new(),
+            observed: Vec::new(),
             started,
+            owned_group: group.owned().then(|| group.leader_pgid()),
         }
+    }
+
+    pub(super) fn push(&mut self, handle: StageHandle) {
+        self.stages.push(Some(handle));
+        self.observed.push(None);
     }
 
     /// One non-blocking pass over every unobserved stage, tail-first: end a
@@ -343,12 +351,18 @@ impl CollectState {
     /// terminate once nothing that holds a pipe end is alive, and a stage's
     /// own kill reaches its pid alone.  A pumped descendant of a killed stage
     /// outlives the stage, and no wait on that pump returns while it does.
-    /// `PipelineBuild::abort`, `ParkedPipeline::cancel` and
-    /// `PipelineGroup::drop` keep the same order.
+    /// This is the one path that observes on purpose, so the kill is explicit
+    /// and precedes the observation; a collector dropped short of that is
+    /// ended by `Drop`, kill first.
     ///
     /// Tail-first once the tree is dead, so each edge's held read end is
     /// released behind its writer.
-    fn cancel_all(&mut self, group: &mut PipelineGroup, cause: CancelCause, shell: &Shell) -> Pass {
+    pub(super) fn cancel_all(
+        &mut self,
+        group: &PipelineGroup,
+        cause: CancelCause,
+        shell: &Shell,
+    ) -> Pass {
         self.cancel_stages(cause);
         // A joining group has no signal to grace and no pgid to kill: its
         // stages die of their own cancel, and the owner's teardown does the rest.
@@ -439,6 +453,22 @@ impl CollectState {
     }
 }
 
+impl Drop for CollectState {
+    /// A collector dropped with a stage unobserved is a pipeline ending by
+    /// force — an aborted launch, an unwind, a park nobody resumed — so the
+    /// group dies before the handles below join: a stage's own kill reaches
+    /// its pid alone, and a pumped descendant that survived it would hold the
+    /// pump's pipe open for ever.  Every stage observed is the ordinary end,
+    /// which a `spawn` worker that joined the pgid outlives.
+    fn drop(&mut self) {
+        if self.stages.iter().any(Option::is_some)
+            && let Some(pgid) = self.owned_group
+        {
+            pgid.kill();
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
@@ -518,11 +548,9 @@ mod tests {
         let gate = StageGate::new();
         let mooring = Mooring::adrift();
 
-        let running = vec![
-            StageHandle::for_test(spawn_exiting(1)),
-            StageHandle::for_test(spawn_exiting(0)),
-        ];
-        let mut collect = CollectState::new(running, std::time::Instant::now());
+        let mut collect = CollectState::new(&group, std::time::Instant::now());
+        collect.push(StageHandle::for_test(spawn_exiting(1)));
+        collect.push(StageHandle::for_test(spawn_exiting(0)));
 
         match collect.drive(&mut group, &gate, &mooring, &shell) {
             Drive::Done => {}
@@ -616,8 +644,8 @@ mod tests {
         let gate = StageGate::new();
         let mooring = Mooring::adrift();
 
-        let running = vec![StageHandle::for_test(spawn_stopped_sleep())];
-        let mut collect = CollectState::new(running, std::time::Instant::now());
+        let mut collect = CollectState::new(&group, std::time::Instant::now());
+        collect.push(StageHandle::for_test(spawn_stopped_sleep()));
 
         let signal = 'wait: {
             for _ in 0..100 {
@@ -652,8 +680,8 @@ mod tests {
         };
         let shell = Shell::default();
 
-        let running = vec![StageHandle::for_test(spawn_stopped_sleep())];
-        let mut collect = CollectState::new(running, std::time::Instant::now());
+        let mut collect = CollectState::new(&group, std::time::Instant::now());
+        collect.push(StageHandle::for_test(spawn_stopped_sleep()));
 
         for _ in 0..100 {
             match collect.pass(&mut group, &gate, &mooring, &shell) {
@@ -667,5 +695,125 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("the stop was never forwarded to the joining collector's own stage status");
+    }
+
+    /// A stage spawned into the group's own pgid via `PgidPolicy::Join`, as
+    /// `launch.rs` wires a direct external — a background `sleep` forked from
+    /// under `/bin/sh`, whose pid comes back over the stage's own stdout
+    /// before the stage is wrapped for the collector. `wait_on_child` decides
+    /// whether the wrapped `sh` waits on it (so the grandchild is still
+    /// running when the stage is observed) or exits at once (so the
+    /// grandchild is orphaned into the group, still alive, before the stage
+    /// even ends).
+    #[cfg(unix)]
+    fn spawn_stage_with_grandchild(
+        group: &PipelineGroup,
+        wait_on_child: bool,
+    ) -> (command::RunningChild, i32) {
+        use std::io::Read;
+        let script = if wait_on_child {
+            "sleep 30 & echo $!; wait"
+        } else {
+            "sleep 30 & echo $!"
+        };
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", script]);
+        cmd.stdout(std::process::Stdio::piped());
+        let (mut child, _pgid) = crate::process::spawn_with_pgid(
+            &mut cmd,
+            crate::process::PgidPolicy::Join(group.leader_pgid()),
+        )
+        .expect("spawn /bin/sh under the group's pgid");
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let mut pid_line = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            stdout.read_exact(&mut byte).expect("read the grandchild pid");
+            if byte[0] == b'\n' {
+                break;
+            }
+            pid_line.push(byte[0]);
+        }
+        let pid: i32 = String::from_utf8(pid_line)
+            .expect("ascii pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let rc = command::RunningChild::assemble_with_owner(
+            crate::process::ChildHandle::from_std(child),
+            "sh".to_string(),
+            command::ExternalPlumbing {
+                stdout_pump: None,
+                stderr_pump: None,
+            },
+            crate::process::StopPolicy::KillAndReap,
+            command::GroupOwner::BorrowedByPipeline(group.leader_pgid()),
+            crate::process::CancelScope::root(),
+            None,
+        );
+        (rc, pid)
+    }
+
+    #[cfg(unix)]
+    fn assert_dead_within_2s(pid: i32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let dead = unsafe { libc::kill(pid, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if dead {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        panic!("grandchild pid {pid} outlived the collector's forced end");
+    }
+
+    /// A grandchild in the pipeline's pgid that its stage's own pid kill
+    /// cannot reach.  Dropping the collector with the stage unobserved is a
+    /// forced end, and the group kill it fires is what ends the grandchild.
+    #[cfg(unix)]
+    #[test]
+    fn a_collector_dropped_short_of_observation_kills_the_group() {
+        let shell = Shell::default();
+        let group = PipelineGroup::prepare(super::super::resolve::TerminalPlan::NoTerminal, &shell)
+            .expect("anchor spawns");
+        let (rc, pid) = spawn_stage_with_grandchild(&group, true);
+
+        let mut collect = CollectState::new(&group, std::time::Instant::now());
+        collect.push(StageHandle::for_test(rc));
+        drop(collect);
+
+        assert_dead_within_2s(pid);
+        drop(group);
+    }
+
+    /// The ordinary end kills nothing: a member that outlives its stage — a
+    /// `spawn` worker that joined the pgid — outlives the pipeline too.
+    #[cfg(unix)]
+    #[test]
+    fn a_collector_that_observed_every_stage_kills_nothing() {
+        let shell = Shell::default();
+        let mut group =
+            PipelineGroup::prepare(super::super::resolve::TerminalPlan::NoTerminal, &shell)
+                .expect("anchor spawns");
+        let gate = StageGate::new();
+        let mooring = Mooring::adrift();
+        let (rc, pid) = spawn_stage_with_grandchild(&group, false);
+
+        let mut collect = CollectState::new(&group, std::time::Instant::now());
+        collect.push(StageHandle::for_test(rc));
+        match collect.drive(&mut group, &gate, &mooring, &shell) {
+            Drive::Done => {}
+            Drive::Parked(_) => panic!("an ordinary exit must not park"),
+        }
+        drop(collect);
+
+        assert!(
+            unsafe { libc::kill(pid, 0) } == 0,
+            "the orphaned grandchild must survive the collector's ordinary end"
+        );
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        drop(group);
     }
 }

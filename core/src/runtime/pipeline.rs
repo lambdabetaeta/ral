@@ -22,8 +22,9 @@ use crate::types::{Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 use std::time::Instant;
 
+use collect::CollectState;
 use group::PipelineGroup;
-use launch::{StageHandle, launch_pipeline};
+use launch::launch_pipeline;
 use resolve::resolve_pipeline;
 
 /// A multi-stage pipeline between two launches and one join: the node the
@@ -35,11 +36,13 @@ use resolve::resolve_pipeline;
 /// Field order is teardown order, as in `PipelineResources`: an unwind
 /// through the `Pipeline` rule must join the stages before the anchor.
 pub(crate) struct PipeNode {
-    running: Vec<StageHandle>,
+    /// Before `group`: a collector dropped mid-flight kills the pgid, which
+    /// must still be the anchor's — a reaped leader's pid may be reused once
+    /// its group is empty.
+    collect: CollectState,
     gate: Arc<StageGate>,
     group: PipelineGroup,
     yields: PipeYield,
-    started: Instant,
     /// The pipeline's rendered source, for `ParkedPipeline`'s job-table name.
     cmd: String,
 }
@@ -90,13 +93,13 @@ impl PipeNode {
         };
         let cmd = render_cmd(shell, stages);
 
-        let (group, running) = launch_pipeline(stages, &plan, env, mooring, shell, group, &gate)?;
+        let (group, collect) =
+            launch_pipeline(stages, &plan, env, mooring, shell, group, &gate, started)?;
         Ok(Self {
-            group,
+            collect,
             gate,
-            running,
+            group,
             yields: plan.yields,
-            started,
             cmd,
         })
     }
@@ -109,30 +112,28 @@ impl PipeNode {
     /// parks the pipeline instead of returning: the terminal goes back to the
     /// shell, the state is deposited under its pgid, and `Escape::Stopped`
     /// propagates exactly as a foreground external's stop would.
-    pub(crate) fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        let Self {
-            mut group,
-            gate,
-            running,
-            yields,
-            started,
-            cmd,
-        } = self;
+    pub(crate) fn join(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
         // `cmd` names a parked pipeline's job entry — Unix only, since there
         // is no park to name off Unix.
         #[cfg(not(unix))]
-        let _ = &cmd;
-        let mut collect = collect::CollectState::new(running, started);
-        match collect.drive(&mut group, &gate, mooring, shell) {
-            collect::Drive::Done => collect.fold(mooring, shell).finish(yields),
+        let _ = &self.cmd;
+        match self.collect.drive(&mut self.group, &self.gate, mooring, shell) {
+            collect::Drive::Done => self.collect.fold(mooring, shell).finish(self.yields),
             #[cfg(unix)]
             collect::Drive::Parked(signal) => {
+                let Self {
+                    collect,
+                    gate,
+                    mut group,
+                    yields,
+                    cmd,
+                } = self;
                 group.release_foreground_and_relay();
                 let pgid = group.leader_pgid();
                 shell.park_pipeline(parked::ParkedPipeline {
-                    group,
-                    gate,
                     collect,
+                    gate,
+                    group,
                     yields,
                     cmd: cmd.clone(),
                 });

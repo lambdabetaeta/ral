@@ -52,10 +52,6 @@ pub(super) struct PipelineGroup {
     relay: Option<crate::process::PipelineRelay>,
     /// `Some` exactly when `role` is not `Joining`; taken by `Drop`.
     anchor: Option<AnchorProcess>,
-    /// Set by `signal`/`kill`, so `Drop` follows up on a member that outlived
-    /// the teardown.  Never set on the ordinary completion path, where a
-    /// `spawn` worker that joined the pgid must survive the pipeline.
-    torn_down: bool,
 }
 
 /// What the anchor saw happen to the group.
@@ -81,7 +77,6 @@ impl PipelineGroup {
             #[cfg(unix)]
             relay: crate::process::PipelineRelay::install(leader.as_raw()),
             anchor: Some(anchor),
-            torn_down: false,
         })
     }
 
@@ -95,7 +90,6 @@ impl PipelineGroup {
             #[cfg(unix)]
             relay: None,
             anchor: None,
-            torn_down: false,
         }
     }
 
@@ -145,11 +139,10 @@ impl PipelineGroup {
     /// The owner's cause signal: `SIGINT` for `Interrupt`, else `SIGTERM`,
     /// then `SIGCONT` — a stopped member cannot act on either until it runs.
     /// Nothing on Windows, whose only group verb is [`Self::kill`].
-    pub(super) fn signal(&mut self, cause: CancelCause) {
+    pub(super) fn signal(&self, cause: CancelCause) {
         if !self.owned() {
             return;
         }
-        self.torn_down = true;
         #[cfg(unix)]
         {
             let signal = if cause == CancelCause::Interrupt {
@@ -168,18 +161,14 @@ impl PipelineGroup {
     /// nothing for a joining group, whose pgid is its owner's to end.
     ///
     /// After this returns, nothing in the group holds a pipe end open.  That
-    /// is the precondition every join in the teardown path rests on: a stage's
+    /// is the precondition `cancel_all`'s observation rests on: a stage's
     /// own kill reaches its pid alone, so only the owner can make a pump's
     /// join terminate.
-    pub(super) fn kill(&mut self) {
+    pub(super) fn kill(&self) {
         if !self.owned() {
             return;
         }
-        self.torn_down = true;
-        #[cfg(unix)]
-        self.leader.signal_group(Signal::new(libc::SIGKILL));
-        #[cfg(windows)]
-        crate::process::kill_pipeline_group(self.leader);
+        self.leader.kill();
     }
 
     /// Give the terminal back to the shell and drop the relay, keeping the
@@ -202,9 +191,6 @@ impl Drop for PipelineGroup {
     /// and `PipeNode` both order their fields to guarantee it): a stage parked
     /// on its gate must be able to leave before the anchor is waited on.
     fn drop(&mut self) {
-        if self.torn_down {
-            self.kill();
-        }
         // The Windows group release lives inside this arm, so it cannot be
         // guarded on an ownership fact this same statement has consumed.
         let Some(anchor) = self.anchor.take() else {
