@@ -4,7 +4,7 @@
 //! twice" unwritable.
 
 use crate::io::Sink;
-use crate::process::{CancelCause, Ending, KillTarget, StopPolicy};
+use crate::process::{CancelCause, Ending, EndingCell, KillTarget, StopPolicy};
 #[cfg(unix)]
 use crate::types::Escape;
 use crate::types::{Break, Error, Settled};
@@ -66,9 +66,9 @@ pub(crate) struct RunningChild {
     settled: Option<crate::process::WaitOutcome>,
     /// How this child's life ended, once ral itself ended it: the cancel
     /// branch of `wait` and the pipeline collector's reader-gone kill are the
-    /// only writers, and they join by `max`.  Sole input to forgiveness and
-    /// to whether the drainers are joined.
-    ending: Ending,
+    /// only writers.  Sole input to forgiveness and to whether the drainers
+    /// are joined.
+    ending: EndingCell,
 }
 
 /// A child observed dead, holding its outcome and its not-yet-joined drainers.
@@ -131,7 +131,7 @@ impl RunningChild {
             group_owner,
             cancel,
             settled: None,
-            ending: Ending::OwnAccord,
+            ending: EndingCell::default(),
         }
     }
 
@@ -336,7 +336,7 @@ impl RunningChild {
                             // (`SIGCONT`ed), so keep waiting on the same one.
                             Ok(()) => continue,
                             Err(cause) => {
-                                self.ending = self.ending.max(Ending::RalEnded(cause));
+                                self.ending.raise(Ending::RalEnded(cause));
                                 break self.terminate_group(&mut child, cause);
                             }
                         }
@@ -382,7 +382,7 @@ impl RunningChild {
                     // never wait on a dead pid.  The Windows group release is
                     // not part of teardown; the `Standalone` branch below still
                     // performs it on the way out.
-                    self.ending = self.ending.max(Ending::RalEnded(cause));
+                    self.ending.raise(Ending::RalEnded(cause));
                     break self.terminate_group(&mut child, cause);
                 }
                 std::thread::sleep(interval);
@@ -423,7 +423,7 @@ impl RunningChild {
         // A death by a signal on our own ladder is our doing, so the report
         // names the cause rather than the number; anything else the child met in
         // the grace window stays its own and is reported as such.
-        let outcome = match self.ending {
+        let outcome = match self.ending.get() {
             Ending::RalEnded(cause) => outcome.attribute_to(cause),
             Ending::OwnAccord => outcome,
         };
@@ -433,7 +433,7 @@ impl RunningChild {
         #[cfg(unix)]
         let outcome = match outcome {
             crate::process::WaitOutcome::Stopped(signal) => {
-                match (&self.stop, self.ending, self.group_owner) {
+                match (&self.stop, self.ending.get(), self.group_owner) {
                     // A group is what a job is keyed by, so a child without one
                     // cannot become one however its policy reads.
                     (
@@ -505,7 +505,7 @@ impl RunningChild {
         );
         Ok(WaitedChild {
             outcome,
-            ending: self.ending,
+            ending: self.ending.get(),
             pump: self.pump.take(),
             stderr_pump: self.stderr_pump.take(),
             name: self.name.clone(),
@@ -571,7 +571,7 @@ impl RunningChild {
     /// still live — and lands harmlessly on an already-exited child, which is
     /// what keeps a recorded exit status from ever being overwritten.
     pub(crate) fn reader_gone(&mut self) {
-        self.ending = self.ending.max(Ending::RalEnded(CancelCause::ReaderGone));
+        self.ending.raise(Ending::RalEnded(CancelCause::ReaderGone));
         let Some(child) = self.child.as_mut() else {
             return;
         };

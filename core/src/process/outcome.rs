@@ -290,12 +290,28 @@ pub enum CommandFailure {
 /// collector's reader-gone kill and a cancellation that arrived alongside it
 /// cannot lose to each other, and a cancellation in force outranks
 /// forgiveness by the order rather than by a special case.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ending {
     /// Nothing ral did ended it; whatever it reports is its own.
+    #[default]
     OwnAccord,
     /// ral ended it, for `cause`.
     RalEnded(CancelCause),
+}
+
+/// An ending that is only ever raised: a cause in force outranks a milder one,
+/// so no site can lower one already recorded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EndingCell(Ending);
+
+impl EndingCell {
+    pub fn raise(&mut self, to: Ending) {
+        self.0 = self.0.max(to);
+    }
+
+    pub fn get(&self) -> Ending {
+        self.0
+    }
 }
 
 impl CommandFailure {

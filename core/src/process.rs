@@ -19,7 +19,7 @@ pub mod spawn_lock;
 pub mod wake;
 
 pub(crate) use outcome::not_found_hint;
-pub use outcome::{CommandFailure, Ending, Signal, SpawnFailure, WaitOutcome};
+pub use outcome::{CommandFailure, Ending, EndingCell, Signal, SpawnFailure, WaitOutcome};
 
 pub use launch::{Launch, StdioSpec};
 pub use lease::TerminalLease;

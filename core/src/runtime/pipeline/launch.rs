@@ -10,7 +10,7 @@ use super::resolve::{ExternalStage, PipelinePlan, StageLaunch, StageSpec};
 use super::route::{ByteIn, ByteOut, StageRoute, open_stage_routes};
 use super::thread::{ThreadStage, launch_thread_stage};
 use crate::io::{Sink, Source, SourceReader};
-use crate::process::{CancelCause, Ending, Signal, StageGate, StopPolicy};
+use crate::process::{CancelCause, Ending, EndingCell, Signal, StageGate, StopPolicy};
 use crate::types::{Break, Env, Error, Mooring, Settled, Shell};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub(super) struct StageHandle {
     /// Private to this module: only [`StageHandle::reader_gone`] can record
     /// the one ending that is forgiven, so no stage is forgiven a death
     /// nothing sent it.
-    ending: Ending,
+    ending: EndingCell,
 }
 
 enum StageKind {
@@ -51,10 +51,10 @@ impl StageHandle {
     /// interior edge, so a stage that already finished keeps its outcome and
     /// no exit status is ever forgiven.
     pub(super) fn reader_gone(&mut self) {
-        if !self.feeds_pipe || self.ending != Ending::OwnAccord {
+        if !self.feeds_pipe || self.ending.get() != Ending::OwnAccord {
             return;
         }
-        self.ending = Ending::RalEnded(CancelCause::ReaderGone);
+        self.ending.raise(Ending::RalEnded(CancelCause::ReaderGone));
         match &mut self.kind {
             StageKind::External(c) => c.reader_gone(),
             StageKind::Thread(t) => {
@@ -68,7 +68,7 @@ impl StageHandle {
     /// and kills the group separately.  A thread is also woken, which ends
     /// the read or write it is blocked in.
     pub(super) fn cancel(&mut self, cause: CancelCause) {
-        self.ending = self.ending.max(Ending::RalEnded(cause));
+        self.ending.raise(Ending::RalEnded(cause));
         match &self.kind {
             StageKind::External(c) => c.cancel.cancel(cause),
             StageKind::Thread(t) => {
@@ -129,7 +129,7 @@ impl StageHandle {
             ending,
             ..
         } = self;
-        let obs = match (kind, ending) {
+        let obs = match (kind, ending.get()) {
             (StageKind::External(c), _) => observe_external_stage(c, shell, started),
             // A thread's `Break` carries no mark of whether the kill or its
             // own code ended it, so a killed thread is forgiven whatever it
@@ -152,7 +152,7 @@ impl StageHandle {
             kind: StageKind::External(child),
             held_edge: None,
             feeds_pipe: true,
-            ending: Ending::OwnAccord,
+            ending: EndingCell::default(),
         }
     }
 }
@@ -378,7 +378,7 @@ fn spawn_stage(
         kind,
         held_edge,
         feeds_pipe: spec.feeds_pipe,
-        ending: Ending::OwnAccord,
+        ending: EndingCell::default(),
     })
 }
 
