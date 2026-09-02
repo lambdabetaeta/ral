@@ -2333,7 +2333,7 @@ fn a_cancelled_pipeline_stages_grandchild_does_not_survive() {
         .parse()
         .expect("a pid");
 
-    // The host's teardown grace (worker registry's `TEARDOWN_GRACE`) is the
+    // The host's drain grace (worker registry's `WORKER_DRAIN_GRACE`) is the
     // outer bound; this margin is for a loaded machine's scheduling.
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < deadline && alive(gc_pid) {
@@ -2346,5 +2346,124 @@ fn a_cancelled_pipeline_stages_grandchild_does_not_survive() {
     assert!(
         !survived,
         "the forked grandchild (pid {gc_pid}) survived the pipeline's cancel teardown"
+    );
+}
+
+/// Every other cancellation fixture honours `SIGTERM`, so nothing else in the
+/// suite reaches the branch *after* a grace deadline expires.  This one covers
+/// the stage's own: `terminate_group` signals the pid, `grace_poll` waits out
+/// `TEARDOWN_GRACE`, and the `SIGKILL` that follows is what ends a stage that
+/// blocks in the shell itself — no child for the signal to fell instead.
+#[test]
+fn a_cancelled_stage_that_ignores_sigterm_dies_when_the_grace_expires() {
+    let gate = fresh_tmp_path("ral_pipeline_grace_expiry", "gate");
+    let blocker = fresh_tmp_path("ral_pipeline_grace_expiry", "blocker");
+    let fixture = fresh_tmp_path("ral_pipeline_grace_expiry", "sh");
+    mkfifo(&gate);
+    mkfifo(&blocker);
+    // `read` is a builtin, so sh blocks opening a fifo nobody ever writes:
+    // the ignored TERM reaches the process that is actually waiting.
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\ntrap \"\" TERM\n: > {}\nread x < {}\n",
+            gate.display(),
+            blocker.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let script = format!(
+        "let job = watch \"tests\" {{ {} | cat ; return `done }}\ncat {}\ncancel $job\n",
+        fixture.display(),
+        gate.display(),
+    );
+    let started = std::time::Instant::now();
+    let out = run_with_timeout(&[], &script, Duration::from_secs(30));
+    let elapsed = started.elapsed();
+
+    std::fs::remove_file(&fixture).ok();
+    std::fs::remove_file(&gate).ok();
+    std::fs::remove_file(&blocker).ok();
+
+    let Some(out) = out else {
+        panic!("ral never exited: the cancelled stage outlived the teardown grace");
+    };
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the teardown paid far more than one grace: {elapsed:?}"
+    );
+}
+
+/// The group's grace, and the reason the kill precedes the join.  Like
+/// `a_cancelled_pipeline_stages_grandchild_does_not_survive`, but the
+/// grandchild ignores `SIGTERM`, so the polite group signal does not fell it
+/// and the stage's own kill — pid-addressed, the stage being
+/// `BorrowedByPipeline` — cannot reach it.  It holds the stage's pumped stderr
+/// open, so nothing but the group `SIGKILL` after `TEARDOWN_GRACE` lets the
+/// pump's join return.  Take that kill out of `cancel_all` and the grandchild
+/// outlives the pipeline: `Drop`'s follow-up is too late to be observed.
+#[test]
+fn a_cancelled_stages_sigterm_proof_grandchild_dies_when_the_group_grace_expires() {
+    let pidfile = fresh_tmp_path("ral_pipeline_group_grace", "pid");
+    let gate = fresh_tmp_path("ral_pipeline_group_grace", "gate");
+    let blocker = fresh_tmp_path("ral_pipeline_group_grace", "blocker");
+    let fixture = fresh_tmp_path("ral_pipeline_group_grace", "sh");
+    mkfifo(&gate);
+    mkfifo(&blocker);
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\nsh -c 'trap \"\" TERM; read x < {}' &\necho $! > {}\n: > {}\nwait\n",
+            blocker.display(),
+            pidfile.display(),
+            gate.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let script = format!(
+        "let job = watch \"tests\" {{ {} | cat ; return `done }}\ncat {}\ncancel $job\n",
+        fixture.display(),
+        gate.display(),
+    );
+    let started = std::time::Instant::now();
+    let out = run_with_timeout(&[], &script, Duration::from_secs(30));
+    let elapsed = started.elapsed();
+
+    let recorded = std::fs::read_to_string(&pidfile);
+    std::fs::remove_file(&fixture).ok();
+    std::fs::remove_file(&gate).ok();
+    std::fs::remove_file(&blocker).ok();
+    std::fs::remove_file(&pidfile).ok();
+
+    let Some(out) = out else {
+        panic!("ral never exited: the collector joined a pump the grandchild still holds open");
+    };
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the teardown paid far more than one grace: {elapsed:?}"
+    );
+
+    let gc_pid: i32 = recorded
+        .expect("the gate opened without the grandchild pid being published")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline && alive(gc_pid) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let survived = alive(gc_pid);
+    if survived {
+        unsafe { libc::kill(gc_pid, libc::SIGKILL) };
+    }
+    assert!(
+        !survived,
+        "the SIGTERM-proof grandchild (pid {gc_pid}) outlived the group's grace"
     );
 }

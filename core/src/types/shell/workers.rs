@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime};
 /// SIGKILL (`runtime::command::child`), so anything that will die dies well
 /// inside this; expiry means a wedged worker, and exiting anyway is the lesser
 /// harm.
-const TEARDOWN_GRACE: Duration = Duration::from_millis(1500);
+const WORKER_DRAIN_GRACE: Duration = Duration::from_millis(1500);
 
 /// Stable identifier for a registered worker, minted from a process-global
 /// counter rather than a per-registry one, so ids never collide across
@@ -364,11 +364,11 @@ impl WorkerRegistry {
         self.0.lock().unwrap().live.clone()
     }
 
-    /// Wait, up to [`TEARDOWN_GRACE`], for every live worker thread to end. A
-    /// cancel lands at the worker's next observation point, and a host that
+    /// Wait, up to [`WORKER_DRAIN_GRACE`], for every live worker thread to end.
+    /// A cancel lands at the worker's next observation point, and a host that
     /// exits in the same breath outruns it — orphaning the child under PID 1.
     fn drain(&self) {
-        let deadline = std::time::Instant::now() + TEARDOWN_GRACE;
+        let deadline = std::time::Instant::now() + WORKER_DRAIN_GRACE;
         while std::time::Instant::now() < deadline {
             if Arc::strong_count(&self.0.lock().unwrap().live) == 1 {
                 return;
