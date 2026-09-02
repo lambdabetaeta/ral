@@ -497,8 +497,8 @@ mod tests {
         let mooring = Mooring::adrift();
 
         let running = vec![
-            StageHandle::for_test(spawn_exiting("false")),
-            StageHandle::for_test(spawn_exiting("true")),
+            StageHandle::for_test(spawn_exiting(1)),
+            StageHandle::for_test(spawn_exiting(0)),
         ];
         let mut collect = CollectState::new(running, std::time::Instant::now());
 
@@ -510,19 +510,23 @@ mod tests {
         let folded = collect.fold(&mooring, &mut shell);
         match folded.break_ {
             Some(Break::Error(error)) => assert_ne!(error.exit_code(), 0),
-            other => panic!("expected `false`'s nonzero exit to fold in, got {other:?}"),
+            other => panic!("expected the failing stage's exit to fold in, got {other:?}"),
         }
     }
 
-    /// `/bin/false` or `/bin/true`, wrapped exactly as a direct external
+    /// An external that exits with `code`, wrapped exactly as a direct
     /// pipeline stage: `GroupOwner::None` never parks (`RunningChild::parks`),
-    /// so `StopPolicy` is irrelevant here.
-    fn spawn_exiting(name: &str) -> command::RunningChild {
-        let mut cmd = std::process::Command::new(format!("/bin/{name}"));
-        let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn /bin/{name}: {e}"));
+    /// so `StopPolicy` is irrelevant here.  `/bin/sh` because `true` and
+    /// `false` are not in `/bin` on macOS.
+    fn spawn_exiting(code: u8) -> command::RunningChild {
+        let name = format!("exit {code}");
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", &name])
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn /bin/sh: {e}"));
         command::RunningChild::assemble_with_owner(
             crate::process::ChildHandle::from_std(child),
-            name.to_string(),
+            name,
             command::ExternalPlumbing {
                 stdout_pump: None,
                 stderr_pump: None,

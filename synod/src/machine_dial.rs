@@ -76,7 +76,7 @@ mod tests {
             unimplemented!("not exercised by these tests")
         }
         fn connect_guest(&self, port: u32) -> std::io::Result<vm_manager::AgentDial> {
-            let (guest, host) = UnixStream::pair()?;
+            let (guest, host) = ral_core::process::cloexec_socketpair()?;
             self.guest_ends.lock_ignore_poison().push((port, guest));
             Ok(OwnedFd::from(host))
         }

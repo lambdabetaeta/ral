@@ -654,22 +654,37 @@ fn many_sequential_pipelines_no_leak() {
     // (`/proc/$PPID/status` read by a nested external, since that external's
     // parent is ral itself) and assert it returns to baseline — every stage
     // thread this loop spawns must actually join.
-    let script = r"
+    // The probe reads `/proc`, which only Linux has; elsewhere the stress
+    // loop runs on its own.
+    let (open, close) = if cfg!(target_os = "linux") {
+        (
+            r"
 let probe = { /bin/sh -c 'grep Threads: /proc/$PPID/status' | !{from-line} }
 let before = !{probe}
 echo threads:before=$before
-let _go = { |n|
-    if $[$n <= 0] {} else {
-        /bin/echo $n | !{filter-lines { |_| true }} | grep . > /dev/null
-        _go $[$n - 1]
-    }
-}
-_go 50
+",
+            r"
 let after = !{probe}
 echo threads:after=$after
+",
+        )
+    } else {
+        ("", "")
+    };
+    let script = format!(
+        r"{open}
+let _go = {{ |n|
+    if $[$n <= 0] {{}} else {{
+        /bin/echo $n | !{{filter-lines {{ |_| true }}}} | grep . > /dev/null
+        _go $[$n - 1]
+    }}
+}}
+_go 50
+{close}
 echo done
-";
-    let o = run_with_timeout(&[], script, Duration::from_mins(1))
+"
+    );
+    let o = run_with_timeout(&[], &script, Duration::from_mins(1))
         .expect("sequential pipeline stress timed out");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(o.stdout.contains("done"));
@@ -1654,13 +1669,14 @@ impl PtySession {
         String::from_utf8_lossy(&self.bytes).into_owned()
     }
 
-    /// Poll until `done` reads true on the accumulated output, the child
-    /// exits, or `timeout` elapses.  `true` only on the `done` case.
-    fn wait_until(&mut self, timeout: Duration, done: impl Fn(&str) -> bool) -> bool {
+    /// Poll until `ready`, the child exits, or `timeout` elapses, draining
+    /// the pty each round so the shell never blocks on a full one.  `true`
+    /// only on the `ready` case.
+    fn poll_until(&mut self, timeout: Duration, mut ready: impl FnMut(&Self) -> bool) -> bool {
         let start = std::time::Instant::now();
         loop {
             self.read_available();
-            if done(&self.text()) {
+            if ready(self) {
                 return true;
             }
             if matches!(self.child.try_wait(), Ok(Some(_))) {
@@ -1671,6 +1687,40 @@ impl PtySession {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Poll until `done` reads true on the accumulated output, the child
+    /// exits, or `timeout` elapses.  `true` only on the `done` case.
+    fn wait_until(&mut self, timeout: Duration, done: impl Fn(&str) -> bool) -> bool {
+        self.poll_until(timeout, |s| done(&s.text()))
+    }
+
+    /// The pty's foreground process group, read from the master this test
+    /// owns — `tcgetpgrp` answers on the master side even though the caller
+    /// belongs to another session.
+    fn foreground_pgid(&self) -> Option<i32> {
+        rustix::termios::tcgetpgrp(&self.input)
+            .ok()
+            .map(|pgid| pgid.as_raw_nonzero().get())
+    }
+
+    /// Poll until the shell hands the terminal to a pipeline group, and
+    /// answer that group — the only honest "the pipeline is up" signal a
+    /// test has.  An echoed command line is the *tty's* doing and says
+    /// nothing about the shell, which after a fresh link is the best part of
+    /// a second from its first prompt; a signal sent before the handover
+    /// kills the shell outright (its handlers are not installed until it
+    /// boots) or is spared as an idle interrupt at the prompt, but never
+    /// reaches the pipeline.
+    fn wait_for_lent_terminal(&mut self, timeout: Duration) -> Option<i32> {
+        // `spawn` gives the shell a session of its own, so its pgid is its pid.
+        let shell = self.pid();
+        let mut lent = None;
+        self.poll_until(timeout, |s| {
+            lent = s.foreground_pgid().filter(|&pgid| pgid != shell);
+            lent.is_some()
+        });
+        lent
     }
 
     /// Kill the child, drain the pty for a short post-exit window (ral
@@ -1760,73 +1810,6 @@ fn pty_external_stage_runs_to_completion() {
 // stays running under `kill -TSTP`).  ral's stop path reads whichever signal
 // `waitpid(WUNTRACED)` reports, so `SIGSTOP` drives the same park.
 
-/// The pipeline's process group, discovered from outside the pty: every
-/// child of the REPL is enumerated, and the REPL is its own session leader
-/// (`setsid` in `PtySession::spawn`), so its own pgid equals its pid — any
-/// child reporting a different pgid is a member of the anchor's group.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn find_pipeline_pgid(repl_pid: i32, timeout: Duration) -> Option<i32> {
-    let start = std::time::Instant::now();
-    loop {
-        if let Some(pgid) = child_pgid_distinct_from(repl_pid) {
-            return Some(pgid);
-        }
-        if start.elapsed() > timeout {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-// `ps` is not guaranteed present in a minimal container (it isn't in this
-// one), so Linux reads `/proc/*/stat` directly; macOS keeps `ps`, the
-// portable option there.
-#[cfg(target_os = "linux")]
-fn child_pgid_distinct_from(parent_pid: i32) -> Option<i32> {
-    let entries = std::fs::read_dir("/proc").ok()?;
-    for entry in entries.flatten() {
-        if entry.file_name().to_str().and_then(|s| s.parse::<i32>().ok()).is_none() {
-            continue;
-        }
-        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
-            continue;
-        };
-        // Fields after `pid (comm) `: state, ppid, pgrp, ... — `comm` may
-        // itself contain parens, so split on the *last* `)`.
-        let Some((_, rest)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        let mut fields = rest.split_whitespace();
-        let (Some(_state), Some(ppid), Some(pgrp)) = (
-            fields.next(),
-            fields.next().and_then(|s| s.parse::<i32>().ok()),
-            fields.next().and_then(|s| s.parse::<i32>().ok()),
-        ) else {
-            continue;
-        };
-        if ppid == parent_pid && pgrp != parent_pid {
-            return Some(pgrp);
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "macos")]
-fn child_pgid_distinct_from(parent_pid: i32) -> Option<i32> {
-    let out = std::process::Command::new("ps")
-        .args(["-eo", "pid=,ppid=,pgid="])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines().find_map(|line| {
-        let mut cols = line.split_whitespace();
-        let _pid: i32 = cols.next()?.parse().ok()?;
-        let ppid: i32 = cols.next()?.parse().ok()?;
-        let pgid: i32 = cols.next()?.parse().ok()?;
-        (ppid == parent_pid && pgid != parent_pid).then_some(pgid)
-    })
-}
-
 /// `kill(-pgid, SIGSTOP)`, direct — `SIGSTOP` rather than `SIGTSTP` because
 /// this container does not honour `SIGTSTP` at all (see the module comment
 /// above); the stop path downstream is signal-agnostic.
@@ -1834,6 +1817,16 @@ fn child_pgid_distinct_from(parent_pid: i32) -> Option<i32> {
 fn stop_process_group(pgid: i32) {
     let pid = rustix::process::Pid::from_raw(pgid).expect("pgid must be positive");
     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::STOP);
+}
+
+/// The undo of [`stop_process_group`], for a test that kills the shell while
+/// a group of its session is still parked: on macOS an exiting session leader
+/// whose tty is still held by a stopped group never finishes exiting, and the
+/// waiting parent hangs with it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn continue_process_group(pgid: i32) {
+    let pid = rustix::process::Pid::from_raw(pgid).expect("pgid must be positive");
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::CONT);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1844,19 +1837,12 @@ fn park_returns_the_terminal_to_the_shell() {
     session
         .send_line("sleep 5 | !{ from-line }")
         .expect("send failed");
-    // `sleep` writes nothing until it exits, so ral's own debug trace for
-    // it is buffered up with everything else and only flushed once the
-    // pipeline settles — it cannot be used to detect that `sleep` has
-    // started.  The echoed command line proves the REPL processed the
-    // keystrokes; `sleep` forks immediately after, well within this delay.
-    assert!(
-        session.wait_until(Duration::from_secs(8), |t| t.contains("sleep 5")),
-        "command line was never echoed; stderr: {}",
-        session.text()
-    );
-    std::thread::sleep(Duration::from_millis(500));
-    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
-        .expect("pipeline pgid not found");
+    // `sleep` writes nothing until it exits, so ral's output cannot say when
+    // the pipeline started; the terminal handover can, and a stop is a park
+    // only for the group that holds the tty.
+    let pgid = session
+        .wait_for_lent_terminal(Duration::from_secs(8))
+        .expect("pipeline never took the terminal");
     stop_process_group(pgid);
     assert!(
         session.wait_until(Duration::from_secs(8), |t| t.contains("stopped")),
@@ -1873,6 +1859,7 @@ fn park_returns_the_terminal_to_the_shell() {
     let answered = session.wait_until(Duration::from_secs(8), |t| {
         parse_tagged_pgid(t, "post").is_some() && parse_tagged_tcpgrp(t, "post").is_some()
     });
+    continue_process_group(pgid);
     let out = session.finish();
     assert!(
         answered,
@@ -1897,14 +1884,9 @@ fn fg_resumes_a_parked_pipeline_to_completion() {
     session
         .send_line("sleep 2 | !{ from-line }")
         .expect("send failed");
-    assert!(
-        session.wait_until(Duration::from_secs(8), |t| t.contains("sleep 2")),
-        "command line was never echoed; stderr: {}",
-        session.text()
-    );
-    std::thread::sleep(Duration::from_millis(300));
-    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
-        .expect("pipeline pgid not found");
+    let pgid = session
+        .wait_for_lent_terminal(Duration::from_secs(8))
+        .expect("pipeline never took the terminal");
     stop_process_group(pgid);
     assert!(
         session.wait_until(Duration::from_secs(8), |t| t.contains("[1] stopped")),
@@ -1934,14 +1916,9 @@ fn a_pipeline_with_no_external_parks_through_the_anchor_witness() {
     session
         .send_line("!{ let go = { |n| echo tick; go $[$n + 1] }; go 0 } | !{ from-lines }")
         .expect("send failed");
-    assert!(
-        session.wait_until(Duration::from_secs(8), |t| t.contains("go 0")),
-        "command line was never echoed; stderr: {}",
-        session.text()
-    );
-    std::thread::sleep(Duration::from_millis(300));
-    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
-        .expect("pipeline pgid not found");
+    let pgid = session
+        .wait_for_lent_terminal(Duration::from_secs(8))
+        .expect("pipeline never took the terminal");
     stop_process_group(pgid);
     assert!(
         session.wait_until(Duration::from_secs(8), |t| t.contains("[1] stopped")),
@@ -1950,7 +1927,9 @@ fn a_pipeline_with_no_external_parks_through_the_anchor_witness() {
     );
 
     session.send_line("fg 1").expect("send failed");
-    std::thread::sleep(Duration::from_millis(300));
+    session
+        .wait_for_lent_terminal(Duration::from_secs(8))
+        .expect("fg never gave the terminal back to the pipeline");
     session.send_ctrl_c().expect("ctrl-c failed");
     let ended = session.wait_until(Duration::from_secs(8), |t| t.matches("❯").count() >= 3);
     let out = session.finish();
@@ -1971,12 +1950,9 @@ fn ctrl_c_ends_an_all_ral_foreground_pipeline() {
     session
         .send_line("!{ let go = { |n| echo tick; go $[$n + 1] }; go 0 } | !{ from-lines }")
         .expect("send failed");
-    assert!(
-        session.wait_until(Duration::from_secs(8), |t| t.contains("go 0")),
-        "command line was never echoed; stderr: {}",
-        session.text()
-    );
-    std::thread::sleep(Duration::from_millis(300));
+    session
+        .wait_for_lent_terminal(Duration::from_secs(8))
+        .expect("pipeline never took the terminal");
     session.send_ctrl_c().expect("ctrl-c failed");
     let ended = session.wait_until(Duration::from_secs(8), |t| t.matches("❯").count() >= 2);
     let out = session.finish();
@@ -1994,14 +1970,9 @@ fn bg_runs_a_parked_pipeline_in_the_background() {
     session
         .send_line("sleep 2 | !{ from-line }")
         .expect("send failed");
-    assert!(
-        session.wait_until(Duration::from_secs(8), |t| t.contains("sleep 2")),
-        "command line was never echoed; stderr: {}",
-        session.text()
-    );
-    std::thread::sleep(Duration::from_millis(300));
-    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
-        .expect("pipeline pgid not found");
+    let pgid = session
+        .wait_for_lent_terminal(Duration::from_secs(8))
+        .expect("pipeline never took the terminal");
     stop_process_group(pgid);
     assert!(
         session.wait_until(Duration::from_secs(8), |t| t.contains("[1] stopped")),
@@ -2055,14 +2026,9 @@ fn a_nested_pipeline_parks_and_resumes_with_its_owner() {
     session
         .send_line("!{ sleep 3 | cat; echo inner-done } | cat")
         .expect("send failed");
-    assert!(
-        session.wait_until(Duration::from_secs(8), |t| t.contains("sleep 3")),
-        "command line was never echoed; stderr: {}",
-        session.text()
-    );
-    std::thread::sleep(Duration::from_millis(500));
-    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
-        .expect("pipeline pgid not found");
+    let pgid = session
+        .wait_for_lent_terminal(Duration::from_secs(8))
+        .expect("pipeline never took the terminal");
     stop_process_group(pgid);
     assert!(
         session.wait_until(Duration::from_secs(8), |t| t.contains("[1] stopped")),
