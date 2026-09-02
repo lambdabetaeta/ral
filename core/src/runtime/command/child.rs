@@ -332,9 +332,24 @@ impl RunningChild {
                             t_enter.elapsed(),
                         );
                         match park.gate.wait(&self.cancel) {
-                            // The gate opened: the child is alive again
-                            // (`SIGCONT`ed), so keep waiting on the same one.
-                            Ok(()) => continue,
+                            Ok(()) => {
+                                // The owner's resume CONTs the group; a gate
+                                // that was never paused has no owner, so the
+                                // waiter revives its own child (a no-op after
+                                // an owner's CONT).
+                                #[cfg(unix)]
+                                {
+                                    #[allow(
+                                        clippy::cast_possible_wrap,
+                                        reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
+                                    )]
+                                    let _ = rustix::process::kill_process(
+                                        rustix::process::Pid::from_raw(pid as i32).unwrap(),
+                                        rustix::process::Signal::CONT,
+                                    );
+                                }
+                                continue;
+                            }
                             Err(cause) => {
                                 self.ending.raise(Ending::RalEnded(cause));
                                 break self.terminate_group(&mut child, cause);
@@ -597,6 +612,23 @@ impl RunningChild {
             self.settled = Some(outcome);
         }
     }
+
+    /// The ownerless resume: no group `SIGCONT` is coming, so revive this
+    /// child directly.
+    #[cfg(unix)]
+    pub(crate) fn resume_stopped(&mut self) {
+        self.clear_remembered_stop();
+        if let Some(child) = self.child.as_mut() {
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
+            )]
+            let _ = rustix::process::kill_process(
+                rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+                rustix::process::Signal::CONT,
+            );
+        }
+    }
 }
 
 impl WaitedChild {
@@ -817,6 +849,48 @@ mod tests {
         assert!(
             !alive,
             "the forked grandchild (pid {gc_pid}) survived the interrupt teardown"
+        );
+    }
+
+    /// `StopPolicy::Park` behind a fresh, never-paused gate — the shape a
+    /// detached `spawn` worker's pipeline carries, with no owner above it to
+    /// ever open the gate.  `wait` must revive the child itself rather than
+    /// loop forever behind a gate nobody will open.
+    #[test]
+    fn park_with_an_unpaused_gate_revives_its_own_child() {
+        let mut cmd = std::process::Command::new("/bin/sleep");
+        cmd.arg("0.2");
+        let (child, pgid) = spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader)
+            .expect("spawn /bin/sleep under a pgid");
+        let pgid = pgid.expect("NewLeader yields a tracked pgid");
+        rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::STOP)
+            .expect("SIGSTOP the sleep");
+
+        let park = StagePark {
+            gate: StageGate::new(),
+            stop: StageStop::new(),
+        };
+        let running = RunningChild::assemble_with_owner(
+            crate::process::ChildHandle::from_std(child),
+            "sleep".to_string(),
+            ExternalPlumbing {
+                stdout_pump: None,
+                stderr_pump: None,
+            },
+            StopPolicy::Park(park),
+            GroupOwner::Standalone(pgid),
+            CancelScope::root(),
+            None,
+        );
+
+        let t0 = std::time::Instant::now();
+        let waited = running.wait().expect("wait should not error");
+        let elapsed = t0.elapsed();
+        waited.settle();
+
+        assert!(
+            elapsed.as_secs() < 5,
+            "an ownerless park must not hang behind a gate nobody opens: took {elapsed:?}"
         );
     }
 }

@@ -148,7 +148,11 @@ slot the owning collector already reads for a direct `Park` arm — and forgets
 the stop locally, meeting the owner's pause at the `process::check` heading its
 next pass. This is the mechanism by which a stop the anchor cannot witness — a
 single-member `SIGSTOP`, a `SIGTTIN` under `bg` two levels down — still surfaces
-to the top-level owner, one collector per nesting level.
+to the top-level owner, one collector per nesting level. A joining group whose
+mooring carries no park — the detached `spawn` worker above — has no `StageStop`
+slot to write and no owner to ever `SIGCONT` it, so its collector instead
+resumes the stopped member itself: a waiter whose stop has no owner above it
+revives its own child.
 
 **Kill for a dead reader cancels a thread and wakes it; the wake ends a write
 as well as a read.** The collector's rule is unchanged in shape: a stage whose

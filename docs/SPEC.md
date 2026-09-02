@@ -2522,6 +2522,12 @@ The interactive builtins are:
 value has an optional one. `jobs` prints the designators to name. Job
 designators are decimal integers. There is no `%1`, `%+`, or `%-` syntax.
 
+`disown` refuses a job whose stages are ral-written pipeline stages: those run
+as threads of this shell, not as a process group any external signal could
+revive, so nothing would actually detach. The job stays in the table and
+`disown` names `spawn` as the verb that does make a detachable worker. A job
+whose stages are all external processes disowns as above.
+
 `jobs` folds two kinds of residents into one listing. Process groups use `[N]`
 and report `running` or `stopped`, their pgid, and original command. Workers
 created by `spawn` or `watch` use `[wN]` and report `running

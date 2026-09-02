@@ -197,19 +197,30 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         "disown <id>  — detach pgid job <id> from the shell. \
               pgid-only: a worker handle has no disown — `cancel` is its kill.",
         BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
+            let id = job_id_arg(args);
             let disowned = {
                 let mut jt = jobs.lock().unwrap();
-                jt.disown(job_id_arg(args))
+                jt.disown(id)
             };
             match disowned {
                 // Windows keeps its pipeline groups in a side registry, so
                 // disowning must let go of that entry too.  Elsewhere,
                 // dropping the row *is* the disown.
                 #[cfg(windows)]
-                Some(pgid) => ral_core::process::disown_pipeline_group(pgid),
+                Ok(pgid) => ral_core::process::disown_pipeline_group(pgid),
                 #[cfg(not(windows))]
-                Some(_) => {}
-                None => diagnostic::cmd_error("disown", NOT_A_PGID_JOB),
+                Ok(_) => {}
+                Err(crate::jobs::DisownRefusal::NoSuchJob) => {
+                    diagnostic::cmd_error("disown", NOT_A_PGID_JOB);
+                }
+                Err(crate::jobs::DisownRefusal::ThreadStaged) => diagnostic::cmd_error(
+                    "disown",
+                    &format!(
+                        "job [{id}] is a ral pipeline: its stages are threads of this shell \
+                         and cannot be detached. Did you mean spawn, which makes a detachable \
+                         worker?"
+                    ),
+                ),
             }
             Ok(Value::Unit)
         })),

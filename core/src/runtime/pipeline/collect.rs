@@ -257,7 +257,9 @@ impl CollectState {
     /// has a job table to resume it, so only it parks; any other owned group
     /// is cancelled; a joining collector forwards the stop into its own
     /// stage's slot — the report its owner reads — and forgets it here,
-    /// never parking, signalling, or escaping.
+    /// never parking, signalling, or escaping.  A stop with no park above it
+    /// — a detached worker, deaf to job control — is instead resumed by this
+    /// collector itself.
     #[cfg_attr(
         not(unix),
         allow(unused_variables, reason = "the Ctrl-Z gate has no Windows use")
@@ -326,12 +328,13 @@ impl CollectState {
                         handle.end_stopped(sig);
                         return self.cancel_all(group, CancelCause::Terminate, shell);
                     }
-                    GroupRole::Joining => {
-                        if let Some(park) = &mooring.park {
+                    GroupRole::Joining => match &mooring.park {
+                        Some(park) => {
                             park.stop.set(Some(sig));
+                            handle.resume();
                         }
-                        handle.resume();
-                    }
+                        None => handle.resume_unowned(),
+                    },
                 },
             }
         }
@@ -588,14 +591,14 @@ mod tests {
         )
     }
 
-    /// `/bin/sleep 30` under its own pgid, real-`SIGSTOP`'d — the stop a
+    /// `/bin/sleep secs` under its own pgid, real-`SIGSTOP`'d — the stop a
     /// direct external pipeline stage sees, without a whole pipeline launch to
     /// set one up.  `Drop` (via `RunningChild`'s) kills it regardless of the
     /// stop, so nothing survives the test.
     #[cfg(unix)]
-    fn spawn_stopped_sleep() -> command::RunningChild {
+    fn spawn_stopped_sleep(secs: &str) -> command::RunningChild {
         let mut cmd = std::process::Command::new("/bin/sleep");
-        cmd.arg("30");
+        cmd.arg(secs);
         let (child, pgid) = crate::process::spawn_with_pgid(&mut cmd, crate::process::PgidPolicy::NewLeader)
             .expect("spawn /bin/sleep under a pgid");
         let pgid = pgid.expect("NewLeader yields a tracked pgid");
@@ -645,7 +648,7 @@ mod tests {
         let mooring = Mooring::adrift();
 
         let mut collect = CollectState::new(&group, std::time::Instant::now());
-        collect.push(StageHandle::for_test(spawn_stopped_sleep()));
+        collect.push(StageHandle::for_test(spawn_stopped_sleep("30")));
 
         let signal = 'wait: {
             for _ in 0..100 {
@@ -681,7 +684,7 @@ mod tests {
         let shell = Shell::default();
 
         let mut collect = CollectState::new(&group, std::time::Instant::now());
-        collect.push(StageHandle::for_test(spawn_stopped_sleep()));
+        collect.push(StageHandle::for_test(spawn_stopped_sleep("30")));
 
         for _ in 0..100 {
             match collect.pass(&mut group, &gate, &mooring, &shell) {
@@ -695,6 +698,38 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("the stop was never forwarded to the joining collector's own stage status");
+    }
+
+    /// A joining group whose mooring carries no park — a `spawn` worker's
+    /// pipeline — is deaf to job control: nothing above it will ever `SIGCONT`
+    /// its stopped stage, so the collector must revive it itself and walk on
+    /// to `Done` rather than spin forever on `Idle`.
+    #[cfg(unix)]
+    #[test]
+    fn stopped_probe_on_a_joining_group_with_no_park_resumes_its_own_stage() {
+        let mut group = PipelineGroup::joining(
+            crate::process::Pgid::from_raw(std::process::id().cast_signed()).expect("our own pid"),
+        );
+        let gate = StageGate::new();
+        let mooring = Mooring::adrift();
+        let shell = Shell::default();
+
+        let mut collect = CollectState::new(&group, std::time::Instant::now());
+        collect.push(StageHandle::for_test(spawn_stopped_sleep("0.2")));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match collect.pass(&mut group, &gate, &mooring, &shell) {
+                Pass::Parked(_) => panic!("a joining collector must never park"),
+                Pass::Done => break,
+                Pass::Advanced | Pass::Idle => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "an ownerless stop must be resumed rather than livelocked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// A stage spawned into the group's own pgid via `PgidPolicy::Join`, as

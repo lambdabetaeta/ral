@@ -73,6 +73,15 @@ pub enum JobState {
     Stopped,
 }
 
+/// Why [`JobTable::disown`] refused, distinct from finding no job at all:
+/// a caller needs to tell "no such job" from "this job cannot be disowned".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisownRefusal {
+    NoSuchJob,
+    /// The job's stages are threads of this shell.
+    ThreadStaged,
+}
+
 /// The job-table chapter's answer to [`Resident`], alongside core's own for
 /// `WorkerEntry`: a bare numeric designator, which the listing fold brackets
 /// just as it brackets a worker's `wN`, so neither chapter brackets for
@@ -105,11 +114,6 @@ impl Resident for Job {
 
 pub struct JobTable {
     jobs: HashMap<usize, Job>,
-    /// Pipelines `disown` detached from their job row.  Nothing left to
-    /// `fg`/`bg`/sweep them once here — `cleanup` is their only remaining
-    /// eliminator, at REPL exit.
-    #[cfg(unix)]
-    disowned: Vec<ral_core::ParkedPipeline>,
 }
 
 impl Default for JobTable {
@@ -122,8 +126,6 @@ impl JobTable {
     pub fn new() -> Self {
         Self {
             jobs: HashMap::new(),
-            #[cfg(unix)]
-            disowned: Vec::new(),
         }
     }
 
@@ -206,24 +208,24 @@ impl JobTable {
         }
     }
 
-    /// Detach a job from the shell, handing back the pgid it had.
+    /// Detach a job from the shell, handing back the pgid it had — refusing
+    /// a thread-staged job: its stages are threads of this shell, not a
+    /// process group any external `kill -CONT` could ever revive, so
+    /// "disowning" it would only leak those threads past REPL exit.
     ///
     /// Its staged writes go unfinished: once the row is gone nothing is left
-    /// to rename them, so each target keeps exactly what it had. A parked
-    /// pipeline moves into [`Self::disowned`] rather than being dropped here
-    /// — it still owns live stage threads, and only `cleanup` tears those
-    /// down.
-    pub fn disown(&mut self, id: usize) -> Option<Pgid> {
-        let job = self.jobs.remove(&id)?;
-        let pgid = job.pgid;
+    /// to rename them, so each target keeps exactly what it had.
+    pub fn disown(&mut self, id: usize) -> Result<Pgid, DisownRefusal> {
         #[cfg(unix)]
-        if let Some(parked) = job.parked {
-            self.disowned.push(parked);
+        if self.jobs.get(&id).is_some_and(|job| job.parked.is_some()) {
+            return Err(DisownRefusal::ThreadStaged);
         }
+        let job = self.jobs.remove(&id).ok_or(DisownRefusal::NoSuchJob)?;
+        let pgid = job.pgid;
         for write in job.pending {
             write.abandon();
         }
-        Some(pgid)
+        Ok(pgid)
     }
 
     /// Mark every job with this pgid as stopped (e.g. observed through a
@@ -413,23 +415,16 @@ impl JobTable {
     /// only buys time for jobs to finish naturally; survivors get
     /// `TerminateJobObject` via `kill_pipeline_group`.
     pub fn cleanup(&mut self, mooring: &Mooring, shell: &mut Shell) {
-        #[cfg(unix)]
-        let empty = self.jobs.is_empty() && self.disowned.is_empty();
-        #[cfg(not(unix))]
-        let empty = self.jobs.is_empty();
-        if empty {
+        if self.jobs.is_empty() {
             return;
         }
 
         #[cfg(unix)]
         {
             // A pipeline's anchor swallows SIGTERM, so the sweep below cannot
-            // end a parked or disowned pipeline: each gets the collector's own
-            // teardown — signal, grace, kill, observe — and its drop reaps the
-            // anchor.
-            let mut terminating = std::mem::take(&mut self.disowned);
-            terminating.extend(self.jobs.values_mut().filter_map(|job| job.parked.take()));
-            for parked in terminating {
+            // end a parked pipeline: it gets the collector's own teardown —
+            // signal, grace, kill, observe — and its drop reaps the anchor.
+            for parked in self.jobs.values_mut().filter_map(|job| job.parked.take()) {
                 parked.cancel(ral_core::process::CancelCause::Terminate, shell);
             }
 
@@ -767,8 +762,8 @@ mod tests {
         let mut jt = JobTable::new();
         let id = jt.add(99_999_993, "c > out".into(), JobState::Stopped, vec![write], #[cfg(unix)] None);
 
-        assert_eq!(jt.disown(id), Some(pgid(99_999_993)));
-        assert_eq!(jt.disown(id), None);
+        assert_eq!(jt.disown(id), Ok(pgid(99_999_993)));
+        assert_eq!(jt.disown(id), Err(DisownRefusal::NoSuchJob));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
     }
 

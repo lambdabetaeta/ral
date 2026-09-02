@@ -98,12 +98,14 @@ verbs instead of a raw wait:
   `kill %n` verb — `fg` then Ctrl-C ends a job, the pipeline's anchor
   witnessing the interrupt for the collector.
 
-`disown` moves a job's `ParkedPipeline` into a session-lived `disowned: Vec<_>`
-rather than dropping the table row outright, so a disowned parked pipeline is
-still driven to completion (just no longer through `jobs`/`fg`/`bg`) instead of
-abandoned mid-collection. A stopped standalone external — no `ParkedPipeline`,
-just a remembered pgid — is the one case still resumed by a bare `SIGCONT`
-and reaped by `waitpid(-pgid)`.
+`disown` refuses a job that owns a `ParkedPipeline`: its stages are threads of
+this shell, not a process group any external `kill -CONT` could ever revive,
+so "detaching" it would be a fiction — the job stays in the table and
+`disown` reports why (`DisownRefusal::ThreadStaged`), pointing at `spawn` as
+the verb that does make a detachable worker. A stopped standalone external —
+no `ParkedPipeline`, just a remembered pgid — is the one job `disown` still
+hands off outright, resumable by a bare `SIGCONT` and reaped by
+`waitpid(-pgid)`.
 
 ## Two populations, one listing
 

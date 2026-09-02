@@ -114,6 +114,18 @@ impl StageHandle {
         }
     }
 
+    /// The ownerless resume: no group `SIGCONT` is coming, so the member
+    /// itself is revived.
+    pub(super) fn resume_unowned(&mut self) {
+        match &mut self.kind {
+            #[cfg(unix)]
+            StageKind::External(c) => c.resume_stopped(),
+            #[cfg(not(unix))]
+            StageKind::External(_) => unreachable!("nothing stops on Windows"),
+            StageKind::Thread(t) => t.resume(),
+        }
+    }
+
     /// Reduce a settled stage to its observation, then release the held-open
     /// read end — only now that the writer is reaped, so any descendant of that
     /// edge still blocked writing into it is freed.
