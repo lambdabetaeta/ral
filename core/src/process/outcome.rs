@@ -174,6 +174,9 @@ pub enum WaitOutcome {
         signal: Signal,
     },
     Stopped(Signal),
+    /// A stopped child resumed — reported only by the stop-tracking wait
+    /// (`ChildHandle::try_wait_tracking_stops`), never by `try_wait_handling_stop`.
+    Continued,
     StoppedThenKilled {
         stopped_by: Signal,
         killed_by: Signal,
@@ -224,6 +227,10 @@ impl WaitOutcome {
                 sig.user_exit_code()
             }
             Self::StoppedThenKilled { stopped_by, .. } => stopped_by.user_exit_code(),
+            Self::Continued => unreachable!(
+                "WaitOutcome::Continued must be intercepted by the stop-tracking wait's \
+                 one caller (RunningChild::try_settle) before reaching a terminal-outcome reader"
+            ),
         }
     }
 
@@ -332,6 +339,11 @@ impl CommandFailure {
                 "WaitOutcome::Stopped must be intercepted by the caller \
                  (RunningChild::wait) and surfaced as Escape::Stopped \
                  before reaching CommandFailure::from_outcome"
+            ),
+            WaitOutcome::Continued => unreachable!(
+                "WaitOutcome::Continued must be intercepted by the caller \
+                 (RunningChild::try_settle), the only consumer of the \
+                 stop-tracking wait, before reaching CommandFailure::from_outcome"
             ),
             WaitOutcome::StoppedThenKilled {
                 stopped_by,

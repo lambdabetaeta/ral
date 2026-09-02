@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 30ac8e07
+verified_at_commit: af15f422
 verified_at_date: 2026-09-02
-anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, GroupRole, Ending, AnchorProcess, StageGate, StagePark, StagePark::gate, StageStop, Mooring::park, StopPolicy, ParkedPipeline, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
+anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, GroupRole, Ending, AnchorProcess, StageGate, StagePark, StagePark::gate, StageStop, Mooring::park, StopPolicy, ParkedPipeline, ChildHandle, wait_handling_stop, try_wait_tracking_stops, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -250,9 +250,11 @@ create → assign → resume path.
 
 **Collection is an event loop over a non-blocking probe.** The collector polls
 every unsettled stage — a `ThreadStage`'s `probe()` reads its join handle's
-`is_finished` and then its `StageStop`, an external stage the same
-`try_wait_handling_stop` a standalone wait already uses — so stages settle in
-whatever order they actually end, and no stage's blocking wait can starve
+`is_finished` and then its `StageStop`, an external stage `try_settle`, which
+polls with `WUNTRACED | WCONTINUED` (unlike the plain `try_wait_handling_stop`
+a standalone wait uses) so a stop reads as a level tracked from its two edges
+rather than a one-shot cell someone must remember to clear — so stages settle
+in whatever order they actually end, and no stage's blocking wait can starve
 another's news. A stage still running whose reader has settled is ended
 (`reader_gone`) and observed on the next pass, so the cascade runs tail-ward;
 a stage that stops is answered at once, wherever it sits. Each interior edge's

@@ -163,6 +163,31 @@ impl ChildHandle {
         }
     }
 
+    /// Non-blocking wait that reports both edges of a stop — `Stopped` and
+    /// `Continued` — so a holder that tracks "stopped" as a level between
+    /// them never has to remember one edge and clear it by convention, the
+    /// way [`Self::try_wait_handling_stop`]'s callers otherwise must.  Used
+    /// only by the pipeline collector's stop tracking; a standalone child's
+    /// own wait must not see `Continued` and keeps the plain variant.
+    ///
+    /// # Errors
+    /// Returns `Err` if the poll fails.
+    pub(crate) fn try_wait_tracking_stops(&mut self) -> std::io::Result<Option<WaitOutcome>> {
+        #[cfg(unix)]
+        {
+            let ChildRepr::Std(child) = &mut self.0;
+            unix::try_wait_tracking_stops(child)
+        }
+        #[cfg(windows)]
+        {
+            // Nothing stops on Windows, so the tracking wait is the plain one.
+            match &mut self.0 {
+                ChildRepr::Std(child) => windows::try_wait_handling_stop(child),
+                ChildRepr::RawWindows(child) => child.try_wait_handling_stop(),
+            }
+        }
+    }
+
     /// Kill this stopped child and reap the terminal status, reporting the
     /// stop that preceded it.  The caller has already decided that this stop
     /// means death; `target` is who the kill addresses.

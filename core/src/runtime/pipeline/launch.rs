@@ -79,15 +79,18 @@ impl StageHandle {
     }
 
     /// One non-blocking probe: whether this stage is ready to observe, still
-    /// running, or stopped.  An external's stop is read back from the outcome
-    /// `try_settle` remembered; a thread's is read live.
+    /// running, or stopped.  The end is read before the level, as
+    /// [`super::thread::ThreadStage::probe`]'s does for a thread: a terminal
+    /// outcome outranks a stale level.  An external's stop is a level
+    /// `try_settle` tracks from its two edges, so this needs no convention
+    /// for when to forget it — the level does that itself.
     pub(super) fn probe(&mut self) -> Probe {
         match &mut self.kind {
             StageKind::External(c) => {
-                if !c.try_settle() {
-                    return Probe::Running;
+                if c.try_settle() {
+                    return Probe::Ready;
                 }
-                c.remembered_stop().map_or(Probe::Ready, Probe::Stopped)
+                c.stopped_level().map_or(Probe::Running, Probe::Stopped)
             }
             StageKind::Thread(t) => t.probe(),
         }
@@ -105,11 +108,13 @@ impl StageHandle {
         unreachable!("nothing stops on Windows: {sig:?}");
     }
 
-    /// `Stopped` → `Running`: a thread's status, or an external's remembered
-    /// stop, forgotten so the next probe waits on it fresh.
+    /// `Stopped` → `Running`, synchronously: an external's stop level is
+    /// cleared directly rather than waiting for the `Continued` edge on a
+    /// later poll, which would otherwise re-park the job `fg`/`bg` just
+    /// resumed; a thread's status is cleared the same way.
     pub(super) fn resume(&mut self) {
         match &mut self.kind {
-            StageKind::External(c) => c.clear_remembered_stop(),
+            StageKind::External(c) => c.clear_stopped_level(),
             StageKind::Thread(t) => t.resume(),
         }
     }

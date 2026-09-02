@@ -62,8 +62,16 @@ pub(crate) struct RunningChild {
     /// timeout, a signal the platform handler translated into a cause) could
     /// not preempt a child that never exits on its own.
     pub cancel: crate::process::CancelScope,
-    /// An outcome a collector probe already collected, consumed by `wait`.
+    /// A terminal outcome a collector probe already collected, consumed by
+    /// `wait`.  Never a stop — that is [`Self::stopped_level`]'s.
     settled: Option<crate::process::WaitOutcome>,
+    /// The stop this child is currently under, as a level tracked from its
+    /// two edges (`Stopped` sets it, `Continued` clears it) rather than a
+    /// one-shot cell someone must remember to clear.  Cleared eagerly by
+    /// [`Self::resume_stopped`] too: the explicit resume must not wait for
+    /// the `Continued` edge to arrive on a later poll, or the collector would
+    /// re-park the job it just resumed.
+    stopped_level: Option<crate::process::Signal>,
     /// How this child's life ended, once ral itself ended it: the cancel
     /// branch of `wait` and the pipeline collector's reader-gone kill are the
     /// only writers.  Sole input to forgiveness and to whether the drainers
@@ -131,6 +139,7 @@ impl RunningChild {
             group_owner,
             cancel,
             settled: None,
+            stopped_level: None,
             ending: EndingCell::default(),
         }
     }
@@ -303,9 +312,9 @@ impl RunningChild {
         let early_outcome: Option<crate::process::WaitOutcome> = if let Some(o) =
             self.settled.take()
         {
-            // A collector probe already took this child's event — an exit is
-            // consumed, a stop leaves it alive but noted — so the poll must
-            // not run `try_wait_handling_stop` again.
+            // A collector probe already reaped this child's terminal outcome
+            // — a stop never lands here, only in `stopped_level` — so the
+            // poll must not run `try_wait_handling_stop` again.
             Some(o)
         } else {
             // Snappy for short-lived children, gentle on CPU for long ones.
@@ -543,9 +552,10 @@ impl RunningChild {
         Ok(failure)
     }
 
-    /// One non-blocking probe: note the child's end or stop if it has one,
-    /// caching the outcome for the eventual `wait`.  Returns whether this
-    /// child is ready to observe.
+    /// One non-blocking probe: whether this child is terminally settled.
+    /// Tracks the stop level from its two edges — `Stopped` records it,
+    /// `Continued` clears it — and caches a terminal outcome for the eventual
+    /// `wait`.
     pub(crate) fn try_settle(&mut self) -> bool {
         if self.settled.is_some() {
             return true;
@@ -553,9 +563,18 @@ impl RunningChild {
         let Some(child) = self.child.as_mut() else {
             return true;
         };
-        match child.try_wait_handling_stop() {
+        match child.try_wait_tracking_stops() {
+            Ok(Some(crate::process::WaitOutcome::Stopped(sig))) => {
+                self.stopped_level = Some(sig);
+                false
+            }
+            Ok(Some(crate::process::WaitOutcome::Continued)) => {
+                self.stopped_level = None;
+                false
+            }
             Ok(Some(outcome)) => {
                 self.settled = Some(outcome);
+                self.stopped_level = None;
                 true
             }
             Ok(None) => false,
@@ -564,21 +583,18 @@ impl RunningChild {
         }
     }
 
-    /// The stop signal `try_settle` remembered, if the settled outcome was
-    /// one; `None` otherwise, including "not yet settled".
-    pub(crate) fn remembered_stop(&self) -> Option<crate::process::Signal> {
-        match self.settled {
-            Some(crate::process::WaitOutcome::Stopped(sig)) => Some(sig),
-            _ => None,
-        }
+    /// The stop level `try_settle` is tracking, if this child is currently
+    /// stopped; `None` otherwise.
+    pub(crate) fn stopped_level(&self) -> Option<crate::process::Signal> {
+        self.stopped_level
     }
 
-    /// Forget a remembered stop on resume, so the next `try_settle` waits on
-    /// this child fresh rather than replaying the stop it already reported.
-    pub(crate) fn clear_remembered_stop(&mut self) {
-        if matches!(self.settled, Some(crate::process::WaitOutcome::Stopped(_))) {
-            self.settled = None;
-        }
+    /// Clear the tracked stop level directly, without signalling: `fg`/`bg`'s
+    /// explicit resume (`StageHandle::resume`) needs the level gone
+    /// synchronously, rather than waiting for the `Continued` edge to arrive
+    /// on a later poll and re-park the job it just resumed.
+    pub(crate) fn clear_stopped_level(&mut self) {
+        self.stopped_level = None;
     }
 
     /// The pipeline collector's own kill, for a stage whose reader is reaped.
@@ -610,14 +626,16 @@ impl RunningChild {
             && let Ok(outcome) = child.kill_and_reap_stopped(sig, target)
         {
             self.settled = Some(outcome);
+            self.clear_stopped_level();
         }
     }
 
     /// The ownerless resume: no group `SIGCONT` is coming, so revive this
-    /// child directly.
+    /// child directly.  Clears the level eagerly rather than waiting for the
+    /// `Continued` edge on a later poll — see [`Self::stopped_level`].
     #[cfg(unix)]
     pub(crate) fn resume_stopped(&mut self) {
-        self.clear_remembered_stop();
+        self.clear_stopped_level();
         if let Some(child) = self.child.as_mut() {
             #[allow(
                 clippy::cast_possible_wrap,

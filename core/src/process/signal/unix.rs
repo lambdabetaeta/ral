@@ -451,12 +451,27 @@ pub(super) fn try_wait_handling_stop(
     Ok(Some(classify_wait_status(status)))
 }
 
+/// Non-blocking wait reporting both edges of a stop, for the pipeline
+/// collector's stop tracking; see [`crate::process::ChildHandle::try_wait_tracking_stops`].
+pub(super) fn try_wait_tracking_stops(
+    child: &std::process::Child,
+) -> std::io::Result<Option<crate::process::WaitOutcome>> {
+    let options = WaitOptions::UNTRACED | WaitOptions::CONTINUED;
+    let Some((_, status)) = try_waitpid_eintr(Pid::from_child(child), options)? else {
+        return Ok(None);
+    };
+    Ok(Some(classify_wait_status(status)))
+}
+
 /// Translate a `waitpid` status into a `WaitOutcome`, shared by the blocking and
 /// polling paths.  `WaitStatus` is a total, transparent view of the kernel bits,
 /// so termination by a real-time signal classifies with no fallible enum between.
 fn classify_wait_status(status: WaitStatus) -> crate::process::WaitOutcome {
     if let Some(signal) = status.stopping_signal() {
         return crate::process::WaitOutcome::Stopped(crate::process::Signal::new(signal));
+    }
+    if status.continued() {
+        return crate::process::WaitOutcome::Continued;
     }
     if let Some(code) = status.exit_status() {
         return crate::process::WaitOutcome::Exited(code);
