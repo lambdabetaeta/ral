@@ -1,0 +1,167 @@
+    /* --- the report column, now on the left ---------------------------- */
+    .report-col {
+      flex: 1 1 40%;
+      min-width: 0;
+      max-width: 480px;
+      overflow-y: auto;
+      border-right: 1px solid var(--line);
+      padding: 22px clamp(16px, 3vw, 28px) 40px;
+    }
+    @media (max-width: 880px) {
+      .report-col {
+        max-width: none;
+        flex: none;
+        max-height: 38vh;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+    }
+
+    .report-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+    .report-head h2 {
+      font-family: var(--serif); font-weight: 600; font-size: 21px; margin: 0;
+    }
+
+    .report-empty {
+      margin-top: 14px;
+      color: var(--ink-faint);
+      font-size: 14.5px;
+      line-height: 1.6;
+    }
+
+    /* The report column's quiet register: how far this report reaches, and
+       where it stopped. A standing fact, not an alarm — nothing like
+       .banner's. Worn by #report-gap (what the copy could not read) and by
+       #report-error (the report itself could not be taken). */
+    .report-gap {
+      display: none;
+      margin-top: 14px;
+      padding: 10px 12px;
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--ink-soft);
+    }
+    .report-gap.show { display: block; }
+    .report-gap code { font-family: var(--mono); font-size: 12px; }
+
+    .bulk {
+      display: flex; gap: 10px; align-items: center;
+      margin: 16px 0 4px;
+      padding: 8px 10px;
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+    .bulk .count { flex: 1; font-size: 13px; color: var(--ink-soft); }
+
+    .cards { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+
+    /* The folder a run of rows sits in, named once above them: position says
+       where a file is, so the row itself is free to be just the file. */
+    .group {
+      margin: 10px 0 0 2px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--ink-faint);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .group:first-child { margin-top: 0; }
+
+    /* One changed file, one row. Shape carries the kind — a nominal fact hue
+       could not order anyway — leaving hue to mean "this one needs you",
+       which here is the conflict tint alone. */
+    .card {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--raised);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 5px 8px 5px 10px;
+      animation: rise 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
+    /* The one row that says more than it can fit: the note takes a line of
+       its own and the choices fall below it. */
+    .card.conflict {
+      border-color: var(--conflict-line);
+      background: var(--conflict-bg);
+      flex-wrap: wrap;
+    }
+
+    .glyph {
+      flex: none;
+      width: 1.1ch;
+      text-align: center;
+      font-family: var(--mono);
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--ink-soft);
+      user-select: none;
+    }
+
+    /* The name holds the row's give, and its two parts shrink by wildly
+       different weights: the context in front ellipsizes away first, so the
+       file's own name keeps its glyphs. */
+    .card .name {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      font-family: var(--mono);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .card .name .lead {
+      flex: 0 999 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--ink-faint);
+    }
+    .card .name .base {
+      flex: 0 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--ink);
+    }
+
+    .conflict-note {
+      flex-basis: 100%;
+      margin: 4px 0 2px;
+      color: var(--conflict);
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+
+    /* Quiet, and small enough that the row stays a row. */
+    .btn-mini {
+      flex: none;
+      background: transparent;
+      color: var(--ink-soft);
+      border-color: var(--line);
+      font-size: 12.5px;
+      font-weight: 550;
+      padding: 5px 10px;
+      border-radius: 8px;
+    }
+    .btn-mini:not(:disabled):hover { color: var(--accent); border-color: var(--accent); }
+    .btn-mini.keep {
+      background: var(--accent);
+      border-color: transparent;
+      color: var(--accent-ink);
+    }
+    .btn-mini.keep:not(:disabled):hover { background: var(--accent-hover); color: var(--accent-ink); }
+
+    .banner {
+      margin-top: 14px; padding: 12px 14px;
+      border-radius: 11px; font-size: 13.5px; line-height: 1.5;
+      background: var(--conflict-bg); border: 1px solid var(--conflict-line); color: var(--conflict);
+      display: none;
+    }
+    .banner.show { display: block; }
+

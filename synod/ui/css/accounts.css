@@ -1,0 +1,109 @@
+    /* --- accounts screen: the services, and the keys they are spoken to
+       with. One card per service, each saying the same three things: who
+       it is, whether a key is in force, and what may be done about it. --- */
+    #screen-accounts {
+      height: 100%;
+      flex-direction: column;
+      align-items: center;
+      overflow-y: auto;
+      padding: 28px 20px 56px;
+    }
+    #screen-accounts .wrap {
+      flex: none;
+      width: 100%;
+      max-width: 560px;
+      animation: rise 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
+    .accounts-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .accounts-head h1 { margin: 0; }
+    .accounts-lede {
+      font-size: 14.5px;
+      line-height: 1.6;
+      color: var(--ink-soft);
+      margin: 8px 0 24px;
+    }
+    .accounts-empty {
+      font-size: 14.5px;
+      line-height: 1.6;
+      color: var(--ink-faint);
+      margin: 0 0 20px;
+    }
+    .account, .add-service {
+      background: var(--raised);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+      text-align: left;
+    }
+    .account-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .account-name {
+      font-family: var(--serif);
+      font-weight: 600;
+      font-size: 17px;
+      margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .account-state {
+      flex: none;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      color: var(--ink-soft);
+    }
+    .account-note {
+      margin: 6px 0 0;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--ink-faint);
+      overflow-wrap: anywhere;
+    }
+    .account-form { margin-top: 12px; }
+    .account-form .field-label { margin-bottom: 6px; }
+    .row-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .text-input {
+      display: block;
+      width: 100%;
+      font-family: var(--sans);
+      font-size: 14.5px;
+      color: var(--ink);
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .text-input::placeholder { color: var(--ink-faint); }
+    .add-service h2 {
+      font-family: var(--serif);
+      font-weight: 600;
+      font-size: 18px;
+      margin: 0 0 4px;
+    }
+    .add-service .field { margin: 14px 0 0; }
+    .add-service .field-label { margin-bottom: 6px; }
+    .add-note {
+      margin: 10px 0 0;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--ink-faint);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>

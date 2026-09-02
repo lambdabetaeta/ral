@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "noImplicitAny": false,
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "types": ["./js/globals.d.ts"]
+  },
+  "lint": {
+    "include": ["js/"],
+    "exclude": ["js/bindings/"]
+  }
+}

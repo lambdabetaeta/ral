@@ -26,7 +26,8 @@ use tauri::{AppHandle, State};
 
 /// How a file was changed, judged against the folder as it was before
 /// the job.
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
     Created,
@@ -36,7 +37,8 @@ pub enum ChangeKind {
 }
 
 /// Where a change stands: already real in the folder, or put back.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeStatus {
     Applied,
@@ -44,7 +46,8 @@ pub enum ChangeStatus {
 }
 
 /// One changed file, as one card on the report screen.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 pub struct ChangeFile {
     /// The handle the undo commands name the card by — the path as the
     /// report shows it, which the library resolves even across a rename.
@@ -67,7 +70,8 @@ pub struct ChangeFile {
 }
 
 /// The whole payload the report screen renders.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 pub struct WindowReport {
     pub files: Vec<ChangeFile>,
     /// Paths synod could not read while taking one of the two checkpoints

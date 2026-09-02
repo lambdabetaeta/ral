@@ -1,0 +1,65 @@
+    :root {
+      --serif: ui-serif, "Iowan Old Style", Georgia, "Times New Roman", serif;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      --mono: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+
+      color-scheme: light dark;
+
+      /* Warm paper (light) / deep ink (dark) */
+      --paper: light-dark(#f4efe6, #1e1b18);
+      --raised: light-dark(#fffdf8, #2a2521);
+      --raised-2: light-dark(#faf5ec, #241f1c);
+      --ink: light-dark(#292420, #efe7db);
+      --ink-soft: light-dark(#6d6459, #aca194);
+      --ink-faint: light-dark(#988d7e, #7e7466);
+      --line: light-dark(#e5ddce, #38322c);
+      --line-strong: light-dark(#d5cab6, #48413a);
+
+      --accent: light-dark(#2f6d5c, #74c3aa);
+      --accent-hover: light-dark(#275c4d, #86cfb8);
+      --accent-ink: light-dark(#fbf8f1, #17201c);
+
+      --discard: light-dark(#9a6a52, #c79a83);
+      --conflict: light-dark(#a5641c, #e0a85e);
+      --conflict-bg: light-dark(#f7ecd9, #34291a);
+      --conflict-line: light-dark(#e6cfa6, #5a4526);
+      --danger: light-dark(#a5401c, #e08a5e);
+      --danger-bg: light-dark(#f7ded9, #34211a);
+      --danger-line: light-dark(#e6b6a6, #5a3526);
+
+      --diff-add-bg: light-dark(#e9f2ec, #1f2c22);
+      --diff-del-bg: light-dark(#f9e9e2, #2e211b);
+
+      --shadow-soft: 0 1px 2px rgba(60, 48, 32, 0.05);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.25);
+      }
+    }
+
+    /* The viewer's theme toggle wins in both directions. */
+    :root[data-theme="light"] { color-scheme: light; }
+    :root[data-theme="dark"]  { color-scheme: dark; }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--sans);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    body {
+      /* A whisper of texture so the paper is paper, not a flat fill. */
+      background-image:
+        radial-gradient(1200px 600px at 12% -8%, rgba(120, 150, 132, 0.06), transparent 60%),
+        radial-gradient(1000px 500px at 100% 0%, rgba(160, 120, 60, 0.05), transparent 55%);
+      background-attachment: fixed;
+    }
+

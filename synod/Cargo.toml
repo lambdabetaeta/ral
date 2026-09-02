@@ -35,6 +35,7 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 blake3     = { workspace = true }
 fs4        = { workspace = true }
+ts-rs      = { workspace = true }
 
 # The guest's whole network: `session::net_seat` hands the net wire beside
 # the control wire `vm-manager` already returns straight to `guest_net::run`.

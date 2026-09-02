@@ -57,6 +57,32 @@ examples-check:
     set -eu
     for f in examples/*/*.ral; do cargo run -p ral --quiet -- --check "$f"; done
 
+# The one check that reads both of the window's languages at once: `ts-rs`
+# writes the TypeScript for every type crossing the Tauri seam, and `deno
+# check` reads synod/ui/js against it — so a `case` the Rust has no variant
+# for is a build failure rather than a renderer nothing ever reaches.
+#
+# Where the types land is each type's own `export_to`, not this recipe's: a
+# bare `cargo test` runs the same export, and a destination that depended on
+# the invocation would strew a second, stale copy through the tree. They are
+# generated and never committed — one copy of the fact, no staleness to police.
+#
+# --unstable-sloppy-imports because ts-rs emits extensionless relative imports
+# between the types it generates, which Deno otherwise refuses.
+#
+# Skipped on Linux for the reason `gui` excludes synod there: generating the
+# types means compiling synod, and its tauri dependency links GTK.
+[unix]
+ui-check:
+    #!/bin/sh
+    set -eu
+    if [ "{{ os() }}" = linux ]; then
+        echo 'ui-check: skipped — synod does not build on Linux'
+        exit 0
+    fi
+    cargo test -p synod --quiet export_bindings
+    cd synod/ui && deno check --unstable-sloppy-imports js/*.js
+
 # Both run scripts/ci.sh — the same step list GitHub Actions runs, differing
 # only in where cargo runs.  It calls the recipes above rather than spelling
 # out their cargo lines, so `just test` is CI's test and cannot drift from it;

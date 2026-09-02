@@ -53,6 +53,10 @@ guest-net/fuzz/target/
 scratch/
 .scratch/
 
+# The window's seam types, written from the Rust by `just ui-check`.  Generated
+# on demand so there is one copy of the fact and no stale checked-in twin.
+synod/ui/js/bindings/
+
 # Tauri regenerates a permission schema per host it is built on. The three
 # synod ships on are tracked; a Linux host's is a build product of a platform
 # synod has no bundle for.

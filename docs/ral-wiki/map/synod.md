@@ -314,10 +314,17 @@ sentence composed once, where the module's deny reaches the fold — and
 the window render the streaming bubble as plain text between flush
 boundaries. Every enum on this wire is `#[serde(rename_all = "snake_case")]`
 — the JSON seam speaks `snake_case` throughout, matching exarch, with no
-`camelCase` renaming anywhere on it — and `sink.rs`'s own `mod
-wire_vocabulary` test is the one check that reads both languages: it compares
-each enum's serde tag set against the `case` labels named in
-`synod/ui/index.html`. Plain register throughout: the window says *helpers*,
+`camelCase` renaming anywhere on it. Every type that crosses the seam derives
+`ts_rs::TS` beside its `Serialize`, so the TypeScript the window is checked
+against is written *from* the Rust rather than kept in step with it by hand:
+`just ui-check` generates it into `synod/ui/js/bindings/` and runs `deno
+check` over `synod/ui/js/`, which is the one check that reads both languages.
+A `case` the Rust has no variant for is now a type error — the shape the dead
+`listing` renderer had — and a variant the window ignores is caught by the
+`never` assertion in each switch's `default`. A mark's *payload* is
+deliberately not typed: those four shapes are exarch's card vocabulary, and
+typing them would put `ts-rs` in exarch to serve synod's window alone, so they
+cross as open records and the discriminant carries the check. Plain register throughout: the window says *helpers*,
 never agent/session/model, and there is deliberately no tab strip — the
 assistant delegates onward, and the window reports the folder, not the org
 chart. `signin.rs` runs the opening screen's
@@ -340,8 +347,17 @@ system `temp_dir`, so nothing opened this way needs cleanup of its own.
 `dispatch_pre_main` re-exec trampoline first, like every
 [[invariants/single-binary|multicall]] binary here.
 
-The frontend is one file, `synod/ui/index.html` — markup, style and script
-together — beside the three libraries it vendors and the nothing it fetches:
+The frontend is `synod/ui/`: `index.html` holds the markup and its tags,
+`css/*.css` the sections the stylesheet's own comments already delimited, and
+`js/*.js` the ten concerns as ES modules — `type="module"`, no bundler, which
+is the whole reason the frontend is hand-written. `js/core.js` is what every
+other module imports (`$`, `invoke`, `listen`, `state`, `show`); `app.js` is
+the only file `index.html` names, and its `render()` is the first paint, after
+the module graph has loaded. `chat-document.js` and `projector.js` import each
+other, as do `conversation.js` and `projector.js`: safe because every binding
+crossed is a hoisted function declaration and nothing calls across a cycle
+during evaluation, which is stated at the import itself. Beside them are the
+three libraries the window vendors and the nothing it fetches:
 `marked.min.js` (GFM), `purify.min.js`, and `katex/` (KaTeX 0.18.1, its
 stylesheet and its twenty `woff2` faces; the only web fonts the app ships).
 Assistant prose is markdown with TeX, and `renderAssistantMarkdown` is the

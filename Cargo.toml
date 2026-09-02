@@ -51,6 +51,10 @@ ruzstd     = "0.9"
 blake3     = "1"
 tempfile   = "3.27"
 fs4        = { version = "1", default-features = false }
+# The window's half of the seam: `serde-compat` is the whole point, so the
+# emitted TypeScript carries the serde tag and casing the JSON actually has,
+# rather than a second spelling of it.
+ts-rs      = "12"
 
 [workspace.lints.clippy]
 complexity = { level = "warn", priority = -1 }

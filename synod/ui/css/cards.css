@@ -1,0 +1,167 @@
+    /* --- the "a little Bertin-pilled" card: magnitude, category, text -- */
+    .mark-card {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background: var(--raised);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 13.5px;
+    }
+    /* A surfaced card stands in the transcript at the assistant's rank and
+       wears its shadow; a process card inside a dial stays flat. */
+    .msg .mark-card { box-shadow: var(--shadow-soft); }
+
+    /* Hue is spent on severity and on the accent, which means "you can act on
+       this"; machine text is marked by the mono grain instead, since an
+       accent-tinted path invites a click that does nothing. */
+    .mark-text { margin: 0; line-height: 1.55; }
+    .role-plain { color: var(--ink); }
+    .role-path, .role-code { font-family: var(--mono); color: var(--ink); }
+    .role-ok { color: var(--accent); }
+    .role-warn { color: var(--conflict); }
+    .role-bad { color: var(--danger); }
+    .role-muted { color: var(--ink-faint); }
+    .role-strong { font-weight: 650; color: var(--ink); }
+
+    .measure-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+    /* The label absorbs all give (ellipsized, never wrapped), so the meter
+       and readout hold a fixed position at the row's right edge — the
+       magnitude mark never drifts, and never flows past the margin. */
+    .measure-label {
+      color: var(--ink-soft);
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .measure-readout { font-family: var(--mono); color: var(--ink); flex: none; }
+    .meter {
+      display: inline-block;
+      width: 120px;
+      height: 6px;
+      border: 1px solid var(--line-strong);
+      border-radius: 3px;
+      background: var(--raised);
+      overflow: hidden;
+      flex: none;
+    }
+    .meter-fill {
+      display: block;
+      height: 100%;
+      background: var(--accent);
+    }
+
+    /* The label column takes its natural width up to half the card, then
+       ellipsizes — a long path never pushes the value column past the
+       card's edge. */
+    .fields {
+      display: grid;
+      grid-template-columns: fit-content(50%) minmax(0, 1fr);
+      column-gap: 12px;
+      row-gap: 6px;
+      font-size: 13px;
+    }
+    .f-label {
+      color: var(--ink-faint);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .f-value { color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+
+    .diff {
+      font-family: var(--mono);
+      font-size: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .diff-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 7px 12px;
+      background: var(--raised);
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+    }
+    .diff-counts { color: var(--ink-faint); }
+    .diff-row {
+      display: flex;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .diff-row.ctx { background: transparent; color: var(--ink-soft); }
+    .diff-row.add { background: var(--diff-add-bg); color: var(--ink); }
+    .diff-row.del { background: var(--diff-del-bg); color: var(--ink); }
+    .gutter {
+      flex: none;
+      width: 5ch;
+      text-align: right;
+      padding: 0 8px;
+      color: var(--ink-faint);
+      user-select: none;
+    }
+    .diff-segs { flex: 1; padding-right: 10px; }
+    .seg-emph {
+      font-style: normal;
+      font-weight: 650;
+      background: var(--line-strong);
+      border-radius: 2px;
+    }
+
+
+    .raw-mark {
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--ink-soft);
+    }
+
+    .composer {
+      flex: none;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      padding: 14px clamp(16px, 4vw, 40px) 20px;
+      border-top: 1px solid var(--line);
+      background: var(--raised);
+    }
+    textarea#message {
+      flex: 1;
+      min-height: 46px;
+      max-height: 200px;
+      resize: vertical;
+      font-family: var(--sans);
+      font-size: 15.5px;
+      line-height: 1.5;
+      color: var(--ink);
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    textarea#message::placeholder { color: var(--ink-faint); }
+    textarea#message:disabled { opacity: 0.6; }
+    .btn-send {
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-size: 15px;
+      font-weight: 600;
+      padding: 13px 20px;
+      flex: none;
+    }
+    .btn-send:not(:disabled):hover { background: var(--accent-hover); }
+

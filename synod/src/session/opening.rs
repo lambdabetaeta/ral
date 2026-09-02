@@ -6,7 +6,8 @@ use std::path::Path;
 
 /// What the window shows before the first message: who is answering, at
 /// what effort, and the ~2GiB warning when the folder is that large.
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 pub struct Opening {
     /// The answering account's
     /// [`identity::label`](exarch::provider::identity::label), set-relative

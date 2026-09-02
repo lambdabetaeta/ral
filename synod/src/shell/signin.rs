@@ -30,7 +30,8 @@ pub struct SignIn(Mutex<Option<Arc<AtomicBool>>>);
 
 /// How a sign-in ended, as one event the window can act on without
 /// inspecting anything else.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum SignInDone {
     /// The account is signed in, and already in the menu the

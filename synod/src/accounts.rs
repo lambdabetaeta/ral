@@ -75,7 +75,8 @@ pub fn prepare() -> Result<CredentialStore, String> {
 /// The one fact the screen needs that the shared [`CredentialStore`] does not
 /// already carry on its face, since only the store knows which of its doors a
 /// key came through.
-#[derive(serde::Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     /// No credential at all — the row is known but keyless.
@@ -91,7 +92,8 @@ pub enum Source {
 }
 
 /// One row of the accounts screen.
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, Clone, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 pub struct Account {
     /// The identifier command payloads name this row by — an `AccountId`
     /// rendering, resolved back through [`exarch::provider::accounts::find`].
@@ -119,7 +121,8 @@ pub struct Account {
 
 /// The accounts screen: every service, whether or not it has a key, and a
 /// plain sentence naming where a key typed here would be kept.
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, Clone, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 pub struct AccountList {
     pub accounts: Vec<Account>,
     /// "the macOS Keychain", "the Windows Credential Manager", or the

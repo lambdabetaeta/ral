@@ -1,0 +1,31 @@
+    /* --- shell ------------------------------------------------------ */
+    #app { height: 100%; }
+
+    .screen { display: none; }
+    .screen.active { display: flex; }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* The wordmark: solid block letters set in the mono face, gradient-tinted
+       ink-to-accent down their height and lit with a soft accent glow. The
+       clamp keeps 48 monospace columns inside the 480px .wrap at any window
+       size the app allows; overflow-x is a last-resort guard beneath it. */
+    .synod-banner {
+      margin: 0 0 22px;
+      font-family: var(--mono);
+      font-size: clamp(8px, 3vw, 14px);
+      line-height: 1;
+      white-space: pre;
+      overflow-x: auto;
+      text-align: center;
+      user-select: none;
+      background: linear-gradient(175deg, var(--ink) 15%, var(--accent) 115%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      text-shadow: 0 2px 20px color-mix(in srgb, var(--accent) 22%, transparent);
+    }
+

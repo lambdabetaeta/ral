@@ -1,0 +1,117 @@
+    /* --- the dial: one per gap between prose bubbles. It holds process
+       only — a single header rotates through three rungs on click:
+       nothing, then the step intents, then the scripts, process cards &
+       telemetry. Surfaced cards stand in the transcript, not here. ---- */
+    .dial {
+      /* `overflow: hidden` zeroes a flex item's automatic minimum size, so
+         without this the transcript column would squish the dial (clipping
+         its cards) instead of scrolling. */
+      flex: none;
+      max-width: 74ch;
+      align-self: flex-start;
+      background: var(--raised-2);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      animation: rise 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
+    /* A rebuilt element stands in for one already on screen: the entrance
+       animation belongs to a block's first appearance, never to a
+       replacement. */
+    .msg.settled, .dial.settled, .card.settled { animation: none; }
+    .dial-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 13px;
+      cursor: pointer;
+      user-select: none;
+      border: none;
+      background: none;
+      font: inherit;
+      text-align: left;
+      width: 100%;
+    }
+    .dial-head:hover { background: var(--raised); }
+    .dial-mark {
+      flex: none;
+      width: 0; height: 0;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      border-left: 7px solid var(--ink-faint);
+      transition: transform 0.2s ease;
+    }
+    .dial[data-rung="1"] .dial-mark { transform: rotate(90deg); }
+    .dial[data-rung="2"] .dial-mark { transform: rotate(180deg); }
+    .dial-tip {
+      flex: 1;
+      min-width: 0;
+      font-size: 13px;
+      font-weight: 550;
+      color: var(--ink-soft);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dial-rung {
+      flex: none;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+    }
+    /* The live-helper count: a fixed station in the dial's own head, not a
+       stream — it holds one number, replaced in place, never animated.
+       Tabular figures keep its width from jittering as the count changes. */
+    .dial-helpers {
+      flex: none;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--ink-faint);
+      font-variant-numeric: tabular-nums;
+    }
+    .dial-body {
+      border-top: 1px solid var(--line);
+      padding: 10px 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .dial.empty-body .dial-body { display: none; }
+
+    .dial-entry { display: flex; flex-direction: column; gap: 6px; }
+    .dial-entry-head { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+    .dial-entry-head.failed { color: var(--danger); }
+    .dial-script {
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--ink-soft);
+      background: var(--raised);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+
+    .dial-notes {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding-top: 4px;
+      border-top: 1px solid var(--line);
+    }
+    .dial-note {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--ink-soft);
+    }
+    .dial-note.warn { color: var(--conflict); }
+    .dial-note.bad { color: var(--danger); }
+    .dial-note.muted { color: var(--ink-faint); }
+

@@ -21,14 +21,16 @@ use std::sync::Mutex;
 /// that as permission rather than refusal. This is the same
 /// only-gray-on-positive-absence rule exarch's `/model` picker applies to
 /// its highlighted row's parameters.
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, Clone, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 pub struct ModelChoice {
     pub name: String,
     pub reasoning: bool,
 }
 
 /// One account the window can offer, and the models known for it.
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, Clone, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 pub struct ProviderChoice {
     /// The [`AccountId`](exarch::provider::identity::AccountId) rendering —
     /// the identifier that round-trips as [`crate::session::Choice::account`]
@@ -48,7 +50,8 @@ pub struct ProviderChoice {
 
 /// The provider picker: one entry per available account, plus the shared
 /// effort ladder every entry's models offer a rung from.
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, Clone, ts_rs::TS)]
+#[ts(export, export_to = "../ui/js/bindings/")]
 pub struct ModelMenu {
     pub providers: Vec<ProviderChoice>,
     /// [`provider::EFFORT_LADDER`]'s labels, ascending — the rungs
