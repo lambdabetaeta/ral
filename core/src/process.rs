@@ -19,7 +19,7 @@ pub mod spawn_lock;
 pub mod wake;
 
 pub(crate) use outcome::not_found_hint;
-pub use outcome::{CommandFailure, Signal, SpawnFailure, StageKill, WaitOutcome};
+pub use outcome::{CommandFailure, Ending, Signal, SpawnFailure, WaitOutcome};
 
 pub use launch::{Launch, StdioSpec};
 pub use lease::TerminalLease;
@@ -30,8 +30,10 @@ pub use cancel::{
     CancelCause, CancelScope, DurableRoot, ForegroundScope, request_foreground_cancel,
     request_root_cancel,
 };
+#[cfg(unix)]
+pub(crate) use cancel::TEARDOWN_GRACE;
 
-pub use gate::{StageGate, StagePark, StageState, StageStatus, StopPolicy};
+pub use gate::{StageGate, StagePark, StageStop, StopPolicy};
 
 pub(crate) use signal::KillTarget;
 pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};

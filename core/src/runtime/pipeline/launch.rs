@@ -10,7 +10,7 @@ use super::resolve::{ExternalStage, PipelinePlan, StageLaunch, StageSpec};
 use super::route::{ByteIn, ByteOut, StageRoute, open_stage_routes};
 use super::thread::{ThreadStage, launch_thread_stage};
 use crate::io::{Sink, Source, SourceReader};
-use crate::process::{CancelCause, Signal, StageGate, StageKill, StageState, StopPolicy};
+use crate::process::{CancelCause, Ending, Signal, StageGate, StopPolicy};
 use crate::types::{Break, Env, Error, Mooring, Settled, Shell};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -33,10 +33,10 @@ pub(super) struct StageHandle {
     /// still reach the interior edge, so the collector knows when a dead
     /// reader downstream is none of this stage's business at all.
     feeds_pipe: bool,
-    /// Private to this module and reachable only through
-    /// [`StageHandle::kill_for_dead_reader`], so no stage can be forgiven a
-    /// death nothing sent it.
-    kill: StageKill,
+    /// Private to this module: only [`StageHandle::reader_gone`] can record
+    /// the one ending that is forgiven, so no stage is forgiven a death
+    /// nothing sent it.
+    ending: Ending,
 }
 
 enum StageKind {
@@ -45,27 +45,30 @@ enum StageKind {
 }
 
 impl StageHandle {
-    /// End a stage that now writes for nobody — its reader stage has already
-    /// been observed — and record the kill in the same breath: this is the
-    /// only way to reach `StageKill::Sent`.  Idempotent, and a no-op for a
-    /// stage whose stdout never reached the interior edge.  A thread that has
-    /// already finished keeps its outcome, as an exited process keeps its
-    /// status.
-    pub(super) fn kill_for_dead_reader(&mut self) {
-        if self.kill == StageKill::Sent || !self.feeds_pipe {
+    /// This stage's reader has been observed, so nothing it still produces is
+    /// owed to anybody: record the ending and end it.  Only reached for a
+    /// stage that just probed `Running` and whose stdout can still reach the
+    /// interior edge, so a stage that already finished keeps its outcome and
+    /// no exit status is ever forgiven.
+    pub(super) fn reader_gone(&mut self) {
+        if !self.feeds_pipe || self.ending != Ending::OwnAccord {
             return;
         }
+        self.ending = Ending::RalEnded(CancelCause::ReaderGone);
         match &mut self.kind {
-            StageKind::External(c) => c.kill_for_dead_reader(),
-            StageKind::Thread(t) if t.probe() == StageState::Finished => return,
-            StageKind::Thread(_) => self.cancel(CancelCause::ReaderGone),
+            StageKind::External(c) => c.reader_gone(),
+            StageKind::Thread(t) => {
+                t.cancel(CancelCause::ReaderGone);
+                t.interrupt();
+            }
         }
-        self.kill = StageKill::Sent;
     }
 
-    /// Cancel this stage's own scope; the caller signals the pgid separately.
-    /// A thread is also woken, which ends the read or write it is blocked in.
-    pub(super) fn cancel(&self, cause: CancelCause) {
+    /// End this stage as part of the pipeline's teardown; the caller signals
+    /// and kills the group separately.  A thread is also woken, which ends
+    /// the read or write it is blocked in.
+    pub(super) fn cancel(&mut self, cause: CancelCause) {
+        self.ending = self.ending.max(Ending::RalEnded(cause));
         match &self.kind {
             StageKind::External(c) => c.cancel.cancel(cause),
             StageKind::Thread(t) => {
@@ -77,24 +80,29 @@ impl StageHandle {
 
     /// One non-blocking probe: whether this stage is ready to observe, still
     /// running, or stopped.  An external's stop is read back from the outcome
-    /// `try_settle` remembered; a thread's status is read live.
+    /// `try_settle` remembered; a thread's is read live.
     pub(super) fn probe(&mut self) -> Probe {
         match &mut self.kind {
             StageKind::External(c) => {
                 if !c.try_settle() {
                     return Probe::Running;
                 }
-                match c.remembered_stop() {
-                    Some(sig) => Probe::Stopped(sig),
-                    None => Probe::Ready,
-                }
+                c.remembered_stop().map_or(Probe::Ready, Probe::Stopped)
             }
-            StageKind::Thread(t) => match t.probe() {
-                StageState::Running => Probe::Running,
-                StageState::Stopped(sig) => Probe::Stopped(sig),
-                StageState::Finished => Probe::Ready,
-            },
+            StageKind::Thread(t) => t.probe(),
         }
+    }
+
+    /// The collector answered this stage's stop with death.  A thread stage's
+    /// stop is its own external's, which its `wait` is holding at the gate and
+    /// the cancel will release; only a direct external must be settled here.
+    pub(super) fn end_stopped(&mut self, sig: Signal) {
+        #[cfg(unix)]
+        if let StageKind::External(c) = &mut self.kind {
+            c.end_stopped(sig);
+        }
+        #[cfg(not(unix))]
+        unreachable!("nothing stops on Windows: {sig:?}");
     }
 
     /// `Stopped` → `Running`: a thread's status, or an external's remembered
@@ -118,16 +126,18 @@ impl StageHandle {
         let Self {
             held_edge,
             kind,
-            kill,
+            ending,
             ..
         } = self;
-        let obs = match kind {
-            StageKind::External(c) => observe_external_stage(c, kill, shell, started),
+        let obs = match (kind, ending) {
+            (StageKind::External(c), _) => observe_external_stage(c, shell, started),
             // A thread's `Break` carries no mark of whether the kill or its
             // own code ended it, so a killed thread is forgiven whatever it
-            // returned; `kill_for_dead_reader` never marks a finished one.
-            StageKind::Thread(t) if kill == StageKill::Sent => t.observe(is_last).forgiven(),
-            StageKind::Thread(t) => t.observe(is_last),
+            // returned.
+            (StageKind::Thread(t), Ending::RalEnded(CancelCause::ReaderGone)) => {
+                t.observe(is_last).forgiven()
+            }
+            (StageKind::Thread(t), _) => t.observe(is_last),
         };
         drop(held_edge);
         obs
@@ -142,7 +152,7 @@ impl StageHandle {
             kind: StageKind::External(child),
             held_edge: None,
             feeds_pipe: true,
-            kill: StageKill::NotSent,
+            ending: Ending::OwnAccord,
         }
     }
 }
@@ -167,7 +177,7 @@ fn route_parent_stdin(group: &PipelineGroup, shell: &Shell) -> Settled<command::
         None if !shell.io.terminal.startup_stdin_tty => {
             command::StdinRoute::Inherit(command::TtyInputPermit::for_non_tty_stdin())
         }
-        None if group.owns_tty() => {
+        None if group.holds_terminal() => {
             command::StdinRoute::Inherit(command::TtyInputPermit::for_pure_external_pipeline())
         }
         None => command::StdinRoute::Null,
@@ -266,7 +276,7 @@ pub(super) fn wire_stage_stdout(
         ByteOut::Parent => {
             // Inherit ral's real fd 1 so a pager or `ls` still sees a TTY —
             // the pipeline analogue of `command::stdio::inherit_tty`.
-            let inherit = shell.io.terminal.startup_stdout_tty && group.owns_tty();
+            let inherit = shell.io.terminal.startup_stdout_tty && group.holds_terminal();
             let plan = shell
                 .io
                 .stdout
@@ -301,11 +311,9 @@ pub(super) fn wire_stage_stdio(
 }
 
 /// Spawn `cmd` into `group` and assemble the [`command::RunningChild`] for a
-/// direct external stage.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the single funnel for post-spawn assembly; splitting it would scatter the same parameters"
-)]
+/// direct external stage.  Its stop reaches the collector through
+/// `try_settle`, whatever the policy; `KillAndReap` answers only a stop that
+/// somehow reaches `wait` unclaimed.
 pub(super) fn spawn_into_group(
     group: &PipelineGroup,
     cmd: &mut crate::process::Launch,
@@ -313,7 +321,6 @@ pub(super) fn spawn_into_group(
     plumbing: command::ExternalPlumbing,
     mooring: &Mooring,
     shell: &Shell,
-    stop: StopPolicy,
     spawn_error: impl FnOnce(std::io::Error) -> Break,
 ) -> Settled<command::RunningChild> {
     let (child, jail) = group.spawn(cmd).map_err(spawn_error)?;
@@ -327,7 +334,7 @@ pub(super) fn spawn_into_group(
         child,
         name,
         plumbing,
-        stop,
+        StopPolicy::KillAndReap,
         // Windows group release belongs to `PipelineGroup::drop`.
         command::GroupOwner::BorrowedByPipeline(leader),
         mooring.cancel.as_scope().clone(),
@@ -343,7 +350,6 @@ pub(super) struct LaunchCx<'a> {
     /// machine (a lambda body, say).
     pub(super) env: &'a Env,
     pub(super) group: &'a mut PipelineGroup,
-    pub(super) stop: StopPolicy,
 }
 
 /// Dispatch one stage per its resolve-time [`StageLaunch`] — a direct
@@ -362,7 +368,7 @@ fn spawn_stage(
     let held_edge = route.held.take();
     let kind = match &spec.launch {
         StageLaunch::Direct(ext) => StageKind::External(launch_external_stage_direct(
-            ext, route, cx.mooring, cx.shell, cx.group, cx.stop,
+            ext, route, cx.mooring, cx.shell, cx.group,
         )?),
         StageLaunch::Thread => {
             StageKind::Thread(launch_thread_stage(stage, spec, route, cx, gate)?)
@@ -372,7 +378,7 @@ fn spawn_stage(
         kind,
         held_edge,
         feeds_pipe: spec.feeds_pipe,
-        kill: StageKill::NotSent,
+        ending: Ending::OwnAccord,
     })
 }
 
@@ -403,7 +409,6 @@ impl PipelineResources {
 /// foreground decision is settled.
 struct PipelineBuild {
     resources: PipelineResources,
-    stop: StopPolicy,
     gate: Arc<StageGate>,
 }
 
@@ -411,16 +416,13 @@ impl PipelineBuild {
     fn new(
         mut group: PipelineGroup,
         gate: Arc<StageGate>,
-        plan: &PipelinePlan,
         routes: VecDeque<StageRoute>,
         shell: &Shell,
         mooring: &Mooring,
     ) -> Self {
         group.claim_foreground(shell, mooring);
-        let stop = StopPolicy::for_external(mooring, plan.terminal.owns_tty());
         Self {
             resources: PipelineResources::new(group, routes),
-            stop,
             gate,
         }
     }
@@ -443,20 +445,20 @@ impl PipelineBuild {
             shell,
             env,
             group: &mut self.resources.group,
-            stop: self.stop.clone(),
         };
         let handle = spawn_stage(stage, spec, route, cx, &self.gate)?;
         self.resources.running.push(handle);
         Ok(())
     }
 
-    /// Tear down a partially-launched pipeline.  Signal the pgid first so
-    /// stages and externals that honour it leave before `Drop`'s
-    /// `cancelled` follow-up reaches SIGKILL; [`PipelineResources`]'s field
-    /// order does the rest.
+    /// Tear down a partially-launched pipeline in the one order signal, kill,
+    /// join — see `CollectState::cancel_all` — minus the grace: a launch that
+    /// failed has no verdict to protect, so nothing is waiting to exit
+    /// cleanly.  [`PipelineResources`]'s field order does the rest.
     fn abort(self) {
         let Self { mut resources, .. } = self;
         resources.group.signal(CancelCause::Terminate);
+        resources.group.kill();
         drop(resources);
     }
 
@@ -483,7 +485,6 @@ fn launch_external_stage_direct(
     mooring: &Mooring,
     shell: &mut Shell,
     group: &PipelineGroup,
-    stop: StopPolicy,
 ) -> Result<command::RunningChild, Break> {
     let rc = command::vet(&ext.id, &ext.args, shell)?;
     let mut cmd = command::build_command(
@@ -509,7 +510,6 @@ fn launch_external_stage_direct(
         plumbing,
         mooring,
         shell,
-        stop,
         |e| command::spawn_error(confinement, &rc.shown, &e),
     )
 }
@@ -543,7 +543,7 @@ pub(super) fn launch_pipeline(
     gate: &Arc<StageGate>,
 ) -> Result<(PipelineGroup, Vec<StageHandle>), Break> {
     let routes = open_stage_routes(plan)?.into();
-    let mut build = PipelineBuild::new(group, Arc::clone(gate), plan, routes, shell, mooring);
+    let mut build = PipelineBuild::new(group, Arc::clone(gate), routes, shell, mooring);
     match spawn_all_stages(&mut build, stages, plan, env, mooring, shell) {
         Ok(()) => Ok(build.finish()),
         Err(e) => {

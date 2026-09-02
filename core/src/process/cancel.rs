@@ -23,7 +23,8 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CancelCause {
     /// A pipeline stage's reader stage has already been observed; the
-    /// mildest cause, forgiven by `StageKill::Sent`.
+    /// mildest cause, and the one ending `CommandFailure::from_outcome`
+    /// forgives.
     ReaderGone = 1,
     /// Ctrl-C / Esc.
     Interrupt = 2,
@@ -37,6 +38,12 @@ pub enum CancelCause {
     /// Ctrl-\, reaping the session root.
     RootAbort = 6,
 }
+
+/// How long ral's teardown waits between its cause signal and the kill that
+/// ends the argument.  Short — a cancelled call is already over budget — but
+/// enough for a test runner to print its summary and exit.
+#[cfg(unix)]
+pub(crate) const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl CancelCause {
     fn from_u8(flag: u8) -> Option<Self> {

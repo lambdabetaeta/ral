@@ -157,10 +157,9 @@ impl Signal {
 
 /// What the OS reported when a process stopped or exited.
 ///
-/// `Stopped` is a live suspended child: park its pgid as a job and resume it
-/// with SIGCONT rather than reap it.  It arises only for an interactive
-/// foreground wait — `handle_stopped` in `process/signal/unix.rs` otherwise
-/// kills the stopped child and reports `StoppedThenKilled`.
+/// `Stopped` is a live suspended child: the wait layer reports every stop as
+/// one, and whoever holds the child decides what it means — parking its pgid
+/// as a job, or killing and reaping it into `StoppedThenKilled`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitOutcome {
     Exited(i32),
@@ -232,13 +231,18 @@ impl WaitOutcome {
         matches!(self, Self::Exited(0) | Self::NativeCode(0))
     }
 
-    /// Whether this death reads as the pipeline collector's own kill.
-    /// `Cancelled` is deliberately excluded even when its signal is SIGKILL:
-    /// a cancellation in force outranks forgiveness.
+    /// Whether this death reads as ral's own kill of a stage.  The attributed
+    /// form counts: which *reason* the kill had is the [`Ending`]'s to say,
+    /// not this predicate's — a cancellation in force outranks forgiveness by
+    /// the `Ending` order, since a stronger cause displaces `ReaderGone`
+    /// there.
     pub fn is_stage_kill(self) -> bool {
         #[cfg(unix)]
         {
-            matches!(self, Self::Signaled(sig) if sig.is_sigkill())
+            matches!(
+                self,
+                Self::Signaled(sig) | Self::Cancelled { signal: sig, .. } if sig.is_sigkill()
+            )
         }
         #[cfg(windows)]
         {
@@ -274,22 +278,33 @@ pub enum CommandFailure {
     Spawn(SpawnFailure),
 }
 
-/// Whether the pipeline collector itself ended this stage because its reader
-/// had already been reaped — the one death [`CommandFailure::from_outcome`]
-/// forgives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StageKill {
-    NotSent,
-    Sent,
+/// How a child's or a stage's life ended: on its own accord, or because ral
+/// ended it, for a cause.
+///
+/// The sole input to forgiveness, to whether a child's drainers are joined,
+/// and to the verdict a pipeline stage folds.  [`CancelCause::ReaderGone`] —
+/// the collector reclaiming a producer whose reader is already observed — is
+/// the one death a pipeline forgives; every other cause is kept.
+///
+/// Ordered, so two parties that each ended the same child join by `max`: the
+/// collector's reader-gone kill and a cancellation that arrived alongside it
+/// cannot lose to each other, and a cancellation in force outranks
+/// forgiveness by the order rather than by a special case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Ending {
+    /// Nothing ral did ended it; whatever it reports is its own.
+    OwnAccord,
+    /// ral ended it, for `cause`.
+    RalEnded(CancelCause),
 }
 
 impl CommandFailure {
     /// The failure an outcome amounts to, or `None` for success.  Forgiveness
-    /// reaches only the collector's own kill, and never an exit status:
-    /// killing a zombie cannot rewrite its recorded status, so a real failure
-    /// cannot be silently forgiven.
-    pub fn from_outcome(outcome: WaitOutcome, kill: StageKill) -> Option<Self> {
-        if kill == StageKill::Sent && outcome.is_stage_kill() {
+    /// reaches only the collector's own kill of a producer whose reader was
+    /// gone, and only a death that kill actually caused — never an exit
+    /// status, which killing a zombie cannot rewrite.
+    pub fn from_outcome(outcome: WaitOutcome, ending: Ending) -> Option<Self> {
+        if ending == Ending::RalEnded(CancelCause::ReaderGone) && outcome.is_stage_kill() {
             return None;
         }
         match outcome {
@@ -407,11 +422,11 @@ mod tests {
     #[test]
     fn ordinary_exit_and_signal_death_stay_distinct() {
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(137), StageKill::NotSent),
+            CommandFailure::from_outcome(WaitOutcome::Exited(137), Ending::OwnAccord),
             Some(CommandFailure::ExitCode(137))
         );
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), StageKill::NotSent),
+            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), Ending::OwnAccord),
             Some(CommandFailure::Signal(Signal::new(9)))
         );
     }
@@ -424,7 +439,7 @@ mod tests {
             killed_by: Signal::new(libc::SIGKILL),
         };
         assert_eq!(outcome.to_user_exit_code(), 128 + libc::SIGSTOP);
-        let failure = CommandFailure::from_outcome(outcome, StageKill::NotSent).unwrap();
+        let failure = CommandFailure::from_outcome(outcome, Ending::OwnAccord).unwrap();
         assert!(failure.message("cmd").contains("stopped by signal"));
         assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGSTOP);
     }
@@ -448,7 +463,7 @@ mod tests {
                 outcome.to_user_exit_code(),
                 WaitOutcome::Signaled(term).to_user_exit_code()
             );
-            let failure = CommandFailure::from_outcome(outcome, StageKill::NotSent).unwrap();
+            let failure = CommandFailure::from_outcome(outcome, Ending::OwnAccord).unwrap();
             assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGTERM);
             assert_eq!(
                 failure.message("sleep"),
@@ -476,7 +491,7 @@ mod tests {
         let segv = Signal::new(libc::SIGSEGV);
         let outcome = WaitOutcome::Signaled(segv).attribute_to(CancelCause::Deadline);
         assert_eq!(outcome, WaitOutcome::Signaled(segv));
-        let failure = CommandFailure::from_outcome(outcome, StageKill::NotSent).unwrap();
+        let failure = CommandFailure::from_outcome(outcome, Ending::OwnAccord).unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 11 (SIGSEGV)");
         assert_eq!(
             failure.default_hint("sh").as_deref(),
@@ -491,7 +506,7 @@ mod tests {
     fn a_foreign_signal_is_still_reported_as_a_signal() {
         let failure = CommandFailure::from_outcome(
             WaitOutcome::Signaled(Signal::new(libc::SIGKILL)),
-            StageKill::NotSent,
+            Ending::OwnAccord,
         )
         .unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 9 (SIGKILL)");
@@ -508,58 +523,69 @@ mod tests {
     #[test]
     fn a_stage_kill_is_forgiven() {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
-        assert_eq!(CommandFailure::from_outcome(outcome, StageKill::Sent), None);
+        let ending = Ending::RalEnded(CancelCause::ReaderGone);
+        assert_eq!(CommandFailure::from_outcome(outcome, ending), None);
     }
 
-    /// The very same death, unsent, is an ordinary SIGKILL failure: nothing
-    /// about the signal itself carries forgiveness, only the collector's
-    /// bookkeeping that it was the one who sent it.
+    /// The very same death, which nothing in ral caused, is an ordinary
+    /// SIGKILL failure: nothing about the signal itself carries forgiveness,
+    /// only the ending recording who ended the stage and why.
     #[cfg(unix)]
     #[test]
     fn the_same_death_unsent_is_kept() {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
         assert_eq!(
-            CommandFailure::from_outcome(outcome, StageKill::NotSent),
+            CommandFailure::from_outcome(outcome, Ending::OwnAccord),
             Some(CommandFailure::Signal(Signal::new(libc::SIGKILL)))
         );
     }
 
     /// A zombie's exit status cannot be overwritten by a kill that arrives
-    /// too late: an exit is always kept, sent or not, which is exactly what
-    /// makes a real failure impossible to launder through forgiveness.
+    /// too late: an exit is always kept, whoever ended the stage, which is
+    /// exactly what makes a real failure impossible to launder through
+    /// forgiveness.
     #[test]
-    fn an_exit_status_is_kept_even_when_sent() {
+    fn an_exit_status_is_kept_even_when_ral_ended_the_stage() {
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(3), StageKill::Sent),
+            CommandFailure::from_outcome(
+                WaitOutcome::Exited(3),
+                Ending::RalEnded(CancelCause::ReaderGone)
+            ),
             Some(CommandFailure::ExitCode(3))
         );
     }
 
     /// SIGPIPE is no longer special: with no interior edge left to deliver
     /// it, a pipe of the stage's own making that breaks is its own failure,
-    /// sent or not.
+    /// whoever ended the stage.
     #[cfg(unix)]
     #[test]
-    fn a_sigpipe_death_is_kept_regardless_of_the_kill_fact() {
+    fn a_sigpipe_death_is_kept_under_every_ending() {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
-        for kill in [StageKill::Sent, StageKill::NotSent] {
+        for ending in [
+            Ending::RalEnded(CancelCause::ReaderGone),
+            Ending::OwnAccord,
+        ] {
             assert_eq!(
-                CommandFailure::from_outcome(outcome, kill),
+                CommandFailure::from_outcome(outcome, ending),
                 Some(CommandFailure::Signal(Signal::new(libc::SIGPIPE)))
             );
         }
     }
 
-    /// A cancellation in force outranks forgiveness, deliberately: even a
-    /// `Cancelled` outcome whose signal is SIGKILL is kept, because
-    /// `is_stage_kill` only ever reads a bare `Signaled`.
+    /// A cancellation in force outranks forgiveness, by the `Ending` order:
+    /// the stronger cause displaces `ReaderGone`, so the SIGKILL death it
+    /// attributes is kept rather than forgiven.
     #[cfg(unix)]
     #[test]
-    fn a_cancelled_sigkill_outranks_forgiveness() {
+    fn a_stronger_ending_outranks_forgiveness() {
+        let ending = Ending::RalEnded(CancelCause::ReaderGone)
+            .max(Ending::RalEnded(CancelCause::RootAbort));
+        assert_eq!(ending, Ending::RalEnded(CancelCause::RootAbort));
         let outcome = WaitOutcome::Cancelled {
             cause: CancelCause::RootAbort,
             signal: Signal::new(libc::SIGKILL),
         };
-        assert!(CommandFailure::from_outcome(outcome, StageKill::Sent).is_some());
+        assert!(CommandFailure::from_outcome(outcome, ending).is_some());
     }
 }

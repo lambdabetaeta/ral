@@ -598,15 +598,11 @@ mod tests {
             launch.stderr(StdioSpec::null());
             super::confine(&mut launch, &projection, Some(cmd), &CancelScope::default())
                 .expect("confine under a derived capability SID");
-            let (mut child, pgid, _) = launch
+            let (mut child, _pgid, _) = launch
                 .spawn(PgidPolicy::Inherit)
                 .expect("CreateProcessW must accept the derived capability SIDs");
-            let target = match pgid {
-                Some(p) => crate::process::KillTarget::Group(p),
-                None => crate::process::KillTarget::Pid,
-            };
             child
-                .wait_handling_stop(false, target)
+                .wait_handling_stop()
                 .expect("wait for the confined child")
         };
 

@@ -31,10 +31,13 @@ use resolve::resolve_pipeline;
 /// process group (§5 of the CEK plan). `group` — the pgid anchor, foreground
 /// guard and SIGINT relay — stays alive across both `collect` and `finish`,
 /// so it lives here rather than as a local dropped early.
+///
+/// Field order is teardown order, as in `PipelineResources`: an unwind
+/// through the `Pipeline` rule must join the stages before the anchor.
 pub(crate) struct PipeNode {
-    group: PipelineGroup,
-    gate: Arc<StageGate>,
     running: Vec<StageHandle>,
+    gate: Arc<StageGate>,
+    group: PipelineGroup,
     yields: PipeYield,
     started: Instant,
     /// The pipeline's rendered source, for `ParkedPipeline`'s job-table name.

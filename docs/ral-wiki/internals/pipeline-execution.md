@@ -1,7 +1,7 @@
 ---
-verified_at_commit: c8af3823
+verified_at_commit: 6104758c
 verified_at_date: 2026-09-02
-anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, AnchorProcess, StageGate, StagePark, StagePark::gate, Mooring::park, StopPolicy, ParkedPipeline, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
+anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, GroupRole, Ending, AnchorProcess, StageGate, StagePark, StagePark::gate, StageStop, Mooring::park, StopPolicy, ParkedPipeline, ChildHandle, wait_handling_stop, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -143,7 +143,7 @@ since only the owning top-level group may act on the pgid. Its gate comes from
 `mooring.park` — the enclosing stage's own park — never from the role, so
 nesting inherits the Ctrl-Z gate the way it inherits the pgid. A joining
 collector never parks, signals, or escapes on its own account: on a `Stopped`
-probe it writes `Stopped(sig)` into its own stage's `StageStatus` — the exact
+probe it writes the signal into its own stage's `StageStop` — the exact
 slot the owning collector already reads for a direct `Park` arm — and forgets
 the stop locally, meeting the owner's pause at the `process::check` heading its
 next pass. This is the mechanism by which a stop the anchor cannot witness — a
@@ -152,7 +152,15 @@ to the top-level owner, one collector per nesting level.
 
 **Kill for a dead reader cancels a thread and wakes it; the wake ends a write
 as well as a read.** The collector's rule is unchanged in shape: a stage whose
-reader stage has been observed is killed, and only that kill is forgiven. For
+reader stage has been observed is ended, and only that ending is forgiven. The
+collector records it as the stage's `Ending` — `RalEnded(ReaderGone)`, not a
+boolean — and issues it only for a stage that has just probed `Running`, so a
+stage that already finished keeps its outcome and no exit status is ever
+forgiven. The kill addresses the stage's pid alone, so a descendant the stage
+forked outlives it and may still hold the pipe a pump of that stage reads; a
+child ral ended for a dead reader therefore *detaches* its drainer threads
+rather than joining them (`WaitedChild::settle`) — its remaining bytes are owed
+to nobody, and the join would otherwise wait on the descendant. For
 a `Thread` stage "kill" is `cancel(ReaderGone)` plus `interrupt()` (fires the
 wake; Windows also `CancelSynchronousIo`). The held duplicate of the edge's
 read end is kept until the stage is observed, exactly as for an external —
@@ -169,10 +177,13 @@ external (if it has one) is torn down by pid inside that stage's own
 this way, each stage's own wake ending only that stage's own I/O. Forgiveness differs in one respect from an external's: a
 process's wait status says whether the kill or its own `exit` ended it, a
 thread's `Break` does not, so a killed thread is forgiven *whatever* it
-returned — and to keep `!{ echo a; exit 3 } | head -1` honest, a thread that
-has already finished when the kill decision is taken is never marked killed
-and keeps its outcome. Its audit fragment is folded either way: the verdict is
-the collector's doing, what the stage observed still happened.
+returned — which is why the collector probes before it kills: a thread that has
+already finished is never marked, and `!{ echo a; exit 3 } | head -1` stays
+honest. Its audit fragment is folded either way: the verdict is the
+collector's doing, what the stage observed still happened. A stage thread's
+*end* is `JoinHandle::is_finished`, so a panic cannot make a stage read as
+running; the panic surfaces at the collector as an `Error` carrying the
+stage's span.
 
 **Stop and park is Ctrl-Z's whole story, and it is Unix-only.** The kernel
 stops what it can stop directly — the anchor and every external in the group —
@@ -181,22 +192,27 @@ sees `WaitOutcome::Stopped`; the collector's probe of a direct external sees
 the same; the collector's probe of the *anchor* sees it stopped. The anchor
 keeps the default `SIGTSTP` disposition specifically so it can serve as the
 group's stop witness — this is what makes `!{ a } | !{ b }`, a pipeline with no
-external at all, park exactly as one with externals does. Whichever fires
-first, one rule answers it (`collect::on_stop`): a *tty-owning* group parks —
-the collector sets the pipeline's `StageGate` paused, `SIGSTOP`s the whole
-`-pgid` (idempotent for the ordinary Ctrl-Z case), and stops probing; any other
-owned group — batch mode, a pipeline inside a `spawn` worker — has no job table
-to resume it and is cancelled with `Terminate`, as `KillAndReap` ends a lone
-stopped external; a joining group forwards the stop to its owner (below). A
-stage thread notices at its own pace: `process::check` consults
-`mooring.park`'s gate behind an atomic fast path, so a stage blocked in a
-builtin finishes that call before parking, and a stage that was mid-write or
-mid-read is simply blocked at the OS level like the process it is talking to.
-`StopPolicy` replaces a bare boolean: `KillAndReap` for batch mode,
-`Escape` for a top-level foreground external or a direct external of a
-tty-owning pipeline, `Park(StagePark)` for anything running inside a stage
-thread — an external inside it waits on the same child across the stop rather
-than being torn down.
+external at all, park exactly as one with externals does. The wait layer
+reports every stop as `WaitOutcome::Stopped` and decides nothing; whichever
+fires first, the collector answers it by the group's `GroupRole`: a
+*`Foreground`* group parks — the collector sets the pipeline's `StageGate`
+paused, `SIGSTOP`s the whole `-pgid` (idempotent for the ordinary Ctrl-Z
+case), and stops probing; a *`Background`* group — batch mode, a capture, a
+pipeline inside a `spawn` worker — has no job table to resume it and is
+cancelled with `Terminate`, a direct stage first settled as
+`StoppedThenKilled` (`end_stopped`) so its verdict still names the stop rather
+than whatever the teardown's `SIGCONT` would have let it do next; a *`Joining`*
+group forwards the stop to its owner (below). A stage thread notices at its
+own pace: `process::check` consults `mooring.park`'s gate behind an atomic
+fast path, so a stage blocked in a builtin finishes that call before parking,
+and a stage that was mid-write or mid-read is simply blocked at the OS level
+like the process it is talking to. `StopPolicy` says what becomes of a stop
+that reaches a child's own `wait` unclaimed: `KillAndReap` for batch mode,
+`Escape` for a top-level foreground external the REPL's job table owns,
+`Park(StagePark)` for anything running inside a stage thread — an external
+inside it waits on the same child across the stop rather than being torn
+down. A pipeline stage's stop never gets that far: it reaches the collector
+through `try_settle`, whatever the policy.
 
 **A parked pipeline is a value, not an abandoned process tree.** Because the
 stages are threads waiting on their own children, `fg` cannot `waitpid(-pgid)`
@@ -212,9 +228,10 @@ the same collect loop to completion or the next stop) instead of a bare
 `waitpid`. `bg` opens the gate and `SIGCONT`s without touching the terminal;
 the sweep drives `ParkedPipeline::poll`, a single non-blocking pass; the
 REPL's exit `cleanup` drives `ParkedPipeline::cancel`, which signals the
-group, cancels every stage scope, fires every wake, and opens the gate so
-cancelled threads can leave. There is no `kill` verb: a job is ended by `fg`
-and Ctrl-C, which the anchor witnesses for the collector.
+group, cancels every stage scope, fires every wake, opens the gate so
+cancelled threads can leave, and kills the group before the drop joins them.
+There is no `kill` verb: a job is ended by `fg` and Ctrl-C, which the anchor
+witnesses for the collector.
 
 **Windows has no foreground handoff and no stop to park from.** There is no
 `tcsetpgrp` to race, and the terminal plan never selects
@@ -226,27 +243,42 @@ same `PgidPolicy::Join` resolution, assigned at creation under the suspended
 create → assign → resume path.
 
 **Collection is an event loop over a non-blocking probe.** The collector polls
-every unsettled stage — a `ThreadStage`'s `probe()` reads its `StageStatus`, an
-external stage the same `try_wait_handling_stop` a standalone wait already
-uses — so stages settle in whatever order they actually end, and no stage's
-blocking wait can starve another's news. A stage whose reader has settled is
-killed (`kill_for_dead_reader`), so the cascade runs tail-ward; a stage that
-stops parks the group at once, wherever it sits. Each interior edge's held-open
-read end drops once that edge's writer's kill or observation completes, which
-also releases any descendant of that edge still blocked writing into it.
+every unsettled stage — a `ThreadStage`'s `probe()` reads its join handle's
+`is_finished` and then its `StageStop`, an external stage the same
+`try_wait_handling_stop` a standalone wait already uses — so stages settle in
+whatever order they actually end, and no stage's blocking wait can starve
+another's news. A stage still running whose reader has settled is ended
+(`reader_gone`) and observed on the next pass, so the cascade runs tail-ward;
+a stage that stops is answered at once, wherever it sits. Each interior edge's
+held-open read end drops once that edge's writer's observation completes,
+which also releases any descendant of that edge still blocked writing into it.
 Verdicts fold in launch order regardless of settle order, so which stage the
 collector kills when never changes which failure the fold reports.
 
-**Abort is signal-first.** A mid-launch failure signals the group so whoever
-honours it can leave before the drop order reaches `kill()`, and a
-`PipelineBuild` accumulator then releases every transient resource in one
-order: unreleased stage routes close first (every unspawned stage's edge
-ends), then the running stage handles (`ThreadStage`'s `Drop` cancels,
-interrupts and joins; a direct external's `Drop` kills by pid), then
-`PipelineGroup`, whose own `Drop` `kill()`s a cancelled group before finishing
-the anchor. That order is the invariant — a stage thread parked on its own gate
-must be given the chance to leave before the anchor is waited, or the wait
-deadlocks.
+**Teardown is kill-first.** Every path that ends a pipeline before its stages
+have all been observed — `CollectState::cancel_all` (a cancel, a witnessed
+signal, a stop with no job table), `PipelineBuild::abort` (a mid-launch
+failure), `ParkedPipeline::cancel` (the REPL's exit) and `PipelineGroup::drop`
+— is one order: (1) `signal` — the cause's catchable signal to `-pgid`, then
+`SIGCONT`, so a member that honours it exits with its own status; (2) a bounded
+grace of at most `TEARDOWN_GRACE` (500 ms, shared with a standalone child's
+`terminate_group`), during which the collector probes non-blockingly and
+leaves the moment every stage has settled — `abort` skips it, having no
+verdict to protect; (3) `kill` — `SIGKILL -pgid`, unconditional and
+idempotent; (4) only now the blocking joins — stage threads, pump drains,
+waits; (5) the anchor last, in `Drop`, after every stage handle has gone.
+Step 3 before step 4 is what makes the joins terminate: a stage's own kill
+reaches its pid alone, and a pumped descendant that survived it would hold the
+pump's pipe open forever. The two graces nest without adding — the group's
+`SIGKILL` ends whatever a stage's own `grace_poll` is waiting on. The group's
+whole verb set is `signal` and `kill`, both no-ops for a joining group, whose
+stages die of their own cancel and whose owner does the rest.
+`PipelineResources`' and `PipeNode`'s field orders carry the drop half of the
+invariant: routes, then stage handles, then the group — a stage thread parked
+on its own gate must be given the chance to leave before the anchor is waited,
+or the wait deadlocks. Windows has no polite signal and no grace: the Job
+Object kill is the whole of it, and `Drop` releases the group's `GROUPS` entry
+once the anchor is reaped.
 
 **The terminal lease, and where it goes on park.** A foreground pipeline that
 takes `SIGTSTP` becomes a parked job rather than dying. On the way into

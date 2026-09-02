@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c8af3823
+generated_at_commit: 6104758c
 generated_at_date: 2026-09-02
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
@@ -110,7 +110,9 @@ recursion is irreducible; the evaluator reaches it at
   through `PipelineGroup`'s `Drop` rather than through any undo of the
   machine's.  `group` (the pgid anchor, foreground guard, SIGINT relay)
   stays alive across both `collect` and `finish` rather than dropped early
-  ([[map/core/evaluator|evaluator]]). `resolve.rs` freezes each stage's launch decision once as
+  ([[map/core/evaluator|evaluator]]). `PipeNode`'s field order carries the same
+  teardown invariant as `PipelineResources`': the stage handles drop before the
+  group, so a stage parked on its gate can leave before the anchor is waited on. `resolve.rs` freezes each stage's launch decision once as
   `StageLaunch` (`Direct(ExternalStage)` | `Thread`) from the head's resolution, redirects,
   terminal ownership, and audit state, so launch reads a decision rather than
   re-deriving a dispatch gate. **No route enters that classification**: a
@@ -138,12 +140,21 @@ recursion is irreducible; the evaluator reaches it at
     likewise gates on a reachable terminal lease and a terminal-bound final
     sink, not on a `startup_foreground` predicate.
   - `launch.rs` (`PipelineBuild` owns launch and abort teardown; `StageHandle`
-    dispatches `probe`/`interrupt`/`resume`/`cancel`/`observe` over its two
-    kinds, `External`/`Thread`), `group.rs` (`PipelineGroup::prepare` spawns
+    dispatches `probe`/`interrupt`/`resume`/`cancel`/`reader_gone`/
+    `end_stopped`/`observe` over its two kinds, `External`/`Thread`, and
+    carries the one `Ending` every later decision about that stage reads —
+    forgiveness, and whether a killed child's drainers are joined),
+    `group.rs` (`PipelineGroup::prepare` spawns
     the pgid anchor — `--ral-pipeline-anchor`, immune to termination signals —
-    on every platform before any stage exists; `PipelineGroup::joining` is the
+    on every platform before any stage exists; a `GroupRole` of
+    `Foreground`/`Background`/`Joining` says what the group owns and so what a
+    stop of it means, while `holds_terminal` reports the handoff actually held
+    rather than the plan it was launched under; `PipelineGroup::joining` is the
     no-anchor, no-relay, may-not-signal shape a nested pipeline inside a stage
-    thread gets instead), `thread.rs` (`launch_thread_stage` wires a `Thread`
+    thread gets instead. The group's whole verb set is `signal` and `kill`, and
+    every path that ends a pipeline — `CollectState::cancel_all`,
+    `PipelineBuild::abort`, `ParkedPipeline::cancel`, `Drop` — is one order:
+    signal, bounded grace, kill, and only then join), `thread.rs` (`launch_thread_stage` wires a `Thread`
     stage's `Io` from its `StageRoute` and hands the closure to
     `Shell::spawn_thread`; `ThreadStage` is the collector's handle onto the
     running thread), `collect.rs` (the non-blocking probe loop that folds

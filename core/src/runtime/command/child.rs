@@ -1,10 +1,10 @@
 //! In-flight child handles: [`RunningChild`] after spawn, [`WaitedChild`] after
 //! the wait, and [`ExternalPlumbing`], the pump plan the caller hands in.  The
-//! running → waited → drained typestate makes "drain before wait" and "wait
+//! running → waited → settled typestate makes "settle before wait" and "wait
 //! twice" unwritable.
 
 use crate::io::Sink;
-use crate::process::{KillTarget, StopPolicy};
+use crate::process::{CancelCause, Ending, KillTarget, StopPolicy};
 #[cfg(unix)]
 use crate::types::Escape;
 use crate::types::{Break, Error, Settled};
@@ -52,9 +52,9 @@ pub(crate) struct RunningChild {
     /// stdout by `2>&1` — nothing to pump in any of those cases.
     pub stderr_pump: Option<std::thread::JoinHandle<()>>,
     pub name: String,
-    /// On `WIFSTOPPED`: `Escape` surfaces `Escape::Stopped` so the REPL can
-    /// register the pgid as a job; `Park` waits on a pipeline's gate instead;
-    /// `KillAndReap` kills and reaps on the spot.
+    /// What a stop `wait` itself sees means: `Escape` surfaces
+    /// `Escape::Stopped` so the REPL can register the pgid as a job; `Park`
+    /// waits on a pipeline's gate; `KillAndReap` kills and reaps on the spot.
     pub stop: StopPolicy,
     pub group_owner: GroupOwner,
     /// Polled by `wait`, because a blocking `waitpid` / `WaitForSingleObject`
@@ -64,6 +64,11 @@ pub(crate) struct RunningChild {
     pub cancel: crate::process::CancelScope,
     /// An outcome a collector probe already collected, consumed by `wait`.
     settled: Option<crate::process::WaitOutcome>,
+    /// How this child's life ended, once ral itself ended it: the cancel
+    /// branch of `wait` and the pipeline collector's reader-gone kill are the
+    /// only writers, and they join by `max`.  Sole input to forgiveness and
+    /// to whether the drainers are joined.
+    ending: Ending,
 }
 
 /// A child observed dead, holding its outcome and its not-yet-joined drainers.
@@ -71,9 +76,10 @@ pub(crate) struct RunningChild {
 /// status interpretation carry a borrow-check proof that the child has exited.
 pub(crate) struct WaitedChild {
     pub outcome: crate::process::WaitOutcome,
+    pub ending: Ending,
     pump: Option<std::thread::JoinHandle<()>>,
     stderr_pump: Option<std::thread::JoinHandle<()>>,
-    /// Trace context carried from the `RunningChild` so `drain`'s pump-join
+    /// Trace context carried from the `RunningChild` so `settle`'s pump-join
     /// timings attribute to the same command instance.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     name: String,
@@ -125,6 +131,7 @@ impl RunningChild {
             group_owner,
             cancel,
             settled: None,
+            ending: Ending::OwnAccord,
         }
     }
 
@@ -137,13 +144,6 @@ impl RunningChild {
             GroupOwner::Standalone(p) => KillTarget::Group(p),
             GroupOwner::BorrowedByPipeline(_) | GroupOwner::None => KillTarget::Pid,
         }
-    }
-
-    /// Whether a stop on this child should surface rather than be killed and
-    /// reaped: the policy says so, and there is a group to register as a job
-    /// — a child with no group cannot be one.
-    fn parks(&self) -> bool {
-        self.stop.parks() && !matches!(self.group_owner, GroupOwner::None)
     }
 
     /// SIGKILL the process group this child owns outright, or the child alone
@@ -184,16 +184,14 @@ impl RunningChild {
         }
     }
 
-    /// Poll for the leader until `deadline`, classifying a stop as `wait` does.
-    /// `None` on timeout.
+    /// Poll for the leader until `deadline`; `None` on timeout.
     #[cfg(unix)]
     fn grace_poll(
-        &self,
         child: &mut crate::process::ChildHandle,
         deadline: std::time::Instant,
     ) -> Option<crate::process::WaitOutcome> {
         while std::time::Instant::now() < deadline {
-            match child.try_wait_handling_stop(self.parks(), self.kill_target()) {
+            match child.try_wait_handling_stop() {
                 Ok(Some(o)) => return Some(o),
                 Err(_) => break,
                 Ok(None) => {}
@@ -249,10 +247,8 @@ impl RunningChild {
                     let _ = rustix::process::kill_process_group(pgid.as_pid(), signal);
                 }
             }
-            // Short — a timed-out call is already over budget — but enough
-            // for a test runner to print its summary and exit.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-            let reaped = self.grace_poll(child, deadline);
+            let deadline = std::time::Instant::now() + crate::process::TEARDOWN_GRACE;
+            let reaped = Self::grace_poll(child, deadline);
             // `Child::kill` on an already-reaped child is an already-ignored
             // error, so this always runs — harmless on a tree that already
             // left, decisive against a grandchild that trapped the signal and
@@ -287,11 +283,10 @@ impl RunningChild {
         let t_enter = std::time::Instant::now();
         crate::dbg_trace!(
             "wait",
-            "enter name={} pid={} group={:?} parks={} has_pump={} has_stderr_pump={}",
+            "enter name={} pid={} group={:?} has_pump={} has_stderr_pump={}",
             self.name,
             pid,
             self.group_owner,
-            self.parks(),
             self.pump.is_some(),
             self.stderr_pump.is_some(),
         );
@@ -302,14 +297,9 @@ impl RunningChild {
         // translated into a cause.
         //
         // `try_wait_handling_stop`, not `Child::try_wait`, so a SIGSTOP'd child
-        // is seen (WUNTRACED) and classified — parked (on the job table or a
-        // pipeline's gate) when `self.stop` parks, killed and reaped
-        // otherwise; plain `try_wait` reports `Ok(None)` on a stop and the
-        // loop would spin forever.  `Some(outcome)` therefore means the child
-        // is already consumed, and must not be waited on again.
-        // Set exactly when the poll leaves through the cancel branch below, so
-        // whatever status comes back after that is our teardown's doing.
-        let mut torn_down_by: Option<crate::process::CancelCause> = None;
+        // is seen (WUNTRACED): plain `try_wait` reports `Ok(None)` on a stop
+        // and the loop would spin forever.  A `Park` stop waits at the gate
+        // here; every other outcome leaves the loop and is classified below.
         let early_outcome: Option<crate::process::WaitOutcome> = if let Some(o) =
             self.settled.take()
         {
@@ -328,11 +318,11 @@ impl RunningChild {
                 {
                     polls += 1;
                 }
-                match child.try_wait_handling_stop(self.parks(), self.kill_target()) {
+                match child.try_wait_handling_stop() {
                     Ok(Some(crate::process::WaitOutcome::Stopped(sig)))
                         if let StopPolicy::Park(park) = &self.stop =>
                     {
-                        park.status.set(crate::process::StageState::Stopped(sig));
+                        park.stop.set(Some(sig));
                         crate::dbg_trace!(
                             "wait",
                             "parked name={} pid={} polls={} elapsed={:?} signal={sig:?}",
@@ -346,7 +336,7 @@ impl RunningChild {
                             // (`SIGCONT`ed), so keep waiting on the same one.
                             Ok(()) => continue,
                             Err(cause) => {
-                                torn_down_by = Some(cause);
+                                self.ending = self.ending.max(Ending::RalEnded(cause));
                                 break self.terminate_group(&mut child, cause);
                             }
                         }
@@ -392,7 +382,7 @@ impl RunningChild {
                     // never wait on a dead pid.  The Windows group release is
                     // not part of teardown; the `Standalone` branch below still
                     // performs it on the way out.
-                    torn_down_by = Some(cause);
+                    self.ending = self.ending.max(Ending::RalEnded(cause));
                     break self.terminate_group(&mut child, cause);
                 }
                 std::thread::sleep(interval);
@@ -408,13 +398,12 @@ impl RunningChild {
             // hang in waitpid / WaitForSingleObject is visible.
             crate::dbg_trace!(
                 "wait",
-                "blocking-wait name={} pid={} parks={} elapsed={:?}",
+                "blocking-wait name={} pid={} elapsed={:?}",
                 self.name,
                 pid,
-                self.parks(),
                 t_enter.elapsed(),
             );
-            let out = match child.wait_handling_stop(self.parks(), self.kill_target()) {
+            let out = match child.wait_handling_stop() {
                 Ok(out) => out,
                 Err(e) => {
                     // Re-arm `Drop`, as in the poll loop's error arm.
@@ -434,34 +423,47 @@ impl RunningChild {
         // A death by a signal on our own ladder is our doing, so the report
         // names the cause rather than the number; anything else the child met in
         // the grace window stays its own and is reported as such.
-        let outcome = match torn_down_by {
-            Some(cause) => outcome.attribute_to(cause),
-            None => outcome,
+        let outcome = match self.ending {
+            Ending::RalEnded(cause) => outcome.attribute_to(cause),
+            Ending::OwnAccord => outcome,
         };
-        // Only `StopPolicy::Escape` can still carry a `Stopped` outcome here:
-        // `Park` loops back onto the same child inside the poll above, and
-        // `KillAndReap` never gets `Stopped` back from `try_wait_handling_stop`.
+        // A stop is job control's business only while nothing is ending this
+        // child; once ral is, it is a corpse to be.  `Park` never arrives
+        // here: the poll loop above loops back onto the same child.
         #[cfg(unix)]
-        if let crate::process::WaitOutcome::Stopped(signal) = outcome {
-            let pgid = match self.group_owner {
-                GroupOwner::Standalone(p) | GroupOwner::BorrowedByPipeline(p) => p,
-                GroupOwner::None => {
-                    unreachable!("wait_handling_stop only returns Stopped when parks() is true")
+        let outcome = match outcome {
+            crate::process::WaitOutcome::Stopped(signal) => {
+                match (&self.stop, self.ending, self.group_owner) {
+                    // A group is what a job is keyed by, so a child without one
+                    // cannot become one however its policy reads.
+                    (
+                        StopPolicy::Escape,
+                        Ending::OwnAccord,
+                        GroupOwner::Standalone(pgid) | GroupOwner::BorrowedByPipeline(pgid),
+                    ) => {
+                        // Detach the pumps rather than join them: the stopped
+                        // child still holds its pipes open.
+                        drop((self.pump.take(), self.stderr_pump.take()));
+                        return Err(Break::Escape(Escape::Stopped {
+                            pgid,
+                            signal,
+                            cmd: self.name.clone(),
+                            // Empty at birth: the frames that staged writes
+                            // hang them on the escape as it passes them.
+                            pending: Vec::new(),
+                        }));
+                    }
+                    _ => match child.kill_and_reap_stopped(signal, self.kill_target()) {
+                        Ok(out) => out,
+                        Err(e) => {
+                            self.child = Some(child);
+                            return Err(Break::Error(Error::new(format!("{}: {e}", self.name), 1)));
+                        }
+                    },
                 }
-            };
-            // Detach the pumps rather than join them: the stopped child still
-            // holds its pipes open, so a join here would never return.
-            let _ = self.pump.take();
-            let _ = self.stderr_pump.take();
-            return Err(Break::Escape(Escape::Stopped {
-                pgid,
-                signal,
-                cmd: self.name.clone(),
-                // Empty at birth: the frames that staged writes hang them on
-                // the escape as it passes them on the way out.
-                pending: Vec::new(),
-            }));
-        }
+            }
+            other => other,
+        };
         // Let the Job Object's whole-job completion drain any descendants before
         // the handle goes.  A pipeline stage never lands here: its release
         // belongs to `PipelineGroup::Drop`.
@@ -503,6 +505,7 @@ impl RunningChild {
         );
         Ok(WaitedChild {
             outcome,
+            ending: self.ending,
             pump: self.pump.take(),
             stderr_pump: self.stderr_pump.take(),
             name: self.name.clone(),
@@ -513,22 +516,15 @@ impl RunningChild {
 }
 
 impl RunningChild {
-    /// Wait, classify, and join the drainers: the failure the outcome amounts
-    /// to, or `None` for success.  `kill` says whether the pipeline collector
-    /// itself sent this stage its kill because its reader was already reaped —
-    /// the one death `CommandFailure::from_outcome` forgives, and the reason
-    /// the raw status does not come back beside the verdict: a caller holding
-    /// both can branch on the un-forgiven one.  Where a status still means
-    /// something it is `failure.to_user_exit_code()`, reachable only inside
-    /// `Some`.  `runtime::pipeline::collect::observe_external_stage` reduces
-    /// a direct-spawn external stage this way.
-    pub(crate) fn observe(
-        self,
-        kill: crate::process::StageKill,
-    ) -> Settled<Option<crate::process::CommandFailure>> {
+    /// Wait, classify, and settle the drainers: the failure the outcome
+    /// amounts to, or `None` for success.  The raw status does not come back
+    /// beside the verdict, so no caller can branch on a forgiven death; where
+    /// a status still means something it is `failure.to_user_exit_code()`,
+    /// reachable only inside `Some`.
+    pub(crate) fn observe(self) -> Settled<Option<crate::process::CommandFailure>> {
         let waited = self.wait()?;
-        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, kill);
-        waited.drain();
+        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, waited.ending);
+        waited.settle();
         Ok(failure)
     }
 
@@ -539,12 +535,10 @@ impl RunningChild {
         if self.settled.is_some() {
             return true;
         }
-        let parks = self.parks();
-        let target = self.kill_target();
         let Some(child) = self.child.as_mut() else {
             return true;
         };
-        match child.try_wait_handling_stop(parks, target) {
+        match child.try_wait_handling_stop() {
             Ok(Some(outcome)) => {
                 self.settled = Some(outcome);
                 true
@@ -576,7 +570,8 @@ impl RunningChild {
     /// It addresses the pid alone — the anchor and unrelated group members
     /// still live — and lands harmlessly on an already-exited child, which is
     /// what keeps a recorded exit status from ever being overwritten.
-    pub(crate) fn kill_for_dead_reader(&mut self) {
+    pub(crate) fn reader_gone(&mut self) {
+        self.ending = self.ending.max(Ending::RalEnded(CancelCause::ReaderGone));
         let Some(child) = self.child.as_mut() else {
             return;
         };
@@ -590,22 +585,34 @@ impl RunningChild {
         }
     }
 
+    /// Kill and reap a stopped child whose stop the collector answered with
+    /// death, recording the stop as its verdict: `waitpid` reports a stop
+    /// once, so a later wait would find nothing and the report would lose it.
+    #[cfg(unix)]
+    pub(crate) fn end_stopped(&mut self, sig: crate::process::Signal) {
+        let target = self.kill_target();
+        if let Some(child) = self.child.as_mut()
+            && let Ok(outcome) = child.kill_and_reap_stopped(sig, target)
+        {
+            self.settled = Some(outcome);
+        }
+    }
 }
 
 impl WaitedChild {
-    /// Join the drainer threads.  Consumes `self`, since they join exactly
-    /// once; a `WaitedChild` only exists past the child's death, so the joins
-    /// meet a pipe already at EOF.
-    pub fn drain(mut self) {
-        crate::dbg_trace!(
-            "wait",
-            "drain-begin name={} pid={} elapsed={:?} has_pump={} has_stderr_pump={}",
-            self.name,
-            self.pid,
-            self.t_enter.elapsed(),
-            self.pump.is_some(),
-            self.stderr_pump.is_some(),
-        );
+    /// Join the drainer threads — or, for a child ral killed because its
+    /// reader was gone, detach them.  Its remaining bytes are owed to nobody,
+    /// and a descendant that survived that pid-addressed kill still holds the
+    /// pipe the pump reads, so the join would never return.  Every other
+    /// ending still joins: a group teardown kills the whole tree before
+    /// anything is observed (`PipelineGroup::kill`), and a standalone child's
+    /// own teardown addresses its group, so in both the pumps are already at
+    /// EOF and the capture is complete.
+    pub fn settle(mut self) {
+        if self.ending == Ending::RalEnded(CancelCause::ReaderGone) {
+            drop((self.pump.take(), self.stderr_pump.take()));
+            return;
+        }
         if let Some(jh) = self.pump.take() {
             let _ = jh.join();
             crate::dbg_trace!(
@@ -704,7 +711,7 @@ mod tests {
         });
 
         let failure = running
-            .observe(crate::process::StageKill::NotSent)
+            .observe()
             .expect("wait should not error")
             .expect("a torn-down child is a failure");
         canceller.join().expect("canceller thread");
@@ -780,7 +787,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         let waited = running.wait().expect("wait should not error");
         let elapsed = t0.elapsed();
-        waited.drain();
+        waited.settle();
         canceller.join().expect("canceller thread");
 
         // Property 1: grace is 500 ms then group SIGKILL, so real time is well

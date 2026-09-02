@@ -183,9 +183,10 @@ exponential backoff (5 ms → 100 ms cap). On each iteration it `try_wait`s
 - **`RootAbort`** → an immediate group SIGKILL, no grace.
 
 Every external wait goes through this one loop — the interactive REPL
-foreground included (`park_on_stop = true` there makes a SIGSTOP *classify* as
-a parked job instead of a kill-and-reap; it no longer selects a different,
-blocking wait). A foreground external still gets its Ctrl-C from the kernel
+foreground included (`StopPolicy::Escape` there makes a SIGSTOP *classify* as
+a parked job instead of a kill-and-reap, and only while nothing is ending the
+child; it does not select a different, blocking wait). A foreground external
+still gets its Ctrl-C from the kernel
 directly — it owns the terminal (see [[map/repl/jobs|jobs]]) — but a SIGTERM
 delivered to *ral* now preempts even that wait through the root cause.
 

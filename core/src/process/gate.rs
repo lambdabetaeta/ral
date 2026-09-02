@@ -67,46 +67,39 @@ impl StageGate {
     }
 }
 
-/// Running, stopped by a signal, or finished.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StageState {
-    Running,
-    Stopped(Signal),
-    Finished,
-}
-
-/// A stage thread's status as the collector reads it.
+/// A stage thread's outstanding stop, as the collector reads it.
 ///
-/// The thread writes `Stopped`/`Finished`; the collector holding the handle
-/// writes `Running` once it has acknowledged the stop — the owner on resume,
-/// a joining collector at once, having reported the stop to its own stage's
-/// status.
-pub struct StageStatus(Mutex<StageState>);
+/// The thread (or an external it waits on) writes the signal; the collector
+/// holding the handle clears it once acknowledged — the owner on resume, a
+/// joining collector at once, having reported the stop to its own stage.
+/// Whether the stage has *ended* is not here: that is `JoinHandle::is_finished`,
+/// which an unwinding panic cannot skip.
+pub struct StageStop(Mutex<Option<Signal>>);
 
-impl StageStatus {
+impl StageStop {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self(Mutex::new(StageState::Running)))
+        Arc::new(Self(Mutex::new(None)))
     }
 
-    pub fn get(&self) -> StageState {
+    pub fn get(&self) -> Option<Signal> {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub fn set(&self, s: StageState) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = s;
+    pub fn set(&self, sig: Option<Signal>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = sig;
     }
 }
 
 /// A stage thread's share of its pipeline's park.
 ///
 /// The gate every stage of the pipeline waits on, and this stage's own
-/// status, read by the collector that holds its handle.  Travels on the
-/// `Mooring` beside the cancel scope, so a nested pipeline's stages inherit
+/// outstanding stop, read by the collector that holds its handle.  Travels on
+/// the `Mooring` beside the cancel scope, so a nested pipeline's stages inherit
 /// the gate and a detached worker does not.
 #[derive(Clone)]
 pub struct StagePark {
     pub gate: Arc<StageGate>,
-    pub status: Arc<StageStatus>,
+    pub stop: Arc<StageStop>,
 }
 
 /// What a stopped external does to the ral that waits on it.
@@ -114,20 +107,16 @@ pub struct StagePark {
 pub enum StopPolicy {
     /// Batch mode: kill and reap on the spot.
     KillAndReap,
-    /// A top-level foreground external, or a direct external of a
-    /// tty-owning pipeline: surface `Escape::Stopped`.
+    /// A top-level foreground external the REPL's job table owns: surface
+    /// `Escape::Stopped`.
     Escape,
-    /// An external inside a stage thread: record `Stopped(sig)` in
-    /// `park.status`, wait on `park.gate`, then continue waiting on the
-    /// same child (it is alive and will be `SIGCONT`ed).
+    /// An external inside a stage thread: record the signal in `park.stop`,
+    /// wait on `park.gate`, then continue waiting on the same child (it is
+    /// alive and will be `SIGCONT`ed).
     Park(StagePark),
 }
 
 impl StopPolicy {
-    pub fn parks(&self) -> bool {
-        !matches!(self, Self::KillAndReap)
-    }
-
     /// The one rule for every external ral waits on.  Inside a stage thread it
     /// parks on the pipeline's gate; outside one, `escapes` (a foreground the
     /// job table can resume) surfaces the stop, and anything else kills and
@@ -182,7 +171,7 @@ mod tests {
         let mut mooring = crate::types::Mooring::adrift();
         let park = StagePark {
             gate: StageGate::new(),
-            status: StageStatus::new(),
+            stop: StageStop::new(),
         };
         mooring.park = Some(park);
         assert!(

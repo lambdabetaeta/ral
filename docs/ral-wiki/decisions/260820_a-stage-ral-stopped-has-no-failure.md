@@ -24,8 +24,10 @@ disposition toward that signal never again decides its pipeline's verdict.
   Unix, a distinctive-code `TerminateProcess` on Windows, so the cascade runs
   tail-ward. That kill is the pipeline's one forgiven death — a non-final
   stage ral itself ended keeps no failure, because the rest of its output was
-  owed to nobody. A stage that stops, wherever it sits, parks the whole
-  pipeline at once rather than wedging a collector blocked on its neighbour.
+  owed to nobody. A stage that stops, wherever it sits, is answered at once
+  rather than wedging a collector blocked on its neighbour: the collector
+  parks a foreground pipeline as a resumable job, and cancels any other owned
+  one, there being no job table to resume it.
 - The kill is `SIGKILL`, not a caught signal, because any catchable signal
   reopens negotiation with the producer's handler table: a handler that
   ignores, delays, or reinterprets it hands the disposition question straight
@@ -54,8 +56,12 @@ disposition toward that signal never again decides its pipeline's verdict.
 - Cancellation outranks forgiveness: a death attributed to a cancellation
   already in force (Ctrl-C teardown) is kept even when the signal ral sent
   was `SIGKILL`. The kill this decision forgives is the collector's own,
-  raised for exactly one reason — the reader is gone — and a `SIGKILL` raised
-  for a different, already-recorded reason is not that kill.
+  raised for exactly one reason — the reader is gone. Each stage and each
+  child carries one `Ending` — its own accord, or ral ended it for a cause —
+  which is ordered so that two parties ending the same stage join by `max`,
+  and every stronger cause outranks the reader-gone kill there. Forgiveness
+  reads that ending, so a cancellation arriving alongside the collector's kill
+  displaces it and the death is kept.
 - A parked pipeline (`SIGTSTP`) abandons its held read ends along with its
   stage handles and reverts to raw OS pipe behaviour; its verdict was already
   only its leader's exit, so no forgiveness question arises for a job that

@@ -820,21 +820,21 @@ fn real_sigkill_is_not_reported_as_plain_exit_137() {
     );
 }
 
+/// A stage that stops itself reaches the collector as a stop (the wait is
+/// `WUNTRACED`, so a stopped child does not read as running forever), and the
+/// collector — not the wait helper — answers it: a batch pipeline has no job
+/// table to resume it, so the whole group is cancelled and the verdict is the
+/// stop.  The tail here is `cat`, which dies of EOF whether or not the group
+/// is cancelled; `pipeline_self_stopping_child_cancels_an_unrelated_tail` is
+/// what proves the cancel.
 #[test]
 fn pipeline_self_stopping_child_does_not_hang_ral() {
-    // Without WUNTRACED, child.wait() only returns on termination — a
-    // SIGTSTP'd child leaves the pipeline stuck and the terminal owned by
-    // the stopped pgid.  wait_handling_stop must detect WIFSTOPPED, kill
-    // the pgid (no job control), and reap so ral can exit promptly.
-    //
-    // Drives this by having stage 1 SIGSTOP itself; the entire pipeline
-    // pgid then needs to be killed by ral's wait helper.
     let o = run_with_timeout(
         &[],
         "/bin/sh -c 'kill -STOP $$' | cat",
         Duration::from_secs(5),
     )
-    .expect("pipeline hung after child stopped — wait_handling_stop did not fire");
+    .expect("pipeline hung after child stopped — the collector never answered the stop");
     assert_eq!(o.status, 128 + libc::SIGSTOP, "stderr: {}", o.stderr);
     assert!(
         o.stderr.contains("stopped by signal")
@@ -843,6 +843,45 @@ fn pipeline_self_stopping_child_does_not_hang_ral() {
         "stderr: {}",
         o.stderr
     );
+}
+
+/// The test the `| cat` tail could never be: `sleep 6` reads nothing and
+/// dies of nothing but a group cancel, so returning well inside three seconds
+/// proves the collector tore the group down — and the verdict is still the
+/// stop that ended the pipeline, not the tail's teardown.
+#[test]
+fn pipeline_self_stopping_child_cancels_an_unrelated_tail() {
+    let o = run_with_timeout(
+        &[],
+        "/bin/sh -c 'kill -STOP $$' | /bin/sleep 6",
+        Duration::from_secs(3),
+    )
+    .expect("the stopped stage's group was never cancelled: the tail ran its six seconds");
+    assert_eq!(o.status, 128 + libc::SIGSTOP, "stderr: {}", o.stderr);
+    assert!(
+        o.stderr.contains("stopped by signal") && o.stderr.contains("SIGSTOP"),
+        "stderr: {}",
+        o.stderr
+    );
+}
+
+/// A stage's reader-gone kill addresses the stage's pid alone, so a
+/// backgrounded descendant survives it holding the stage's pumped stderr
+/// open; the pump must be detached, not joined, or the pipeline waits for
+/// the descendant.  Under `--audit` stderr is teed, hence pumped — the
+/// control without it already passed.  Two seconds discriminates: the
+/// descendant sleeps four.
+#[test]
+fn a_pumped_descendant_does_not_outlive_the_reader_gone_kill() {
+    for args in [&[][..], &["--audit"][..]] {
+        let o = run_with_timeout(
+            args,
+            "/bin/sh -c 'sleep 4 & wait' | /usr/bin/true",
+            Duration::from_secs(2),
+        )
+        .unwrap_or_else(|| panic!("{args:?}: the pipeline waited for the stage's descendant"));
+        assert_eq!(o.status, 0, "{args:?}: stderr: {}", o.stderr);
+    }
 }
 
 #[test]
@@ -2250,12 +2289,8 @@ fn mkfifo(path: &std::path::Path) {
 /// whose stage forks a grandchild must still take the whole group down, so
 /// the collector must signal the group itself.  The `sleep 300 &` the fixture
 /// forks never `setsid`s away, so it is the group member that would survive.
-///
-/// The fixture closes its own stderr before backgrounding the grandchild:
-/// otherwise the grandchild would inherit the pipe this test's own stderr
-/// pump reads, and the collector's `drain` — which runs before this test's
-/// group-wide kill has any chance to fire — would block on that pipe's EOF
-/// forever, an unrelated deadlock this regression is not about.
+/// It also inherits the stage's pumped stderr, so the teardown's group kill
+/// is what makes that pump's join terminate.
 #[test]
 fn a_cancelled_pipeline_stages_grandchild_does_not_survive() {
     let pidfile = fresh_tmp_path("ral_pipeline_cancel_teardown", "pid");
@@ -2265,7 +2300,7 @@ fn a_cancelled_pipeline_stages_grandchild_does_not_survive() {
     std::fs::write(
         &fixture,
         format!(
-            "#!/bin/sh\nexec 2>/dev/null\nsleep 300 &\necho $! > {}\n: > {}\nwait\n",
+            "#!/bin/sh\nsleep 300 &\necho $! > {}\n: > {}\nwait\n",
             pidfile.display(),
             gate.display(),
         ),

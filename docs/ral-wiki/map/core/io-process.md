@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c8af3823
+generated_at_commit: 6104758c
 generated_at_date: 2026-09-02
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
@@ -74,25 +74,34 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 
 ## Process — `core/src/process/`
 
-- `outcome.rs` — `Signal`, `WaitOutcome`, and the user-facing `SpawnFailure` /
-  `CommandFailure` the evaluator surfaces. A death ral itself caused is its own
-  variant (`Cancelled`, carrying the `CancelCause` and the signal we sent), so a
-  torn-down child reports the cause — an expired time limit, a `cancel`, an
-  interrupt, a shutdown — while a signal from outside ral still reports its
-  number. Same status either way, and it carries the one forgiveness: a
-  non-final stage the collector itself killed (`StageKill`, sent once that
-  stage's reader is reaped) keeps no failure; every other status is kept,
-  because the kill precedes the wait and cannot rewrite a recorded status
+- `outcome.rs` — `Signal`, `WaitOutcome`, `Ending`, and the user-facing
+  `SpawnFailure` / `CommandFailure` the evaluator surfaces. A death ral itself
+  caused is its own variant (`Cancelled`, carrying the `CancelCause` and the
+  signal we sent), so a torn-down child reports the cause — an expired time
+  limit, a `cancel`, an interrupt, a shutdown — while a signal from outside ral
+  still reports its number. *`Ending`* is how a child's or a stage's life ended:
+  `OwnAccord`, or `RalEnded(CancelCause)`. It is recorded on the child and on
+  the stage handle rather than read back off a status, and it is ordered, so two
+  parties that each ended the same one join by `max` and a cancellation in force
+  outranks the collector's reader-gone kill by the order rather than by a
+  special case. It is the sole input to forgiveness and to whether a child's
+  drainers are joined: only `RalEnded(ReaderGone)`, and only a death that kill
+  actually caused, keeps no failure; every other status is kept, because the
+  kill precedes the wait and cannot rewrite a recorded status
   ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
 - `gate.rs` (Unix) — `StageGate`, the one Ctrl-Z park per pipeline, shared by
   every stage thread it holds (`pause`/`resume`/`is_paused` behind an atomic
-  fast path plus a `Condvar` for the blocking wait); `StageStatus`, a stage's
-  own `Running`/`Stopped(Signal)`/`Finished` slot the collector holding its
-  handle reads and clears; `StagePark { gate, status }`, the pair that travels
+  fast path plus a `Condvar` for the blocking wait); `StageStop`, a stage's
+  outstanding stop and nothing besides — one `Option<Signal>`, written by the
+  stage or by an external it waits on and cleared by the collector holding its
+  handle, while whether the stage has *ended* is read off
+  `JoinHandle::is_finished`, which an unwinding panic cannot skip;
+  `StagePark { gate, stop }`, the pair that travels
   on `Mooring::park` so a nested pipeline's stages inherit the gate and a
   detached `spawn` worker, minted a fresh park-free `Mooring`, does not; and
-  `StopPolicy` (`KillAndReap` / `Escape` / `Park(StagePark)`), the one rule
-  every external ral waits on reads to decide what a `SIGTSTP` becomes.
+  `StopPolicy` (`KillAndReap` / `Escape` / `Park(StagePark)`), what becomes of
+  a stop nobody else claimed — a pipeline stage's stop is the collector's to
+  classify, since only it holds the group's role.
 - `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
   stdout write from another thread: a self-pipe polled beside the stage's own
   fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle

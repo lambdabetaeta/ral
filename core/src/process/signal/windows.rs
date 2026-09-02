@@ -19,7 +19,7 @@
 
 use std::sync::atomic::Ordering;
 
-use super::{ESCALATION, KillTarget, Pgid, PgidPolicy};
+use super::{ESCALATION, Pgid, PgidPolicy};
 use crate::process::cancel::{CancelCause, request_foreground_cancel};
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -777,8 +777,6 @@ pub fn disown_pipeline_group(pgid: Pgid) {
 #[allow(clippy::disallowed_methods)]
 pub(super) fn wait_handling_stop(
     child: &mut std::process::Child,
-    _parks: bool,
-    _target: KillTarget,
 ) -> std::io::Result<crate::process::WaitOutcome> {
     child
         .wait()
@@ -790,8 +788,6 @@ pub(super) fn wait_handling_stop(
 #[allow(clippy::disallowed_methods)]
 pub(super) fn try_wait_handling_stop(
     child: &mut std::process::Child,
-    _parks: bool,
-    _target: KillTarget,
 ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
     child
         .try_wait()

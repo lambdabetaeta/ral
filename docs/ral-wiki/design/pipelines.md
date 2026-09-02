@@ -79,9 +79,10 @@ multi-stage pipeline shares one process group:
 - the final value, when the final route is `Value`, is simply the last
   stage's thread returning it — no frame, no wire, crosses back.
 
-Only an external is ever isolated by a process boundary now; a stage panic or
-stack overflow takes the whole shell, exactly as it already does for a
-`spawn` worker.
+Only an external is ever isolated by a process boundary. A stage thread's panic
+is caught at the pipeline boundary and folded as that stage's own failure,
+carrying the stage's span, its own stack having none to attribute it to; a Rust
+stack overflow is not an unwind and still takes the whole shell.
 
 A stage is a subshell with respect to mutation regardless of whether it is a
 thread or a process: its `cd`, environment, alias, or module changes do not

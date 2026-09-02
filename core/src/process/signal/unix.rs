@@ -327,7 +327,7 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
 
     let (mut receipt, handshake) = crate::process::cloexec_pipe()?;
     let fd = handshake.as_raw_fd();
-    let (mut intermediate, _its_pgid) =
+    let (intermediate, _its_pgid) =
         spawn_with_pgid_after(cmd, PgidPolicy::NewSession, move || {
             // Async-signal-safe throughout: fork, write, _exit, setsid, fcntl.
             let pid = unsafe { libc::fork() };
@@ -356,7 +356,7 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
             Ok(())
         })?;
     drop(handshake);
-    let born = wait_handling_stop(&mut intermediate, false, KillTarget::Pid)?;
+    let born = wait_handling_stop(&intermediate)?;
     if born != crate::process::WaitOutcome::Exited(0) {
         return Err(std::io::Error::other(format!(
             "could not detach: the intermediate process ended as {born:?} instead of exiting 0, so nothing here knows the pid of what it started"
@@ -377,22 +377,17 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
 //
 // `Child::wait()` returns only on termination, so a child stopped by SIGTSTP,
 // SIGSTOP or SIGTTIN hangs ral with the tty still owned by the stopped pgid;
-// `WaitOptions::UNTRACED` makes the wait return on a stop as well.  With
-// `parks` the stop surfaces as `Stopped`, which `RunningChild::wait` turns
-// into an `Escape::Stopped` (or, parked inside a stage thread, a wait on the
-// pipeline's gate).  Otherwise `target` is SIGKILLed and reaped as
-// `StoppedThenKilled`.
+// `WaitOptions::UNTRACED` makes the wait return on a stop as well.  The stop
+// surfaces as `Stopped` and nothing more: what it means — a job to park, a
+// gate to wait on, a child to kill and reap — belongs to whoever holds the
+// child, never to the wait.
 
-/// Wait for `child` to terminate or stop, classifying a stop per the two modes
-/// above.
+/// Wait for `child` to terminate or stop.
 pub(super) fn wait_handling_stop(
-    child: &mut std::process::Child,
-    parks: bool,
-    target: KillTarget,
+    child: &std::process::Child,
 ) -> std::io::Result<crate::process::WaitOutcome> {
-    let pid = Pid::from_child(child);
-    let (_, status) = waitpid_eintr(pid, WaitOptions::UNTRACED)?;
-    classify_wait_status(pid, status, parks, target, child)
+    let (_, status) = waitpid_eintr(Pid::from_child(child), WaitOptions::UNTRACED)?;
+    Ok(classify_wait_status(status))
 }
 
 /// Wait for `pid`, retrying after `EINTR` so a signal delivery can never be
@@ -448,60 +443,38 @@ fn wait_blocking_eintr(
 /// is pending.  It must keep `UNTRACED`: without it a SIGSTOP'd child reads as
 /// "still running" and the pre-wait poll in `RunningChild::wait` spins forever.
 pub(super) fn try_wait_handling_stop(
-    child: &mut std::process::Child,
-    parks: bool,
-    target: KillTarget,
+    child: &std::process::Child,
 ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
-    let pid = Pid::from_child(child);
-    let Some((_, status)) = try_waitpid_eintr(pid, WaitOptions::UNTRACED)? else {
+    let Some((_, status)) = try_waitpid_eintr(Pid::from_child(child), WaitOptions::UNTRACED)? else {
         return Ok(None);
     };
-    classify_wait_status(pid, status, parks, target, child).map(Some)
+    Ok(Some(classify_wait_status(status)))
 }
 
 /// Translate a `waitpid` status into a `WaitOutcome`, shared by the blocking and
 /// polling paths.  `WaitStatus` is a total, transparent view of the kernel bits,
 /// so termination by a real-time signal classifies with no fallible enum between.
-fn classify_wait_status(
-    pid: Pid,
-    status: WaitStatus,
-    parks: bool,
-    target: KillTarget,
-    child: &mut std::process::Child,
-) -> std::io::Result<crate::process::WaitOutcome> {
+fn classify_wait_status(status: WaitStatus) -> crate::process::WaitOutcome {
     if let Some(signal) = status.stopping_signal() {
-        let stopped_by = crate::process::Signal::new(signal);
-        return handle_stopped(stopped_by, pid, parks, target, child);
+        return crate::process::WaitOutcome::Stopped(crate::process::Signal::new(signal));
     }
     if let Some(code) = status.exit_status() {
-        return Ok(crate::process::WaitOutcome::Exited(code));
+        return crate::process::WaitOutcome::Exited(code);
     }
     if let Some(signal) = status.terminating_signal() {
-        return Ok(crate::process::WaitOutcome::Signaled(
-            crate::process::Signal::new(signal),
-        ));
+        return crate::process::WaitOutcome::Signaled(crate::process::Signal::new(signal));
     }
-    Ok(crate::process::WaitOutcome::NativeCode(status.as_raw()))
+    crate::process::WaitOutcome::NativeCode(status.as_raw())
 }
 
-/// Park the stopped child when the caller has a job table (or a pipeline
-/// gate) to resume it from; otherwise SIGKILL `target` and reap the terminal
-/// status.
-fn handle_stopped(
-    stopped_by: crate::process::Signal,
-    pid: Pid,
-    parks: bool,
-    target: KillTarget,
+/// SIGKILL `target` and reap the terminal status, reporting the stop that
+/// preceded it.
+pub(super) fn kill_and_reap_stopped(
     child: &mut std::process::Child,
+    stopped_by: crate::process::Signal,
+    target: KillTarget,
 ) -> std::io::Result<crate::process::WaitOutcome> {
-    if parks {
-        crate::dbg_trace!(
-            "fg",
-            "pid {pid} stopped (signal {}); parking",
-            stopped_by.display(),
-        );
-        return Ok(crate::process::WaitOutcome::Stopped(stopped_by));
-    }
+    let pid = Pid::from_child(child);
     crate::dbg_trace!(
         "fg",
         "pid {pid} stopped (signal {}); killing {target:?}",

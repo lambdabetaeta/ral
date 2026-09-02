@@ -21,20 +21,41 @@ use crate::process::Signal;
 use crate::process::{CancelCause, Pgid, PgidPolicy};
 use crate::types::{Break, Mooring, Settled, Shell};
 
+/// What this group owns, and therefore what a stop of it means.  The fourth
+/// combination the two booleans it replaces could spell — a joining group
+/// that owns the terminal — does not exist: a nested pipeline is never
+/// foreground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GroupRole {
+    /// Owns the pgid and was launched into the terminal foreground, so a
+    /// stop parks it as a job the REPL can resume.  Survives the park: the
+    /// foreground guard is handed back on the way in, the role is not.
+    Foreground,
+    /// Owns the pgid with nothing to resume a stop — batch mode, a capture, a
+    /// pipeline inside a `spawn` worker — so a stop cancels it.
+    Background,
+    /// Joined an enclosing stage's group: it may not signal, kill, park or
+    /// escape on its own account, and forwards a stop to the owner.
+    Joining,
+}
+
 /// Pgid lifecycle for one pipeline: the anchor, the foreground guard and the
 /// SIGINT relay slot, all released together on drop.  The Ctrl-Z gate stage
 /// threads wait on lives beside this, on `PipeNode`, not here.
 pub(super) struct PipelineGroup {
-    terminal: TerminalPlan,
+    role: GroupRole,
     leader: Pgid,
+    /// The terminal handoff *actually held*: `None` when `tcsetpgrp` failed,
+    /// and `None` again once a park hands the terminal back.
     foreground: Option<crate::process::ForegroundGuard>,
     #[cfg(unix)]
     relay: Option<crate::process::PipelineRelay>,
-    /// `None` for a joining group.
+    /// `Some` exactly when `role` is not `Joining`; taken by `Drop`.
     anchor: Option<AnchorProcess>,
-    /// Set by `signal`, so `Drop` follows up with `kill` on a member that
-    /// ignored it.
-    cancelled: bool,
+    /// Set by `signal`/`kill`, so `Drop` follows up on a member that outlived
+    /// the teardown.  Never set on the ordinary completion path, where a
+    /// `spawn` worker that joined the pgid must survive the pipeline.
+    torn_down: bool,
 }
 
 /// What the anchor saw happen to the group.
@@ -51,13 +72,16 @@ impl PipelineGroup {
         let anchor = AnchorProcess::spawn(shell)?;
         let leader = anchor.pgid;
         Ok(Self {
-            terminal,
+            role: match terminal {
+                TerminalPlan::ForegroundExternalGroup => GroupRole::Foreground,
+                TerminalPlan::NoTerminal => GroupRole::Background,
+            },
             leader,
             foreground: None,
             #[cfg(unix)]
             relay: crate::process::PipelineRelay::install(leader.as_raw()),
             anchor: Some(anchor),
-            cancelled: false,
+            torn_down: false,
         })
     }
 
@@ -65,22 +89,30 @@ impl PipelineGroup {
     /// owning one.
     pub(super) fn joining(group: Pgid) -> Self {
         Self {
-            terminal: TerminalPlan::NoTerminal,
+            role: GroupRole::Joining,
             leader: group,
             foreground: None,
             #[cfg(unix)]
             relay: None,
             anchor: None,
-            cancelled: false,
+            torn_down: false,
         }
     }
 
-    pub(super) fn owns_tty(&self) -> bool {
-        self.terminal.owns_tty()
+    pub(super) fn role(&self) -> GroupRole {
+        self.role
     }
 
     pub(super) fn owned(&self) -> bool {
-        self.anchor.is_some()
+        self.role != GroupRole::Joining
+    }
+
+    /// Whether this group actually holds the controlling terminal — the guard
+    /// it acquired, never the plan it was launched under.  `claim_foreground`
+    /// runs before any stage exists, so this is settled by the time a stage's
+    /// stdin or stdout is routed.
+    pub(super) fn holds_terminal(&self) -> bool {
+        self.foreground.is_some()
     }
 
     pub(super) fn leader_pgid(&self) -> Pgid {
@@ -99,10 +131,9 @@ impl PipelineGroup {
     }
 
     pub(super) fn claim_foreground(&mut self, shell: &Shell, mooring: &Mooring) {
-        // `resolve_terminal_plan` already gated `owns_tty` on the lease;
-        // re-borrowing it here is the proof `try_acquire` demands.
-        if self.owned()
-            && self.terminal.owns_tty()
+        // `resolve_terminal_plan` already gated the foreground plan on the
+        // lease; re-borrowing it here is the proof `try_acquire` demands.
+        if self.role == GroupRole::Foreground
             && self.foreground.is_none()
             && let Some(lease) = shell.terminal_lease(mooring)
         {
@@ -111,14 +142,14 @@ impl PipelineGroup {
         }
     }
 
-    /// The owner's cancel signal: `SIGINT` for `Interrupt`, else `SIGTERM`,
+    /// The owner's cause signal: `SIGINT` for `Interrupt`, else `SIGTERM`,
     /// then `SIGCONT` — a stopped member cannot act on either until it runs.
-    /// Nothing on Windows, where the per-child ladder cancels.
+    /// Nothing on Windows, whose only group verb is [`Self::kill`].
     pub(super) fn signal(&mut self, cause: CancelCause) {
         if !self.owned() {
             return;
         }
-        self.cancelled = true;
+        self.torn_down = true;
         #[cfg(unix)]
         {
             let signal = if cause == CancelCause::Interrupt {
@@ -133,7 +164,18 @@ impl PipelineGroup {
         let _ = cause;
     }
 
-    fn kill(&self) {
+    /// SIGKILL the pgid — the Job Object's kill on Windows.  Idempotent, and
+    /// nothing for a joining group, whose pgid is its owner's to end.
+    ///
+    /// After this returns, nothing in the group holds a pipe end open.  That
+    /// is the precondition every join in the teardown path rests on: a stage's
+    /// own kill reaches its pid alone, so only the owner can make a pump's
+    /// join terminate.
+    pub(super) fn kill(&mut self) {
+        if !self.owned() {
+            return;
+        }
+        self.torn_down = true;
         #[cfg(unix)]
         self.leader.signal_group(Signal::new(libc::SIGKILL));
         #[cfg(windows)]
@@ -156,17 +198,21 @@ impl PipelineGroup {
 }
 
 impl Drop for PipelineGroup {
+    /// The anchor last, after every stage handle has gone (`PipelineResources`
+    /// and `PipeNode` both order their fields to guarantee it): a stage parked
+    /// on its gate must be able to leave before the anchor is waited on.
     fn drop(&mut self) {
-        if self.cancelled {
+        if self.torn_down {
             self.kill();
         }
-        if let Some(anchor) = self.anchor.take() {
-            anchor.finish();
-        }
+        // The Windows group release lives inside this arm, so it cannot be
+        // guarded on an ownership fact this same statement has consumed.
+        let Some(anchor) = self.anchor.take() else {
+            return;
+        };
+        anchor.finish();
         #[cfg(windows)]
-        if self.owned() {
-            crate::process::release_win_group(self.leader.as_raw());
-        }
+        crate::process::release_win_group(self.leader.as_raw());
     }
 }
 
@@ -243,10 +289,7 @@ impl AnchorProcess {
         if matches!((&self.report).read(&mut byte), Ok(1)) {
             return Some(Witnessed::Cancelled(cancel_cause(i32::from(byte[0]))));
         }
-        match self
-            .child
-            .try_wait_handling_stop(true, crate::process::KillTarget::Pid)
-        {
+        match self.child.try_wait_handling_stop() {
             Ok(Some(WaitOutcome::Stopped(sig))) => Some(Witnessed::Stopped(sig)),
             Ok(Some(WaitOutcome::Signaled(sig))) => {
                 Some(Witnessed::Cancelled(cancel_cause(sig.number())))
@@ -293,6 +336,29 @@ mod tests {
         let group = PipelineGroup::prepare(TerminalPlan::NoTerminal, &shell).expect("anchor spawns");
         assert!(group.owned());
         assert!(group.leader_pgid().as_raw() > 0);
+    }
+
+    /// A default shell mints no terminal lease, so `claim_foreground` acquires
+    /// nothing: the plan stands, the fact does not.
+    #[test]
+    fn a_group_that_never_acquired_the_terminal_does_not_claim_it() {
+        let shell = Shell::default();
+        let mut group = PipelineGroup::prepare(TerminalPlan::ForegroundExternalGroup, &shell)
+            .expect("anchor spawns");
+        group.claim_foreground(&shell, &Mooring::adrift());
+        assert_eq!(group.role(), GroupRole::Foreground);
+        assert!(!group.holds_terminal());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_completed_group_releases_its_windows_job() {
+        let shell = Shell::default();
+        let group = PipelineGroup::prepare(TerminalPlan::NoTerminal, &shell).expect("anchor spawns");
+        let leader = group.leader_pgid().as_raw();
+        assert!(crate::process::is_known_group(leader));
+        drop(group);
+        assert!(!crate::process::is_known_group(leader));
     }
 
     #[cfg(unix)]

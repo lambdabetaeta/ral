@@ -105,11 +105,13 @@ impl ParkedPipeline {
         }
     }
 
-    /// Signal the group, cancel and wake every stage, and open the gate so
-    /// cancelled threads can leave.  The caller's drop then joins them.
+    /// Signal the group, cancel and wake every stage, open the gate so
+    /// cancelled threads can leave, then kill: the caller's drop joins them,
+    /// and a join before the kill can outlive the pipeline.
     pub fn cancel(&mut self, cause: CancelCause) {
         self.group.signal(cause);
         self.collect.cancel_stages(cause);
         self.gate.resume();
+        self.group.kill();
     }
 }

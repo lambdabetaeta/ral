@@ -22,12 +22,6 @@ pub(super) enum TerminalPlan {
     ForegroundExternalGroup,
 }
 
-impl TerminalPlan {
-    pub(super) fn owns_tty(self) -> bool {
-        matches!(self, Self::ForegroundExternalGroup)
-    }
-}
-
 /// Identity and pre-evaluated argv for a directly spawned external stage.  Args
 /// stay `Value`s so launch-time `command::vet` applies the same shape rejection
 /// single-command exec does.

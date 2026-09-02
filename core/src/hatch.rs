@@ -76,10 +76,11 @@ fn sweep_hatched() {
     let mut table = table()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A stopped child is still alive and still ours to reap later.
     table.retain_mut(|child| {
         !matches!(
-            child.try_wait_handling_stop(false, crate::process::KillTarget::Pid),
-            Ok(Some(_))
+            child.try_wait_handling_stop(),
+            Ok(Some(o)) if !matches!(o, crate::process::WaitOutcome::Stopped(_))
         )
     });
 }

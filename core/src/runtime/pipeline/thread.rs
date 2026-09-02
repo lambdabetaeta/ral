@@ -13,9 +13,7 @@ use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::source::Span;
 use crate::types::{AuditFragment, Break, Closure, Error, Mooring, Settled, Value};
-use crate::process::{
-    CancelCause, CancelScope, StageGate, StagePark, StageState, StageStatus, Wake,
-};
+use crate::process::{CancelCause, CancelScope, StageGate, StagePark, StageStop, Wake};
 use std::sync::Arc;
 
 /// A stage thread's result, returned on its `JoinHandle`.
@@ -27,15 +25,32 @@ pub(super) struct StageOutcome {
 /// The parent's handle onto a running stage thread.
 pub(super) struct ThreadStage {
     join: Option<std::thread::JoinHandle<StageOutcome>>,
-    status: Arc<StageStatus>,
+    stop: Arc<StageStop>,
     cancel: CancelScope,
     wake: Arc<Wake>,
     span: Option<Span>,
 }
 
 impl ThreadStage {
-    pub(super) fn probe(&self) -> StageState {
-        self.status.get()
+    /// One non-blocking probe.  The end is read before the stop: a stop can
+    /// go stale — the child parked at the gate is cancelled and the thread
+    /// leaves with the stop still recorded — and a stale stop must not read
+    /// as a live one.  The converse cannot happen: a thread whose child is
+    /// genuinely parked has not finished.
+    pub(super) fn probe(&self) -> super::launch::Probe {
+        if self.finished() {
+            return super::launch::Probe::Ready;
+        }
+        self.stop
+            .get()
+            .map_or(super::launch::Probe::Running, super::launch::Probe::Stopped)
+    }
+
+    /// Read off the thread itself, so an unwinding panic cannot skip it.
+    fn finished(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
     }
 
     pub(super) fn cancel(&self, cause: CancelCause) {
@@ -52,7 +67,7 @@ impl ThreadStage {
             use std::os::windows::io::AsRawHandle;
             use windows_sys::Win32::System::IO::CancelSynchronousIo;
             let Some(join) = &self.join else { return };
-            while !self.wake.acknowledged() && self.status.get() != StageState::Finished {
+            while !self.wake.acknowledged() && !self.finished() {
                 // SAFETY: `join`'s handle is valid for the thread's whole
                 // life, which this `ThreadStage` outlives by construction.
                 unsafe { CancelSynchronousIo(join.as_raw_handle().cast()) };
@@ -61,11 +76,8 @@ impl ThreadStage {
         }
     }
 
-    /// `Stopped` → `Running`; a `Running`/`Finished` status is left alone.
     pub(super) fn resume(&self) {
-        if matches!(self.status.get(), StageState::Stopped(_)) {
-            self.status.set(StageState::Running);
-        }
+        self.stop.set(None);
     }
 
     /// Join the stage thread and reduce it to a [`super::collect::StageObservation`].
@@ -140,7 +152,7 @@ pub(super) fn launch_thread_stage(
 
     let park = StagePark {
         gate: Arc::clone(gate),
-        status: StageStatus::new(),
+        stop: StageStop::new(),
     };
     let policy = cx.shell.local.audit.active_policy();
     let mooring = Mooring::for_stage_thread(cx.mooring, park.clone());
@@ -157,8 +169,7 @@ pub(super) fn launch_thread_stage(
 
     let env = cx.env.clone();
     let comp = Arc::clone(stage);
-    let status = Arc::clone(&park.status);
-    let thread_status = Arc::clone(&status);
+    let stop = Arc::clone(&park.stop);
     let span = spec.span;
 
     let spawned = cx.shell.spawn_thread(
@@ -170,7 +181,6 @@ pub(super) fn launch_thread_stage(
             child.local.audit.install_active_policy(policy);
             let result = machine::evaluate(Closure { comp, env }, mooring, child);
             let audit = child.local.audit.take_fragment();
-            thread_status.set(StageState::Finished);
             StageOutcome { result, audit }
         },
     );
@@ -182,7 +192,7 @@ pub(super) fn launch_thread_stage(
 
     Ok(ThreadStage {
         join: Some(join),
-        status,
+        stop,
         cancel,
         wake,
         span,
@@ -245,7 +255,6 @@ mod tests {
             shell: &mut shell,
             env: &env,
             group: &mut group,
-            stop: crate::process::StopPolicy::KillAndReap,
         };
         let handle = launch_thread_stage(&stage, &spec, route, cx, &gate).expect("launch");
 
@@ -280,7 +289,6 @@ mod tests {
             shell: &mut shell,
             env: &env,
             group: &mut group,
-            stop: crate::process::StopPolicy::KillAndReap,
         };
         let handle = launch_thread_stage(&stage, &spec, route, cx, &gate).expect("launch");
 
@@ -293,20 +301,50 @@ mod tests {
         assert!(obs.break_.is_some(), "a killed stage must not settle Ok");
     }
 
+    /// A `ThreadStage` over a body that panics at once.
+    fn panicking_stage(span: Span) -> ThreadStage {
+        let join = std::thread::Builder::new()
+            .spawn(move || -> StageOutcome { panic!("boom") })
+            .expect("spawn");
+        ThreadStage {
+            join: Some(join),
+            stop: StageStop::new(),
+            cancel: CancelScope::root(),
+            wake: Wake::new().expect("wake"),
+            span: Some(span),
+        }
+    }
+
+    /// The collector never calls `observe` on a stage that probes `Running`,
+    /// so a panicked stage must first read as ready; the panic hook writes a
+    /// crash log rather than aborting, so it is the unwind that ends the
+    /// thread.
+    fn probe_until_ready(handle: &ThreadStage) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(handle.probe(), super::super::launch::Probe::Ready) {
+            assert!(
+                Instant::now() < deadline,
+                "a panicked stage read as running for 5 s"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_panicking_stage_probes_ready_rather_than_running_forever() {
+        let file = Shell::default().install_script_context("<test>", "boom");
+        let handle = panicking_stage(Span::new(file, 0, 4));
+        probe_until_ready(&handle);
+    }
+
+    /// Only once ready does the panic convert to an error carrying the stage's
+    /// own span, its stack having none.
     #[test]
     fn observe_of_a_panicking_body_carries_the_panic_and_its_span() {
         let file = Shell::default().install_script_context("<test>", "boom");
         let span = Span::new(file, 0, 4);
-        let join = std::thread::Builder::new()
-            .spawn(move || -> StageOutcome { panic!("boom") })
-            .expect("spawn");
-        let handle = ThreadStage {
-            join: Some(join),
-            status: StageStatus::new(),
-            cancel: CancelScope::root(),
-            wake: Wake::new().expect("wake"),
-            span: Some(span),
-        };
+        let handle = panicking_stage(span);
+        probe_until_ready(&handle);
 
         let obs = handle.observe(true);
         match obs.break_ {
@@ -337,7 +375,7 @@ mod tests {
 
         let park = StagePark {
             gate: StageGate::new(),
-            status: StageStatus::new(),
+            stop: StageStop::new(),
         };
         let stage_mooring = Mooring::for_stage_thread(&outer, park);
         assert!(

@@ -179,7 +179,7 @@ pub(crate) fn run(
             return Err(defer_to_stop(brk, atomic_commit.take()));
         }
     };
-    let outcome = waited.outcome;
+    let (outcome, ending) = (waited.outcome, waited.ending);
 
     // Held rather than `?`-propagated: the drain below must still run for a
     // command that did run, even when its commit failed.
@@ -242,13 +242,12 @@ pub(crate) fn run(
 
     // Only joins the pump threads: under audit the bytes are already
     // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
-    waited.drain();
+    waited.settle();
     commit_result?;
     // A command inside a pipeline stage cannot take SIGPIPE from an interior
     // edge — the parent holds that edge's read end — so any SIGPIPE it
     // suffers is from a pipe of its own making and is its own failure.
-    match crate::process::CommandFailure::from_outcome(outcome, crate::process::StageKill::NotSent)
-    {
+    match crate::process::CommandFailure::from_outcome(outcome, ending) {
         None => Ok(Value::Unit),
         Some(failure) => {
             let err = Error::from_command_failure(&cmd_name, failure, shell);

@@ -1,4 +1,4 @@
-<!-- verified_at_commit: 68f1964e -->
+<!-- verified_at_commit: 6104758c -->
 # ral(1) — language specification
 
 ## 1. About this specification
@@ -1993,7 +1993,7 @@ Boundary rules are deliberately specific:
 - A forced block returns only its value; cwd and bindings remain private.
 - An ordinary lambda call returns its value, and its logical cwd flows back to its caller, while its lexical locals remain private. Inside a surrounding `within dir`, that dynamic directory override still wins, and the enclosing block ultimately contains the cwd change.
 - Ordinary application and bind run sequentially in the evaluator, so they follow the ordinary function and block rules and do not create pipeline stages.
-- Each stage of a process-staged pipeline runs in a child process with a snapshot of the active lexical and dynamic context. Stage-local bindings, cwd changes, environment changes, aliases, and handlers do not return. If every stage succeeds, the pipeline's value is the final stage's. Otherwise the first stage failure observed in launch order is propagated; a control escape takes priority over an ordinary failure. Returned values and audit data cross only through their defined channels.
+- Each stage of a pipeline runs as a subshell with a snapshot of the active lexical and dynamic context — a ral-written stage on its own thread over a cloned shell, an external command as a process. Stage-local bindings, cwd changes, environment changes, aliases, and handlers do not return. If every stage succeeds, the pipeline's value is the final stage's. Otherwise the first stage failure observed in launch order is propagated; a control escape takes priority over an ordinary failure. Returned values and audit data cross only through their defined channels.
 - A spawned worker receives the closure’s lexical capture and a snapshot of the dynamic context, including directory, environment, handlers, arguments, and grants. Its cwd, bindings, and later dynamic changes remain private, while its result returns through the handle.
 - An external process receives the effective cwd and environment at launch. It cannot mutate ral’s shell state.
 

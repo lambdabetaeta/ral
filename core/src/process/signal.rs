@@ -123,28 +123,21 @@ impl ChildHandle {
         }
     }
 
-    /// Blocking wait that returns on a stop too, which the platform
-    /// `wait_handling_stop` then parks or kills and reaps.  `parks` is
-    /// whether a stop should surface as [`WaitOutcome::Stopped`] rather than
-    /// being killed and reaped on the spot; `target` is who a non-parked stop
-    /// or a kill decision addresses.
+    /// Blocking wait that returns on a stop too, as [`WaitOutcome::Stopped`];
+    /// what the stop means is the holder's decision, never the wait's.
     ///
     /// # Errors
-    /// Returns `Err` if the wait, or the kill-and-reap on a stop, fails.
-    pub(crate) fn wait_handling_stop(
-        &mut self,
-        parks: bool,
-        target: KillTarget,
-    ) -> std::io::Result<WaitOutcome> {
+    /// Returns `Err` if the wait fails.
+    pub(crate) fn wait_handling_stop(&mut self) -> std::io::Result<WaitOutcome> {
         #[cfg(unix)]
         {
             let ChildRepr::Std(child) = &mut self.0;
-            unix::wait_handling_stop(child, parks, target)
+            unix::wait_handling_stop(child)
         }
         #[cfg(windows)]
         {
             match &mut self.0 {
-                ChildRepr::Std(child) => windows::wait_handling_stop(child, parks, target),
+                ChildRepr::Std(child) => windows::wait_handling_stop(child),
                 ChildRepr::RawWindows(child) => child.wait_handling_stop(),
             }
         }
@@ -154,24 +147,36 @@ impl ChildHandle {
     /// nothing is pending.
     ///
     /// # Errors
-    /// Returns `Err` if the poll, or the kill-and-reap on a stop, fails.
-    pub(crate) fn try_wait_handling_stop(
-        &mut self,
-        parks: bool,
-        target: KillTarget,
-    ) -> std::io::Result<Option<WaitOutcome>> {
+    /// Returns `Err` if the poll fails.
+    pub(crate) fn try_wait_handling_stop(&mut self) -> std::io::Result<Option<WaitOutcome>> {
         #[cfg(unix)]
         {
             let ChildRepr::Std(child) = &mut self.0;
-            unix::try_wait_handling_stop(child, parks, target)
+            unix::try_wait_handling_stop(child)
         }
         #[cfg(windows)]
         {
             match &mut self.0 {
-                ChildRepr::Std(child) => windows::try_wait_handling_stop(child, parks, target),
+                ChildRepr::Std(child) => windows::try_wait_handling_stop(child),
                 ChildRepr::RawWindows(child) => child.try_wait_handling_stop(),
             }
         }
+    }
+
+    /// Kill this stopped child and reap the terminal status, reporting the
+    /// stop that preceded it.  The caller has already decided that this stop
+    /// means death; `target` is who the kill addresses.
+    ///
+    /// # Errors
+    /// Returns `Err` if the reaping wait fails.
+    #[cfg(unix)]
+    pub(crate) fn kill_and_reap_stopped(
+        &mut self,
+        stopped_by: Signal,
+        target: KillTarget,
+    ) -> std::io::Result<WaitOutcome> {
+        let ChildRepr::Std(child) = &mut self.0;
+        unix::kill_and_reap_stopped(child, stopped_by, target)
     }
 
     /// Blocking reap after a confirmed SIGKILL, which terminates even a stopped
@@ -340,7 +345,7 @@ pub(crate) enum KillTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::gate::{StageGate, StagePark, StageStatus};
+    use crate::process::gate::{StageGate, StagePark, StageStop};
     use std::sync::Arc;
 
     /// `check` consults the mooring's park after its cause check: a paused
@@ -352,7 +357,7 @@ mod tests {
         let mut mooring = crate::types::Mooring::adrift();
         mooring.park = Some(StagePark {
             gate: Arc::clone(&gate),
-            status: StageStatus::new(),
+            stop: StageStop::new(),
         });
 
         let resumer = std::thread::spawn(move || {

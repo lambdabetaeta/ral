@@ -40,7 +40,7 @@ forced, and the boot-per-stage cost — is deleted.
   in `PipelineBuild::new`, before any stage runs — collapsing the old
   post-launch frame gate, which no longer has a job.
 - **A stage's `Mooring` carries the park, not its `LaunchRole`.**
-  `StagePark { gate: Arc<StageGate>, status: Arc<StageStatus> }` travels on
+  `StagePark { gate: Arc<StageGate>, stop: Arc<StageStop> }` travels on
   `Mooring::park: Option<StagePark>`. A `spawn` worker started inside a stage
   joins the stage's process group (`LaunchRole::PipelineStage(pgid)`) but
   mints a fresh `Mooring` with no park, so a detached worker is no more parked
@@ -50,9 +50,9 @@ forced, and the boot-per-stage cost — is deleted.
   an owner.** `PipelineGroup::joining(pgid)` installs no anchor, claims no
   foreground, and may not signal or kill the group — only the owning,
   top-level group does that. Its collector never parks, signals, or escapes:
-  on a `Stopped` probe it writes `Stopped(sig)` into its own stage's
-  `StageStatus` — the report the owning collector reads, since that is the
-  same slot a direct `Park` arm writes — and forgets the stop locally,
+  on a `Stopped` probe it writes the signal into its own stage's `StageStop` —
+  the report the owning collector reads, since that is the same slot a direct
+  `Park` arm writes — and forgets the stop locally,
   meeting the owner's pause at the `process::check` heading its next pass.
   This is how a stop the anchor cannot see — a single-member `SIGSTOP`, a
   `SIGTTIN` under `bg` — still reaches the owner, one collector per nesting
@@ -74,8 +74,10 @@ forced, and the boot-per-stage cost — is deleted.
   kill the shell.
 - **Stop and park is Unix-only and gate-mediated.** `StopPolicy` replaces the
   boolean `park_on_stop`: `KillAndReap` (batch), `Escape` (a top-level
-  foreground external, or a direct external of a tty-owning pipeline), or
-  `Park(StagePark)` (anything inside a stage thread). A parked pipeline is a
+  foreground external the REPL job table owns), or `Park(StagePark)` (anything
+  inside a stage thread). A pipeline stage's stop is not its policy's to
+  classify — it reaches the collector, which holds the group's role. A parked
+  pipeline is a
   value, `ParkedPipeline`, holding the group with its foreground guard and
   relay already released (the anchor kept, so the pgid stays joinable), the
   gate, and the collector's unobserved state — deposited in
@@ -136,9 +138,14 @@ per stage.
   — a newly created member is not itself stopped, and the later `SIGCONT` is a
   no-op on it. The window is the same family as "parks at the next machine
   step" above: one `check`-to-`spawn` gap.
-- **A stage panic or Rust stack overflow takes the shell**, exactly as it
-  already does for a `spawn` worker; a stage thread gets an 8 MiB stack and
-  the machine's own frame cap bounds ral-level recursion.
+- **A Rust stack overflow takes the shell; a stage panic does not.** An
+  overflow is not an unwind — it aborts the process, exactly as it does for a
+  `spawn` worker. A panic unwinds that stage's thread alone and is caught where
+  the collector joins it, surfacing as an `Error` carrying the stage's span,
+  the stage's own stack having none to attribute it to, and folding like any
+  other stage failure; the collector reads a stage's end off
+  `JoinHandle::is_finished`, which a panic cannot skip. A stage thread gets an
+  8 MiB stack and the machine's own frame cap bounds ral-level recursion.
 - **The anchor survives `SIGTERM`.** `PipelineGroup::drop` reaps it through
   EOF (closing the release pipe), and a cancelled group is `SIGKILL`ed first,
   so `JobTable::cleanup`'s `SIGTERM -pgid` at REPL exit cannot end an anchor

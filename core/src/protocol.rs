@@ -2046,7 +2046,7 @@ impl Drop for WireTransport {
         #[cfg(unix)]
         if let Some(child) = &mut self.child {
             let _ = child.kill();
-            let _ = child.wait_handling_stop(false, crate::process::KillTarget::Pid);
+            let _ = child.reap();
         }
     }
 }
