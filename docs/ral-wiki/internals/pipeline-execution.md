@@ -1,7 +1,7 @@
 ---
-verified_at_commit: af15f422
-verified_at_date: 2026-09-02
-anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, GroupRole, Ending, AnchorProcess, StageGate, StagePark, StagePark::gate, StageStop, Mooring::park, StopPolicy, ParkedPipeline, ChildHandle, wait_handling_stop, try_wait_tracking_stops, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
+verified_at_commit: 9795bda4
+verified_at_date: 2026-09-03
+anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, Event, StageObservation, CollectState, CollectState::sender, CollectState::all_stages_launched, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, GroupRole, Ending, EndingCell, AnchorProcess, StageGate, StagePark, StagePark::gate, StageStop, Mooring::park, StopPolicy, ParkedPipeline, ChildHandle, wait_handling_stop, try_wait_tracking_stops, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -248,20 +248,34 @@ external spawned inside a stage thread still joins the Job Object through the
 same `PgidPolicy::Join` resolution, assigned at creation under the suspended
 create → assign → resume path.
 
-**Collection is an event loop over a non-blocking probe.** The collector polls
-every unsettled stage — a `ThreadStage`'s `probe()` reads its join handle's
-`is_finished` and then its `StageStop`, an external stage `try_settle`, which
-polls with `WUNTRACED | WCONTINUED` (unlike the plain `try_wait_handling_stop`
-a standalone wait uses) so a stop reads as a level tracked from its two edges
-rather than a one-shot cell someone must remember to clear — so stages settle
-in whatever order they actually end, and no stage's blocking wait can starve
-another's news. A stage still running whose reader has settled is ended
-(`reader_gone`) and observed on the next pass, so the cascade runs tail-ward;
-a stage that stops is answered at once, wherever it sits. Each interior edge's
-held-open read end drops once that edge's writer's observation completes,
-which also releases any descendant of that edge still blocked writing into it.
-Verdicts fold in launch order regardless of settle order, so which stage the
-collector kills when never changes which failure the fold reports.
+**Collection is a channel for threads, a non-blocking probe for everything
+else.** A stage thread computes its own [`StageObservation`] and sends it as
+its last act — `tx.send(Event::Settled(ix, obs))`, `tx` cloned once per stage
+and bound in the closure's outermost frame so it is dropped only by that send
+or by an unwind. `CollectState` drops its own clone once every stage is
+launched (`all_stages_launched`), so a `recv` that disconnects while some
+index is still unobserved *is* that stage's panic, recovered by joining the
+handle the collector kept for exactly this — never for polling. An external
+stage is still probed: `try_settle` polls with `WUNTRACED | WCONTINUED`
+(unlike the plain `try_wait_handling_stop` a standalone wait uses) so a stop
+reads as a level tracked from its two edges rather than a one-shot cell
+someone must remember to clear. `CollectState::pass` drains the channel
+(`try_recv`) before probing the externals, so stages settle in whatever order
+they actually end and no stage's blocking wait can starve another's news; the
+blocking `drive` loop does the same wait as a `recv_timeout` in place of the
+old fixed sleep, so a thread's event wakes it at once. A stage still running
+whose reader has settled is ended (`reader_gone`) and observed on the next
+pass, so the cascade runs tail-ward, thread and external alike; a stage that
+stops — a thread's own `StagePark` cell, or an external's probed level — is
+answered at once, wherever it sits. Forgiveness for a killed thread (whatever
+`Break` it was about to return, forgiven, its audit fragment kept) is applied
+where the `Settled` event is filed, reading the stage's own `EndingCell`,
+since the stage itself no longer carries an `Ending` to consult. Each
+interior edge's held-open read end drops once that edge's writer's
+observation completes, which also releases any descendant of that edge still
+blocked writing into it. Verdicts fold in launch order regardless of settle
+order, so which stage the collector kills when never changes which failure
+the fold reports.
 
 **Teardown is kill-first.** A pipeline that ends before every stage has been
 observed ends by one of two mechanisms, and both put the group's death before
@@ -270,10 +284,13 @@ purpose — a cancel, a witnessed signal, a stop with no job table, the REPL's
 exit — and spells the order out: (1) `signal` — the cause's catchable signal
 to `-pgid`, then `SIGCONT`, so a member that honours it exits with its own
 status; (2) a bounded grace of at most `TEARDOWN_GRACE` (500 ms, shared with a
-standalone child's `terminate_group`), during which the collector probes
-non-blockingly and leaves the moment every stage has settled; (3) `kill` —
-`SIGKILL -pgid`, unconditional and idempotent; (4) only now the observation,
-whose joins are blocking — stage threads, pump drains, waits; (5) the anchor
+standalone child's `terminate_group`), during which the collector drains the
+channel and probes every external non-blockingly, leaving the moment each
+stage has settled by whichever route is its own; (3) `kill` — `SIGKILL
+-pgid`, unconditional and idempotent; (4) a blocking drain of the channel for
+every thread stage the grace did not already account for, a cancelled and
+killed one having nowhere left to block; (5) only now the remaining
+observation, whose joins are blocking — pump drains, waits; (6) the anchor
 last, in `Drop`, after every stage handle has gone.
 
 `CollectState::drop` is the other, and it covers every forced end that drops

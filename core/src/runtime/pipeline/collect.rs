@@ -16,9 +16,7 @@ use super::group::Witnessed;
 use super::group::{GroupRole, PipelineGroup};
 use super::launch::{Probe, StageHandle};
 use crate::evaluator::audit::observe_stamped;
-#[cfg(unix)]
-use crate::process::Signal;
-use crate::process::{CancelCause, Pgid, StageGate};
+use crate::process::{CancelCause, Pgid, Signal, StageGate};
 use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Observed, Settled,
     Shell, Value, epoch_us,
@@ -70,6 +68,14 @@ fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) ->
         },
     );
     AuditFragment::from_observations(vec![obs])
+}
+
+/// The collector's one event source: a stage thread's terminal observation,
+/// sent as its own last act — see [`super::thread::launch_thread_stage`].
+/// The full sum (`Stopped`, `Continued`, `Witnessed`, `Cancelled`) is phase
+/// 3's; externals and the anchor are still polled in this phase.
+pub(super) enum Event {
+    Settled(usize, StageObservation),
 }
 
 /// One stage's observation, normalized across external children and ral
@@ -220,6 +226,13 @@ pub(super) struct CollectState {
     /// The pgid a forced end of this collector kills; `None` for a joining
     /// collector, whose owner's teardown does it.
     owned_group: Option<Pgid>,
+    /// Every thread stage's [`Event`] arrives here.
+    rx: std::sync::mpsc::Receiver<Event>,
+    /// This collector's own clone, held only while stages are still being
+    /// launched: [`Self::all_stages_launched`] drops it, so afterwards a
+    /// `recv` disconnects exactly when every stage's own clone is gone too —
+    /// the structural signal that the missing one panicked.
+    tx: Option<std::sync::mpsc::Sender<Event>>,
 }
 
 #[cfg(unix)]
@@ -237,12 +250,37 @@ fn scope_cancelled(mooring: &Mooring) -> Option<CancelCause> {
 
 impl CollectState {
     pub(super) fn new(group: &PipelineGroup, started: std::time::Instant) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
         Self {
             stages: Vec::new(),
             observed: Vec::new(),
             started,
             owned_group: group.owned().then(|| group.leader_pgid()),
+            rx,
+            tx: Some(tx),
         }
+    }
+
+    /// The index a stage about to be launched will occupy once pushed, for
+    /// [`super::thread::launch_thread_stage`]'s closure to name itself by in
+    /// its `Settled` event.
+    pub(super) fn next_index(&self) -> usize {
+        self.stages.len()
+    }
+
+    /// A clone for a stage thread's closure — see [`Event`] and
+    /// [`Self::all_stages_launched`].
+    pub(super) fn sender(&self) -> std::sync::mpsc::Sender<Event> {
+        self.tx
+            .as_ref()
+            .expect("a stage is still launching, so the collector's own sender is alive")
+            .clone()
+    }
+
+    /// Every stage is now launched, so the last clone this collector itself
+    /// held is dropped.
+    pub(super) fn all_stages_launched(&mut self) {
+        self.tx = None;
     }
 
     pub(super) fn push(&mut self, handle: StageHandle) {
@@ -250,9 +288,110 @@ impl CollectState {
         self.observed.push(None);
     }
 
-    /// One non-blocking pass over every unobserved stage, tail-first: end a
-    /// running stage whose reader has already settled, observe whichever
-    /// finished, and detect a stop — through the anchor or a stage's own
+    /// One stage's [`Event::Settled`] has arrived: apply the forgiven-death
+    /// rule its `Ending` earns, join its now-returning thread, and release
+    /// its held read end.
+    fn file(&mut self, ev: Event) {
+        let Event::Settled(ix, obs) = ev;
+        let handle = self.stages[ix]
+            .take()
+            .expect("a stage's Settled event arrives once");
+        self.observed[ix] = Some(handle.file_settled(obs));
+    }
+
+    /// The channel has disconnected: every thread stage still `Some` had its
+    /// sender dropped by an unwind rather than a send — the structural panic
+    /// signal, attributed by the missing index.  An external stage never
+    /// held a clone, so it is left alone.  Returns whether any stage was
+    /// filed this way.
+    fn file_panics(&mut self) -> bool {
+        let mut filed = false;
+        for ix in 0..self.stages.len() {
+            if self.stages[ix].as_ref().is_some_and(StageHandle::is_thread) {
+                let handle = self.stages[ix].take().expect("checked above");
+                self.observed[ix] = Some(handle.recover_panic());
+                filed = true;
+            }
+        }
+        filed
+    }
+
+    /// File every event the channel already holds, without blocking.
+    /// Returns whether any arrived.
+    fn drain_ready(&mut self) -> bool {
+        let mut filed = false;
+        loop {
+            match self.rx.try_recv() {
+                Ok(ev) => {
+                    self.file(ev);
+                    filed = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return filed,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return self.file_panics() || filed;
+                }
+            }
+        }
+    }
+
+    /// This stage's stop, however it was read — an external's probed level,
+    /// a thread's own `StagePark` cell — answered by the group's role.
+    /// `Some` only for the foreground case, whose caller must return it at
+    /// once.
+    #[cfg_attr(
+        not(unix),
+        allow(unused_variables, reason = "the Ctrl-Z gate has no Windows use")
+    )]
+    fn answer_stop(
+        &mut self,
+        ix: usize,
+        sig: Signal,
+        group: &PipelineGroup,
+        gate: &StageGate,
+        mooring: &Mooring,
+        shell: &Shell,
+    ) -> Option<Pass> {
+        match group.role() {
+            #[cfg(unix)]
+            GroupRole::Foreground => {
+                stop_the_group(group, gate);
+                Some(Pass::Parked(sig))
+            }
+            #[cfg(not(unix))]
+            GroupRole::Foreground => unreachable!("nothing stops on Windows: {sig:?}"),
+            GroupRole::Background => {
+                // Settled before the group teardown: its SIGCONT would
+                // resume the stopped child, and the verdict would then name
+                // whatever it did next instead of the stop.
+                self.stages[ix]
+                    .as_mut()
+                    .expect("caller holds a live stage at ix")
+                    .end_stopped(sig);
+                Some(self.cancel_all(group, CancelCause::Terminate, shell))
+            }
+            GroupRole::Joining => {
+                match &mooring.park {
+                    Some(park) => {
+                        park.stop.set(Some(sig));
+                        self.stages[ix]
+                            .as_mut()
+                            .expect("caller holds a live stage at ix")
+                            .resume();
+                    }
+                    None => self.stages[ix]
+                        .as_mut()
+                        .expect("caller holds a live stage at ix")
+                        .resume_unowned(),
+                }
+                None
+            }
+        }
+    }
+
+    /// One non-blocking pass over every unobserved stage, tail-first: file
+    /// whatever the channel has for a thread stage, probe an external one,
+    /// end a running stage whose reader has already settled, and detect a
+    /// stop — through the anchor, a thread's own cell, or an external's
     /// probe — and answer it by the group's role.  Only a foreground group
     /// has a job table to resume it, so only it parks; any other owned group
     /// is cancelled; a joining collector forwards the stop into its own
@@ -291,8 +430,9 @@ impl CollectState {
             return self.cancel_all(group, cause, shell);
         }
 
+        let mut progress = self.drain_ready();
+
         let n = self.stages.len();
-        let mut progress = false;
         for ix in (0..n).rev() {
             let Some(handle) = self.stages[ix].as_mut() else {
                 continue;
@@ -305,37 +445,21 @@ impl CollectState {
                     handle.reader_gone();
                 }
                 Probe::Running => {}
+                // Only an external ever probes ready; a thread's observation
+                // arrives on the channel above.
                 Probe::Ready => {
                     let obs = self.stages[ix]
                         .take()
                         .expect("probed above")
-                        .observe(shell, ix + 1 == n, self.started);
+                        .observe(shell, self.started);
                     self.observed[ix] = Some(obs);
                     progress = true;
                 }
-                Probe::Stopped(sig) => match group.role() {
-                    #[cfg(unix)]
-                    GroupRole::Foreground => {
-                        stop_the_group(group, gate);
-                        return Pass::Parked(sig);
+                Probe::Stopped(sig) => {
+                    if let Some(pass) = self.answer_stop(ix, sig, group, gate, mooring, shell) {
+                        return pass;
                     }
-                    #[cfg(not(unix))]
-                    GroupRole::Foreground => unreachable!("nothing stops on Windows"),
-                    GroupRole::Background => {
-                        // Settled before the group teardown: its SIGCONT would
-                        // resume the stopped child, and the verdict would then
-                        // name whatever it did next instead of the stop.
-                        handle.end_stopped(sig);
-                        return self.cancel_all(group, CancelCause::Terminate, shell);
-                    }
-                    GroupRole::Joining => match &mooring.park {
-                        Some(park) => {
-                            park.stop.set(Some(sig));
-                            handle.resume();
-                        }
-                        None => handle.resume_unowned(),
-                    },
-                },
+                }
             }
         }
 
@@ -350,13 +474,19 @@ impl CollectState {
 
     /// Tear the whole pipeline down, and only then observe it.
     ///
-    /// Signal, grace, kill, join — in that order, because a join can only
-    /// terminate once nothing that holds a pipe end is alive, and a stage's
-    /// own kill reaches its pid alone.  A pumped descendant of a killed stage
-    /// outlives the stage, and no wait on that pump returns while it does.
-    /// This is the one path that observes on purpose, so the kill is explicit
-    /// and precedes the observation; a collector dropped short of that is
-    /// ended by `Drop`, kill first.
+    /// Signal, grace, kill, drain, observe — in that order, because a drain
+    /// can only terminate once nothing that holds a pipe end is alive, and a
+    /// stage's own kill reaches its pid alone.  A pumped descendant of a
+    /// killed stage outlives the stage, and no wait on that pump returns
+    /// while it does.  This is the one path that observes on purpose, so the
+    /// kill is explicit and precedes the observation; a collector dropped
+    /// short of that is ended by `Drop`, kill first.
+    ///
+    /// The channel drain (blocking, for every thread stage a probe can no
+    /// longer reach) comes after the kill regardless of `group.owned()`: a
+    /// joining collector signals and kills nothing of its own, but its
+    /// stage's own cancel — already raised above — still ends it, and its
+    /// `Settled` still arrives only by channel.
     ///
     /// Tail-first once the tree is dead, so each edge's held read end is
     /// released behind its writer.
@@ -375,8 +505,11 @@ impl CollectState {
             {
                 let deadline = std::time::Instant::now() + crate::process::TEARDOWN_GRACE;
                 loop {
-                    // Every stage each round, not up to the first unsettled
-                    // one: a probe is also what reaps a direct external.
+                    // A thread stage leaves the grace by filing its own
+                    // event, an external by probing ready — every one each
+                    // round, not up to the first unsettled: a probe is also
+                    // what reaps an external.
+                    self.drain_ready();
                     let mut pending = 0_usize;
                     for handle in self.stages.iter_mut().flatten() {
                         if !matches!(handle.probe(), Probe::Ready) {
@@ -391,10 +524,18 @@ impl CollectState {
             }
             group.kill();
         }
+        while self.stages.iter().flatten().any(StageHandle::is_thread) {
+            if let Ok(ev) = self.rx.recv() {
+                self.file(ev);
+            } else {
+                self.file_panics();
+                break;
+            }
+        }
         let n = self.stages.len();
         for ix in (0..n).rev() {
             if let Some(handle) = self.stages[ix].take() {
-                self.observed[ix] = Some(handle.observe(shell, ix + 1 == n, self.started));
+                self.observed[ix] = Some(handle.observe(shell, self.started));
             }
         }
         Pass::Done
@@ -418,7 +559,18 @@ impl CollectState {
                 Pass::Parked(sig) => return Drive::Parked(sig),
                 Pass::Advanced => interval = std::time::Duration::from_millis(5),
                 Pass::Idle => {
-                    std::thread::sleep(interval);
+                    match self.rx.recv_timeout(interval) {
+                        Ok(ev) => self.file(ev),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            // No thread stage will ever report again, and a
+                            // disconnected `recv_timeout` returns at once:
+                            // sleep out the interval the externals still
+                            // need polling over.
+                            self.file_panics();
+                            std::thread::sleep(interval);
+                        }
+                    }
                     interval = (interval * 2).min(cap);
                 }
             }

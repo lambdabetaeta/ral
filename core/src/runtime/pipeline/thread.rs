@@ -12,19 +12,13 @@ use crate::evaluator::machine;
 use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::source::Span;
-use crate::types::{AuditFragment, Break, Closure, Error, Mooring, Settled, Value};
-use crate::process::{CancelCause, CancelScope, StageGate, StagePark, StageStop, Wake};
+use crate::types::{Break, Closure, Error, Mooring, Settled};
+use crate::process::{CancelCause, CancelScope, Signal, StageGate, StagePark, StageStop, Wake};
 use std::sync::Arc;
-
-/// A stage thread's result, returned on its `JoinHandle`.
-pub(super) struct StageOutcome {
-    pub result: Settled<Value>,
-    pub audit: AuditFragment,
-}
 
 /// The parent's handle onto a running stage thread.
 pub(super) struct ThreadStage {
-    join: Option<std::thread::JoinHandle<StageOutcome>>,
+    join: Option<std::thread::JoinHandle<()>>,
     stop: Arc<StageStop>,
     cancel: CancelScope,
     wake: Arc<Wake>,
@@ -32,25 +26,11 @@ pub(super) struct ThreadStage {
 }
 
 impl ThreadStage {
-    /// One non-blocking probe.  The end is read before the stop: a stop can
-    /// go stale — the child parked at the gate is cancelled and the thread
-    /// leaves with the stop still recorded — and a stale stop must not read
-    /// as a live one.  The converse cannot happen: a thread whose child is
-    /// genuinely parked has not finished.
-    pub(super) fn probe(&self) -> super::launch::Probe {
-        if self.finished() {
-            return super::launch::Probe::Ready;
-        }
-        self.stop
-            .get()
-            .map_or(super::launch::Probe::Running, super::launch::Probe::Stopped)
-    }
-
-    /// Read off the thread itself, so an unwinding panic cannot skip it.
-    fn finished(&self) -> bool {
-        self.join
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
+    /// This stage's own interior stop — a child it spawned itself stopping —
+    /// read from `StagePark`'s cell, independent of whether the thread has
+    /// finished: readiness arrives only by [`super::collect::Event::Settled`].
+    pub(super) fn stopped(&self) -> Option<Signal> {
+        self.stop.get()
     }
 
     pub(super) fn cancel(&self, cause: CancelCause) {
@@ -67,7 +47,7 @@ impl ThreadStage {
             use std::os::windows::io::AsRawHandle;
             use windows_sys::Win32::System::IO::CancelSynchronousIo;
             let Some(join) = &self.join else { return };
-            while !self.wake.acknowledged() && !self.finished() {
+            while !self.wake.acknowledged() && !join.is_finished() {
                 // SAFETY: `join`'s handle is valid for the thread's whole
                 // life, which this `ThreadStage` outlives by construction.
                 unsafe { CancelSynchronousIo(join.as_raw_handle().cast()) };
@@ -80,29 +60,35 @@ impl ThreadStage {
         self.stop.set(None);
     }
 
-    /// Join the stage thread and reduce it to a [`super::collect::StageObservation`].
-    /// A panic surfaces as an `Error` carrying this stage's span, since the
-    /// stage's own stack carries none of its own to attribute it to.
-    pub(super) fn observe(mut self, is_last: bool) -> super::collect::StageObservation {
-        let outcome = match self.join.take().expect("observed once").join() {
-            Ok(o) => o,
-            Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .map(|s| (*s).to_string())
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_string());
-                let mut err = Error::new(format!("ral pipeline stage panicked: {msg}"), 1);
-                err.span = self.span;
-                return super::collect::StageObservation::failure(err);
-            }
-        };
-        match outcome.result {
-            Ok(v) => super::collect::StageObservation::ok()
-                .with_value(is_last.then_some(v))
-                .with_audit(outcome.audit),
-            Err(br) => super::collect::StageObservation::from_break(br).with_audit(outcome.audit),
+    /// This stage's `Settled` event has already arrived by channel — the
+    /// thread is already returning, so this reclaims it rather than waiting
+    /// for it.
+    pub(super) fn join_after_settled(mut self) {
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
         }
+    }
+
+    /// This stage's sender was dropped by an unwind rather than a send: a
+    /// disconnect alone carries no message, so only `join` can recover it.
+    /// Surfaces as an `Error` carrying this stage's span, since the stage's
+    /// own stack carries none of its own to attribute it to.
+    pub(super) fn recover_panic(mut self) -> super::collect::StageObservation {
+        let join = self
+            .join
+            .take()
+            .expect("a disconnected sender's thread has not been joined yet");
+        let payload = join
+            .join()
+            .expect_err("a disconnected sender implies its thread unwound rather than returned");
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        let mut err = Error::new(format!("ral pipeline stage panicked: {msg}"), 1);
+        err.span = self.span;
+        super::collect::StageObservation::failure(err)
     }
 }
 
@@ -127,12 +113,19 @@ impl Drop for ThreadStage {
     clippy::needless_pass_by_value,
     reason = "LaunchCx bundles unique `&mut` borrows; by-value transfers them so this fn gets mutable access — a shared `&LaunchCx` cannot yield `&mut`"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one launch call per stage; its index, finality, and sender have nowhere else to ride"
+)]
 pub(super) fn launch_thread_stage(
     stage: &Arc<Comp>,
     spec: &StageSpec,
     route: StageRoute,
     cx: LaunchCx<'_>,
     gate: &Arc<StageGate>,
+    ix: usize,
+    is_last: bool,
+    tx: std::sync::mpsc::Sender<super::collect::Event>,
 ) -> Settled<ThreadStage> {
     let wake = Wake::new().map_err(|e| {
         let mut err = Error::new(format!("could not create a pipeline stage's wake: {e}"), 1);
@@ -181,7 +174,16 @@ pub(super) fn launch_thread_stage(
             child.local.audit.install_active_policy(policy);
             let result = machine::evaluate(Closure { comp, env }, mooring, child);
             let audit = child.local.audit.take_fragment();
-            StageOutcome { result, audit }
+            let obs = match result {
+                Ok(v) => super::collect::StageObservation::ok()
+                    .with_value(is_last.then_some(v))
+                    .with_audit(audit),
+                Err(br) => super::collect::StageObservation::from_break(br).with_audit(audit),
+            };
+            // The stage's last act, and `tx`'s only other exit is this
+            // closure unwinding: a sender dropped with no `Settled` sent is
+            // the disconnect the collector reads as this stage's panic.
+            let _ = tx.send(super::collect::Event::Settled(ix, obs));
         },
     );
     let (join, cancel) = spawned.map_err(|e| {
@@ -256,13 +258,17 @@ mod tests {
             env: &env,
             group: &mut group,
         };
-        let handle = launch_thread_stage(&stage, &spec, route, cx, &gate).expect("launch");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _handle =
+            launch_thread_stage(&stage, &spec, route, cx, &gate, 0, true, tx).expect("launch");
 
         let mut out = Vec::new();
         reader.read_to_end(&mut out).expect("read stage stdout");
         assert_eq!(out, b"hi\n");
 
-        let obs = handle.observe(true);
+        let super::super::collect::Event::Settled(ix, obs) =
+            rx.recv().expect("the stage sends its own Settled");
+        assert_eq!(ix, 0);
         assert!(obs.break_.is_none(), "echo hi must not fail");
     }
 
@@ -290,21 +296,27 @@ mod tests {
             env: &env,
             group: &mut group,
         };
-        let handle = launch_thread_stage(&stage, &spec, route, cx, &gate).expect("launch");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle =
+            launch_thread_stage(&stage, &spec, route, cx, &gate, 0, true, tx).expect("launch");
 
         handle.cancel(CancelCause::ReaderGone);
         handle.interrupt();
 
         let start = Instant::now();
-        let obs = handle.observe(true);
+        let super::super::collect::Event::Settled(_, obs) = rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("a cancelled stage sends its own Settled within 500ms");
         assert!(start.elapsed() < Duration::from_millis(500));
         assert!(obs.break_.is_some(), "a killed stage must not settle Ok");
     }
 
-    /// A `ThreadStage` over a body that panics at once.
+    /// A `ThreadStage` over a body that panics at once, with no sender: its
+    /// news arrives by direct `join`, as `recover_panic` does once the
+    /// collector reads its absence as a disconnect.
     fn panicking_stage(span: Span) -> ThreadStage {
         let join = std::thread::Builder::new()
-            .spawn(move || -> StageOutcome { panic!("boom") })
+            .spawn(move || panic!("boom"))
             .expect("spawn");
         ThreadStage {
             join: Some(join),
@@ -315,38 +327,16 @@ mod tests {
         }
     }
 
-    /// The collector never calls `observe` on a stage that probes `Running`,
-    /// so a panicked stage must first read as ready; the panic hook writes a
-    /// crash log rather than aborting, so it is the unwind that ends the
-    /// thread.
-    fn probe_until_ready(handle: &ThreadStage) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !matches!(handle.probe(), super::super::launch::Probe::Ready) {
-            assert!(
-                Instant::now() < deadline,
-                "a panicked stage read as running for 5 s"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    #[test]
-    fn a_panicking_stage_probes_ready_rather_than_running_forever() {
-        let file = Shell::default().install_script_context("<test>", "boom");
-        let handle = panicking_stage(Span::new(file, 0, 4));
-        probe_until_ready(&handle);
-    }
-
-    /// Only once ready does the panic convert to an error carrying the stage's
-    /// own span, its stack having none.
+    /// `recover_panic` joins the panicking thread directly — no probe, no
+    /// polling — and converts the payload to an error carrying the stage's
+    /// own span, its stack having none of its own.
     #[test]
     fn observe_of_a_panicking_body_carries_the_panic_and_its_span() {
         let file = Shell::default().install_script_context("<test>", "boom");
         let span = Span::new(file, 0, 4);
         let handle = panicking_stage(span);
-        probe_until_ready(&handle);
 
-        let obs = handle.observe(true);
+        let obs = handle.recover_panic();
         match obs.break_ {
             Some(Break::Error(err)) => {
                 assert!(

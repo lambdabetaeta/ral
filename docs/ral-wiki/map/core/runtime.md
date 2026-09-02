@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 30ac8e07
-generated_at_date: 2026-09-02
+generated_at_commit: 9795bda4
+generated_at_date: 2026-09-03
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -142,10 +142,13 @@ recursion is irreducible; the evaluator reaches it at
     sink, not on a `startup_foreground` predicate.
   - `launch.rs` (`PipelineBuild` owns launch; a failed launch is its drop, the
     collector it carries killing the group before any stage handle joins;
-    `StageHandle`
-    dispatches `probe`/`interrupt`/`resume`/`cancel`/`reader_gone`/
-    `end_stopped`/`observe` over its two kinds, `External`/`Thread`, and
-    carries the one `Ending` every later decision about that stage reads —
+    `StageHandle` dispatches `probe`/`interrupt`/`resume`/`cancel`/
+    `reader_gone`/`end_stopped` over its two kinds, `External`/`Thread`,
+    though only an external ever probes `Ready` — a thread's readiness
+    arrives solely as its own `Event::Settled`, filed by
+    `file_settled`/`recover_panic` instead of `observe`, leaving `probe` to
+    read no more of a thread than its interior stop; `StageHandle` carries
+    the one `Ending` every later decision about that stage reads —
     forgiveness, and whether a killed child's drainers are joined),
     `group.rs` (`PipelineGroup::prepare` spawns
     the pgid anchor — `--ral-pipeline-anchor`, immune to termination signals —
@@ -156,13 +159,21 @@ recursion is irreducible; the evaluator reaches it at
     no-anchor, no-relay, may-not-signal shape a nested pipeline inside a stage
     thread gets instead. The group's whole verb set is `signal` and `kill`,
     both `&self`, and both belong to the collector: `CollectState::cancel_all`
-    spells signal, bounded grace, kill, and only then observe, while
+    spells signal, bounded grace, kill, a blocking drain of every thread
+    stage's own channel, and only then the remaining observation, while
     `CollectState::drop` kills whenever it is dropped with a stage still
     unobserved), `thread.rs` (`launch_thread_stage` wires a `Thread`
-    stage's `Io` from its `StageRoute` and hands the closure to
-    `Shell::spawn_thread`; `ThreadStage` is the collector's handle onto the
-    running thread), `collect.rs` (`CollectState` owns the stage handles from
-    the first one launched, the non-blocking probe loop that folds every
+    stage's `Io` from its `StageRoute`, and its closure — given its own index,
+    finality, and a sender clone — builds its own `StageObservation` and
+    sends `Event::Settled` as its last act, the sender bound in the closure's
+    outermost frame so an unwind drops it too; `ThreadStage` is the
+    collector's handle onto the running thread, kept only to join once that
+    event has arrived, or to recover a panic's message when it never does),
+    `collect.rs` (`CollectState` owns the stage handles from the first one
+    launched, an `mpsc` channel every thread stage's clone feeds and whose own
+    clone it drops once every stage is launched — so a `recv` disconnecting
+    with some index still unobserved is that stage's panic — a per-pass
+    channel drain plus non-blocking probe loop for externals that folds every
     stage's `StageObservation` in launch order, and the forced-end kill in its
     own `Drop`), and `parked.rs`
     (`cfg(unix)`; `ParkedPipeline` — the group with its foreground guard and

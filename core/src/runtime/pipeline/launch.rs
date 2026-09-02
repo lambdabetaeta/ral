@@ -78,12 +78,19 @@ impl StageHandle {
         }
     }
 
+    /// Whether this is a thread stage: its readiness never arrives through
+    /// [`Self::probe`], only its own [`super::collect::Event::Settled`].
+    pub(super) fn is_thread(&self) -> bool {
+        matches!(self.kind, StageKind::Thread(_))
+    }
+
     /// One non-blocking probe: whether this stage is ready to observe, still
-    /// running, or stopped.  The end is read before the level, as
-    /// [`super::thread::ThreadStage::probe`]'s does for a thread: a terminal
-    /// outcome outranks a stale level.  An external's stop is a level
-    /// `try_settle` tracks from its two edges, so this needs no convention
-    /// for when to forget it — the level does that itself.
+    /// running, or stopped.  Only an external is ever `Ready` here — a
+    /// thread's readiness arrives solely as its own
+    /// [`super::collect::Event::Settled`], so all this reads of a thread is
+    /// the interior stop in its `StagePark` cell.  An external's stop is a
+    /// level `try_settle` tracks from its two edges, read after the end so a
+    /// terminal outcome outranks a stale level.
     pub(super) fn probe(&mut self) -> Probe {
         match &mut self.kind {
             StageKind::External(c) => {
@@ -92,7 +99,7 @@ impl StageHandle {
                 }
                 c.stopped_level().map_or(Probe::Running, Probe::Stopped)
             }
-            StageKind::Thread(t) => t.probe(),
+            StageKind::Thread(t) => t.stopped().map_or(Probe::Running, Probe::Stopped),
         }
     }
 
@@ -131,33 +138,57 @@ impl StageHandle {
         }
     }
 
-    /// Reduce a settled stage to its observation, then release the held-open
-    /// read end — only now that the writer is reaped, so any descendant of that
-    /// edge still blocked writing into it is freed.
-    pub(super) fn observe(
-        self,
-        shell: &Shell,
-        is_last: bool,
-        started: std::time::Instant,
-    ) -> StageObservation {
+    /// Reduce a settled external stage to its observation, then release the
+    /// held-open read end — only now that the writer is reaped, so any
+    /// descendant of that edge still blocked writing into it is freed.  Never
+    /// called on a thread stage, whose observation is filed by
+    /// [`Self::file_settled`] instead.
+    pub(super) fn observe(self, shell: &Shell, started: std::time::Instant) -> StageObservation {
+        let Self { held_edge, kind, .. } = self;
+        let obs = match kind {
+            StageKind::External(c) => observe_external_stage(c, shell, started),
+            StageKind::Thread(_) => {
+                unreachable!("a thread stage's observation arrives by channel")
+            }
+        };
+        drop(held_edge);
+        obs
+    }
+
+    /// A thread's own [`super::collect::Event::Settled`] has arrived: apply
+    /// the forgiven-death rule its `Ending` earns, join its now-returning
+    /// thread, and release the held-open read end.
+    ///
+    /// A thread's `Break` carries no mark of whether the kill or its own code
+    /// ended it, so a killed thread is forgiven whatever it returned.
+    pub(super) fn file_settled(self, obs: StageObservation) -> StageObservation {
         let Self {
             held_edge,
             kind,
             ending,
             ..
         } = self;
-        let obs = match (kind, ending.get()) {
-            (StageKind::External(c), _) => observe_external_stage(c, shell, started),
-            // A thread's `Break` carries no mark of whether the kill or its
-            // own code ended it, so a killed thread is forgiven whatever it
-            // returned.
-            (StageKind::Thread(t), Ending::RalEnded(CancelCause::ReaderGone)) => {
-                t.observe(is_last).forgiven()
-            }
-            (StageKind::Thread(t), _) => t.observe(is_last),
+        let StageKind::Thread(t) = kind else {
+            unreachable!("only a thread stage's Settled arrives by channel")
+        };
+        t.join_after_settled();
+        drop(held_edge);
+        match ending.get() {
+            Ending::RalEnded(CancelCause::ReaderGone) => obs.forgiven(),
+            _ => obs,
+        }
+    }
+
+    /// This stage's sender disconnected without sending: a panic.  Only
+    /// reached for a thread stage, the only kind that ever holds a sender
+    /// clone.
+    pub(super) fn recover_panic(self) -> StageObservation {
+        let Self { held_edge, kind, .. } = self;
+        let StageKind::Thread(t) = kind else {
+            unreachable!("only a thread stage holds a sender clone")
         };
         drop(held_edge);
-        obs
+        t.recover_panic()
     }
 
     /// A `StageHandle` around an already-running external, for `collect.rs`'s
@@ -375,21 +406,28 @@ pub(super) struct LaunchCx<'a> {
     clippy::needless_pass_by_value,
     reason = "LaunchCx bundles unique `&mut` borrows; by-value transfers them so callees get mutable access — a shared `&LaunchCx` cannot yield `&mut`"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one dispatch call per stage; a thread stage's index, finality, and sender have nowhere else to ride"
+)]
 fn spawn_stage(
     stage: &Arc<crate::ir::Comp>,
     spec: &StageSpec,
     mut route: StageRoute,
     cx: LaunchCx<'_>,
     gate: &Arc<StageGate>,
+    ix: usize,
+    is_last: bool,
+    tx: std::sync::mpsc::Sender<super::collect::Event>,
 ) -> Settled<StageHandle> {
     let held_edge = route.held.take();
     let kind = match &spec.launch {
         StageLaunch::Direct(ext) => StageKind::External(launch_external_stage_direct(
             ext, route, cx.mooring, cx.shell, cx.group,
         )?),
-        StageLaunch::Thread => {
-            StageKind::Thread(launch_thread_stage(stage, spec, route, cx, gate)?)
-        }
+        StageLaunch::Thread => StageKind::Thread(launch_thread_stage(
+            stage, spec, route, cx, gate, ix, is_last, tx,
+        )?),
     };
     Ok(StageHandle {
         kind,
@@ -444,6 +482,7 @@ impl PipelineBuild {
         &mut self,
         stage: &Arc<crate::ir::Comp>,
         spec: &StageSpec,
+        is_last: bool,
         env: &Env,
         mooring: &Mooring,
         shell: &mut Shell,
@@ -453,13 +492,15 @@ impl PipelineBuild {
             .routes
             .pop_front()
             .expect("one route per stage");
+        let ix = self.resources.collect.next_index();
+        let tx = self.resources.collect.sender();
         let cx = LaunchCx {
             mooring,
             shell,
             env,
             group: &mut self.resources.group,
         };
-        let handle = spawn_stage(stage, spec, route, cx, &self.gate)?;
+        let handle = spawn_stage(stage, spec, route, cx, &self.gate, ix, is_last, tx)?;
         self.resources.collect.push(handle);
         Ok(())
     }
@@ -467,7 +508,8 @@ impl PipelineBuild {
     /// Return the group alongside the collector — its anchor and guards must
     /// outlive collect.  The foreground was already claimed in `new`, before
     /// any stage existed.
-    fn finish(self) -> (PipelineGroup, CollectState) {
+    fn finish(mut self) -> (PipelineGroup, CollectState) {
+        self.resources.collect.all_stages_launched();
         let Self { resources, .. } = self;
         let PipelineResources {
             routes,
@@ -526,9 +568,10 @@ fn spawn_all_stages(
     mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<()> {
+    let n = stages.len();
     for (ix, stage) in stages.iter().enumerate() {
         crate::process::check(mooring)?;
-        build.step(stage, &plan.specs[ix], env, mooring, shell)?;
+        build.step(stage, &plan.specs[ix], ix + 1 == n, env, mooring, shell)?;
     }
     Ok(())
 }
