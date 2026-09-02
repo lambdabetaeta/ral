@@ -112,8 +112,10 @@ fn expect_static(source: &str) -> StaticDiagnostics {
 /// Run `source` expecting one type error, whose code must be `code`.
 fn expect_type_code(source: &str, code: &str) {
     let codes: Vec<_> = match expect_static(source) {
-        StaticDiagnostics::Types(errs) => errs.iter().map(|e| e.kind.code()).collect(),
-        StaticDiagnostics::Parse(e) => panic!("{source:?}: expected a type error, got parse {e:?}"),
+        StaticDiagnostics::Types { errors, .. } => errors.iter().map(|e| e.kind.code()).collect(),
+        StaticDiagnostics::Parse { error, .. } => {
+            panic!("{source:?}: expected a type error, got parse {error:?}")
+        }
         StaticDiagnostics::Host(e) => panic!("{source:?}: expected a type error, got host {e:?}"),
     };
     assert_eq!(codes, [code], "{source:?}");

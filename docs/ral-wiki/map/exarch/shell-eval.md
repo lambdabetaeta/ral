@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 50388d83
-generated_at_date: 2026-08-29
+generated_at_commit: cd4b16e4
+generated_at_date: 2026-09-02
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -30,8 +30,9 @@ and `run_shell` owns only the run it builds and the outcome it formats:
   evaluated at boot. The check is strict — any type error is fatal — over the
   one inference pass every evaluated path shares
   ([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
-  Parse/type errors come back as `Report::Static { diagnostics }`, which
-  `run_shell` formats to `Outcome::Static`; on success the *annotated* comp
+  Parse/type errors come back as `Report::Static { rendered, status }`, already
+  the caret report the protocol drew, which `run_shell` passes through to
+  `Outcome::Static`; on success the *annotated* comp
   runs ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]);
 - **`caps`** — the session `Capabilities`, pushed for the eval's dynamic extent.
   **This is the sandbox**: the boundary is the pushed [[design/grant|grant]]

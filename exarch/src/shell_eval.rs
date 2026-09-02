@@ -283,13 +283,7 @@ pub(crate) fn run_shell(
     ral_core::dbg_trace!("shell", "eval in {:?}", tool_start.elapsed());
 
     match report {
-        Report::Static { diagnostics } => {
-            use ral_core::protocol::Diagnostics;
-            match diagnostics {
-                Diagnostics::Types(errs) => Outcome::Static(errs.join("\n")),
-                Diagnostics::Parse(msg) | Diagnostics::Host(msg) => Outcome::Static(msg),
-            }
-        }
+        Report::Static { rendered, .. } => Outcome::Static(rendered),
         Report::Ran {
             ending,
             captured,

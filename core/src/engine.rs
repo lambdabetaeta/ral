@@ -550,10 +550,8 @@ fn engine_session(
                     },
                 },
             }))
-            .unwrap_or_else(|_| Report::Static {
-                diagnostics: crate::protocol::Diagnostics::Host(
-                    "engine: dispatch panicked in the engine worker".into(),
-                ),
+            .unwrap_or_else(|_| {
+                Report::host_fault("engine: dispatch panicked in the engine worker")
             });
 
             // `dispatch` drops before this, never after: the same thread
@@ -587,9 +585,7 @@ fn engine_session(
                 &writer,
                 &wire_fault,
                 id,
-                Report::Static {
-                    diagnostics: crate::protocol::Diagnostics::Host("engine busy".into()),
-                },
+                Report::host_fault("engine busy"),
             );
             Claimed::Busy
         }
@@ -1082,9 +1078,7 @@ mod engine_session_tests {
     }
 
     fn is_engine_busy(report: &Report) -> bool {
-        matches!(report, Report::Static {
-            diagnostics: crate::protocol::Diagnostics::Host(msg),
-        } if msg == "engine busy")
+        matches!(report, Report::Static { rendered, .. } if rendered.contains("engine busy"))
     }
 
     #[test]

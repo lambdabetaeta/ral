@@ -245,8 +245,8 @@ fn prove_the_host_can_dial_in(
                     }
                 }
             }
-            Ok(Ok(Report::Static { diagnostics })) => {
-                eprintln!("the guest never ran the listener: {diagnostics:?}");
+            Ok(Ok(Report::Static { rendered, .. })) => {
+                eprint!("the guest never ran the listener: {rendered}");
             }
             Ok(Err(severed)) => eprintln!("{severed}"),
             Err(_) => eprintln!("the listening thread panicked"),

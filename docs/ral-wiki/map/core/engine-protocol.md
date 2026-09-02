@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 50388d83
-generated_at_date: 2026-08-29
+generated_at_commit: cd4b16e4
+generated_at_date: 2026-09-02
 covers_paths: [core/src/protocol.rs, core/src/engine.rs, core/src/wire.rs, core/src/hatch.rs]
 ---
 
@@ -32,13 +32,17 @@ is a wire-seat child's spawn machinery.** The why is
 - `Control` / `Winsize` / `TerminalEndpoint` — the out-of-band control frame
   and the attach-time terminal conveyance (`TerminalEndpoint.lease` is
   `#[serde(skip)]`).
-- `Report` / `Diagnostics` / `Ending` — the terminal frame: `Static {
-  diagnostics }` or `Ran { ending, captured, trail }`; `Ending::Stopped`
-  carries no platform `cfg` — the wire type is data, identical everywhere,
-  only its producer (`render_ending`) is Unix.
+- `Report` / `Ending` — the terminal frame: `Static { rendered, status }` or
+  `Ran { ending, captured, trail }`; `Ending::Stopped` carries no platform
+  `cfg` — the wire type is data, identical everywhere, only its producer
+  (`render_ending`) is Unix. `Report::host_fault` is the engine's own refusal
+  (a panicked worker, a busy engine) shaped as a `Static`, so a host never has
+  to tell it from a run's own failure.
 - `render_ending` / `RunReport::into_report` — project the engine's own
-  `run::Ending`/`RunReport` onto these wire shapes, rendering a caught error
-  to a string against the `SourceDb`.
+  `run::Ending`/`RunReport` onto these wire shapes. Every diagnostic renders
+  here, runtime errors against the `SourceDb` and static ones against the
+  `Source` the diagnostic carries
+  ([[decisions/260902_static-diagnostics-render-at-the-seam|static-diagnostics-render-at-the-seam]]).
 - `Severed` — why no further frame will cross: `Refused` / `Closed` /
   `Silent` / `Faulted`, `Display`ed as the sentence a front-end shows; the
   private `sever()` is first-cause-wins, and `WireTransport::sever` lets a

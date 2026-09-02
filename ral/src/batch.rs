@@ -211,8 +211,12 @@ pub(crate) fn run_batch(
             (ending, compact_root)
         }
         // Batch already typechecked above, so a static report should not occur
-        // here; treat it defensively as a fatal run (exit 1).
-        RunReport::Static { .. } => (Ending::Exited(1), None),
+        // here; render it anyway rather than exit mutely if it ever does.
+        RunReport::Static { diagnostics } => {
+            let (rendered, status) = diagnostic::format_static_diagnostics(&diagnostics);
+            eprint!("{rendered}");
+            (Ending::Exited(status), None)
+        }
     };
     let result = ending.into_result();
     tick!("evaluate");

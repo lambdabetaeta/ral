@@ -21,9 +21,7 @@ use ral_core::builtins::{REPL_PRINT_PARAMS, pretty_print};
 use ral_core::ir::Val;
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{Capabilities, Shell, Value, fmt_float};
-use ral_core::{
-    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, StaticDiagnostics,
-};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.
@@ -67,11 +65,7 @@ fn printed(src: &str) -> String {
         }
         RunReport::Static { diagnostics, .. } => panic!(
             "{src:?} must reach the evaluator, got {}",
-            match diagnostics {
-                StaticDiagnostics::Parse(e) => format!("parse {e:?}"),
-                StaticDiagnostics::Types(errs) => format!("{} type diagnostic(s)", errs.len()),
-                StaticDiagnostics::Host(e) => format!("host {e:?}"),
-            }
+            ral_core::diagnostic::format_static_diagnostics(&diagnostics).0
         ),
     }
 }

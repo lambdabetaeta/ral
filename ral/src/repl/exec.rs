@@ -10,7 +10,7 @@
 //! Job-control and plugin-lifecycle commands are handled by the captured
 //! builtins installed at boot (see [`super::host_handlers`]).
 
-use ral_core::protocol::{self, Diagnostics, IdentityTransport, Program, Report, Run};
+use ral_core::protocol::{self, IdentityTransport, Program, Report, Run};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use ral_core::{Value, builtins};
 use std::sync::{Arc, Mutex};
@@ -146,20 +146,8 @@ pub(super) fn execute_input(
     };
 
     match report {
-        Report::Static { diagnostics } => {
-            match diagnostics {
-                Diagnostics::Parse(msg) => {
-                    eprintln!("parse error: {msg}");
-                }
-                Diagnostics::Types(errs) => {
-                    for e in &errs {
-                        eprintln!("{e}");
-                    }
-                }
-                Diagnostics::Host(msg) => {
-                    eprintln!("{msg}");
-                }
-            }
+        Report::Static { rendered, .. } => {
+            eprint!("{rendered}");
             None
         }
         Report::Ran { ending, .. } => {

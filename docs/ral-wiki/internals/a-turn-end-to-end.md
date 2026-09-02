@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 50388d83
-verified_at_date: 2026-08-29
+verified_at_commit: cd4b16e4
+verified_at_date: 2026-09-02
 anchors: [run, run_under, run_nested, enter, Program, register_hook, RunRequest, RunReport, Ending, RunIo, TrailScope, Mooring, IoLoan, compile_run, build_run, run_framed, run_phrases, compile_and_typecheck]
 ---
 
@@ -80,8 +80,12 @@ module's framed scaffold:
   live session's schemes ([[internals/compilation-ladder|the ladder]];
   [[decisions/260603_session-scheme-continuity|session-scheme-continuity]]). A
   parse or type failure returns `RunReport::Static { diagnostics }` at once —
-  no run state, no root context, no hooks; the host renders the diagnostics and
-  treats it as status 1. The hook arm skips this: its program is an
+  no run state, no root context, no hooks. The diagnostic carries the `Source`
+  its carets point into rather than registering it: a run that failed to
+  compile leaves no live span, so its text has no business in a registry that
+  is append-only precisely because live spans index it
+  ([[decisions/260902_static-diagnostics-render-at-the-seam|static-diagnostics-render-at-the-seam]]).
+  The hook arm skips this: its program is an
   already-compiled value resolved by name in the hook table, and the hook's
   registered `DefaultPolicy` (capture, terminal authority) folds into
   the run's conditions — the hook's to decide, not the dispatching host's.
@@ -103,7 +107,8 @@ module's framed scaffold:
   teardown survives a caught worker panic. The mooring needs no guard — it
   never moved, so an outer run's is back the instant this stack frame ends, and
   the `NurseryGuard` beside it empties the nursery on the unwinding path as
-  surely as on the clean one. The root context is installed, the pre-exec hook
+  surely as on the clean one. The root context is installed — for a source run
+  only, a hook having no text to register — the pre-exec hook
   fires (taking `&Mooring` beside the shell, as every in-run body does), and
   `with_capabilities(caps, body)` runs the run's program under the request's
   capability ceiling — `run_phrases(&top.phrases, shell.env.clone(),
@@ -142,7 +147,9 @@ module's framed scaffold:
   and discarded — the panicked dispatch reports `Static`, never a trail.
   `RunReport::into_report` then renders the engine's `Ending` against the
   `SourceDb` — a `Raised`/`Walled` error becomes the string the host prints
-  verbatim, `command_exit`/`status` computed alongside it — onto the wire's own
+  verbatim, `command_exit`/`status` computed alongside it; a `Static` renders
+  the same way through `format_static_diagnostics`, which also settles its exit
+  status (2 parse, 1 type) — onto the wire's own
   `protocol::Ending`, and projects each `Observation` through
   [[design/audit|`to_wire`]] onto `Report::Ran.trail: Vec<FOValue>`, unbounded
   by declaration — the wire's frame fuse is the shared backstop, as it already

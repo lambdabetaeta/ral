@@ -256,9 +256,10 @@ impl Clone for TerminalEndpoint {
 /// [`RunReport::into_report`](crate::run::RunReport::into_report).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Report {
-    /// Parse/type/host failure: the run never reached evaluation. The host
-    /// renders the diagnostics and treats the run as status 1.
-    Static { diagnostics: Diagnostics },
+    /// Parse/type/host failure: the run never reached evaluation. `rendered`
+    /// is the whole report — prefix, code, caret, hint — so the host prints it
+    /// and exits on `status`.
+    Static { rendered: String, status: i32 },
     /// The run ran to a settled result.
     Ran {
         ending: Ending,
@@ -271,13 +272,17 @@ pub enum Report {
     },
 }
 
-/// Rendered diagnostics from a run that never ran: the protocol projection
-/// of [`StaticDiagnostics`](crate::run::StaticDiagnostics).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Diagnostics {
-    Parse(String),
-    Types(Vec<String>),
-    Host(String),
+impl Report {
+    /// A refusal the engine raises on its own behalf — a panicked worker, a
+    /// busy engine — rendered through the same door as a run's own static
+    /// failure, so a host never has to know which of the two it is printing.
+    #[cfg(unix)]
+    pub(crate) fn host_fault(message: impl Into<String>) -> Self {
+        let diagnostics =
+            crate::run::StaticDiagnostics::Host(crate::types::Error::new(message, 1));
+        let (rendered, status) = crate::diagnostic::format_static_diagnostics(&diagnostics);
+        Self::Static { rendered, status }
+    }
 }
 
 /// How a run left evaluation, wire-shaped.
@@ -431,17 +436,13 @@ impl crate::run::RunReport {
     /// Never: [`Observation::to_wire`] is total over exactly the vocabulary
     /// [`FOValue`] admits.
     pub fn into_report(self, sources: &crate::source::SourceDb) -> Report {
-        use crate::run::StaticDiagnostics;
         match self {
-            Self::Static { diagnostics } => Report::Static {
-                diagnostics: match diagnostics {
-                    StaticDiagnostics::Parse(e) => Diagnostics::Parse(e.message),
-                    StaticDiagnostics::Types(errs) => Diagnostics::Types(
-                        errs.iter().map(std::string::ToString::to_string).collect(),
-                    ),
-                    StaticDiagnostics::Host(e) => Diagnostics::Host(e.message),
-                },
-            },
+            // Not `sources`: a static failure carries the text its carets point
+            // into, so nothing about it was ever registered.
+            Self::Static { diagnostics } => {
+                let (rendered, status) = crate::diagnostic::format_static_diagnostics(&diagnostics);
+                Report::Static { rendered, status }
+            }
             Self::Ran {
                 ending,
                 captured,
@@ -531,7 +532,8 @@ mod ending_wire_round_trip_tests {
     #[test]
     fn static_round_trips() {
         round_trips(&Report::Static {
-            diagnostics: Diagnostics::Host("boom".into()),
+            rendered: "Error: boom\n".into(),
+            status: 1,
         });
     }
 }
@@ -2079,16 +2081,11 @@ impl Transport for WireTransport {
                             ending:
                                 Ending::Raised { rendered, .. } | Ending::Walled { rendered, .. },
                             ..
-                        } => Err(ProbeError::Rejected(rendered)),
+                        }
+                        | Report::Static { rendered, .. } => Err(ProbeError::Rejected(rendered)),
                         Report::Ran { ending, .. } => Err(ProbeError::Rejected(format!(
                             "probe answered abnormally: {ending:?}"
                         ))),
-                        Report::Static { diagnostics } => {
-                            Err(ProbeError::Rejected(match diagnostics {
-                                Diagnostics::Host(msg) | Diagnostics::Parse(msg) => msg,
-                                Diagnostics::Types(errs) => errs.join("\n"),
-                            }))
-                        }
                     };
                 }
                 Some(item) => carried.push_back(item),
@@ -2424,10 +2421,12 @@ mod durability_tests {
         let report = dispatch_to_report(&transport, run("protocol-panic-now"), Arc::new(()))
             .expect("the identity transport sends the Report synchronously");
         match report {
-            Report::Static {
-                diagnostics: Diagnostics::Host(msg),
-            } => assert!(msg.contains("run panicked"), "got {msg:?}"),
-            other => panic!("a panicking run must report Static Host, got {other:?}"),
+            Report::Static { rendered, .. } => {
+                assert!(rendered.contains("run panicked"), "got {rendered:?}");
+            }
+            other @ Report::Ran { .. } => {
+                panic!("a panicking run must report Static Host, got {other:?}")
+            }
         }
 
         let report = dispatch_to_report(&transport, run("$[1 + 1]"), Arc::new(()))
@@ -2659,6 +2658,97 @@ mod runtime_error_seam_tests {
             rendered.ends_with('\n'),
             "the protocol must supply the trailing newline the host prints verbatim: {rendered:?}"
         );
+    }
+}
+
+// ── The static seam ──────────────────────────────────────────────────
+//
+// The counterpart law for a run that never reached evaluation: the caret, the
+// code and the hint survive the projection, and the registry never learns of
+// text no live span can index.
+#[cfg(test)]
+mod static_diagnostic_seam_tests {
+    use super::*;
+    use crate::run::{RunReport, StaticDiagnostics, tests::capture_req};
+    use crate::types::Shell;
+
+    /// The wire report for `src`, and how many registry ids the run minted.
+    fn project(src: &str) -> (String, i32, u32) {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        let before = shell.sources().next_id().0;
+        let report = shell.run(capture_req(src));
+        assert!(
+            matches!(report, RunReport::Static { .. }),
+            "{src:?} must fail before evaluation"
+        );
+        let minted = shell.sources().next_id().0 - before;
+        let Report::Static { rendered, status } = report.into_report(shell.sources()) else {
+            panic!("a static run must project to Report::Static");
+        };
+        (rendered, status, minted)
+    }
+
+    #[test]
+    fn a_parse_failure_projects_to_a_caret_report() {
+        let (rendered, status, _) = project("let = ");
+        assert_eq!(status, 2, "a parse failure exits 2: {rendered:?}");
+        assert!(
+            rendered.contains("[P0001]"),
+            "the code must survive: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("<test>:1:5"),
+            "the resolved position must survive: {rendered:?}"
+        );
+        assert!(
+            rendered.contains('╰'),
+            "the caret must survive: {rendered:?}"
+        );
+    }
+
+    /// `code()`, `render_label()` and `hint()` are exactly what `Display` drops.
+    #[test]
+    fn a_type_failure_projects_with_its_code_label_and_hint() {
+        let (rendered, status, _) = project("$[1 + true]");
+        assert_eq!(status, 1, "a type failure exits 1: {rendered:?}");
+        assert!(
+            rendered.contains("[T0010]"),
+            "the code must survive: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Integer doesn't match Bool"),
+            "the under-caret label must survive: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Help:"),
+            "the hint must survive: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("@0.."),
+            "raw byte offsets must not reach a host: {rendered:?}"
+        );
+    }
+
+    /// A failed compile leaves no live span, so its text has no slot.
+    #[test]
+    fn a_static_failure_registers_no_source() {
+        for src in ["let = ", "$[1 + true]"] {
+            let (_, _, minted) = project(src);
+            assert_eq!(minted, 0, "{src:?} must not grow the registry");
+        }
+    }
+
+    /// The `Host` arm is spanless, so it renders as the one-liner.
+    #[test]
+    fn a_host_fault_renders_without_a_caret() {
+        let (rendered, status) = crate::diagnostic::format_static_diagnostics(
+            &StaticDiagnostics::Host(crate::types::Error::new("hook 'x' is not registered", 1)),
+        );
+        assert_eq!(status, 1);
+        assert!(rendered.contains("hook 'x' is not registered"));
+        assert!(!rendered.contains('╰'), "no span, no caret: {rendered:?}");
+        assert!(rendered.ends_with('\n'));
     }
 }
 

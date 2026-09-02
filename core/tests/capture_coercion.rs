@@ -17,7 +17,7 @@ mod common;
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{Capabilities, Shell};
 use ral_core::{
-    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, StaticDiagnostics, Value,
+    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value,
 };
 
 /// A session as every front end builds one: prelude registered, env seeded,
@@ -61,11 +61,7 @@ fn run_seen(shell: &mut Shell, source: &str) -> (Result<Value, String>, Vec<u8>)
             captured.map(|c| c.stdout).unwrap_or_default(),
         ),
         RunReport::Static { diagnostics, .. } => (
-            Err(match diagnostics {
-                StaticDiagnostics::Parse(e) => format!("parse: {e:?}"),
-                StaticDiagnostics::Types(errs) => format!("types: {} diagnostic(s)", errs.len()),
-                StaticDiagnostics::Host(e) => format!("host: {e:?}"),
-            }),
+            Err(ral_core::diagnostic::format_static_diagnostics(&diagnostics).0),
             Vec::new(),
         ),
     }

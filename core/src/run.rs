@@ -39,11 +39,23 @@ pub trait RunLifecycle {
 impl RunLifecycle for () {}
 
 /// Parse/type diagnostics from a run that never reached evaluation.
+///
+/// The spanned arms carry the [`Source`](crate::source::Source) their carets
+/// point into, rather than resolving it through the session's
+/// [`SourceDb`](crate::source::SourceDb): a run that failed to compile leaves
+/// no live span behind, so its text has no business in a registry that is
+/// append-only precisely because live spans index it.
 pub enum StaticDiagnostics {
-    Parse(ParseError),
-    Types(Vec<TypeError>),
+    Parse {
+        error: ParseError,
+        source: crate::source::Source,
+    },
+    Types {
+        errors: Vec<TypeError>,
+        source: crate::source::Source,
+    },
     /// A host-level error that stopped the run before it started: hook not
-    /// found, non-ground argument, and the like.
+    /// found, non-ground argument, and the like. Spanless, so no text.
     Host(crate::types::Error),
 }
 
@@ -340,7 +352,11 @@ impl Shell {
                 let (top, single_command, root) =
                     match compile_run(self, src, &req.run.script_name) {
                         Ok(parts) => parts,
-                        Err(diagnostics) => return RunReport::Static { diagnostics },
+                        Err(diagnostics) => {
+                            return RunReport::Static {
+                                diagnostics: *diagnostics,
+                            };
+                        }
                     };
 
                 // Reaching evaluation is what renews a lease. Gated so an
@@ -421,8 +437,8 @@ impl Shell {
 
         // A hook run has no text: its program is an already-compiled value.
         let src = match &run.program {
-            Program::Source(src) => src.as_str(),
-            Program::Hook { .. } => "",
+            Program::Source(src) => Some(src.as_str()),
+            Program::Hook { .. } => None,
         };
 
         let (capture, capture_bufs) = match run.io {
@@ -626,7 +642,7 @@ pub(crate) fn compile_run(
     shell: &Shell,
     src: &str,
     name: &str,
-) -> Result<(Arc<crate::ir::Toplevel>, bool, FileId), StaticDiagnostics> {
+) -> Result<(Arc<crate::ir::Toplevel>, bool, FileId), Box<StaticDiagnostics>> {
     crate::process::clear();
     let file = shell.session.sources.next_id();
 
@@ -652,8 +668,20 @@ pub(crate) fn compile_run(
     );
     let top = match outcome {
         CompileOutcome::Compiled(t) => Arc::new(t),
-        CompileOutcome::Parse(e) => return Err(StaticDiagnostics::Parse(e)),
-        CompileOutcome::Types(errs) => return Err(StaticDiagnostics::Types(errs)),
+        // The text is copied only here, on the failure path, and dies with the
+        // report: `file` was peeked, never minted, so the registry is untouched.
+        CompileOutcome::Parse(error) => {
+            return Err(Box::new(StaticDiagnostics::Parse {
+                error,
+                source: crate::source::Source::from_text(name, src),
+            }));
+        }
+        CompileOutcome::Types(errors) => {
+            return Err(Box::new(StaticDiagnostics::Types {
+                errors,
+                source: crate::source::Source::from_text(name, src),
+            }));
+        }
     };
 
     let single_command = crate::ir::is_single_command(&top);
@@ -673,15 +701,21 @@ pub(crate) fn run_framed<'a>(
     shell: &mut Shell,
     next: Io,
     script_name: &str,
-    src: &str,
+    src: Option<&str>,
     capabilities: Capabilities,
     mut lifecycle: Box<dyn RunLifecycle + 'a>,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
 ) -> (Settled<Value>, i32) {
     let mut guard = IoLoan::install(shell, next);
     let shell = guard.shell_mut();
-    shell.install_root_context(script_name, src);
+    // Only a source run registers: a hook's spans point into the file the hook
+    // was defined in, so an entry for its absent text would name nothing and
+    // never be reclaimed — the registry is append-only for the session's life.
+    if let Some(src) = src {
+        shell.install_root_context(script_name, src);
+    }
 
+    let src = src.unwrap_or("");
     lifecycle.pre_exec(mooring, shell, src);
 
     let result = shell.with_capabilities(capabilities, |s| body(mooring, s));
@@ -710,13 +744,13 @@ pub(crate) fn run_framed<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
     /// The minimal request, shaped like exarch's tool run: ⊤ ceiling, no
     /// surface, foreground `Denied`, stdin `Empty`.
-    fn capture_req<'a>(src: &str) -> RunRequest<'a> {
+    pub(crate) fn capture_req<'a>(src: &str) -> RunRequest<'a> {
         RunRequest {
             run: Run {
                 program: Program::Source(src.into()),
@@ -759,12 +793,59 @@ mod tests {
         match shell.run(capture_req("let = ")) {
             RunReport::Static { diagnostics } => {
                 assert!(
-                    matches!(diagnostics, StaticDiagnostics::Parse(_)),
+                    matches!(diagnostics, StaticDiagnostics::Parse { .. }),
                     "expected a parse diagnostic"
                 );
             }
             RunReport::Ran { .. } => panic!("malformed source must be Static"),
         }
+    }
+
+    /// A hook's program is an already-compiled value, so `run_framed` has no
+    /// text to register. The registry never shrinks, so an entry naming the
+    /// empty string would stand for the session's whole life — one per prompt
+    /// draw, and one per keystroke under a `buffer-change` hook.
+    #[test]
+    fn a_hook_run_registers_no_source() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.run(capture_req("let body = { 1 }"));
+        let thunk = shell
+            .scope_lookup("body")
+            .cloned()
+            .expect("body must be bound");
+        let name = crate::types::HookName::session("test_hook");
+        shell
+            .register_hook(
+                name.clone(),
+                thunk,
+                crate::types::HookSig::Prompt,
+                crate::types::DefaultPolicy::denied(),
+                crate::source::Span {
+                    start: 0,
+                    end: 0,
+                    file: crate::source::FileId::DUMMY,
+                },
+            )
+            .expect("register the hook");
+
+        let before = shell.sources().next_id();
+        let report = shell.run(RunRequest {
+            run: Run {
+                program: Program::Hook { name, args: vec![] },
+                ..capture_req("").run
+            },
+            ..capture_req("")
+        });
+        assert!(
+            matches!(report, RunReport::Ran { .. }),
+            "the registered hook must run"
+        );
+        assert_eq!(
+            shell.sources().next_id(),
+            before,
+            "a hook run must mint no source id"
+        );
     }
 
     #[test]
@@ -774,7 +855,7 @@ mod tests {
         match shell.run(capture_req("$[1 + true]")) {
             RunReport::Static { diagnostics } => {
                 assert!(
-                    matches!(diagnostics, StaticDiagnostics::Types(_)),
+                    matches!(diagnostics, StaticDiagnostics::Types { .. }),
                     "expected type diagnostics"
                 );
             }

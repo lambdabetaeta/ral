@@ -2,6 +2,7 @@
 //! `ariadne` when a span points somewhere, as a one-liner when it does not.
 
 use crate::ansi::{self, BOLD_CYAN, BOLD_RED, BOLD_YELLOW, RESET};
+use crate::run::StaticDiagnostics;
 use crate::source::{SourceDb, Span, byte_to_line_col};
 use crate::syntax::lexer::LexErrorKind;
 use crate::syntax::parser::ParseError;
@@ -294,12 +295,37 @@ pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> S
     )
 }
 
-/// Every error in `errs`, one caret report each.  The script, `--check`, and
-/// rc paths render this way; the module loaders and the REPL print `Display`.
+/// Every error in `errs`, one caret report each.
+///
+/// The script and `--check` paths call this directly; every host on the
+/// protocol reaches it through [`format_static_diagnostics`].  The module
+/// loaders still print `Display`.
 pub fn format_type_errors_ariadne(file: &str, source: &str, errs: &[TypeError]) -> String {
     errs.iter()
         .map(|e| format_type_error_ariadne(file, source, e))
         .collect()
+}
+
+/// A run that never reached evaluation, rendered whole, with its exit status.
+///
+/// The status is 2 for a parse failure, 1 for a type failure, and the host
+/// error's own otherwise.  The one place static diagnostics become text, so
+/// every host prints the same report.
+pub fn format_static_diagnostics(diagnostics: &StaticDiagnostics) -> (String, i32) {
+    match diagnostics {
+        StaticDiagnostics::Parse { error, source } => (
+            format_parse_error_ariadne(source.name(), source.as_str(), error),
+            2,
+        ),
+        StaticDiagnostics::Types { errors, source } => (
+            format_type_errors_ariadne(source.name(), source.as_str(), errors),
+            1,
+        ),
+        StaticDiagnostics::Host(e) => (
+            render_messageless(None, &e.message, e.hint.as_deref()),
+            e.exit_code(),
+        ),
+    }
 }
 
 /// Draw the caret into the source `span` names, resolved through `db`.  A span

@@ -73,11 +73,7 @@ fn run_capture(src: &str) -> (Settled<Value>, String) {
         }
         RunReport::Static { diagnostics, .. } => panic!(
             "{src:?} must reach the evaluator, got {}",
-            match diagnostics {
-                StaticDiagnostics::Parse(e) => format!("parse {e:?}"),
-                StaticDiagnostics::Types(errs) => format!("{} type diagnostic(s)", errs.len()),
-                StaticDiagnostics::Host(e) => format!("host {e:?}"),
-            }
+            ral_core::diagnostic::format_static_diagnostics(&diagnostics).0
         ),
     }
 }
@@ -94,13 +90,13 @@ fn printed(src: &str) -> String {
 fn static_codes(src: &str) -> Vec<String> {
     match report(src) {
         RunReport::Static {
-            diagnostics: StaticDiagnostics::Types(errs),
+            diagnostics: StaticDiagnostics::Types { errors, .. },
             ..
-        } => errs.iter().map(|e| e.kind.code().to_string()).collect(),
+        } => errors.iter().map(|e| e.kind.code().to_string()).collect(),
         RunReport::Static {
-            diagnostics: StaticDiagnostics::Parse(e),
+            diagnostics: StaticDiagnostics::Parse { error, .. },
             ..
-        } => panic!("{src:?}: expected type diagnostics, got parse {e:?}"),
+        } => panic!("{src:?}: expected type diagnostics, got parse {error:?}"),
         RunReport::Static {
             diagnostics: StaticDiagnostics::Host(e),
             ..

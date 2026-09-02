@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 50388d83
-generated_at_date: 2026-08-29
+generated_at_commit: cd4b16e4
+generated_at_date: 2026-09-02
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -104,8 +104,8 @@ inference pass always runs
 
 It matches the one flat `Report`:
 
-- `Static` — a parse, type, or host failure that never reached evaluation,
-  printed from its `Diagnostics` arm; the run never evaluates.
+- `Static` — a parse, type, or host failure that never reached evaluation; its
+  `rendered` is the whole caret report, printed verbatim.
 - `Ran` — a run that compiled. `Ok` prints via `print_result` (and, on a
   `structural` build, records the bind into the worksheet);
   `Break::Exit` ends the loop (clamped through `platform::exit_byte`);

@@ -43,15 +43,7 @@ fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
         // outcome — `must_fail` reads it the same as a runtime error, since
         // both mean "this program never produced a value."
         RunReport::Static { diagnostics } => {
-            let msg = match diagnostics {
-                ral_core::StaticDiagnostics::Parse(e) => e.to_string(),
-                ral_core::StaticDiagnostics::Types(errs) => errs
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; "),
-                ral_core::StaticDiagnostics::Host(e) => e.to_string(),
-            };
+            let msg = ral_core::diagnostic::format_static_diagnostics(&diagnostics).0;
             Err(Break::Error(ral_core::types::Error::new(msg, 2)))
         }
     }

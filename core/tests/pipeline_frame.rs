@@ -14,9 +14,7 @@ mod common;
 use ral_core::builtins;
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{Capabilities, Settled, Shell, Value};
-use ral_core::{
-    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, StaticDiagnostics,
-};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
 /// A real PATH, so `echo` is a genuine external stage — the pipeline this
 /// test drives spawns actual processes, not just ral computations.
@@ -49,15 +47,7 @@ fn run(shell: &mut Shell, source: &str) -> Settled<Value> {
     }) {
         RunReport::Ran { ending, .. } => ending.into_result(),
         RunReport::Static { diagnostics } => {
-            let msg = match diagnostics {
-                StaticDiagnostics::Parse(e) => e.to_string(),
-                StaticDiagnostics::Types(errs) => errs
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; "),
-                StaticDiagnostics::Host(e) => e.to_string(),
-            };
+            let msg = ral_core::diagnostic::format_static_diagnostics(&diagnostics).0;
             panic!("static diagnostic on {source:?}: {msg}");
         }
     }
