@@ -81,6 +81,9 @@
 # SIGCONT, test harnesses) carry an `#[allow]` with a reason at the
 # call site.
 #
+# Apple spawn-lock discipline: see `core/src/process/spawn_lock.rs`'s module
+# doc. Doors carry an `#[allow]` with a reason at the call site.
+#
 # I/O-door discipline: every filesystem and process *constructor* the
 # model can reach is banned so that all I/O passes through a known door
 # (see decisions/260619_surface-reads-writes-execs).  The handle is the
@@ -136,6 +139,11 @@ disallowed-methods = [
     { path = "std::fs::copy", reason = "I/O goes through a known door. A file copy is reasoned-silent infrastructure unless it is the model's own exec image; #[allow] with a reason." },
     { path = "std::fs::set_permissions", reason = "I/O goes through a known door. The atomic-commit mode restore is a surfacing write door's sub-step; other chmods are reasoned-silent. #[allow] with a reason naming which." },
     { path = "std::process::Command::new", reason = "Process spawning goes through a known door. The model's external exec is the door in runtime/command.rs (build_command) that surfaces an exec card; every other Command::new (sandbox respawn, which probes, infra subprocesses) is reasoned-silent and #[allow]s with a reason." },
+    { path = "os_pipe::pipe", reason = "Use crate::process::cloexec_pipe — Apple sets CLOEXEC after pipe(), and a concurrent fork on another thread inherits the window." },
+    { path = "std::os::unix::net::UnixStream::pair", reason = "Use crate::process::cloexec_socketpair — same window." },
+    { path = "std::process::Command::spawn", reason = "Use crate::process::spawn — the fork door; see spawn_lock.rs." },
+    { path = "std::process::Command::output", reason = "Use crate::process::output — spawns through the fork door and waits outside it; see spawn_lock.rs." },
+    { path = "std::process::Command::status", reason = "Use crate::process::status — spawns through the fork door and waits outside it; see spawn_lock.rs." },
     # `allow-invalid` because the path is unix-only: on a Windows build the
     # trait does not exist, and clippy warns about every entry it cannot
     # resolve.  The ban still has to be written — the door it guards is real

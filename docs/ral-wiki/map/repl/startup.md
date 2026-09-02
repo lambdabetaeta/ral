@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: c8af3823
+generated_at_date: 2026-09-02
 covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -27,8 +27,10 @@ uniform). The chain is two-staged around the sandbox:
   tag (`ENGINE_INSTALLER_TAG = "repl"`) carries `engine_boot_shell`, the baked
   prelude over the empty `HostSurface`, since the
   captured host builtins are boot-time closures a child cannot construct.
-- **Helper trampolines** — `try_run_pipeline_stage_helper` (the parent re-execs
-  `current_exe()` to run one pipeline stage in a fresh subprocess) and
+- **Helper trampolines** — `try_run_pipeline_anchor` (`--ral-pipeline-anchor`,
+  the one multicall re-exec a pipeline still uses: a stage itself now runs on
+  a thread of the parent process, but a multi-stage pipeline still needs one
+  process to hold its pgid open for its whole life) and
   `test_helper::try_run_test_helper`.
 - **Sandbox entry** — `ral_core::sandbox::early_init(&argv)` returns the
   *stripped* post-init argv together with an optional exit. It consumes

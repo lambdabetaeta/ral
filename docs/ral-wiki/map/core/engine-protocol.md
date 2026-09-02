@@ -164,7 +164,7 @@ hatch section for the why.
   on hydration, not on death, so only `waitpid` tells running from gone).
 
 The seed a hatch carries is `EngineSeed` — [[map/core/transport|transport]]'s
-`core/src/child_eval.rs` section.
+`core/src/engine_seed.rs` section.
 
 ## See also
 

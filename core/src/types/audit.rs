@@ -3,10 +3,9 @@
 //! `within`, `grant`, `guard`, `try`, and `audit` are collection boundaries,
 //! not observations themselves — none of them owns or wraps one; the real
 //! commands, writes, reads, and capability checks their bodies produce land
-//! flat in whichever trail is open.  A sandboxed subprocess or a
-//! pipeline-stage helper only *transports* its fragment back to the parent
-//! process; nothing decides where an observation "belongs" beyond that flat
-//! merge.
+//! flat in whichever trail is open.  A sandboxed subprocess or a stage
+//! thread only *transports* its fragment back to the parent; nothing
+//! decides where an observation "belongs" beyond that flat merge.
 
 use super::observation::Observation;
 use super::value::Value;
@@ -41,9 +40,9 @@ struct AuditTrail {
     observations: Vec<Observation>,
 }
 
-/// Observations detached from a trail — a sandboxed child or a pipeline
-/// helper hands some up across a process boundary, and the receiving side
-/// merges them into the surrounding trail.
+/// Observations detached from a trail — a sandboxed child or a stage thread
+/// hands some up across its boundary, and the receiving side merges them
+/// into the surrounding trail.
 ///
 /// Same shape as [`AuditTrail`], but in transit.
 #[derive(Default, Debug, Clone)]
@@ -112,10 +111,10 @@ impl Audit {
         self.capture
     }
 
-    /// The policy to inherit across a process boundary, `Some` iff a scope is
-    /// collecting — a helper learns in one answer whether to open a trail and
-    /// which policy to install.  Rides in `ChildEvalRequest`'s own
-    /// `audit_policy` field: it instructs the child, it is not snapshot state.
+    /// The policy to inherit across a stage boundary, `Some` iff a scope is
+    /// collecting — a stage thread learns in one answer whether to open a
+    /// trail and which policy to install.  An instruction to the child, not
+    /// snapshot state.
     pub fn active_policy(&self) -> Option<CapturePolicy> {
         self.active().then_some(self.capture)
     }
@@ -178,22 +177,6 @@ impl Audit {
         }
     }
 
-    /// STT-in for a same-thread thunk body.  The trail and policy move in and
-    /// the call site is copied in, but it never flows back on
-    /// [`Self::return_to`]: the asymmetry keeps a body's own dispatches from
-    /// leaking their site into the caller's next one.
-    pub fn inherit_from(&mut self, parent: &mut Self) {
-        self.trail = parent.trail.take();
-        self.capture = parent.capture;
-        self.call_site = parent.call_site;
-    }
-
-    /// STT-out: the trail the body extended, and the policy, go back to the
-    /// parent.  The call site does not.
-    pub fn return_to(&mut self, parent: &mut Self) {
-        parent.trail = self.trail.take();
-        parent.capture = self.capture;
-    }
 }
 
 /// Microseconds since the Unix epoch.

@@ -144,10 +144,9 @@ pub(super) fn edit_text_in_editor(draft: &str) -> io::Result<Option<String>> {
     let (program, args) = editor_command();
 
     restore_terminal_modes();
-    let status = std::process::Command::new(&program)
-        .args(&args)
-        .arg(&path)
-        .status();
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(&args).arg(&path);
+    let status = ral_core::process::status(&mut cmd);
     if let Err(e) = apply_terminal_modes() {
         let _ = std::fs::remove_file(&path);
         return Err(e);

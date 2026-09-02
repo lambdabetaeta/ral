@@ -20,10 +20,9 @@ use crate::types::{Break, Settled};
 /// One end of a socketpair, owned, carrying blocking length-prefixed frames.
 pub(crate) type Channel = std::os::unix::net::UnixStream;
 
-/// Allocate one socketpair.  The anchor and the frame protocol both want a
-/// bare pair with no `FrameGate`.
+/// Allocate one socketpair: a bare pair with no `FrameGate`.
 pub(crate) fn pair() -> Result<(Channel, Channel), Break> {
-    Channel::pair().map_err(pipe_error)
+    crate::process::cloexec_socketpair().map_err(pipe_error)
 }
 
 /// Stash the child-end fd number in `env` on `cmd` and register the

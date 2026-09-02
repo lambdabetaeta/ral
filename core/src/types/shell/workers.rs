@@ -152,12 +152,6 @@ impl Resident for WorkerEntry {
             "done (worker)".to_string()
         }
     }
-
-    fn cancel(&self) {
-        self.handle
-            .cancel
-            .cancel(crate::process::CancelCause::Explicit);
-    }
 }
 
 /// The three ledgers behind [`WorkerRegistry`]'s one lock: live entries, reap
@@ -471,16 +465,6 @@ mod tests {
         let row = entry.lease_row();
         assert!(row.contains("durable"));
         assert!(row.contains("/clear"));
-    }
-
-    /// `cancel` fires the worker's own cooperative scope, the same edge
-    /// [`WorkerRegistry::cancel_all`] fires per entry.
-    #[test]
-    fn resident_cancel_fires_the_handles_cancel_scope() {
-        let entry = fake_entry(1, "spawn { x }", LeaseClass::Worker, true);
-        assert!(!entry.handle.cancel.is_cancelled());
-        entry.cancel();
-        assert!(entry.handle.cancel.is_cancelled());
     }
 
     // ── reservation (the admission/registration TOCTOU close) ───────────

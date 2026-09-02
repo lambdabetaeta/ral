@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods, reason = "[io-door:test] test fs/process scaffolding")]
+
 //! A peer that stops reading must never be able to wedge the front-end
 //! behind the one `Mutex<WireChannel>` every write serialises on. Before
 //! `WireChannel::set_write_deadline` existed, a stuck write parked that lock

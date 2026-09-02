@@ -339,7 +339,7 @@ pub(super) fn respawn_under_bwrap(
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    let mut child = cmd.spawn().map_err(|e| {
+    let mut child = crate::process::spawn(&mut cmd).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             format!("ral: failed to enter sandbox: {BWRAP} not found")
         } else {

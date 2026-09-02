@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use super::util::{arg0_str, as_byte_list, as_bytes, decode_utf8_strict};
 
-fn read_stdin_bytes(name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
+fn read_stdin_bytes(name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     use std::io::Read;
 
     let mut bytes = Vec::new();
@@ -31,7 +31,7 @@ fn read_stdin_bytes(name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
 /// Channel bytes for a `from-X` decoder.  The typechecker rejects a written
 /// argument outright, so this guard is for spread calls, whose arity it
 /// cannot see ([`crate::ir::args::positional`] gives up on them).
-fn input_bytes(args: &[Value], name: &str, shell: &mut Shell) -> Settled<Vec<u8>> {
+fn input_bytes(args: &[Value], name: &str, shell: &Shell) -> Settled<Vec<u8>> {
     if !args.is_empty() {
         return Err(sig_hint(
             format!("{name}: takes no arguments — it reads the byte channel"),
@@ -41,11 +41,11 @@ fn input_bytes(args: &[Value], name: &str, shell: &mut Shell) -> Settled<Vec<u8>
     read_stdin_bytes(name, shell)
 }
 
-pub(super) fn builtin_from_bytes(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_from_bytes(args: &[Value], shell: &Shell) -> Settled<Value> {
     Ok(Value::Bytes(input_bytes(args, "from-bytes", shell)?))
 }
 
-pub(super) fn builtin_from_string(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_from_string(args: &[Value], shell: &Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-string", shell)?;
     Ok(Value::String(decode_utf8_strict(
         bytes,
@@ -54,7 +54,7 @@ pub(super) fn builtin_from_string(args: &[Value], shell: &mut Shell) -> Settled<
     )?))
 }
 
-pub(super) fn builtin_from_line(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_from_line(args: &[Value], shell: &Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-line", shell)?;
     let text = decode_utf8_strict(
         bytes,
@@ -97,7 +97,7 @@ fn stream_cons(head: String, tail: Value) -> Value {
 /// lossily so a line stream survives invalid bytes.  Only the shape is lazy:
 /// the channel is read to EOF and every node built before this returns, so a
 /// downstream `stream-take 3` still drains an unbounded source.
-pub(super) fn builtin_from_lines(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_from_lines(args: &[Value], shell: &Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-lines", shell)?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let mut s = Value::Variant {
@@ -140,7 +140,7 @@ fn json_to_value(j: &serde_json::Value) -> Settled<Value> {
     })
 }
 
-pub(super) fn builtin_from_json(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_from_json(args: &[Value], shell: &Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-json", shell)?;
     let text = decode_utf8_strict(
         bytes,
@@ -155,7 +155,7 @@ pub(super) fn builtin_from_json(args: &[Value], shell: &mut Shell) -> Settled<Va
 /// Decode CSV into a list of records keyed by the header row; fields stay
 /// `String`, since CSV is untyped.  A duplicate header is refused rather than
 /// resolved last-write-wins — a record cannot hold two columns of one name.
-pub(super) fn builtin_from_csv(args: &[Value], shell: &mut Shell) -> Settled<Value> {
+pub(super) fn builtin_from_csv(args: &[Value], shell: &Shell) -> Settled<Value> {
     let bytes = input_bytes(args, "from-csv", shell)?;
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)

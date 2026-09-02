@@ -4,7 +4,7 @@
 //!
 //! Also installs a pre-main constructor that serves the shared re-exec
 //! stages (see [`ral_core::test_helper::run_pre_main_reexec_stages`]):
-//! pipelines and capture-active standalone invocations of bundled
+//! the pipeline anchor and capture-active standalone invocations of bundled
 //! coreutils tools re-exec `current_exe()` — the test binary itself — so
 //! without the constructor the re-exec would land in the test framework
 //! instead of the helper, and bundled `test`/`wc`/`stat` would never run.

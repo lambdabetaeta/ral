@@ -15,7 +15,7 @@ use super::protocol::{DeferredFrame, FrameReader, HelperProtocol, pipe_error};
 use super::resolve::StageSpec;
 use super::route::StageRoute;
 use crate::child_eval::{ChildEvalRequest, ChildEvalResponse, DecodedResponse, decode_response};
-use crate::process::StageKill;
+use crate::process::{StageKill, StopPolicy};
 use crate::types::{AuditFragment, Break, Error, Mooring, Settled, Shell};
 
 /// A running ral helper stage: one process and one report-reader thread.
@@ -108,9 +108,9 @@ pub(super) fn launch_helper_stage(
     spec: &StageSpec,
     route: StageRoute,
     mooring: &Mooring,
-    shell: &mut Shell,
-    group: &mut PipelineGroup,
-    park_on_stop: bool,
+    shell: &Shell,
+    group: &PipelineGroup,
+    stop: StopPolicy,
 ) -> Settled<(HelperStageHandle, DeferredFrame)> {
     let StageRoute { stdin, stdout, .. } = route;
     let (mut cmd, proto) = HelperProtocol::build_command()?;
@@ -122,7 +122,7 @@ pub(super) fn launch_helper_stage(
         plumbing,
         mooring,
         shell,
-        park_on_stop,
+        stop,
         |e| {
             let mut err = Error::new(format!("pipeline helper: {e}"), 127);
             err.span = spec.span;

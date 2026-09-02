@@ -16,7 +16,8 @@ pub(super) fn read_window(elapsed: Duration) -> Option<String> {
     // Pad by a second so a sub-second call still spans its own denials.
     let secs = elapsed.as_secs().saturating_add(1).to_string();
     let since = format!("{secs} seconds ago");
-    let journal = std::process::Command::new("journalctl")
+    let mut journal_cmd = std::process::Command::new("journalctl");
+    journal_cmd
         .args([
             "-k",
             "--since",
@@ -26,19 +27,19 @@ pub(super) fn read_window(elapsed: Duration) -> Option<String> {
             "short",
         ])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
+        .stderr(std::process::Stdio::null());
+    let journal = crate::process::output(&mut journal_cmd);
     if let Ok(out) = journal
         && out.status.success()
     {
         return Some(String::from_utf8_lossy(&out.stdout).into_owned());
     }
-    let dmesg = std::process::Command::new("dmesg")
+    let mut dmesg_cmd = std::process::Command::new("dmesg");
+    dmesg_cmd
         .args(["--since", since.as_str()])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    let dmesg = crate::process::output(&mut dmesg_cmd).ok()?;
     Some(String::from_utf8_lossy(&dmesg.stdout).into_owned())
 }
 

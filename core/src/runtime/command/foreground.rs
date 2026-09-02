@@ -2,11 +2,13 @@
 //!
 //! One predicate drives two correlated outputs — the [`PgidPolicy`] to spawn
 //! under and the post-spawn terminal handoff — so they are bundled in one
-//! witness and cannot drift apart.  Pipeline stages never come through here:
-//! they own their pgid via `PipelineGroup` in `core/src/runtime/pipeline/group.rs`
-//! and gate foreground on the pipeline's frozen `TerminalPlan` instead.
+//! witness and cannot drift apart.  A pipeline stage itself is spawned via
+//! `PipelineGroup` in `core/src/runtime/pipeline/group.rs`, which gates
+//! foreground on the pipeline's frozen `TerminalPlan` instead; an external
+//! spawned *from inside* a stage still comes through here and joins the
+//! stage's group.
 
-use crate::process::{ForegroundGuard, PgidPolicy};
+use crate::process::{ForegroundGuard, Pgid, PgidPolicy, StopPolicy};
 use crate::types::{Mooring, Shell};
 
 /// Whether a freshly-spawned standalone external takes the controlling
@@ -17,10 +19,14 @@ pub(super) struct ForegroundDecision {
     /// group the child must stay consistent with, so it may lead its own
     /// group and let a cancel tree-kill it.
     own_group_when_background: bool,
-    /// Park the child as a resumable job on a stop signal instead of
-    /// reaping it.  Only an interactive REPL has a job table to `fg` it
-    /// back, hence foreground *and* interactive.
-    park_on_stop: bool,
+    /// Whether a stop signal should surface as a resumable job — an
+    /// interactive REPL foreground child, which has a job table to `fg` it
+    /// back — rather than being killed and reaped.  Fed into
+    /// [`StopPolicy::for_external`] via [`Self::stop_policy`], which also
+    /// parks on a pipeline's gate when this run is a stage thread.
+    escapes: bool,
+    /// The pipeline group this run's stage thread belongs to, if any.
+    stage_group: Option<Pgid>,
 }
 
 impl ForegroundDecision {
@@ -45,7 +51,8 @@ impl ForegroundDecision {
         Self {
             want_fg,
             own_group_when_background: shell.io.launch_role.is_top_level() && !shell.io.interactive,
-            park_on_stop: want_fg && shell.io.interactive,
+            escapes: want_fg && shell.io.interactive,
+            stage_group: shell.io.launch_role.stage_group(),
         }
     }
 
@@ -61,15 +68,17 @@ impl ForegroundDecision {
     /// anything it spawns — from signalling whatever owns the tty; the new
     /// session's pgid still equals its pid, so the tree-kill is unchanged.
     ///
-    /// `Inherit` covers the two cases that depend on sharing ral's pgid: a
-    /// pipeline stage, which must join the pipeline group to keep the
-    /// foreground handoff consistent, and an interactive background child,
-    /// which relies on the kernel's terminal-driven SIGINT reaching it.
+    /// A run inside a pipeline stage joins the stage's group instead, so its
+    /// externals stay under the one pgid the pipeline signals as a whole.
+    /// `Inherit` is what remains: an interactive background child, which
+    /// relies on the kernel's terminal-driven SIGINT reaching it.
     pub(super) fn pgid_policy(&self) -> PgidPolicy {
         if self.want_fg {
             PgidPolicy::NewLeader
         } else if self.own_group_when_background {
             PgidPolicy::NewSession
+        } else if let Some(g) = self.stage_group {
+            PgidPolicy::Join(g)
         } else {
             PgidPolicy::Inherit
         }
@@ -83,8 +92,9 @@ impl ForegroundDecision {
         self.want_fg
     }
 
-    pub(super) fn park_on_stop(&self) -> bool {
-        self.park_on_stop
+    /// The [`StopPolicy`] a spawn under this decision should wait with.
+    pub(super) fn stop_policy(&self, mooring: &Mooring) -> StopPolicy {
+        StopPolicy::for_external(mooring, self.escapes)
     }
 
     /// Hand the controlling terminal to the freshly-spawned child.
@@ -118,5 +128,21 @@ impl ForegroundDecision {
         {
             ForegroundGuard::try_acquire(child_id.cast_signed(), lease)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pgid_policy_for_a_stage_group() {
+        let decision = ForegroundDecision {
+            want_fg: false,
+            own_group_when_background: false,
+            escapes: false,
+            stage_group: Some(Pgid::from_raw(1).expect("1 is positive")),
+        };
+        assert!(matches!(decision.pgid_policy(), PgidPolicy::Join(_)));
     }
 }

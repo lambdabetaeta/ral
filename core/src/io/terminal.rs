@@ -81,12 +81,6 @@ pub struct TerminalState {
 }
 
 impl TerminalState {
-    /// Probe in `Auto`, for contexts with no env of their own to consult (a
-    /// re-exec'd pipeline-stage child).
-    pub fn probe() -> Self {
-        Self::probe_with_mode(InteractiveMode::Auto)
-    }
-
     /// Probe in the mode `RAL_INTERACTIVE_MODE` names.  The env var is read
     /// here, beside the type defining the modes, rather than respelled in each
     /// frontend.

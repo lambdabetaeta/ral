@@ -19,7 +19,7 @@
 
 use std::sync::atomic::Ordering;
 
-use super::{ESCALATION, Pgid, PgidPolicy};
+use super::{ESCALATION, KillTarget, Pgid, PgidPolicy};
 use crate::process::cancel::{CancelCause, request_foreground_cancel};
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -667,18 +667,6 @@ mod win_groups {
     }
 }
 
-/// Windows analogue of the Unix `PipelineRelay`, holding nothing.
-///
-/// `win_groups::GROUPS` already *is* the live-group set, so `install` exists
-/// only to keep its caller in `runtime::pipeline::group` free of cfg gates.
-pub struct PipelineRelay;
-
-impl PipelineRelay {
-    pub fn install(_pgid: i32) -> Option<Self> {
-        Some(Self)
-    }
-}
-
 /// Release the Job Object backing the group led by `leader`.
 ///
 /// Surviving members die with it.  Idempotent, and needs to be —
@@ -789,8 +777,8 @@ pub fn disown_pipeline_group(pgid: Pgid) {
 #[allow(clippy::disallowed_methods)]
 pub(super) fn wait_handling_stop(
     child: &mut std::process::Child,
-    _pgid: Option<Pgid>,
-    _park_on_stop: bool,
+    _parks: bool,
+    _target: KillTarget,
 ) -> std::io::Result<crate::process::WaitOutcome> {
     child
         .wait()
@@ -802,8 +790,8 @@ pub(super) fn wait_handling_stop(
 #[allow(clippy::disallowed_methods)]
 pub(super) fn try_wait_handling_stop(
     child: &mut std::process::Child,
-    _pgid: Option<Pgid>,
-    _park_on_stop: bool,
+    _parks: bool,
+    _target: KillTarget,
 ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
     child
         .try_wait()

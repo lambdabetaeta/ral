@@ -7,13 +7,12 @@
 //! job leaves the table when its group terminates.  A `spawn`ed pipeline is
 //! an in-process handle, not a pgid job, and is not tracked here.
 //!
-//! A single-process job places its child in its own pgid (set in the
-//! `pre_exec` hook of every pipeline stage on Unix; via
-//! `CREATE_NEW_PROCESS_GROUP` + a Job Object on Windows), so every
-//! signal, wait, and foreground handoff in this module operates on the
-//! whole group regardless of whether the job has one stage or many.
-//! This is the structural prevention rule for the "is this a pid or a
-//! pgid?" confusion: there is only the group here.
+//! A standalone external leads its own pgid; a pipeline's externals share
+//! its anchor's.  Every signal, wait, and foreground handoff here addresses
+//! the group, so there is no "pid or pgid?" question to get wrong — except
+//! that a job driving a [`ral_core::ParkedPipeline`] is waited through its
+//! own collector, never `waitpid(-pgid)`, whose stage threads own those
+//! children.
 //!
 //! Provides jobs/fg/bg/disown.  On shell exit, the group is taken down
 //! gracefully first (`SIGTERM` to the pgid on Unix; `CTRL_BREAK_EVENT`
@@ -46,7 +45,8 @@ use rustix::io::Errno;
 #[cfg(unix)]
 use rustix::process::WaitOptions;
 
-#[derive(Debug, Clone)]
+/// Neither `Debug` nor `Clone`: a parked job owns a live `ParkedPipeline`
+/// (the pgid's collector state), which is neither.
 pub struct Job {
     pub id: usize,
     /// Process-group id of the whole pipeline.  All signal and wait
@@ -60,6 +60,11 @@ pub struct Job {
     /// them, which is why they are parked here and nowhere shorter-lived —
     /// see [`JobTable::settle`].
     pub pending: Vec<PendingWrite>,
+    /// The pipeline this job is driving through its own collector, once it
+    /// has parked at least once.  `None` for a stopped standalone external,
+    /// which still takes the pgid `waitpid` path.
+    #[cfg(unix)]
+    pub parked: Option<ral_core::ParkedPipeline>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,28 +101,15 @@ impl Resident for Job {
             JobState::Stopped => "stopped".to_string(),
         }
     }
-
-    /// The cooperative-signal analogue of a worker's cancel scope: `SIGTERM`
-    /// to the whole pgid, the same first step [`JobTable::cleanup`] takes for
-    /// every group at exit, letting the process decide how to wind down
-    /// rather than reaching for `SIGKILL` directly.
-    fn cancel(&self) {
-        #[cfg(unix)]
-        {
-            let _ = rustix::process::kill_process_group(
-                self.pgid.as_pid(),
-                rustix::process::Signal::TERM,
-            );
-        }
-        #[cfg(windows)]
-        {
-            ral_core::process::kill_pipeline_group(self.pgid);
-        }
-    }
 }
 
 pub struct JobTable {
     jobs: HashMap<usize, Job>,
+    /// Pipelines `disown` detached from their job row.  Nothing left to
+    /// `fg`/`bg`/sweep them once here — `cleanup` is their only remaining
+    /// eliminator, at REPL exit.
+    #[cfg(unix)]
+    disowned: Vec<ral_core::ParkedPipeline>,
 }
 
 impl Default for JobTable {
@@ -130,6 +122,8 @@ impl JobTable {
     pub fn new() -> Self {
         Self {
             jobs: HashMap::new(),
+            #[cfg(unix)]
+            disowned: Vec::new(),
         }
     }
 
@@ -148,6 +142,7 @@ impl JobTable {
         cmd: String,
         state: JobState,
         pending: Vec<PendingWrite>,
+        #[cfg(unix)] parked: Option<ral_core::ParkedPipeline>,
     ) -> usize {
         let pgid = Pgid::from_raw(pgid).expect("a job pgid is positive");
         let id = self.jobs.keys().max().map_or(1, |n| n + 1);
@@ -159,9 +154,18 @@ impl JobTable {
                 cmd,
                 state,
                 pending,
+                #[cfg(unix)]
+                parked,
             },
         );
         id
+    }
+
+    /// The mutable job `fg` drives to completion — `wait_foreground` needs
+    /// exclusive access to take and (on a further park) put back its
+    /// `ParkedPipeline`.
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut Job> {
+        self.jobs.get_mut(&id)
     }
 
     /// Finish job `id`'s staged writes and drop it from the table.
@@ -205,10 +209,20 @@ impl JobTable {
     /// Detach a job from the shell, handing back the pgid it had.
     ///
     /// Its staged writes go unfinished: once the row is gone nothing is left
-    /// to rename them, so each target keeps exactly what it had.
+    /// to rename them, so each target keeps exactly what it had. A parked
+    /// pipeline moves into [`Self::disowned`] rather than being dropped here
+    /// — it still owns live stage threads, and only `cleanup` tears those
+    /// down.
     pub fn disown(&mut self, id: usize) -> Option<Pgid> {
-        let pgid = self.jobs.get(&id)?.pgid;
-        self.settle(id, false);
+        let job = self.jobs.remove(&id)?;
+        let pgid = job.pgid;
+        #[cfg(unix)]
+        if let Some(parked) = job.parked {
+            self.disowned.push(parked);
+        }
+        for write in job.pending {
+            write.abandon();
+        }
         Some(pgid)
     }
 
@@ -265,6 +279,10 @@ impl JobTable {
     /// the background.  Returns the pgid for parity with `resume`, or
     /// `None` when the id is unknown.
     ///
+    /// A job driving a `ParkedPipeline` opens its gate through
+    /// [`ral_core::ParkedPipeline::resume`] instead of a bare `SIGCONT` —
+    /// the stage threads must see the gate open too.
+    ///
     /// Not for `fg`: there the SIGCONT must be sequenced after the
     /// tty handoff inside [`wait_foreground`].  Idempotent for an
     /// already-running job (the SIGCONT is a kernel no-op).
@@ -272,27 +290,63 @@ impl JobTable {
         let pgid = self.resume(id)?;
         #[cfg(unix)]
         {
-            let _ =
-                rustix::process::kill_process_group(pgid.as_pid(), rustix::process::Signal::CONT);
+            match self.jobs.get_mut(&id).and_then(|job| job.parked.as_mut()) {
+                Some(parked) => parked.resume(),
+                None => {
+                    let _ = rustix::process::kill_process_group(
+                        pgid.as_pid(),
+                        rustix::process::Signal::CONT,
+                    );
+                }
+            }
         }
         Some(pgid)
     }
 
     /// Reap any pipeline members that have exited or stopped (non-blocking).
     ///
-    /// Unix: `waitpgid_eintr` with `NOHANG | UNTRACED` drains ready events;
-    /// ECHILD drops the job from the table. Windows: poll the leader via
-    /// `try_reap_leader`; an exit (or unknown group) drops the entry and
+    /// Unix: a job driving a [`ral_core::ParkedPipeline`] is swept through
+    /// [`ral_core::ParkedPipeline::poll`] — never a bare `waitpid(-pgid)`,
+    /// which would reap children its stage threads own. Every other job
+    /// takes the `waitpgid_eintr` drain: `NOHANG | UNTRACED` drains ready
+    /// events; ECHILD drops the job from the table. Windows: poll the leader
+    /// via `try_reap_leader`; an exit (or unknown group) drops the entry and
     /// closes the Job handle, killing stragglers through `KILL_ON_JOB_CLOSE`.
     /// No live path populates `JobTable` on Windows — the only live
     /// [`Self::add`] caller is the Unix `Break::Stopped` arm in `repl/exec.rs`
-    /// (`&` registers `Worker`s, never `JobTable` jobs) — so the Windows arm
-    /// here is exercised only by unit-test fixtures; revisit if that changes.
-    pub fn reap(&mut self) {
+    /// — so the Windows arm is exercised only by unit-test fixtures.
+    pub fn reap(&mut self, #[cfg(unix)] mooring: &Mooring, #[cfg(unix)] shell: &mut Shell) {
         #[cfg(unix)]
         {
-            let entries: Vec<(usize, Pgid)> =
-                self.jobs.iter().map(|(id, j)| (*id, j.pgid)).collect();
+            let parked_ids: Vec<usize> = self
+                .jobs
+                .iter()
+                .filter(|(_, j)| j.parked.is_some())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in parked_ids {
+                let Some(job) = self.jobs.get_mut(&id) else {
+                    continue;
+                };
+                let pgid = job.pgid;
+                let poll = job
+                    .parked
+                    .as_mut()
+                    .expect("filtered on parked.is_some()")
+                    .poll(mooring, shell);
+                match poll {
+                    ral_core::ParkedPoll::Running => {}
+                    ral_core::ParkedPoll::Stopped(_) => self.stop(pgid),
+                    ral_core::ParkedPoll::Finished { completed } => self.settle(id, completed),
+                }
+            }
+
+            let entries: Vec<(usize, Pgid)> = self
+                .jobs
+                .iter()
+                .filter(|(_, j)| j.parked.is_none())
+                .map(|(id, j)| (*id, j.pgid))
+                .collect();
             for (id, pgid) in entries {
                 // The leader's exit status is what settles the job's staged
                 // writes, so it is kept rather than drained past.
@@ -357,13 +411,26 @@ impl JobTable {
     /// `KILL_ON_JOB_CLOSE` is already a hard kill, so the grace window
     /// only buys time for jobs to finish naturally; survivors get
     /// `TerminateJobObject` via `kill_pipeline_group`.
-    pub fn cleanup(&mut self) {
-        if self.jobs.is_empty() {
+    pub fn cleanup(&mut self, #[cfg(unix)] mooring: &Mooring, #[cfg(unix)] shell: &mut Shell) {
+        #[cfg(unix)]
+        let empty = self.jobs.is_empty() && self.disowned.is_empty();
+        #[cfg(not(unix))]
+        let empty = self.jobs.is_empty();
+        if empty {
             return;
         }
 
         #[cfg(unix)]
         {
+            // A pipeline's anchor swallows SIGTERM, so the sweep below cannot
+            // end a parked or disowned pipeline: each is cancelled and dropped,
+            // which joins its stage threads and kills and reaps its anchor.
+            let mut terminating = std::mem::take(&mut self.disowned);
+            terminating.extend(self.jobs.values_mut().filter_map(|job| job.parked.take()));
+            for mut parked in terminating {
+                parked.cancel(ral_core::process::CancelCause::Terminate);
+            }
+
             for job in self.jobs.values() {
                 let pgid = job.pgid.as_pid();
                 let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
@@ -377,7 +444,7 @@ impl JobTable {
 
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !self.jobs.is_empty() && std::time::Instant::now() < deadline {
-                self.reap();
+                self.reap(mooring, shell);
                 if !self.jobs.is_empty() {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
@@ -443,34 +510,39 @@ impl ForegroundWait {
     }
 }
 
-/// Hand the controlling terminal to `pgid`, SIGCONT the group, and
-/// block until the whole pipeline exits or any member parks again.
+/// Hand the controlling terminal to `job`'s pgid, resume it, and block
+/// until the whole pipeline exits or any member parks again.
 ///
 /// Unix discipline:
 ///
-///   1. acquire a [`ral_core::process::ForegroundGuard`] for `pgid` —
+///   1. acquire a [`ral_core::process::ForegroundGuard`] for the pgid —
 ///      that snapshots the shell's foreground pgid and termios and
 ///      runs `tcsetpgrp(STDIN_FILENO, pgid)`.  Drop reverses both with
 ///      EINTR-retried syscalls, so every early return (including a
 ///      panic anywhere below) restores the tty;
-///   2. `kill(-pgid, SIGCONT)` **after** the handoff — otherwise a
-///      resumed member that immediately reads the tty hits SIGTTIN
-///      (children have SIGTTIN at default disposition via
+///   2. a job driving a [`ral_core::ParkedPipeline`] hands off to
+///      [`ral_core::ParkedPipeline::resume_and_collect`], which does the
+///      `SIGCONT` itself — *after* the handoff above, preserving the
+///      tcsetpgrp-then-SIGCONT order. A `Parked` outcome puts the pipeline
+///      back so a later `fg`/`bg`/sweep can drive it again;
+///   3. a job with no parked pipeline (a stopped standalone external)
+///      gets `kill(-pgid, SIGCONT)` **after** the handoff
+///      — otherwise a resumed member that immediately reads the tty hits
+///      SIGTTIN (children have SIGTTIN at default disposition via
 ///      `reset_child_signals`) and re-stops the whole group before we
-///      ever hand it the terminal.  Idempotent for a group that was
+///      ever hand it the terminal. Idempotent for a group that was
 ///      already running (this entrypoint handles both `fg <stopped>`
-///      and `fg <running-bg>`);
-///   3. `waitpgid_eintr` with `UNTRACED` loops over typed statuses. A
-///      stopping signal from any member returns with `stopped_by` set; an
-///      `ECHILD` drain returns `stopped_by = None`. Misclassifying EINTR as
-///      "group is gone" would let the caller remove a live job from the
-///      table — the retrying funnel rules that out;
-///   4. on stop, SIGSTOP the whole `-pgid` so any sibling stages that
-///      were still running park together — mirrors
-///      `PipelineCollector::note_stop`, which handles the
-///      initial-launch path.  Idempotent for the Ctrl-Z case where the
-///      kernel already stopped every member through the terminal;
-///   5. drop closes the loop: foreground pgid restored, then termios
+///      and `fg <running-bg>`); then `waitpgid_eintr` with `UNTRACED`
+///      loops over typed statuses. A stopping signal from any member
+///      returns with `stopped_by` set; an `ECHILD` drain returns
+///      `stopped_by = None`. Misclassifying EINTR as "group is gone"
+///      would let the caller remove a live job from the table — the
+///      retrying funnel rules that out. On stop, SIGSTOP the whole
+///      `-pgid` so any sibling stages that were still running park
+///      together — mirrors `PipelineCollector::note_stop`, which handles
+///      the initial-launch path. Idempotent for the Ctrl-Z case where
+///      the kernel already stopped every member through the terminal;
+///   4. drop closes the loop: foreground pgid restored, then termios
 ///      with `TCSADRAIN` so the child's last buffered output drains
 ///      under its own settings before ours reapply.
 ///
@@ -478,9 +550,10 @@ impl ForegroundWait {
 /// is nothing to hand the console to (it's shared across attached
 /// processes), and no SIGTSTP analogue — `stopped_by` is therefore
 /// always `None`; a stopped foreground job is unreachable on Windows.
-pub fn wait_foreground(pgid: Pgid, mooring: &Mooring, shell: &Shell) -> ForegroundWait {
+pub fn wait_foreground(job: &mut Job, mooring: &Mooring, shell: &mut Shell) -> ForegroundWait {
     #[cfg(unix)]
     {
+        let pgid = job.pgid;
         // RAII handoff: tcsetpgrp + termios snapshot on acquire,
         // restored on drop.  `None` when the run holds no terminal
         // lease (e.g. a non-interactive resume) — exactly when there
@@ -489,6 +562,23 @@ pub fn wait_foreground(pgid: Pgid, mooring: &Mooring, shell: &Shell) -> Foregrou
         let _fg_guard = shell.terminal_lease(mooring).and_then(|lease| {
             ral_core::process::ForegroundGuard::try_acquire(pgid.as_raw(), lease)
         });
+
+        if let Some(parked) = job.parked.take() {
+            return match parked.resume_and_collect(mooring, shell) {
+                ral_core::Resumed::Finished { completed } => ForegroundWait {
+                    stopped_by: None,
+                    completed,
+                },
+                ral_core::Resumed::Parked(parked, signal) => {
+                    job.parked = Some(*parked);
+                    ForegroundWait {
+                        stopped_by: Some(signal),
+                        completed: false,
+                    }
+                }
+            };
+        }
+
         // SIGCONT after the tty handoff: the kernel-level race that
         // would otherwise drop the group back into Stopped is gone by
         // construction.  Sending to the whole pgid (not just the
@@ -533,6 +623,7 @@ pub fn wait_foreground(pgid: Pgid, mooring: &Mooring, shell: &Shell) -> Foregrou
     #[cfg(windows)]
     {
         let _ = (shell, mooring);
+        let pgid = job.pgid;
         let completed = matches!(
             ral_core::process::wait_leader_blocking(pgid),
             ral_core::process::ReapStatus::Exited(0)
@@ -563,6 +654,8 @@ mod tests {
             cmd: cmd.into(),
             state,
             pending: Vec::new(),
+            #[cfg(unix)]
+            parked: None,
         }
     }
 
@@ -589,16 +682,16 @@ mod tests {
     #[test]
     fn add_assigns_monotonic_ids() {
         let mut jt = JobTable::new();
-        assert_eq!(jt.add(1001, "a".into(), JobState::Running, Vec::new()), 1);
-        assert_eq!(jt.add(1002, "b".into(), JobState::Stopped, Vec::new()), 2);
-        assert_eq!(jt.add(1003, "c".into(), JobState::Running, Vec::new()), 3);
+        assert_eq!(jt.add(1001, "a".into(), JobState::Running, Vec::new(), #[cfg(unix)] None), 1);
+        assert_eq!(jt.add(1002, "b".into(), JobState::Stopped, Vec::new(), #[cfg(unix)] None), 2);
+        assert_eq!(jt.add(1003, "c".into(), JobState::Running, Vec::new(), #[cfg(unix)] None), 3);
     }
 
     #[test]
     fn list_returns_jobs_in_id_order() {
         let mut jt = JobTable::new();
-        jt.add(1001, "first".into(), JobState::Running, Vec::new());
-        jt.add(1002, "second".into(), JobState::Running, Vec::new());
+        jt.add(1001, "first".into(), JobState::Running, Vec::new(), #[cfg(unix)] None);
+        jt.add(1002, "second".into(), JobState::Running, Vec::new(), #[cfg(unix)] None);
         let listed: Vec<_> = jt.list().iter().map(|j| j.cmd.clone()).collect();
         assert_eq!(listed, vec!["first".to_string(), "second".to_string()]);
     }
@@ -606,9 +699,9 @@ mod tests {
     #[test]
     fn stop_marks_every_job_with_pgid() {
         let mut jt = JobTable::new();
-        let _ = jt.add(1001, "a".into(), JobState::Running, Vec::new());
-        let _ = jt.add(1001, "duplicate-pgid".into(), JobState::Running, Vec::new());
-        let _ = jt.add(1002, "other".into(), JobState::Running, Vec::new());
+        let _ = jt.add(1001, "a".into(), JobState::Running, Vec::new(), #[cfg(unix)] None);
+        let _ = jt.add(1001, "duplicate-pgid".into(), JobState::Running, Vec::new(), #[cfg(unix)] None);
+        let _ = jt.add(1002, "other".into(), JobState::Running, Vec::new(), #[cfg(unix)] None);
         jt.stop(pgid(1001));
         for j in jt.list() {
             let want = if j.pgid == pgid(1001) {
@@ -623,7 +716,7 @@ mod tests {
     #[test]
     fn settle_drops_the_entry() {
         let mut jt = JobTable::new();
-        let id = jt.add(1001, "a".into(), JobState::Running, Vec::new());
+        let id = jt.add(1001, "a".into(), JobState::Running, Vec::new(), #[cfg(unix)] None);
         jt.settle(id, true);
         assert!(jt.list().is_empty());
     }
@@ -637,7 +730,7 @@ mod tests {
         let (write, target) = staged(dir.path(), "out", "new");
 
         let mut jt = JobTable::new();
-        let id = jt.add(1001, "c > out".into(), JobState::Stopped, vec![write]);
+        let id = jt.add(1001, "c > out".into(), JobState::Stopped, vec![write], #[cfg(unix)] None);
         jt.settle(id, true);
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
@@ -653,7 +746,7 @@ mod tests {
         let tmp = write.tmp.clone();
 
         let mut jt = JobTable::new();
-        let id = jt.add(1001, "c > out".into(), JobState::Stopped, vec![write]);
+        let id = jt.add(1001, "c > out".into(), JobState::Stopped, vec![write], #[cfg(unix)] None);
         jt.settle(id, false);
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
@@ -669,7 +762,7 @@ mod tests {
         let (write, target) = staged(dir.path(), "out", "new");
 
         let mut jt = JobTable::new();
-        let id = jt.add(99_999_993, "c > out".into(), JobState::Stopped, vec![write]);
+        let id = jt.add(99_999_993, "c > out".into(), JobState::Stopped, vec![write], #[cfg(unix)] None);
 
         assert_eq!(jt.disown(id), Some(pgid(99_999_993)));
         assert_eq!(jt.disown(id), None);
@@ -683,7 +776,7 @@ mod tests {
         // tcsetpgrp-then-SIGCONT dance for `fg`).  The fake pgid is
         // never signalled here.
         let mut jt = JobTable::new();
-        let id = jt.add(99_999_991, "x".into(), JobState::Stopped, Vec::new());
+        let id = jt.add(99_999_991, "x".into(), JobState::Stopped, Vec::new(), #[cfg(unix)] None);
         assert_eq!(jt.resume(id), Some(pgid(99_999_991)));
         assert_eq!(jt.list()[0].state, JobState::Running);
     }
@@ -692,9 +785,9 @@ mod tests {
     #[test]
     fn mark_running_flips_every_job_with_pgid() {
         let mut jt = JobTable::new();
-        let _ = jt.add(2001, "a".into(), JobState::Stopped, Vec::new());
-        let _ = jt.add(2001, "same-pgid".into(), JobState::Stopped, Vec::new());
-        let _ = jt.add(2002, "other".into(), JobState::Stopped, Vec::new());
+        let _ = jt.add(2001, "a".into(), JobState::Stopped, Vec::new(), #[cfg(unix)] None);
+        let _ = jt.add(2001, "same-pgid".into(), JobState::Stopped, Vec::new(), #[cfg(unix)] None);
+        let _ = jt.add(2002, "other".into(), JobState::Stopped, Vec::new(), #[cfg(unix)] None);
         jt.mark_running(pgid(2001));
         for j in jt.list() {
             let want = if j.pgid == pgid(2001) {
@@ -713,7 +806,7 @@ mod tests {
         // `fg <running>` keep working (SIGCONT to a running pgid is a
         // kernel no-op).
         let mut jt = JobTable::new();
-        let id = jt.add(99_999_992, "y".into(), JobState::Running, Vec::new());
+        let id = jt.add(99_999_992, "y".into(), JobState::Running, Vec::new(), #[cfg(unix)] None);
         assert_eq!(jt.resume(id), Some(pgid(99_999_992)));
         assert_eq!(jt.list()[0].state, JobState::Running);
     }

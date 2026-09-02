@@ -1372,11 +1372,13 @@ that returns a thunk and runs nothing. `cat f | { from-line }` is accepted and
 does nothing; `cat f | !{ from-line }` runs the block as a stage. No rule
 consults how a stage was written, only its type.
 
-Every multi-stage pipeline is process-staged. Each stage runs in its own child,
-and every `|` uses an operating-system byte pipe. State changes made by a stage
-are private to that child: its working directory, environment changes, aliases,
-loaded modules, and bindings do not alter the parent. Only pipe contents, the
-final result, and recorded observations cross the process boundary.
+In a multi-stage pipeline, a ral-written stage runs on its own thread and an
+external command runs as its own process; every `|` uses an operating-system
+byte pipe regardless. State changes made by a stage are private to it: its
+working directory, environment changes, aliases, loaded modules, and bindings
+do not alter the parent, since a stage thread evaluates over a cloned shell
+that is simply dropped at the stage's end. Only pipe contents, the final
+result, and recorded observations cross the boundary.
 
 Value-style composition stays in the ordinary evaluator. There is no second
 kind of pipe; use application or bind:
@@ -1421,11 +1423,10 @@ value may still write bytes — they go to the surrounding stream and take no
 part in the binding — and a byte-routed command may write none, in which case
 its capture is `""`.
 
-When the final stage returns a value in a process-staged pipeline, the value
-is still collected through the helper-staged final-value report path for now:
-the child evaluates the stage and returns its value in `ChildEvalResponse`,
-selected by `FinalValue::Report`. A future decision may move this tail into the
-parent, but it is not part of the current pipeline model.
+When the final stage returns a value, and the pipeline's route says to report
+it, the value simply comes back from that stage's own thread: a ral-written
+final stage runs `machine::evaluate` over its own closure and returns the
+result directly, no serialisation and no separate channel involved.
 
 ```ral
 let greeting = echo hello       # "hello"
@@ -1536,7 +1537,7 @@ Large here strings are written concurrently with the reader, so filling an opera
 
 ### 7.6. Process completion and the terminal
 
-In a process-staged pipeline, ral launches all stages and waits for all of them. A failure in any stage fails the whole pipeline. If several stages fail, the first failing stage in launch order supplies the reported failure. A control escape such as `return` or `exit` takes precedence over an ordinary stage failure.
+ral runs a ral-written stage on its own thread and an external stage as a process; every external in the pipeline shares one process group the shell is not a member of. ral launches all stages and waits for all of them. A failure in any stage fails the whole pipeline. If several stages fail, the first failing stage in launch order supplies the reported failure. A control escape such as `return` or `exit` takes precedence over an ordinary stage failure.
 
 A downstream command often stops reading before an upstream producer is done writing, as in:
 
@@ -1548,11 +1549,13 @@ ral itself ends a non-final stage once its reader stage is gone — SIGKILL on U
 
 A stage whose own redirect statically sends every byte of its stdout to a file, never to the interior edge, is exempt from this kill: its reader's death is none of its business, since nothing it produces was ever owed to that reader. Killing it anyway would not merely be unforgiven-for-nothing — it would sever whatever the stage was still doing on the redirect's own account (an atomic write's pending rename, say), and the forgiveness that follows would launder that loss into a silent success. `cmd > file | next` therefore runs `cmd`'s redirect to completion regardless of when `next` settles.
 
-The kill is exact rather than a race because a non-final stage has no other way to observe its reader's death: ral holds a duplicate of each interior edge's read end until that edge's writer stage is reaped, so no interior edge ever delivers a broken-pipe signal or a write error to the stage that writes it. Collection observes stages as they end, in whatever order that happens; a stage whose reader has been reaped is killed, so the kill cascades tail-ward, and a stage that stops parks the whole pipeline at once. An exit status, once recorded, is never overwritten: the kill precedes the wait, and a kill landing on an already-exited stage changes nothing. This is one rule, stated once, true on both platforms.
+The kill is exact rather than a race because a non-final stage has no other way to observe its reader's death: ral holds a duplicate of each interior edge's read end until that edge's writer stage is reaped or joined, so no interior edge ever delivers a broken-pipe signal or a write error to the stage that writes it. Collection observes stages as they end, in whatever order that happens; a stage whose reader has been reaped is killed, so the kill cascades tail-ward, and a stage that stops parks the whole pipeline at once. An exit status, once recorded, is never overwritten: the kill precedes the wait, and a kill landing on an already-exited stage changes nothing. This is one rule, stated once, true on both platforms.
 
 A producer that exits on its own account keeps that status, whatever the cause: on Unix, `python … | head -1` still fails with Python's status where `yes | head -1` still succeeds, now for the same reason on both platforms rather than a broken-pipe signal on one and an exit-order reading on the other. A producer that must run to completion regardless of whether anything reads it can no longer lean on a broken pipe being survivable — run it as its own statement, or `spawn` it, so it is never a pipeline stage whose reader can disappear.
 
 On Unix, an interactive process-staged pipeline receives the foreground terminal as one process group only when the session owns a terminal lease and final standard output is attached to that terminal. A captured pipeline normally writes to a buffer, so the parent keeps terminal ownership. Ordinary application and bind do not create a pipeline process group.
+
+A ral-written stage runs on a thread of the shell's own process, so it cannot itself read the controlling terminal while that terminal's foreground belongs to the pipeline's external process group: doing so would raise SIGTTIN against the whole shell. A stage with no upstream pipe and nothing else to read from therefore sees immediate EOF rather than falling through to the terminal, on a pipeline that owns the foreground — `!{ from-line } | cat` at an interactive prompt returns at once instead of waiting for a line. An external stage reading the terminal (`cat | grep x`) is unaffected, since it is a process inside the foreground group.
 
 Windows has no POSIX foreground-terminal handoff. Pipeline members share the console and are supervised as one job.
 
@@ -2496,6 +2499,15 @@ prints a notice such as:
 When any stage of a byte-pipe process pipeline stops, ral stops the remaining
 stages so the pipeline is parked as one job. Ordinary application and bind have
 no pipeline process group to stop.
+
+An external stage stops the instant the kernel delivers SIGTSTP. A ral-written
+stage parks only at its next evaluation step — a stage mid-builtin finishes
+that call first, and a stage writing to the terminal may emit one more step's
+output before parking — so Ctrl-Z stops ral-written code at its next machine
+step, not at the instruction the kernel happened to interrupt. A pipeline with
+no external stage at all still parks, and still ends on Ctrl-C: ral holds one
+process open for the whole life of every multi-stage pipeline expressly to
+witness a stop or an interrupt the stages themselves cannot report.
 
 The interactive builtins are:
 

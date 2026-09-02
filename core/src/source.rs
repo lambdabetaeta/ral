@@ -238,8 +238,7 @@ impl Source {
 /// Append-only for the session's whole life: a nested run
 /// ([`Shell::run_nested`](crate::Shell::run_nested)) shares the registry with
 /// the run it nests in, so reclaiming a slot would re-mint a [`FileId`] the
-/// outer run's live spans still carry.  Slots are `Option` because
-/// `register_at` may land a source above ids this registry never minted.
+/// outer run's live spans still carry.
 #[derive(Clone, Debug, Default)]
 pub struct SourceDb {
     sources: Arc<Vec<Option<Source>>>,
@@ -251,21 +250,6 @@ impl SourceDb {
         let id = self.next_id();
         Arc::make_mut(&mut self.sources).push(Some(source));
         id
-    }
-
-    /// Place `source` under an id another registry minted — sound only for a
-    /// process handed both across the wire, i.e. a re-exec'd pipeline-stage
-    /// child resolving spans its parent compiled.
-    pub(crate) fn register_at(&mut self, id: FileId, source: Source) {
-        if id == FileId::DUMMY {
-            return;
-        }
-        let sources = Arc::make_mut(&mut self.sources);
-        let idx = id.0 as usize;
-        if sources.len() <= idx {
-            sources.resize(idx + 1, None);
-        }
-        sources[idx] = Some(source);
     }
 
     /// The [`Source`] `id` resolves to, or `None` for [`FileId::DUMMY`] and

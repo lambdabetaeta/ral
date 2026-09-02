@@ -1,4 +1,4 @@
-//! Hidden multicall flags that let a test drive ral as a pipeline stage and
+//! Hidden multicall flags that let a test birth a detached survivor and
 //! observe runtime state (process group, controlling terminal) without
 //! shipping a helper binary.
 //!
@@ -15,14 +15,15 @@
 pub fn run_pre_main_reexec_stages() -> Option<u8> {
     #[cfg(unix)]
     crate::uutils::init_signal_dispositions();
-    crate::try_run_pipeline_stage_helper(test_prelude())
+    crate::try_run_pipeline_anchor()
         .or_else(crate::sandbox::serve_sandbox_early_init)
         .or_else(try_birth_detached)
 }
 
 /// The prelude a test binary bakes at runtime, cached for every call this
-/// process makes — the pipeline-stage helper and the detach-birth fixture
-/// both need one, and there is no build-script blob to embed here.
+/// process makes — the detach-birth fixture needs one, and there is no
+/// build-script blob to embed here.
+#[cfg(unix)]
 fn test_prelude() -> &'static crate::boot::BakedPrelude {
     static PRELUDE: std::sync::OnceLock<crate::boot::BakedPrelude> = std::sync::OnceLock::new();
     PRELUDE.get_or_init(crate::boot::BakedPrelude::bake_runtime)

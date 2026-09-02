@@ -37,6 +37,8 @@ pub fn set_child_shell_extension(surface: fn() -> crate::boot::HostSurface) {
     let _ = CHILD_SHELL_HOOK.set(surface);
 }
 
+/// Test-only: `subprocess::bare_child_shell`'s only caller.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
     if let Some(surface) = CHILD_SHELL_HOOK.get() {
         surface().install_into_shell(shell);
@@ -207,26 +209,23 @@ pub fn bwrap_devnull_writable() -> bool {
 )]
 pub fn apply_child_limits_in_pipeline(
     child: &crate::process::ChildHandle,
-    leader: Option<crate::process::Pgid>,
+    leader: crate::process::Pgid,
 ) {
     #[cfg(windows)]
     {
-        match leader {
-            Some(group) if crate::process::is_known_group(group.as_raw()) => {
-                if !crate::process::apply_group_active_process_limit(
-                    group.as_raw(),
-                    ACTIVE_PROCESS_CAP,
-                ) {
-                    eprintln!("ral: warning: failed to apply active-process limit to pipeline job");
-                }
+        if crate::process::is_known_group(leader.as_raw()) {
+            if !crate::process::apply_group_active_process_limit(leader.as_raw(), ACTIVE_PROCESS_CAP)
+            {
+                eprintln!("ral: warning: failed to apply active-process limit to pipeline job");
             }
-            _ => windows::apply_job_limits(child),
+        } else {
+            windows::apply_job_limits(child);
         }
     }
 }
 
-/// Pin this executable for the Unix pipeline-stage helper, which serves its
-/// mode and exits before [`early_init`] would have pinned it.
+/// Pin this executable for the Unix pipeline anchor, which serves its mode
+/// and exits before [`early_init`] would have pinned it.
 #[cfg(unix)]
 pub(crate) fn register_self_for_helpers() {
     reexec::register_sandbox_self();
@@ -237,7 +236,7 @@ pub(crate) fn register_self_for_helpers() {
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline helper, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
+    reason = "[io-door:silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline anchor, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
 )]
 pub(crate) fn self_command() -> std::io::Result<Command> {
     if let Some(s) = reexec::SANDBOX_SELF.get() {
@@ -269,10 +268,10 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
     // inside its AppContainer anyway.
     #[cfg(windows)]
     {
-        use crate::runtime::pipeline::helper::{BUNDLED_TOOL_FLAG, HELPER_FLAG};
+        use crate::runtime::pipeline::helper::{ANCHOR_FLAG, BUNDLED_TOOL_FLAG};
         let is_reexec_child = argv
             .iter()
-            .any(|a| a == BUNDLED_TOOL_FLAG || a == HELPER_FLAG);
+            .any(|a| a == BUNDLED_TOOL_FLAG || a == ANCHOR_FLAG);
         if !is_reexec_child {
             windows::session::boot_recover();
         }

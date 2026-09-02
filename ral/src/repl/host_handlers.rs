@@ -146,15 +146,12 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
         "fg <id>  — bring pgid job <id> to the foreground. \
               pgid-only: a worker handle has no foreground — `await` is its fg.",
         BuiltinBody::Captured(Arc::new(move |args, mooring, shell| {
-            let (id, pgid) = {
-                let mut jt = jobs.lock().unwrap();
-                let id = job_id_arg(args);
-                (id, jt.resume(id))
-            };
-            match pgid {
+            let id = job_id_arg(args);
+            let mut jt = jobs.lock().unwrap();
+            match jt.resume(id) {
                 Some(pgid) => {
-                    let wait = crate::jobs::wait_foreground(pgid, mooring, shell);
-                    let mut jt = jobs.lock().unwrap();
+                    let job = jt.get_mut(id).expect("resume just found this id");
+                    let wait = crate::jobs::wait_foreground(job, mooring, shell);
                     if wait.stopped() {
                         jt.stop(pgid);
                         eprintln!("[stopped]");
@@ -164,6 +161,7 @@ fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
                 }
                 None => diagnostic::cmd_error("fg", NOT_A_PGID_JOB),
             }
+            drop(jt);
             Ok(Value::Unit)
         })),
     )
@@ -318,7 +316,7 @@ mod tests {
     #[test]
     fn render_jobs_folds_pgid_and_worker_populations() {
         let mut jt = JobTable::new();
-        jt.add(1001, "vim".into(), JobState::Stopped, Vec::new());
+        jt.add(1001, "vim".into(), JobState::Stopped, Vec::new(), #[cfg(unix)] None);
         let workers = vec![
             fake_worker(3, "spawn { long_task }", true),
             fake_worker(7, "watch { tail }", false),

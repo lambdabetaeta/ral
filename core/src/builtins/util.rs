@@ -297,13 +297,18 @@ pub fn admits_read(shell: &mut Shell, path: &str) -> bool {
 /// stdin was a terminal, since these builtins want bytes and not a prompt; else
 /// the inherited fd 0.  The [`super::codecs`] decoders and
 /// [`for_each_stdin_line`] both drain through here.
-pub(crate) fn stdin_reader(name: &str, shell: &mut Shell) -> Settled<Box<dyn std::io::BufRead>> {
+pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io::BufRead>> {
     // `Empty` is a deliberate no-input marker: immediate EOF, never the "no
     // input" error and never a fall-through to fd 0.
     if matches!(shell.io.stdin, crate::io::Source::Empty) {
         return Ok(Box::new(std::io::empty()));
     }
-    if let Some(reader) = shell.io.stdin.take_reader() {
+    if let Some(reader) = shell
+        .io
+        .stdin
+        .reader()
+        .map_err(|e| sig(format!("could not duplicate stdin: {e}")))?
+    {
         return Ok(Box::new(std::io::BufReader::new(reader)));
     }
     if shell.io.terminal.startup_stdin_tty {
@@ -394,7 +399,7 @@ mod stdin_tests {
     fn empty_source_reads_as_eof() {
         let mut shell = Shell::default();
         shell.io.stdin = Source::Empty;
-        let mut reader = stdin_reader("test", &mut shell).expect("Empty must not error");
+        let mut reader = stdin_reader("test", &shell).expect("Empty must not error");
         let mut buf = Vec::new();
         let n = reader.read_to_end(&mut buf).expect("read");
         assert_eq!(n, 0, "Empty source yields no bytes");

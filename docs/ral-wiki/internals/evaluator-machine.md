@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1dd9935f
-verified_at_date: 2026-08-26
+verified_at_commit: c8af3823
+verified_at_date: 2026-09-02
 anchors: [Machine, step_eval, step_return, step_halt, Frame, Focus, Terminal, Closure, Env, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
 ---
 
@@ -106,7 +106,7 @@ decides leases and the PATH-shadow check.
 
 **Boundaries.** Three things start a fresh machine over the empty stack: a
 run-door phrase, a worker thread (`spawn`/`watch`/`service`), and a pipeline
-stage child (`child_eval`). A native that applies a user function — the
+stage thread (`runtime/pipeline/thread.rs`). A native that applies a user function — the
 collection combinators, hook dispatch, pattern defaults — runs a *nested*
 machine on the host stack through `machine::apply`; `NESTED_MACHINE_LIMIT`
 (set by `nested_machines_fit_a_worker_stack` against a 2 MiB thread) caps

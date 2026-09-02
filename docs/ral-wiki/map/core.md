@@ -77,7 +77,7 @@ Source text flows down a fixed ladder; each rung is a subsystem page.
   focus, frame stack, matching, audit (`core/src/evaluator/`).
 - [[map/core/runtime|runtime]] — the command/pipeline/transport machinery the
   machine dispatches into, and the shared re-exec'd-child eval runner
-  (`core/src/runtime/`, `core/src/child_eval.rs`).
+  (`core/src/runtime/`, `core/src/engine_seed.rs`).
 
 ## Authority, plumbing, surface
 

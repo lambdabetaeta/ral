@@ -17,20 +17,19 @@ pub(super) fn read_window(elapsed: Duration) -> Option<String> {
     // asks for a zero-length window and sees nothing.
     let secs = elapsed.as_secs().saturating_add(1).to_string();
     let last_arg = format!("{secs}s");
-    let output = std::process::Command::new("/usr/bin/log")
-        .args([
-            "show",
-            "--predicate",
-            "eventMessage BEGINSWITH \"Sandbox: \"",
-            "--last",
-            last_arg.as_str(),
-            "--style",
-            "compact",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("/usr/bin/log");
+    cmd.args([
+        "show",
+        "--predicate",
+        "eventMessage BEGINSWITH \"Sandbox: \"",
+        "--last",
+        last_arg.as_str(),
+        "--style",
+        "compact",
+    ])
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::null());
+    let output = crate::process::output(&mut cmd).ok()?;
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 

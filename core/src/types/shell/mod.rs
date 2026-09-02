@@ -40,10 +40,12 @@ use super::env::Env;
 use super::env::EnvVars;
 use super::error::Error;
 use super::handler::HandlerStack;
-use super::mooring::{Fork, Mooring, NurseryId, SurfaceSink, TerminalAccess};
+use super::mooring::{Fork, Mooring, NurseryId, TerminalAccess};
 use crate::diagnostic::CallSite;
 use crate::io::Io;
 use crate::process::{DurableRoot, ForegroundScope};
+#[cfg(unix)]
+use crate::runtime::pipeline::parked::ParkedPipeline;
 use crate::source::{FileId, Source, SourceDb, Span};
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -111,9 +113,9 @@ pub struct SessionState {
     /// run's spans can never alias an outer run's [`FileId`].
     pub(crate) sources: SourceDb,
     /// The current run's root source.  [`FileId::DUMMY`] between runs, and in
-    /// the pipeline-stage child (`crate::child_eval`), which roots no run of
-    /// its own: its `source` / `use` fallback therefore resolves through a
-    /// missing entry to `""`, i.e. cwd-relative.
+    /// a spawned stage or worker thread, which roots no run of its own: its
+    /// `source` / `use` fallback therefore resolves through a missing entry
+    /// to `""`, i.e. cwd-relative.
     pub(crate) root_file: FileId,
     pub(crate) exit_hints: crate::exit_hints::ExitHints,
     /// Builtin bodies are Rust fn pointers or captured host closures, hence
@@ -137,6 +139,11 @@ pub struct SessionState {
     /// frames, not host stack frames; `--recursion-limit`/rc's
     /// `recursion_limit:` key set it.
     pub(crate) stack_limit: usize,
+    /// Pipelines stopped mid-flight, keyed by their pgid: `PipeNode::join`
+    /// deposits one on a park, `fg`/`bg`/the sweep drive it from the
+    /// job table.  No stop to park from off Unix.
+    #[cfg(unix)]
+    pub(crate) parked: std::collections::HashMap<crate::process::Pgid, ParkedPipeline>,
 }
 
 /// Host-local scratch whose members each carry their own flow rule — not a
@@ -342,16 +349,6 @@ impl Shell {
         let file = self.install_script_context(name, text);
         self.session.root_file = file;
         file
-    }
-
-    /// Register under an already-minted [`FileId`], so a re-exec'd
-    /// pipeline-stage child resolves its spans against the exact file identity
-    /// its parent handed it, rather than minting a second, differently
-    /// numbered copy in its own empty registry.
-    pub(crate) fn install_remote_context(&mut self, name: &str, file: FileId, text: &str) {
-        self.session
-            .sources
-            .register_at(file, Source::from_text(name, text));
     }
 
     /// Write `bytes` to the current stdout sink.

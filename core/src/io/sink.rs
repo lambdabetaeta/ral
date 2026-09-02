@@ -107,6 +107,81 @@ pub enum Sink {
         prefix: String,
         pending: Vec<u8>,
     },
+    /// A stage thread's interior edge, and the stage's wake.  Shared by
+    /// `stdout` and `ambient`, and duplicated into each child it spawns; the
+    /// edge closes when the last holder drops.  A blocked write ends when the
+    /// wake fires, as success: the parent still holds the edge's read end, so
+    /// no `EPIPE` — and no `SIGPIPE` to the whole shell — can reach a thread.
+    Pipe(Arc<os_pipe::PipeWriter>, Arc<crate::process::Wake>),
+}
+
+/// Write `bytes` in `PIPE_BUF` chunks, each after `poll` says it will not
+/// block, so the wake is consulted between chunks.  A fired wake ends the
+/// write as success: the stage is being cancelled and its next `check` says
+/// why.
+#[cfg(unix)]
+fn write_interruptible(
+    w: &os_pipe::PipeWriter,
+    wake: &crate::process::Wake,
+    mut bytes: &[u8],
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    while !bytes.is_empty() {
+        let mut fds = [
+            libc::pollfd {
+                fd: w.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: `fds` is two fully initialised pollfds and `2` is their count.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if fds[1].revents != 0 {
+            return Ok(());
+        }
+        if fds[0].revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        if fds[0].revents & libc::POLLOUT != 0 {
+            let n = (&*w).write(&bytes[..bytes.len().min(libc::PIPE_BUF)])?;
+            bytes = &bytes[n..];
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_interruptible(
+    w: &os_pipe::PipeWriter,
+    wake: &crate::process::Wake,
+    bytes: &[u8],
+) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
+    if wake.is_fired() {
+        wake.acknowledge();
+        return Ok(());
+    }
+    match (&*w).write_all(bytes) {
+        // `CancelSynchronousIo` (from `ThreadStage::interrupt`) aborts the
+        // `WriteFile` in flight; only a wake-caused abort is success.
+        Err(e) if e.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) && wake.is_fired() => {
+            wake.acknowledge();
+            Ok(())
+        }
+        r => r,
+    }
 }
 
 impl Sink {
@@ -152,7 +227,7 @@ impl Sink {
         {
             return Ok(ChildStdioPlan::inherit());
         }
-        Ok(ChildStdioPlan::for_sink(self))
+        self.child_stdio_plan()
     }
 
     /// Plan a child's stderr into this sink: `Stderr` inherits fd 2, everything
@@ -163,6 +238,19 @@ impl Sink {
     pub fn child_stderr(&self) -> io::Result<ChildStdioPlan> {
         if matches!(self, Self::Stderr) {
             return Ok(ChildStdioPlan::inherit());
+        }
+        self.child_stdio_plan()
+    }
+
+    /// The shared tail of `child_stdout`/`child_stderr` once inheriting is
+    /// ruled out: a `Pipe` hands the child the fd directly, everything else
+    /// is pumped.
+    fn child_stdio_plan(&self) -> io::Result<ChildStdioPlan> {
+        if let Self::Pipe(w, _) = self {
+            return Ok(ChildStdioPlan {
+                stdio: crate::process::StdioSpec::from_pipe_writer(w.try_clone()?),
+                pump: None,
+            });
         }
         Ok(ChildStdioPlan::for_sink(self))
     }
@@ -197,6 +285,7 @@ impl Clone for Sink {
                 // would let two threads interleave halves of one.
                 pending: Vec::new(),
             },
+            Self::Pipe(w, wake) => Self::Pipe(w.clone(), wake.clone()),
         }
     }
 }
@@ -319,6 +408,7 @@ impl Write for Sink {
                 b.write_all(bytes)
             }
             Self::External(w) => w.write(bytes),
+            Self::Pipe(w, wake) => write_interruptible(w, wake, bytes),
             Self::LineFramed {
                 inner,
                 prefix,
@@ -357,8 +447,13 @@ impl Write for Sink {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
-    use super::{str_strip_one_terminator, strip_trailing_newline};
+    use super::{Sink, str_strip_one_terminator, strip_trailing_newline};
+    use crate::process::Wake;
 
     fn strip(input: &[u8]) -> Vec<u8> {
         let mut buf = input.to_vec();
@@ -411,5 +506,81 @@ mod tests {
     #[test]
     fn strips_exactly_one_crlf() {
         assert_eq!(strip(b"hi\r\n\r\n"), b"hi\r\n");
+    }
+
+    #[test]
+    fn pipe_write_is_read_by_pair() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+
+        let (mut reader, writer) = os_pipe::pipe().expect("pipe");
+        let mut sink = Sink::Pipe(Arc::new(writer), Wake::new().expect("wake"));
+        sink.write_all(b"hello").expect("write");
+        drop(sink);
+
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).expect("read");
+        assert_eq!(buf, b"hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_child_stdout_reaches_reader() {
+        use std::io::Read;
+        use std::sync::Arc;
+
+        let (mut reader, writer) = os_pipe::pipe().expect("pipe");
+        let sink = Sink::Pipe(Arc::new(writer), Wake::new().expect("wake"));
+        let plan = sink.child_stdout(false).expect("plan");
+        assert!(plan.pump.is_none());
+        drop(sink);
+
+        let mut child = crate::process::Launch::new("/bin/echo")
+            .arg("hi")
+            .stdout(plan.stdio)
+            .spawn(crate::process::PgidPolicy::Inherit)
+            .expect("spawn")
+            .0;
+
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).expect("read");
+        assert_eq!(buf, b"hi\n");
+        child.reap().expect("reap");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_reader_eof_waits_for_sink_and_child() {
+        use std::io::Read;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (mut reader, writer) = os_pipe::pipe().expect("pipe");
+        let writer = Arc::new(writer);
+        let sink = Sink::Pipe(writer.clone(), Wake::new().expect("wake"));
+        let plan = sink.child_stdout(false).expect("plan");
+
+        let mut child = crate::process::Launch::new("/bin/echo")
+            .arg("hi")
+            .stdout(plan.stdio)
+            .spawn(crate::process::PgidPolicy::Inherit)
+            .expect("spawn")
+            .0;
+        child.reap().expect("reap");
+
+        let handle = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).expect("read");
+            buf
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !handle.is_finished(),
+            "reader saw EOF while the sink still held its edge"
+        );
+
+        drop(sink);
+        drop(writer);
+        assert_eq!(handle.join().expect("join"), b"hi\n");
     }
 }

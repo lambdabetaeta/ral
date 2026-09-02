@@ -1,6 +1,19 @@
 ---
-status: active
+status: superseded
 ---
+
+> Superseded by
+> [[decisions/260902_stages-are-threads|stages-are-threads]]: a pipeline stage
+> no longer crosses a wire at all, running its own CEK machine on a thread
+> instead. `run_child_eval`, `ChildKind`, `ChildEvalRequest`/
+> `ChildEvalResponse`, and the whole shared-runner argument below are gone —
+> the grant body already evaluated locally and never used this runner for its
+> own confinement (external children are confined per-command,
+> [[decisions/260617_sandbox-external-children|sandbox-external-children]]),
+> so removing the pipeline-stage half leaves nothing left to unify.
+> `core/src/engine_seed.rs` survives trimmed to `EngineSeed`/`pack_seed`, the
+> engine seat's own seed wire for `hatch`
+> ([[map/core/transport|transport]]).
 
 # One re-exec'd-child eval protocol
 
@@ -10,7 +23,7 @@ preludes, not two protocols that must agree.** The confined-eval child
 stage (a helper subprocess, [[design/pipelines|pipelines]]) both pack a
 body plus a `WireMobile` snapshot, reconstruct a shell, evaluate, and
 report a structured outcome with audit nodes. That shared shape is now a
-single module — `core/src/child_eval.rs`, a crate-root sibling of the
+single module — `core/src/engine_seed.rs`, a crate-root sibling of the
 [[map/core/transport|transport]] layer it rides on.
 
 - **One wire shape, one runner.** `ChildEvalRequest` in,

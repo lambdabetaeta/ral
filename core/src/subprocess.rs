@@ -1,13 +1,12 @@
 //! Serialisable mirror of the wire half of a shell — `env`,
-//! `session.stack_limit`, `context` — what crosses to a re-exec'd child.
-//! `serial.rs` transports the values and closures inside;
-//! this module is the envelope around them.
+//! `session.stack_limit`, `context` — what crosses to a re-exec'd engine
+//! child (`hatch`'s [`crate::engine_seed::EngineSeed`]).  `serial.rs`
+//! transports the values and closures inside; this module is the envelope
+//! around them.
 //!
 //! Nothing host-local rides: the builtin table holds fn pointers, hooks are
 //! host lifecycle entry points, and IO and session state belong to whoever
-//! runs — the child constructs its own.  Audit policy travels on
-//! `child_eval`'s request envelope instead, being an instruction to the child
-//! rather than a property of its shell.
+//! runs — the child constructs its own.
 
 use crate::serial::{InternCtx, SerialEnvSnapshot, SerialValue, WireDecoder};
 use crate::typecheck;
@@ -180,6 +179,9 @@ impl WireContext {
 /// Frames go through [`HandlerStack::push_frame`], which mints a handle from
 /// the receiver's counter and keeps every other field, so an alias frame
 /// stays removable by `unalias` in the child.
+///
+/// `hatch::apply_seed` (Unix-only) is the sole production caller.
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 pub(crate) fn install_wire_shell(
     state: WireShell,
     shell: &mut Shell,
@@ -206,6 +208,10 @@ pub(crate) fn install_wire_shell(
 /// reinstalls the rest — and seats the prelude — before any [`WireDecoder`]
 /// is built against it, since a decoder seats every hydrated environment
 /// under this shell's own prelude.
+///
+/// Test-only scaffolding: production hydration goes through
+/// [`crate::boot::boot_shell`], which takes its `HostSurface` directly.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn bare_child_shell(prelude: &crate::boot::BakedPrelude) -> Shell {
     let mut shell = Shell::new(crate::io::TerminalState::default());
     crate::sandbox::run_child_shell_extension(&mut shell);

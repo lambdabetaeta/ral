@@ -11,7 +11,7 @@ pub mod ansi;
 pub mod boot;
 pub mod builtins;
 pub mod capability;
-pub(crate) mod child_eval;
+pub(crate) mod engine_seed;
 pub mod diagnostic;
 pub mod elaborator;
 pub mod evaluator;
@@ -61,7 +61,9 @@ pub use run::{
     RunStdin, StaticDiagnostics,
 };
 pub use runtime::command::PendingWrite;
-pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_stage_helper};
+pub use runtime::pipeline::helper::{try_run_bundled_tool, try_run_pipeline_anchor};
+#[cfg(unix)]
+pub use runtime::pipeline::parked::{ParkedPipeline, ParkedPoll, Resumed};
 pub use typecheck::{Scheme, SessionSchemes, TypeError, bake_prelude, typecheck};
 pub use types::{
     Break, DefaultPolicy, Error, Escape, EventSink, HookName, HookSig, Map, RegisterError, Settled,

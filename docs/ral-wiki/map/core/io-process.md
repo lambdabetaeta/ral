@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 68f1964e
-generated_at_date: 2026-08-26
+generated_at_commit: c8af3823
+generated_at_date: 2026-09-02
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -19,18 +19,32 @@ re-derived from process state** — the foreground handoff is gated on a held
 `io.rs` holds `Io`, the per-`Shell` bundle (stdin / stdout / stderr /
 interactive / terminal / launch_role / capture_outer), and
 *`LaunchRole`* — the process-group role distinguishing the top-level
-orchestrator (`TopLevel`) from a pipeline-local child (`PipelineStage`). It
-decides pgid *placement* (a top-level standalone external may lead its own
-group so a watchdog cancel can `kill(-pgid, …)` the whole subtree; a stage
-joins the pipeline's pgid) and says whether a child's reader is the caller or
-the next stage — never who may foreground. `Io::inherit_from` / `return_to` move the read-once stdin
-between parent and child shells.
+orchestrator (`TopLevel`) from a stage's own children (`PipelineStage(Pgid)`,
+carrying the group an external spawned anywhere inside that stage must join —
+at the stage's own root or nested arbitrarily deep, thread or process alike).
+It decides pgid *placement* (a top-level standalone external may lead its own
+group so a watchdog cancel can `kill(-pgid, …)` the whole subtree; anything
+inside a stage joins that stage's pgid) and says whether a child's reader is
+the caller or the next stage — never who may foreground. `pipeline/launch.rs`'s
+`stage_stdin` resolves a stage thread's stdin against its route — the upstream
+edge, or (`stage_stdin_parent`) a duplicate of the parent's own `shell.io.stdin`
+— never taking or moving it, since `Source::reader` only ever hands out a
+duplicate ([[internals/pipeline-execution|pipeline execution]]).
 
-- `source.rs` — `Source`, a stage's byte input: `Pipe` (upstream stage),
-  `File` (a `<file` redirect parked here), `Terminal` (fall through to fd 0),
-  and `Empty` (no input — immediate EOF, child stdin to `/dev/null`, *no*
-  fall-through to fd 0). `Empty` is what an exarch tool run installs so a tool
-  command can never steal the TUI's terminal; it is kept distinct from
+- `source.rs` — `Source`, a stage's byte input: `Terminal` (fall through to
+  fd 0), `Empty` (no input — immediate EOF, child stdin to `/dev/null`, *no*
+  fall-through to fd 0), and `Reader(SourceReader)` — a pipe (an upstream
+  stage, a here-string) or a file (a `<file` redirect), and for a stage
+  thread's own stdin the `Wake` a blocked read polls beside its fd; a fired
+  wake reads as EOF, never as an interrupted-read error a retry loop would
+  spin on. `Source::reader` never *takes* a source: it hands every consumer —
+  a builtin, an external's stdin, a nested stage — a duplicate, the wake left
+  behind when a child inherits it, so a stage's
+  stdin outlives every command that reads it. `Empty` is also what a
+  tty-owning pipeline's stage 0 resolves to when it has no upstream reader —
+  a thread in the shell process cannot read a terminal whose foreground
+  belongs to the externals' group — and what an exarch tool run installs so a
+  tool command can never steal the TUI's terminal; it is kept distinct from
   `Terminal` precisely so denial of byte input and denial of foreground stay
   separate effects.
 - `sink.rs` — `Sink`, byte output and child stdio routing (`ChildStdioPlan`):
@@ -70,6 +84,31 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   stage's reader is reaped) keeps no failure; every other status is kept,
   because the kill precedes the wait and cannot rewrite a recorded status
   ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
+- `gate.rs` (Unix) — `StageGate`, the one Ctrl-Z park per pipeline, shared by
+  every stage thread it holds (`pause`/`resume`/`is_paused` behind an atomic
+  fast path plus a `Condvar` for the blocking wait); `StageStatus`, a stage's
+  own `Running`/`Stopped(Signal)`/`Finished` slot the collector holding its
+  handle reads and clears; `StagePark { gate, status }`, the pair that travels
+  on `Mooring::park` so a nested pipeline's stages inherit the gate and a
+  detached `spawn` worker, minted a fresh park-free `Mooring`, does not; and
+  `StopPolicy` (`KillAndReap` / `Escape` / `Park(StagePark)`), the one rule
+  every external ral waits on reads to decide what a `SIGTSTP` becomes.
+- `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
+  stdout write from another thread: a self-pipe polled beside the stage's own
+  fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle
+  on Windows. `fire`/`is_fired` are the reader-visible surface; a fired wake
+  is read as EOF by a `SourceReader` carrying it and written as success by a
+  `Sink::Pipe` carrying it, never as an interrupted I/O error.
+- `spawn_lock.rs` (`target_vendor = "apple"`) — the process-wide `RwLock`
+  closing Apple's fork/`CLOEXEC` race: neither `pipe2` nor `SOCK_CLOEXEC` is
+  atomic there, so a `fork` racing a pipe's create-then-`fcntl` window can hand
+  an exec'd child a fd it should never have inherited. `cloexec_pipe` /
+  `cloexec_socketpair` take the shared side; `spawn(cmd)` is the *only* fork
+  door, holding the exclusive side around `Command::spawn` and nothing else —
+  a `.output()`/`.status()` caller must spawn through it and wait outside the
+  lock, or a child's whole lifetime would block every other thread's fd
+  creation. `clippy.toml`'s `disallowed-methods` enforces both doors on this
+  target. Every other target is the identity: no lock, no cost.
 - `lease.rs` — `TerminalLease`, the unforgeable authority to hand the
   controlling terminal to a child via `tcsetpgrp`. No public constructor,
   neither `Clone` nor `Copy`: a host cannot forge or duplicate it. Minted at

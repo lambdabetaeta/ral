@@ -64,27 +64,37 @@ let document = cat data.json | from-json
 length $document
 ```
 
-**Every multi-stage pipeline is process-staged.** The runtime launches the
-stages as one process group:
+**A ral-written stage is a thread; only an external is a process.** Every
+multi-stage pipeline shares one process group:
 
-- every stage, including ral-written stages, executes in a helper or external
-  child;
-- operating-system pipes carry every interior edge, all of them alike;
-- the parent ral process is not a member of the stage group;
-- the final value, when the final route is `Value`, comes home in the
-  `ChildEvalResponse` selected by `FinalValue::Report`.
+- a stage whose head resolves to ral runs its own CEK machine on an OS thread,
+  over a cloned `Shell`, wired to its neighbours by ordinary kernel pipes;
+- an external command is a process in the group, spawned directly when no
+  redirect or byte-capturing audit rules that out, else spawned from inside
+  the stage thread that hosts it;
+- operating-system pipes carry every interior edge, all of them alike, whether
+  the stage writing or reading one is a thread or a process;
+- the parent ral process is not a member of the group; a stable anchor process
+  holds the pgid joinable for the pipeline's whole life;
+- the final value, when the final route is `Value`, is simply the last
+  stage's thread returning it — no frame, no wire, crosses back.
 
-The final-value report is deliberately helper-staged for now. Moving a
-value-returning tail into the parent would change job control, failure
-precedence, audit ordering, cancellation, input restoration, and capability
-enforcement; it is a separate decision.
+Only an external is ever isolated by a process boundary now; a stage panic or
+stack overflow takes the whole shell, exactly as it already does for a
+`spawn` worker.
 
-Out-of-process stages are subshells with respect to mutation: a helper stage's
-`cd`, environment, alias, or module changes do not flow back to the parent.
-Only pipe contents, the final result, and recorded observations cross the
-boundary. This keeps terminal ownership coherent: a shell computation inside
-its own foreground process group cannot both own the terminal and remain the
-parent's session.
+A stage is a subshell with respect to mutation regardless of whether it is a
+thread or a process: its `cd`, environment, alias, or module changes do not
+flow back to the parent, since a thread's cloned `Shell` is simply dropped at
+the stage's end. Only pipe contents, the final result, and recorded
+observations cross the boundary. This keeps terminal ownership coherent: a
+shell computation inside its own foreground process group cannot both own the
+terminal and remain the parent's session — and a thread in the parent's own
+process cannot read a terminal whose foreground belongs to the externals'
+group either, which is why a ral-written stage 0 with nothing else to read
+from sees EOF on an interactive terminal
+(`!{ from-line } | cat` at the prompt) rather than falling through to the
+controlling tty.
 
 Failure is a separate axis. A pipeline propagates a stage's failure, but the
 pipe never reacts to it: recovering from failure is `?`'s and `try`'s job, and
@@ -101,11 +111,12 @@ lives exactly as long as its reader needs it
 ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
 
 The terminal-handoff and process-containment machinery is transport detail, not
-surface semantics. Unix uses process groups, a foreground guard, and helper
-job-frame gates where a tty handoff must settle before user code runs; Windows
-uses Job Objects and a creation-time launch path to close its handle-inheritance
-window. The moving parts live in the [[map/core/runtime|runtime]]'s `pipeline/`
-and [[map/core/io-process|process]] maps.
+surface semantics. Unix uses process groups, a foreground guard claimed before
+any stage runs, and a Ctrl-Z gate every stage thread polls cooperatively;
+Windows uses Job Objects and a creation-time launch path to close its
+handle-inheritance window. The moving parts live in the
+[[map/core/runtime|runtime]]'s `pipeline/` and [[map/core/io-process|process]]
+maps.
 
 See also [[design/types|types]], [[design/cbpv|cbpv]],
 [[design/codecs|codecs]], [[design/scoping|scoping]].

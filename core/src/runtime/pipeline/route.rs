@@ -12,9 +12,12 @@
 //! is dropped once the writer's own observation completes, releasing any of
 //! the writer's descendants still blocked on the edge.
 
-use super::protocol::pipe_error;
 use super::resolve::PipelinePlan;
-use crate::types::Settled;
+use crate::types::{Break, Error, Settled};
+
+pub(super) fn pipe_error(e: impl std::fmt::Display) -> Break {
+    Break::Error(Error::new(format!("pipe: {e}"), 1))
+}
 
 /// Stdin source for one stage.
 pub(super) enum ByteIn {
@@ -32,20 +35,11 @@ pub(super) enum ByteOut {
     Downstream(os_pipe::PipeWriter),
 }
 
-/// Whether the stage's `ChildEvalResponse` carries the pipeline's final
-/// value.  Only the last stage of a value-yielding pipeline reports one — a
-/// chatty decoder tail (`{ echo warn ; from-line }`) still has one to report.
-pub(super) enum FinalValue {
-    Report,
-    Ignore,
-}
-
 /// One stage's fully-wired byte endpoints, consumed by value at spawn. A
-/// directly spawned external carries the same route shape as a helper.
+/// directly spawned external carries the same route shape as a thread stage.
 pub(super) struct StageRoute {
     pub(super) stdin: ByteIn,
     pub(super) stdout: ByteOut,
-    pub(super) final_value: FinalValue,
     /// The parent's duplicate of this stage's outbound edge's read end;
     /// `None` for the final stage, which has no outbound edge.
     pub(super) held: Option<os_pipe::PipeReader>,
@@ -63,24 +57,14 @@ pub(super) fn open_stage_routes(plan: &PipelinePlan) -> Settled<Vec<StageRoute>>
             None => ByteIn::Parent,
         };
         let (stdout, held) = if i + 1 < n {
-            let (r, w) = os_pipe::pipe().map_err(pipe_error)?;
+            let (r, w) = crate::process::cloexec_pipe().map_err(pipe_error)?;
             let held = r.try_clone().map_err(pipe_error)?;
             inbound = Some(r);
             (ByteOut::Downstream(w), Some(held))
         } else {
             (ByteOut::Parent, None)
         };
-        let final_value = if i + 1 == n && plan.yields == crate::ir::PipeYield::Last {
-            FinalValue::Report
-        } else {
-            FinalValue::Ignore
-        };
-        routes.push(StageRoute {
-            stdin,
-            stdout,
-            final_value,
-            held,
-        });
+        routes.push(StageRoute { stdin, stdout, held });
     }
     Ok(routes)
 }

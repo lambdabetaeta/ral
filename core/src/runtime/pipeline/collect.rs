@@ -11,21 +11,23 @@
 //! order, over observations buffered during the walk.
 
 use super::super::command;
-use super::launch::StageHandle;
+#[cfg(unix)]
+use super::group::Witnessed;
+use super::group::PipelineGroup;
+use super::launch::{Probe, StageHandle};
 use crate::evaluator::audit::observe_stamped;
-use crate::process::StageKill;
+#[cfg(unix)]
+use crate::process::Signal;
+use crate::process::{CancelCause, StageGate, StageKill, StageState};
 use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Observed, Settled,
     Shell, Value, epoch_us,
 };
-/// Only the park has a use for the escape's payload, and only Unix parks.
-#[cfg(unix)]
-use crate::types::Escape;
 
 /// Wait on a direct-spawn external stage and reduce it to a [`StageObservation`].
 ///
 /// Such a stage has no audit-emitting evaluator behind it, so its one command
-/// node is synthesised here to keep it level with helper-routed stages.
+/// node is synthesised here to keep it level with thread-routed stages.
 pub(super) fn observe_external_stage(
     running: command::RunningChild,
     kill: StageKill,
@@ -72,12 +74,12 @@ fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) ->
 }
 
 /// One stage's observation, normalized across external children and ral
-/// helpers.  `final_value` is set only by the final value-typed ral stage,
-/// so a stage that broke carries none.
+/// stage threads.  `final_value` is set only by the final value-typed ral
+/// stage, so a stage that broke carries none.
 ///
 /// The break is a [`Break`], whose own two constructors are already the
-/// classification the fold needs: a protocol-layer failure (report pipe,
-/// frame decode, waitpid) arrives as `Error` like any other, and only an
+/// classification the fold needs: a stage-boundary failure (a panicked
+/// thread, `waitpid`) arrives as `Error` like any other, and only an
 /// `Escape` is control flow.
 pub(super) struct StageObservation {
     pub(super) break_: Option<Break>,
@@ -115,6 +117,12 @@ impl StageObservation {
         self.final_value = value;
         self
     }
+
+    /// A killed stage's verdict is the collector's own doing and is dropped;
+    /// what the stage observed still happened and is kept.
+    pub(super) fn forgiven(self) -> Self {
+        Self::ok().with_audit(self.audit)
+    }
 }
 
 pub(super) struct PipelineCollector {
@@ -145,9 +153,9 @@ impl PipelineCollector {
 
     /// The audit observations broadcast before the break is ranked, so a stage
     /// that fails or escapes still contributes what it observed.  Reporting
-    /// each rather than merging them in puts a helper stage's writes and execs
-    /// on the rail — though only where the parent already holds a trail, since
-    /// that is what makes a stage collect at all.
+    /// each rather than merging them in puts a stage thread's writes and
+    /// execs on the rail — though only where the parent already holds a
+    /// trail, since that is what makes a stage collect at all.
     fn fold(
         &mut self,
         mooring: &Mooring,
@@ -192,92 +200,225 @@ impl Running {
     pub(super) fn add(&mut self, handle: StageHandle) {
         self.handles.push(handle);
     }
+}
 
-    /// The event loop.  Stages are observed as they end, in whatever order
-    /// that happens — a non-blocking probe per still-running stage, not a
-    /// blocking wait on one at a time — so a stage stuck reading from a dead
-    /// writer never wedges the collector against a producer that has merely
-    /// stopped itself.  A stage whose reader has settled is killed, and that
-    /// kill is the one death forgiven.  A stop parks the group at once.
-    /// Verdicts fold in launch order, over observations buffered during the
-    /// walk.
-    pub(super) fn collect(
-        mut self,
+/// One pass's outcome: whether it made progress, found nothing new, finished
+/// every stage, or hit a stop.  Shared by [`CollectState::drive`]'s blocking
+/// loop and [`CollectState::pass`]'s single non-blocking use by
+/// `ParkedPipeline::poll`.
+pub(super) enum Pass {
+    Advanced,
+    Idle,
+    Done,
+    #[cfg(unix)]
+    Parked(Signal),
+}
+
+/// `drive`'s two outcomes: every stage observed, or a stop parked the group.
+/// `Parked` is `cfg(unix)`: there is no stop to park from on Windows.
+pub(super) enum Drive {
+    Done,
+    #[cfg(unix)]
+    Parked(Signal),
+}
+
+/// Live collector state: every stage still running or already observed.
+/// Re-entrant — `drive` may be called again after a park to resume the same
+/// walk — so both vectors, not just the pending count, survive between calls.
+pub(super) struct CollectState {
+    stages: Vec<Option<StageHandle>>,
+    observed: Vec<Option<StageObservation>>,
+    started: std::time::Instant,
+}
+
+#[cfg(unix)]
+fn stop_the_group(group: &PipelineGroup, gate: &StageGate) {
+    gate.pause();
+    group.leader_pgid().signal_group(Signal::new(libc::SIGSTOP));
+}
+
+/// This collector's own scope, once `check` has also parked a joining
+/// collector alongside its owner.
+fn scope_cancelled(mooring: &Mooring) -> Option<CancelCause> {
+    crate::process::check(mooring).err()?;
+    mooring.cancel.cause()
+}
+
+impl CollectState {
+    pub(super) fn new(running: Running, started: std::time::Instant) -> Self {
+        let n = running.handles.len();
+        Self {
+            stages: running.handles.into_iter().map(Some).collect(),
+            observed: (0..n).map(|_| None).collect(),
+            started,
+        }
+    }
+
+    /// One non-blocking pass over every unobserved stage, tail-first: kill a
+    /// stage whose reader has already settled, observe whichever finished,
+    /// and detect a stop.  A stop on an owning group pauses the gate and
+    /// `SIGSTOP`s the pgid; a stop reported to a *joining* collector is
+    /// forwarded into its own stage's status and forgotten here — it never
+    /// parks, signals, or escapes.
+    #[cfg_attr(
+        not(unix),
+        allow(unused_variables, reason = "the Ctrl-Z gate has no Windows use")
+    )]
+    pub(super) fn pass(
+        &mut self,
+        group: &mut PipelineGroup,
+        gate: &StageGate,
         mooring: &Mooring,
-        shell: &mut Shell,
-        started: std::time::Instant,
-    ) -> PipelineCollector {
-        let handles = std::mem::take(&mut self.handles);
-        let n = handles.len();
-        let mut stages: Vec<Option<StageHandle>> = handles.into_iter().map(Some).collect();
-        let mut observed: Vec<Option<StageObservation>> = (0..n).map(|_| None).collect();
+        shell: &Shell,
+    ) -> Pass {
         #[cfg(unix)]
-        let mut parked = false;
+        let witnessed = match group.witness() {
+            Some(Witnessed::Stopped(sig)) if group.owns_tty() => {
+                stop_the_group(group, gate);
+                return Pass::Parked(sig);
+            }
+            // No job table will resume this pipeline: kill and reap, as
+            // `StopPolicy::KillAndReap` does for a lone external.
+            Some(Witnessed::Stopped(_)) => Some(CancelCause::Terminate),
+            Some(Witnessed::Cancelled(cause)) => Some(cause),
+            None => None,
+        };
+        #[cfg(not(unix))]
+        let witnessed = None;
+
+        if let Some(cause) = witnessed.or_else(|| scope_cancelled(mooring)) {
+            group.signal(cause);
+            self.observe_cancelled(cause, shell);
+            return Pass::Done;
+        }
+
+        let n = self.stages.len();
+        let mut progress = false;
+        for ix in (0..n).rev() {
+            let Some(handle) = self.stages[ix].as_mut() else {
+                continue;
+            };
+            if self.observed.get(ix + 1).is_some_and(Option::is_some) {
+                handle.kill_for_dead_reader();
+            }
+            match handle.probe() {
+                Probe::Running => {}
+                Probe::Ready => {
+                    let obs = self.stages[ix]
+                        .take()
+                        .expect("probed above")
+                        .observe(shell, ix + 1 == n, self.started);
+                    self.observed[ix] = Some(obs);
+                    progress = true;
+                }
+                Probe::Stopped(sig) => {
+                    #[cfg(unix)]
+                    if group.owned() {
+                        stop_the_group(group, gate);
+                        return Pass::Parked(sig);
+                    }
+                    if let Some(park) = &mooring.park {
+                        park.status.set(StageState::Stopped(sig));
+                    }
+                    handle.resume();
+                }
+            }
+        }
+
+        if !self.stages.iter().any(Option::is_some) {
+            Pass::Done
+        } else if progress {
+            Pass::Advanced
+        } else {
+            Pass::Idle
+        }
+    }
+
+    /// Cancel every stage, then observe them tail-first, blocking: the final
+    /// stage leaves first and drops its reader end, which `EPIPE`s the stage
+    /// before it, and so on up the pipeline.
+    fn observe_cancelled(&mut self, cause: CancelCause, shell: &Shell) {
+        self.cancel_stages(cause);
+        let n = self.stages.len();
+        for ix in (0..n).rev() {
+            if let Some(handle) = self.stages[ix].take() {
+                let obs = handle.observe(shell, ix + 1 == n, self.started);
+                self.observed[ix] = Some(obs);
+            }
+        }
+    }
+
+    /// Pass until every stage is observed or a stop parks the group.
+    /// Re-entrant: `fg` resumes the same walk.
+    pub(super) fn drive(
+        &mut self,
+        group: &mut PipelineGroup,
+        gate: &StageGate,
+        mooring: &Mooring,
+        shell: &Shell,
+    ) -> Drive {
         let mut interval = std::time::Duration::from_millis(5);
         let cap = std::time::Duration::from_millis(100);
-
-        while stages.iter().any(Option::is_some) {
-            // On cancellation, stop probing and observe everything blocking,
-            // tail-first: the first `wait` performs the group teardown and
-            // attribution, and the rest reap what it felled.
-            let cancelled = crate::process::check(mooring).is_err();
-            let mut progress = false;
-            for ix in (0..n).rev() {
-                let Some(handle) = stages[ix].as_mut() else {
-                    continue;
-                };
-                if observed.get(ix + 1).is_some_and(Option::is_some) {
-                    handle.kill_for_dead_reader();
-                }
-                if !cancelled && !handle.try_settle() {
-                    continue;
-                }
-                let obs = stages[ix]
-                    .take()
-                    .expect("probed above")
-                    .observe(shell, ix + 1 == n, started);
+        loop {
+            match self.pass(group, gate, mooring, shell) {
+                Pass::Done => return Drive::Done,
                 #[cfg(unix)]
-                if let Some(Break::Escape(Escape::Stopped { pgid, .. })) = &obs.break_ {
-                    parked = true;
-                    pgid.signal_group(crate::process::Signal::new(libc::SIGSTOP));
+                Pass::Parked(sig) => return Drive::Parked(sig),
+                Pass::Advanced => interval = std::time::Duration::from_millis(5),
+                Pass::Idle => {
+                    std::thread::sleep(interval);
+                    interval = (interval * 2).min(cap);
                 }
-                observed[ix] = Some(obs);
-                progress = true;
-                #[cfg(unix)]
-                if parked {
-                    break;
-                }
-            }
-            // `wait` on a stopped child would block, so stop probing at once.
-            #[cfg(unix)]
-            if parked {
-                break;
-            }
-            if progress {
-                interval = std::time::Duration::from_millis(5);
-            } else if !cancelled {
-                std::thread::sleep(interval);
-                interval = (interval * 2).min(cap);
             }
         }
+    }
 
-        // Only a parked pipeline leaves a stage unobserved, and `Drop` would
-        // SIGKILL the pgid the kernel is holding stopped.
-        for handle in stages.into_iter().flatten() {
-            handle.abandon();
+    /// `Stopped` → `Running` on every stage, for `fg`/`bg`.
+    #[cfg(unix)]
+    pub(super) fn resume_all(&mut self) {
+        for handle in self.stages.iter_mut().flatten() {
+            handle.resume();
         }
+    }
 
+    /// Cancel and wake every unobserved stage.  Explicit per stage rather than
+    /// through the mooring: a cancel the anchor witnessed, or a parked
+    /// pipeline's, has no cancelled ancestor scope to propagate from.
+    pub(super) fn cancel_stages(&self, cause: CancelCause) {
+        for handle in self.stages.iter().flatten() {
+            handle.cancel(cause);
+        }
+    }
+
+    /// The audit observations and verdict fold, in launch order, over
+    /// whatever this walk observed.
+    fn fold_inner(&mut self, mooring: &Mooring, shell: &mut Shell) -> PipelineCollector {
+        let n = self.observed.len();
         let mut collector = PipelineCollector::new();
-        for (ix, obs) in observed.into_iter().enumerate() {
+        for (ix, obs) in std::mem::take(&mut self.observed).into_iter().enumerate() {
             if let Some(obs) = obs {
                 collector.fold(mooring, shell, ix + 1 == n, obs);
             }
         }
         collector
     }
+
+    pub(super) fn fold(mut self, mooring: &Mooring, shell: &mut Shell) -> PipelineCollector {
+        self.fold_inner(mooring, shell)
+    }
+
+    /// [`Self::fold`] for `ParkedPipeline::poll`, which holds only `&mut`.
+    #[cfg(unix)]
+    pub(super) fn fold_mut(&mut self, mooring: &Mooring, shell: &mut Shell) -> PipelineCollector {
+        self.fold_inner(mooring, shell)
+    }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
     use crate::types::Escape;
@@ -341,5 +482,148 @@ mod tests {
             Some(Break::Error(error)) => assert_eq!(error.message, "stage one boom"),
             _ => panic!("expected the first stage failure to win"),
         }
+    }
+
+    #[test]
+    fn drive_folds_two_ready_stages_in_launch_order() {
+        let mut shell = Shell::default();
+        let mut group =
+            PipelineGroup::prepare(super::super::resolve::TerminalPlan::NoTerminal, &shell)
+                .expect("anchor spawns");
+        let gate = StageGate::new();
+        let mooring = Mooring::adrift();
+
+        let mut running = Running::new();
+        running.add(StageHandle::for_test(spawn_exiting("false")));
+        running.add(StageHandle::for_test(spawn_exiting("true")));
+        let mut collect = CollectState::new(running, std::time::Instant::now());
+
+        match collect.drive(&mut group, &gate, &mooring, &shell) {
+            Drive::Done => {}
+            #[cfg(unix)]
+            Drive::Parked(_) => panic!("two ordinary exits must not park"),
+        }
+        let folded = collect.fold(&mooring, &mut shell);
+        match folded.break_ {
+            Some(Break::Error(error)) => assert_ne!(error.exit_code(), 0),
+            other => panic!("expected `false`'s nonzero exit to fold in, got {other:?}"),
+        }
+    }
+
+    /// `/bin/false` or `/bin/true`, wrapped exactly as a direct external
+    /// pipeline stage: `GroupOwner::None` never parks (`RunningChild::parks`),
+    /// so `StopPolicy` is irrelevant here.
+    fn spawn_exiting(name: &str) -> command::RunningChild {
+        let mut cmd = std::process::Command::new(format!("/bin/{name}"));
+        let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn /bin/{name}: {e}"));
+        command::RunningChild::assemble_with_owner(
+            crate::process::ChildHandle::from_std(child),
+            name.to_string(),
+            command::ExternalPlumbing {
+                stdout_pump: None,
+                stderr_pump: None,
+            },
+            crate::process::StopPolicy::KillAndReap,
+            command::GroupOwner::None,
+            crate::process::CancelScope::root(),
+            None,
+        )
+    }
+
+    /// `/bin/sleep 30` under its own pgid, real-`SIGSTOP`'d — the stop a
+    /// direct external pipeline stage sees, without a whole pipeline launch to
+    /// set one up.  `Drop` (via `RunningChild`'s) kills it regardless of the
+    /// stop, so nothing survives the test.
+    #[cfg(unix)]
+    fn spawn_stopped_sleep(stop: crate::process::StopPolicy) -> command::RunningChild {
+        let mut cmd = std::process::Command::new("/bin/sleep");
+        cmd.arg("30");
+        let (child, pgid) = crate::process::spawn_with_pgid(&mut cmd, crate::process::PgidPolicy::NewLeader)
+            .expect("spawn /bin/sleep under a pgid");
+        let pgid = pgid.expect("NewLeader yields a tracked pgid");
+        rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::STOP)
+            .expect("SIGSTOP the sleep");
+        command::RunningChild::assemble_with_owner(
+            crate::process::ChildHandle::from_std(child),
+            "sleep".to_string(),
+            command::ExternalPlumbing {
+                stdout_pump: None,
+                stderr_pump: None,
+            },
+            stop,
+            command::GroupOwner::Standalone(pgid),
+            crate::process::CancelScope::root(),
+            None,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopped_probe_on_an_owned_group_pauses_the_gate_and_parks() {
+        let shell = Shell::default();
+        let mut group =
+            PipelineGroup::prepare(super::super::resolve::TerminalPlan::NoTerminal, &shell)
+                .expect("anchor spawns");
+        assert!(group.owned());
+        let gate = StageGate::new();
+        let mooring = Mooring::adrift();
+
+        let mut running = Running::new();
+        running.add(StageHandle::for_test(spawn_stopped_sleep(
+            crate::process::StopPolicy::Escape,
+        )));
+        let mut collect = CollectState::new(running, std::time::Instant::now());
+
+        let signal = 'wait: {
+            for _ in 0..100 {
+                if let Pass::Parked(sig) = collect.pass(&mut group, &gate, &mooring, &shell) {
+                    break 'wait sig;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            panic!("an owned group's stop must eventually park");
+        };
+        assert_eq!(signal, crate::process::Signal::new(libc::SIGSTOP));
+        assert!(
+            gate.is_paused(),
+            "pausing the gate is what makes every other stage block"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopped_probe_on_a_joining_group_forwards_to_its_own_stage_and_never_parks() {
+        let mut group = PipelineGroup::joining(
+            crate::process::Pgid::from_raw(std::process::id().cast_signed()).expect("our own pid"),
+        );
+        let gate = StageGate::new();
+        let park = crate::process::StagePark {
+            gate: StageGate::new(),
+            status: crate::process::StageStatus::new(),
+        };
+        let mooring = Mooring {
+            park: Some(park.clone()),
+            ..Mooring::adrift()
+        };
+        let shell = Shell::default();
+
+        let mut running = Running::new();
+        running.add(StageHandle::for_test(spawn_stopped_sleep(
+            crate::process::StopPolicy::Escape,
+        )));
+        let mut collect = CollectState::new(running, std::time::Instant::now());
+
+        for _ in 0..100 {
+            match collect.pass(&mut group, &gate, &mooring, &shell) {
+                Pass::Parked(_) => panic!("a joining collector must never park"),
+                Pass::Done => panic!("a mere stop must not be observed as done"),
+                Pass::Advanced | Pass::Idle => {}
+            }
+            if matches!(park.status.get(), StageState::Stopped(_)) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("the stop was never forwarded to the joining collector's own stage status");
     }
 }

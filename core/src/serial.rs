@@ -2,8 +2,8 @@
 //!
 //! [`FOValue`] is first-order by construction — data all the way down — over
 //! an extension slot uninhabited by default ([`NoExt`]).  [`SerialValue`]
-//! fills the slot with [`Closure`] so the re-exec'd child IPC (`child_eval`,
-//! `subprocess`, the pipeline stage helper) can ship a captured environment
+//! fills the slot with [`Closure`] so the re-exec'd engine child IPC
+//! (`engine_seed`, `subprocess`, `hatch`) can ship a captured environment
 //! as JSON.  `serial.rs` interns *environments*, not scopes: one row per
 //! distinct session-tier root, by [`imbl::GenericHashMap::ptr_eq`] identity
 //! ([`InternCtx`]), rebuilt topologically ([`WireDecoder::for_shell`]) and
@@ -266,6 +266,9 @@ impl WireDecoder {
     /// # Errors
     /// A row reference out of range or unresolved, a binding that fails to
     /// decode, or a cycle — a pass in which no row makes progress.
+    ///
+    /// `hatch` (Unix-only) is the sole production caller.
+    #[cfg_attr(not(any(unix, test)), allow(dead_code))]
     pub(crate) fn for_shell(shell: &Shell, scope_table: &ScopeTable) -> Result<Self, Error> {
         let n = scope_table.len();
         let mut dec = Self {
@@ -328,6 +331,7 @@ impl WireDecoder {
 /// The match is exhaustive on purpose: a new [`SerialValue`] variant must
 /// declare whether it carries scope references, or its dependency edges go
 /// silently missing from [`WireDecoder::for_shell`].
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
 fn collect_scope_deps(value: &SerialValue, out: &mut HashSet<u32>) {
     match value {
         SerialValue::Ext(SerialClosure::Thunk(t)) => {

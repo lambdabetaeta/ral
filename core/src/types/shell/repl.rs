@@ -1,6 +1,5 @@
 //! REPL-only editor scratch on `Shell.local`: no part of the language
-//! semantics, in no wire format.  Only `Shell::child_of` / `Shell::return_to`
-//! carry it across a fork; every other fork starts from `default()`.
+//! semantics, in no wire format.  Every fork starts from `default()`.
 
 /// The channel between core's builtins and the host's line editor.
 #[derive(Default)]
@@ -23,22 +22,5 @@ impl std::fmt::Debug for ReplScratch {
             )
             .field("pending_chpwd", &self.pending_chpwd)
             .finish()
-    }
-}
-
-impl ReplScratch {
-    /// Lend the parent's `plugin_context` to the child for the stage's
-    /// duration; pair with `return_to` or it dies with the child.
-    pub fn inherit_from(&mut self, parent: &mut Self) {
-        self.plugin_context = parent.plugin_context.take();
-    }
-
-    /// Repay the loan and raise the child's queued `chpwd` — only if it queued
-    /// one, lest an outer pending pair be clobbered by a silent `None`.
-    pub fn return_to(&mut self, parent: &mut Self) {
-        parent.plugin_context = self.plugin_context.take();
-        if let Some(pair) = self.pending_chpwd.take() {
-            parent.pending_chpwd = Some(pair);
-        }
     }
 }

@@ -78,9 +78,9 @@ fn authorize_url(redirect_uri: &str, challenge: &str, state: &str) -> Result<Str
     reason = "[io-door:silent:browser-launch] opens the OAuth authorize URL in the platform browser; not turn-time data I/O"
 )]
 fn launch_browser(url: &str) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(url)
-        .spawn()
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg(url);
+    ral_core::process::spawn(&mut cmd)
         .map(|_| ())
         .map_err(|e| format!("could not open browser with `open`: {e}"))
 }
@@ -91,9 +91,9 @@ fn launch_browser(url: &str) -> Result<(), String> {
     reason = "[io-door:silent:browser-launch-linux] opens the OAuth authorize URL via xdg-open; not turn-time data I/O"
 )]
 fn launch_browser(url: &str) -> Result<(), String> {
-    std::process::Command::new("xdg-open")
-        .arg(url)
-        .spawn()
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url);
+    ral_core::process::spawn(&mut cmd)
         .map(|_| ())
         .map_err(|e| format!("could not open browser with `xdg-open`: {e}"))
 }

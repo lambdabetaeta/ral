@@ -1857,7 +1857,7 @@ impl WireTransport {
                 Ok(())
             });
         }
-        let child = cmd.spawn()?;
+        let child = crate::process::spawn(&mut cmd)?;
         // The parent must not hold the engine end open, or the child's exit
         // would never read as EOF.
         drop(engine);
@@ -2046,7 +2046,7 @@ impl Drop for WireTransport {
         #[cfg(unix)]
         if let Some(child) = &mut self.child {
             let _ = child.kill();
-            let _ = child.wait_handling_stop(None, false);
+            let _ = child.wait_handling_stop(false, crate::process::KillTarget::Pid);
         }
     }
 }
@@ -2761,6 +2761,10 @@ mod static_diagnostic_seam_tests {
 // since the dev fleet includes a jittery VM — nothing here asserts a tight
 // upper bound, only that death is or is not reached within seconds of slack.
 #[cfg(all(test, unix))]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod wire_liveness_tests {
     use super::*;
     use std::os::unix::net::UnixStream;

@@ -67,7 +67,7 @@ pub(crate) fn run(
     crate::process::check(mooring)?;
 
     let plan = classify_redirects(redirects)?;
-    command.stdin(wire_stdin(shell).into_stdio());
+    command.stdin(wire_stdin(shell)?.into_stdio());
     let (mut atomic_commit, stdout_file_dup) =
         wire_stdout_file(&mut command, &plan, mooring, shell)?;
     let inherit_tty = inherit_tty(&plan, shell);
@@ -130,26 +130,26 @@ pub(crate) fn run(
     // pgroup.
     let _fg_guard = fg.acquire(child_pid, shell, mooring);
 
-    let park_on_stop = fg.park_on_stop();
+    let stop = fg.stop_policy(mooring);
     // A tracked leader pgid is exactly what there is to release on
-    // Windows; an `Inherit` child has no group at all.
-    let group_owner = if wait_pgid.is_some() {
-        GroupOwner::Standalone
-    } else {
-        GroupOwner::None
+    // Windows; an `Inherit` child has no group at all. A `Join` child
+    // borrowed a group it does not own.
+    let group_owner = match (wait_pgid, fg.pgid_policy()) {
+        (Some(p), crate::process::PgidPolicy::Join(_)) => GroupOwner::BorrowedByPipeline(p),
+        (Some(p), _) => GroupOwner::Standalone(p),
+        (None, _) => GroupOwner::None,
     };
     // Nothing fallible may run between `spawn` and this assembly: until
     // `RunningChild` owns it the bare child leaks on an early return,
     // whereas afterwards its `Drop` SIGKILLs the pgid and reaps.
     let running = RunningChild::assemble_with_owner(
         child,
-        wait_pgid,
         cmd_name.clone(),
         ExternalPlumbing {
             stdout_pump: stdout_plan,
             stderr_pump,
         },
-        park_on_stop,
+        stop,
         group_owner,
         mooring.cancel.as_scope().clone(),
         jail,
@@ -244,9 +244,9 @@ pub(crate) fn run(
     // captured by the dispatch-level Tee on `shell.io.stdout` / `stderr`.
     waited.drain();
     commit_result?;
-    // A command inside a helper stage can no longer take SIGPIPE from an
-    // interior edge — the parent holds that edge's read end — so any SIGPIPE
-    // it suffers is from a pipe of its own making and is its own failure.
+    // A command inside a pipeline stage cannot take SIGPIPE from an interior
+    // edge — the parent holds that edge's read end — so any SIGPIPE it
+    // suffers is from a pipe of its own making and is its own failure.
     match crate::process::CommandFailure::from_outcome(outcome, crate::process::StageKill::NotSent)
     {
         None => Ok(Value::Unit),

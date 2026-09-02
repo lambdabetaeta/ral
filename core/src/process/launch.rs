@@ -1026,7 +1026,7 @@ mod windows {
             };
             if ok == 0 {
                 return Err(io::Error::other(
-                    "could not launch pipeline helper with an explicit handle list",
+                    "could not launch child with an explicit handle list",
                 ));
             }
             Ok(())

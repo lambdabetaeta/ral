@@ -197,11 +197,9 @@ where
     let state = Arc::new(Mutex::new(HandleState::Running));
     let worker_state = state.clone();
 
-    let (_join, cancel) = shell.spawn_thread(
-        mooring,
-        worker_surface.clone(),
-        snap,
-        move |mooring, child_env| {
+    let worker_mooring = Mooring::for_worker(mooring, &shell.session.root, worker_surface.clone());
+    let (_join, cancel) = shell
+        .spawn_thread(worker_mooring, "ral spawn worker", snap, move |mooring, child_env| {
             // A worker's visible stream *is* its handle buffer: nobody is
             // watching it until `await` drains one, so both conduits land
             // there and a discarded statement is held rather than interleaved.
@@ -244,8 +242,8 @@ where
             if *settled_state == HandleState::Running {
                 *settled_state = HandleState::Completed;
             }
-        },
-    );
+        })
+        .map_err(|e| sig(format!("could not start a worker thread: {e}")))?;
 
     let handle = HandleInner {
         result: Arc::new(Mutex::new(Some(rx))),
@@ -923,11 +921,10 @@ mod tests {
         let snap = Arc::new(shell.env.clone());
         let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        let (_join, worker_cancel) = shell.spawn_thread(
-            &Mooring::adrift(),
-            Arc::new(()),
-            snap,
-            move |mooring, _child| {
+        let worker_mooring =
+            Mooring::for_worker(&Mooring::adrift(), &shell.session.root, Arc::new(()));
+        let (_join, worker_cancel) = shell
+            .spawn_thread(worker_mooring, "test-worker", snap, move |mooring, _child| {
                 ready_tx.send(()).unwrap();
                 loop {
                     if let Err(b) = crate::process::check(mooring) {
@@ -936,8 +933,8 @@ mod tests {
                     }
                     std::thread::yield_now();
                 }
-            },
-        );
+            })
+            .expect("spawn_thread");
         ready_rx.recv().unwrap();
         cancel_via(&worker_cancel);
         (done_rx.recv().unwrap(), worker_cancel)
@@ -949,12 +946,16 @@ mod tests {
     #[test]
     fn worker_scope_cancel_stops_the_worker() {
         let shell = Shell::new(crate::io::TerminalState::default());
-        let (_idle_join, sibling) = shell.spawn_thread(
-            &Mooring::adrift(),
-            Arc::new(()),
-            Arc::new(shell.env.clone()),
-            |_, _| (),
-        );
+        let sibling_mooring =
+            Mooring::for_worker(&Mooring::adrift(), &shell.session.root, Arc::new(()));
+        let (_idle_join, sibling) = shell
+            .spawn_thread(
+                sibling_mooring,
+                "test-sibling",
+                Arc::new(shell.env.clone()),
+                |_, _| (),
+            )
+            .expect("spawn_thread");
         let (observed, worker_scope) = spawn_polling_worker(&shell, |c| {
             c.cancel(crate::process::CancelCause::Explicit);
         });
@@ -992,7 +993,10 @@ mod tests {
         let shell = Shell::new(crate::io::TerminalState::default());
         let snap = Arc::new(shell.env.clone());
         let m = Mooring::adrift();
-        let (_join, worker_scope) = shell.spawn_thread(&m, Arc::new(()), snap, |_, _| ());
+        let worker_mooring = Mooring::for_worker(&m, &shell.session.root, Arc::new(()));
+        let (_join, worker_scope) = shell
+            .spawn_thread(worker_mooring, "test-worker", snap, |_, _| ())
+            .expect("spawn_thread");
         m.cancel.cancel(crate::process::CancelCause::Interrupt);
         assert!(
             !worker_scope.is_cancelled(),

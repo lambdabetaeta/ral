@@ -1,18 +1,21 @@
 ---
-generated_at_commit: 50388d83
-generated_at_date: 2026-08-29
-covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs]
+generated_at_commit: c8af3823
+generated_at_date: 2026-09-02
+covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs]
 ---
 
 # Map: core / transport
 
-The wire layer that carries a shell across a process boundary. When a pipeline
-stage runs in a re-exec'd helper, the shell's mobile state — `env`,
-`context`, the relevant parent state — is serialised to JSON,
-framed, and reconstituted on the other side of a re-exec of this
-[[invariants/single-binary|same binary]] ([[map/core/shell-state|shell-state]]).
-(A [[design/grant|grant]] does
-not ride this wire: its body evaluates locally, and external children are
+The wire layer that carries a shell across a process boundary. The one
+consumer left is the wire-seat agent hatch: when a run seats an engine on a
+remote transport, a forked shell's mobile state — `env`, `context`, the
+relevant parent state — is serialised to JSON, framed, and reconstituted on
+the other side ([[map/core/shell-state|shell-state]]). A pipeline stage no
+longer rides this wire at all — it runs on a thread of the parent process,
+sharing the parent's memory directly
+([[decisions/260902_stages-are-threads|stages-are-threads]]). (A
+[[design/grant|grant]] does
+not ride this wire either: its body evaluates locally, and external children are
 confined per-command — see
 [[decisions/260617_sandbox-external-children|sandbox-external-children]].)
 The front-end⇄engine protocol is a separate wire —
@@ -49,8 +52,8 @@ fills that slot with closures, the mirror of the runtime `Value` this wire
 carries. Around it:
 
 - `SerialLambda` / `SerialThunk` for closures, `SerialEnvSnapshot` for an `Env`;
-  `SerialBinding` mirrors a scope entry — value *and* scheme — so a re-exec'd
-  helper stage preserves the binding's scheme across the round-trip
+  `SerialBinding` mirrors a scope entry — value *and* scheme — so a wire-hatched
+  engine child preserves the binding's scheme across the round-trip
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 - An interning table, `InternCtx`, deduplicates shared scopes, so a captured
   environment with shared frames cannot unfold into an O(2^N) tree. Interning
@@ -89,31 +92,27 @@ past them):
 - `WireContext` — the [`Context`] mirror (`env_overrides`, `dir`/`cwd`,
   `grants`, `handlers`, `args`, `modules`); `hooks` is dropped outright and
   the receiver starts with an empty table;
-- `WireObservation` — the [[design/audit|audit]] trail fragment, one flat list
-  with no recursion, living beside the request it rides in
-  `core/src/child_eval.rs` ([[map/core/runtime|runtime]]);
 - `WireHandlerFrame` — a [[internals/handler-dispatch|handler stack]] frame,
-  carrying each alias arm's scheme so a re-exec'd helper stage does not strip it
+  carrying each alias arm's scheme so a wire-hatched engine child does not strip it
   ([[decisions/260603_session-scheme-continuity|session-scheme-continuity]]).
 
 `install_wire_shell` reinstates a received `WireShell` into a child `Shell`,
 splicing the wire's handler frames atop the receiver's own so the receiver's
-own builtin table survives, never having ridden the wire.
-`reexec_child_shell` is the one constructor the
-[[internals/pipeline-execution|pipeline-stage helper]] — the sole re-exec'd
-eval path — builds its shell through (`Shell::new` + the host's `HostSurface`
-reinstalled via the child-shell-extension hook + `install_wire_shell`), so it
-cannot drop the host builtins. All
+own builtin table survives, never having ridden the wire. `bare_child_shell`
+is the one constructor `hatch::apply_seed` — the sole production caller,
+Unix-only — builds a fresh shell through before installing the wire state,
+so a wire-hatched engine child cannot drop the host builtins. All
 conversions share the `InternCtx` from `serial.rs`.
 
-`core/src/child_eval.rs` also carries `EngineSeed` — a forked shell reified
-for a wire-seat hatch, `ChildEvalRequest`'s shape minus a body
-(`scope_table`, `mobile: WireShell`, `captured: SerialEnvSnapshot`, the
-spawn's validated `grant` tag). `pack_seed` builds one from a `Shell`, and
+`core/src/engine_seed.rs` carries `EngineSeed` — a forked shell reified
+for a wire-seat hatch (`scope_table`, `mobile: WireShell`,
+`captured: SerialEnvSnapshot`, the spawn's validated `grant` tag), the one
+type left in that module now that a pipeline stage no longer crosses a wire
+([[decisions/260902_stages-are-threads|stages-are-threads]]). `pack_seed` builds one from a `Shell`, and
 `seed_from_env` takes it before the engine waits for `Attach` — striking the env
 var as it takes the fd, so no descendant inherits a number that has stopped being
 one — and after `Attach` selects an installer and boots the shell, `apply_seed`
-hydrates it through the same `WireDecoder::for_shell` `eval_request` already uses,
+hydrates it through `WireDecoder::for_shell` plus `install_wire_shell`,
 before narrowing the shell's capabilities to the seed's grant. Taking and applying
 are split for one reason each: the take must not wait on the host, and the
 application needs the booted installer's shell. The scope it carries is never the
@@ -128,12 +127,11 @@ serialisable fragment and
 ## Framing codec — `core/src/subprocess_codec.rs`
 
 `write_frame` / `read_frame` are length-prefixed JSON frames (a `u32` length
-followed by the `serde_json` body). One codec carries the
-[[internals/pipeline-execution|pipeline-stage helper]]'s request/response frames
-— the single re-exec'd eval protocol — and the engine protocol's front-end⇄engine
+followed by the `serde_json` body). One codec carries the wire-seat hatch's
+one-shot `EngineSeed` frame and the engine protocol's front-end⇄engine
 `WireChannel` frames (`core/src/wire.rs`).
 
 This layer is the mechanism behind the mobile/local split — `env` /
 `context` cross a re-exec boundary, `io` / `session` / `local`
-do not ([[map/core/shell-state|shell-state]]) — that the pipeline-stage helper
-relies on for out-of-process stage evaluation.
+do not ([[map/core/shell-state|shell-state]]) — that a wire-hatched engine
+child relies on to boot from a snapshot of its parent's scope.

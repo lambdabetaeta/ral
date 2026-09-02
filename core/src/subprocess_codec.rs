@@ -1,6 +1,5 @@
 //! Length-prefixed JSON frames: the one framing codec on every ral IPC
-//! channel — the pipeline gate / report protocol, the helper stages it
-//! re-execs, and the engine wire in `wire`.
+//! channel — `hatch`'s engine seed and the engine wire in `wire`.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -24,7 +23,7 @@ pub fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io:
 ///
 /// Batch mode leaves SIGPIPE at `SIG_DFL` so the bundled coreutils die on a
 /// closed downstream (`yes | head`) — but it would equally kill the parent
-/// mid-write to a helper that has already exited, instead of yielding the
+/// mid-write to a peer that has already exited, instead of yielding the
 /// `EPIPE` the error path is written to observe.  SIGPIPE is thread-directed,
 /// so masking it on the writing thread suffices, and unlike `SO_NOSIGPIPE`
 /// (BSD-only) or `MSG_NOSIGNAL` (wants `send(2)`) it rides `Write` unchanged.
@@ -155,7 +154,7 @@ fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:frame-dump] subprocess codec (helper IPC): writes a post-mortem frame dump for debugging the helper protocol; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
+    reason = "[io-door:silent:frame-dump] subprocess codec: writes a post-mortem frame dump for debugging a frame IPC channel; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
 )]
 fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -171,7 +170,7 @@ fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
 #[cfg(not(unix))]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:frame-dump-nonunix] subprocess codec (helper IPC): writes a post-mortem frame dump for debugging the helper protocol; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
+    reason = "[io-door:silent:frame-dump-nonunix] subprocess codec: writes a post-mortem frame dump for debugging a frame IPC channel; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
 )]
 fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
     std::fs::write(path, body)

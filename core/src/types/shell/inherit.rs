@@ -8,7 +8,7 @@
 //! the run's access *and* the session's lease, so a fork fails the second half
 //! whatever [`Mooring`] it later runs under.
 
-use super::{Mooring, Shell, SurfaceSink};
+use super::{Mooring, Shell};
 use crate::types::Env;
 use std::sync::Arc;
 
@@ -19,19 +19,6 @@ impl Shell {
         let mut shell = Self::new(crate::io::TerminalState::default());
         shell.env = captured.clone();
         shell
-    }
-
-    /// Cross-process pipeline-stage child: inherit `parent`'s context *and*
-    /// move its read-once bits — pipe stdin, audit trail, REPL editor context
-    /// — into the child.  Pair with [`Shell::return_to`], lest the lent state
-    /// die with the child.
-    ///
-    /// `parent` is the throwaway `child_eval` rebuilds in the helper process,
-    /// so the loan is repaid into that throwaway and not a live caller.
-    pub fn child_of(captured: &Env, parent: &mut Self) -> Self {
-        let mut child = Self::from_captured(captured);
-        child.inherit_from(parent);
-        child
     }
 
     /// Clone `parent`'s context into an independent sibling, touching none of
@@ -97,34 +84,22 @@ impl Shell {
         aside
     }
 
-    /// Spawn `f` on a fresh OS thread with a cloned child shell — the one and
-    /// only thread-spawn primitive.  `scopes` is the thunk's captured closure
-    /// scope and `surface` the buffering sink the worker surfaces into instead
-    /// of the spawning run's live one; per-fork IO setup lives inside `f`.
+    /// The one and only thread-spawn primitive: `f` runs on a fresh OS thread
+    /// with a cloned child shell built from `scopes`. `mooring` is minted by
+    /// the caller, since only it has the parent mooring to rebuild from.
     ///
-    /// The worker's counters start fresh, since it continues no call stack,
-    /// but the `stack_limit` ceiling is the parent's: a limit set by rc or
-    /// CLI belongs to the session, not to one stack.
+    /// Counters start fresh; `stack_limit` is inherited. The worker registry
+    /// and detach budget are `Arc`-shared, not copied.
     ///
-    /// Its [`Mooring`] is a *rebuild* ([`Mooring::for_worker`]), never a
-    /// share, minted here rather than in the thread so the worker's cancel
-    /// scope can be returned: the worker hangs off a
-    /// [`worker`](crate::process::DurableRoot::worker) scope of the durable
-    /// root, so a foreground cancel — a run timeout, a Ctrl-C — misses it,
-    /// while the ambient shutdown cause folded through the root, a
-    /// [`RootAbort`](crate::process::CancelCause::RootAbort), or a cancel on
-    /// the returned scope stops it.
-    ///
-    /// The worker registry and the detach budget are `Arc`-shared, not copied,
-    /// so a `spawn` or `detach` nested in `f`'s body registers and spends
-    /// where this shell's own do.
+    /// # Errors
+    /// Returns `Err` if the OS refuses to start the thread.
     pub fn spawn_thread<F, R>(
         &self,
-        parent: &Mooring,
-        surface: SurfaceSink,
+        mooring: Mooring,
+        name: &str,
         scopes: Arc<Env>,
         f: F,
-    ) -> (std::thread::JoinHandle<R>, crate::process::CancelScope)
+    ) -> std::io::Result<(std::thread::JoinHandle<R>, crate::process::CancelScope)>
     where
         F: FnOnce(&Mooring, &mut Self) -> R + Send + 'static,
         R: Send + 'static,
@@ -135,62 +110,37 @@ impl Shell {
         let builtins = self.session.builtins.clone();
         let library_docs = self.session.library_docs.clone();
         let guest_jail = self.session.guest_jail.clone();
+        let sources = self.session.sources.clone();
         let workers = self.local.workers.clone();
         let detach = self.local.detach.clone();
-        let mooring = Mooring::for_worker(parent, &root, surface);
         let worker_cancel = mooring.cancel.as_scope().clone();
         let live = self.local.workers.live_ticket();
-        let handle = std::thread::spawn(move || {
-            let mut child = Self::from_captured(&scopes);
-            child.context = context;
-            child.session.stack_limit = stack_limit;
-            child.session.anchor = mooring.cancel.clone();
-            child.session.root = root;
-            child.session.builtins = builtins;
-            child.session.library_docs = library_docs;
-            child.session.guest_jail = guest_jail;
-            child.local.workers = workers;
-            child.local.detach = detach;
-            // Shared, not owned: this worker's shell dropping must not cancel
-            // the parent's whole registry.
-            child.local.workers_owned = false;
-            let out = f(&mooring, &mut child);
-            // The ticket goes last, after the body and its shell, so a
-            // teardown's drain outlasts this frame's children rather than
-            // merely seeing the cancel land.
-            drop((child, live));
-            out
-        });
-        (handle, worker_cancel)
-    }
-
-    /// Propagate `parent`'s state into this cross-process pipeline-stage child;
-    /// [`Self::child_of`] is its only caller.  Each substate carries its own
-    /// inherit rule, whose asymmetry with [`Self::return_to`] is the flow
-    /// matrix.
-    pub fn inherit_from(&mut self, parent: &mut Self) {
-        self.context = parent.context.clone();
-        self.io.inherit_from(&mut parent.io);
-        self.local.audit.inherit_from(&mut parent.local.audit);
-        self.local.repl.inherit_from(&mut parent.local.repl);
-        self.session.builtins = parent.session.builtins.clone();
-        self.session.library_docs = parent.session.library_docs.clone();
-        self.session.stack_limit = parent.session.stack_limit;
-        self.session.root = parent.session.root.clone();
-        self.session.anchor = parent.session.anchor.clone();
-        self.session.guest_jail = parent.session.guest_jail.clone();
-    }
-
-    /// Flow a child stage's mutations back to `parent`.  The call site and the
-    /// `within`-attenuable bits stay behind; both halves of `cwd` do not, so a
-    /// `cd` in a stage persists like every other shell.  A spawned thread
-    /// never runs this, so its own `cd`s stay private.
-    pub fn return_to(&mut self, parent: &mut Self) {
-        self.local.audit.return_to(&mut parent.local.audit);
-        self.local.repl.return_to(&mut parent.local.repl);
-        self.io.return_to(&mut parent.io);
-        parent.context.cwd.current = self.context.cwd.current.take();
-        parent.context.cwd.previous = self.context.cwd.previous.take();
+        let handle = std::thread::Builder::new()
+            .name(name.into())
+            .stack_size(8 << 20)
+            .spawn(move || {
+                let mut child = Self::from_captured(&scopes);
+                child.context = context;
+                child.session.stack_limit = stack_limit;
+                child.session.anchor = mooring.cancel.clone();
+                child.session.root = root;
+                child.session.builtins = builtins;
+                child.session.library_docs = library_docs;
+                child.session.guest_jail = guest_jail;
+                child.session.sources = sources;
+                child.local.workers = workers;
+                child.local.detach = detach;
+                // Shared, not owned: this worker's shell dropping must not cancel
+                // the parent's whole registry.
+                child.local.workers_owned = false;
+                let out = f(&mooring, &mut child);
+                // The ticket goes last, after the body and its shell, so a
+                // teardown's drain outlasts this frame's children rather than
+                // merely seeing the cancel land.
+                drop((child, live));
+                out
+            })?;
+        Ok((handle, worker_cancel))
     }
 }
 
@@ -235,12 +185,44 @@ mod tests {
         let mut parent = Shell::default();
         parent.set_stack_limit(DEFAULT_STACK_LIMIT + 7);
         let scopes = Arc::new(parent.env.clone());
-        let (join, _cancel) =
-            parent.spawn_thread(&Mooring::adrift(), Arc::new(()), scopes, |_, child| {
+        let (join, _cancel) = parent
+            .spawn_thread(Mooring::adrift(), "test-worker", scopes, |_, child| {
                 child.session.stack_limit
-            });
+            })
+            .expect("spawn_thread");
 
         let stack_limit = join.join().expect("worker thread");
         assert_eq!(stack_limit, DEFAULT_STACK_LIMIT + 7);
+    }
+}
+
+// Not gated on unix: this exercises source-db propagation, not the terminal
+// lease.
+#[cfg(test)]
+mod spawn_thread_tests {
+    use super::*;
+    use crate::diagnostic::format_runtime_error_ariadne;
+    use crate::source::Span;
+
+    /// `session.sources` must ride into a spawned worker's shell, else a
+    /// `spawn` body's error span resolves against nothing and the diagnostic
+    /// falls back to caret-less rendering.
+    #[test]
+    fn spawned_worker_renders_errors_against_the_parents_source() {
+        let mut parent = Shell::default();
+        let file = parent.install_script_context("worker.ral", "one\ntwo\nbad\n");
+        let span = Span::new(file, 8, 11);
+        let scopes = Arc::new(parent.env.clone());
+        let (join, _cancel) = parent
+            .spawn_thread(Mooring::adrift(), "test-worker", scopes, move |_, child| {
+                format_runtime_error_ariadne(&child.session.sources, Some(span), "boom", None)
+            })
+            .expect("spawn_thread");
+
+        let rendered = join.join().expect("worker thread");
+        assert!(
+            rendered.contains("worker.ral"),
+            "the worker's error must resolve against the parent's source: {rendered}"
+        );
     }
 }

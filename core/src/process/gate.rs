@@ -1,0 +1,222 @@
+//! The Ctrl-Z park: one gate per pipeline, shared by its stage threads, and
+//! the policy that says whether a stopped external parks, escapes, or is
+//! killed and reaped.
+//!
+//! [`StageGate::wait`] is the one place a parked stage blocks, so its two
+//! invariants — cancel checked before pause, `paused` read under the
+//! `Condvar`'s own mutex — are what a nested pipeline's correctness rests on.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
+
+use super::cancel::{CancelCause, CancelScope};
+use super::outcome::Signal;
+
+/// One per pipeline, shared by its stage threads.  `paused` is the Ctrl-Z
+/// park; waiters wake on resume or on their own scope's cancel.
+pub struct StageGate {
+    paused: AtomicBool,
+    lock: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl StageGate {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            paused: AtomicBool::new(false),
+            lock: Mutex::new(()),
+            condvar: Condvar::new(),
+        })
+    }
+
+    pub fn pause(&self) {
+        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        self.paused.store(true, Ordering::Release);
+        self.condvar.notify_all();
+    }
+
+    pub fn resume(&self) {
+        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        self.paused.store(false, Ordering::Release);
+        self.condvar.notify_all();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    /// Block while paused.  Polls `scope.cause()` every 20 ms so a cancel
+    /// always wins; `Err` carries the cause.
+    ///
+    /// # Errors
+    /// Returns `Err(cause)` when `scope` is cancelled while parked.
+    pub fn wait(&self, scope: &CancelScope) -> Result<(), CancelCause> {
+        let mut guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(cause) = scope.cause() {
+                return Err(cause);
+            }
+            if !self.paused.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let (next, _timeout) = self
+                .condvar
+                .wait_timeout(guard, Duration::from_millis(20))
+                .unwrap_or_else(PoisonError::into_inner);
+            guard = next;
+        }
+    }
+}
+
+/// Running, stopped by a signal, or finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageState {
+    Running,
+    Stopped(Signal),
+    Finished,
+}
+
+/// A stage thread's status as the collector reads it.
+///
+/// The thread writes `Stopped`/`Finished`; the collector holding the handle
+/// writes `Running` once it has acknowledged the stop — the owner on resume,
+/// a joining collector at once, having reported the stop to its own stage's
+/// status.
+pub struct StageStatus(Mutex<StageState>);
+
+impl StageStatus {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self(Mutex::new(StageState::Running)))
+    }
+
+    pub fn get(&self) -> StageState {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn set(&self, s: StageState) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = s;
+    }
+}
+
+/// A stage thread's share of its pipeline's park.
+///
+/// The gate every stage of the pipeline waits on, and this stage's own
+/// status, read by the collector that holds its handle.  Travels on the
+/// `Mooring` beside the cancel scope, so a nested pipeline's stages inherit
+/// the gate and a detached worker does not.
+#[derive(Clone)]
+pub struct StagePark {
+    pub gate: Arc<StageGate>,
+    pub status: Arc<StageStatus>,
+}
+
+/// What a stopped external does to the ral that waits on it.
+#[derive(Clone)]
+pub enum StopPolicy {
+    /// Batch mode: kill and reap on the spot.
+    KillAndReap,
+    /// A top-level foreground external, or a direct external of a
+    /// tty-owning pipeline: surface `Escape::Stopped`.
+    Escape,
+    /// An external inside a stage thread: record `Stopped(sig)` in
+    /// `park.status`, wait on `park.gate`, then continue waiting on the
+    /// same child (it is alive and will be `SIGCONT`ed).
+    Park(StagePark),
+}
+
+impl StopPolicy {
+    pub fn parks(&self) -> bool {
+        !matches!(self, Self::KillAndReap)
+    }
+
+    /// The one rule for every external ral waits on.  Inside a stage thread it
+    /// parks on the pipeline's gate; outside one, `escapes` (a foreground the
+    /// job table can resume) surfaces the stop, and anything else kills and
+    /// reaps.
+    pub fn for_external(mooring: &crate::types::Mooring, escapes: bool) -> Self {
+        match &mooring.park {
+            Some(p) => Self::Park(p.clone()),
+            None if escapes => Self::Escape,
+            None => Self::KillAndReap,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_returns_ok_on_resume() {
+        let gate = StageGate::new();
+        gate.pause();
+        let scope = CancelScope::root();
+        let g = Arc::clone(&gate);
+        let resumer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            g.resume();
+        });
+        assert!(gate.wait(&scope).is_ok(), "resume must unblock the wait");
+        resumer.join().expect("resumer thread");
+    }
+
+    #[test]
+    fn wait_returns_err_on_cancel_while_paused() {
+        let gate = StageGate::new();
+        gate.pause();
+        let scope = CancelScope::root();
+        let s = scope.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            s.cancel(CancelCause::Interrupt);
+        });
+        assert_eq!(
+            gate.wait(&scope),
+            Err(CancelCause::Interrupt),
+            "a scope cancelled while parked must end the wait with its cause"
+        );
+        canceller.join().expect("canceller thread");
+    }
+
+    #[test]
+    fn stop_policy_parks_is_false_only_for_kill_and_reap() {
+        assert!(!StopPolicy::KillAndReap.parks());
+        assert!(StopPolicy::Escape.parks());
+        let park = StagePark {
+            gate: StageGate::new(),
+            status: StageStatus::new(),
+        };
+        assert!(StopPolicy::Park(park).parks());
+    }
+
+    #[test]
+    fn for_external_yields_park_under_a_mooring_with_one() {
+        let mut mooring = crate::types::Mooring::adrift();
+        let park = StagePark {
+            gate: StageGate::new(),
+            status: StageStatus::new(),
+        };
+        mooring.park = Some(park);
+        assert!(
+            matches!(
+                StopPolicy::for_external(&mooring, false),
+                StopPolicy::Park(_)
+            ),
+            "a mooring carrying a park always parks, whatever `escapes` says"
+        );
+    }
+
+    #[test]
+    fn for_external_yields_escape_or_kill_and_reap_without_one() {
+        let mooring = crate::types::Mooring::adrift();
+        assert!(matches!(
+            StopPolicy::for_external(&mooring, true),
+            StopPolicy::Escape
+        ));
+        assert!(matches!(
+            StopPolicy::for_external(&mooring, false),
+            StopPolicy::KillAndReap
+        ));
+    }
+}

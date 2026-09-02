@@ -472,6 +472,7 @@ impl Shell {
             deferred_lease: run.deferred_lease,
             worker_cap: run.worker_cap,
             terminal_access,
+            park: None,
         };
         let next = build_run(self, capture, stdin);
         let (result, status) = run_framed(

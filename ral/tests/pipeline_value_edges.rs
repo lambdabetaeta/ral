@@ -470,27 +470,35 @@ fn captured_native_crosses_the_final_report_boundary_and_relinks() {
     assert_eq!(o.stdout.trim(), "1.57");
 }
 
-/// A value a helper cannot serialize fails at the Report boundary with the
-/// process-boundary diagnostic, not a silent `None`.  `spawn`'s `Handle` is
-/// the non-transferable case.
+/// A `spawn` handle now crosses a pipeline stage cleanly: a stage is a
+/// thread in the same process, so nothing needs to serialize the `Handle`
+/// to reach the final report boundary.  (Regression: under the process-
+/// staged helper this was the one non-transferable value; the wire is
+/// gone.)
 #[test]
-fn non_transferable_value_fails_at_the_final_report_boundary() {
+fn a_spawn_handle_crosses_the_final_report_boundary() {
     let o = run_pipe(
         "let hold = { from-line; let h = !{spawn { return 1 }}; return $h }\n\
          let result = !{printf hi | !$hold}\n\
-         echo got",
+         let awaited = await $result\n\
+         echo $awaited[value]",
     );
-    assert_ne!(o.status, 0, "expected a boundary failure: {}", o.stdout);
-    assert!(
-        o.stderr.contains("cannot cross the process boundary"),
-        "expected the boundary diagnostic; stderr: {}",
-        o.stderr
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "1", "stdout: {}", o.stdout);
+}
+
+/// The single most important new behaviour this plan buys: a pipeline stage
+/// closing over a `spawn` handle and awaiting it in place, something a
+/// `Value::Handle` could never do across the old helper wire.
+#[test]
+fn a_pipeline_stage_awaits_a_handle_closed_over_from_outside() {
+    let o = run_pipe(
+        "let h = spawn { return 7 }\n\
+         let result = echo x | !{ await $h }\n\
+         echo $result[value]",
     );
-    assert!(
-        !o.stdout.contains("got"),
-        "the script must not continue past the failed report: {}",
-        o.stdout
-    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "7", "stdout: {}", o.stdout);
 }
 
 // ── Capture semantics ────────────────────────────────────────────────────

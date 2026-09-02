@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 11b9ebd
-verified_at_date: 2026-08-06
+verified_at_commit: c8af3823
+verified_at_date: 2026-09-02
 anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, confined_by]
 ---
 
@@ -228,22 +228,20 @@ binary, so blame is read off what the launcher did rather than re-derived from
 the shell's state. Both routes end in the same refusal,
 `sandbox::confinement_unavailable`: nothing ran, and the sandbox is why.
 
-The pipeline-stage helper re-exec is unchanged and unrelated: a process-staged
-ral stage still runs through `run_child_eval` over one request/response frame
+A ral-written pipeline stage is unrelated to this sandbox re-exec: it runs on
+its own thread of the parent process, sharing the parent's memory directly,
+never a re-exec'd child of any kind
 ([[internals/pipeline-execution|pipeline execution]];
-[[decisions/260610_child-eval-unification|child-eval-unification]]). That is a
-real process boundary, not a lexical grant body pretending to be one.
+[[decisions/260902_stages-are-threads|stages-are-threads]]).
 
-**The hard rule for any such synchronous child wait: the host must own an
-out-of-band cancellation path.** A parent blocked in a request/response frame
-cannot observe its own foreground `CancelScope` by cooperative polling — the poll
-never runs while the read is parked. Deadline and Esc therefore cannot break a
-wedged frame unless the parent has a side channel that signals the confined child
-subtree from outside the wait. Extra signal authority *inside* the child is not a
-substitute: it lets a child signal its own descendants, but it does nothing to
-free a parent stuck on the IPC edge. This is why the surviving `run_child_eval`
-consumers keep teardown on the parent side rather than trusting the child to
-notice cancellation.
+**The hard rule for any synchronous child wait a host still performs: it must
+own an out-of-band cancellation path.** A parent blocked reading a framed
+response cannot observe its own foreground `CancelScope` by cooperative
+polling — the poll never runs while the read is parked. Deadline and Esc
+therefore cannot break a wedged wait unless the parent has a side channel that
+signals the confined child subtree from outside it. Extra signal authority
+*inside* the child is not a substitute: it lets a child signal its own
+descendants, but it does nothing to free a parent stuck on the IPC edge.
 
 A bundled coreutil's filesystem access has no in-process gate, so under a
 restrictive grant it is never inlined: it is spawned as a `ral --ral-bundled-tool

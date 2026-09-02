@@ -39,18 +39,16 @@ pub struct GitStatus {
     reason = "[io-door:silent:git-launch] shells out to git(1) to probe the working tree; best-effort host info, not turn-time data I/O"
 )]
 pub fn git() -> Option<GitStatus> {
-    let head = without_a_console_window(Command::new("git"))
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
+    let mut head_cmd = without_a_console_window(Command::new("git"));
+    head_cmd.args(["rev-parse", "--abbrev-ref", "HEAD"]);
+    let head = crate::process::output(&mut head_cmd).ok()?;
     if !head.status.success() {
         return None;
     }
     let branch = String::from_utf8(head.stdout).ok()?.trim().to_string();
-    let porcelain = without_a_console_window(Command::new("git"))
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()?;
+    let mut porcelain_cmd = without_a_console_window(Command::new("git"));
+    porcelain_cmd.args(["status", "--porcelain"]);
+    let porcelain = crate::process::output(&mut porcelain_cmd).ok()?;
     if !porcelain.status.success() {
         return None;
     }
@@ -82,10 +80,9 @@ pub fn family() -> &'static str {
     reason = "[io-door:silent:date-launch] shells out to date(1) for the host info line; not turn-time data I/O"
 )]
 pub fn now() -> Option<String> {
-    let out = without_a_console_window(Command::new("date"))
-        .arg("+%Y-%m-%d %H:%M:%S %Z")
-        .output()
-        .ok()?;
+    let mut cmd = without_a_console_window(Command::new("date"));
+    cmd.arg("+%Y-%m-%d %H:%M:%S %Z");
+    let out = crate::process::output(&mut cmd).ok()?;
     out.status
         .success()
         .then(|| String::from_utf8(out.stdout).ok())

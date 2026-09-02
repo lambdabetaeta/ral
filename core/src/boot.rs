@@ -84,12 +84,12 @@ impl BakedPrelude {
 /// or a thunk — naming the bound name(s) (§6.2).
 ///
 /// The wire ships the prelude tier by name alone, never by value: a
-/// pipeline-stage helper re-derives it by running the same prelude source
-/// under its own process.  A `Define` whose right-hand side is anything but
-/// `Return` — an `if`, a call, a store read — could close over *this*
-/// process's facts (its stdout, its args, its clock) and so differ from the
-/// helper's own bake, silently.  `Return(V)` cannot: closing a literal or a
-/// thunk reads nothing about the process it runs in.
+/// re-exec'd engine child (`hatch`) re-derives it by running the same
+/// prelude source under its own process.  A `Define` whose right-hand side
+/// is anything but `Return` — an `if`, a call, a store read — could close
+/// over *this* process's facts (its stdout, its args, its clock) and so
+/// differ from the child's own bake, silently.  `Return(V)` cannot: closing
+/// a literal or a thunk reads nothing about the process it runs in.
 ///
 /// # Panics
 /// If any phrase fails the shape check.

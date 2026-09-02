@@ -26,7 +26,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
-use crate::child_eval::{EngineSeed, pack_seed};
+use crate::engine_seed::{EngineSeed, pack_seed};
 use crate::process::ChildHandle;
 use crate::serial::WireDecoder;
 use crate::subprocess::install_wire_shell;
@@ -76,7 +76,12 @@ fn sweep_hatched() {
     let mut table = table()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    table.retain_mut(|child| !matches!(child.try_wait_handling_stop(None, false), Ok(Some(_))));
+    table.retain_mut(|child| {
+        !matches!(
+            child.try_wait_handling_stop(false, crate::process::KillTarget::Pid),
+            Ok(Some(_))
+        )
+    });
 }
 
 /// Called once, from `engine_session`'s teardown. Anything still running is
@@ -314,8 +319,8 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed, recipe: Recipe) -> Result<
     sweep_hatched();
 
     let mut dial = UnixStream::from(connection);
-    let (mut parent_seed, child_seed) =
-        UnixStream::pair().map_err(|e| format!("hatch: failed to open the seed channel: {e}"))?;
+    let (mut parent_seed, child_seed) = crate::process::cloexec_socketpair()
+        .map_err(|e| format!("hatch: failed to open the seed channel: {e}"))?;
     // The child is draining before the first byte goes out, so a seed larger
     // than the socketpair's buffer crosses instead of wedging both sides.
     let mut child = ChildHandle::from_std(spawn_engine(recipe, &dial, child_seed)?);
@@ -407,8 +412,7 @@ fn spawn_engine(
         });
     }
 
-    let child = cmd
-        .spawn()
+    let child = crate::process::spawn(&mut cmd)
         .map_err(|e| format!("hatch: could not start the child engine: {e}"));
     // Closed here and nowhere else. The child holds its own copy across the
     // exec, and one kept in this process would leave the seed write blocked on
@@ -471,9 +475,9 @@ fn read_seed(mut channel: UnixStream) -> Result<EngineSeed, String> {
 }
 
 /// Application of a seed already taken: called from `engine_session` once the
-/// installer has booted `shell`. Hydrates scope and context exactly as
-/// `child_eval::eval_request` does, then narrows `shell`'s capabilities
-/// through `narrow`, the [`GrantNarrower`] that installer carries.
+/// installer has booted `shell`. Hydrates scope and context, then narrows
+/// `shell`'s capabilities through `narrow`, the [`GrantNarrower`] that
+/// installer carries.
 ///
 /// # Errors
 /// Returns a sentence naming a decode failure, or whatever `narrow` refuses
@@ -501,6 +505,10 @@ pub(crate) fn apply_seed(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::*;
     use crate::boot::BakedPrelude;

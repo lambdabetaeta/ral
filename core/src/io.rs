@@ -37,12 +37,19 @@ pub enum LaunchRole {
     #[default]
     TopLevel,
     /// Joins the pipeline's pgid; never leads a group of its own.
-    PipelineStage,
+    PipelineStage(crate::process::Pgid),
 }
 
 impl LaunchRole {
     pub fn is_top_level(self) -> bool {
         matches!(self, Self::TopLevel)
+    }
+
+    pub fn stage_group(self) -> Option<crate::process::Pgid> {
+        match self {
+            Self::TopLevel => None,
+            Self::PipelineStage(g) => Some(g),
+        }
     }
 }
 
@@ -66,28 +73,6 @@ pub struct Io {
 }
 
 impl Io {
-    /// Install `parent`'s IO into a cross-process pipeline-stage child — via
-    /// `Shell::child_of`, over the throwaway parent `child_eval` rebuilds in the
-    /// helper process.  Sinks are cloned; stdin is *moved*, since only one of
-    /// the two may consume a read-once source.
-    pub fn inherit_from(&mut self, parent: &mut Self) {
-        self.stdout = parent.stdout.clone();
-        self.ambient = parent.ambient.clone();
-        self.stderr = parent.stderr.clone();
-        self.terminal = parent.terminal;
-        self.interactive = parent.interactive;
-        self.launch_role = parent.launch_role;
-        // The whole source moves, markers included: a child of an `Empty` stdin
-        // must also see no fall-through to fd 0, not revert to `Terminal`.
-        self.stdin = std::mem::replace(&mut parent.stdin, Source::Terminal);
-    }
-
-    /// Hand the read-once stdin back to `parent`, so a later sibling still sees
-    /// the unconsumed pipe.
-    pub fn return_to(&mut self, parent: &mut Self) {
-        parent.stdin = std::mem::replace(&mut self.stdin, Source::Terminal);
-    }
-
     /// Swap `stdout` for the ambient sink, returning what `stdout` was.
     /// `with_ambient_stdout` is a bracket over this; the `Bind` rule of a
     /// binder's RHS is the other caller — the RHS's bytes are effect, so

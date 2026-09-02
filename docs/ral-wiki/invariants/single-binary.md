@@ -6,15 +6,20 @@ capability sandbox are all linked into the one binary — none is a separate
 program ral shells out to. Every re-exec is a *multicall* of this same binary
 behind a hidden sentinel flag, never a sibling helper:
 
-- a process-staged pipeline runs each ral stage — and each bundled tool, which
-  is demoted to a ral stage — through `--ral-pipeline-stage-helper`, and pins
-  the group's pgid with `--ral-pipeline-anchor` ([[design/pipelines|pipelines]]);
-- an `fs`/`net` [[design/grant|grant]] that drops into an OS sandbox re-execs
-  under `--internal-sandbox-block`, confined by the `sandbox_projection` of the
-  live [[design/grant|grant]].
+- a multi-stage pipeline pins its process group's pgid open for the
+  pipeline's whole life with a lone anchor, `--ral-pipeline-anchor`
+  ([[design/pipelines|pipelines]]) — the only stage-adjacent re-exec left,
+  since a ral-written stage now runs on a thread of the parent process rather
+  than a child of its own, and a bundled tool re-execs as
+  `--ral-bundled-tool <tool>` whether standalone or a stage;
+- an `fs`/`net` [[design/grant|grant]] confines an external child by
+  re-execing it under `--sandbox-projection <json> --ral-sandbox-exec <host>`
+  (macOS) or entering the OS sandbox directly (Linux `bwrap`, Windows
+  AppContainer at spawn — no child re-exec there), confined by the
+  `sandbox_projection` of the live [[design/grant|grant]];
+- a wire-seat agent hatch re-execs an engine child under `--engine`, seeded
+  from an `EngineSeed` the parent packs ([[map/core/transport|transport]]).
 
-A re-exec'd child reconstructs a shell from a wire snapshot, evaluates, and
-reports a structured outcome through one shared protocol ([[map/core/runtime|child_eval]]).
 This in-process linking is also what routes the bundled tools through the same
 capability chokepoint as the structured primitives.
 

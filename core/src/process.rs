@@ -6,6 +6,7 @@
 //! on a [`CancelScope`], observed at the evaluator's poll points via [`check`].
 
 pub mod cancel;
+pub mod gate;
 pub mod jail;
 pub mod launch;
 pub mod lease;
@@ -14,6 +15,8 @@ pub mod reaper;
 pub mod signal;
 #[cfg(unix)]
 pub mod slot;
+pub mod spawn_lock;
+pub mod wake;
 
 pub(crate) use outcome::not_found_hint;
 pub use outcome::{CommandFailure, Signal, SpawnFailure, StageKill, WaitOutcome};
@@ -28,7 +31,15 @@ pub use cancel::{
     request_root_cancel,
 };
 
+pub use gate::{StageGate, StagePark, StageState, StageStatus, StopPolicy};
+
+pub(crate) use signal::KillTarget;
 pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};
+
+pub use spawn_lock::{cloexec_pipe, output, spawn, status};
+#[cfg(unix)]
+pub use spawn_lock::cloexec_socketpair;
+pub use wake::Wake;
 
 #[cfg(unix)]
 pub use signal::{
@@ -42,7 +53,7 @@ pub use slot::clobber_slot;
 
 #[cfg(windows)]
 pub use signal::{
-    ForegroundGuard, PipelineRelay, ReapStatus, apply_group_active_process_limit,
+    ForegroundGuard, ReapStatus, apply_group_active_process_limit,
     break_pipeline_group, disown_pipeline_group, install_handlers, is_known_group,
     kill_pipeline_group, relay_interrupt, release_win_group, reset_child_signals,
     set_active_process_limit, try_reap_leader, wait_leader_blocking,

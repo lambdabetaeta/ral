@@ -601,8 +601,12 @@ mod tests {
             let (mut child, pgid, _) = launch
                 .spawn(PgidPolicy::Inherit)
                 .expect("CreateProcessW must accept the derived capability SIDs");
+            let target = match pgid {
+                Some(p) => crate::process::KillTarget::Group(p),
+                None => crate::process::KillTarget::Pid,
+            };
             child
-                .wait_handling_stop(pgid, false)
+                .wait_handling_stop(false, target)
                 .expect("wait for the confined child")
         };
 

@@ -32,7 +32,7 @@ impl WireChannel {
     /// Returns the socket error if the pair cannot be made.
     #[cfg(unix)]
     pub fn pair() -> io::Result<(Self, Self)> {
-        let (a, b) = WireStream::pair()?;
+        let (a, b) = crate::process::cloexec_socketpair()?;
         Ok((Self { stream: a }, Self { stream: b }))
     }
 

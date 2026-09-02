@@ -95,7 +95,7 @@ The owned-`Shell` construction is **retained** only for cases that are genuinely
   detached-worker helper path);
 - the cross-process pipeline helper
   ([[decisions/260610_child-eval-unification|child-eval-unification]],
-  `core/src/child_eval.rs`);
+  `core/src/engine_seed.rs`);
 - the REPL aside (`child_from`: a deliberately isolated prompt/hook sibling).
 
 `from_captured` remains the constructor primitive for those modes. `child_of`

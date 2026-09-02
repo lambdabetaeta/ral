@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5afa1c81
-generated_at_date: 2026-08-12
+generated_at_commit: c8af3823
+generated_at_date: 2026-09-02
 covers_paths: [ral/src/jobs.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -37,6 +37,16 @@ On exit a job group is taken down in three steps:
 - given a five-second grace during which natural exits are reaped;
 - then forced — SIGKILL / `TerminateJobObject`.
 
+A parked job's pgid anchor ignores every termination signal by design
+([[decisions/260902_stages-are-threads|stages-are-threads]]), so a bare
+`SIGTERM -pgid` at exit would never reach it: `cleanup` instead calls
+`ParkedPipeline::cancel(Terminate)` on every parked job, which signals the
+group, cancels every stage thread's scope, fires every wake, and opens the
+Ctrl-Z gate so a cancelled thread can leave — dropping the `ParkedPipeline`
+this way is what finishes the anchor (its release pipe closes, it reads EOF,
+`PipelineGroup::drop` reaps it). A stopped standalone external, which owns no
+`ParkedPipeline`, still takes the plain SIGTERM/SIGCONT/SIGKILL ladder above.
+
 A job also owns whatever atomic writes its members staged but have not
 finished. `Escape::Stopped` carries them out of the evaluator as
 `PendingWrite`s — a `tmp` path and a `target` path, no open file — and
@@ -62,9 +72,36 @@ the `&Mooring` that threads beside the shell. `Shell::terminal_lease` yields
 `Some(&TerminalLease)` only when that mooring's terminal access permits and
 the session owns the lease (see [[decisions/260619_terminal-lease|terminal-lease]]);
 the [[map/core/io-process|ForegroundGuard]] acquires `tcsetpgrp` + the termios
-snapshot only on that borrow. Without a lease — a non-interactive resume — there
-is no tty dance to do, so `fg` still SIGCONTs the whole `-pgid` and waits but
-skips the handoff.
+snapshot only on that borrow, *before* `fg` drives the resume. Without a lease
+— a non-interactive resume — there is no tty dance to do, so `fg` still
+resumes and waits but skips the handoff.
+
+**A `Job` parked by Ctrl-Z owns a live `ral_core::ParkedPipeline`, not a bare
+pgid to `waitpid` on.** A pipeline's stages are threads waiting on their own
+externals now, so the REPL cannot `waitpid(-pgid)` without reaping children a
+stage thread still owns ([[decisions/260902_stages-are-threads|stages-are-threads]]).
+`Job` therefore holds `parked: Option<ral_core::ParkedPipeline>` and is neither
+`Clone` nor `Debug`; every consumer routes through the parked pipeline's own
+verbs instead of a raw wait:
+
+- `fg` drives `ParkedPipeline::resume_and_collect` (open the gate, `SIGCONT
+  -pgid`, resume the same collect loop the pipeline was parked out of) after
+  acquiring the `ForegroundGuard` above, and re-parks the job if a later stop
+  interrupts it;
+- `bg` drives the cheaper `ParkedPipeline::resume` (gate plus `SIGCONT`, no
+  terminal claim) and leaves the job in the table;
+- the job sweep drives `ParkedPipeline::poll`, one non-blocking probe pass,
+  in place of the old `try_waitpgid`;
+- session `cleanup` drives `ParkedPipeline::cancel` (above); there is no
+  `kill %n` verb — `fg` then Ctrl-C ends a job, the pipeline's anchor
+  witnessing the interrupt for the collector.
+
+`disown` moves a job's `ParkedPipeline` into a session-lived `disowned: Vec<_>`
+rather than dropping the table row outright, so a disowned parked pipeline is
+still driven to completion (just no longer through `jobs`/`fg`/`bg`) instead of
+abandoned mid-collection. A stopped standalone external — no `ParkedPipeline`,
+just a remembered pgid — is the one case still resumed by a bare `SIGCONT`
+and reaped by `waitpid(-pgid)`.
 
 ## Two populations, one listing
 

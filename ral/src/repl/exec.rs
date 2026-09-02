@@ -174,11 +174,17 @@ pub(super) fn execute_input(
                     pending,
                     ..
                 } => {
+                    let parked = transport.with_shell(|shell| {
+                        let typed = ral_core::process::Pgid::from_raw(pgid)
+                            .expect("a stopped job's pgid is positive");
+                        shell.take_parked(typed)
+                    });
                     let id = job_table.lock().unwrap().add(
                         pgid,
                         trimmed.to_string(),
                         crate::jobs::JobState::Stopped,
                         pending,
+                        parked,
                     );
                     eprintln!("[{id}] stopped\t{trimmed} ({signal_name})");
                     None

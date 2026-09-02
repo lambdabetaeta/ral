@@ -34,9 +34,4 @@ pub trait Resident {
     /// chapter-specific qualifier (a worker's `"(worker)"` suffix); a fold
     /// prints it verbatim.
     fn state_label(&self) -> String;
-
-    /// Fire this resident's own teardown edge, never a shared kill switch
-    /// reaching in from outside its chapter. Cooperative: this raises a flag or
-    /// sends a signal, and the resident notices at its own next check.
-    fn cancel(&self);
 }

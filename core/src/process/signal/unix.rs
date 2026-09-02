@@ -12,7 +12,7 @@ use rustix::io::Errno;
 use rustix::process::{Pid, WaitOptions, WaitStatus};
 use rustix::termios::{OptionalActions, Termios};
 
-use super::{ESCALATION, Pgid, PgidPolicy};
+use super::{ESCALATION, KillTarget, Pgid, PgidPolicy};
 use crate::process::cancel::{CancelCause, request_foreground_cancel, request_root_cancel};
 
 // ── Termination handler ────────────────────────────────────────────────────
@@ -275,7 +275,7 @@ where
             Ok(())
         });
     }
-    let child = cmd.spawn()?;
+    let child = crate::process::spawn(cmd)?;
     // The mirror's result is ignored: either the child already applied the
     // policy, and a failure here is the benign post-`execve` `EACCES` race, or
     // its `pre_exec` failed and the spawn above already returned that error.
@@ -325,7 +325,7 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
     use std::io::Read;
     use std::os::fd::AsRawFd;
 
-    let (mut receipt, handshake) = os_pipe::pipe()?;
+    let (mut receipt, handshake) = crate::process::cloexec_pipe()?;
     let fd = handshake.as_raw_fd();
     let (mut intermediate, _its_pgid) =
         spawn_with_pgid_after(cmd, PgidPolicy::NewSession, move || {
@@ -356,7 +356,7 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
             Ok(())
         })?;
     drop(handshake);
-    let born = wait_handling_stop(&mut intermediate, None, false)?;
+    let born = wait_handling_stop(&mut intermediate, false, KillTarget::Pid)?;
     if born != crate::process::WaitOutcome::Exited(0) {
         return Err(std::io::Error::other(format!(
             "could not detach: the intermediate process ended as {born:?} instead of exiting 0, so nothing here knows the pid of what it started"
@@ -378,21 +378,21 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
 // `Child::wait()` returns only on termination, so a child stopped by SIGTSTP,
 // SIGSTOP or SIGTTIN hangs ral with the tty still owned by the stopped pgid;
 // `WaitOptions::UNTRACED` makes the wait return on a stop as well.  With
-// `park_on_stop` and a tracked pgid the stop surfaces as `Stopped`, which
-// `RunningChild::wait` turns into an `Escape::Stopped` for the REPL to park in
-// its job table and `fg` to resume.  Otherwise the group is SIGKILLed and
-// reaped as `StoppedThenKilled`.
+// `parks` the stop surfaces as `Stopped`, which `RunningChild::wait` turns
+// into an `Escape::Stopped` (or, parked inside a stage thread, a wait on the
+// pipeline's gate).  Otherwise `target` is SIGKILLed and reaped as
+// `StoppedThenKilled`.
 
 /// Wait for `child` to terminate or stop, classifying a stop per the two modes
 /// above.
 pub(super) fn wait_handling_stop(
     child: &mut std::process::Child,
-    pgid: Option<Pgid>,
-    park_on_stop: bool,
+    parks: bool,
+    target: KillTarget,
 ) -> std::io::Result<crate::process::WaitOutcome> {
     let pid = Pid::from_child(child);
     let (_, status) = waitpid_eintr(pid, WaitOptions::UNTRACED)?;
-    classify_wait_status(pid, status, pgid, park_on_stop, child)
+    classify_wait_status(pid, status, parks, target, child)
 }
 
 /// Wait for `pid`, retrying after `EINTR` so a signal delivery can never be
@@ -449,14 +449,14 @@ fn wait_blocking_eintr(
 /// "still running" and the pre-wait poll in `RunningChild::wait` spins forever.
 pub(super) fn try_wait_handling_stop(
     child: &mut std::process::Child,
-    pgid: Option<Pgid>,
-    park_on_stop: bool,
+    parks: bool,
+    target: KillTarget,
 ) -> std::io::Result<Option<crate::process::WaitOutcome>> {
     let pid = Pid::from_child(child);
     let Some((_, status)) = try_waitpid_eintr(pid, WaitOptions::UNTRACED)? else {
         return Ok(None);
     };
-    classify_wait_status(pid, status, pgid, park_on_stop, child).map(Some)
+    classify_wait_status(pid, status, parks, target, child).map(Some)
 }
 
 /// Translate a `waitpid` status into a `WaitOutcome`, shared by the blocking and
@@ -465,13 +465,13 @@ pub(super) fn try_wait_handling_stop(
 fn classify_wait_status(
     pid: Pid,
     status: WaitStatus,
-    pgid: Option<Pgid>,
-    park_on_stop: bool,
+    parks: bool,
+    target: KillTarget,
     child: &mut std::process::Child,
 ) -> std::io::Result<crate::process::WaitOutcome> {
     if let Some(signal) = status.stopping_signal() {
         let stopped_by = crate::process::Signal::new(signal);
-        return handle_stopped(stopped_by, pid, pgid, park_on_stop, child);
+        return handle_stopped(stopped_by, pid, parks, target, child);
     }
     if let Some(code) = status.exit_status() {
         return Ok(crate::process::WaitOutcome::Exited(code));
@@ -484,36 +484,35 @@ fn classify_wait_status(
     Ok(crate::process::WaitOutcome::NativeCode(status.as_raw()))
 }
 
-/// Park the stopped child when the caller has a job table to resume it from;
-/// otherwise SIGKILL its group and reap the terminal status.
+/// Park the stopped child when the caller has a job table (or a pipeline
+/// gate) to resume it from; otherwise SIGKILL `target` and reap the terminal
+/// status.
 fn handle_stopped(
     stopped_by: crate::process::Signal,
     pid: Pid,
-    pgid: Option<Pgid>,
-    park_on_stop: bool,
+    parks: bool,
+    target: KillTarget,
     child: &mut std::process::Child,
 ) -> std::io::Result<crate::process::WaitOutcome> {
-    if park_on_stop && pgid.is_some() {
+    if parks {
         crate::dbg_trace!(
             "fg",
-            "pid {pid} stopped (signal {}); parking pgid {:?}",
+            "pid {pid} stopped (signal {}); parking",
             stopped_by.display(),
-            pgid
         );
         return Ok(crate::process::WaitOutcome::Stopped(stopped_by));
     }
     crate::dbg_trace!(
         "fg",
-        "pid {pid} stopped (signal {}); killing pgid {:?}",
+        "pid {pid} stopped (signal {}); killing {target:?}",
         stopped_by.display(),
-        pgid,
     );
-    match pgid {
-        Some(group) => {
+    match target {
+        KillTarget::Group(group) => {
             let _ =
                 rustix::process::kill_process_group(group.as_pid(), rustix::process::Signal::KILL);
         }
-        None => {
+        KillTarget::Pid => {
             let _ = child.kill();
         }
     }

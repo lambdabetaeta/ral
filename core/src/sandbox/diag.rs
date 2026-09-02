@@ -185,12 +185,11 @@ fn build_hint(denials: &[&str]) -> String {
     reason = "[io-door:silent:ps-sample] sandbox diagnostics: shells out to `/bin/ps` to sample the live process tree for denial attribution; a diagnostic probe, not turn-time model data I/O, raises no surface card."
 )]
 pub(crate) fn sample_descendants(root: u32) -> HashSet<u32> {
-    let Ok(out) = std::process::Command::new("/bin/ps")
-        .args(["-axo", "pid=,ppid="])
+    let mut cmd = std::process::Command::new("/bin/ps");
+    cmd.args(["-axo", "pid=,ppid="])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
+        .stderr(std::process::Stdio::null());
+    let Ok(out) = crate::process::output(&mut cmd) else {
         return HashSet::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);

@@ -98,6 +98,18 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "io-door:surface:process-launch",
     ),
     (
+        "core/src/process/spawn_lock.rs",
+        "io-door:silent:cloexec-pipe",
+    ),
+    (
+        "core/src/process/spawn_lock.rs",
+        "io-door:silent:cloexec-socketpair",
+    ),
+    (
+        "core/src/process/spawn_lock.rs",
+        "io-door:silent:spawn-door",
+    ),
+    (
         "core/src/runtime/command/redirect.rs",
         "io-door:silent:atomic-abandon",
     ),

@@ -42,8 +42,7 @@ impl TtyInputPermit {
 /// How a child's stdin is wired; `Inherit` costs a [`TtyInputPermit`].
 pub enum StdinRoute {
     Inherit(TtyInputPermit),
-    Pipe(os_pipe::PipeReader),
-    File(std::fs::File),
+    Reader(crate::io::SourceReader),
     Null,
 }
 
@@ -51,8 +50,7 @@ impl StdinRoute {
     pub fn into_stdio(self) -> crate::process::StdioSpec {
         match self {
             Self::Inherit(_) => crate::process::StdioSpec::inherit(),
-            Self::Pipe(r) => crate::process::StdioSpec::from_pipe_reader(r),
-            Self::File(f) => crate::process::StdioSpec::from_file(f),
+            Self::Reader(r) => r.into(),
             Self::Null => crate::process::StdioSpec::null(),
         }
     }
@@ -137,24 +135,26 @@ fn unmodeled_redirect(fd: u32, target: &str) -> Break {
 /// Every non-terminal source — a pipeline pipe, a `<file` opened by
 /// `redirect::install_stdin_redirect` — already sits on `shell.io.stdin`;
 /// only the fall-through needs a permit to inherit fd 0.
-pub(super) fn wire_stdin(shell: &mut Shell) -> StdinRoute {
+pub(super) fn wire_stdin(shell: &Shell) -> Settled<StdinRoute> {
     // An explicit empty source (an exarch tool run) denies byte input in its
     // own right, so it wires `/dev/null` instead of falling through to fd 0.
     if matches!(shell.io.stdin, crate::io::Source::Empty) {
-        return StdinRoute::Null;
+        return Ok(StdinRoute::Null);
     }
-    match shell.io.stdin.take_reader() {
-        Some(crate::io::SourceReader::Pipe(r)) => StdinRoute::Pipe(r),
-        Some(crate::io::SourceReader::File(f)) => StdinRoute::File(f),
-        None => {
-            let permit = if shell.io.terminal.startup_stdin_tty {
-                TtyInputPermit::for_standalone_external()
-            } else {
-                TtyInputPermit::for_non_tty_stdin()
-            };
-            StdinRoute::Inherit(permit)
-        }
+    let reader = shell
+        .io
+        .stdin
+        .reader()
+        .map_err(|e| Break::Error(Error::new(format!("could not duplicate stdin: {e}"), 1)))?;
+    if let Some(r) = reader {
+        return Ok(StdinRoute::Reader(r));
     }
+    let permit = if shell.io.terminal.startup_stdin_tty {
+        TtyInputPermit::for_standalone_external()
+    } else {
+        TtyInputPermit::for_non_tty_stdin()
+    };
+    Ok(StdinRoute::Inherit(permit))
 }
 
 /// Wire the child's stdout to the plan's redirect file, if any.
@@ -288,6 +288,10 @@ pub(super) fn wire_stderr(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:test] test fs/process scaffolding"
+)]
 mod tests {
     use super::{StdinRoute, wire_stdin};
     use crate::io::Source;
@@ -301,15 +305,34 @@ mod tests {
 
         shell.io.stdin = Source::Empty;
         assert!(
-            matches!(wire_stdin(&mut shell), StdinRoute::Null),
+            matches!(wire_stdin(&shell), Ok(StdinRoute::Null)),
             "Empty stdin must wire to /dev/null"
         );
 
         shell.io.stdin = Source::Terminal;
         shell.io.terminal.startup_stdin_tty = false;
         assert!(
-            matches!(wire_stdin(&mut shell), StdinRoute::Inherit(_)),
+            matches!(wire_stdin(&shell), Ok(StdinRoute::Inherit(_))),
             "Terminal stdin still inherits fd 0"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wire_stdin_borrows_a_stage_shaped_source() {
+        use crate::io::SourceReader;
+        use crate::process::Wake;
+
+        let mut shell = Shell::default();
+        let (r, _w) = os_pipe::pipe().expect("data pipe");
+        let wake = Wake::new().expect("wake");
+        shell.io.stdin = Source::Reader(SourceReader::pipe(r).interruptible(wake));
+
+        let route = wire_stdin(&shell).expect("wire_stdin");
+        assert!(matches!(route, StdinRoute::Reader(_)));
+        let _stdio = route.into_stdio();
+
+        // The source is borrowed, never taken, so it still has a reader.
+        assert!(shell.io.stdin.reader().expect("reader").is_some());
     }
 }

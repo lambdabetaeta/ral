@@ -702,14 +702,14 @@ pub(crate) fn install_stdin_redirect(
             // Door 1 — READ, recorded eagerly so it precedes the body or
             // exec it feeds, as in `cat < a`.
             observe(shell, mooring, Observed::Read { path: word.clone() });
-            crate::io::Source::File(f)
+            crate::io::Source::Reader(crate::io::SourceReader::file(f))
         }
         RedirectMode::HereString => {
             let body = word
                 .strip_prefix("\r\n")
                 .or_else(|| word.strip_prefix('\n'))
                 .unwrap_or(word);
-            let (reader, mut writer) = os_pipe::pipe()
+            let (reader, mut writer) = crate::process::cloexec_pipe()
                 .map_err(|e| Break::Error(Error::new(format!("here-string: {e}"), 1)))?;
             let bytes = body.as_bytes().to_vec();
             std::thread::Builder::new()
@@ -720,7 +720,7 @@ pub(crate) fn install_stdin_redirect(
                     let _ = writer.write_all(&bytes);
                 })
                 .map_err(|e| Break::Error(Error::new(format!("here-string: {e}"), 1)))?;
-            crate::io::Source::Pipe(reader)
+            crate::io::Source::Reader(crate::io::SourceReader::pipe(reader))
         }
         _ => unreachable!("find_map above only yields Read or HereString"),
     };

@@ -59,7 +59,7 @@ fn main() -> ExitCode {
     ral_core::io::enable_virtual_terminal_processing();
 
     // Restore SIGPIPE to SIG_DFL once at startup so bundled uutils (this
-    // same binary re-exec'd as `--ral-bundled-tool`) and pipeline helpers
+    // same binary re-exec'd as `--ral-bundled-tool`) and the pipeline anchor
     // see the default disposition.
     #[cfg(unix)]
     ral_core::uutils::init_signal_dispositions();
@@ -73,7 +73,7 @@ fn main() -> ExitCode {
         }]);
     }
 
-    if let Some(code) = ral_core::try_run_pipeline_stage_helper(&PRELUDE) {
+    if let Some(code) = ral_core::try_run_pipeline_anchor() {
         return ExitCode::from(code);
     }
     if let Some(code) = ral_core::test_helper::try_run_test_helper() {

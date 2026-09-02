@@ -1,7 +1,7 @@
 ---
-generated_at_commit: d05cdb89
-generated_at_date: 2026-08-31
-covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
+generated_at_commit: c8af3823
+generated_at_date: 2026-09-02
+covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
 # Map: core / runtime
@@ -10,8 +10,8 @@ covers_paths: [core/src/runtime.rs, core/src/runtime/, core/src/child_eval.rs]
 dispatches into — command execution, pipeline orchestration, and the
 per-child confinement choice. It re-enters evaluation only through
 `evaluator::machine::apply` (a handler or alias arm's thunk, from
-`command_call.rs`) and `evaluator::machine::evaluate` (a re-exec'd stage's
-closure, from `child_eval.rs`) — stages carry closures, so the mutual
+`command_call.rs`) and `evaluator::machine::evaluate` (a stage thread's own
+closure, from `pipeline/thread.rs`) — stages carry closures, so the mutual
 recursion is irreducible; the evaluator reaches it at
 `PipeNode::launch`/`join` and, dispatching an `Exec` node, at
 `command_call::classify_command` → `run_base_frame` / `run_external`, and the `command` redirect guards
@@ -86,9 +86,9 @@ recursion is irreducible; the evaluator reaches it at
     Child stdio routing — the `(Stdio, pump)` plan for a spawned child's
     stdout/stderr — is one shape, `Sink::child_stdout` / `child_stderr` yielding
     the shared `ChildStdioPlan` ([[map/core/io-process|io-process]]), through
-    which the standalone command, the direct pipeline stage, and the ral helper
-    stage all route; the tty-inherit predicate (`stdio::inherit_tty`) is
-    likewise shared.
+    which the standalone command, a direct pipeline stage, and an external a
+    stage thread spawns internally all route; the tty-inherit predicate
+    (`stdio::inherit_tty`) is likewise shared.
   - The read door (`< file`), the write door (`> / >> / >|`, settled
     `committed`/`aborted`/`failed` at frame teardown), and the exec door (Host
     and `BundledTool` completion) each build an `Observation`
@@ -111,7 +111,7 @@ recursion is irreducible; the evaluator reaches it at
   machine's.  `group` (the pgid anchor, foreground guard, SIGINT relay)
   stays alive across both `collect` and `finish` rather than dropped early
   ([[map/core/evaluator|evaluator]]). `resolve.rs` freezes each stage's launch decision once as
-  `StageLaunch` (`Direct` | `HelperEval`) from the head's resolution, redirects,
+  `StageLaunch` (`Direct(ExternalStage)` | `Thread`) from the head's resolution, redirects,
   terminal ownership, and audit state, so launch reads a decision rather than
   re-deriving a dispatch gate. **No route enters that classification**: a
   stage's dispatch may not depend on where its payload lives, or the choice
@@ -120,33 +120,44 @@ recursion is irreducible; the evaluator reaches it at
   the IR's own `PipeYield`, which the checker wrote and the runtime only reads.
   `route.rs`'s `open_stage_routes` then allocates every interior edge as an
   operating-system byte pipe from **stage position alone** (`i + 1 < n`), and
-  derives `FinalValue::Report` from `i + 1 == n` together with that one yield —
-  the pipeline's only value-transport question
+  the collector derives `is_last` from `i + 1 == n` together with that one
+  yield — the pipeline's only value-transport question
   ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
   A non-final stage's returned value is discarded, never serialised onto an
-  edge. A multi-stage pipeline always launches its stages as subprocesses in one
-  process group; ordinary application and bind do not enter this runtime.
+  edge; a `Thread` stage's final value simply returns on its `JoinHandle`, no
+  wire in between. A `Direct` stage is a process in the group; a `Thread`
+  stage is an OS thread over a cloned `Shell`, and only an external it spawns
+  — at any nesting depth — is a process. Ordinary application and bind do not
+  enter this runtime.
   - A bundled (uutils) head routes `Direct` like any external, its
     `ral --ral-bundled-tool` child the image chosen by `command::build_command`
     — nothing in the pipeline distinguishes a bundled head from a host binary,
     so both classify as `External` carrying the resolved `CommandIdentity`.
-    Value-style composition is evaluator application, not a helper route. The
-    terminal-ownership decision (`resolve_terminal_plan`) likewise gates on a
-    reachable terminal lease and a terminal-bound final sink, not on a
-    `startup_foreground` predicate.
-  - `launch.rs` (`PipelineBuild` / `PipelineResources` own launch and
-    gate-first abort teardown), `group.rs` (the pgid anchor is forked only for a
-    multi-stage pipeline, since a single stage leads its own group on spawn),
-    `stage.rs` (helper-stage launch + observe), `collect.rs`, `helper.rs` (the
-    hidden `--ral-pipeline-stage-helper` / `--ral-pipeline-anchor` /
-    `--ral-bundled-tool` child entrypoints and their final-report helper), and
-    `protocol/` (`common.rs`, `unix.rs` / `windows.rs`, `fallback.rs`) for the
-    ral⇄ral stage frames. The helper protocol carries gate and final-report
-    frames; it carries no typed value between interior stages. On Windows the
-    protocol pushes helper handles into `process::Launch`, whose raw
-    `CreateProcessW` backend admits them with `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`;
-    `PipelineGroup` prepares Job Objects before spawn and registers only children
-    already assigned before resume
+    Value-style composition is evaluator application, never a stage-transport
+    concern. The terminal-ownership decision (`resolve_terminal_plan`)
+    likewise gates on a reachable terminal lease and a terminal-bound final
+    sink, not on a `startup_foreground` predicate.
+  - `launch.rs` (`PipelineBuild` owns launch and abort teardown; `StageHandle`
+    dispatches `probe`/`interrupt`/`resume`/`cancel`/`observe` over its two
+    kinds, `External`/`Thread`), `group.rs` (`PipelineGroup::prepare` spawns
+    the pgid anchor — `--ral-pipeline-anchor`, immune to termination signals —
+    on every platform before any stage exists; `PipelineGroup::joining` is the
+    no-anchor, no-relay, may-not-signal shape a nested pipeline inside a stage
+    thread gets instead), `thread.rs` (`launch_thread_stage` wires a `Thread`
+    stage's `Io` from its `StageRoute` and hands the closure to
+    `Shell::spawn_thread`; `ThreadStage` is the collector's handle onto the
+    running thread), `collect.rs` (the non-blocking probe loop that folds
+    every stage's `StageObservation` in launch order), and `parked.rs`
+    (`cfg(unix)`; `ParkedPipeline` — the group with its foreground guard and
+    relay released but its anchor kept, the Ctrl-Z gate, and the collector's
+    unobserved state — is what `fg`/`bg`/`kill`/the job sweep drive instead of
+    a bare `waitpid(-pgid)`, since the stage threads themselves are now the
+    ones waiting on the group's children). `helper.rs` is the hidden
+    `--ral-pipeline-anchor` / `--ral-bundled-tool` child entrypoints — the only
+    two multicall flags left here, since a ral-written stage no longer
+    re-execs at all. On Windows every external a stage thread spawns still
+    resolves `PgidPolicy::Join` against the anchor's registered Job Object,
+    assigned at creation under the suspended create → assign → resume path
     ([[decisions/260702_windows-spawn-boundary|windows-spawn-boundary]]).
 - **A `grant` is a dynamic effect scope, not a process boundary, so the grant
   body always evaluates locally** — the machine steps its body in process, with
@@ -174,18 +185,12 @@ recursion is irreducible; the evaluator reaches it at
   cancel and settle kill the whole tree through `cgroup.kill` (a
   `setsid`'d grandchild cannot leave its cgroup) while the grace phase
   stays pgid-addressed (`docs/SPEC.md` §12.11).
-- `core/src/child_eval.rs` (crate root, beside the wire layer it rides, *not*
-  under `runtime/`) — the one re-exec'd-child eval runner the pipeline stage
-  helper drives, `run_child_eval` ([[decisions/260610_child-eval-unification|child-eval-unification]]).
-  One request frame in, one response frame out: the child packs the body plus a
-  `WireShell` snapshot, rebuilds its shell through `subprocess::bare_child_shell`
-  and `install_wire_shell` — the manifest first, so the `WireDecoder` re-links
-  natives against it — evaluates the stage against its byte input, drains its
-  audit fragment, and ships a single `ChildEvalResponse`. When the pipeline
-  yields its last stage's value, `FinalValue::Report` asks this helper response
-  to carry it; the final report remains helper-staged until a separate
-  in-parent-tail decision. The response frame travels its own socketpair, never aliased with an
-  interior pipe, so there is no upstream typed-value edge.
+`core/src/engine_seed.rs` (crate root, beside the wire layer it rides, *not*
+under `runtime/`) now carries only `EngineSeed`/`pack_seed`, the engine seat's
+own seed wire for a wire-hatched child (`hatch.rs`); a pipeline stage no
+longer crosses a wire at all and this module carries no pipeline-stage type
+([[decisions/260902_stages-are-threads|stages-are-threads]],
+[[decisions/260610_child-eval-unification|child-eval-unification]], superseded).
 
 The `Shell` state these thread is [[map/core/shell-state|shell-state]]; the serde
 mirror and wire envelope they ride is [[map/core/transport|transport]].

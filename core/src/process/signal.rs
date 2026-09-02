@@ -34,7 +34,7 @@ pub use unix::{
 mod windows;
 #[cfg(windows)]
 pub use windows::{
-    ForegroundGuard, PipelineRelay, ReapStatus, apply_group_active_process_limit,
+    ForegroundGuard, ReapStatus, apply_group_active_process_limit,
     break_pipeline_group, disown_pipeline_group, install_handlers, is_known_group,
     kill_pipeline_group, relay_interrupt, release_win_group, reset_child_signals,
     set_active_process_limit, try_reap_leader, wait_leader_blocking,
@@ -124,24 +124,27 @@ impl ChildHandle {
     }
 
     /// Blocking wait that returns on a stop too, which the platform
-    /// `wait_handling_stop` then parks or kills and reaps.
+    /// `wait_handling_stop` then parks or kills and reaps.  `parks` is
+    /// whether a stop should surface as [`WaitOutcome::Stopped`] rather than
+    /// being killed and reaped on the spot; `target` is who a non-parked stop
+    /// or a kill decision addresses.
     ///
     /// # Errors
     /// Returns `Err` if the wait, or the kill-and-reap on a stop, fails.
-    pub fn wait_handling_stop(
+    pub(crate) fn wait_handling_stop(
         &mut self,
-        pgid: Option<Pgid>,
-        park_on_stop: bool,
+        parks: bool,
+        target: KillTarget,
     ) -> std::io::Result<WaitOutcome> {
         #[cfg(unix)]
         {
             let ChildRepr::Std(child) = &mut self.0;
-            unix::wait_handling_stop(child, pgid, park_on_stop)
+            unix::wait_handling_stop(child, parks, target)
         }
         #[cfg(windows)]
         {
             match &mut self.0 {
-                ChildRepr::Std(child) => windows::wait_handling_stop(child, pgid, park_on_stop),
+                ChildRepr::Std(child) => windows::wait_handling_stop(child, parks, target),
                 ChildRepr::RawWindows(child) => child.wait_handling_stop(),
             }
         }
@@ -152,20 +155,20 @@ impl ChildHandle {
     ///
     /// # Errors
     /// Returns `Err` if the poll, or the kill-and-reap on a stop, fails.
-    pub fn try_wait_handling_stop(
+    pub(crate) fn try_wait_handling_stop(
         &mut self,
-        pgid: Option<Pgid>,
-        park_on_stop: bool,
+        parks: bool,
+        target: KillTarget,
     ) -> std::io::Result<Option<WaitOutcome>> {
         #[cfg(unix)]
         {
             let ChildRepr::Std(child) = &mut self.0;
-            unix::try_wait_handling_stop(child, pgid, park_on_stop)
+            unix::try_wait_handling_stop(child, parks, target)
         }
         #[cfg(windows)]
         {
             match &mut self.0 {
-                ChildRepr::Std(child) => windows::try_wait_handling_stop(child, pgid, park_on_stop),
+                ChildRepr::Std(child) => windows::try_wait_handling_stop(child, parks, target),
                 ChildRepr::RawWindows(child) => child.try_wait_handling_stop(),
             }
         }
@@ -216,6 +219,13 @@ pub fn check(mooring: &crate::types::Mooring) -> Result<(), crate::types::Break>
             cause.exit_code(),
         )));
     }
+    if let Some(p) = &mooring.park
+        && p.gate.is_paused()
+    {
+        p.gate.wait(mooring.cancel.as_scope()).map_err(|c| {
+            crate::types::Break::Error(crate::types::Error::new(c.message(), c.exit_code()))
+        })?;
+    }
     Ok(())
 }
 
@@ -247,7 +257,7 @@ pub fn escalation_pending() -> bool {
 /// the Job Object that `TerminateJobObject` takes down as one.
 ///
 /// Positive by construction; "no pgid" is `Option<Pgid>`, never a sentinel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Pgid(NonZeroI32);
 
 impl Pgid {
@@ -313,4 +323,49 @@ pub enum PgidPolicy {
     NewSession,
     /// Join an existing pgid as a non-leader (`setpgid(0, leader)`).
     Join(Pgid),
+}
+
+/// Who a signal a `RunningChild` sends addresses.
+///
+/// Only a child that owns its group outright (`GroupOwner::Standalone`) may
+/// have that group signalled; a stage borrowing a pipeline's group signals
+/// its own pid alone — the pipeline itself is the only thing that may bring
+/// the whole group down. `Pid` also covers a child with no group at all.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum KillTarget {
+    Group(Pgid),
+    Pid,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::process::gate::{StageGate, StagePark, StageStatus};
+    use std::sync::Arc;
+
+    /// `check` consults the mooring's park after its cause check: a paused
+    /// gate blocks the call until `resume`, then returns `Ok`.
+    #[test]
+    fn check_blocks_while_paused_and_returns_when_resumed() {
+        let gate = StageGate::new();
+        gate.pause();
+        let mut mooring = crate::types::Mooring::adrift();
+        mooring.park = Some(StagePark {
+            gate: Arc::clone(&gate),
+            status: StageStatus::new(),
+        });
+
+        let resumer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            gate.resume();
+        });
+
+        let start = std::time::Instant::now();
+        assert!(check(&mooring).is_ok(), "check must return once resumed");
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(40),
+            "check must actually have blocked on the pause"
+        );
+        resumer.join().expect("resumer thread");
+    }
 }

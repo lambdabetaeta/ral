@@ -152,10 +152,10 @@ more.
 
 - Every interior edge is a positional operating-system byte pipe, wired from
   the left stage's stdout to the right stage's stdin — a fact about stage
-  position, not a promise that either side writes or reads. A pipeline is
-  therefore always a process pipeline — every stage runs in a subprocess, the
-  stages share one process group, and the parent shell remains outside that
-  group.
+  position, not a promise that either side writes or reads. A ral-written
+  stage runs on its own thread; an external command runs as its own process;
+  every external in the pipeline, however deeply nested, shares one process
+  group the parent shell remains outside of.
 - Values are combined by application and `let`, the ordinary composition of
   the calculus. There is no second, value-shaped pipe to learn, and no rule
   the model would have to invent to describe one.
@@ -174,9 +174,10 @@ Failure is independent of this routing. `|` moves data; it does not branch on
 success. A failing stage fails the pipeline, while `?` and `try` decide how to
 recover.
 
-The cost is process isolation. A `ral` stage inside a byte pipeline is a subshell:
+The cost is isolation. A `ral` stage inside a byte pipeline is a subshell:
 its working-directory, environment, alias, and module changes do not flow back
-to the parent. Only the pipeline's data and final value cross the boundary.
+to the parent, whether the stage ran on a thread or as a process. Only the
+pipeline's data and final value cross the boundary.
 
 ## Structured values cross once
 

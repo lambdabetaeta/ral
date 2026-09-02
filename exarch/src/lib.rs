@@ -34,9 +34,9 @@ use tui::SessionInfo;
 /// sandbox-IPC child's fresh shell with exarch's host builtins, then serve
 /// any helper re-exec.
 ///
-/// A pipeline stage re-execs the running binary, which under `cargo test` is
-/// the libtest harness, so the flag must be served before libtest sees argv
-/// and rejects it.
+/// The pipeline anchor re-execs the running binary, which under `cargo test`
+/// is the libtest harness, so the flag must be served before libtest sees
+/// argv and rejects it.
 pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
     ral_core::sandbox::set_child_shell_extension(shell_eval::builtins::host_surface);
     #[cfg(unix)]
@@ -47,7 +47,7 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
             narrow: policy::narrow,
         }]);
     }
-    if let Some(code) = ral_core::try_run_pipeline_stage_helper(&shell_eval::PRELUDE) {
+    if let Some(code) = ral_core::try_run_pipeline_anchor() {
         return Some(code);
     }
     if let Some(code) = ral_core::test_helper::try_run_test_helper() {

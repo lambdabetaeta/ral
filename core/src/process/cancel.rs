@@ -16,33 +16,37 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// Why a [`CancelScope`] was cancelled.
 ///
-/// The causes escalate `Interrupt < Explicit < Deadline < Terminate <
-/// RootAbort`; a scope records the highest ever applied to it and never
-/// downgrades.  The numeric values are the on-flag encoding, `0` meaning
-/// uncancelled.
+/// The causes escalate `ReaderGone < Interrupt < Explicit < Deadline <
+/// Terminate < RootAbort`; a scope records the highest ever applied to it and
+/// never downgrades.  The numeric values are the on-flag encoding, `0`
+/// meaning uncancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CancelCause {
+    /// A pipeline stage's reader stage has already been observed; the
+    /// mildest cause, forgiven by `StageKill::Sent`.
+    ReaderGone = 1,
     /// Ctrl-C / Esc.
-    Interrupt = 1,
+    Interrupt = 2,
     /// A targeted teardown: `cancel <handle>`, or a `race` loser reaped.
-    Explicit = 2,
+    Explicit = 3,
     /// A wall-clock or lifetime ceiling expired.
-    Deadline = 3,
+    Deadline = 4,
     /// SIGTERM / SIGHUP.  Lands on the durable root, so it reaches detached
     /// workers and not just the foreground run.
-    Terminate = 4,
+    Terminate = 5,
     /// Ctrl-\, reaping the session root.
-    RootAbort = 5,
+    RootAbort = 6,
 }
 
 impl CancelCause {
     fn from_u8(flag: u8) -> Option<Self> {
         match flag {
-            1 => Some(Self::Interrupt),
-            2 => Some(Self::Explicit),
-            3 => Some(Self::Deadline),
-            4 => Some(Self::Terminate),
-            5 => Some(Self::RootAbort),
+            1 => Some(Self::ReaderGone),
+            2 => Some(Self::Interrupt),
+            3 => Some(Self::Explicit),
+            4 => Some(Self::Deadline),
+            5 => Some(Self::Terminate),
+            6 => Some(Self::RootAbort),
             _ => None,
         }
     }
@@ -51,6 +55,7 @@ impl CancelCause {
     /// cause with, so the phrasing cannot drift between them.
     pub fn message(self) -> &'static str {
         match self {
+            Self::ReaderGone => "its reader ended",
             Self::Interrupt => "interrupted",
             Self::Explicit => "cancelled",
             Self::Deadline => "timed out",
@@ -65,6 +70,7 @@ impl CancelCause {
     /// the vocabulary is one, and lives here so it cannot drift.
     pub fn event(self) -> &'static str {
         match self {
+            Self::ReaderGone => "reader-gone",
             Self::Interrupt => "the call was interrupted",
             Self::Explicit => "the call was cancelled",
             Self::Deadline => "the call's time limit expired",
@@ -73,11 +79,13 @@ impl CancelCause {
         }
     }
 
-    /// The status paired with [`message`](Self::message): 130 (`128 + SIGINT`)
-    /// for every interactive-shaped cancellation, 143 (`128 + SIGTERM`) for a
-    /// shutdown request — what a supervisor that sent `SIGTERM` reads back.
+    /// The status paired with [`message`](Self::message): 141 (`128 +
+    /// SIGPIPE`) for a stage whose reader ended, 130 (`128 + SIGINT`) for
+    /// every other interactive-shaped cancellation, 143 (`128 + SIGTERM`) for
+    /// a shutdown request — what a supervisor that sent `SIGTERM` reads back.
     pub fn exit_code(self) -> i32 {
         match self {
+            Self::ReaderGone => 141,
             Self::Terminate => 143,
             _ => 130,
         }
@@ -372,6 +380,7 @@ mod tests {
     #[test]
     fn cause_encoding_roundtrips_and_orders() {
         let causes = [
+            CancelCause::ReaderGone,
             CancelCause::Interrupt,
             CancelCause::Explicit,
             CancelCause::Deadline,

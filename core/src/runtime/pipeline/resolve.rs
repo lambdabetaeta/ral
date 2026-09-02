@@ -48,13 +48,13 @@ enum StageKind {
 
 /// One stage's launch decision, frozen in `resolve_pipeline` and read by launch
 /// rather than re-derived.  Argv is evaluated into the carried `ExternalStage`
-/// only on the `Direct` path, which consumes it; a `HelperEval` stage
-/// re-evaluates its argv inside the child, so doing it here too would run
-/// effectful arguments twice.
+/// only on the `Direct` path, which consumes it; a `Thread` stage re-evaluates
+/// its argv inside the thread, so doing it here too would run effectful
+/// arguments twice.
 #[derive(Clone, Debug)]
 pub(super) enum StageLaunch {
     Direct(ExternalStage),
-    HelperEval,
+    Thread,
 }
 
 /// Per-stage analysis.  Edge transport is deliberately absent: the allocator
@@ -124,9 +124,10 @@ fn classify_stage(stage: &Comp, env: &Env, shell: &Shell) -> StageKind {
     }
 }
 
-/// Evaluate a stage's argv, for the `Direct` path alone — a `HelperEval`
-/// external re-evaluates it inside the child.  `direct_spawnable` admits only
-/// redirect-free stages, so the evaluated redirects are always empty here.
+/// Evaluate a stage's argv, for the `Direct` path alone — a `Thread`
+/// external re-evaluates it inside the thread.  `direct_spawnable` admits
+/// only redirect-free stages, so the evaluated redirects are always empty
+/// here.
 fn eval_external_stage(id: CommandIdentity, stage: &Comp, env: &Env) -> Settled<ExternalStage> {
     let CompKind::Exec(e) = &stage.item else {
         unreachable!("classify_stage yields an identity only for Exec stages")
@@ -140,46 +141,34 @@ fn eval_external_stage(id: CommandIdentity, stage: &Comp, env: &Env) -> Settled<
     Ok(ExternalStage { id, args })
 }
 
-/// Whether an external stage can be spawned with no helper — every
-/// condition a resolve-time fact:
+/// Whether an external stage can be spawned with no thread hosting it —
+/// every condition a resolve-time fact:
 ///
-/// - the pipeline does not own the controlling terminal (a foreground
-///   pipeline parks its stages on stop, which only the helper handles);
 /// - the stage has no redirects (the direct path wires only byte ends);
-/// - no `!{…}` audit is capturing bytes (that needs the helper's accounting).
-fn direct_spawnable(stage: &Comp, terminal: TerminalPlan, shell: &Shell) -> bool {
+/// - no `!{…}` audit is capturing bytes (that needs a thread's accounting).
+fn direct_spawnable(stage: &Comp, shell: &Shell) -> bool {
     let redirects_empty = matches!(&stage.item, CompKind::Exec(e) if e.redirects.is_empty());
-    !terminal.owns_tty() && redirects_empty && !shell.local.audit.captures_bytes()
+    redirects_empty && !shell.local.audit.captures_bytes()
 }
 
 /// Freeze one stage's launch decision.  A bundled tool still becomes an
-/// external stage, while redirects, foreground ownership, and byte-capturing
-/// audits keep the evaluator in a helper.
-fn resolve_launch(
-    stage: &Comp,
-    terminal: TerminalPlan,
-    env: &Env,
-    shell: &Shell,
-) -> Settled<StageLaunch> {
+/// external stage, while redirects and byte-capturing audits keep it on a
+/// thread.
+fn resolve_launch(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageLaunch> {
     Ok(match classify_stage(stage, env, shell) {
-        StageKind::Ral => StageLaunch::HelperEval,
+        StageKind::Ral => StageLaunch::Thread,
         StageKind::External(id) => {
-            if direct_spawnable(stage, terminal, shell) {
+            if direct_spawnable(stage, shell) {
                 StageLaunch::Direct(eval_external_stage(id, stage, env)?)
             } else {
-                StageLaunch::HelperEval
+                StageLaunch::Thread
             }
         }
     })
 }
 
-fn analyze_stage(
-    stage: &Comp,
-    terminal: TerminalPlan,
-    env: &Env,
-    shell: &Shell,
-) -> Settled<StageSpec> {
-    let launch = resolve_launch(stage, terminal, env, shell)?;
+fn analyze_stage(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageSpec> {
+    let launch = resolve_launch(stage, env, shell)?;
     Ok(StageSpec {
         launch,
         span: stage.span,
@@ -232,12 +221,10 @@ pub(super) fn resolve_pipeline(
     mooring: &Mooring,
     shell: &Shell,
 ) -> Settled<PipelinePlan> {
-    // Every stage's launch decision depends on it, so the terminal plan is frozen
-    // first; it reads only boot/capture state, which argv evaluation cannot touch.
     let terminal = resolve_terminal_plan(mooring, shell);
     let specs = stages
         .iter()
-        .map(|stage| analyze_stage(stage, terminal, env, shell))
+        .map(|stage| analyze_stage(stage, env, shell))
         .collect::<Settled<Vec<_>>>()?;
     Ok(PipelinePlan {
         specs,

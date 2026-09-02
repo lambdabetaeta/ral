@@ -5,7 +5,7 @@
 use super::shell::Shell;
 use super::shell::workers::WorkerLease;
 use super::value::Value;
-use crate::process::{DurableRoot, ForegroundScope};
+use crate::process::{DurableRoot, ForegroundScope, StagePark};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -19,8 +19,8 @@ pub trait EventSink: Send + Sync {
     fn emit(&self, ev: &crate::serial::FOValue);
 }
 
-/// The no-op surface, for a caller with no rail to speak into
-/// ([`Mooring::for_stage`]); an absent sink (`None`) behaves identically.
+/// The no-op surface, for a caller with no rail to speak into; an absent
+/// sink (`None`) behaves identically.
 impl EventSink for () {
     fn emit(&self, _ev: &crate::serial::FOValue) {}
 }
@@ -201,6 +201,11 @@ pub struct Mooring {
     /// entries — settled ones lingering under retention never block a birth.
     pub(crate) worker_cap: Option<usize>,
     pub(crate) terminal_access: TerminalAccess,
+    /// The pipeline gate a stage thread parks on, and this stage's own
+    /// status.  `None` outside a stage thread — a detached worker, a nested
+    /// pipeline's `spawn`, or a run with no pipeline at all — so nothing but
+    /// a genuine stage ever parks.
+    pub(crate) park: Option<StagePark>,
 }
 
 impl Mooring {
@@ -221,24 +226,28 @@ impl Mooring {
             deferred_lease: parent.deferred_lease,
             worker_cap: parent.worker_cap,
             terminal_access: TerminalAccess::Denied,
+            park: None,
         }
     }
 
-    /// The mooring a cross-process pipeline stage runs under, in the helper
-    /// process (`child_eval`).  Nothing crosses the process boundary, so there
-    /// is no parent to rebuild from: no enquiries, no forks, no rail, no
-    /// terminal authority, and the `()` sink, which discards whatever the stage
-    /// body surfaces.
-    pub(crate) fn for_stage(root: &DurableRoot, surface: SurfaceSink) -> Self {
+    /// The mooring a stage thread runs under: the node's own surface and
+    /// deferred sink carry over — a stage's audit and `spawn` deliveries are
+    /// the pipeline's, not a worker's own — but no desk, no fork, and no
+    /// terminal authority, since only the node itself may claim the
+    /// foreground.  `cancel` is a child of the node's own scope, so a
+    /// pipeline-wide cancel reaches every stage transitively; `park` is
+    /// `Some`, so this stage waits on its pipeline's gate.
+    pub(crate) fn for_stage_thread(parent: &Self, park: StagePark) -> Self {
         Self {
-            surface: Some(surface),
-            deferred: None,
+            surface: parent.surface.clone(),
+            deferred: parent.deferred.clone(),
             desk: None,
             fork: None,
-            cancel: root.worker(),
-            deferred_lease: None,
-            worker_cap: None,
+            cancel: parent.cancel.child(),
+            deferred_lease: parent.deferred_lease,
+            worker_cap: parent.worker_cap,
             terminal_access: TerminalAccess::Denied,
+            park: Some(park),
         }
     }
 
@@ -256,6 +265,7 @@ impl Mooring {
             deferred_lease: None,
             worker_cap: None,
             terminal_access: TerminalAccess::Denied,
+            park: None,
         }
     }
 
@@ -312,6 +322,7 @@ impl Mooring {
                 TerminalAccess::Leased => TerminalAccess::ExplicitLoan,
                 other => other,
             },
+            park: self.park.clone(),
         }
     }
 

@@ -249,12 +249,11 @@ fn mixed_pipeline_first_external_stage_does_not_inherit_tty_stdin() {
 }
 
 #[test]
-fn deep_stream_crosses_the_stage_wire() {
-    // A stream is one closure per line, and the helper stage ships it to the
-    // parent through the serial encoder.  Two thousand lines must cross and
-    // then drop without exhausting either process's stack.  (Regression: the
-    // encoder recursed per link, so the helper died once `from-lines` saw a
-    // few hundred lines.)
+fn deep_stream_returns_from_a_final_stage() {
+    // A stream is one closure per line, returned from the final stage's
+    // thread.  Two thousand lines must cross and then drop without
+    // exhausting either thread's stack.  (Regression: the encoder recursed
+    // per link, so the stage died once `from-lines` saw a few hundred lines.)
     let o = run("let s = !{seq 1 2000 | from-lines}; echo done");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(o.stdout.contains("done"), "stdout: {}", o.stdout);
@@ -647,28 +646,53 @@ fn mixed_pipeline_range_to_wc() {
 
 #[test]
 fn many_sequential_pipelines_no_leak() {
-    // Run 50 external pipelines in sequence.  If file descriptors or process
-    // groups leak, this will exhaust them and start failing.
+    // Run 50 pipelines in sequence, each with a ral-written stage thread in
+    // the middle.  If file descriptors, process groups, or stage threads
+    // leak, this will exhaust them and start failing.
     //
-    // This pipeline takes the direct-external path: no ral helper stage,
-    // no redirects on the stages, no byte audit capture, and no foreground
-    // terminal handoff.  It still allocates byte pipes and process-group
-    // state each iteration, so the test catches fd/pgid leaks without
-    // exercising helper-evaluated stages.
+    // On Linux, also probe the process's own thread count before and after
+    // (`/proc/$PPID/status` read by a nested external, since that external's
+    // parent is ral itself) and assert it returns to baseline — every stage
+    // thread this loop spawns must actually join.
     let script = r"
+let probe = { /bin/sh -c 'grep Threads: /proc/$PPID/status' | !{from-line} }
+let before = !{probe}
+echo threads:before=$before
 let _go = { |n|
     if $[$n <= 0] {} else {
-        /bin/echo $n | cat | grep . > /dev/null
+        /bin/echo $n | !{filter-lines { |_| true }} | grep . > /dev/null
         _go $[$n - 1]
     }
 }
 _go 50
+let after = !{probe}
+echo threads:after=$after
 echo done
 ";
     let o = run_with_timeout(&[], script, Duration::from_mins(1))
         .expect("sequential pipeline stress timed out");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(o.stdout.contains("done"));
+
+    if cfg!(target_os = "linux") {
+        let before = parse_tagged_field(&o.stdout, "threads:before=")
+            .expect("baseline thread count missing");
+        let after =
+            parse_tagged_field(&o.stdout, "threads:after=").expect("final thread count missing");
+        assert_eq!(
+            before, after,
+            "stage-thread count did not return to baseline; stdout: {}",
+            o.stdout
+        );
+    }
+}
+
+/// Pull `<prefix><rest of the line>` out of some text — the little-sibling
+/// of `parse_tagged_pgid`, for tags this file only ever prints once.
+fn parse_tagged_field(text: &str, prefix: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .map(str::to_string)
 }
 
 // ── Stopped pipeline children ────────────────────────────────────────────────
@@ -702,6 +726,66 @@ fn pipeline_first_external_failure_wins_over_later_helper_failure() {
         !o.stderr.contains("from-json: EOF"),
         "later helper failure won first-failure policy: {}",
         o.stderr
+    );
+}
+
+#[test]
+fn a_nested_pipeline_joins_its_stages_group() {
+    // A pipeline launched from inside a ral-written stage thread must join
+    // the outer pipeline's group rather than prepare its own: every stage
+    // of `inner1 | inner2`, run from within the outer's first stage, and
+    // the outer's own direct final stage, all share one anchor pgid.  The
+    // final stage drains its stdin first, so the inner stages have reported
+    // before their reader is gone and ral kills them.
+    let ral = ral_bin();
+    let script = format!(
+        "!{{ {r} --ral-test-pgid-check inner1 | {r} --ral-test-pgid-check inner2 }} \
+         | sh -c 'cat >/dev/null; exec {r} --ral-test-pgid-check outer'",
+        r = ral.display(),
+    );
+    let o = run_with_timeout(&[], &script, Duration::from_secs(5)).expect("nested pipeline hung");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    let outer = parse_tagged_pgid(&o.stderr, "outer").expect("outer pgid");
+    let inner1 = parse_tagged_pgid(&o.stderr, "inner1").expect("inner1 pgid");
+    let inner2 = parse_tagged_pgid(&o.stderr, "inner2").expect("inner2 pgid");
+    assert_eq!(
+        outer, inner1,
+        "inner1 did not join the outer group; stderr: {}",
+        o.stderr
+    );
+    assert_eq!(
+        outer, inner2,
+        "inner2 did not join the outer group; stderr: {}",
+        o.stderr
+    );
+}
+
+#[test]
+fn a_stages_error_keeps_its_span() {
+    // A ral-written stage's error must point into the source line exactly
+    // as the same failure would at top level — a stage thread evaluates
+    // the same `Comp`, with no re-exec to lose the span across.
+    let top_level = run("/bin/echo notjson | from-json");
+    assert_ne!(top_level.status, 0, "stderr: {}", top_level.stderr);
+    assert!(
+        top_level.stderr.contains("from-json"),
+        "top-level stderr: {}",
+        top_level.stderr
+    );
+
+    let staged = run("/bin/echo notjson | !{ from-json }");
+    assert_ne!(staged.status, 0, "stderr: {}", staged.stderr);
+    assert!(
+        staged.stderr.contains("from-json"),
+        "staged stderr: {}",
+        staged.stderr
+    );
+    // Both renderings underline the `from-json` token itself, not the
+    // whole block or an empty span at 0:0.
+    assert!(
+        staged.stderr.contains("────┬────") || staged.stderr.contains("──┬──"),
+        "staged error must carry a real span into the source line, not a synthetic one; stderr: {}",
+        staged.stderr
     );
 }
 
@@ -767,24 +851,15 @@ fn pipeline_self_stopping_child_with_pumped_stdout_does_not_hang() {
 
 // ── SIGINT kills external child ──────────────────────────────────────────────
 
-#[test]
-fn sigint_kills_external_child_in_pipeline() {
-    // Spawn ral running a pipeline where an external process (sleep) is
-    // the last stage.  Send SIGINT to the ral process group.  It must
-    // terminate within a short deadline — not block forever.
-    //
-    // In batch mode (non-interactive), the relay is not active; SIGINT goes to
-    // the ral process itself via the counting handler, which sets the
-    // interrupted flag.  The external children got SIG_DFL via pre_exec and
-    // will die on SIGINT delivered to their process group via the terminal
-    // driver — or, since we are sending to the whole ral pgid, to all of
-    // them.
-    let mut tmp = std::env::temp_dir();
-    tmp.push("ral_sigint_test.ral");
-    std::fs::write(&tmp, "/bin/echo start | sleep 60\n").unwrap();
-
-    // Put ral in its own process group so kill(-pid) reaches exactly
-    // ral without affecting the cargo test runner's group.
+/// Run `script` in a ral of its own process group — so `kill(-pid)` reaches
+/// exactly ral, not the test runner — `SIGINT` that group once `settle` has
+/// let the pipeline start, and return how ral ended within 3 s: `None` if it
+/// did not.  In batch mode the shell itself receives the SIGINT and cancels
+/// the run, so it must *exit* — a status with no code means a signal killed
+/// it (a `SIGPIPE` from its own interior edge, say).
+fn ral_exits_after_sigint(script: &str, settle: Duration) -> Option<std::process::ExitStatus> {
+    let tmp = fresh_tmp_path("ral_sigint", "ral");
+    std::fs::write(&tmp, script).unwrap();
     let mut cmd = ral_command();
     cmd.arg(&tmp)
         .stdin(Stdio::null())
@@ -798,39 +873,76 @@ fn sigint_kills_external_child_in_pipeline() {
         });
     }
     let mut child = cmd.spawn().expect("spawn");
-
-    let pid = child.id().cast_signed();
-
-    // Let the pipeline start before sending the signal.  Either
-    // outcome — SIGINT relayed to the spawned children, or
-    // `signal::check` aborting cleanly mid-launch — is correct;
-    // the deadline below is what we care about.  100 ms is plenty
-    // for the external-only `NoTerminal` path that this test
-    // exercises (no anchor reexec, no helper protocol).
-    std::thread::sleep(Duration::from_millis(100));
-
-    // Send SIGINT to ral's process group.
+    std::thread::sleep(settle);
     unsafe {
-        libc::kill(-pid, libc::SIGINT);
+        libc::kill(-child.id().cast_signed(), libc::SIGINT);
     }
-
-    let start = std::time::Instant::now();
-    let deadline = Duration::from_secs(3);
-    let exited = loop {
-        if child.try_wait().unwrap().is_some() {
-            break true;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let ended = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
         }
-        if start.elapsed() > deadline {
-            break false;
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            child.wait().ok();
+            break None;
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    if !exited {
-        child.kill().ok();
-    }
-    child.wait().ok();
     std::fs::remove_file(&tmp).ok();
-    assert!(exited, "ral did not exit after SIGINT within {deadline:?}");
+    ended
+}
+
+fn assert_ral_exited_after_sigint(script: &str, settle: Duration, hang: &str) {
+    let status = ral_exits_after_sigint(script, settle).unwrap_or_else(|| panic!("{hang}"));
+    assert!(status.code().is_some(), "ral was killed by a signal instead of exiting: {status}");
+}
+
+#[test]
+fn sigint_kills_external_child_in_pipeline() {
+    // The externals have SIG_DFL and die of the relayed signal.
+    assert_ral_exited_after_sigint(
+        "/bin/echo start | sleep 60\n",
+        Duration::from_millis(100),
+        "ral did not exit after SIGINT",
+    );
+}
+
+#[test]
+fn sigint_kills_a_ral_stage_blocked_reading_a_live_upstream() {
+    // A stage thread blocked in `from-line` on a producer that never
+    // writes: only the wake can end its read.
+    assert_ral_exited_after_sigint(
+        "sleep 100 | !{ from-line }\n",
+        Duration::from_millis(200),
+        "a stage thread blocked on a live upstream was not woken",
+    );
+}
+
+#[test]
+fn sigint_kills_a_ral_stage_blocked_writing_to_a_full_edge() {
+    // The producer fills the edge (well under a second) and blocks in
+    // `echo`.  Only the wake may end that write: the parent holds the edge's
+    // read end, and an `EPIPE` there would be a `SIGPIPE` to the whole shell.
+    assert_ral_exited_after_sigint(
+        "!{ let go = { |n| echo tick; go $[$n + 1] }; go 0 } | sleep 100\n",
+        Duration::from_secs(1),
+        "a stage thread blocked writing into a full edge was not woken",
+    );
+}
+
+#[test]
+fn a_killed_producer_blocked_in_a_full_edge_does_not_take_the_shell() {
+    // The reader drains past the pipe's capacity and exits with the producer
+    // blocked mid-write; the reader-gone kill must end that write through
+    // the wake, never by closing the edge under a thread of this process.
+    let o = run_with_timeout(
+        &[],
+        "!{ let go = { |n| echo tick; go $[$n + 1] }; go 0 } | sh -c 'head -c 200000 >/dev/null'",
+        Duration::from_secs(10),
+    )
+    .expect("killed-producer pipeline hung");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
 }
 
 // ── Stdin-consuming builtins ─────────────────────────────────────────────────
@@ -1260,6 +1372,26 @@ fn pipeline_three_stages_share_anchor_pgid() {
     let c = parse_tagged_pgid(&o.stderr, "c").expect("c pgid");
     assert_eq!(a, b, "stages a/b differ; stderr: {}", o.stderr);
     assert_eq!(b, c, "stages b/c differ; stderr: {}", o.stderr);
+
+    // An external spawned *inside* a ral-written stage thread joins the
+    // same anchor pgid as a direct stage in the same pipeline, not one of
+    // its own.  `!{ ral --ral-test-pgid-check inner }` forces the first
+    // stage to be a ral-written block that spawns the probe as a nested
+    // external, rather than launching it direct.
+    let nested_script = format!(
+        "!{{ {r} --ral-test-pgid-check inner }} | {r} --ral-test-pgid-check outer",
+        r = ral.display(),
+    );
+    let o = run_with_timeout(&[], &nested_script, Duration::from_secs(5))
+        .expect("nested-external pipeline hung");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    let inner = parse_tagged_pgid(&o.stderr, "inner").expect("inner pgid");
+    let outer = parse_tagged_pgid(&o.stderr, "outer").expect("outer pgid");
+    assert_eq!(
+        inner, outer,
+        "external spawned inside a ral stage did not share the anchor pgid; stderr: {}",
+        o.stderr
+    );
 }
 
 #[test]
@@ -1405,116 +1537,174 @@ mod pty_helper {
     }
 }
 
+/// A live pty-backed `ral -i --norc` REPL, for job-control tests that need
+/// more than one round of input (Ctrl-Z, then a line, then `fg`, …).
+/// `run_pty_repl_until` is the single-shot case built on top of it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct PtySession {
+    child: std::process::Child,
+    input: std::fs::File,
+    reader: std::fs::File,
+    bytes: Vec<u8>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl PtySession {
+    fn spawn() -> Option<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::process::CommandExt;
+
+        let pty = pty_helper::open().ok()?;
+        let slave_path = pty.slave_path.clone();
+
+        let mut cmd = ral_command();
+        cmd.arg("-i").arg("--norc");
+        cmd.env("RAL_INTERACTIVE_MODE", "minimal");
+        unsafe {
+            cmd.pre_exec(move || {
+                // New session, then make the pty our controlling terminal
+                // and dup it onto fds 0/1/2.  Errors propagate as `execve`-
+                // time failures, which the parent sees via `wait`.
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let slave = pty_helper::open_slave(&slave_path)?;
+                let raw = slave.as_raw_fd();
+                pty_helper::become_controlling(raw)?;
+                for target in [0, 1, 2] {
+                    if libc::dup2(raw, target) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().ok()?;
+
+        let input_fd = unsafe { libc::dup(pty.master.as_raw_fd()) };
+        if input_fd < 0 {
+            return None;
+        }
+        let input = unsafe { std::fs::File::from_raw_fd(input_fd) };
+
+        let raw = pty.master.as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(raw, libc::F_GETFL);
+            libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        let reader_fd = unsafe { libc::dup(raw) };
+        if reader_fd < 0 {
+            return None;
+        }
+        let reader = unsafe { std::fs::File::from_raw_fd(reader_fd) };
+
+        // Leak the master fd's owner: `input`/`reader` are dup()s of it, and
+        // this pty must outlive them for the session's whole life.
+        std::mem::forget(pty.master);
+
+        Some(Self {
+            child,
+            input,
+            reader,
+            bytes: Vec::new(),
+        })
+    }
+
+    fn send_line(&mut self, s: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        writeln!(self.input, "{s}")
+    }
+
+    /// Ctrl-Z: 0x1a. Unused by the job-control tests below: under this
+    /// container's virtualized tty line discipline, writing VSUSP never
+    /// raises SIGTSTP (`ISIG` is on and VSUSP maps to 0x1a, but the child
+    /// stays `S` forever), so those tests signal the pipeline's process
+    /// group directly instead. Kept for a real tty.
+    #[allow(dead_code)]
+    fn send_ctrl_z(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+        self.input.write_all(&[0x1a])
+    }
+
+    fn pid(&self) -> i32 {
+        self.child.id().cast_signed()
+    }
+
+    /// Ctrl-C: 0x03.
+    fn send_ctrl_c(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+        self.input.write_all(&[0x03])
+    }
+
+    fn read_available(&mut self) {
+        use std::io::Read;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match self.reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => self.bytes.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+
+    /// Poll until `done` reads true on the accumulated output, the child
+    /// exits, or `timeout` elapses.  `true` only on the `done` case.
+    fn wait_until(&mut self, timeout: Duration, done: impl Fn(&str) -> bool) -> bool {
+        let start = std::time::Instant::now();
+        loop {
+            self.read_available();
+            if done(&self.text()) {
+                return true;
+            }
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return false;
+            }
+            if start.elapsed() > timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Kill the child, drain the pty for a short post-exit window (ral
+    /// writes its trace lines just before exiting, and the slave-side fds
+    /// may outlive the exit by a few millis on Linux), and reduce to an
+    /// `Output`.
+    fn finish(mut self) -> Output {
+        let _ = self.child.kill();
+        let status = self.child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+        let drain_start = std::time::Instant::now();
+        while drain_start.elapsed() < Duration::from_millis(200) {
+            self.read_available();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Output {
+            stdout: String::new(),
+            stderr: self.text(),
+            status,
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_pty_repl_until(
     line: &str,
     timeout: Duration,
     done: impl Fn(&str) -> bool,
 ) -> Option<Output> {
-    use std::io::{Read, Write};
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::process::CommandExt;
-
-    let pty = pty_helper::open().ok()?;
-    let slave_path = pty.slave_path.clone();
-
-    let mut cmd = ral_command();
-    cmd.arg("-i").arg("--norc");
-    cmd.env("RAL_INTERACTIVE_MODE", "minimal");
-    let slave_path_for_child = slave_path;
-    unsafe {
-        cmd.pre_exec(move || {
-            // New session, then make the pty our controlling terminal
-            // and dup it onto fds 0/1/2.  Errors propagate as `execve`-
-            // time failures, which the parent sees via `wait`.
-            if libc::setsid() < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let slave = pty_helper::open_slave(&slave_path_for_child)?;
-            let raw = slave.as_raw_fd();
-            pty_helper::become_controlling(raw)?;
-            for target in [0, 1, 2] {
-                if libc::dup2(raw, target) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().ok()?;
-
-    let dup = unsafe { libc::dup(pty.master.as_raw_fd()) };
-    if dup < 0 {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
-    }
-    let mut input = unsafe { std::fs::File::from_raw_fd(dup) };
-    if writeln!(&mut input, "{line}").is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
-    }
-    drop(input);
-
-    let raw = pty.master.as_raw_fd();
-    unsafe {
-        let flags = libc::fcntl(raw, libc::F_GETFL);
-        libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
-    let reader_dup = unsafe { libc::dup(raw) };
-    if reader_dup < 0 {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
-    }
-    let mut reader = unsafe { std::fs::File::from_raw_fd(reader_dup) };
-    let mut read_available = |bytes: &mut Vec<u8>| {
-        let mut chunk = [0u8; 4096];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
-                Err(_) => break,
-            }
-        }
-    };
-
-    let start = std::time::Instant::now();
-    let mut bytes = Vec::new();
-    let status = loop {
-        read_available(&mut bytes);
-        let text = String::from_utf8_lossy(&bytes);
-        if done(&text) {
-            let _ = child.kill();
-            let _ = child.wait();
-            break 0;
-        }
-        match child.try_wait().ok()? {
-            Some(s) => break s.code().unwrap_or(1),
-            None if start.elapsed() > timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break 124;
-            }
-            None => std::thread::sleep(Duration::from_millis(50)),
-        }
-    };
-    // Drain the pty master with a short post-exit window: ral writes
-    // its trace lines just before exiting, and the slave-side fds may
-    // outlive the exit by a few millis on Linux.
-    let drain_start = std::time::Instant::now();
-    while drain_start.elapsed() < Duration::from_millis(200) {
-        read_available(&mut bytes);
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Some(Output {
-        stdout: String::new(),
-        stderr: String::from_utf8_lossy(&bytes).into_owned(),
-        status,
-    })
+    let mut session = PtySession::spawn()?;
+    session.send_line(line).ok()?;
+    let reached = session.wait_until(timeout, done);
+    let mut out = session.finish();
+    out.status = if reached { 0 } else { 124 };
+    Some(out)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1558,49 +1748,337 @@ fn pty_external_stage_runs_to_completion() {
     assert_eq!(tcpgrp, pgid, "stderr: {}", o.stderr);
 }
 
-// ── Process-staged ral helper protocol regressions ──────────────────────────
+// ── Job control (pty) ────────────────────────────────────────────────────
+//
+// Parking must hand the terminal back to the shell before the REPL's next
+// tty read, or that read raises SIGTTIN and stops ral itself — so every test
+// here would hang rather than fail.
+//
+// The stop is delivered as `kill(-pgid, SIGSTOP)` rather than a Ctrl-Z byte:
+// this container's virtualized kernel implements neither VSUSP-generated
+// nor default-disposition `SIGTSTP` (a bare `/bin/sleep` in its own pgid
+// stays running under `kill -TSTP`).  ral's stop path reads whichever signal
+// `waitpid(WUNTRACED)` reports, so `SIGSTOP` drives the same park.
 
-#[test]
-fn ral_helper_returns_large_final_value_through_report() {
-    // The final ral helper's value comes back inside the ChildEvalResponse
-    // frame (drained concurrently by a parent reader thread).  A
-    // pre-Fix-2 build read the value off a separate fd *after* waiting
-    // on the child; if the value exceeded the kernel buffer, the
-    // helper would block writing while the parent blocked waiting —
-    // a circular wait.  This script forces a Bytes value far larger
-    // than a typical pipe buffer (~64 KiB) through a process-staged
-    // pipeline whose final stage is a ral helper (`from-bytes`).
-    //
-    // `length` of a 200 KiB Bytes value confirms we got the whole
-    // value out without truncation or deadlock.
-    let script = r"
-let bs = !{ /usr/bin/yes | head -c 200000 | from-bytes }
-echo !{length $bs}
-";
-    let o = run_with_timeout(&[], script, Duration::from_secs(15))
-        .expect("large-value pipeline hung — report-channel deadlock?");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "200000");
+/// The pipeline's process group, discovered from outside the pty: every
+/// child of the REPL is enumerated, and the REPL is its own session leader
+/// (`setsid` in `PtySession::spawn`), so its own pgid equals its pid — any
+/// child reporting a different pgid is a member of the anchor's group.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn find_pipeline_pgid(repl_pid: i32, timeout: Duration) -> Option<i32> {
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(pgid) = child_pgid_distinct_from(repl_pid) {
+            return Some(pgid);
+        }
+        if start.elapsed() > timeout {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
+// `ps` is not guaranteed present in a minimal container (it isn't in this
+// one), so Linux reads `/proc/*/stat` directly; macOS keeps `ps`, the
+// portable option there.
+#[cfg(target_os = "linux")]
+fn child_pgid_distinct_from(parent_pid: i32) -> Option<i32> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        if entry.file_name().to_str().and_then(|s| s.parse::<i32>().ok()).is_none() {
+            continue;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // Fields after `pid (comm) `: state, ppid, pgrp, ... — `comm` may
+        // itself contain parens, so split on the *last* `)`.
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let (Some(_state), Some(ppid), Some(pgrp)) = (
+            fields.next(),
+            fields.next().and_then(|s| s.parse::<i32>().ok()),
+            fields.next().and_then(|s| s.parse::<i32>().ok()),
+        ) else {
+            continue;
+        };
+        if ppid == parent_pid && pgrp != parent_pid {
+            return Some(pgrp);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn child_pgid_distinct_from(parent_pid: i32) -> Option<i32> {
+    let out = std::process::Command::new("ps")
+        .args(["-eo", "pid=,ppid=,pgid="])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().find_map(|line| {
+        let mut cols = line.split_whitespace();
+        let _pid: i32 = cols.next()?.parse().ok()?;
+        let ppid: i32 = cols.next()?.parse().ok()?;
+        let pgid: i32 = cols.next()?.parse().ok()?;
+        (ppid == parent_pid && pgid != parent_pid).then_some(pgid)
+    })
+}
+
+/// `kill(-pgid, SIGSTOP)`, direct — `SIGSTOP` rather than `SIGTSTP` because
+/// this container does not honour `SIGTSTP` at all (see the module comment
+/// above); the stop path downstream is signal-agnostic.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stop_process_group(pgid: i32) {
+    let pid = rustix::process::Pid::from_raw(pgid).expect("pgid must be positive");
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::STOP);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn ral_helper_emits_large_audit_payload_without_deadlock() {
-    // A ral helper stage runs a nested external that writes 200 KiB
-    // of stderr.  Under `--audit` the nested external's stderr is
-    // captured by the helper's audit tree and rides back to the
-    // parent inside the ChildEvalResponse frame.  Without a concurrent
-    // reader thread the helper would block writing the report (full
-    // socket buffer) while the parent blocked waiting on the helper
-    // — a circular wait this test would catch as a 15-second hang.
-    let script = r#"
-let noisy = { from-line; /bin/sh -c 'head -c 200000 /dev/zero >&2' }
-let s = !{ /bin/echo "" | !$noisy }
-echo done
-"#;
-    let o = run_with_timeout(&["--audit"], script, Duration::from_secs(15))
-        .expect("audited pipeline hung — report drain blocked?");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert!(o.stdout.contains("done"), "stdout: {}", o.stdout);
+fn park_returns_the_terminal_to_the_shell() {
+    let ral = ral_bin();
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session
+        .send_line("sleep 5 | !{ from-line }")
+        .expect("send failed");
+    // `sleep` writes nothing until it exits, so ral's own debug trace for
+    // it is buffered up with everything else and only flushed once the
+    // pipeline settles — it cannot be used to detect that `sleep` has
+    // started.  The echoed command line proves the REPL processed the
+    // keystrokes; `sleep` forks immediately after, well within this delay.
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("sleep 5")),
+        "command line was never echoed; stderr: {}",
+        session.text()
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
+        .expect("pipeline pgid not found");
+    stop_process_group(pgid);
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("stopped")),
+        "pipeline never reported stopped; stderr: {}",
+        session.text()
+    );
+
+    // ral must be back in the pty's foreground pgid: a probe run right
+    // now must see its own pgid as the tty's tcpgrp.  If parking left the
+    // terminal with the (now-stopped) pipeline group, this tty read would
+    // raise SIGTTIN and stop ral, and this probe would never answer.
+    let probe = format!("printf \"\" | {} --ral-test-pgid-check post", ral.display());
+    session.send_line(&probe).expect("send failed");
+    let answered = session.wait_until(Duration::from_secs(8), |t| {
+        parse_tagged_pgid(t, "post").is_some() && parse_tagged_tcpgrp(t, "post").is_some()
+    });
+    let out = session.finish();
+    assert!(
+        answered,
+        "REPL did not answer after park — terminal not returned; stderr: {}",
+        out.stderr
+    );
+    let pgid =
+        parse_tagged_pgid(&out.stderr, "post").expect("post pgid missing after assertion above");
+    let tcpgrp = parse_tagged_tcpgrp(&out.stderr, "post")
+        .expect("post tcpgrp missing after assertion above");
+    assert_eq!(
+        pgid, tcpgrp,
+        "ral is not in the foreground pgid after park; stderr: {}",
+        out.stderr
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn fg_resumes_a_parked_pipeline_to_completion() {
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session
+        .send_line("sleep 2 | !{ from-line }")
+        .expect("send failed");
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("sleep 2")),
+        "command line was never echoed; stderr: {}",
+        session.text()
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
+        .expect("pipeline pgid not found");
+    stop_process_group(pgid);
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("[1] stopped")),
+        "pipeline never reported stopped; stderr: {}",
+        session.text()
+    );
+
+    session.send_line("fg 1").expect("send failed");
+    // `sleep 2` has already used up part of its run before the park; `fg`
+    // must let it finish and return the prompt, not hang.
+    let done = session.wait_until(Duration::from_secs(8), |t| t.matches("❯").count() >= 3);
+    let out = session.finish();
+    assert!(
+        done,
+        "fg did not resume the parked pipeline to completion; stderr: {}",
+        out.stderr
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_pipeline_with_no_external_parks_through_the_anchor_witness() {
+    // Neither stage is an external process — the anchor is the only thing
+    // the kernel can stop, and it must still be enough to park the whole
+    // pipeline.
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session
+        .send_line("!{ let go = { |n| echo tick; go $[$n + 1] }; go 0 } | !{ from-lines }")
+        .expect("send failed");
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("go 0")),
+        "command line was never echoed; stderr: {}",
+        session.text()
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
+        .expect("pipeline pgid not found");
+    stop_process_group(pgid);
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("[1] stopped")),
+        "an all-ral pipeline with no external never parked; stderr: {}",
+        session.text()
+    );
+
+    session.send_line("fg 1").expect("send failed");
+    std::thread::sleep(Duration::from_millis(300));
+    session.send_ctrl_c().expect("ctrl-c failed");
+    let ended = session.wait_until(Duration::from_secs(8), |t| t.matches("❯").count() >= 3);
+    let out = session.finish();
+    assert!(
+        ended,
+        "fg then Ctrl-C did not end the resumed pipeline; stderr: {}",
+        out.stderr
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ctrl_c_ends_an_all_ral_foreground_pipeline() {
+    // The terminal belongs to the pipeline's group, whose only process is
+    // the anchor: the tty's SIGINT reaches nothing that can die, so the
+    // anchor must witness it and the collector cancel the stages.
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session
+        .send_line("!{ let go = { |n| echo tick; go $[$n + 1] }; go 0 } | !{ from-lines }")
+        .expect("send failed");
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("go 0")),
+        "command line was never echoed; stderr: {}",
+        session.text()
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    session.send_ctrl_c().expect("ctrl-c failed");
+    let ended = session.wait_until(Duration::from_secs(8), |t| t.matches("❯").count() >= 2);
+    let out = session.finish();
+    assert!(
+        ended,
+        "Ctrl-C did not end an all-ral foreground pipeline; stderr: {}",
+        out.stderr
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn bg_runs_a_parked_pipeline_in_the_background() {
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session
+        .send_line("sleep 2 | !{ from-line }")
+        .expect("send failed");
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("sleep 2")),
+        "command line was never echoed; stderr: {}",
+        session.text()
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
+        .expect("pipeline pgid not found");
+    stop_process_group(pgid);
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("[1] stopped")),
+        "pipeline never reported stopped; stderr: {}",
+        session.text()
+    );
+
+    session.send_line("bg 1").expect("send failed");
+    // `bg` must return the prompt at once, without waiting for `sleep`.
+    assert!(
+        session.wait_until(Duration::from_secs(3), |t| t.matches("❯").count() >= 3),
+        "bg did not return the prompt promptly; stderr: {}",
+        session.text()
+    );
+
+    // `sleep 2` finishes on its own shortly; once it does the job table's
+    // sweep should have dropped it, so a `jobs` reply names no job.  Resent
+    // on a poll rather than waited for once, since the remaining sleep at
+    // `bg` time depends on how long the park itself took.
+    let mut cleared = false;
+    let mut sent = 0usize;
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        session.send_line("jobs").expect("send failed");
+        sent += 1;
+        session.wait_until(Duration::from_secs(2), |t| t.matches("❯ jobs").count() >= sent);
+        let text = session.text();
+        let reply = text.rfind("❯ jobs").map_or("", |i| &text[i..]);
+        if !reply.contains("[1]") {
+            cleared = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let out = session.finish();
+    assert!(
+        cleared,
+        "backgrounded job never left the table after finishing; stderr: {}",
+        out.stderr
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_nested_pipeline_parks_and_resumes_with_its_owner() {
+    // A joining collector records a stop on its own stage's status and
+    // forgets it locally rather than acting on it: `fg` must see
+    // `inner-done`, proving the nested `cat` was resumed, not killed, at
+    // park time.
+    let mut session = PtySession::spawn().expect("pty setup failed");
+    session
+        .send_line("!{ sleep 3 | cat; echo inner-done } | cat")
+        .expect("send failed");
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("sleep 3")),
+        "command line was never echoed; stderr: {}",
+        session.text()
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let pgid = find_pipeline_pgid(session.pid(), Duration::from_secs(3))
+        .expect("pipeline pgid not found");
+    stop_process_group(pgid);
+    assert!(
+        session.wait_until(Duration::from_secs(8), |t| t.contains("[1] stopped")),
+        "nested pipeline never reported stopped; stderr: {}",
+        session.text()
+    );
+
+    session.send_line("fg 1").expect("send failed");
+    let saw_inner_done = session.wait_until(Duration::from_secs(8), |t| t.contains("inner-done"));
+    let out = session.finish();
+    assert!(
+        saw_inner_done,
+        "fg did not resume the nested pipeline through to `inner-done` — the joining \
+         collector's stop-forgetting rule regressed; stderr: {}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -1743,33 +2221,31 @@ fn audited_stdout_and_stderr_redirect_does_not_panic() {
 // ── Audit survives helper errors ─────────────────────────────────────────────
 
 #[test]
-fn audited_failing_helper_preserves_nested_external_audit() {
-    // A ral helper that runs a nested external and then fails must
+fn audited_failing_stage_preserves_nested_external_audit() {
+    // A ral stage that runs a nested external and then fails must
     // still leave the nested external's observation in the parent
     // trail.  Pre-fix `unpack_stage_report` discarded observations on
     // structured-error reports.
     //
-    // Shape: a process-staged pipeline (`printf hi` makes it
-    // process-staged) whose final stage is a forced ral helper block. The
-    // block runs `/bin/echo nested-record` (audit-captured by the
-    // helper), reads the upstream bytes via `from-string`, and then
-    // calls `fail` to report a structured failure.  The parent must
-    // extend its audit trail with the nested external before
-    // surfacing the helper's error.
+    // Shape: `printf hi` feeds a ral-written final stage. The block runs
+    // `/bin/echo nested-record` (audit-captured by the stage), reads the
+    // upstream bytes via `from-string`, and then calls `fail` to report a
+    // structured failure.  The parent must extend its audit trail with the
+    // nested external before surfacing the stage's error.
     let script = r#"
-printf hi | !{ let _s = !{from-string}; let _x = !{/bin/echo nested-record}; fail [status: 1, message: "helper failed"] }
+printf hi | !{ let _s = !{from-string}; let _x = !{/bin/echo nested-record}; fail [status: 1, message: "stage failed"] }
 "#;
     let o = run_with_timeout(&["--audit"], script, Duration::from_secs(5))
-        .expect("audited failing-helper pipeline hung");
-    assert_ne!(o.status, 0, "expected helper failure to bubble up");
+        .expect("audited failing-stage pipeline hung");
+    assert_ne!(o.status, 0, "expected stage failure to bubble up");
     assert!(
         o.stderr.contains("nested-record"),
-        "audit must record the nested external even when the helper fails; stderr: {}",
+        "audit must record the nested external even when the stage fails; stderr: {}",
         o.stderr
     );
     assert!(
-        o.stderr.contains("helper failed"),
-        "structured helper error must surface; stderr: {}",
+        o.stderr.contains("stage failed"),
+        "structured stage error must surface; stderr: {}",
         o.stderr
     );
 }
@@ -1781,4 +2257,93 @@ fn failed_chain_arm_bytes_flush_live_not_into_the_winner() {
     let o = run("let vv = /bin/sh -c 'echo half; exit 3' ? echo x\necho $vv");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout, "half\nx\n", "stderr: {}", o.stderr);
+}
+
+// ── A non-interrupt pipeline cancel must take the whole group down ──────────
+
+/// `pid` is still a live process — signal 0 is the existence probe.
+fn alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// A named pipe whose opening end rendezvous with the fixture, so the test
+/// never guesses how long a spawn takes to reach its gate write.
+fn mkfifo(path: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert!(
+        unsafe { libc::mkfifo(raw.as_ptr(), 0o600) } == 0,
+        "mkfifo {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
+}
+
+/// A stage's own kill addresses its pid, never the group; a non-interrupt
+/// cancel — here `cancel $job`'s `CancelCause::Explicit` — of a pipeline
+/// whose stage forks a grandchild must still take the whole group down, so
+/// the collector must signal the group itself.  The `sleep 300 &` the fixture
+/// forks never `setsid`s away, so it is the group member that would survive.
+///
+/// The fixture closes its own stderr before backgrounding the grandchild:
+/// otherwise the grandchild would inherit the pipe this test's own stderr
+/// pump reads, and the collector's `drain` — which runs before this test's
+/// group-wide kill has any chance to fire — would block on that pipe's EOF
+/// forever, an unrelated deadlock this regression is not about.
+#[test]
+fn a_cancelled_pipeline_stages_grandchild_does_not_survive() {
+    let pidfile = fresh_tmp_path("ral_pipeline_cancel_teardown", "pid");
+    let gate = fresh_tmp_path("ral_pipeline_cancel_teardown", "gate");
+    let fixture = fresh_tmp_path("ral_pipeline_cancel_teardown", "sh");
+    mkfifo(&gate);
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\nexec 2>/dev/null\nsleep 300 &\necho $! > {}\n: > {}\nwait\n",
+            pidfile.display(),
+            gate.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The fixture is a pipeline stage (`| cat`), not a standalone external —
+    // `BorrowedByPipeline` is what puts this on the pid-addressed path this
+    // regression is about.
+    let script = format!(
+        "let job = watch \"tests\" {{ {} | cat ; return `done }}\ncat {}\ncancel $job\n",
+        fixture.display(),
+        gate.display(),
+    );
+    let out = run_with_timeout(&[], &script, Duration::from_secs(30));
+
+    let recorded = std::fs::read_to_string(&pidfile);
+    std::fs::remove_file(&fixture).ok();
+    std::fs::remove_file(&gate).ok();
+    std::fs::remove_file(&pidfile).ok();
+
+    let Some(out) = out else {
+        panic!("ral never exited: the pipeline stage never opened the gate");
+    };
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    let gc_pid: i32 = recorded
+        .expect("the gate opened without the grandchild pid being published")
+        .trim()
+        .parse()
+        .expect("a pid");
+
+    // The host's teardown grace (worker registry's `TEARDOWN_GRACE`) is the
+    // outer bound; this margin is for a loaded machine's scheduling.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline && alive(gc_pid) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let survived = alive(gc_pid);
+    if survived {
+        unsafe { libc::kill(gc_pid, libc::SIGKILL) };
+    }
+    assert!(
+        !survived,
+        "the forked grandchild (pid {gc_pid}) survived the pipeline's cancel teardown"
+    );
 }

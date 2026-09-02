@@ -282,7 +282,7 @@ mod tests {
     /// `try` forces collection on for its body via `delimited`, and closing
     /// is the opener's: once `try` returns, the trail is closed again, so a
     /// stage launched afterward inherits nothing.  `Audit::active_policy` is
-    /// exactly what `pipeline::launch` and `child_eval` read to decide.
+    /// exactly what `pipeline::thread` reads to decide.
     #[test]
     fn try_closes_the_trail_it_opened() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
