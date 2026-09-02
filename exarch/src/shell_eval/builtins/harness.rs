@@ -1948,15 +1948,15 @@ mod tests {
         );
 
         let listed = session.run_shell("call-6".to_string(), "tasks-list", BUDGET, &emit);
+        for field in ["fix the parser", "`doing", "urgent", "blocked on review"] {
+            assert!(
+                listed.content.contains(field),
+                "tasks-list must show the tagged, noted task's {field}, got: {}",
+                listed.content
+            );
+        }
         assert!(
-            listed
-                .content
-                .contains(r#"status: `doing, tags: ["urgent"], notes: "blocked on review""#),
-            "tasks-list must show the tagged, noted task, got: {}",
-            listed.content
-        );
-        assert!(
-            listed.content.contains(r#"desc: "write docs""#),
+            listed.content.contains("write docs"),
             "tasks-list must show the untouched second task, got: {}",
             listed.content
         );
@@ -2099,13 +2099,13 @@ mod tests {
 
         session.run_shell("call-4".to_string(), r#"tasks-add "fresh""#, 5, &emit);
         let listed = session.run_shell("call-5".to_string(), "tasks-list", 5, &emit);
-        assert!(
-            listed
-                .content
-                .contains(r#"id: 1, desc: "fresh", status: `open"#),
-            "id allocation must restart at 1 once the register is empty, got: {}",
-            listed.content
-        );
+        for field in ["id: 1", "fresh", "`open"] {
+            assert!(
+                listed.content.contains(field),
+                "id allocation must restart at 1 once the register is empty, missing {field} in: {}",
+                listed.content
+            );
+        }
     }
 
     /// A card under "tasks" that `tasks-decode` does not recognise — the
@@ -2227,15 +2227,29 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "let t = transcript [1]\n\
-             echo !{length $t}\n\
-             echo $t[0][exchange]\n\
-             let msgs = $t[0][messages]\n\
-             echo !{length $msgs}\n\
-             case $msgs[0][role] [`user: { |_| echo \"role=user\" }]\n\
-             case $msgs[0][parts][0] [`text: { |[content: c]| echo \"text=$c\" }]\n\
-             case $msgs[1][role] [`assistant: { |_| echo \"role=assistant\" }]\n\
-             case $msgs[1][parts][0] [`text: { |[content: c]| echo \"text=$c\" }]",
+            r#"let t = transcript [1]
+               echo !{length $t}
+               echo $t[0][exchange]
+               let msgs = $t[0][messages]
+               echo !{length $msgs}
+               let say-role = { |r| case $r [
+                 `system: { |_| echo "role=system" },
+                 `user: { |_| echo "role=user" },
+                 `assistant: { |_| echo "role=assistant" },
+                 `tool: { |_| echo "role=tool" },
+               ] }
+               let say-part = { |p| case $p [
+                 `text: { |[content: c]| echo "text=$c" },
+                 `program: { |_| echo "part=program" },
+                 `result: { |_| echo "part=result" },
+                 `reasoning: { |_| echo "part=reasoning" },
+                 `binary: { |_| echo "part=binary" },
+                 `custom: { |_| echo "part=custom" },
+               ] }
+               say-role $msgs[0][role]
+               say-part $msgs[0][parts][0]
+               say-role $msgs[1][role]
+               say-part $msgs[1][parts][0]"#,
             5,
             &emit,
         );

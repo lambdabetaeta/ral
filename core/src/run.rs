@@ -1415,6 +1415,39 @@ pub(crate) mod tests {
         }
     }
 
+    /// A real wall, so the cancel lands *during* the script rather than
+    /// before it: `deadline_cancel_reports_walled`'s `pre_exec` hook fires
+    /// ahead of evaluation, so no binding has landed there for the wall to
+    /// be measured against.
+    #[test]
+    fn mid_script_wall_keeps_the_bindings_that_landed() {
+        let _slot_guard = crate::process::cancel::REQUEST_SERIAL.lock();
+        let mut shell = Shell::new(crate::io::TerminalState::default());
+        shell.face_signals();
+        let req = capture_req("let pre_wall = 1\nsleep 30\nlet post_wall = 2");
+        match shell.run(RunRequest {
+            run: Run {
+                wall: Some(std::time::Duration::from_millis(500)),
+                ..req.run
+            },
+            ..req
+        }) {
+            RunReport::Ran { ending, .. } => assert!(
+                matches!(ending, Ending::Walled { .. }),
+                "a wall cut mid-script must report Walled, got {ending:?}"
+            ),
+            RunReport::Static { .. } => panic!("valid source must reach evaluation"),
+        }
+        assert!(
+            shell.scope_lookup("pre_wall").is_some(),
+            "the `let` that landed before the wall stays bound in the session"
+        );
+        assert!(
+            shell.scope_lookup("post_wall").is_none(),
+            "the `let` after the wall never ran"
+        );
+    }
+
     /// Under `RunIo::Inherit` the guard restores the session's stdout sink to
     /// the *same* object it was before the run, and the run's output lands in
     /// it.

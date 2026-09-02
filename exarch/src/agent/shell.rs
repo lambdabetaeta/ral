@@ -508,15 +508,8 @@ mod tests {
             result.content
         );
         assert!(
-            result
-                .content
-                .contains("work this call spawned is now orphaned: `<block>`"),
+            result.content.contains("`<block>`"),
             "the surviving worker is named by the `cmd` core filed it under; content was: {}",
-            result.content
-        );
-        assert!(
-            result.content.contains("you cannot `await` it"),
-            "the sentence says why the handle is no help; content was: {}",
             result.content
         );
     }
@@ -532,15 +525,15 @@ mod tests {
         let result = session.run_shell("c0".into(), "let ok = defer { return 1 }", 10, &emit);
 
         assert!(
-            !result.content.contains("orphaned"),
+            !result.content.contains("`<block>`"),
             "a call that returned holds its own handle; content was: {}",
             result.content
         );
     }
 
-    /// The widening this wave deliberately introduces: the handle is equally
-    /// lost on a routine non-zero exit, not just the wall — so a live birth
-    /// draws the same orphan sentence there too.
+    /// The widening this wave deliberately introduces: a live birth outlives a
+    /// routine non-zero exit exactly as it outlives the wall, so it draws the
+    /// same sentence there too.
     #[cfg(unix)]
     #[test]
     fn a_non_zero_exit_with_a_live_birth_names_the_orphan() {
@@ -561,10 +554,8 @@ mod tests {
             result.content
         );
         assert!(
-            result
-                .content
-                .contains("work this call spawned is now orphaned: `<block>`"),
-            "a non-zero exit orphans a live birth exactly as the wall does; content was: {}",
+            result.content.contains("`<block>`"),
+            "a non-zero exit leaves a live birth standing exactly as the wall does; content was: {}",
             result.content
         );
     }

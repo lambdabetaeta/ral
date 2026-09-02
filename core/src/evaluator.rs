@@ -36,7 +36,7 @@ pub(crate) struct Ran {
 /// Whose phrases these are.  Leases and the PATH-shadow check belong to
 /// `Session` alone; a block-local `source` and a `use` body run under a mode
 /// that leases nothing.  Only `Session` writes each landed `Define` back
-/// into `shell.env` (§1.3, §3.2) — a `Local`/`Module`/`Prelude` run threads
+/// into `shell.env` (`docs/SPEC.md` §5.6) — a `Local`/`Module`/`Prelude` run threads
 /// its own `E` and never touches the session environment at all.
 #[derive(Clone, Copy)]
 pub(crate) enum Mode {
@@ -53,7 +53,7 @@ pub(crate) enum Mode {
 ///
 /// A phrase halting stops the loop; `Ran::env` is `env` as extended by the
 /// phrases that ran before the halt, never rolled back — the whole of "a
-/// `let` before a failing command still binds" (§1.3).
+/// `let` before a failing command still binds" (`docs/SPEC.md` §5.6).
 pub(crate) fn run_phrases(
     phrases: &[Spanned<Phrase>],
     env: Env,

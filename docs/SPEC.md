@@ -964,8 +964,10 @@ A top-level run is one complete script, one `-c` program, one submitted REPL
 entry, or one exarch tool call. When the host keeps the session open,
 successful top-level bindings are available to the next top-level run.
 
-If a top-level run fails, effects completed before the failure still remain.
-A binding after the failing statement is never evaluated.
+If a top-level run fails, effects completed before the failure still remain,
+and so do the bindings it established: a `let` that landed before the failing
+statement stays bound in the session. A binding after the failing statement is
+never evaluated.
 
 ```ral
 let before = 1
@@ -2088,7 +2090,7 @@ preceded it have already been installed.
 
 A relative path inside a script or module is resolved from the directory containing that file. A relative path at the REPL or in source with no file identity is resolved from `$CWD`.
 
-`source` is not transactional. If a loaded file creates bindings and later fails, the earlier changes have already happened. The failure keeps its original status and is reported with a `source:` prefix. Its diagnostic points into the loaded file.
+`source` is not transactional, the same law §5.6 states for a top-level run. If a loaded file creates bindings and later fails, the earlier changes have already happened. The failure keeps its original status and is reported with a `source:` prefix. Its diagnostic points into the loaded file.
 
 ### 10.4. Importing a module with `use`
 

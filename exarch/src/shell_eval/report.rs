@@ -24,8 +24,8 @@ const NAMED: usize = 5;
 /// `trail` and `workers` are read-only, boundary-legal snapshots: the
 /// dispatch's own [`Observed::Worker`] births, and the `` `workers `` probe
 /// taken at the run boundary.  The audit and the orphan sentence never draw
-/// on a [`Ending::Settled`] or [`Ending::Stopped`] ending — job control keeps
-/// its bindings, and a returning call has nothing to answer for.
+/// on a [`Ending::Settled`] or [`Ending::Stopped`] ending — neither leaves the
+/// model unable to see from the transcript what landed.
 pub(crate) fn render(
     ending: &Ending,
     trail: &[FOValue],
@@ -72,8 +72,9 @@ pub(crate) fn render(
 fn timeout_tip(timeout_secs: u64) -> String {
     format!(
         "\nthis call timed out after {timeout_secs}s at the point above. The steps \
-         before it completed; the step it names did not, and the bindings this call \
-         made are gone.\n\
+         before it completed and their definitions are still bound; the step it names \
+         did not complete, and the steps after it did not run — resume from there \
+         rather than replaying this call.\n\
          recovery: if the command is simply slow and there is nothing to overlap it \
          with, retry with a higher `timeout_secs`. If other work can run alongside it, \
          defer it instead (`let h = defer {{ … }}`) and let the run return: the host \
@@ -93,8 +94,10 @@ fn exit_tip(single_command: bool) -> String {
     );
     if !single_command {
         tip.push_str(
-            " A non-zero exit also aborts the rest of this command and discards earlier \
-             bindings; wrap risky tools in `audit`/`try`, or split them out.",
+            " A non-zero exit also aborts the rest of this command: the steps after it \
+             never ran, while the definitions that completed before it are still bound — \
+             resume from the failing step rather than replaying the whole call. Wrap \
+             risky tools in `audit`/`try`, or split them out.",
         );
     }
     tip.push('\n');
@@ -114,10 +117,9 @@ fn trail_worker_ids(trail: &[FOValue]) -> HashSet<u64> {
         .collect()
 }
 
-/// The sentence a binding-discarding ending owes the model about work that
-/// outlived it: a birth this dispatch made, still present in the registry —
-/// running or settled-unclaimed, both equally unreachable once the handle
-/// binding unwound — is joined against `workers` by id.  A consumed worker
+/// The sentence a failed ending owes the model about work that outlived it: a
+/// birth this dispatch made, still present in the registry — running or
+/// settled-unclaimed — is joined against `workers` by id.  A consumed worker
 /// has already left the registry and is nobody's orphan.  `None` when this
 /// dispatch spawned nothing still present — silence is then the whole truth.
 fn orphan_note(trail: &[FOValue], workers: &[ProbedWorker]) -> Option<String> {
@@ -138,8 +140,9 @@ fn orphan_note(trail: &[FOValue], workers: &[ProbedWorker]) -> Option<String> {
         n => format!(", and {n} more not named here"),
     };
     Some(format!(
-        "\nwork this call spawned is now orphaned: {named}{overflow}. The binding that \
-         named it went with the unwind, so you cannot `await` it.\n"
+        "\nwork this call spawned outlived it: {named}{overflow}. A handle bound by a \
+         step that completed before the failure is still bound — `await $h` reaches it; \
+         one the failing step would have bound never landed, so that work is orphaned.\n"
     ))
 }
 
@@ -217,7 +220,10 @@ mod tests {
         let fragment = ActFragment::from_acts(vec![committed_act("reply", None)]);
         let workers = vec![worker_row(1, "sleep 20", true)];
         let (out, exit) = render(&stopped_ending(), &trail, &fragment, &workers, 5);
-        assert!(out.is_empty(), "job control keeps its bindings: {out:?}");
+        assert!(
+            out.is_empty(),
+            "job control's transcript already shows what landed: {out:?}"
+        );
         assert_eq!(exit, 1);
     }
 
@@ -236,7 +242,7 @@ mod tests {
         let rendered_at = out.find("error: sleep 30").expect("engine rendering");
         let remedy_at = out.find("recovery:").expect("timeout remedy");
         let audit_at = out.find("audit:").expect("audit sentence");
-        let orphan_at = out.find("orphaned").expect("orphan sentence");
+        let orphan_at = out.find("sleep 20").expect("orphan sentence");
         assert!(
             rendered_at < remedy_at && remedy_at < audit_at && audit_at < orphan_at,
             "composition order must be rendering, remedy, audit, orphan: {out:?}"
@@ -279,7 +285,7 @@ mod tests {
         let trail = vec![worker_birth(9, "spawn body")];
         let (out, _) = render(&ending, &trail, &ActFragment::default(), &[], 5);
         assert!(
-            !out.contains("orphaned"),
+            !out.contains("spawn body"),
             "absent from the probe means already consumed: {out:?}"
         );
     }
@@ -302,11 +308,12 @@ mod tests {
         assert!(out.contains("2 more not named here"), "{out:?}");
     }
 
-    /// The full ending matrix: audit and orphan draw only on a
-    /// binding-discarding ending, and only when there is something to say.
+    /// The full ending matrix: audit and orphan draw only on an ending whose
+    /// transcript does not otherwise show what landed, and only when there is
+    /// something to say.
     #[cfg(unix)]
     #[test]
-    fn ending_matrix_gates_audit_and_orphan_on_binding_loss() {
+    fn ending_matrix_gates_audit_and_orphan_on_unshown_effects() {
         let births = vec![worker_birth(3, "job")];
         let live = vec![worker_row(3, "job", true)];
         let committed = ActFragment::from_acts(vec![committed_act("spawn", Some("helper"))]);
@@ -337,19 +344,19 @@ mod tests {
         ];
 
         for (name, ending, want_exit) in &endings {
-            let binding_loss = !matches!(ending, Ending::Settled { .. } | Ending::Stopped { .. });
+            let effects_unshown = !matches!(ending, Ending::Settled { .. } | Ending::Stopped { .. });
             for (births_label, trail) in [("present", births.clone()), ("absent", Vec::new())] {
                 for (acts_label, fragment) in [("committed", &committed), ("refused", &refused)] {
                     let (out, exit) = render(ending, &trail, fragment, &live, 5);
                     assert_eq!(exit, *want_exit, "{name}/{births_label}/{acts_label}");
                     assert_eq!(
                         out.contains("audit:"),
-                        binding_loss && acts_label == "committed",
+                        effects_unshown && acts_label == "committed",
                         "{name}/{births_label}/{acts_label} audit mismatch: {out:?}"
                     );
                     assert_eq!(
-                        out.contains("orphaned"),
-                        binding_loss && births_label == "present",
+                        out.contains("`job`"),
+                        effects_unshown && births_label == "present",
                         "{name}/{births_label}/{acts_label} orphan mismatch: {out:?}"
                     );
                 }

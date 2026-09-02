@@ -142,13 +142,12 @@ impl DeskAct {
 
 /// What this `ral` call has committed, in the order it landed: one
 /// [`Observation`] per attempt that landed, minted at [`HostServices::commit_act`]
-/// — the door every acting handler funnels through — and read back once a
-/// raise discards the call's bindings but not its acts.
+/// — the door every acting handler funnels through — and read back once the
+/// call has failed.
 ///
-/// Effects persist across an unwind: a call the wall cut short still started
-/// what it started and delivered what it delivered, while every binding it made
-/// is gone. The fragment is how the raise says so, since the model's only other
-/// in-band signal — the diagnostic — speaks of the failure and not of the acts.
+/// A call the wall cut short still started what it started and delivered what
+/// it delivered, and no other in-band channel says so: the model's only other
+/// signal — the diagnostic — speaks of the failure and not of the acts.
 ///
 /// Only committed acts are recorded. A refused act changed nothing, so it
 /// leaves no entry: this fragment answers *what stands*.
@@ -2407,10 +2406,10 @@ mod tests {
         ));
     }
 
-    /// One Str per named span, not one concatenated blob: the list is the
+    /// One record per named span, not one concatenated blob: the list is the
     /// shape the doc's own "read in slices" advice needs to be sayable.
     #[test]
-    fn transcript_answers_one_string_per_span_without_committing_an_act() {
+    fn transcript_answers_one_record_per_span_without_committing_an_act() {
         let mut desk = desk();
         {
             let mut log = desk.services.log.lock();
@@ -2428,12 +2427,24 @@ mod tests {
         else {
             panic!("transcript must answer a list of spans")
         };
-        let [FOValue::String { value }] = items.as_slice() else {
-            panic!("one named span must answer exactly one Str, got {items:?}")
+        let [FOValue::Map { entries }] = items.as_slice() else {
+            panic!("one named span must answer exactly one record, got {items:?}")
         };
-        assert!(value.starts_with("=== exchange 1 ==="));
-        assert!(value.contains("[user]\nfirst prompt"));
-        assert!(value.contains("[assistant]\nfirst answer"));
+        let field = |name: &str| {
+            let Some((_, value)) = entries.iter().find(|(key, _)| key == name) else {
+                panic!("a span carries `{name}`, got {entries:?}")
+            };
+            value
+        };
+        assert!(matches!(field("exchange"), FOValue::Int { value: 1 }));
+        let FOValue::List { items: messages } = field("messages") else {
+            panic!("a span's messages are a list, got {entries:?}")
+        };
+        assert_eq!(
+            messages.len(),
+            2,
+            "the closed exchange's two turns, got {messages:?}"
+        );
         assert!(desk.services.acts.audit().is_none(), "a read has no act");
         let record = crate::bus::drain_records(&rx)
             .into_iter()

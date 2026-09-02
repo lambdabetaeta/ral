@@ -1,5 +1,5 @@
 ---
-generated_at_commit: cd4b16e4
+generated_at_commit: 14b304fa
 generated_at_date: 2026-09-02
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
@@ -112,12 +112,17 @@ builds and passes to the dispatch, never installed as shared state, so an
 unwind drops it with the rest of that call's stack. The
 dynamic-context half of the contract lives in [[map/exarch/agent|agent]].
 
-**The wall is a place, and the acts before it stand.** A timed-out call unwinds
-its bindings and keeps its effects: the child is running, the bytes are in the
-inbox, the wakeup is armed, the staged `reply` is still harvested. Nothing
-rolls back, and a model told only "retry with a higher `timeout_secs`" would
-duplicate every one of them. So the `timed_out` branch writes four things to
-stderr, in order, and exits 124:
+**The wall is a place, and everything before it stands.** A timed-out call
+keeps both its effects and its bindings: the child is running, the bytes are in
+the inbox, the wakeup is armed, the staged `reply` is still harvested, and the
+`let`s that landed are still bound —
+[[invariants/a-failed-run-keeps-its-bindings|a failed run keeps its bindings]],
+pinned mid-script for the wall by
+`mid_script_wall_keeps_the_bindings_that_landed`. The asymmetry is
+before/after the wall, never bound/unbound. Nothing rolls back, and a model
+told only "retry with a higher `timeout_secs`" would duplicate every one of
+those effects. So the `timed_out` branch writes four things to stderr, in
+order, and exits 124:
 
 1. **the engine's rendering, verbatim** — unconditionally, exactly as the
    ordinary-failure branch beside it. A cancel is stamped on the innermost node
@@ -125,18 +130,21 @@ stderr, in order, and exits 124:
    diagnostic carries the span that *locates* the wall: the frontier between the
    steps that completed and the one that did not;
 2. **the asymmetry and the remedy** — it timed out after *n* seconds at the
-   point above; the steps before it completed, the step it names did not, and
-   the bindings are gone. Then `recovery:` — raise `timeout_secs` for work that
+   point above; the steps before it completed and their definitions are still
+   bound, the step it names did not complete, and the steps after it did not
+   run, so resume from there rather than replaying the call. Then `recovery:` —
+   raise `timeout_secs` for work that
    is simply slow, or `let h = defer { … }` and let the run return, since the
    host notifies at the next exchange boundary and `await $h` yields the value
    record without polling;
 3. **an audit of what already stands**, when there is any — and not the wall's
-   alone: *every* ending that discards the bindings files it, a chosen `exit` as
-   much as a suffered raise, last, after whichever remedy the ending offered,
-   because the asymmetry belongs to the unwind and not to the deadline (a call
-   that staged its `reply` and then died on a command's non-zero exit, or chose
-   `exit 2`, made that reply stand just as surely). `Break::Stopped` is job
-   control rather than an ending, keeps its bindings, and files nothing. This
+   alone: *every* ending whose transcript does not otherwise show what landed
+   files it, a chosen `exit` as much as a suffered raise, last, after whichever
+   remedy the ending offered, because the record is owed by the failure and not
+   by the deadline (a call that staged its `reply` and then died on a command's
+   non-zero exit, or chose `exit 2`, made that reply stand just as surely).
+   `Break::Stopped` is job control rather than an ending, and a stopped call's
+   transcript shows what landed, so it files nothing. This
    is the one exception to core's own trail: the desk authors the shared
    `Observation` vocabulary from the *host* side, into a per-call fragment
    joined at render — never into the engine's trail, because a wire seat's
@@ -159,18 +167,18 @@ stderr, in order, and exits 124:
    requires one, so there is no minted default that could ever disagree with
    it. `DeskAct` still names the six acts and yields both spellings, the
    rail's `verb` column and the audit's past tense.
-4. **the workers that survived binding loss**, named. A `defer`red worker is
+4. **the workers that outlived the call**, named. A `defer`red worker is
    moored by `Mooring::for_worker` onto the session root precisely so a
-   foreground cancel cannot reach it, so a raise, the wall, or an `exit` takes
-   the handle *binding* and leaves the work running — but not `Stopped`, which
-   is no ending and keeps bindings, so a stopped call draws neither this
-   sentence nor the audit one. The sentence stops at binding loss — it says
-   the binding went with the unwind and so the worker cannot be `await`ed,
-   which is also what keeps it from reading as a contradiction of the
-   `recovery:` line's `await $h`; the exchange-boundary promise is already
-   made four lines above and is not made twice. That is a different fact from
-   a committed act, so it is its own sentence and the desk grows no worker
-   view to hold it. Which workers are *this* dispatch's is not arithmetic
+   foreground cancel cannot reach it, so a raise, the wall, or an `exit`
+   leaves the work running — but not `Stopped`, which is no ending and whose
+   transcript shows what landed, so a stopped call draws neither this sentence
+   nor the audit one. What the sentence reports is reachability, and that
+   splits: a handle bound by a step that *completed* before the failure is
+   still bound, so the `recovery:` line's `await $h` reaches it; one the
+   failing step would have bound never landed — `bind_pattern` is
+   all-or-nothing — and that work is orphaned. Which workers outlived the call
+   is a different fact from a committed act, so it is its own sentence and the
+   desk grows no worker view to hold it. Which workers are *this* dispatch's is not arithmetic
    across the seam: the dispatch's own trail carries an `Observed::Worker`
    for every birth its extent gave, and `shell_eval/report.rs`'s `render`
    joins those ids against the `` `workers `` probe, decoded by
