@@ -186,22 +186,6 @@ impl PipelineCollector {
     }
 }
 
-pub(super) struct Running {
-    handles: Vec<StageHandle>,
-}
-
-impl Running {
-    pub(super) fn new() -> Self {
-        Self {
-            handles: Vec::new(),
-        }
-    }
-
-    pub(super) fn add(&mut self, handle: StageHandle) {
-        self.handles.push(handle);
-    }
-}
-
 /// One pass's outcome: whether it made progress, found nothing new, finished
 /// every stage, or hit a stop.  Shared by [`CollectState::drive`]'s blocking
 /// loop and [`CollectState::pass`]'s single non-blocking use by
@@ -267,10 +251,10 @@ fn scope_cancelled(mooring: &Mooring) -> Option<CancelCause> {
 }
 
 impl CollectState {
-    pub(super) fn new(running: Running, started: std::time::Instant) -> Self {
-        let n = running.handles.len();
+    pub(super) fn new(running: Vec<StageHandle>, started: std::time::Instant) -> Self {
+        let n = running.len();
         Self {
-            stages: running.handles.into_iter().map(Some).collect(),
+            stages: running.into_iter().map(Some).collect(),
             observed: (0..n).map(|_| None).collect(),
             started,
         }
@@ -512,9 +496,10 @@ mod tests {
         let gate = StageGate::new();
         let mooring = Mooring::adrift();
 
-        let mut running = Running::new();
-        running.add(StageHandle::for_test(spawn_exiting("false")));
-        running.add(StageHandle::for_test(spawn_exiting("true")));
+        let running = vec![
+            StageHandle::for_test(spawn_exiting("false")),
+            StageHandle::for_test(spawn_exiting("true")),
+        ];
         let mut collect = CollectState::new(running, std::time::Instant::now());
 
         match collect.drive(&mut group, &gate, &mooring, &shell) {
@@ -605,10 +590,9 @@ mod tests {
         let gate = StageGate::new();
         let mooring = Mooring::adrift();
 
-        let mut running = Running::new();
-        running.add(StageHandle::for_test(spawn_stopped_sleep(
+        let running = vec![StageHandle::for_test(spawn_stopped_sleep(
             crate::process::StopPolicy::Escape,
-        )));
+        ))];
         let mut collect = CollectState::new(running, std::time::Instant::now());
 
         let signal = 'wait: {
@@ -644,10 +628,9 @@ mod tests {
         };
         let shell = Shell::default();
 
-        let mut running = Running::new();
-        running.add(StageHandle::for_test(spawn_stopped_sleep(
+        let running = vec![StageHandle::for_test(spawn_stopped_sleep(
             crate::process::StopPolicy::Escape,
-        )));
+        ))];
         let mut collect = CollectState::new(running, std::time::Instant::now());
 
         for _ in 0..100 {

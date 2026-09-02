@@ -4,7 +4,7 @@
 //! unconsumed routes — so a leaked pipe end is a borrow error.
 
 use super::super::command;
-use super::collect::{Running, StageObservation, observe_external_stage};
+use super::collect::{StageObservation, observe_external_stage};
 use super::group::PipelineGroup;
 use super::resolve::{ExternalStage, PipelinePlan, StageLaunch, StageSpec};
 use super::route::{ByteIn, ByteOut, StageRoute, open_stage_routes};
@@ -382,7 +382,7 @@ fn spawn_stage(
 /// which outlives all of them.
 struct PipelineResources {
     routes: VecDeque<StageRoute>,
-    running: Running,
+    running: Vec<StageHandle>,
     group: PipelineGroup,
 }
 
@@ -390,7 +390,7 @@ impl PipelineResources {
     fn new(group: PipelineGroup, routes: VecDeque<StageRoute>) -> Self {
         Self {
             routes,
-            running: Running::new(),
+            running: Vec::new(),
             group,
         }
     }
@@ -446,7 +446,7 @@ impl PipelineBuild {
             stop: self.stop.clone(),
         };
         let handle = spawn_stage(stage, spec, route, cx, &self.gate)?;
-        self.resources.running.add(handle);
+        self.resources.running.push(handle);
         Ok(())
     }
 
@@ -463,7 +463,7 @@ impl PipelineBuild {
     /// Return the group alongside the running stages — its anchor and
     /// guards must outlive collect.  The foreground was already claimed in
     /// `new`, before any stage existed.
-    fn finish(self) -> (PipelineGroup, Running) {
+    fn finish(self) -> (PipelineGroup, Vec<StageHandle>) {
         let Self { resources, .. } = self;
         let PipelineResources {
             routes,
@@ -541,7 +541,7 @@ pub(super) fn launch_pipeline(
     shell: &mut Shell,
     group: PipelineGroup,
     gate: &Arc<StageGate>,
-) -> Result<(PipelineGroup, Running), Break> {
+) -> Result<(PipelineGroup, Vec<StageHandle>), Break> {
     let routes = open_stage_routes(plan)?.into();
     let mut build = PipelineBuild::new(group, Arc::clone(gate), plan, routes, shell, mooring);
     match spawn_all_stages(&mut build, stages, plan, env, mooring, shell) {

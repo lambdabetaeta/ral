@@ -22,9 +22,8 @@ use crate::types::{Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 use std::time::Instant;
 
-use collect::Running;
 use group::PipelineGroup;
-use launch::launch_pipeline;
+use launch::{StageHandle, launch_pipeline};
 use resolve::resolve_pipeline;
 
 /// A multi-stage pipeline between two launches and one join: the node the
@@ -35,7 +34,7 @@ use resolve::resolve_pipeline;
 pub(crate) struct PipeNode {
     group: PipelineGroup,
     gate: Arc<StageGate>,
-    running: Running,
+    running: Vec<StageHandle>,
     yields: PipeYield,
     started: Instant,
     /// The pipeline's rendered source, for `ParkedPipeline`'s job-table name.

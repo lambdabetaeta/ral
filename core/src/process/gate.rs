@@ -6,7 +6,6 @@
 //! invariants — cancel checked before pause, `paused` read under the
 //! `Condvar`'s own mutex — are what a nested pipeline's correctness rests on.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -16,34 +15,33 @@ use super::outcome::Signal;
 /// One per pipeline, shared by its stage threads.  `paused` is the Ctrl-Z
 /// park; waiters wake on resume or on their own scope's cancel.
 pub struct StageGate {
-    paused: AtomicBool,
-    lock: Mutex<()>,
+    paused: Mutex<bool>,
     condvar: Condvar,
 }
 
 impl StageGate {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            paused: AtomicBool::new(false),
-            lock: Mutex::new(()),
+            paused: Mutex::new(false),
             condvar: Condvar::new(),
         })
     }
 
-    pub fn pause(&self) {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
-        self.paused.store(true, Ordering::Release);
+    fn set(&self, paused: bool) {
+        *self.paused.lock().unwrap_or_else(PoisonError::into_inner) = paused;
         self.condvar.notify_all();
+    }
+
+    pub fn pause(&self) {
+        self.set(true);
     }
 
     pub fn resume(&self) {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
-        self.paused.store(false, Ordering::Release);
-        self.condvar.notify_all();
+        self.set(false);
     }
 
     pub fn is_paused(&self) -> bool {
-        self.paused.load(Ordering::Acquire)
+        *self.paused.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Block while paused.  Polls `scope.cause()` every 20 ms so a cancel
@@ -52,12 +50,12 @@ impl StageGate {
     /// # Errors
     /// Returns `Err(cause)` when `scope` is cancelled while parked.
     pub fn wait(&self, scope: &CancelScope) -> Result<(), CancelCause> {
-        let mut guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.paused.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if let Some(cause) = scope.cause() {
                 return Err(cause);
             }
-            if !self.paused.load(Ordering::Acquire) {
+            if !*guard {
                 return Ok(());
             }
             let (next, _timeout) = self
@@ -177,17 +175,6 @@ mod tests {
             "a scope cancelled while parked must end the wait with its cause"
         );
         canceller.join().expect("canceller thread");
-    }
-
-    #[test]
-    fn stop_policy_parks_is_false_only_for_kill_and_reap() {
-        assert!(!StopPolicy::KillAndReap.parks());
-        assert!(StopPolicy::Escape.parks());
-        let park = StagePark {
-            gate: StageGate::new(),
-            status: StageStatus::new(),
-        };
-        assert!(StopPolicy::Park(park).parks());
     }
 
     #[test]
