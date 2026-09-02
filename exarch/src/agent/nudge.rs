@@ -205,7 +205,7 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
 /// survives the summary that compaction is about to fold history into.
 const PRESSURE_MESSAGE: &str = "Older history will be auto-compacted into a summary soon. \
     Preserve what must survive verbatim: write durable state to files and keep the paths — do \
-    not park large values in bindings — and record your intent with `set-goal`/`add-task`.";
+    not park large values in bindings — and record your intent with `goal-set`/`tasks-add`.";
 
 const EMPTY_MESSAGE: &str = "Your previous turn produced no text and no tool calls. \
     If you are finished, say so explicitly; otherwise continue.";

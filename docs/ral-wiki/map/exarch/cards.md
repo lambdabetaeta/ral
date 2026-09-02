@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cbeb5457
-generated_at_date: 2026-08-17
+generated_at_commit: a6117cb1
+generated_at_date: 2026-09-02
 covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
 ---
 
@@ -182,13 +182,13 @@ variables, and with no host `surface` is the identity, so a kit stays runnable i
 a bare ral REPL. The tasks library holds the small constructor so the mark
 grammar lives in one ral place: `tasks-card` in `exarch/data/agent.ral` (the
 tasks section; the kit owns the status→role mapping, since the host knows
-only the closed role set), paired with `decode-tasks`, its inverse over the
-same shape. It leads with a strong `text` heading — the same mark `set-goal`
+only the closed role set), paired with `tasks-decode`, its inverse over the
+same shape. It leads with a strong `text` heading — the same mark `goal-set`
 writes — so the framed renderer lifts `tasks` into the top rule and the gauge
 below it counts what is `completed`, rather than the label doing double duty as
-a title. Every mutator reads the register through `decode-tasks
-!{pin-read "tasks"}`, computes the new list, and writes it back through
-`sync-tasks` — one write point wrapping `pin-set`/`pin-clear`
+a title. Every mutator reads the register through `tasks-list`, computes the
+new list, and writes it back through
+`tasks-sync` — one write point wrapping `pin-set`/`pin-clear`
 ([[map/exarch/builtins|builtins]];
 [[decisions/260803_register-is-read-write|register-is-read-write]]). The card
 is the kit's only state; there is no bound list threaded alongside it to drift

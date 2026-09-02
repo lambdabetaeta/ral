@@ -18,11 +18,13 @@ use super::log::Log;
 use super::{Fold, Protocol, Record, Recorded, Refusal, Stamp};
 use crate::agent::event::{
     CompactionPlan, ContextOp, ContextSpanKind, ContextSurvey, ContextSurveyItem, QuiesceReason,
-    ToolResult, summary_prompt, validate_result_ids,
+    ToolResult, TranscriptMessage, TranscriptPart, TranscriptSpan, summary_prompt,
+    validate_result_ids,
 };
-use genai::chat::{ChatMessage, ChatRole, ToolResponse};
+use genai::chat::{
+    Binary, BinarySource, ChatMessage, ChatRole, ContentPart, CustomPart, ToolCall, ToolResponse,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -571,22 +573,57 @@ impl Memo {
         survey
     }
 
-    /// Read named, closed spans in their model-view order — one string each,
-    /// so the order is the view's and not the argument's.
+    /// Read named, closed spans in their model-view order — one
+    /// [`TranscriptSpan`] each, addressed by its own `exchange` field rather
+    /// than by argument position, so the order is the view's and not the
+    /// argument's. Each span's messages are exactly the ones
+    /// [`Self::render_closed_entry`] caches for the next provider request,
+    /// narrowed to [`TranscriptPart`]s rather than the provider's own
+    /// content parts — a span answers what the model saw, not a fresh
+    /// rendering of it.
     ///
     /// # Errors
     /// Refuses an empty list, a duplicate name, a missing or folded exchange,
     /// or the exchange still in progress.
-    pub(crate) fn read_context(&self, exchanges: &[u64]) -> Result<Vec<String>, String> {
+    pub(crate) fn read_context(&mut self, exchanges: &[u64]) -> Result<Vec<TranscriptSpan>, String> {
         if exchanges.is_empty() {
             return Err("transcript must name at least one exchange".into());
         }
         self.validate_named_exchanges(exchanges)?;
-        Ok(render_context_transcript(
-            &self.ledger,
-            &self.view,
-            &exchanges.iter().copied().collect(),
-        ))
+        let named: HashSet<u64> = exchanges.iter().copied().collect();
+        let mut spans = Vec::new();
+        if let Some(digest) = &self.view.digest
+            && named.contains(&digest.through_exchange)
+        {
+            let messages = self
+                .digest_render
+                .as_ref()
+                .expect("a view digest always has a cached rendering")
+                .segment
+                .iter()
+                .map(transcript_message)
+                .collect();
+            spans.push(TranscriptSpan {
+                exchange: digest.through_exchange,
+                messages,
+            });
+        }
+        for span in self.view.spans.clone() {
+            if !named.contains(&span.id) {
+                continue;
+            }
+            let messages = self
+                .render_closed_entry(&span)
+                .segment
+                .iter()
+                .map(transcript_message)
+                .collect();
+            spans.push(TranscriptSpan {
+                exchange: span.id,
+                messages,
+            });
+        }
+        Ok(spans)
     }
 
     /// Resolve a user rewind into the whole visible suffix beginning at its
@@ -748,87 +785,86 @@ fn opening_line_for_events(events: &[&Protocol]) -> String {
     String::new()
 }
 
-/// One string per named span, each opening with its own `=== … ===` header:
-/// the header is the element's address, since the order is the view's rather
-/// than the caller's.
-fn render_context_transcript(ledger: &Ledger, view: &View, named: &HashSet<u64>) -> Vec<String> {
-    let mut sections = Vec::new();
-    if let Some(digest) = &view.digest
-        && named.contains(&digest.through_exchange)
-    {
-        let mut section = context_section(&format!("digest through {}", digest.through_exchange));
-        render_role(&mut section, "user", &digest.text);
-        sections.push(section);
+/// A [`ChatMessage`] as material: role kept verbatim, content narrowed to
+/// [`TranscriptPart`]s so a reader never meets a serialization of a Rust
+/// struct standing in for content.
+fn transcript_message(message: &ChatMessage) -> TranscriptMessage {
+    TranscriptMessage {
+        role: message.role.clone(),
+        parts: message.content.iter().filter_map(transcript_part).collect(),
     }
-    for span in &view.spans {
-        if !named.contains(&span.id) {
-            continue;
-        }
-        let mut section = context_section(&format!("exchange {}", span.id));
-        let events = ledger
-            .resident_events(span.events.clone())
-            .expect("view spans are resident in the ledger");
-        for event in events {
-            match event {
-                Protocol::UserPrompt { text, .. } => render_role(&mut section, "user", text),
-                Protocol::ContextMessage { message, .. }
-                | Protocol::AssistantMessage { message, .. } => {
-                    render_chat_message(&mut section, message);
-                }
-                Protocol::StepStarted { n, .. } => {
-                    writeln!(section, "--- step {n} ---").expect("writing to a String never fails");
-                }
-                Protocol::ToolResults { results } => {
-                    for result in results {
-                        render_role(
-                            &mut section,
-                            "tool",
-                            &format!("{}: {}", result.id, result.content),
-                        );
-                    }
-                }
-                Protocol::SessionStarted { .. }
-                | Protocol::SessionResumed { .. }
-                | Protocol::SessionEnded
-                | Protocol::ContextEdited { .. } => {}
-            }
-        }
-        sections.push(section);
-    }
-    sections
 }
 
-fn context_section(title: &str) -> String {
-    format!("=== {title} ===\n")
+/// One arm per [`ContentPart`] variant — exhaustive, so a variant genai adds
+/// later is a compile error here rather than a silent blob dump.
+fn transcript_part(part: &ContentPart) -> Option<TranscriptPart> {
+    match part {
+        ContentPart::Text(text) => Some(TranscriptPart::Text(text.clone())),
+        ContentPart::ToolCall(call) => Some(transcript_program(call)),
+        ContentPart::ToolResponse(response) => {
+            Some(TranscriptPart::Result(response.content.clone()))
+        }
+        ContentPart::ReasoningContent(text) => Some(TranscriptPart::Reasoning(text.clone())),
+        ContentPart::Binary(binary) => Some(transcript_binary(binary)),
+        ContentPart::Custom(custom) => Some(transcript_custom(custom)),
+        // An opaque provider continuation token, carrying no information of
+        // its own — it produces no part.
+        ContentPart::ThoughtSignature(_) => None,
+    }
 }
 
-fn render_chat_message(output: &mut String, message: &ChatMessage) {
-    let role = match message.role {
-        ChatRole::System => "system",
-        ChatRole::User => "user",
-        ChatRole::Assistant => "assistant",
-        ChatRole::Tool => "tool",
+/// The tool call IS the ral program the agent ran, so for exarch's one tool
+/// this carries the script source rather than the raw arguments JSON; any
+/// other tool carries its name and argument keys instead of their values.
+fn transcript_program(call: &ToolCall) -> TranscriptPart {
+    let keys = call
+        .fn_arguments
+        .as_object()
+        .map(|args| args.keys().cloned().collect())
+        .unwrap_or_default();
+    let source = if call.fn_name == crate::shell_eval::tools::ral::NAME {
+        call.fn_arguments
+            .get("cmd")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_default()
+    } else {
+        String::new()
     };
-    let mut rendered = false;
-    for part in &message.content {
-        let text = part.as_text().map_or_else(
-            || serde_json::to_string(part).unwrap_or_else(|_| "<unrenderable content>".into()),
-            str::to_string,
-        );
-        render_role(output, role, &text);
-        rendered = true;
-    }
-    if !rendered {
-        render_role(output, role, "");
+    TranscriptPart::Program {
+        tool: call.fn_name.clone(),
+        source,
+        keys,
     }
 }
 
-fn render_role(output: &mut String, role: &str, text: &str) {
-    writeln!(output, "[{role}]").expect("writing to a String never fails");
-    output.push_str(text);
-    if !text.ends_with('\n') {
-        output.push('\n');
+fn transcript_binary(binary: &Binary) -> TranscriptPart {
+    TranscriptPart::Binary {
+        content_type: binary.content_type.clone(),
+        name: binary.name.clone().unwrap_or_default(),
+        bytes: binary_payload_bytes(&binary.source),
     }
+}
+
+/// The decoded byte length of a binary payload. A URL source names no local
+/// bytes at all, so it reports zero rather than the length of the URL text.
+fn binary_payload_bytes(source: &BinarySource) -> usize {
+    match source {
+        BinarySource::Url(_) => 0,
+        BinarySource::Base64(data) => {
+            let padding = data.chars().rev().take_while(|&c| c == '=').count();
+            (data.len() / 4) * 3 - padding
+        }
+    }
+}
+
+fn transcript_custom(custom: &CustomPart) -> TranscriptPart {
+    let (provider, model) = custom
+        .model_iden
+        .as_ref()
+        .map(|iden| (iden.adapter_kind.to_string(), iden.model_name.to_string()))
+        .unwrap_or_default();
+    TranscriptPart::Custom { provider, model }
 }
 
 fn live_exchange_refusal(id: u64) -> String {

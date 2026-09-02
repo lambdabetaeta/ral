@@ -8,7 +8,9 @@
 //! rides, so a handler's chrome can never outrun the run's earlier surface
 //! output.
 
-use crate::agent::event::{ContextOp, ContextSurvey, EditAuthority};
+use crate::agent::event::{
+    ContextOp, ContextSurvey, EditAuthority, TranscriptMessage, TranscriptPart, TranscriptSpan,
+};
 use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Stamp};
@@ -16,6 +18,7 @@ use crate::fleet::schedule::{CronSchedule, Trigger, parse_duration};
 use crate::fleet::{Fleet, check_name, roster::listing};
 use crate::record::commit::SurfaceBuffer;
 use crate::shell_eval::{self, PinDigests, Surface};
+use genai::chat::ChatRole;
 use ral_core::sync::LockExt;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
@@ -1446,9 +1449,10 @@ impl ExarchDesk {
         self.services.log.lock().context_survey()
     }
 
-    /// `` `transcript `` — the rendered transcript of the named exchanges, one
-    /// Str per span, probing rather than acting: a read commits no act, so the
-    /// verb string below is a second mint outside [`DeskAct::verb`] on purpose.
+    /// `` `transcript `` — the named exchanges read back as material, one
+    /// span record per named exchange, probing rather than acting: a read
+    /// commits no act, so the verb string below is a second mint outside
+    /// [`DeskAct::verb`] on purpose.
     fn transcript(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let exchanges = payload_exchanges(payload, "transcript")?;
         let subject = exchanges_subject(&exchanges);
@@ -1461,12 +1465,7 @@ impl ExarchDesk {
                 failed: result.is_err(),
             });
         result
-            .map(|sections| FOValue::List {
-                items: sections
-                    .into_iter()
-                    .map(|value| FOValue::String { value })
-                    .collect(),
-            })
+            .map(transcript_answer)
             .map_err(|error| Error::new(error, 1))
     }
 
@@ -1612,6 +1611,117 @@ fn survey_answer(survey: ContextSurvey) -> FOValue {
             ),
         ],
     }
+}
+
+/// `` `transcript ``'s answer: one span record per named exchange or digest,
+/// each carrying the model's own messages narrowed to variant parts — never
+/// a serialization of the provider's own content structs.
+fn transcript_answer(spans: Vec<TranscriptSpan>) -> FOValue {
+    FOValue::List {
+        items: spans.into_iter().map(transcript_span_value).collect(),
+    }
+}
+
+fn transcript_span_value(span: TranscriptSpan) -> FOValue {
+    FOValue::Map {
+        entries: vec![
+            (
+                "exchange".to_string(),
+                FOValue::Int {
+                    value: u64_to_i64(span.exchange),
+                },
+            ),
+            (
+                "messages".to_string(),
+                FOValue::List {
+                    items: span
+                        .messages
+                        .into_iter()
+                        .map(transcript_message_value)
+                        .collect(),
+                },
+            ),
+        ],
+    }
+}
+
+fn transcript_message_value(message: TranscriptMessage) -> FOValue {
+    let role = match message.role {
+        ChatRole::System => "system",
+        ChatRole::User => "user",
+        ChatRole::Assistant => "assistant",
+        ChatRole::Tool => "tool",
+    };
+    FOValue::Map {
+        entries: vec![
+            (
+                "role".to_string(),
+                FOValue::Variant {
+                    label: role.to_string(),
+                    payload: None,
+                },
+            ),
+            (
+                "parts".to_string(),
+                FOValue::List {
+                    items: message.parts.into_iter().map(transcript_part_value).collect(),
+                },
+            ),
+        ],
+    }
+}
+
+fn transcript_part_value(part: TranscriptPart) -> FOValue {
+    let (label, entries) = match part {
+        TranscriptPart::Text(content) => ("text", vec![text_field("content", content)]),
+        TranscriptPart::Program { tool, source, keys } => (
+            "program",
+            vec![
+                text_field("tool", tool),
+                text_field("source", source),
+                (
+                    "keys".to_string(),
+                    FOValue::List {
+                        items: keys
+                            .into_iter()
+                            .map(|key| FOValue::String { value: key })
+                            .collect(),
+                    },
+                ),
+            ],
+        ),
+        TranscriptPart::Result(content) => ("result", vec![text_field("content", content)]),
+        TranscriptPart::Reasoning(content) => ("reasoning", vec![text_field("content", content)]),
+        TranscriptPart::Binary {
+            content_type,
+            name,
+            bytes,
+        } => (
+            "binary",
+            vec![
+                text_field("content-type", content_type),
+                text_field("name", name),
+                (
+                    "bytes".to_string(),
+                    FOValue::Int {
+                        value: usize_to_i64(bytes),
+                    },
+                ),
+            ],
+        ),
+        TranscriptPart::Custom { provider, model } => (
+            "custom",
+            vec![text_field("provider", provider), text_field("model", model)],
+        ),
+    };
+    FOValue::Variant {
+        label: label.to_string(),
+        payload: Some(Box::new(FOValue::Map { entries })),
+    }
+}
+
+fn text_field(name: &str, value: String) -> (String, FOValue) {
+    (name.to_string(), FOValue::String { value })
 }
 
 /// Decodes a surfaced value onto the bus, folding a `` `pin ``/`` `unpin ``

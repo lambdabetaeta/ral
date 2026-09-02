@@ -274,7 +274,11 @@ impl Shell {
     ) -> Result<crate::serial::FOValue, crate::types::Error> {
         match mooring.desk.as_ref() {
             Some(desk) => desk.enquire(req, mooring.cancel.as_scope()),
-            None => Err(self.err(crate::types::NO_DESK, crate::types::NO_DESK_STATUS)),
+            None => Err(self.err_hint(
+                crate::types::NO_DESK,
+                crate::types::NO_DESK_HINT,
+                crate::types::NO_DESK_STATUS,
+            )),
         }
     }
 

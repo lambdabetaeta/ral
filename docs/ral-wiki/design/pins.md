@@ -50,7 +50,7 @@ register is a collection rather than one card per key.
 
 So a kit holding evolving state pins one rollup and overwrites it, rather than
 marching `tasks 0/3`, `tasks 1/3`, … down the scrollback — the streaming the rail
-doctrine forbids. `exarch/data/agent.ral` (the tasks section) is the first client: `transition` reads the
+doctrine forbids. `exarch/data/agent.ral` (the tasks section) is the first client: `tasks-status` reads the
 list back, computes the next one, and pins the gauge that *fills in place* —
 a per-task `open → done` move appends nothing to the transcript, and now
 appends nothing to a bound list either.
@@ -128,9 +128,9 @@ apparatus. A kit that *owns* a key instead treats its card as a
 serialization: read it back, destructure against its own schema, mutate,
 `pin-set` again. The tasks kit is the worked example
 ([[decisions/260803_register-is-read-write|register-is-read-write]], §4): its
-mutators take no list argument and thread none — `add-task`, `transition`,
-`tag-task` each read `pin-read "tasks"`, decode it against the kit's own row
-shape, and write the new rollup back through one `sync-tasks` write point,
+mutators take no list argument and thread none — `tasks-add`, `tasks-status`,
+`tasks-tag` each read `pin-read "tasks"`, decode it against the kit's own row
+shape, and write the new rollup back through one `tasks-sync` write point,
 which clears the slot once no task remains open. A card under `"tasks"` the
 model wrote directly, in a shape the kit's decoder does not recognize, fails
 the next kit call with a didactic `fail` naming the expected shape — the
@@ -151,7 +151,7 @@ told, and stays silent on every quiet completion that repeats an
 already-told digest. An emptied register is itself silent — unpinning only
 re-arms the edge, so a later re-pin fires again even at a digest told long
 before, and there is no fallback reminder that nudges an empty register
-toward `set-goal`/`add-task`: that advertisement is what let a completion,
+toward `goal-set`/`tasks-add`: that advertisement is what let a completion,
 its own reminder, and the next completion cycle forever, and it is gone with
 the livelock it caused. The exception is *actionability*: while the agent has
 live descendants, the pin reminder waits for their results, because the

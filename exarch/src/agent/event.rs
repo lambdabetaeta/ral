@@ -231,6 +231,56 @@ impl ContextSurvey {
     }
 }
 
+/// `transcript`'s answer: one element per named span or digest.
+///
+/// In the model view's own order, addressed by `exchange` rather than by
+/// argument position — [`super::model::AgentLog::read_context`]'s doc comment.
+#[derive(Clone, Debug)]
+pub struct TranscriptSpan {
+    pub exchange: u64,
+    pub messages: Vec<TranscriptMessage>,
+}
+
+/// One [`genai::chat::ChatMessage`] as the model actually saw it, narrowed
+/// to [`TranscriptPart`]s rather than the provider's raw content parts.
+#[derive(Clone, Debug)]
+pub struct TranscriptMessage {
+    pub role: ChatRole,
+    pub parts: Vec<TranscriptPart>,
+}
+
+/// One arm per [`genai::chat::ContentPart`] variant.
+///
+/// Holds only what a reader may usefully narrow into — never a serialization
+/// of the provider's own struct. `ThoughtSignature` has no arm here: it
+/// produces no part.
+#[derive(Clone, Debug)]
+pub enum TranscriptPart {
+    Text(String),
+    /// The ral tool call itself: `tool` is always `"ral"` and `source` the
+    /// script that ran, when the call is exarch's one tool; for any other
+    /// tool, `source` is empty and `keys` names its arguments instead of
+    /// their values.
+    Program {
+        tool: String,
+        source: String,
+        keys: Vec<String>,
+    },
+    Result(String),
+    Reasoning(String),
+    /// Metadata only — a base64 payload is never something a reader can
+    /// narrow into, so it never crosses this boundary.
+    Binary {
+        content_type: String,
+        name: String,
+        bytes: usize,
+    },
+    Custom {
+        provider: String,
+        model: String,
+    },
+}
+
 /// One session's handle onto `sessions/<n>/record.jsonl`.
 ///
 /// Carries the seam every fact authors through, and the model fold's
@@ -531,7 +581,7 @@ impl AgentLog {
     /// # Errors
     /// Refuses an empty list, a duplicate name, a missing or folded exchange,
     /// or the exchange still in progress.
-    pub fn read_context(&self, exchanges: &[u64]) -> Result<Vec<String>, String> {
+    pub fn read_context(&mut self, exchanges: &[u64]) -> Result<Vec<TranscriptSpan>, String> {
         self.model_memo.read_context(exchanges)
     }
 
@@ -1248,10 +1298,13 @@ mod tests {
         );
     }
 
-    /// One string per named span, each opening with its own header: the
-    /// header is that element's address, since the order is the view's.
+    /// One [`TranscriptSpan`] per named span, addressed by its own
+    /// `exchange` field rather than by argument order, since the order is
+    /// the view's. A step marker carries no model content, so it contributes
+    /// no message — [`into_chat_messages`] drops it the same way for a live
+    /// provider request.
     #[test]
-    fn transcript_marks_roles_delimits_steps_and_addresses_digest_by_reach() {
+    fn transcript_addresses_spans_by_exchange_and_carries_their_messages() {
         let mut s = fresh_root();
         s.append_user("first prompt".into(), None).unwrap();
         s.record_step(1, Tuning::default()).unwrap();
@@ -1261,12 +1314,23 @@ mod tests {
 
         let transcript = s.read_context(&[1]).expect("closed exchange is readable");
         let [exchange] = transcript.as_slice() else {
-            panic!("one named span answers one Str, got {transcript:?}")
+            panic!("one named span answers one TranscriptSpan, got {transcript:?}")
         };
-        assert!(exchange.starts_with("=== exchange 1 ===\n"));
-        assert!(exchange.contains("[user]\nfirst prompt"));
-        assert!(exchange.contains("--- step 1 ---"));
-        assert!(exchange.contains("[assistant]\nfirst answer"));
+        assert_eq!(exchange.exchange, 1);
+        let [user_msg, assistant_msg] = exchange.messages.as_slice() else {
+            panic!(
+                "a step marker carries no message, got {:?}",
+                exchange.messages
+            )
+        };
+        assert_eq!(user_msg.role, ChatRole::User);
+        assert!(
+            matches!(user_msg.parts.as_slice(), [TranscriptPart::Text(text)] if text == "first prompt")
+        );
+        assert_eq!(assistant_msg.role, ChatRole::Assistant);
+        assert!(
+            matches!(assistant_msg.parts.as_slice(), [TranscriptPart::Text(text)] if text == "first answer")
+        );
 
         s.apply_edit(
             ContextOp::Fold {
@@ -1282,9 +1346,17 @@ mod tests {
         let [digest] = digest.as_slice() else {
             panic!("the digest is one span, got {digest:?}")
         };
-        assert!(digest.starts_with("=== digest through 2 ===\n"));
-        assert!(digest.contains("the old work is complete"));
-        assert!(!digest.contains("first prompt"));
+        assert_eq!(digest.exchange, 2);
+        let digest_text = |m: &TranscriptMessage| {
+            m.parts
+                .iter()
+                .any(|p| matches!(p, TranscriptPart::Text(text) if text.contains("the old work is complete")))
+        };
+        assert!(digest.messages.iter().any(digest_text));
+        assert!(!digest.messages.iter().any(|m| m
+            .parts
+            .iter()
+            .any(|p| matches!(p, TranscriptPart::Text(text) if text.contains("first prompt")))));
         assert_eq!(
             s.read_context(&[1]).unwrap_err(),
             "exchange 1 is folded into the digest through 2 — name 2 to drop the digest whole, or fold further"

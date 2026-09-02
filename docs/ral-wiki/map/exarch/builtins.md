@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4d02e3bb
-generated_at_date: 2026-09-01
+generated_at_commit: a6117cb1
+generated_at_date: 2026-09-02
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -154,12 +154,14 @@ Sourced into the shell at boot:
   thin wrappers over `surface `` `pin ``/`` `unpin ``, completing the
   `pin-*` family the two enquiries below start
   ([[decisions/260803_register-is-read-write|register-is-read-write]]).
-- the **tasks kit** — `mk-task`/`add-task`/`transition` and friends, a
+- the **tasks kit** — `task-new`/`tasks-add`/`tasks-status` and friends, a
   pure-ral task list that reads its own state back through `pin-read` and
   writes the rendered rollup forward through `pin-set`/`pin-clear`
-  (`sync-tasks`) rather than threading a bound list through every mutator
+  (`tasks-sync`) rather than threading a bound list through every mutator;
+  `tasks-list` is the read point, and the kit ships no query functions —
+  `filter`/`first` over `tasks-list` is how you query
   ([[map/exarch/cards|cards]]).
-- `set-goal` / `clear-goal` — `pin-set`/`pin-clear` under the `goal`
+- `goal-set` / `goal-clear` — `pin-set`/`pin-clear` under the `goal`
   register key, kept visible by the [[map/exarch/agent|nudge]] reminder.
 
 ## Harness verbs — context, spawn, schedule, reply
@@ -223,18 +225,38 @@ queryable store.
   `bytes` sitting beside the spans it replaced — that says *where* the weight
   is, not merely that it moved
   ([[decisions/260812_context-is-a-projection|context-is-a-projection]]).
-- **`transcript <exchanges>`** → `F [Str]`. Reads named closed exchanges back as
-  material: one role-marked, step-delimited string per span, ordered by the view
-  rather than by the argument, each opening with the `=== … ===` header that is
-  its address. It may name a digest by its reach, but not an exchange swallowed
-  by that digest. It is **not** a tag of `context`, because it is the one
-  harness verb whose answer is the size of the thing it describes: the survey
-  spends a few hundred bytes to describe a 200 KB view, and this returns the
-  200 KB. A distinct name is the cheapest safety mechanism available on a
-  model-facing surface, and the only one that acts before the call rather than
-  after. The list is what makes the doc's own advice sayable — a slice is
-  `$t[0]`, a count is `length $t` — where a concatenated `Str` left the header
-  load-bearing as a boundary the reader had to re-parse.
+- **`transcript <exchanges>`** → `F [[exchange: Int, messages: [Message]]]`.
+  Reads named closed exchanges back as material: one span record per named
+  exchange or digest, ordered by the view rather than by the argument, each
+  addressed by its own `exchange` field rather than by a `=== … ===` header a
+  reader had to re-parse. It may name a digest by its reach, but not an
+  exchange swallowed by that digest. It is **not** a tag of `context`, because
+  it is the one harness verb whose answer is the size of the thing it
+  describes: the survey spends a few hundred bytes to describe a 200 KB view,
+  and this returns the 200 KB. A distinct name is the cheapest safety
+  mechanism available on a model-facing surface, and the only one that acts
+  before the call rather than after. The list is what makes the doc's own
+  advice sayable — a slice is `$t[0]`, a count is `length $t`.
+
+  A `Message` is `[role: `system|`user|`assistant|`tool, parts: [Part]]`, one
+  per model turn the span holds — a step boundary is not a turn and
+  contributes no message, the same as it contributes no message to a live
+  provider request. A `Part` is a variant, one arm per
+  `genai::chat::ContentPart` — `` `text ``, `` `program `` (the ral tool call
+  itself: the script source for exarch's own tool, or a name and argument
+  keys for any other), `` `result ``, `` `reasoning ``, `` `binary `` (media
+  metadata only), `` `custom `` — matched exhaustively in
+  `exarch/src/record/model.rs`, so a genai variant this arm list has not met
+  is a compile error rather than a serialization of the provider's struct
+  leaking through as content. `` `ThoughtSignature `` carries no part at all:
+  an opaque continuation token, dropped rather than rendered. Narrowing this
+  material — truncation, elision, byte caps — is deliberately not this
+  builtin's job: it is `filter`/`take`/`view-text` over the records, the way
+  `tasks-list` puts querying on the caller rather than the kit
+  ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]
+  for the private `Transcript` cache this reads through,
+  `render_closed_entry`'s cached segment converted to material rather than
+  re-rendered).
 
 - **`agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
   of six tags — `` `list ``, `` `start ``, `` `message ``, `` `cancel ``,

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4d02e3bb
-generated_at_date: 2026-09-01
+generated_at_commit: a6117cb1
+generated_at_date: 2026-09-02
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -387,7 +387,7 @@ so without the rebirth the telling would be recorded but never committed.
 Edge-triggering the pin reminder closes a livelock: a stationary register can
 now produce at most one nudge, where a bare per-completion reminder let a
 `Complete`, its own reminder, and the next `Complete` cycle forever while the
-register sat unchanged — the no-pins `set-goal` advertisement that used to
+register sat unchanged — the no-pins `goal-set` advertisement that used to
 steer an agent straight into that state is deleted outright with it. A
 standing condition staying *event-shaped* on the wire looks like it should
 strain the fold law

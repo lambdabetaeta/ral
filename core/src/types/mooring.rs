@@ -43,6 +43,11 @@ pub const NO_DESK: &str = "this host answers no enquiries";
 /// simply has no desk — but a raise all the same, since there is no answer.
 pub const NO_DESK_STATUS: i32 = 1;
 
+/// The hint that refusal carries, spelled once alongside it: host-independent,
+/// since the wording must not reveal which host refused.
+pub const NO_DESK_HINT: &str =
+    "only a foreground run has a desk: call it directly, not in `spawn` or a pipeline stage";
+
 /// The host's answer desk for the engine→host answered channel.  `enquire` is
 /// blocking and short by contract: a receipt, a ledger read, a verdict — never
 /// a long-running result.

@@ -34,62 +34,55 @@ let pin-clear = { |key|      surface `unpin [key: $key] }
 # Statuses: open | doing | blocked | done
 # Id allocation: max(ids) + 1; freed ids are recycled.
 # The list lives on the "tasks" pin, not in a binding: every mutator reads the
-# register, changes it, and writes it back through `sync-tasks`, so the state
+# register, changes it, and writes it back through `tasks-sync`, so the state
 # survives blocks, `within`, and skipped rebinds.  Mutate it from the
-# foreground only: `pin-read`/`pin-list` are enquiries, so every mutator below
-# errors inside `spawn { … }`.  The pin clears when no work is left, so a
-# finished board stops being named by the boundary nudge.
+# foreground only: `pin-read`/`pin-list` are enquiries, so every `tasks-*`
+# call below fails there too — not inside `spawn { … }`, and not as a stage
+# of a `|` pipeline.  The pin clears when no work is left, so a finished
+# board stops being named by the boundary nudge.
 
-let mk-task = { |id desc|
+let task-new = { |id desc|
   [ id: $id, desc: $desc, status: `open, tags: [], notes: "" ]
 }
 
-let valid-statuses = [`open, `doing, `blocked, `done]
+let task-statuses = [`open, `doing, `blocked, `done]
 
 # --- per-field setters ---
 
-let set-desc   = { |t v| [id: $t[id], desc: $v,       status: $t[status], tags: $t[tags], notes: $t[notes]] }
-let set-status = { |t v| [id: $t[id], desc: $t[desc], status: $v,         tags: $t[tags], notes: $t[notes]] }
-let set-tags   = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $v,       notes: $t[notes]] }
-let set-notes  = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $t[tags], notes: $v        ] }
+let task-set-desc   = { |t v| [id: $t[id], desc: $v,       status: $t[status], tags: $t[tags], notes: $t[notes]] }
+let task-set-status = { |t v| [id: $t[id], desc: $t[desc], status: $v,         tags: $t[tags], notes: $t[notes]] }
+let task-set-tags   = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $v,       notes: $t[notes]] }
+let task-set-notes  = { |t v| [id: $t[id], desc: $t[desc], status: $t[status], tags: $t[tags], notes: $v        ] }
 
 ## Tags render as one comma-joined, bracketed span on the tasks card, so a
 ## tag holding `,` or `]` would be unreadable back out; refuse it rather than
 ## corrupt the round trip.
-let add-tag = { |t g|
+let task-add-tag = { |t g|
   if !{re-match #'[,\]]'# $g} {
-    fail [status: 1, message: "add-tag: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
+    fail [status: 1, message: "task-add-tag: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
   } else {
-    set-tags $t [...$t[tags], $g]
+    task-set-tags $t [...$t[tags], $g]
   }
 }
-let remove-tag = { |t g| set-tags $t !{filter { |x| $[not !{equal $x $g}] } $t[tags]} }
+let task-remove-tag = { |t g| task-set-tags $t !{filter { |x| $[not !{equal $x $g}] } $t[tags]} }
 
 # --- id allocation ---
 
-let next-id = { |ts|
+let tasks-next-id = { |ts|
   let ids = map { |t| $t[id] } $ts
   if !{is-empty $ids} { 1 }
     else { $[!{fold { |acc x| if $[$x > $acc] { $x } else { $acc } } 0 $ids} + 1] }
 }
 
-# --- rendering ---
-
-let render-task = { |t|
-  let tag-str  = if !{is-empty $t[tags]}   { "" } else { " [!{intercalate "," $t[tags]}]" }
-  let note-str = if !{equal $t[notes] ""}  { "" } else { "  -- $t[notes]" }
-  "#$t[id]  !{to-string $t[status] | from-string}  $t[desc]$tag-str$note-str"
-}
-
 # --- the tasks card, and its inverse ------------------------------------------
-# `tasks-card` and `decode-tasks` are the kit's serialization pair: a strong
+# `tasks-card` and `tasks-decode` are the kit's serialization pair: a strong
 # `text` heading, a `measure` gauge, then a `fields` matrix, one row per task,
 # `label: "#<id>"`, `value` a `text` of exactly four positionally-decoded
 # spans — status word (chrome by status: done->ok, doing->warn, blocked->bad,
 # open->muted), the two-space-led description, the tag list (empty or " [a,b]"),
 # and the notes (empty or " -- text").  Rendering tags and notes is what a
 # readable register demands: a field the card never shows cannot survive a read
-# back.  The heading is the card's own label, the way `set-goal` writes one: a
+# back.  The heading is the card's own label, the way `goal-set` writes one: a
 # leading one-line `text` mark is what the framed renderer lifts into the top
 # rule, so the gauge counts what is completed rather than doubling as the title.
 
@@ -117,7 +110,7 @@ let tasks-card = { |ts|
 ## `marks` is one homogeneous list, so single-tag `case`s over different
 ## elements would close its element type around whichever table ran first;
 ## the one `describe` case names every tag, keeping the list one type.
-let decode-tasks = { |v|
+let tasks-decode = { |v|
   if !{equal $v ()} { [] }
   else {
     try {
@@ -164,47 +157,46 @@ let decode-tasks = { |v|
   }
 }
 
+let tasks-list = { tasks-decode !{pin-read "tasks"} }
+
 ## The kit's one write point: an empty or all-`done` list clears the slot —
 ## no outstanding work, no pin — otherwise it holds `tasks-card`'s rendering.
-let sync-tasks = { |ts|
+let tasks-sync = { |ts|
   if !{is-empty !{filter { |t| $[not !{equal $t[status] `done}] } $ts}} { pin-clear "tasks" }
   else { pin-set "tasks" !{tasks-card $ts} }
 }
 
 # --- mutators: each reads the register, none takes a list ---
 
-let add-task = { |desc|
-  let ts = decode-tasks !{pin-read "tasks"}
-  sync-tasks [...$ts, !{mk-task !{next-id $ts} $desc}]
+let tasks-add = { |desc|
+  let ts = !{tasks-list}
+  tasks-sync [...$ts, !{task-new !{tasks-next-id $ts} $desc}]
 }
 
-let remove-task = { |id| sync-tasks !{filter { |t| $[$t[id] != $id] } !{decode-tasks !{pin-read "tasks"}}} }
+let tasks-remove = { |id| tasks-sync !{filter { |t| $[$t[id] != $id] } !{tasks-list}} }
 
-let transition = { |id new-status|
-  if !{elem $new-status $valid-statuses} {
-    sync-tasks !{map { |t| if $[$t[id] == $id] { set-status $t $new-status } else { $t } } !{decode-tasks !{pin-read "tasks"}}}
+let tasks-status = { |id new-status|
+  if !{elem $new-status $task-statuses} {
+    tasks-sync !{map { |t| if $[$t[id] == $id] { task-set-status $t $new-status } else { $t } } !{tasks-list}}
   } else {
-    warn "transition: invalid status -- !{to-string $new-status | from-string} (expected open|doing|blocked|done)"
+    warn "tasks-status: invalid status -- !{to-string $new-status | from-string} (expected open|doing|blocked|done)"
   }
 }
 
-let tag-task   = { |id tag|  sync-tasks !{map { |t| if $[$t[id] == $id] { add-tag    $t $tag  } else { $t } } !{decode-tasks !{pin-read "tasks"}}} }
-let untag-task = { |id tag|  sync-tasks !{map { |t| if $[$t[id] == $id] { remove-tag $t $tag  } else { $t } } !{decode-tasks !{pin-read "tasks"}}} }
-let note-task  = { |id note| sync-tasks !{map { |t| if $[$t[id] == $id] { set-notes  $t $note } else { $t } } !{decode-tasks !{pin-read "tasks"}}} }
+let tasks-tag   = { |id tag|  tasks-sync !{map { |t| if $[$t[id] == $id] { task-add-tag    $t $tag  } else { $t } } !{tasks-list}} }
+let tasks-untag = { |id tag|  tasks-sync !{map { |t| if $[$t[id] == $id] { task-remove-tag $t $tag  } else { $t } } !{tasks-list}} }
+let tasks-note  = { |id note| tasks-sync !{map { |t| if $[$t[id] == $id] { task-set-notes  $t $note } else { $t } } !{tasks-list}} }
 
-let retag-task = { |id tags|
+let tasks-retag = { |id tags|
   for $tags { |g|
     if !{re-match #'[,\]]'# $g} {
-      fail [status: 1, message: "retag-task: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
+      fail [status: 1, message: "tasks-retag: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
     }
   }
-  sync-tasks !{map { |t| if $[$t[id] == $id] { set-tags $t $tags } else { $t } } !{decode-tasks !{pin-read "tasks"}}}
+  tasks-sync !{map { |t| if $[$t[id] == $id] { task-set-tags $t $tags } else { $t } } !{tasks-list}}
 }
 
-let clear-tasks = { sync-tasks [] }
-let render-tasks = { for !{decode-tasks !{pin-read "tasks"}} { |t| echo !{render-task $t} } }
-let find-task = { |id| first { |t| $[$t[id] == $id] } !{decode-tasks !{pin-read "tasks"}} }
-let by-status = { |s| filter { |t| equal $t[status] $s } !{decode-tasks !{pin-read "tasks"}} }
+let tasks-clear = { tasks-sync [] }
 
 # --- persistence ---
 # `to-json`/`from-json` do not round-trip a bare variant (a JSON tag reads
@@ -212,34 +204,34 @@ let by-status = { |s| filter { |t| equal $t[status] $s } !{decode-tasks !{pin-re
 # word and is translated back on the way in; every other field is already
 # JSON-native.
 
-let save-tasks = { |path|
+let tasks-save = { |path|
   to-json !{map { |t|
     let word =
       if    !{equal $t[status] `done}    { "done" }
       elsif !{equal $t[status] `doing}   { "doing" }
       elsif !{equal $t[status] `blocked} { "blocked" }
       else                                { "open" }
-    set-status $t $word
-  } !{decode-tasks !{pin-read "tasks"}}} > $path
+    task-set-status $t $word
+  } !{tasks-list}} > $path
 }
 
-let load-tasks = { |path|
+let tasks-load = { |path|
   let ts = map { |t|
     let status =
       if    !{equal $t[status] "done"}    { `done }
       elsif !{equal $t[status] "doing"}   { `doing }
       elsif !{equal $t[status] "blocked"} { `blocked }
       else                                 { `open }
-    set-status $t $status
+    task-set-status $t $status
   } !{from-json < $path}
   for $ts { |t|
     for $t[tags] { |g|
       if !{re-match #'[,\]]'# $g} {
-        fail [status: 1, message: "load-tasks: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
+        fail [status: 1, message: "tasks-load: tag '$g' may not contain ',' or ']' — tags render as a comma-joined, bracketed span on the tasks card"]
       }
     }
   }
-  sync-tasks $ts
+  tasks-sync $ts
 }
 
 # --- goal ----------------------------------------------------------------------
@@ -247,7 +239,7 @@ let load-tasks = { |path|
 ## Pin a session goal so the periodic nudge reminder keeps it visible.  A
 ## single plain-text card under the "goal" register key; call again to replace.
 
-let set-goal = { |text|
+let goal-set = { |text|
   pin-set "goal" `card [`text [spans: [[role: "strong", text: "goal"]]],
                         `text [spans: [[role: "", text: $text]]]]
 }
@@ -255,4 +247,4 @@ let set-goal = { |text|
 ## Drop the goal pin — when the session's aim is met or abandoned.  Idempotent:
 ## calling it with nothing pinned is a quiet no-op.
 
-let clear-goal = { pin-clear "goal" }
+let goal-clear = { pin-clear "goal" }

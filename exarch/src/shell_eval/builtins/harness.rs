@@ -706,8 +706,9 @@ fn builtin_context(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Sett
     context_receipt(shell.enquire(mooring, request)?)
 }
 
-/// `transcript` — enquires `` `transcript ``; the answer is the rendered
-/// transcript of the named exchanges, one Str per span in model-view order.
+/// `transcript` — enquires `` `transcript ``; the answer is one span record
+/// per named exchange, each carrying its messages as ral records with
+/// variant parts — see [`scheme_transcript`] for the exact shape.
 fn builtin_transcript(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let payload = context_exchanges_payload(&args[0], "transcript")?;
     let answer = shell.enquire(
@@ -717,31 +718,35 @@ fn builtin_transcript(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> S
             payload: Some(Box::new(payload)),
         },
     )?;
-    let FOValue::List { items } = answer else {
+    if !matches!(answer, FOValue::List { .. }) {
         return Err(sig(
-            "transcript: host answered an unexpected shape; expected one Str per span",
+            "transcript: host answered an unexpected shape; expected one span record per exchange",
         ));
-    };
-    items
-        .into_iter()
-        .map(|item| match item {
-            FOValue::String { value } => Ok(Value::String(value)),
-            _ => Err(sig("transcript: host answered a span that is not a Str")),
-        })
-        .collect::<Settled<Vec<_>>>()
-        .map(Value::list)
+    }
+    Ok(Value::from(answer))
 }
 
-/// A variant over a row of tags with stated payloads, left open on `tail` so
-/// an unknown tag reaches the runtime door that enumerates the legal ones
-/// rather than dying as a row-unification mismatch.
-fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
+/// A variant over a row of tags with stated payloads, ending in `tail`.
+fn variant_row(tags: &[(&str, Ty)], tail: Row) -> Ty {
     use ral_core::syntax::tag::tag_row_label;
-    let mut row = Row::Var(tail);
+    let mut row = tail;
     for (label, ty) in tags.iter().rev() {
         row = Row::Extend(tag_row_label(label), Box::new(ty.clone()), Box::new(row));
     }
     Ty::Variant(row)
+}
+
+/// Left open on `tail` so an unknown tag reaches the runtime door that
+/// enumerates the legal ones rather than dying as a row-unification mismatch.
+fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
+    variant_row(tags, Row::Var(tail))
+}
+
+/// Closed: every tag this call may ever answer is named here, so a
+/// misspelled or forgotten arm on the answering side is a static mismatch
+/// rather than a tag the model discovers only by seeing it fail to match.
+fn closed_variant(tags: &[(&str, Ty)]) -> Ty {
+    variant_row(tags, Row::Empty)
 }
 
 /// `agents :: ∀α β ρ1 ρ2 ρ3. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ3> → F α`
@@ -919,9 +924,66 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// `transcript :: [Int] → F [Str]` — one string per span, in the view's own
-/// order rather than the argument's, so a slice is `$t[0]` and a count is
-/// `length $t`.
+/// One arm per [`genai::chat::ContentPart`] variant kept as material;
+/// `ThoughtSignature` contributes no part and so has no arm here.
+fn transcript_part_ty() -> Ty {
+    closed_variant(&[
+        ("text", closed_record(&[("content", Ty::String)])),
+        (
+            "program",
+            closed_record(&[
+                ("tool", Ty::String),
+                ("source", Ty::String),
+                ("keys", Ty::List(Box::new(Ty::String))),
+            ]),
+        ),
+        ("result", closed_record(&[("content", Ty::String)])),
+        ("reasoning", closed_record(&[("content", Ty::String)])),
+        (
+            "binary",
+            closed_record(&[
+                ("content-type", Ty::String),
+                ("name", Ty::String),
+                ("bytes", Ty::Int),
+            ]),
+        ),
+        (
+            "custom",
+            closed_record(&[("provider", Ty::String), ("model", Ty::String)]),
+        ),
+    ])
+}
+
+fn transcript_role_ty() -> Ty {
+    closed_variant(&[
+        ("system", Ty::Unit),
+        ("user", Ty::Unit),
+        ("assistant", Ty::Unit),
+        ("tool", Ty::Unit),
+    ])
+}
+
+fn transcript_message_ty() -> Ty {
+    closed_record(&[
+        ("role", transcript_role_ty()),
+        ("parts", Ty::List(Box::new(transcript_part_ty()))),
+    ])
+}
+
+fn transcript_span_ty() -> Ty {
+    closed_record(&[
+        ("exchange", Ty::Int),
+        ("messages", Ty::List(Box::new(transcript_message_ty()))),
+    ])
+}
+
+/// `transcript :: [Int] → F [[exchange: Int, messages: [Message]]]` — one
+/// span record per named exchange, in the view's own order rather than the
+/// argument's, so a slice is `$t[0]` and a count is `length $t`.
+///
+/// `Message = [role: `system|`user|`assistant|`tool, parts: [Part]]`, and
+/// `Part` is one variant per [`genai::chat::ContentPart`] kept as material —
+/// see [`transcript_part_ty`].
 fn scheme_transcript(_u: &mut Unifier) -> Scheme {
     scheme(
         &[],
@@ -929,7 +991,7 @@ fn scheme_transcript(_u: &mut Unifier) -> Scheme {
         &[],
         thunk(fun(
             Ty::List(Box::new(Ty::Int)),
-            pure(Ty::List(Box::new(Ty::String))),
+            pure(Ty::List(Box::new(transcript_span_ty()))),
         )),
     )
 }
@@ -970,7 +1032,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::new(
         Cow::Borrowed("transcript"),
         scheme_transcript,
-        "transcript <exchanges>  — read named closed exchanges back as material: one Str per span, roles marked and steps delimited. The list must be non-empty; name a digest by its reach, and do not name an exchange folded strictly inside one. The answer is ordered by the context, not by your argument, so each element opens with its own === exchange n === header — that header is the element's address. Being a list, it reads in slices: $t[0] is one span and length $t is the count. Only stdout echoes into a turn's tool result; a `let`-bound value prints nothing. Both stdout and a turn's final VALUE enter your context, so never bare-print a whole binding merely to inspect it — the transcript is material, not a survey. It commits nothing and edits nothing; context `drop does that. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "transcript <exchanges>  — read named closed exchanges back as material: one [exchange: Int, messages: [Message]] record per span. The list must be non-empty; name a digest by its reach, and do not name an exchange folded strictly inside one. The answer is ordered by the context, not by your argument, so each element carries its own `exchange` — that field is the element's address, not its position. Being a list, it reads in slices: $t[0] is one span and length $t is the count.\n\nA Message is [role: `system|`user|`assistant|`tool, parts: [Part]], one Message per model turn the span holds — a step boundary carries no message of its own. A Part is a variant, one arm per kind of content: `text [content: Str] is plain text; `program [tool: Str, source: Str, keys: [Str]] is a tool call — for exarch's own ral tool, `source` is the script that ran and `keys` is empty; for any other tool, `source` is empty and `keys` names its arguments; `result [content: Str] is a tool's response, already the digest the model saw; `reasoning [content: Str] is a model's reasoning, carried in full; `binary [content-type: Str, name: Str, bytes: Int] is an image/audio/video/PDF attachment's metadata only, never its payload; `custom [provider: Str, model: Str] names a provider-specific extension, never its payload. Narrow this material with `filter`/`take`/`view-text` over the records — do not expect elision or byte caps here, that is your job to apply.\n\nOnly stdout echoes into a turn's tool result; a `let`-bound value prints nothing. Both stdout and a turn's final VALUE enter your context, so never bare-print a whole binding merely to inspect it — the transcript is material, not a survey. It commits nothing and edits nothing; context `drop does that. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_transcript),
     ),
 ];
@@ -1843,9 +1905,9 @@ mod tests {
 
     // ── the task kit as a pure prelude over the pin family ─────────────────
 
-    /// `add-task`, `transition`, `tag-task`, and `note-task` all read and
-    /// write the "tasks" pin through `sync-tasks`; `render-tasks` and a direct
-    /// `decode-tasks !{pin-read "tasks"}` must agree on every field, including
+    /// `tasks-add`, `tasks-status`, `tasks-tag`, and `tasks-note` all read and
+    /// write the "tasks" pin through `tasks-sync`; `tasks-list` and a direct
+    /// `tasks-decode !{pin-read "tasks"}` must agree on every field, including
     /// the tags and notes the old pinned rollup never rendered.
     #[test]
     fn kit_round_trip_holds_every_field_including_tags_and_notes() {
@@ -1861,47 +1923,47 @@ mod tests {
 
         session.run_shell(
             "call-1".to_string(),
-            r#"add-task "fix the parser""#,
+            r#"tasks-add "fix the parser""#,
             BUDGET,
             &emit,
         );
         session.run_shell(
             "call-2".to_string(),
-            r#"add-task "write docs""#,
+            r#"tasks-add "write docs""#,
             BUDGET,
             &emit,
         );
-        session.run_shell("call-3".to_string(), "transition 1 `doing", BUDGET, &emit);
+        session.run_shell("call-3".to_string(), "tasks-status 1 `doing", BUDGET, &emit);
         session.run_shell(
             "call-4".to_string(),
-            r#"tag-task 1 "urgent""#,
+            r#"tasks-tag 1 "urgent""#,
             BUDGET,
             &emit,
         );
         session.run_shell(
             "call-5".to_string(),
-            r#"note-task 1 "blocked on review""#,
+            r#"tasks-note 1 "blocked on review""#,
             BUDGET,
             &emit,
         );
 
-        let rendered = session.run_shell("call-6".to_string(), "render-tasks", BUDGET, &emit);
+        let listed = session.run_shell("call-6".to_string(), "tasks-list", BUDGET, &emit);
         assert!(
-            rendered
+            listed
                 .content
-                .contains("#1  `doing  fix the parser [urgent]  -- blocked on review"),
-            "render-tasks must show the tagged, noted task, got: {}",
-            rendered.content
+                .contains(r#"status: `doing, tags: ["urgent"], notes: "blocked on review""#),
+            "tasks-list must show the tagged, noted task, got: {}",
+            listed.content
         );
         assert!(
-            rendered.content.contains("#2  `open  write docs"),
-            "render-tasks must show the untouched second task, got: {}",
-            rendered.content
+            listed.content.contains(r#"desc: "write docs""#),
+            "tasks-list must show the untouched second task, got: {}",
+            listed.content
         );
 
         let read = session.run_shell(
             "call-7".to_string(),
-            r#"let [t, _] = !{decode-tasks !{pin-read "tasks"}}
+            r#"let [t, _] = !{tasks-decode !{pin-read "tasks"}}
                echo $t[desc]
                echo $t[status]
                echo !{intercalate "," $t[tags]}
@@ -1931,7 +1993,7 @@ mod tests {
         );
     }
 
-    /// `add-task` inside a function body pins to the register, which SPEC
+    /// `tasks-add` inside a function body pins to the register, which SPEC
     /// §10's block-discard rule never touches — a later, separate top-level
     /// run still sees it.
     #[test]
@@ -1942,20 +2004,20 @@ mod tests {
 
         session.run_shell(
             "call-1".to_string(),
-            r#"let f = { add-task "inside a block" }; !{f}"#,
+            r#"let f = { tasks-add "inside a block" }; !{f}"#,
             5,
             &emit,
         );
 
-        let rendered = session.run_shell("call-2".to_string(), "render-tasks", 5, &emit);
+        let listed = session.run_shell("call-2".to_string(), "tasks-list", 5, &emit);
         assert!(
-            rendered.content.contains("inside a block"),
+            listed.content.contains("inside a block"),
             "a task added inside a function body must survive to the next top-level run, got: {}",
-            rendered.content
+            listed.content
         );
     }
 
-    /// A sub-agent's register is its own: a child's `add-task` must never
+    /// A sub-agent's register is its own: a child's `tasks-add` must never
     /// reach the parent's "tasks" pin.
     #[test]
     fn sub_agent_pinning_tasks_leaves_the_parents_register_untouched() {
@@ -1963,14 +2025,14 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell("call-1".to_string(), r#"add-task "parent task""#, 5, &emit);
+        session.run_shell("call-1".to_string(), r#"tasks-add "parent task""#, 5, &emit);
 
         let provider = std::sync::Arc::new(crate::provider::Provider::scripted(
             "test-model",
             crate::provider::scripted::Script::new().then(
                 crate::provider::scripted::Reply::tool_calls(vec![ral_call(
                     "c1",
-                    r#"add-task "child task"; agents `reply "done""#,
+                    r#"tasks-add "child task"; agents `reply "done""#,
                 )]),
             ),
         ));
@@ -2003,21 +2065,21 @@ mod tests {
             }
         }
 
-        let rendered = session.run_shell("call-3".to_string(), "render-tasks", 5, &emit);
+        let listed = session.run_shell("call-3".to_string(), "tasks-list", 5, &emit);
         assert!(
-            rendered.content.contains("parent task"),
+            listed.content.contains("parent task"),
             "the parent's own task must survive, got: {}",
-            rendered.content
+            listed.content
         );
         assert!(
-            !rendered.content.contains("child task"),
+            !listed.content.contains("child task"),
             "the child's pin must never reach the parent's register, got: {}",
-            rendered.content
+            listed.content
         );
     }
 
-    /// `sync-tasks` clears the slot once no work remains: transitioning the
-    /// last open task to `` `done `` empties the pin, and a later `add-task`
+    /// `tasks-sync` clears the slot once no work remains: transitioning the
+    /// last open task to `` `done `` empties the pin, and a later `tasks-add`
     /// finds no register and restarts id allocation at 1.
     #[test]
     fn transitioning_the_last_open_task_to_done_clears_the_pin_and_restarts_ids() {
@@ -2025,8 +2087,8 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
-        session.run_shell("call-1".to_string(), r#"add-task "only task""#, 5, &emit);
-        session.run_shell("call-2".to_string(), "transition 1 `done", 5, &emit);
+        session.run_shell("call-1".to_string(), r#"tasks-add "only task""#, 5, &emit);
+        session.run_shell("call-2".to_string(), "tasks-status 1 `done", 5, &emit);
 
         let read = session.run_shell("call-3".to_string(), r#"pin-read "tasks""#, 5, &emit);
         assert!(
@@ -2035,16 +2097,18 @@ mod tests {
             read.content
         );
 
-        session.run_shell("call-4".to_string(), r#"add-task "fresh""#, 5, &emit);
-        let rendered = session.run_shell("call-5".to_string(), "render-tasks", 5, &emit);
+        session.run_shell("call-4".to_string(), r#"tasks-add "fresh""#, 5, &emit);
+        let listed = session.run_shell("call-5".to_string(), "tasks-list", 5, &emit);
         assert!(
-            rendered.content.contains("#1  `open  fresh"),
+            listed
+                .content
+                .contains(r#"id: 1, desc: "fresh", status: `open"#),
             "id allocation must restart at 1 once the register is empty, got: {}",
-            rendered.content
+            listed.content
         );
     }
 
-    /// A card under "tasks" that `decode-tasks` does not recognise — the
+    /// A card under "tasks" that `tasks-decode` does not recognise — the
     /// model scribbled on the shared key — fails the next kit call with the
     /// didactic message naming the expected shape, rather than corrupting or
     /// silently discarding it.
@@ -2061,7 +2125,7 @@ mod tests {
             &emit,
         );
 
-        let result = session.run_shell("call-2".to_string(), r#"add-task "x""#, 5, &emit);
+        let result = session.run_shell("call-2".to_string(), r#"tasks-add "x""#, 5, &emit);
         assert!(
             result
                 .content
@@ -2153,29 +2217,42 @@ mod tests {
     }
 
     /// §2.1's shape, end to end: the answer is a list, so a slice is `$t[0]`,
-    /// and `Value::String` renders raw — one element prints as exactly that
-    /// span's own text, header and all.
+    /// addressed by its own `exchange` field, and its messages are ral
+    /// records with variant parts rather than a rendered string.
     #[test]
-    fn transcript_answers_a_list_whose_slice_prints_that_span_raw() {
+    fn transcript_answers_span_records_with_variant_parts() {
         let mut session = trunk_with_a_closed_exchange();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "let t = transcript [1]\necho !{length $t}\necho $t[0]",
+            "let t = transcript [1]\n\
+             echo !{length $t}\n\
+             echo $t[0][exchange]\n\
+             let msgs = $t[0][messages]\n\
+             echo !{length $msgs}\n\
+             case $msgs[0][role] [`user: { |_| echo \"role=user\" }]\n\
+             case $msgs[0][parts][0] [`text: { |[content: c]| echo \"text=$c\" }]\n\
+             case $msgs[1][role] [`assistant: { |_| echo \"role=assistant\" }]\n\
+             case $msgs[1][parts][0] [`text: { |[content: c]| echo \"text=$c\" }]",
             5,
             &emit,
         );
         assert!(
-            result.content.contains("=== exchange 1 ===")
-                && result.content.contains("[user]\nfirst prompt"),
-            "a slice must print as that span's raw text, got: {}",
+            result.content.contains("\n1\n"),
+            "one named span, got: {}",
             result.content
         );
         assert!(
-            result.content.contains("\n1\n"),
-            "the count of a list is `length`, got: {}",
+            result.content.contains("role=user") && result.content.contains("text=first prompt"),
+            "the user turn must be a `text part of a `user message, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("role=assistant")
+                && result.content.contains("text=first answer"),
+            "the assistant turn must be a `text part of an `assistant message, got: {}",
             result.content
         );
     }
