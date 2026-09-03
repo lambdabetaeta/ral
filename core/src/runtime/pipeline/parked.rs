@@ -52,9 +52,10 @@ impl ParkedPipeline {
     /// `gate.resume(); SIGCONT -pgid`.  Touches no terminal state — `fg`'s own
     /// guard handles that, through the door `wait_foreground` already opens.
     /// Nothing here needs to forget a tracked stop level itself: each
-    /// member's own dedicated waiter (or, for a thread's interior child,
-    /// `RunningChild::wait`'s own unpaused-gate case) observes the `SIGCONT`
-    /// structurally and reports `Continued` on its own.
+    /// member's own dedicated waiter observes the `SIGCONT` structurally and
+    /// reports `Continued` on its own; a thread's interior child instead has
+    /// `RunningChild::wait`'s own unpaused-gate case clear `park.stop`, which
+    /// its dedicated watcher turns into the same `Continued`.
     pub fn resume(&mut self) {
         self.gate.resume();
         self.pgid().signal_group(Signal::new(libc::SIGCONT));

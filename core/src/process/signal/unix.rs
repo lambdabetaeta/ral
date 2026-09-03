@@ -496,6 +496,32 @@ pub(super) fn kill_stage_by_pid(pid: u32) {
     }
 }
 
+/// The cause's signal: `SIGINT` for `Interrupt`, else `SIGTERM` — shared with
+/// `PipelineGroup::signal`, whose own pgid-wide send this pid-wide one
+/// mirrors.
+pub(crate) fn cause_signal(cause: CancelCause) -> i32 {
+    if cause == CancelCause::Interrupt {
+        libc::SIGINT
+    } else {
+        libc::SIGTERM
+    }
+}
+
+/// Signal a pipeline external stage by pid alone, then `SIGCONT`: the pair
+/// `PipelineGroup::signal` sends the whole group, for a joining group with
+/// no pgid of its own to signal — a stopped process cannot act on the cause
+/// signal until it runs.
+pub(crate) fn signal_stage_by_pid(pid: u32, cause: CancelCause) {
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "a live OS pid is positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
+    )]
+    unsafe {
+        libc::kill(pid as i32, cause_signal(cause));
+        libc::kill(pid as i32, libc::SIGCONT);
+    }
+}
+
 /// `SIGCONT` a pipeline external stage by pid alone; see
 /// [`crate::process::signal::cont_stage_by_pid`].
 pub(super) fn cont_stage_by_pid(pid: u32) {

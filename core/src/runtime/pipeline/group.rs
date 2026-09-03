@@ -157,12 +157,8 @@ impl PipelineGroup {
         }
         #[cfg(unix)]
         {
-            let signal = if cause == CancelCause::Interrupt {
-                libc::SIGINT
-            } else {
-                libc::SIGTERM
-            };
-            self.leader.signal_group(Signal::new(signal));
+            self.leader
+                .signal_group(Signal::new(crate::process::cause_signal(cause)));
             self.leader.signal_group(Signal::new(libc::SIGCONT));
         }
         #[cfg(windows)]

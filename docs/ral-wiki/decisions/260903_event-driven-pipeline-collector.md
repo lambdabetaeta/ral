@@ -106,8 +106,9 @@ anchor's witness — replaces `CollectState::drive`'s 5–100 ms backoff,
   collector's own `StagePark`, one level up — directly inside the fold,
   which a pure-`step` test cannot even observe (nothing about `step`'s
   return value shows it happened) and so cannot pin; forwarding the stop is
-  now `Effect::ForwardStop(Signal)`, and a test asserts `step` alone leaves
-  the owner's park untouched. Separately, `kill_now` unconditionally raised
+  now `Effect::ForwardStop(Option<Signal>)` (`Some` for the stop, `None` for
+  its resume), and a test asserts `step` alone leaves the owner's park
+  untouched. Separately, `kill_now` unconditionally raised
   the one forgiven ending for *any* `KillStage`-shaped kill, so the
   background-stop answer's own kill (below) silently forgave a verdict that
   should have surfaced as `StoppedByJobControl`.
@@ -155,6 +156,22 @@ anchor's witness — replaces `CollectState::drive`'s 5–100 ms backoff,
   `SIGSTOP` already freezes every process transitively, and a joining
   collector's `drive` loop simply goes idle, blocked in `recv`, until a real
   edge — its own member's `Continued` — arrives.
+- **Cancellation reaches the pids this collector launched, not just the pgid
+  it may own.** A joining collector's own group can neither `signal` nor
+  `kill` — there is no pgid of its own to send either to — so a direct
+  external stage nested under a `timeout` used to hang in `cancel_all`'s
+  final drain until it exited on its own: `StageHandle::cancel` set only the
+  waiter's `kill_cause`, an attribution nothing delivers. `cancel` now also
+  signals the stage's own pid directly (the cause's signal, then `SIGCONT`,
+  the same pair `PipelineGroup::signal` sends a whole pgid — factored out as
+  `cause_signal` so the two stay one choice), and `cancel_all`'s kill step
+  falls back to a pid-wise `kill_live_externals` wherever `group.kill()`
+  would itself be a no-op; `CollectState::drop` takes the same fork for an
+  unwinding joining collector. A nested pipeline's `timeout` now behaves
+  exactly as a top-level one's does. Descendants of a killed external remain
+  the group owner's to end, as for any stage's own kill — the same edge
+  every POSIX shell has, and moot on Linux under confinement, where the
+  stage's own jail cgroup kill already takes its descendants with it.
 
 ## Superseded and unamended
 
@@ -196,6 +213,32 @@ it, indistinguishable in `StageObservation` from an ordinary one.
   threads phase 1 already counts. Bounded by stage count, the same order the
   pumps already cost; no pipeline this shape supports has enough stages to
   make this material.
+- **Kill by pid is no longer structurally immune to pid reuse.** The old
+  `Child::kill` refused to signal a handle whose status was already
+  recorded; `kill_stage_by_pid` signals a bare pid from a thread other than
+  the one reaping it. The window is between the waiter's `waitpid` returning
+  and its `Settled` being processed by the collector, while `stages[ix]` is
+  still `Some`. Accepted as negligible on sequential-pid kernels; the exact
+  fix on Linux is `pidfd_open` at spawn + `pidfd_send_signal`, macOS has no
+  equivalent short of a WNOWAIT reaping protocol; to be taken up when phase
+  4 touches the waiter.
+- **The cancel timer watches the launch-time mooring's scope**, where the
+  polling `drive` checked the scope of whichever mooring the caller passed
+  (for `fg`, the REPL's current one). In practice the same root scope;
+  noted as a semantic change.
+- **A panic in the interior-stop watcher or an anchor witness thread loses
+  edges, never a `Settled`.** Neither owns an index — only a stage's own
+  closure or an external's waiter does, each behind its own `SettleOnDrop`
+  — so the pipeline can go deaf to Ctrl-Z/Ctrl-C (a stop or a signal simply
+  never arrives) but `drive` still reaches a stage's own end and cannot
+  hang. Out of scope: a stack overflow or a double panic aborts the process
+  regardless of any of this.
+- **Edges from different producers are ordered only per producer.** After
+  `fg`, one member's `Continued` can in principle overtake another member's
+  `Stopped` from the same Ctrl-Z and re-park the group; the `parked` level's
+  soundness assumes every `Stopped` edge of one stop arrives before any
+  `Continued` of the resume, which holds unless a waiter thread is starved
+  for the whole human-scale interval between Ctrl-Z and `fg`.
 
 ## Measured
 

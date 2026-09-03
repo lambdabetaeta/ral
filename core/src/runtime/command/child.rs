@@ -338,6 +338,8 @@ impl RunningChild {
                                         rustix::process::Signal::CONT,
                                     );
                                 }
+                                // The resume edge: the watcher turns this into `Continued`.
+                                park.stop.set(None);
                                 continue;
                             }
                             Err(cause) => {

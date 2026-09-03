@@ -29,6 +29,8 @@ pub use unix::{
     relay_handler, reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after,
     term_handler, termios_snapshot, try_waitpgid_eintr, waitpgid_eintr,
 };
+#[cfg(unix)]
+pub(crate) use unix::{cause_signal, signal_stage_by_pid};
 
 #[cfg(windows)]
 mod windows;

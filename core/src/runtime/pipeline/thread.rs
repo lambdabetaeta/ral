@@ -13,7 +13,9 @@ use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::source::Span;
 use crate::types::{Break, Closure, Error, Mooring, Settled};
-use crate::process::{CancelCause, CancelScope, StageGate, StagePark, StageStop, Wake};
+use crate::process::{
+    CancelCause, CancelScope, Ending, EndingCell, StageGate, StagePark, StageStop, Wake,
+};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
@@ -28,12 +30,22 @@ pub(super) struct ThreadStage {
     stop: Arc<StageStop>,
     cancel: CancelScope,
     wake: Arc<Wake>,
-    span: Option<Span>,
+    /// Private to this module: only `cancel` (via `StageHandle::kill_now`
+    /// and `StageHandle::cancel`) raises this, and `file_settled` is its only
+    /// reader.
+    ending: EndingCell,
 }
 
 impl ThreadStage {
-    pub(super) fn cancel(&self, cause: CancelCause) {
+    pub(super) fn cancel(&mut self, cause: CancelCause) {
+        self.ending.raise(Ending::RalEnded(cause));
         self.cancel.cancel(cause);
+    }
+
+    /// This stage's own `Ending`, read by `file_settled` alone: whether a
+    /// kill raised the forgiven one.
+    pub(super) fn ending(&self) -> Ending {
+        self.ending.get()
     }
 
     /// Fire the wake; on Windows also `CancelSynchronousIo` the stage
@@ -69,35 +81,21 @@ impl ThreadStage {
             let _ = watcher.join();
         }
     }
+}
 
-    /// This stage's sender was dropped by an unwind rather than a send: a
-    /// disconnect alone carries no message, so only `join` can recover it.
-    /// Surfaces as an `Error` carrying this stage's span, since the stage's
-    /// own stack carries none of its own to attribute it to.  The panic
-    /// skipped the closure's own `StageStop::close`, so this closes it —
-    /// otherwise the watcher would block on an edge that will never come.
-    pub(super) fn recover_panic(mut self) -> super::collect::StageObservation {
-        let join = self
-            .join
-            .take()
-            .expect("a disconnected sender's thread has not been joined yet");
-        let payload = join
-            .join()
-            .expect_err("a disconnected sender implies its thread unwound rather than returned");
-        self.stop.close();
-        #[cfg(unix)]
-        if let Some(watcher) = self.watcher.take() {
-            let _ = watcher.join();
-        }
-        let msg = payload
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown panic".to_string());
-        let mut err = Error::new(format!("ral pipeline stage panicked: {msg}"), 1);
-        err.span = self.span;
-        super::collect::StageObservation::failure(err)
-    }
+/// Turn a caught panic's payload into the `Error` a stage's own `Settled`
+/// carries: downcast the usual `&str`/`String` shapes, else name it unknown,
+/// and stamp the stage's own span, since the panicking thread's stack
+/// carries none of its own to attribute it to.
+fn panic_error(payload: &(dyn std::any::Any + Send), span: Option<Span>) -> Error {
+    let msg = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string());
+    let mut err = Error::new(format!("ral pipeline stage panicked: {msg}"), 1);
+    err.span = span;
+    err
 }
 
 impl Drop for ThreadStage {
@@ -191,6 +189,7 @@ pub(super) fn launch_thread_stage(
     };
 
     let closure_stop = Arc::clone(&stop);
+    let settle = super::collect::SettleOnDrop::new(ix, tx);
     let spawned = cx.shell.spawn_thread(
         mooring,
         "ral pipeline stage",
@@ -198,26 +197,24 @@ pub(super) fn launch_thread_stage(
         move |mooring, child| {
             child.io = io;
             child.local.audit.install_active_policy(policy);
-            let result = machine::evaluate(Closure { comp, env }, mooring, child);
-            let audit = child.local.audit.take_fragment();
+            let child = &mut *child;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                machine::evaluate(Closure { comp, env }, mooring, child)
+            }));
             let obs = match result {
-                Ok(v) => super::collect::StageObservation::ok()
+                Ok(Ok(v)) => super::collect::StageObservation::ok()
                     .with_value(is_last.then_some(v))
-                    .with_audit(audit),
-                Err(br) => super::collect::StageObservation::from_break(br).with_audit(audit),
+                    .with_audit(child.local.audit.take_fragment()),
+                Ok(Err(br)) => super::collect::StageObservation::from_break(br)
+                    .with_audit(child.local.audit.take_fragment()),
+                Err(payload) => super::collect::StageObservation::failure(panic_error(&*payload, span)),
             };
             // Release the interior-stop watcher before this stage's own last
             // act: once `Settled` is filed the collector may drop the
             // receiver at any time, and the watcher must not be found still
             // blocked on an edge that will never come.
             closure_stop.close();
-            // `tx`'s only other exit is this closure unwinding: a sender
-            // dropped with no `Settled` sent is the disconnect the collector
-            // reads as this stage's panic.
-            let _ = tx.send(super::collect::Report::Settled(
-                ix,
-                super::collect::Settlement::Thread(obs),
-            ));
+            settle.send(super::collect::Settlement::Thread(obs));
         },
     );
     let (join, cancel) = spawned.map_err(|e| {
@@ -233,7 +230,7 @@ pub(super) fn launch_thread_stage(
         stop,
         cancel,
         wake,
-        span,
+        ending: EndingCell::default(),
     })
 }
 
@@ -359,7 +356,7 @@ mod tests {
             group: &mut group,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let handle =
+        let mut handle =
             launch_thread_stage(&stage, &spec, route, cx, &gate, 0, true, tx).expect("launch");
 
         handle.cancel(CancelCause::ReaderGone);
@@ -376,45 +373,21 @@ mod tests {
         assert!(obs.break_.is_some(), "a killed stage must not settle Ok");
     }
 
-    /// A `ThreadStage` over a body that panics at once, with no sender: its
-    /// news arrives by direct `join`, as `recover_panic` does once the
-    /// collector reads its absence as a disconnect.
-    fn panicking_stage(span: Span) -> ThreadStage {
-        let join = std::thread::Builder::new()
-            .spawn(move || panic!("boom"))
-            .expect("spawn");
-        ThreadStage {
-            join: Some(join),
-            #[cfg(unix)]
-            watcher: None,
-            stop: StageStop::new(),
-            cancel: CancelScope::root(),
-            wake: Wake::new().expect("wake"),
-            span: Some(span),
-        }
-    }
-
-    /// `recover_panic` joins the panicking thread directly — no probe, no
-    /// polling — and converts the payload to an error carrying the stage's
-    /// own span, its stack having none of its own.
+    /// `panic_error` converts a caught payload to an error carrying the
+    /// stage's own span, its stack having none of its own.
     #[test]
-    fn observe_of_a_panicking_body_carries_the_panic_and_its_span() {
+    fn panic_error_carries_the_payload_and_span() {
         let file = Shell::default().install_script_context("<test>", "boom");
         let span = Span::new(file, 0, 4);
-        let handle = panicking_stage(span);
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
 
-        let obs = handle.recover_panic();
-        match obs.break_ {
-            Some(Break::Error(err)) => {
-                assert!(
-                    err.message.contains("boom"),
-                    "the panic payload must ride in the message: {}",
-                    err.message
-                );
-                assert_eq!(err.span, Some(span), "the stage's own span must survive");
-            }
-            other => panic!("expected an Error break, got {other:?}"),
-        }
+        let err = panic_error(&*payload, Some(span));
+        assert!(
+            err.message.contains("boom"),
+            "the panic payload must ride in the message: {}",
+            err.message
+        );
+        assert_eq!(err.span, Some(span), "the stage's own span must survive");
     }
 
     #[test]

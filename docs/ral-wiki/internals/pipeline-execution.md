@@ -153,14 +153,16 @@ since only the owning top-level group may act on the pgid. Its gate comes from
 `mooring.park` — the enclosing stage's own park — never from the role, so
 nesting inherits the Ctrl-Z gate the way it inherits the pgid. A joining
 collector never parks, signals, or escapes on its own account: on
-`Event::Stopped(ix, sig)` it answers with `Effect::ForwardStop(sig)`, whose
-interpreter writes the signal into its own stage's `StageStop` — the exact
-cell the owning collector's own interior-stop watcher already blocks on for
-a direct `Park` arm. An `Effect`, not a write `step` performs itself: `step`
-stays pure over every party but this collector's own state, so a shared cell
-belonging to the owner one level up is only ever touched by the interpreter.
-There is nothing to "forget" the way a polled level once needed forgetting,
-since the event is consumed exactly once. This is the mechanism
+`Event::Stopped(ix, sig)` it answers with `Effect::ForwardStop(Some(sig))`,
+and on the matching `Event::Continued(ix)` with `Effect::ForwardStop(None)`,
+whose interpreter writes the signal (or its resume) into its own stage's
+`StageStop` — the exact cell the owning collector's own interior-stop watcher
+already blocks on for a direct `Park` arm. An `Effect`, not a write `step`
+performs itself: `step` stays pure over every party but this collector's own
+state, so a shared cell belonging to the owner one level up is only ever
+touched by the interpreter. There is nothing to "forget" the way a polled
+level once needed forgetting, since the event is consumed exactly once. This
+is the mechanism
 by which a stop the anchor cannot witness — a single-member `SIGSTOP`, a
 `SIGTTIN` under `bg` two levels down — still surfaces to the top-level owner,
 one collector per nesting level. A joining group whose mooring carries no
@@ -203,9 +205,15 @@ event arrives: a thread that has already finished keeps its outcome, and
 `!{ echo a; exit 3 } | head -1` stays honest. Its audit fragment is folded
 either way: the verdict is the collector's doing, what the stage observed
 still happened. A stage thread's end is its own `Event::Settled`, sent as its
-last act; a panic is the structural absence of one — the sender dropped by an
-unwind rather than a send — recovered by joining the handle the collector
-kept for exactly this, surfacing as an `Error` carrying the stage's span.
+last act; a panic in the body is caught around the evaluation
+(`catch_unwind(AssertUnwindSafe(..))`) and turned into the same `Settled`,
+its payload becoming an `Error` carrying the stage's span. A `SettleOnDrop`
+guard, constructed before the closure runs and moved into it, is each
+index's own dead-man's switch: an unwind anywhere on that thread — even
+before the closure body starts — drops the guard still armed, and the drop
+itself posts the index's `Settled` (a generic "panicked" or "ended without
+reporting" message, whichever `thread::panicking()` says). An external
+stage's waiter thread carries the identical guard around its own wait.
 
 **Stop and park is Ctrl-Z's whole story, Unix-only, and one way now, not
 three.** The kernel stops what it can stop directly — the anchor and every
@@ -298,12 +306,16 @@ all — and reports `Stopped`/`Continued` per edge, `Settled` on the terminal
 one; the anchor's two threads report `Witnessed`; a low-frequency timer, the
 one left, re-checks the mooring's scope and reports `Cancelled` — the
 stopgap until scopes grow their own notification, existing to be deleted.
-Every sender is cloned once per stage and bound in its closure's outermost
-frame so it drops only by that send or by an unwind; `CollectState` drops its
-own clone once every stage is launched (`all_stages_launched`), so a `recv`
-that disconnects while some index is still unobserved *is* that stage's
-panic, recovered by joining the handle the collector kept for exactly this —
-never for polling. `CollectState::resolve` turns a `Report` into the
+Every index-owning producer — a stage thread's closure, an external's
+waiter — carries its own `SettleOnDrop`, so its `Settled` reaches the
+channel by its own send or by that guard's drop; the cancel timer and the
+anchor's two witness threads hold plain sender clones and outlive every
+stage, but none of them owns an index, so their long life cannot make a
+stage's own end go missing. `CollectState` drops its own clone once every
+stage is launched (`all_stages_launched`); a `recv` that returns `None`
+regardless — every producer gone with some index never settled — is
+therefore this collector's own defect, not a panic to recover, and is
+treated as `Done`. `CollectState::resolve` turns a `Report` into the
 [`Event`] `step` folds over — the one place `&Shell` reaches an external's
 settlement (audit synthesis, exit-hint lookup, sandbox-denial augmentation),
 since no producer thread may hold one. `step` is pure over `CollectState`: it
@@ -331,37 +343,46 @@ fold in launch order regardless of settle order, so which stage the
 collector kills when never changes which failure the fold reports.
 
 **Teardown is kill-first.** A pipeline that ends before every stage has been
-observed ends by one of two mechanisms, and both put the group's death before
-anything that blocks. `CollectState::cancel_all` is the one that observes on
-purpose — a cancel, a witnessed signal, a stop with no job table, the REPL's
-exit — and spells the order out: (1) `signal` — the cause's catchable signal
-to `-pgid`, then `SIGCONT`, so a member that honours it exits with its own
-status; (2) a bounded grace of at most `TEARDOWN_GRACE` (500 ms, shared with a
-standalone child's `terminate_group`) as a single blocking `recv_timeout` on
-the deadline, not a probe loop, filing only the `Settled` events it drains —
-every other kind is moot once the whole group is already dying, and is
-discarded; (3) `kill` — `SIGKILL -pgid`, unconditional and idempotent; (4) a
-further blocking drain, unbounded, for whatever the grace did not already
-account for — a cancelled and killed member having nowhere left to block;
-(5) the anchor last, in `Drop`, after every stage handle has gone, its own
-two threads joined rather than reaped directly (its report reader's read end
-closes only once it sees the anchor's own EOF, so it is never dropped while
-the anchor could still `SIGPIPE` on a stray write into it).
+observed ends by one of two mechanisms, and both put the death of what this
+collector launched before anything that blocks. `CollectState::cancel_all` is
+the one that observes on purpose — a cancel, a witnessed signal, a stop with
+no job table, the REPL's exit — and spells the order out for both an owning
+and a joining group: (1) `cancel_stages` delivers the cause to each stage —
+for an external, its own pid gets the cause's catchable signal then
+`SIGCONT`, on top of the `kill_cause` its waiter attributes the ending to —
+and `signal` sends the same pair to `-pgid`, a no-op for a joining group,
+which has no pgid of its own; (2) a bounded grace of at most `TEARDOWN_GRACE`
+(500 ms, shared with a standalone child's `terminate_group`) as a single
+blocking `recv_timeout` on the deadline, not a probe loop, filing only the
+`Settled` events it drains — every other kind is moot once the whole group is
+already dying, and is discarded; (3) the kill — `group.kill()` (`SIGKILL
+-pgid`) for an owning group, or `kill_live_externals` (a pid-wise `SIGKILL`
+over every stage still `Some`) for a joining one, which has no pgid to
+`SIGKILL` either; (4) a further blocking drain, unbounded, for whatever the
+grace did not already account for — a cancelled and killed member having
+nowhere left to block; (5) the anchor last, in `Drop`, after every stage
+handle has gone, its own two threads joined rather than reaped directly (its
+report reader's read end closes only once it sees the anchor's own EOF, so it
+is never dropped while the anchor could still `SIGPIPE` on a stray write into
+it).
 
 `CollectState::drop` is the other, and it covers every forced end that drops
 rather than observes: a launch that failed part-way, an unwind between launch
-and fold, a parked pipeline nobody resumed. It kills the owned pgid if and
-only if a stage is still unobserved — a condition derived from what the
-collector already knows, not a flag a caller must set — so the group dies
-before the handles beneath it join. Every stage observed is the ordinary end,
-which a `spawn` worker that joined the pgid outlives.
+and fold, a parked pipeline nobody resumed. When a stage is still unobserved —
+a condition derived from what the collector already knows, not a flag a
+caller must set — it kills the owned pgid, or, for a joining collector with no
+pgid of its own, its own live externals by pid; either way the descendants
+below it die before the handles join. Every stage observed is the ordinary
+end, which a `spawn` worker that joined the pgid outlives.
 
 Killing before joining is what makes the joins terminate: a stage's own kill
 reaches its pid alone, and a pumped descendant that survived it would hold the
 pump's pipe open forever. The two graces nest without adding — the group's
-`SIGKILL` ends whatever a stage's own `grace_poll` is waiting on. The group's
-whole verb set is `signal` and `kill`, both no-ops for a joining group, whose
-stages die of their own cancel and whose owner does the rest.
+`SIGKILL` ends whatever a stage's own `grace_poll` is waiting on. A joining
+group's own verb set, `signal` and `kill`, is a no-op either way — it has no
+pgid to send either to — so its half of teardown is per pid: `cancel_stages`
+signals, `kill_live_externals` kills; descendants of a killed external are the
+group owner's, as for any stage's own kill.
 `PipelineResources`', `PipeNode`'s and `ParkedPipeline`'s field orders carry
 the drop half: routes, then the collector, then the group. The collector's
 kill must reach the pgid it named, and it is the live anchor that keeps that
