@@ -3,47 +3,34 @@
 //!
 //! Observation order is the order stages actually end, not launch order: a
 //! non-final stage may outlive its reader (a child that stops itself, or one
-//! that keeps writing after the reader is long gone), so collection probes
-//! every still-running stage rather than blocking on one at a time. The kill
-//! cascade is tail-driven — a stage is killed once its reader has settled —
-//! and that kill is the one death forgiven. Verdict precedence — first
-//! failure wins, control outranks failure, a stop parks — folds in launch
-//! order, over observations buffered during the walk.
+//! that keeps writing after the reader is long gone), so collection reacts to
+//! whichever stage's own dedicated thread reports next rather than blocking
+//! on one at a time. The kill cascade is tail-driven — a stage is killed once
+//! its reader has settled — and that kill is the one death forgiven. Verdict
+//! precedence — first failure wins, control outranks failure, a stop parks —
+//! folds in launch order, over observations buffered during the walk.
+//!
+//! Every event in the pipeline's lifecycle — a stage settling, a member
+//! stopping or resuming, the anchor witnessing a signal or a stop, a scope
+//! cancelling — arrives on one channel, from one dedicated thread per
+//! blocking wait.  [`step`] is the pure fold over it: it never blocks, never
+//! signals, never touches a process: it inspects [`CollectState`] and
+//! returns the [`Effect`]s a thin interpreter (`CollectState::run`) performs.
 
-use super::super::command;
 #[cfg(unix)]
 use super::group::Witnessed;
 use super::group::{GroupRole, PipelineGroup};
-use super::launch::{Probe, StageHandle};
+use super::launch::StageHandle;
 use crate::evaluator::audit::observe_stamped;
-use crate::process::{CancelCause, Pgid, Signal, StageGate};
+use crate::process::{CancelCause, CommandFailure, Pgid, StageGate};
+#[cfg(unix)]
+use crate::process::{Signal, StagePark};
 use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Observed, Settled,
     Shell, Value, epoch_us,
 };
-
-/// Wait on a direct-spawn external stage and reduce it to a [`StageObservation`].
-///
-/// Such a stage has no audit-emitting evaluator behind it, so its one command
-/// node is synthesised here to keep it level with thread-routed stages.
-pub(super) fn observe_external_stage(
-    running: command::RunningChild,
-    shell: &Shell,
-    started: std::time::Instant,
-) -> StageObservation {
-    let name = running.name.clone();
-    let failure = match running.observe() {
-        Ok(failure) => failure,
-        Err(br) => return StageObservation::from_break(br),
-    };
-    let err = failure.map(|f| Error::from_command_failure(&name, f, shell));
-    let audit = synth_external_stage_audit(shell, &name, err.as_ref());
-    match err {
-        Some(err) => StageObservation::failure(super::augment_stage_failure(err, shell, started))
-            .with_audit(audit),
-        None => StageObservation::ok().with_audit(audit),
-    }
-}
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
 
 /// The fragment is empty when audit is inactive at the parent.
 fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) -> AuditFragment {
@@ -70,12 +57,104 @@ fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) ->
     AuditFragment::from_observations(vec![obs])
 }
 
-/// The collector's one event source: a stage thread's terminal observation,
-/// sent as its own last act — see [`super::thread::launch_thread_stage`].
-/// The full sum (`Stopped`, `Continued`, `Witnessed`, `Cancelled`) is phase
-/// 3's; externals and the anchor are still polled in this phase.
+/// The shell-touching finish an external stage's `Settlement` still needs —
+/// audit synthesis, exit-hint lookup, sandbox-denial augmentation — none of
+/// which a producer thread may do, holding no `&Shell` of its own.  Reduces
+/// to what [`super::launch`]'s waiter thread already resolved by running the
+/// child to its own end (`command::RunningChild::run_pipeline_stage`).
+fn finish_external_settlement(
+    name: &str,
+    failure: Settled<Option<CommandFailure>>,
+    shell: &Shell,
+    started: std::time::Instant,
+) -> StageObservation {
+    let failure = match failure {
+        Ok(f) => f,
+        Err(br) => return StageObservation::from_break(br),
+    };
+    let err = failure.map(|f| Error::from_command_failure(name, f, shell));
+    let audit = synth_external_stage_audit(shell, name, err.as_ref());
+    match err {
+        Some(err) => StageObservation::failure(super::augment_stage_failure(err, shell, started))
+            .with_audit(audit),
+        None => StageObservation::ok().with_audit(audit),
+    }
+}
+
+/// One stage's terminal news, in whichever form its own producer thread could
+/// compute it.  A thread stage evaluates entirely in-process, so its own
+/// closure builds the full [`StageObservation`] and this carries it as-is; an
+/// external stage's waiter thread can only run the child to its own end
+/// (`command::RunningChild::run_pipeline_stage`) — the shell-touching finish
+/// is [`finish_external_settlement`]'s, run by [`CollectState::resolve`] with
+/// the `&Shell` no producer thread may hold.
+pub(super) enum Settlement {
+    Thread(StageObservation),
+    External {
+        name: String,
+        failure: Settled<Option<CommandFailure>>,
+    },
+}
+
+/// What a producer thread sends: the channel's wire item.  [`step`] never
+/// sees this directly — [`CollectState::resolve`] turns a `Report` into the
+/// full [`Event`] it folds over.  `Stopped`/`Continued`/`Witnessed` are
+/// `cfg(unix)`: nothing stops on Windows, so nothing produces them there.
+pub(super) enum Report {
+    Settled(usize, Settlement),
+    #[cfg(unix)]
+    Stopped(usize, Signal),
+    #[cfg(unix)]
+    Continued(usize),
+    #[cfg(unix)]
+    Witnessed(Witnessed),
+    Cancelled(CancelCause),
+}
+
+/// The collector's pure fold input — every lifecycle edge, already resolved
+/// to data [`step`] can fold with no I/O of its own.
 pub(super) enum Event {
     Settled(usize, StageObservation),
+    #[cfg(unix)]
+    Stopped(usize, Signal),
+    #[cfg(unix)]
+    Continued(usize),
+    #[cfg(unix)]
+    Witnessed(Witnessed),
+    Cancelled(CancelCause),
+}
+
+/// [`step`]'s pure output: what the interpreter ([`CollectState::run`]) must
+/// perform for one event's worth of consequences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Effect {
+    /// The reader-gone cascade's own kill: the one death forgiven.  Never
+    /// reused for any other kill — see [`StageHandle::kill_now`]'s doc.
+    KillStage(usize),
+    #[cfg(unix)]
+    PauseGate,
+    #[cfg(unix)]
+    SigstopGroup,
+    /// The ownerless-stop rule: no group `SIGCONT` is coming.
+    #[cfg(unix)]
+    SigcontMember(usize),
+    /// A background group's stop-then-kill: fired before the group's own
+    /// `SIGCONT` could wake the child.  Distinct from `KillStage` precisely
+    /// because it must *not* raise the forgiven ending — the waiter's own
+    /// `StoppedThenKilled` classification is the verdict here, not a
+    /// forgiveness `KillStage` would wrongly grant a stop nobody asked to
+    /// forget.
+    #[cfg(unix)]
+    KillStoppedStage(usize),
+    /// The joining-with-a-park forward: writes the stop into the owner's own
+    /// `StagePark`.  An `Effect`, not a fold side effect — `step` never
+    /// touches another party's shared cell itself.
+    #[cfg(unix)]
+    ForwardStop(Signal),
+    CancelAll(CancelCause),
+    #[cfg(unix)]
+    Park(Signal),
+    Done,
 }
 
 /// One stage's observation, normalized across external children and ral
@@ -196,18 +275,6 @@ impl PipelineCollector {
     }
 }
 
-/// One pass's outcome: whether it made progress, found nothing new, finished
-/// every stage, or hit a stop.  Shared by [`CollectState::drive`]'s blocking
-/// loop and [`CollectState::pass`]'s single non-blocking use by
-/// `ParkedPipeline::poll`.
-pub(super) enum Pass {
-    Advanced,
-    Idle,
-    Done,
-    #[cfg(unix)]
-    Parked(Signal),
-}
-
 /// `drive`'s two outcomes: every stage observed, or a stop parked the group.
 /// `Parked` is `cfg(unix)`: there is no stop to park from on Windows.
 pub(super) enum Drive {
@@ -226,31 +293,85 @@ pub(super) struct CollectState {
     /// The pgid a forced end of this collector kills; `None` for a joining
     /// collector, whose owner's teardown does it.
     owned_group: Option<Pgid>,
-    /// Every thread stage's [`Event`] arrives here.
-    rx: std::sync::mpsc::Receiver<Event>,
+    /// Every producer's [`Report`] arrives here: stage threads, external
+    /// waiters, the anchor's two witness threads, the cancel timer.
+    rx: Receiver<Report>,
     /// This collector's own clone, held only while stages are still being
     /// launched: [`Self::all_stages_launched`] drops it, so afterwards a
-    /// `recv` disconnects exactly when every stage's own clone is gone too —
-    /// the structural signal that the missing one panicked.
-    tx: Option<std::sync::mpsc::Sender<Event>>,
-}
-
-#[cfg(unix)]
-fn stop_the_group(group: &PipelineGroup, gate: &StageGate) {
-    gate.pause();
-    group.leader_pgid().signal_group(Signal::new(libc::SIGSTOP));
+    /// stage thread's `recv` disconnect (never this channel's, which every
+    /// other producer also holds) is that stage's panic.
+    tx: Option<Sender<Report>>,
+    /// Cached at construction, so `step` needs nothing beyond `&mut Self`:
+    /// the group's role and, for a joining collector, the owner's own park to
+    /// forward a stop into.  Read only by `on_stopped`/`on_witnessed`, both
+    /// `cfg(unix)` — nothing stops on Windows to answer by role.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    role: GroupRole,
+    #[cfg(unix)]
+    own_park: Option<StagePark>,
+    /// Each stage's stop, tracked as a level from its own two edges
+    /// (`Stopped` sets it, `Continued` clears it) rather than a cell
+    /// someone must remember to clear.
+    #[cfg(unix)]
+    stopped: Vec<bool>,
+    /// The anchor's own stop, tracked the same way as a member's — the
+    /// anchor is a member of the group like any other.
+    #[cfg(unix)]
+    anchor_stopped: bool,
+    /// Whether a `Foreground` group has already parked for the Ctrl-Z still
+    /// in force.  Load-bearing, not ceremony: three producers (the anchor,
+    /// and each of `sleep 10 | cat`'s two externals) each send their own
+    /// edge for one Ctrl-Z, and only the first may answer with `Park` — a
+    /// second `Stopped` for a stop already parked is not a second park, or
+    /// `fg` would need one resume per member instead of one `SIGCONT -pgid`.
+    /// Cleared once every tracked level — every member's and the anchor's —
+    /// reads clear again.
+    #[cfg(unix)]
+    parked: bool,
+    /// Keeps the cancel-timer thread alive; dropping this collector lets it
+    /// notice within one tick and leave, rather than living on unbounded.
+    _alive: Arc<()>,
 }
 
 /// This collector's own scope, once `check` has also parked a joining
-/// collector alongside its owner.
-fn scope_cancelled(mooring: &Mooring) -> Option<CancelCause> {
-    crate::process::check(mooring).err()?;
-    mooring.cancel.cause()
+/// collector alongside its owner — the one timer left, a low-frequency
+/// re-check of `scope.cause()` until scopes grow their own notification.
+/// Runs on its own thread, since every other producer here is a blocking
+/// wait and this is the one thing with nothing to block on.
+fn spawn_cancel_timer(scope: crate::process::CancelScope, tx: Sender<Report>, alive: std::sync::Weak<()>) {
+    let spawned = std::thread::Builder::new()
+        .name("ral pipeline cancel timer".to_string())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if alive.upgrade().is_none() {
+                    return;
+                }
+                if let Some(cause) = scope.cause() {
+                    let _ = tx.send(Report::Cancelled(cause));
+                    return;
+                }
+            }
+        });
+    // A spawn failure here costs only the stopgap's own coverage — every
+    // other cancellation path (a signal handler's cause, `check`'s own poll
+    // points) still works — so it is not worth failing pipeline launch over.
+    drop(spawned);
 }
 
 impl CollectState {
-    pub(super) fn new(group: &PipelineGroup, started: std::time::Instant) -> Self {
+    pub(super) fn new(group: &mut PipelineGroup, mooring: &Mooring, started: std::time::Instant) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        #[cfg(unix)]
+        if group.owned() {
+            group.start_witness_threads(tx.clone());
+        }
+        let alive = Arc::new(());
+        spawn_cancel_timer(
+            mooring.cancel.as_scope().clone(),
+            tx.clone(),
+            Arc::downgrade(&alive),
+        );
         Self {
             stages: Vec::new(),
             observed: Vec::new(),
@@ -258,19 +379,65 @@ impl CollectState {
             owned_group: group.owned().then(|| group.leader_pgid()),
             rx,
             tx: Some(tx),
+            role: group.role(),
+            #[cfg(unix)]
+            own_park: mooring.park.clone(),
+            #[cfg(unix)]
+            stopped: Vec::new(),
+            #[cfg(unix)]
+            anchor_stopped: false,
+            #[cfg(unix)]
+            parked: false,
+            _alive: alive,
         }
     }
 
+    /// A `CollectState` for `step`'s own transition-table tests: no group, no
+    /// anchor, no cancel timer, no processes — just the state `step` folds
+    /// over, with a real channel so `push`ed [`StageHandle`]s (built with
+    /// [`StageHandle::fake_external_for_step_test`]) still have somewhere to
+    /// send from, unused by the tests that construct events by hand instead.
+    #[cfg(test)]
+    pub(super) fn for_step_test(role: GroupRole) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            stages: Vec::new(),
+            observed: Vec::new(),
+            started: std::time::Instant::now(),
+            owned_group: None,
+            rx,
+            tx: Some(tx),
+            role,
+            #[cfg(unix)]
+            own_park: None,
+            #[cfg(unix)]
+            stopped: Vec::new(),
+            #[cfg(unix)]
+            anchor_stopped: false,
+            #[cfg(unix)]
+            parked: false,
+            _alive: Arc::new(()),
+        }
+    }
+
+    /// A joining collector's own owner park, for the "forwards the stop"
+    /// transition-table tests.
+    #[cfg(all(test, unix))]
+    pub(super) fn with_own_park(mut self, park: StagePark) -> Self {
+        self.own_park = Some(park);
+        self
+    }
+
     /// The index a stage about to be launched will occupy once pushed, for
-    /// [`super::thread::launch_thread_stage`]'s closure to name itself by in
-    /// its `Settled` event.
+    /// [`super::thread::launch_thread_stage`]'s closure (and an external
+    /// stage's waiter thread) to name itself by in its own reports.
     pub(super) fn next_index(&self) -> usize {
         self.stages.len()
     }
 
-    /// A clone for a stage thread's closure — see [`Event`] and
+    /// A clone for a stage's own producer thread — see [`Report`] and
     /// [`Self::all_stages_launched`].
-    pub(super) fn sender(&self) -> std::sync::mpsc::Sender<Event> {
+    pub(super) fn sender(&self) -> Sender<Report> {
         self.tx
             .as_ref()
             .expect("a stage is still launching, so the collector's own sender is alive")
@@ -286,302 +453,338 @@ impl CollectState {
     pub(super) fn push(&mut self, handle: StageHandle) {
         self.stages.push(Some(handle));
         self.observed.push(None);
+        #[cfg(unix)]
+        self.stopped.push(false);
     }
 
-    /// One stage's [`Event::Settled`] has arrived: apply the forgiven-death
-    /// rule its `Ending` earns, join its now-returning thread, and release
-    /// its held read end.
-    fn file(&mut self, ev: Event) {
-        let Event::Settled(ix, obs) = ev;
-        let handle = self.stages[ix]
-            .take()
-            .expect("a stage's Settled event arrives once");
-        self.observed[ix] = Some(handle.file_settled(obs));
+    /// Turn one producer's raw [`Report`] into the [`Event`] `step` folds
+    /// over — the one place `&Shell` reaches an external's settlement.
+    fn resolve(&self, report: Report, shell: &Shell) -> Event {
+        match report {
+            Report::Settled(ix, Settlement::Thread(obs)) => Event::Settled(ix, obs),
+            Report::Settled(ix, Settlement::External { name, failure }) => Event::Settled(
+                ix,
+                finish_external_settlement(&name, failure, shell, self.started),
+            ),
+            #[cfg(unix)]
+            Report::Stopped(ix, sig) => Event::Stopped(ix, sig),
+            #[cfg(unix)]
+            Report::Continued(ix) => Event::Continued(ix),
+            #[cfg(unix)]
+            Report::Witnessed(w) => Event::Witnessed(w),
+            Report::Cancelled(cause) => Event::Cancelled(cause),
+        }
+    }
+
+    /// Block for the next event.  `None` once every producer is gone without
+    /// the pipeline ever reaching `Done` — a defect elsewhere, treated the
+    /// same as `Done` itself: there is nothing further collection can do.
+    fn recv(&self, shell: &Shell) -> Option<Event> {
+        self.rx.recv().ok().map(|report| self.resolve(report, shell))
     }
 
     /// The channel has disconnected: every thread stage still `Some` had its
     /// sender dropped by an unwind rather than a send — the structural panic
     /// signal, attributed by the missing index.  An external stage never
-    /// held a clone, so it is left alone.  Returns whether any stage was
-    /// filed this way.
-    fn file_panics(&mut self) -> bool {
-        let mut filed = false;
+    /// held a clone, so it is left alone: its own waiter thread disconnecting
+    /// without a `Settled` would be this collector's own defect, not a panic
+    /// to recover from.
+    fn file_panics(&mut self) {
         for ix in 0..self.stages.len() {
             if self.stages[ix].as_ref().is_some_and(StageHandle::is_thread) {
                 let handle = self.stages[ix].take().expect("checked above");
                 self.observed[ix] = Some(handle.recover_panic());
-                filed = true;
-            }
-        }
-        filed
-    }
-
-    /// File every event the channel already holds, without blocking.
-    /// Returns whether any arrived.
-    fn drain_ready(&mut self) -> bool {
-        let mut filed = false;
-        loop {
-            match self.rx.try_recv() {
-                Ok(ev) => {
-                    self.file(ev);
-                    filed = true;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => return filed,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return self.file_panics() || filed;
-                }
             }
         }
     }
 
-    /// This stage's stop, however it was read — an external's probed level,
-    /// a thread's own `StagePark` cell — answered by the group's role.
-    /// `Some` only for the foreground case, whose caller must return it at
-    /// once.
+    /// One stage's [`Event::Settled`]: file its observation, then the
+    /// reader-gone cascade — identical in content to the old tail-first
+    /// rescan, fired now by the event that justifies it — and whether every
+    /// stage is now observed.
+    fn on_settled(&mut self, ix: usize, obs: StageObservation) -> Vec<Effect> {
+        let handle = self.stages[ix]
+            .take()
+            .expect("a stage's Settled event arrives once");
+        self.observed[ix] = Some(handle.file_settled(obs));
+        // An end is the third edge out of the stopped level, and the only
+        // one a stage killed where it stood ever reports: without this its
+        // level, and `parked` with it, would outlive the stage.
+        #[cfg(unix)]
+        {
+            self.stopped[ix] = false;
+            self.maybe_clear_parked();
+        }
+
+        let mut effects = Vec::new();
+        // A stage that already finished keeps its outcome — `!{ echo a;
+        // exit 3 } | head -1` must stay honest — so the writer is only
+        // killed while still running (`Some`).
+        if ix > 0
+            && let Some(writer) = self.stages[ix - 1].as_ref()
+            && writer.feeds_pipe()
+        {
+            effects.push(Effect::KillStage(ix - 1));
+        }
+        if self.stages.iter().all(Option::is_none) {
+            effects.push(Effect::Done);
+        }
+        effects
+    }
+
+    /// One stage's [`Event::Stopped`], answered by the group's role.  Only a
+    /// foreground group has a job table to resume it, so only it parks —
+    /// and only once per Ctrl-Z: [`Self::maybe_park`] guards it, since
+    /// `sleep 10 | cat`'s stop is three edges (the anchor's, and each
+    /// external's own), not three parks.  Any other owned group is
+    /// cancelled; a joining collector forwards the stop into its own
+    /// stage's slot — the report its owner reads — as an `Effect`, never a
+    /// write `step` performs itself, and never parks, signals, or escapes
+    /// on its own account.  A stop with no park above it — a detached
+    /// worker, deaf to job control — is instead resumed by this collector
+    /// itself.
+    #[cfg(unix)]
+    fn on_stopped(&mut self, ix: usize, sig: Signal) -> Vec<Effect> {
+        self.stopped[ix] = true;
+        match self.role {
+            GroupRole::Foreground => self.maybe_park(sig),
+            GroupRole::Background => {
+                // Killed before the group's own teardown signal: its
+                // `SIGCONT` would otherwise let the child do something else,
+                // and the verdict would then name that instead of the stop.
+                // A thread stage has no `WaitOutcome::StoppedThenKilled` to
+                // settle into — `CancelAll` alone already covers it.
+                let mut effects = Vec::new();
+                if !self.stages[ix]
+                    .as_ref()
+                    .expect("a stopped stage is still live")
+                    .is_thread()
+                {
+                    effects.push(Effect::KillStoppedStage(ix));
+                }
+                effects.push(Effect::CancelAll(CancelCause::Terminate));
+                effects
+            }
+            GroupRole::Joining => match &self.own_park {
+                Some(_) => vec![Effect::ForwardStop(sig)],
+                None => vec![Effect::SigcontMember(ix)],
+            },
+        }
+    }
+
+    /// One stage's [`Event::Continued`]: clear its tracked level, and clear
+    /// `parked` too once no level anywhere — any member's, or the
+    /// anchor's — remains set, so the *next* Ctrl-Z can park again.
+    #[cfg(unix)]
+    fn on_continued(&mut self, ix: usize) -> Vec<Effect> {
+        self.stopped[ix] = false;
+        self.maybe_clear_parked();
+        Vec::new()
+    }
+
+    /// The `Foreground` answer to a stop, guarded so a Ctrl-Z already
+    /// parked does not park again for a second member's (or the anchor's)
+    /// own edge of the same stop.
+    #[cfg(unix)]
+    fn maybe_park(&mut self, sig: Signal) -> Vec<Effect> {
+        if self.parked {
+            return Vec::new();
+        }
+        self.parked = true;
+        vec![Effect::PauseGate, Effect::SigstopGroup, Effect::Park(sig)]
+    }
+
+    #[cfg(unix)]
+    fn maybe_clear_parked(&mut self) {
+        if !self.anchor_stopped && self.stopped.iter().all(|&s| !s) {
+            self.parked = false;
+        }
+    }
+
+    /// The anchor's own report: a stopped anchor parks or cancels exactly as
+    /// a member's own stop would, tracked as the same kind of level a
+    /// member's is; a witnessed signal always cancels.  A joining group has
+    /// no anchor, so it never witnesses.
+    #[cfg(unix)]
+    fn on_witnessed(&mut self, w: Witnessed) -> Vec<Effect> {
+        match w {
+            Witnessed::Stopped(sig) => {
+                self.anchor_stopped = true;
+                match self.role {
+                    GroupRole::Foreground => self.maybe_park(sig),
+                    GroupRole::Background => vec![Effect::CancelAll(CancelCause::Terminate)],
+                    GroupRole::Joining => unreachable!("a joining group has no anchor to witness"),
+                }
+            }
+            Witnessed::Continued => {
+                self.anchor_stopped = false;
+                self.maybe_clear_parked();
+                Vec::new()
+            }
+            Witnessed::Cancelled(cause) => vec![Effect::CancelAll(cause)],
+        }
+    }
+
+    /// Perform one [`Effect`]: signals, gate, wake.  `Some` when it decides
+    /// `drive`'s outcome; the caller returns at once rather than folding
+    /// whatever else the same event's effect list still holds.
     #[cfg_attr(
         not(unix),
         allow(unused_variables, reason = "the Ctrl-Z gate has no Windows use")
     )]
-    fn answer_stop(
+    fn run(
         &mut self,
-        ix: usize,
-        sig: Signal,
+        effect: Effect,
         group: &PipelineGroup,
         gate: &StageGate,
-        mooring: &Mooring,
         shell: &Shell,
-    ) -> Option<Pass> {
-        match group.role() {
-            #[cfg(unix)]
-            GroupRole::Foreground => {
-                stop_the_group(group, gate);
-                Some(Pass::Parked(sig))
-            }
-            #[cfg(not(unix))]
-            GroupRole::Foreground => unreachable!("nothing stops on Windows: {sig:?}"),
-            GroupRole::Background => {
-                // Settled before the group teardown: its SIGCONT would
-                // resume the stopped child, and the verdict would then name
-                // whatever it did next instead of the stop.
-                self.stages[ix]
-                    .as_mut()
-                    .expect("caller holds a live stage at ix")
-                    .end_stopped(sig);
-                Some(self.cancel_all(group, CancelCause::Terminate, shell))
-            }
-            GroupRole::Joining => {
-                match &mooring.park {
-                    Some(park) => {
-                        park.stop.set(Some(sig));
-                        self.stages[ix]
-                            .as_mut()
-                            .expect("caller holds a live stage at ix")
-                            .resume();
-                    }
-                    None => self.stages[ix]
-                        .as_mut()
-                        .expect("caller holds a live stage at ix")
-                        .resume_unowned(),
+    ) -> Option<Drive> {
+        match effect {
+            Effect::KillStage(ix) => {
+                if let Some(handle) = self.stages[ix].as_mut() {
+                    handle.kill_now();
                 }
                 None
             }
+            #[cfg(unix)]
+            Effect::PauseGate => {
+                gate.pause();
+                None
+            }
+            #[cfg(unix)]
+            Effect::SigstopGroup => {
+                group.leader_pgid().signal_group(Signal::new(libc::SIGSTOP));
+                None
+            }
+            #[cfg(unix)]
+            Effect::SigcontMember(ix) => {
+                if let Some(handle) = self.stages[ix].as_ref() {
+                    handle.sigcont_member();
+                }
+                None
+            }
+            #[cfg(unix)]
+            Effect::KillStoppedStage(ix) => {
+                if let Some(handle) = self.stages[ix].as_ref() {
+                    handle.kill_stopped();
+                }
+                None
+            }
+            #[cfg(unix)]
+            Effect::ForwardStop(sig) => {
+                if let Some(park) = &self.own_park {
+                    park.stop.set(Some(sig));
+                }
+                None
+            }
+            Effect::CancelAll(cause) => {
+                self.cancel_all(group, cause, shell);
+                Some(Drive::Done)
+            }
+            #[cfg(unix)]
+            Effect::Park(sig) => Some(Drive::Parked(sig)),
+            Effect::Done => Some(Drive::Done),
         }
     }
 
-    /// One non-blocking pass over every unobserved stage, tail-first: file
-    /// whatever the channel has for a thread stage, probe an external one,
-    /// end a running stage whose reader has already settled, and detect a
-    /// stop — through the anchor, a thread's own cell, or an external's
-    /// probe — and answer it by the group's role.  Only a foreground group
-    /// has a job table to resume it, so only it parks; any other owned group
-    /// is cancelled; a joining collector forwards the stop into its own
-    /// stage's slot — the report its owner reads — and forgets it here,
-    /// never parking, signalling, or escaping.  A stop with no park above it
-    /// — a detached worker, deaf to job control — is instead resumed by this
-    /// collector itself.
-    #[cfg_attr(
-        not(unix),
-        allow(unused_variables, reason = "the Ctrl-Z gate has no Windows use")
-    )]
-    pub(super) fn pass(
+    /// One non-blocking drain of whatever the channel already holds, folding
+    /// each through `step` and `run` in turn — for `ParkedPipeline::poll`'s
+    /// single pass over a backgrounded job.  `None` means still running.
+    /// `cfg(unix)`: `ParkedPipeline` is Unix-only, there being no stop to
+    /// park from on Windows.
+    #[cfg(unix)]
+    pub(super) fn try_advance(
         &mut self,
-        group: &mut PipelineGroup,
+        group: &PipelineGroup,
         gate: &StageGate,
-        mooring: &Mooring,
         shell: &Shell,
-    ) -> Pass {
-        #[cfg(unix)]
-        let witnessed = match group.witness() {
-            Some(Witnessed::Stopped(sig)) => match group.role() {
-                GroupRole::Foreground => {
-                    stop_the_group(group, gate);
-                    return Pass::Parked(sig);
+    ) -> Option<Drive> {
+        loop {
+            let report = match self.rx.try_recv() {
+                Ok(report) => report,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.file_panics();
+                    return Some(Drive::Done);
                 }
-                GroupRole::Background => Some(CancelCause::Terminate),
-                GroupRole::Joining => unreachable!("a joining group has no anchor to witness"),
-            },
-            Some(Witnessed::Cancelled(cause)) => Some(cause),
-            None => None,
-        };
-        #[cfg(not(unix))]
-        let witnessed = None;
-
-        if let Some(cause) = witnessed.or_else(|| scope_cancelled(mooring)) {
-            return self.cancel_all(group, cause, shell);
-        }
-
-        let mut progress = self.drain_ready();
-
-        let n = self.stages.len();
-        for ix in (0..n).rev() {
-            let Some(handle) = self.stages[ix].as_mut() else {
-                continue;
             };
-            match handle.probe() {
-                // Ended only while still running: a stage that already
-                // finished keeps its outcome, so `!{ echo a; exit 3 } | head -1`
-                // stays honest.  Observed on the next pass.
-                Probe::Running if self.observed.get(ix + 1).is_some_and(Option::is_some) => {
-                    handle.reader_gone();
-                }
-                Probe::Running => {}
-                // Only an external ever probes ready; a thread's observation
-                // arrives on the channel above.
-                Probe::Ready => {
-                    let obs = self.stages[ix]
-                        .take()
-                        .expect("probed above")
-                        .observe(shell, self.started);
-                    self.observed[ix] = Some(obs);
-                    progress = true;
-                }
-                Probe::Stopped(sig) => {
-                    if let Some(pass) = self.answer_stop(ix, sig, group, gate, mooring, shell) {
-                        return pass;
-                    }
+            let ev = self.resolve(report, shell);
+            for effect in step(self, ev) {
+                if let Some(drive) = self.run(effect, group, gate, shell) {
+                    return Some(drive);
                 }
             }
         }
+    }
 
-        if !self.stages.iter().any(Option::is_some) {
-            Pass::Done
-        } else if progress {
-            Pass::Advanced
-        } else {
-            Pass::Idle
+    /// Fold events until every stage is observed or a stop parks the group —
+    /// `loop { for e in step(&mut st, rx.recv()?) { run(e) } }`, no interval,
+    /// no backoff, exact latency, zero idle CPU.  Re-entrant: `fg` resumes
+    /// the same walk.
+    pub(super) fn drive(&mut self, group: &PipelineGroup, gate: &StageGate, shell: &Shell) -> Drive {
+        loop {
+            let Some(ev) = self.recv(shell) else {
+                self.file_panics();
+                return Drive::Done;
+            };
+            for effect in step(self, ev) {
+                if let Some(drive) = self.run(effect, group, gate, shell) {
+                    return drive;
+                }
+            }
         }
     }
 
-    /// Tear the whole pipeline down, and only then observe it.
+    /// Tear the whole pipeline down.
     ///
-    /// Signal, grace, kill, drain, observe — in that order, because a drain
+    /// Signal, bounded grace, kill, drain — in that order, because a drain
     /// can only terminate once nothing that holds a pipe end is alive, and a
     /// stage's own kill reaches its pid alone.  A pumped descendant of a
     /// killed stage outlives the stage, and no wait on that pump returns
-    /// while it does.  This is the one path that observes on purpose, so the
-    /// kill is explicit and precedes the observation; a collector dropped
-    /// short of that is ended by `Drop`, kill first.
+    /// while it does.  A collector dropped short of this is ended by `Drop`,
+    /// kill first.
     ///
-    /// The channel drain (blocking, for every thread stage a probe can no
-    /// longer reach) comes after the kill regardless of `group.owned()`: a
-    /// joining collector signals and kills nothing of its own, but its
-    /// stage's own cancel — already raised above — still ends it, and its
-    /// `Settled` still arrives only by channel.
-    ///
-    /// Tail-first once the tree is dead, so each edge's held read end is
-    /// released behind its writer.
-    pub(super) fn cancel_all(
-        &mut self,
-        group: &PipelineGroup,
-        cause: CancelCause,
-        shell: &Shell,
-    ) -> Pass {
+    /// The grace is a bounded blocking `recv_timeout` on the very deadline,
+    /// not a probe loop; only a `Settled` event is filed during teardown —
+    /// the reader-gone cascade and further cancellations are moot once the
+    /// whole group is already dying, so every other event is simply
+    /// discarded.  Idempotent: an event already mid-flight may cause this to
+    /// run again (a second cancel racing the first), and every step here —
+    /// re-cancelling, re-signalling, re-killing — is safe to repeat.
+    pub(super) fn cancel_all(&mut self, group: &PipelineGroup, cause: CancelCause, shell: &Shell) {
         self.cancel_stages(cause);
         // A joining group has no signal to grace and no pgid to kill: its
-        // stages die of their own cancel, and the owner's teardown does the rest.
+        // stages die of their own cancel, and the owner's teardown does the
+        // rest; its `Settled` still arrives only by channel, drained below.
         if group.owned() {
             group.signal(cause);
             #[cfg(unix)]
             {
                 let deadline = std::time::Instant::now() + crate::process::TEARDOWN_GRACE;
-                loop {
-                    // A thread stage leaves the grace by filing its own
-                    // event, an external by probing ready — every one each
-                    // round, not up to the first unsettled: a probe is also
-                    // what reaps an external.
-                    self.drain_ready();
-                    let mut pending = 0_usize;
-                    for handle in self.stages.iter_mut().flatten() {
-                        if !matches!(handle.probe(), Probe::Ready) {
-                            pending += 1;
-                        }
-                    }
-                    if pending == 0 || std::time::Instant::now() >= deadline {
+                while self.stages.iter().any(Option::is_some) {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    let Ok(report) = self.rx.recv_timeout(remaining) else {
+                        self.file_panics();
+                        break;
+                    };
+                    if let Event::Settled(ix, obs) = self.resolve(report, shell) {
+                        let _ = self.on_settled(ix, obs);
+                    }
                 }
             }
             group.kill();
         }
-        while self.stages.iter().flatten().any(StageHandle::is_thread) {
-            if let Ok(ev) = self.rx.recv() {
-                self.file(ev);
-            } else {
+        while self.stages.iter().any(Option::is_some) {
+            let Some(report) = self.rx.recv().ok() else {
                 self.file_panics();
                 break;
+            };
+            if let Event::Settled(ix, obs) = self.resolve(report, shell) {
+                let _ = self.on_settled(ix, obs);
             }
-        }
-        let n = self.stages.len();
-        for ix in (0..n).rev() {
-            if let Some(handle) = self.stages[ix].take() {
-                self.observed[ix] = Some(handle.observe(shell, self.started));
-            }
-        }
-        Pass::Done
-    }
-
-    /// Pass until every stage is observed or a stop parks the group.
-    /// Re-entrant: `fg` resumes the same walk.
-    pub(super) fn drive(
-        &mut self,
-        group: &mut PipelineGroup,
-        gate: &StageGate,
-        mooring: &Mooring,
-        shell: &Shell,
-    ) -> Drive {
-        let mut interval = std::time::Duration::from_millis(5);
-        let cap = std::time::Duration::from_millis(100);
-        loop {
-            match self.pass(group, gate, mooring, shell) {
-                Pass::Done => return Drive::Done,
-                #[cfg(unix)]
-                Pass::Parked(sig) => return Drive::Parked(sig),
-                Pass::Advanced => interval = std::time::Duration::from_millis(5),
-                Pass::Idle => {
-                    match self.rx.recv_timeout(interval) {
-                        Ok(ev) => self.file(ev),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                            // No thread stage will ever report again, and a
-                            // disconnected `recv_timeout` returns at once:
-                            // sleep out the interval the externals still
-                            // need polling over.
-                            self.file_panics();
-                            std::thread::sleep(interval);
-                        }
-                    }
-                    interval = (interval * 2).min(cap);
-                }
-            }
-        }
-    }
-
-    /// `Stopped` → `Running` on every stage, for `fg`/`bg`.
-    #[cfg(unix)]
-    pub(super) fn resume_all(&mut self) {
-        for handle in self.stages.iter_mut().flatten() {
-            handle.resume();
         }
     }
 
@@ -608,6 +811,24 @@ impl CollectState {
     }
 }
 
+/// `step` is pure over [`CollectState`]: it inspects the observation vector,
+/// the group role, and the tracked stop levels, and returns the [`Effect`]s
+/// that answer one [`Event`].  Filing an observation and updating the
+/// tracked stop levels happen here too — in-memory bookkeeping this
+/// collector already owns, not the signals/gate/wake an `Effect` stands for.
+pub(super) fn step(state: &mut CollectState, ev: Event) -> Vec<Effect> {
+    match ev {
+        Event::Settled(ix, obs) => state.on_settled(ix, obs),
+        #[cfg(unix)]
+        Event::Stopped(ix, sig) => state.on_stopped(ix, sig),
+        #[cfg(unix)]
+        Event::Continued(ix) => state.on_continued(ix),
+        #[cfg(unix)]
+        Event::Witnessed(w) => state.on_witnessed(w),
+        Event::Cancelled(cause) => vec![Effect::CancelAll(cause)],
+    }
+}
+
 impl Drop for CollectState {
     /// A collector dropped with a stage unobserved is a pipeline ending by
     /// force — an aborted launch, an unwind, a park nobody resumed — so the
@@ -630,7 +851,10 @@ impl Drop for CollectState {
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod tests {
+    use super::super::super::command;
     use super::*;
+    #[cfg(unix)]
+    use crate::process::Ending;
     use crate::types::Escape;
 
     fn make_error(status: i32, msg: &str) -> Error {
@@ -694,8 +918,15 @@ mod tests {
         }
     }
 
+    /// `drive` over two real children reaches `Done` and folds what they
+    /// settled.  The *final* stage carries the failure: a writer's own exit
+    /// is not assertable here, because a reader that settles first kills it
+    /// where it stands and that death is the one forgiven — precedence
+    /// between two surviving verdicts is
+    /// [`breaks_join_by_rank_earlier_stage_breaking_ties`]'s to state, over
+    /// no processes at all.
     #[test]
-    fn drive_folds_two_ready_stages_in_launch_order() {
+    fn drive_folds_two_settling_stages_to_done() {
         let mut shell = Shell::default();
         let mut group =
             PipelineGroup::prepare(super::super::resolve::TerminalPlan::NoTerminal, &shell)
@@ -703,11 +934,11 @@ mod tests {
         let gate = StageGate::new();
         let mooring = Mooring::adrift();
 
-        let mut collect = CollectState::new(&group, std::time::Instant::now());
-        collect.push(StageHandle::for_test(spawn_exiting(1)));
-        collect.push(StageHandle::for_test(spawn_exiting(0)));
+        let mut collect = CollectState::new(&mut group, &mooring, std::time::Instant::now());
+        collect.push(StageHandle::for_test(&collect, spawn_exiting(0)));
+        collect.push(StageHandle::for_test(&collect, spawn_exiting(1)));
 
-        match collect.drive(&mut group, &gate, &mooring, &shell) {
+        match collect.drive(&group, &gate, &shell) {
             Drive::Done => {}
             #[cfg(unix)]
             Drive::Parked(_) => panic!("two ordinary exits must not park"),
@@ -715,7 +946,7 @@ mod tests {
         let folded = collect.fold(&mooring, &mut shell);
         match folded.break_ {
             Some(Break::Error(error)) => assert_ne!(error.exit_code(), 0),
-            other => panic!("expected the failing stage's exit to fold in, got {other:?}"),
+            other => panic!("expected the final stage's exit to fold in, got {other:?}"),
         }
     }
 
@@ -743,33 +974,6 @@ mod tests {
         )
     }
 
-    /// `/bin/sleep secs` under its own pgid, real-`SIGSTOP`'d — the stop a
-    /// direct external pipeline stage sees, without a whole pipeline launch to
-    /// set one up.  `Drop` (via `RunningChild`'s) kills it regardless of the
-    /// stop, so nothing survives the test.
-    #[cfg(unix)]
-    fn spawn_stopped_sleep(secs: &str) -> command::RunningChild {
-        let mut cmd = std::process::Command::new("/bin/sleep");
-        cmd.arg(secs);
-        let (child, pgid) = crate::process::spawn_with_pgid(&mut cmd, crate::process::PgidPolicy::NewLeader)
-            .expect("spawn /bin/sleep under a pgid");
-        let pgid = pgid.expect("NewLeader yields a tracked pgid");
-        rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::STOP)
-            .expect("SIGSTOP the sleep");
-        command::RunningChild::assemble_with_owner(
-            crate::process::ChildHandle::from_std(child),
-            "sleep".to_string(),
-            command::ExternalPlumbing {
-                stdout_pump: None,
-                stderr_pump: None,
-            },
-            crate::process::StopPolicy::KillAndReap,
-            command::GroupOwner::Standalone(pgid),
-            crate::process::CancelScope::root(),
-            None,
-        )
-    }
-
     /// Only a group with a job table behind it parks; the rest is cancelled
     /// or, in a joining collector, forwarded to the owner.
     #[test]
@@ -784,104 +988,6 @@ mod tests {
         assert_eq!(tty.role(), GroupRole::Foreground);
         assert_eq!(batch.role(), GroupRole::Background);
         assert_eq!(joining.role(), GroupRole::Joining);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stopped_probe_on_a_tty_owning_group_pauses_the_gate_and_parks() {
-        let shell = Shell::default();
-        let mut group = PipelineGroup::prepare(
-            super::super::resolve::TerminalPlan::ForegroundExternalGroup,
-            &shell,
-        )
-        .expect("anchor spawns");
-        assert_eq!(group.role(), GroupRole::Foreground);
-        let gate = StageGate::new();
-        let mooring = Mooring::adrift();
-
-        let mut collect = CollectState::new(&group, std::time::Instant::now());
-        collect.push(StageHandle::for_test(spawn_stopped_sleep("30")));
-
-        let signal = 'wait: {
-            for _ in 0..100 {
-                if let Pass::Parked(sig) = collect.pass(&mut group, &gate, &mooring, &shell) {
-                    break 'wait sig;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            panic!("an owned group's stop must eventually park");
-        };
-        assert_eq!(signal, crate::process::Signal::new(libc::SIGSTOP));
-        assert!(
-            gate.is_paused(),
-            "pausing the gate is what makes every other stage block"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stopped_probe_on_a_joining_group_forwards_to_its_own_stage_and_never_parks() {
-        let mut group = PipelineGroup::joining(
-            crate::process::Pgid::from_raw(std::process::id().cast_signed()).expect("our own pid"),
-        );
-        let gate = StageGate::new();
-        let park = crate::process::StagePark {
-            gate: StageGate::new(),
-            stop: crate::process::StageStop::new(),
-        };
-        let mooring = Mooring {
-            park: Some(park.clone()),
-            ..Mooring::adrift()
-        };
-        let shell = Shell::default();
-
-        let mut collect = CollectState::new(&group, std::time::Instant::now());
-        collect.push(StageHandle::for_test(spawn_stopped_sleep("30")));
-
-        for _ in 0..100 {
-            match collect.pass(&mut group, &gate, &mooring, &shell) {
-                Pass::Parked(_) => panic!("a joining collector must never park"),
-                Pass::Done => panic!("a mere stop must not be observed as done"),
-                Pass::Advanced | Pass::Idle => {}
-            }
-            if park.stop.get().is_some() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        panic!("the stop was never forwarded to the joining collector's own stage status");
-    }
-
-    /// A joining group whose mooring carries no park — a `spawn` worker's
-    /// pipeline — is deaf to job control: nothing above it will ever `SIGCONT`
-    /// its stopped stage, so the collector must revive it itself and walk on
-    /// to `Done` rather than spin forever on `Idle`.
-    #[cfg(unix)]
-    #[test]
-    fn stopped_probe_on_a_joining_group_with_no_park_resumes_its_own_stage() {
-        let mut group = PipelineGroup::joining(
-            crate::process::Pgid::from_raw(std::process::id().cast_signed()).expect("our own pid"),
-        );
-        let gate = StageGate::new();
-        let mooring = Mooring::adrift();
-        let shell = Shell::default();
-
-        let mut collect = CollectState::new(&group, std::time::Instant::now());
-        collect.push(StageHandle::for_test(spawn_stopped_sleep("0.2")));
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            match collect.pass(&mut group, &gate, &mooring, &shell) {
-                Pass::Parked(_) => panic!("a joining collector must never park"),
-                Pass::Done => break,
-                Pass::Advanced | Pass::Idle => {}
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "an ownerless stop must be resumed rather than livelocked"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
     }
 
     /// A stage spawned into the group's own pgid via `PgidPolicy::Join`, as
@@ -963,12 +1069,13 @@ mod tests {
     #[test]
     fn a_collector_dropped_short_of_observation_kills_the_group() {
         let shell = Shell::default();
-        let group = PipelineGroup::prepare(super::super::resolve::TerminalPlan::NoTerminal, &shell)
+        let mut group = PipelineGroup::prepare(super::super::resolve::TerminalPlan::NoTerminal, &shell)
             .expect("anchor spawns");
         let (rc, pid) = spawn_stage_with_grandchild(&group, true);
 
-        let mut collect = CollectState::new(&group, std::time::Instant::now());
-        collect.push(StageHandle::for_test(rc));
+        let mooring = Mooring::adrift();
+        let mut collect = CollectState::new(&mut group, &mooring, std::time::Instant::now());
+        collect.push(StageHandle::for_test(&collect, rc));
         drop(collect);
 
         assert_dead_within_2s(pid);
@@ -988,9 +1095,9 @@ mod tests {
         let mooring = Mooring::adrift();
         let (rc, pid) = spawn_stage_with_grandchild(&group, false);
 
-        let mut collect = CollectState::new(&group, std::time::Instant::now());
-        collect.push(StageHandle::for_test(rc));
-        match collect.drive(&mut group, &gate, &mooring, &shell) {
+        let mut collect = CollectState::new(&mut group, &mooring, std::time::Instant::now());
+        collect.push(StageHandle::for_test(&collect, rc));
+        match collect.drive(&group, &gate, &shell) {
             Drive::Done => {}
             Drive::Parked(_) => panic!("an ordinary exit must not park"),
         }
@@ -1002,5 +1109,312 @@ mod tests {
         );
         unsafe { libc::kill(pid, libc::SIGKILL) };
         drop(group);
+    }
+
+    // ── step: the transition table ─────────────────────────────────────────
+    //
+    // No processes, no sleeps, no retry loops: every corner case here is a
+    // sequence of `Event`s fed to `step`, and an assertion on the `Effect`s
+    // it returns.
+
+    fn state_with(role: GroupRole, n: usize) -> CollectState {
+        let mut state = CollectState::for_step_test(role);
+        for _ in 0..n {
+            state.push(StageHandle::fake_external_for_step_test());
+        }
+        state
+    }
+
+    /// The reader-gone cascade: a settled reader kills its still-running
+    /// writer, once — and an already-finished writer keeps its outcome,
+    /// exactly the honesty `!{ echo a; exit 3 } | head -1` needs.
+    #[test]
+    fn settling_a_stage_kills_its_still_running_writer_but_spares_a_finished_one() {
+        let mut state = state_with(GroupRole::Background, 4);
+        // Stage 0 settles first — nothing upstream of it to cascade into.
+        let effects = step(&mut state, Event::Settled(0, StageObservation::ok()));
+        assert!(
+            !effects.contains(&Effect::Done),
+            "one of four stages settling must not end the pipeline"
+        );
+        // Stage 1 settles: its writer (0) already settled, so it keeps its
+        // outcome rather than being killed again.
+        let effects = step(&mut state, Event::Settled(1, StageObservation::ok()));
+        assert!(
+            !effects.contains(&Effect::KillStage(0)),
+            "a writer that already settled must keep its outcome, not be killed again: {effects:?}"
+        );
+        // Stage 3 settles while its writer (2) is still running: killed —
+        // and stage 2 has not itself settled yet, so the pipeline is not done.
+        let effects = step(&mut state, Event::Settled(3, StageObservation::ok()));
+        assert!(
+            effects.contains(&Effect::KillStage(2)),
+            "a still-running writer whose reader just settled must be killed: {effects:?}"
+        );
+        assert!(
+            !effects.contains(&Effect::Done),
+            "a killed writer is not yet observed, so the pipeline is not done: {effects:?}"
+        );
+        // Stage 2, killed by the cascade above, now settles too: every stage
+        // is observed, so the pipeline ends.
+        let effects = step(&mut state, Event::Settled(2, StageObservation::ok()));
+        assert!(
+            effects.contains(&Effect::Done),
+            "the last stage settling must end the pipeline: {effects:?}"
+        );
+    }
+
+    /// `Foreground` answers a stop by pausing the gate, `SIGSTOP`ing the
+    /// group, and parking — never cancelling, never killing.
+    #[cfg(unix)]
+    #[test]
+    fn foreground_answers_a_stop_by_pausing_and_parking() {
+        let mut state = state_with(GroupRole::Foreground, 1);
+        let sig = Signal::new(libc::SIGTSTP);
+        let effects = step(&mut state, Event::Stopped(0, sig));
+        assert_eq!(
+            effects,
+            vec![Effect::PauseGate, Effect::SigstopGroup, Effect::Park(sig)]
+        );
+    }
+
+    /// `Background` kills the stopped external before cancelling with
+    /// `Terminate` — before the teardown's own `SIGCONT` could let it do
+    /// something else and misname the verdict.  The kill is
+    /// `KillStoppedStage`, never `KillStage`: it must not raise the
+    /// forgiven ending, or the `StoppedByJobControl` verdict the waiter's
+    /// own `StoppedThenKilled` classification earns would be forgiven away
+    /// instead of surfacing.
+    #[cfg(unix)]
+    #[test]
+    fn background_kills_the_stopped_external_then_cancels_with_terminate() {
+        let mut state = state_with(GroupRole::Background, 1);
+        let effects = step(&mut state, Event::Stopped(0, Signal::new(libc::SIGTSTP)));
+        assert_eq!(
+            effects,
+            vec![
+                Effect::KillStoppedStage(0),
+                Effect::CancelAll(CancelCause::Terminate)
+            ]
+        );
+    }
+
+    /// A background stop's kill is not the forgiven ending: running
+    /// `KillStoppedStage`'s mechanical action leaves `Ending::OwnAccord`,
+    /// where `KillStage`'s (the reader-gone cascade's) would have raised
+    /// `RalEnded(ReaderGone)`.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_stops_kill_does_not_raise_the_forgiven_ending() {
+        let state = state_with(GroupRole::Background, 1);
+        state.stages[0].as_ref().unwrap().kill_stopped();
+        assert_eq!(
+            state.stages[0].as_ref().unwrap().ending_for_test(),
+            Ending::OwnAccord,
+            "KillStoppedStage must not forgive a death nothing sent as ReaderGone"
+        );
+
+        // The reader-gone cascade's own kill, for contrast, does.
+        let mut reader_gone = state_with(GroupRole::Background, 1);
+        reader_gone.stages[0].as_mut().unwrap().kill_now();
+        assert_eq!(
+            reader_gone.stages[0].as_ref().unwrap().ending_for_test(),
+            Ending::RalEnded(CancelCause::ReaderGone)
+        );
+    }
+
+    /// `Joining` with a park forwards the stop as an `Effect`, never a write
+    /// `step` performs itself: `step` alone must leave the owner's park
+    /// untouched, and never parks, signals, or kills on its own account.
+    #[cfg(unix)]
+    #[test]
+    fn joining_with_a_park_forwards_the_stop_as_an_effect_not_a_fold_side_effect() {
+        let park = StagePark {
+            gate: StageGate::new(),
+            stop: crate::process::StageStop::new(),
+        };
+        let mut state = state_with(GroupRole::Joining, 1).with_own_park(park.clone());
+        let sig = Signal::new(libc::SIGTSTP);
+        let effects = step(&mut state, Event::Stopped(0, sig));
+        assert_eq!(effects, vec![Effect::ForwardStop(sig)]);
+        assert_eq!(
+            park.stop.get(),
+            None,
+            "step alone must not write into the owner's park — only running the effect may"
+        );
+    }
+
+    /// Running `ForwardStop` is what actually writes into the owner's park.
+    #[cfg(unix)]
+    #[test]
+    fn running_forward_stop_writes_into_the_owner_park() {
+        let park = StagePark {
+            gate: StageGate::new(),
+            stop: crate::process::StageStop::new(),
+        };
+        let mut state = state_with(GroupRole::Joining, 1).with_own_park(park.clone());
+        let group = PipelineGroup::joining(
+            crate::process::Pgid::from_raw(std::process::id().cast_signed()).expect("our own pid"),
+        );
+        let gate = StageGate::new();
+        let shell = Shell::default();
+        let sig = Signal::new(libc::SIGTSTP);
+        let drive = state.run(Effect::ForwardStop(sig), &group, &gate, &shell);
+        assert!(drive.is_none());
+        assert_eq!(park.stop.get(), Some(sig));
+    }
+
+    /// `Joining` with no park is the ownerless-stop rule: the collector
+    /// `SIGCONT`s its own member, since nothing above it ever will.
+    #[cfg(unix)]
+    #[test]
+    fn joining_with_no_park_sigconts_its_own_member() {
+        let mut state = state_with(GroupRole::Joining, 1);
+        let effects = step(&mut state, Event::Stopped(0, Signal::new(libc::SIGTSTP)));
+        assert_eq!(effects, vec![Effect::SigcontMember(0)]);
+    }
+
+    /// A `Stopped` followed by a `Continued` leaves no stale stop behind —
+    /// the level tracked from its two edges, the exact class of bug
+    /// `53c760d7`'s defects B and C were.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_then_a_continue_leaves_no_stale_level() {
+        let mut state = state_with(GroupRole::Joining, 1);
+        let _ = step(&mut state, Event::Stopped(0, Signal::new(libc::SIGTSTP)));
+        assert!(state.stopped[0]);
+        let _ = step(&mut state, Event::Continued(0));
+        assert!(!state.stopped[0], "a Continued must clear the tracked level");
+    }
+
+    /// A stage killed where it stood reports its end and never a `Continued`,
+    /// so the end must clear the level too — otherwise `parked` outlives the
+    /// stage and no later Ctrl-Z ever parks again.
+    #[cfg(unix)]
+    #[test]
+    fn a_settled_stage_leaves_no_stopped_level_behind() {
+        let mut state = state_with(GroupRole::Foreground, 1);
+        let sig = Signal::new(libc::SIGTSTP);
+        let _ = step(&mut state, Event::Stopped(0, sig));
+        assert!(state.parked, "precondition: the stop parked the group");
+
+        let _ = step(&mut state, Event::Settled(0, StageObservation::ok()));
+        assert!(!state.stopped[0], "an end is an edge out of the stopped level");
+        assert!(
+            !state.parked,
+            "the last level gone, a later Ctrl-Z must be able to park again"
+        );
+    }
+
+    /// A second `Stopped` while the group is already parked answers with
+    /// nothing: `sleep 10 | cat`'s one Ctrl-Z is three edges (the anchor's,
+    /// and each external's own), not three parks.  Without this guard `fg`
+    /// would need one resume per stopped member instead of one
+    /// `SIGCONT -pgid`, since a second queued `Stopped` re-entering `drive`
+    /// after `fg` would park it right back.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_stop_while_already_parked_answers_with_nothing() {
+        let mut state = state_with(GroupRole::Foreground, 2);
+        let sig = Signal::new(libc::SIGTSTP);
+        let first = step(&mut state, Event::Stopped(0, sig));
+        assert_eq!(first, vec![Effect::PauseGate, Effect::SigstopGroup, Effect::Park(sig)]);
+        let second = step(&mut state, Event::Stopped(1, sig));
+        assert!(
+            second.is_empty(),
+            "a second member's edge of the same Ctrl-Z must not park again: {second:?}"
+        );
+    }
+
+    /// `Stopped` → `Continued` → `Stopped` parks again: once every tracked
+    /// level clears, the *next* Ctrl-Z is a fresh stop, not a stale one.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_then_a_continue_then_a_stop_parks_again() {
+        let mut state = state_with(GroupRole::Foreground, 1);
+        let sig = Signal::new(libc::SIGTSTP);
+        let first = step(&mut state, Event::Stopped(0, sig));
+        assert_eq!(first, vec![Effect::PauseGate, Effect::SigstopGroup, Effect::Park(sig)]);
+        assert!(step(&mut state, Event::Continued(0)).is_empty());
+        let second = step(&mut state, Event::Stopped(0, sig));
+        assert_eq!(
+            second,
+            vec![Effect::PauseGate, Effect::SigstopGroup, Effect::Park(sig)],
+            "a genuinely new stop, after every level cleared, must park again: {second:?}"
+        );
+    }
+
+    /// The anchor's own witnessed stop answers exactly as a member's own
+    /// stop would, per role, and is guarded by the same `parked` level.
+    #[cfg(unix)]
+    #[test]
+    fn a_witnessed_stop_answers_by_role() {
+        let mut fg = CollectState::for_step_test(GroupRole::Foreground);
+        let sig = Signal::new(libc::SIGTSTP);
+        assert_eq!(
+            step(&mut fg, Event::Witnessed(Witnessed::Stopped(sig))),
+            vec![Effect::PauseGate, Effect::SigstopGroup, Effect::Park(sig)]
+        );
+
+        let mut bg = CollectState::for_step_test(GroupRole::Background);
+        assert_eq!(
+            step(&mut bg, Event::Witnessed(Witnessed::Stopped(sig))),
+            vec![Effect::CancelAll(CancelCause::Terminate)]
+        );
+    }
+
+    /// The anchor's own stop and a member's own stop share one `parked`
+    /// level: whichever edge of one Ctrl-Z arrives first parks, the other
+    /// answers with nothing.
+    #[cfg(unix)]
+    #[test]
+    fn the_anchors_own_stop_and_a_members_share_one_parked_level() {
+        let mut state = state_with(GroupRole::Foreground, 1);
+        let sig = Signal::new(libc::SIGTSTP);
+        let anchor_first = step(&mut state, Event::Witnessed(Witnessed::Stopped(sig)));
+        assert_eq!(
+            anchor_first,
+            vec![Effect::PauseGate, Effect::SigstopGroup, Effect::Park(sig)]
+        );
+        let member_second = step(&mut state, Event::Stopped(0, sig));
+        assert!(
+            member_second.is_empty(),
+            "the member's own edge of the same Ctrl-Z must not park again: {member_second:?}"
+        );
+        // Only once *both* levels clear does the next stop park again.
+        assert!(step(&mut state, Event::Witnessed(Witnessed::Continued)).is_empty());
+        let restopped = step(&mut state, Event::Stopped(0, sig));
+        assert!(
+            restopped.is_empty(),
+            "the anchor's own level is still set, so this must not park yet: {restopped:?}"
+        );
+        assert!(step(&mut state, Event::Continued(0)).is_empty());
+        let fresh = step(&mut state, Event::Witnessed(Witnessed::Stopped(sig)));
+        assert_eq!(
+            fresh,
+            vec![Effect::PauseGate, Effect::SigstopGroup, Effect::Park(sig)],
+            "with every level clear, a fresh stop must park again: {fresh:?}"
+        );
+    }
+
+    /// A witnessed cancel always tears down, whatever the cause.
+    #[cfg(unix)]
+    #[test]
+    fn a_witnessed_cancel_cancels_all() {
+        let mut state = CollectState::for_step_test(GroupRole::Background);
+        let effects = step(
+            &mut state,
+            Event::Witnessed(Witnessed::Cancelled(CancelCause::Interrupt)),
+        );
+        assert_eq!(effects, vec![Effect::CancelAll(CancelCause::Interrupt)]);
+    }
+
+    /// A mid-flight `Cancelled` — the scope timer's own report — always
+    /// tears down too, regardless of role.
+    #[test]
+    fn a_cancelled_event_cancels_all() {
+        let mut state = state_with(GroupRole::Background, 1);
+        let effects = step(&mut state, Event::Cancelled(CancelCause::Deadline));
+        assert_eq!(effects, vec![Effect::CancelAll(CancelCause::Deadline)]);
     }
 }

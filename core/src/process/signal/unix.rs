@@ -451,16 +451,15 @@ pub(super) fn try_wait_handling_stop(
     Ok(Some(classify_wait_status(status)))
 }
 
-/// Non-blocking wait reporting both edges of a stop, for the pipeline
-/// collector's stop tracking; see [`crate::process::ChildHandle::try_wait_tracking_stops`].
-pub(super) fn try_wait_tracking_stops(
+/// Blocking wait reporting both edges of a stop, for the pipeline
+/// collector's dedicated external waiter thread; see
+/// [`crate::process::ChildHandle::wait_tracking_stops`].
+pub(super) fn wait_tracking_stops(
     child: &std::process::Child,
-) -> std::io::Result<Option<crate::process::WaitOutcome>> {
+) -> std::io::Result<crate::process::WaitOutcome> {
     let options = WaitOptions::UNTRACED | WaitOptions::CONTINUED;
-    let Some((_, status)) = try_waitpid_eintr(Pid::from_child(child), options)? else {
-        return Ok(None);
-    };
-    Ok(Some(classify_wait_status(status)))
+    let (_, status) = waitpid_eintr(Pid::from_child(child), options)?;
+    Ok(classify_wait_status(status))
 }
 
 /// Translate a `waitpid` status into a `WaitOutcome`, shared by the blocking and
@@ -480,6 +479,33 @@ fn classify_wait_status(status: WaitStatus) -> crate::process::WaitOutcome {
         return crate::process::WaitOutcome::Signaled(crate::process::Signal::new(signal));
     }
     crate::process::WaitOutcome::NativeCode(status.as_raw())
+}
+
+/// SIGKILL a pipeline external stage by pid alone, from outside the thread
+/// that owns its wait: the reader-gone cascade, and a background group's
+/// stop-then-kill (fired before the group's own `SIGCONT` could wake it).
+/// Async-signal-safe, no reap — the stage's own dedicated waiter thread
+/// reaps it and reports the death, wherever it is in `wait_tracking_stops`.
+pub(super) fn kill_stage_by_pid(pid: u32) {
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "a live OS pid is positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
+    )]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+/// `SIGCONT` a pipeline external stage by pid alone; see
+/// [`crate::process::signal::cont_stage_by_pid`].
+pub(super) fn cont_stage_by_pid(pid: u32) {
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "a live OS pid is positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
+    )]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGCONT);
+    }
 }
 
 /// SIGKILL `target` and reap the terminal status, reporting the stop that

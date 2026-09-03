@@ -117,7 +117,7 @@ impl PipeNode {
         // is no park to name off Unix.
         #[cfg(not(unix))]
         let _ = &self.cmd;
-        match self.collect.drive(&mut self.group, &self.gate, mooring, shell) {
+        match self.collect.drive(&self.group, &self.gate, shell) {
             collect::Drive::Done => self.collect.fold(mooring, shell).finish(self.yields),
             #[cfg(unix)]
             collect::Drive::Parked(signal) => {

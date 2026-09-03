@@ -4,7 +4,7 @@
 //!
 //! Unix only: there is no stop to park from on Windows.
 
-use super::collect::{CollectState, Drive, Pass};
+use super::collect::{CollectState, Drive};
 use super::group::PipelineGroup;
 use crate::ir::PipeYield;
 use crate::process::{CancelCause, Pgid, Signal, StageGate};
@@ -49,19 +49,21 @@ impl ParkedPipeline {
         &self.cmd
     }
 
-    /// `gate.resume(); collect.resume_all(); SIGCONT -pgid`.  Touches no
-    /// terminal state — `fg`'s own guard handles that, through the door
-    /// `wait_foreground` already opens.
+    /// `gate.resume(); SIGCONT -pgid`.  Touches no terminal state — `fg`'s own
+    /// guard handles that, through the door `wait_foreground` already opens.
+    /// Nothing here needs to forget a tracked stop level itself: each
+    /// member's own dedicated waiter (or, for a thread's interior child,
+    /// `RunningChild::wait`'s own unpaused-gate case) observes the `SIGCONT`
+    /// structurally and reports `Continued` on its own.
     pub fn resume(&mut self) {
         self.gate.resume();
-        self.collect.resume_all();
         self.pgid().signal_group(Signal::new(libc::SIGCONT));
     }
 
     /// `resume()`, then drive to `Done` (fold, drop `self`) or the next stop.
     pub fn resume_and_collect(mut self, mooring: &Mooring, shell: &mut Shell) -> Resumed {
         self.resume();
-        match self.collect.drive(&mut self.group, &self.gate, mooring, shell) {
+        match self.collect.drive(&self.group, &self.gate, shell) {
             Drive::Done => Resumed::Finished {
                 completed: self.collect.fold(mooring, shell).finish(self.yields).is_ok(),
             },
@@ -72,11 +74,11 @@ impl ParkedPipeline {
         }
     }
 
-    /// One non-blocking drive pass without `SIGCONT`: for the job table's
-    /// sweep of a backgrounded job.
+    /// One non-blocking drain without `SIGCONT`: for the job table's sweep of
+    /// a backgrounded job.
     pub fn poll(&mut self, mooring: &Mooring, shell: &mut Shell) -> ParkedPoll {
-        match self.collect.pass(&mut self.group, &self.gate, mooring, shell) {
-            Pass::Done => {
+        match self.collect.try_advance(&self.group, &self.gate, shell) {
+            Some(Drive::Done) => {
                 let completed = self
                     .collect
                     .fold(mooring, shell)
@@ -84,18 +86,17 @@ impl ParkedPipeline {
                     .is_ok();
                 ParkedPoll::Finished { completed }
             }
-            Pass::Parked(sig) => ParkedPoll::Stopped(sig),
-            Pass::Advanced | Pass::Idle => ParkedPoll::Running,
+            Some(Drive::Parked(sig)) => ParkedPoll::Stopped(sig),
+            None => ParkedPoll::Running,
         }
     }
 
     /// The REPL's exit: the teardown a cancel gets — signal, grace, kill,
-    /// observe — once the park is undone, so a remembered stop cannot read
-    /// as live and a thread at the gate can leave.  Consumes the pipeline:
-    /// with every stage observed there is nothing left to drive.
+    /// drain — once the park is undone, so a thread at the gate can leave.
+    /// Consumes the pipeline: with every stage observed there is nothing left
+    /// to drive.
     pub fn cancel(mut self, cause: CancelCause, shell: &Shell) {
         self.gate.resume();
-        self.collect.resume_all();
         self.collect.cancel_all(&self.group, cause, shell);
     }
 }

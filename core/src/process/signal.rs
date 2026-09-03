@@ -42,7 +42,6 @@ pub use windows::{
 #[cfg(windows)]
 pub(crate) use windows::{
     PreparedGroup, close_prepared_group, prepare_group, prepared_job, register_prepared_group,
-    terminate_for_stage_kill,
 };
 
 // ── Child handle ───────────────────────────────────────────────────────────
@@ -163,27 +162,29 @@ impl ChildHandle {
         }
     }
 
-    /// Non-blocking wait that reports both edges of a stop — `Stopped` and
+    /// Blocking wait that reports both edges of a stop — `Stopped` and
     /// `Continued` — so a holder that tracks "stopped" as a level between
     /// them never has to remember one edge and clear it by convention, the
-    /// way [`Self::try_wait_handling_stop`]'s callers otherwise must.  Used
-    /// only by the pipeline collector's stop tracking; a standalone child's
-    /// own wait must not see `Continued` and keeps the plain variant.
+    /// way [`Self::wait_handling_stop`]'s callers otherwise must.  The
+    /// pipeline collector's dedicated external waiter thread is this child's
+    /// *sole* waiter, so blocking here costs nothing but that one thread; a
+    /// standalone child's own wait must not see `Continued` and keeps polling
+    /// the plain variant, since its wait is not the only thing it must do.
     ///
     /// # Errors
-    /// Returns `Err` if the poll fails.
-    pub(crate) fn try_wait_tracking_stops(&mut self) -> std::io::Result<Option<WaitOutcome>> {
+    /// Returns `Err` if the wait fails.
+    pub(crate) fn wait_tracking_stops(&mut self) -> std::io::Result<WaitOutcome> {
         #[cfg(unix)]
         {
             let ChildRepr::Std(child) = &mut self.0;
-            unix::try_wait_tracking_stops(child)
+            unix::wait_tracking_stops(child)
         }
         #[cfg(windows)]
         {
             // Nothing stops on Windows, so the tracking wait is the plain one.
             match &mut self.0 {
-                ChildRepr::Std(child) => windows::try_wait_handling_stop(child),
-                ChildRepr::RawWindows(child) => child.try_wait_handling_stop(),
+                ChildRepr::Std(child) => windows::wait_handling_stop(child),
+                ChildRepr::RawWindows(child) => child.wait_handling_stop(),
             }
         }
     }
@@ -217,6 +218,28 @@ impl ChildHandle {
             ChildRepr::RawWindows(child) => child.reap(),
         }
     }
+}
+
+/// Kill a pipeline external stage by pid alone: the reader-gone cascade, and
+/// a background group's stop-then-kill fired before the group's own
+/// `SIGCONT` could wake it.  By pid rather than through a [`ChildHandle`]
+/// because the handle itself lives on the stage's own dedicated waiter
+/// thread, the sole owner of its wait.
+pub(crate) fn kill_stage_by_pid(pid: u32) {
+    #[cfg(unix)]
+    unix::kill_stage_by_pid(pid);
+    #[cfg(windows)]
+    windows::kill_stage_by_pid(pid);
+}
+
+/// `SIGCONT` a pipeline external stage by pid alone — the ownerless-stop
+/// rule (a detached member deaf to job control revives itself), for the
+/// same reason [`kill_stage_by_pid`] is by pid: the `ChildHandle` lives on
+/// the stage's own dedicated waiter thread.  `cfg(unix)`: nothing stops on
+/// Windows, so there is no stop to revive from there.
+#[cfg(unix)]
+pub(crate) fn cont_stage_by_pid(pid: u32) {
+    unix::cont_stage_by_pid(pid);
 }
 
 // ── Escalation ladder ──────────────────────────────────────────────────────

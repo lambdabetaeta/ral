@@ -229,7 +229,8 @@ impl WaitOutcome {
             Self::StoppedThenKilled { stopped_by, .. } => stopped_by.user_exit_code(),
             Self::Continued => unreachable!(
                 "WaitOutcome::Continued must be intercepted by the stop-tracking wait's \
-                 one caller (RunningChild::try_settle) before reaching a terminal-outcome reader"
+                 one caller (the pipeline collector's external waiter thread) before \
+                 reaching a terminal-outcome reader"
             ),
         }
     }
@@ -342,8 +343,8 @@ impl CommandFailure {
             ),
             WaitOutcome::Continued => unreachable!(
                 "WaitOutcome::Continued must be intercepted by the caller \
-                 (RunningChild::try_settle), the only consumer of the \
-                 stop-tracking wait, before reaching CommandFailure::from_outcome"
+                 (the pipeline collector's external waiter thread), the only consumer \
+                 of the stop-tracking wait, before reaching CommandFailure::from_outcome"
             ),
             WaitOutcome::StoppedThenKilled {
                 stopped_by,

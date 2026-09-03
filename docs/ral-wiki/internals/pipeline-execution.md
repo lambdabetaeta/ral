@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 9795bda4
+verified_at_commit: 43183ee3
 verified_at_date: 2026-09-03
-anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, Event, StageObservation, CollectState, CollectState::sender, CollectState::all_stages_launched, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, GroupRole, Ending, EndingCell, AnchorProcess, StageGate, StagePark, StagePark::gate, StageStop, Mooring::park, StopPolicy, ParkedPipeline, ChildHandle, wait_handling_stop, try_wait_tracking_stops, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
+anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, Report, Settlement, Event, Effect, step, StageObservation, CollectState, CollectState::resolve, CollectState::sender, CollectState::all_stages_launched, CollectState::run, CollectState::drive, CollectState::try_advance, CollectState::cancel_all, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, PipelineGroup::start_witness_threads, GroupRole, Ending, EndingCell, AnchorProcess, StageGate, StagePark, StagePark::gate, StageStop, StageStop::wait_for_change, Mooring::park, StopPolicy, ParkedPipeline, ChildHandle, wait_handling_stop, wait_tracking_stops, Escape::Stopped, wait_foreground, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -104,26 +104,36 @@ already, so a relayed signal is never forwarded to a child-less pgid.
 With the terminal settled before user code exists, no start-gate frame is
 needed.
 
-**The anchor is the group's witness, for a stop and for a signal alike.** The
-shell is not a member of the pgid, so while the terminal belongs to the group
-the shell never receives the Ctrl-C or Ctrl-Z the tty delivers to it. With an
-external in the group a Ctrl-C would at least kill that external and the
-pipeline would drain; with none — `!{ a } | !{ b }` at the prompt — the anchor
-is the only process the kernel can reach, and it swallows the signal. So the
-collector's first act on every pass is `PipelineGroup::witness`: a byte on the
-anchor's stdout is `Witnessed::Cancelled(cause)` — `SIGINT` maps to
-`Interrupt`, `SIGQUIT` to `RootAbort`, the rest to `Terminate`, the cause the
-shell's own handler for that signal would apply — and a `WUNTRACED` poll that
-finds the anchor stopped is `Witnessed::Stopped(sig)`. A witnessed cancel is
-applied to the pipeline, not to the run's scope: the collector cancels every
-stage explicitly (`CollectState::cancel_stages`) and signals the group once,
-exactly as it would for a cancel that arrived through its own mooring, and the
-pipeline's error break is what ends the run. A signal outranks a stop when both
-are pending. An anchor that has died has cost the group its join target and is
-witnessed as a cancel too: by the cause of the signal that killed it (one
-landing between its exec and its handler install), else as `Terminate`. A single-stage pipeline never reaches any of this: the machine's
-`Pipeline` arm reduces it to its inner closure inline, and `PipeNode::launch`
-never sees it.
+**The anchor is the group's witness, for a stop and for a signal alike — two
+dedicated threads, never polled.** The shell is not a member of the pgid, so
+while the terminal belongs to the group the shell never receives the Ctrl-C or
+Ctrl-Z the tty delivers to it. With an external in the group a Ctrl-C would at
+least kill that external and the pipeline would drain; with none —
+`!{ a } | !{ b }` at the prompt — the anchor is the only process the kernel
+can reach, and it swallows the signal. `PipelineGroup::start_witness_threads`
+(called once the collector's channel exists, since the anchor spawns before
+it does) starts both: a report reader blocks reading the anchor's stdout to
+EOF, one byte per swallowed signal, sending `Event::Witnessed(Cancelled(cause))`
+— `SIGINT` maps to `Interrupt`, `SIGQUIT` to `RootAbort`, the rest to
+`Terminate`, the cause the shell's own handler for that signal would apply —
+and an anchor waiter blocks `waitpid(WUNTRACED | WCONTINUED)` on the anchor
+itself, the sole reaper of its pid — the anchor is a member of the group like
+any other, so its own stop is tracked as a level from the same two edges a
+member's is, not a cell nothing ever clears — sending `Witnessed::Stopped(sig)`
+on a stop and looping, `Witnessed::Continued` on a resume and looping, or
+`Witnessed::Cancelled` on its own death (a plain terminating signal read by
+number, same as a report) and returning. A witnessed cancel is
+applied to the pipeline, not to the run's scope: `step` answers it with
+`Effect::CancelAll(cause)`, which cancels every stage explicitly
+(`CollectState::cancel_stages`) and signals the group once, exactly as it
+would for a cancel that arrived through its own mooring, and the pipeline's
+error break is what ends the run. The report reader and the anchor waiter are
+separate threads over separate fds, so — unlike the old single poll's
+report-outranks-stop rule — the two can race: whichever event the channel
+delivers first is the one `step` answers, a swallowed signal or the anchor's
+own death read off its wait outcome alike. A single-stage pipeline never
+reaches any of this: the machine's `Pipeline` arm reduces it to its inner
+closure inline, and `PipeNode::launch` never sees it.
 
 **Every external spawned anywhere inside a stage joins the group.** A `Thread`
 stage's `Io` carries `LaunchRole::PipelineStage(pgid)`, so any external it
@@ -142,17 +152,23 @@ one — no anchor, no relay, no foreground claim, and `signal`/`kill` no-op,
 since only the owning top-level group may act on the pgid. Its gate comes from
 `mooring.park` — the enclosing stage's own park — never from the role, so
 nesting inherits the Ctrl-Z gate the way it inherits the pgid. A joining
-collector never parks, signals, or escapes on its own account: on a `Stopped`
-probe it writes the signal into its own stage's `StageStop` — the exact
-slot the owning collector already reads for a direct `Park` arm — and forgets
-the stop locally, meeting the owner's pause at the `process::check` heading its
-next pass. This is the mechanism by which a stop the anchor cannot witness — a
-single-member `SIGSTOP`, a `SIGTTIN` under `bg` two levels down — still surfaces
-to the top-level owner, one collector per nesting level. A joining group whose
-mooring carries no park — the detached `spawn` worker above — has no `StageStop`
-slot to write and no owner to ever `SIGCONT` it, so its collector instead
-resumes the stopped member itself: a waiter whose stop has no owner above it
-revives its own child.
+collector never parks, signals, or escapes on its own account: on
+`Event::Stopped(ix, sig)` it answers with `Effect::ForwardStop(sig)`, whose
+interpreter writes the signal into its own stage's `StageStop` — the exact
+cell the owning collector's own interior-stop watcher already blocks on for
+a direct `Park` arm. An `Effect`, not a write `step` performs itself: `step`
+stays pure over every party but this collector's own state, so a shared cell
+belonging to the owner one level up is only ever touched by the interpreter.
+There is nothing to "forget" the way a polled level once needed forgetting,
+since the event is consumed exactly once. This is the mechanism
+by which a stop the anchor cannot witness — a single-member `SIGSTOP`, a
+`SIGTTIN` under `bg` two levels down — still surfaces to the top-level owner,
+one collector per nesting level. A joining group whose mooring carries no
+park — the detached `spawn` worker above — has no `StageStop` cell to write
+and no owner to ever `SIGCONT` it, so its collector instead answers with
+`Effect::SigcontMember(ix)`: a waiter whose stop has no owner above it revives
+its own child, by pid for an external, structurally by that member's own
+nested `RunningChild::wait` for a further-nested thread.
 
 **Kill for a dead reader cancels a thread and wakes it; the wake ends a write
 as well as a read.** The collector's rule is unchanged in shape: a stage whose
@@ -181,42 +197,63 @@ external (if it has one) is torn down by pid inside that stage's own
 this way, each stage's own wake ending only that stage's own I/O. Forgiveness differs in one respect from an external's: a
 process's wait status says whether the kill or its own `exit` ended it, a
 thread's `Break` does not, so a killed thread is forgiven *whatever* it
-returned — which is why the collector probes before it kills: a thread that has
-already finished is never marked, and `!{ echo a; exit 3 } | head -1` stays
-honest. Its audit fragment is folded either way: the verdict is the
-collector's doing, what the stage observed still happened. A stage thread's
-*end* is `JoinHandle::is_finished`, so a panic cannot make a stage read as
-running; the panic surfaces at the collector as an `Error` carrying the
-stage's span.
+returned — which is why `step`'s reader-gone rule fires `Effect::KillStage`
+only for a writer still `Some` (unsettled) when its reader's own `Settled`
+event arrives: a thread that has already finished keeps its outcome, and
+`!{ echo a; exit 3 } | head -1` stays honest. Its audit fragment is folded
+either way: the verdict is the collector's doing, what the stage observed
+still happened. A stage thread's end is its own `Event::Settled`, sent as its
+last act; a panic is the structural absence of one — the sender dropped by an
+unwind rather than a send — recovered by joining the handle the collector
+kept for exactly this, surfacing as an `Error` carrying the stage's span.
 
-**Stop and park is Ctrl-Z's whole story, and it is Unix-only.** The kernel
-stops what it can stop directly — the anchor and every external in the group —
-and ral notices one of three ways: a stage thread waiting on its own external
-sees `WaitOutcome::Stopped`; the collector's probe of a direct external sees
-the same; the collector's probe of the *anchor* sees it stopped. The anchor
-keeps the default `SIGTSTP` disposition specifically so it can serve as the
-group's stop witness — this is what makes `!{ a } | !{ b }`, a pipeline with no
-external at all, park exactly as one with externals does. The wait layer
-reports every stop as `WaitOutcome::Stopped` and decides nothing; whichever
-fires first, the collector answers it by the group's `GroupRole`: a
-*`Foreground`* group parks — the collector sets the pipeline's `StageGate`
-paused, `SIGSTOP`s the whole `-pgid` (idempotent for the ordinary Ctrl-Z
-case), and stops probing; a *`Background`* group — batch mode, a capture, a
-pipeline inside a `spawn` worker — has no job table to resume it and is
-cancelled with `Terminate`, a direct stage first settled as
-`StoppedThenKilled` (`end_stopped`) so its verdict still names the stop rather
-than whatever the teardown's `SIGCONT` would have let it do next; a *`Joining`*
-group forwards the stop to its owner (below). A stage thread notices at its
-own pace: `process::check` consults `mooring.park`'s gate behind an atomic
-fast path, so a stage blocked in a builtin finishes that call before parking,
-and a stage that was mid-write or mid-read is simply blocked at the OS level
-like the process it is talking to. `StopPolicy` says what becomes of a stop
-that reaches a child's own `wait` unclaimed: `KillAndReap` for batch mode,
-`Escape` for a top-level foreground external the REPL's job table owns,
-`Park(StagePark)` for anything running inside a stage thread — an external
-inside it waits on the same child across the stop rather than being torn
-down. A pipeline stage's stop never gets that far: it reaches the collector
-through `try_settle`, whatever the policy.
+**Stop and park is Ctrl-Z's whole story, Unix-only, and one way now, not
+three.** The kernel stops what it can stop directly — the anchor and every
+external in the group — and every stop arrives at the collector the same way,
+as an edge on its channel: a direct external stage's own dedicated waiter
+thread, blocked `waitpid(WUNTRACED | WCONTINUED)`, sends `Event::Stopped`; the
+anchor's own waiter thread sends `Witnessed::Stopped` the same way. (A stage
+thread's *interior* stop — a child *it* spawned stopping — is a fourth
+producer, its own dedicated watcher thread blocking on `StageStop`'s condvar
+rather than the cell's value directly, but arrives as the identical
+`Event::Stopped`.) The anchor keeps the default `SIGTSTP` disposition
+specifically so it can serve as the group's stop witness — this is what makes
+`!{ a } | !{ b }`, a pipeline with no external at all, park exactly as one
+with externals does. `step` answers whichever arrives by the group's
+`GroupRole`, guarded by one tracked level, `parked` — a *`Foreground`* group
+parks on the *first* edge of one Ctrl-Z and answers every further edge with
+nothing: `sleep 10 | cat`'s single Ctrl-Z is three edges (the anchor's, and
+each external's own waiter's), and without the guard the second and third
+would each re-park the group right after `fg` resumes it, since a `Stopped`
+already queued when `drive` returns is still waiting in the channel come the
+next `recv`. The first edge gets `Effect::PauseGate` then
+`Effect::SigstopGroup` (idempotent for the ordinary Ctrl-Z case) then
+`Effect::Park(sig)`, which ends `drive`'s loop; `parked` clears once every
+tracked level — every member's own `stopped[ix]`, and the anchor's own,
+tracked by the identical two-edge rule off its `WUNTRACED | WCONTINUED`
+wait — reads clear again, so a genuinely later Ctrl-Z still parks. A
+*`Background`* group — batch mode, a capture, a pipeline inside a `spawn`
+worker — has no job table to resume it and is cancelled with `Terminate`, an
+external stage first killed by pid (`Effect::KillStoppedStage`, fired
+*before* `Effect::CancelAll`'s own `SIGCONT` so the verdict still names the
+stop rather than whatever the child would have done once resumed — its
+waiter's own local stop tracking reclassifies the resulting death as
+`StoppedThenKilled`, needing no separate settle step; distinct from
+`Effect::KillStage`, the reader-gone cascade's own kill, specifically because
+it must *not* raise the forgiven ending `KillStage` does — a stopped stage's
+kill is not a death nothing sent it); a *`Joining`* group forwards the stop
+to its owner (below). A stage thread
+notices at its own pace: `process::check` consults `mooring.park`'s gate
+behind an atomic fast path, so a stage blocked in a builtin finishes that call
+before parking, and a stage that was mid-write or mid-read is simply blocked
+at the OS level like the process it is talking to. `StopPolicy` says what
+becomes of a stop that reaches a child's own `wait` unclaimed — `KillAndReap`
+for batch mode, `Escape` for a top-level foreground external the REPL's job
+table owns, `Park(StagePark)` for anything running inside a stage thread, an
+external inside it waiting on the same child across the stop rather than
+being torn down — but a *pipeline* stage's stop never reaches that decision at
+all: its own dedicated waiter thread reports every edge structurally, and
+`StopPolicy::KillAndReap` on its `RunningChild` is inert, never consulted.
 
 **A parked pipeline is a value, not an abandoned process tree.** Because the
 stages are threads waiting on their own children, `fg` cannot `waitpid(-pgid)`
@@ -229,13 +266,15 @@ takes it into the `Job`. `fg` re-acquires the terminal through the same
 `wait_foreground` door as always, then drives
 `ParkedPipeline::resume_and_collect` (opens the gate, `SIGCONT -pgid`, resumes
 the same collect loop to completion or the next stop) instead of a bare
-`waitpid`. `bg` opens the gate and `SIGCONT`s without touching the terminal;
-the sweep drives `ParkedPipeline::poll`, a single non-blocking pass; the
-REPL's exit `cleanup` drives `ParkedPipeline::cancel`, which opens the gate
-and resumes every stage — so a remembered stop cannot read as live, and a
-thread at the gate can leave — and then runs the same `cancel_all` a Ctrl-C
-gets, giving a parked pipeline's stages the grace a plain stopped job
-already gets.
+`waitpid`. `bg` opens the gate and `SIGCONT`s without touching the terminal —
+neither touches `CollectState` itself: every producer thread observes the
+`SIGCONT` structurally and reports its own `Continued`, so there is no level
+left for `fg`/`bg` to clear by hand; the sweep drives
+`ParkedPipeline::poll` → `CollectState::try_advance`, a single non-blocking
+drain of whatever the channel already holds; the REPL's exit `cleanup` drives
+`ParkedPipeline::cancel`, which opens the gate and then runs the same
+`cancel_all` a Ctrl-C gets — a thread at the gate can leave — giving a parked
+pipeline's stages the grace a plain stopped job already gets.
 There is no `kill` verb: a job is ended by `fg` and Ctrl-C, which the anchor
 witnesses for the collector.
 
@@ -248,34 +287,48 @@ external spawned inside a stage thread still joins the Job Object through the
 same `PgidPolicy::Join` resolution, assigned at creation under the suspended
 create → assign → resume path.
 
-**Collection is a channel for threads, a non-blocking probe for everything
-else.** A stage thread computes its own [`StageObservation`] and sends it as
-its last act — `tx.send(Event::Settled(ix, obs))`, `tx` cloned once per stage
-and bound in the closure's outermost frame so it is dropped only by that send
-or by an unwind. `CollectState` drops its own clone once every stage is
-launched (`all_stages_launched`), so a `recv` that disconnects while some
-index is still unobserved *is* that stage's panic, recovered by joining the
-handle the collector kept for exactly this — never for polling. An external
-stage is still probed: `try_settle` polls with `WUNTRACED | WCONTINUED`
-(unlike the plain `try_wait_handling_stop` a standalone wait uses) so a stop
-reads as a level tracked from its two edges rather than a one-shot cell
-someone must remember to clear. `CollectState::pass` drains the channel
-(`try_recv`) before probing the externals, so stages settle in whatever order
-they actually end and no stage's blocking wait can starve another's news; the
-blocking `drive` loop does the same wait as a `recv_timeout` in place of the
-old fixed sleep, so a thread's event wakes it at once. A stage still running
-whose reader has settled is ended (`reader_gone`) and observed on the next
-pass, so the cascade runs tail-ward, thread and external alike; a stage that
-stops — a thread's own `StagePark` cell, or an external's probed level — is
-answered at once, wherever it sits. Forgiveness for a killed thread (whatever
-`Break` it was about to return, forgiven, its audit fragment kept) is applied
-where the `Settled` event is filed, reading the stage's own `EndingCell`,
-since the stage itself no longer carries an `Ending` to consult. Each
-interior edge's held-open read end drops once that edge's writer's
-observation completes, which also releases any descendant of that edge still
-blocked writing into it. Verdicts fold in launch order regardless of settle
-order, so which stage the collector kills when never changes which failure
-the fold reports.
+**Collection is one channel, a pure fold, and a thin interpreter.** Every
+lifecycle edge — a stage settling, a member stopping or resuming, the anchor
+witnessing, a scope cancelling — is a [`Report`] one dedicated producer
+thread sends: a stage thread computes its own [`StageObservation`] and sends
+it as its last act; a direct external's own waiter thread
+(`command::RunningChild::run_pipeline_stage`) owns that child's wait
+exclusively — the collector never calls `waitpid` on a pipeline stage at
+all — and reports `Stopped`/`Continued` per edge, `Settled` on the terminal
+one; the anchor's two threads report `Witnessed`; a low-frequency timer, the
+one left, re-checks the mooring's scope and reports `Cancelled` — the
+stopgap until scopes grow their own notification, existing to be deleted.
+Every sender is cloned once per stage and bound in its closure's outermost
+frame so it drops only by that send or by an unwind; `CollectState` drops its
+own clone once every stage is launched (`all_stages_launched`), so a `recv`
+that disconnects while some index is still unobserved *is* that stage's
+panic, recovered by joining the handle the collector kept for exactly this —
+never for polling. `CollectState::resolve` turns a `Report` into the
+[`Event`] `step` folds over — the one place `&Shell` reaches an external's
+settlement (audit synthesis, exit-hint lookup, sandbox-denial augmentation),
+since no producer thread may hold one. `step` is pure over `CollectState`: it
+never blocks, signals, or touches a process, only inspecting the observation
+vector, the group's role, and the tracked stop levels, and returns the
+[`Effect`]s a thin interpreter (`CollectState::run`) performs — so the whole
+corner-case space is a transition table, testable by feeding `step` a
+sequence of events and asserting the effects, no process, sleep, or retry
+loop needed. `drive` is `loop { for e in step(&mut st, rx.recv()?) { run(e) } }`
+— no interval, no backoff, exact latency, zero idle CPU; `ParkedPipeline::poll`
+is `CollectState::try_advance`, the same fold over a non-blocking drain.
+`step`'s reader-gone rule — on `Event::Settled(ix)`, if stage `ix - 1` still
+holds a stage handle and feeds the pipe, emit `Effect::KillStage(ix - 1)` —
+is unchanged in content from the old tail-first rescan, fired now by the
+event that justifies it: a stage that already finished keeps its outcome.
+A stage that stops — a thread's own interior `StagePark` cell (itself watched
+off a condvar, not polled, by one more dedicated thread per thread stage) or
+an external's own waiter's report — is answered at once, wherever it sits.
+Forgiveness for a killed thread (whatever `Break` it was about to return,
+forgiven, its audit fragment kept) is applied where `Event::Settled` is
+filed, reading the stage's own `EndingCell`. Each interior edge's held-open
+read end drops once that edge's writer's observation completes, which also
+releases any descendant of that edge still blocked writing into it. Verdicts
+fold in launch order regardless of settle order, so which stage the
+collector kills when never changes which failure the fold reports.
 
 **Teardown is kill-first.** A pipeline that ends before every stage has been
 observed ends by one of two mechanisms, and both put the group's death before
@@ -284,14 +337,16 @@ purpose — a cancel, a witnessed signal, a stop with no job table, the REPL's
 exit — and spells the order out: (1) `signal` — the cause's catchable signal
 to `-pgid`, then `SIGCONT`, so a member that honours it exits with its own
 status; (2) a bounded grace of at most `TEARDOWN_GRACE` (500 ms, shared with a
-standalone child's `terminate_group`), during which the collector drains the
-channel and probes every external non-blockingly, leaving the moment each
-stage has settled by whichever route is its own; (3) `kill` — `SIGKILL
--pgid`, unconditional and idempotent; (4) a blocking drain of the channel for
-every thread stage the grace did not already account for, a cancelled and
-killed one having nowhere left to block; (5) only now the remaining
-observation, whose joins are blocking — pump drains, waits; (6) the anchor
-last, in `Drop`, after every stage handle has gone.
+standalone child's `terminate_group`) as a single blocking `recv_timeout` on
+the deadline, not a probe loop, filing only the `Settled` events it drains —
+every other kind is moot once the whole group is already dying, and is
+discarded; (3) `kill` — `SIGKILL -pgid`, unconditional and idempotent; (4) a
+further blocking drain, unbounded, for whatever the grace did not already
+account for — a cancelled and killed member having nowhere left to block;
+(5) the anchor last, in `Drop`, after every stage handle has gone, its own
+two threads joined rather than reaped directly (its report reader's read end
+closes only once it sees the anchor's own EOF, so it is never dropped while
+the anchor could still `SIGPIPE` on a stray write into it).
 
 `CollectState::drop` is the other, and it covers every forced end that drops
 rather than observes: a launch that failed part-way, an unwind between launch

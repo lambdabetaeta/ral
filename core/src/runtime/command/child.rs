@@ -62,16 +62,6 @@ pub(crate) struct RunningChild {
     /// timeout, a signal the platform handler translated into a cause) could
     /// not preempt a child that never exits on its own.
     pub cancel: crate::process::CancelScope,
-    /// A terminal outcome a collector probe already collected, consumed by
-    /// `wait`.  Never a stop — that is [`Self::stopped_level`]'s.
-    settled: Option<crate::process::WaitOutcome>,
-    /// The stop this child is currently under, as a level tracked from its
-    /// two edges (`Stopped` sets it, `Continued` clears it) rather than a
-    /// one-shot cell someone must remember to clear.  Cleared eagerly by
-    /// [`Self::resume_stopped`] too: the explicit resume must not wait for
-    /// the `Continued` edge to arrive on a later poll, or the collector would
-    /// re-park the job it just resumed.
-    stopped_level: Option<crate::process::Signal>,
     /// How this child's life ended, once ral itself ended it: the cancel
     /// branch of `wait` and the pipeline collector's reader-gone kill are the
     /// only writers.  Sole input to forgiveness and to whether the drainers
@@ -138,8 +128,6 @@ impl RunningChild {
             stop,
             group_owner,
             cancel,
-            settled: None,
-            stopped_level: None,
             ending: EndingCell::default(),
         }
     }
@@ -309,14 +297,7 @@ impl RunningChild {
         // is seen (WUNTRACED): plain `try_wait` reports `Ok(None)` on a stop
         // and the loop would spin forever.  A `Park` stop waits at the gate
         // here; every other outcome leaves the loop and is classified below.
-        let early_outcome: Option<crate::process::WaitOutcome> = if let Some(o) =
-            self.settled.take()
-        {
-            // A collector probe already reaped this child's terminal outcome
-            // — a stop never lands here, only in `stopped_level` — so the
-            // poll must not run `try_wait_handling_stop` again.
-            Some(o)
-        } else {
+        let early_outcome: Option<crate::process::WaitOutcome> = {
             // Snappy for short-lived children, gentle on CPU for long ones.
             let mut interval = std::time::Duration::from_millis(5);
             let cap = std::time::Duration::from_millis(100);
@@ -540,112 +521,93 @@ impl RunningChild {
 }
 
 impl RunningChild {
-    /// Wait, classify, and settle the drainers: the failure the outcome
-    /// amounts to, or `None` for success.  The raw status does not come back
-    /// beside the verdict, so no caller can branch on a forgiven death; where
-    /// a status still means something it is `failure.to_user_exit_code()`,
-    /// reachable only inside `Some`.
-    pub(crate) fn observe(self) -> Settled<Option<crate::process::CommandFailure>> {
-        let waited = self.wait()?;
-        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, waited.ending);
-        waited.settle();
-        Ok(failure)
-    }
-
-    /// One non-blocking probe: whether this child is terminally settled.
-    /// Tracks the stop level from its two edges — `Stopped` records it,
-    /// `Continued` clears it — and caches a terminal outcome for the eventual
-    /// `wait`.
-    pub(crate) fn try_settle(&mut self) -> bool {
-        if self.settled.is_some() {
-            return true;
-        }
-        let Some(child) = self.child.as_mut() else {
-            return true;
+    /// Run this external pipeline stage to its own end, on the caller's own
+    /// dedicated waiter thread — meant to *be* that thread, spawned once per
+    /// stage by `runtime::pipeline::launch`.  The sole owner of this child's
+    /// wait from here on: nothing else may `waitpid` / `WaitForSingleObject`
+    /// it once this starts, which is what makes pid reuse a non-issue.
+    ///
+    /// `on_edge` fires for every `Stopped`/`Continued` transition; the caller
+    /// (`runtime::pipeline`) translates each into its own event, since this
+    /// module — a sibling of `pipeline`, not a parent — cannot name
+    /// `pipeline::collect::Event` itself.  A signal death immediately
+    /// following a reported stop, with no `Continued` between, is
+    /// reclassified as `StoppedThenKilled`: the collector's own kill of a
+    /// stopped member (`end_stopped`'s old job) arrives this way now, no
+    /// different from any other signal that finds the child still stopped.
+    ///
+    /// Never called for a standalone (non-pipeline) command, whose own
+    /// [`Self::wait`] keeps polling for [`Self::cancel`] — this stage's own
+    /// end instead arrives as a real signal (the reader-gone cascade, a
+    /// background group's stop-then-kill, the group's own teardown kill),
+    /// which the blocking wait sees structurally, no poll needed.
+    ///
+    /// `kill_cause` — not [`Self::cancel`] — is what attributes the ending:
+    /// `cancel` is the *mooring's* scope, shared with every sibling stage
+    /// (and beyond), so reading it here would let one stage's own kill
+    /// misattribute a death the mooring never actually asked for; `kill_cause`
+    /// is this stage's own, set only by the collector's own `kill_now`/
+    /// `cancel`, one waiter's business alone.
+    pub(crate) fn run_pipeline_stage(
+        mut self,
+        kill_cause: &crate::process::CancelScope,
+        mut on_edge: impl FnMut(crate::process::WaitOutcome),
+    ) -> (String, Settled<Option<crate::process::CommandFailure>>) {
+        let mut child = self.child.take().expect("RunningChild has no child");
+        let name = self.name.clone();
+        let mut last_stop: Option<crate::process::Signal> = None;
+        let terminal = loop {
+            let outcome = match child.wait_tracking_stops() {
+                Ok(o) => o,
+                Err(e) => {
+                    let msg = format!("{name}: {e}");
+                    return (name, Err(Break::Error(Error::new(msg, 1))));
+                }
+            };
+            match outcome {
+                crate::process::WaitOutcome::Stopped(sig) => {
+                    last_stop = Some(sig);
+                    on_edge(outcome);
+                }
+                crate::process::WaitOutcome::Continued => {
+                    last_stop = None;
+                    on_edge(outcome);
+                }
+                terminal => break terminal,
+            }
         };
-        match child.try_wait_tracking_stops() {
-            Ok(Some(crate::process::WaitOutcome::Stopped(sig))) => {
-                self.stopped_level = Some(sig);
-                false
+        let cause = kill_cause.cause();
+        let outcome = match (last_stop, terminal) {
+            (Some(stopped_by), crate::process::WaitOutcome::Signaled(killed_by)) => {
+                crate::process::WaitOutcome::StoppedThenKilled {
+                    stopped_by,
+                    killed_by,
+                }
             }
-            Ok(Some(crate::process::WaitOutcome::Continued)) => {
-                self.stopped_level = None;
-                false
-            }
-            Ok(Some(outcome)) => {
-                self.settled = Some(outcome);
-                self.stopped_level = None;
-                true
-            }
-            Ok(None) => false,
-            // `wait` retries and surfaces the same error with its context.
-            Err(_) => true,
-        }
-    }
-
-    /// The stop level `try_settle` is tracking, if this child is currently
-    /// stopped; `None` otherwise.
-    pub(crate) fn stopped_level(&self) -> Option<crate::process::Signal> {
-        self.stopped_level
-    }
-
-    /// Clear the tracked stop level directly, without signalling: `fg`/`bg`'s
-    /// explicit resume (`StageHandle::resume`) needs the level gone
-    /// synchronously, rather than waiting for the `Continued` edge to arrive
-    /// on a later poll and re-park the job it just resumed.
-    pub(crate) fn clear_stopped_level(&mut self) {
-        self.stopped_level = None;
-    }
-
-    /// The pipeline collector's own kill, for a stage whose reader is reaped.
-    /// It addresses the pid alone — the anchor and unrelated group members
-    /// still live — and lands harmlessly on an already-exited child, which is
-    /// what keeps a recorded exit status from ever being overwritten.
-    pub(crate) fn reader_gone(&mut self) {
-        self.ending.raise(Ending::RalEnded(CancelCause::ReaderGone));
-        let Some(child) = self.child.as_mut() else {
-            return;
+            (_, o) => cause.map_or(o, |c| o.attribute_to(c)),
         };
-        #[cfg(unix)]
-        {
-            let _ = child.kill();
+        let ending = cause.map_or(Ending::OwnAccord, Ending::RalEnded);
+        #[cfg(target_os = "linux")]
+        if let Some(jail) = &self.jail {
+            crate::process::jail::linux::kill(jail);
+            crate::process::jail::linux::remove(jail);
         }
-        #[cfg(windows)]
-        {
-            crate::process::signal::terminate_for_stage_kill(child.raw_process_handle());
+        let failure = crate::process::CommandFailure::from_outcome(outcome, ending);
+        // A reader-gone kill's remaining bytes are owed to nobody, and a
+        // descendant that survived that pid-addressed kill still holds the
+        // pipe the pump reads, so joining it would never return — mirrors
+        // `WaitedChild::settle`'s same rule for the standalone path.
+        if ending == Ending::RalEnded(CancelCause::ReaderGone) {
+            drop((self.pump.take(), self.stderr_pump.take()));
+        } else {
+            if let Some(jh) = self.pump.take() {
+                let _ = jh.join();
+            }
+            if let Some(jh) = self.stderr_pump.take() {
+                let _ = jh.join();
+            }
         }
-    }
-
-    /// Kill and reap a stopped child whose stop the collector answered with
-    /// death, recording the stop as its verdict: `waitpid` reports a stop
-    /// once, so a later wait would find nothing and the report would lose it.
-    #[cfg(unix)]
-    pub(crate) fn end_stopped(&mut self, sig: crate::process::Signal) {
-        let target = self.kill_target();
-        if let Some(child) = self.child.as_mut()
-            && let Ok(outcome) = child.kill_and_reap_stopped(sig, target)
-        {
-            self.settled = Some(outcome);
-            self.clear_stopped_level();
-        }
-    }
-
-    /// The ownerless resume: no group `SIGCONT` is coming, so revive this
-    /// child directly.  Clears the level eagerly rather than waiting for the
-    /// `Continued` edge on a later poll — see [`Self::stopped_level`].
-    #[cfg(unix)]
-    pub(crate) fn resume_stopped(&mut self) {
-        self.clear_stopped_level();
-        if let Some(child) = self.child.as_mut() {
-            #[allow(
-                clippy::cast_possible_wrap,
-                reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
-            )]
-            let _ = rustix::process::kill_process(
-                rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
-                rustix::process::Signal::CONT,
-            );
-        }
+        (name, Ok(failure))
     }
 }
 
@@ -760,10 +722,10 @@ mod tests {
             scope.cancel(CancelCause::Deadline);
         });
 
-        let failure = running
-            .observe()
-            .expect("wait should not error")
+        let waited = running.wait().expect("wait should not error");
+        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, waited.ending)
             .expect("a torn-down child is a failure");
+        waited.settle();
         canceller.join().expect("canceller thread");
 
         assert_eq!(

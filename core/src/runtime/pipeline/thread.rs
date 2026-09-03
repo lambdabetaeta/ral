@@ -13,12 +13,18 @@ use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::source::Span;
 use crate::types::{Break, Closure, Error, Mooring, Settled};
-use crate::process::{CancelCause, CancelScope, Signal, StageGate, StagePark, StageStop, Wake};
+use crate::process::{CancelCause, CancelScope, StageGate, StagePark, StageStop, Wake};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
 pub(super) struct ThreadStage {
     join: Option<std::thread::JoinHandle<()>>,
+    /// Reports this stage's own interior stop — a child it spawned itself
+    /// stopping — as `Report::Stopped`/`Report::Continued`, one edge at a
+    /// time, off [`StageStop`]'s condvar rather than a cell the collector
+    /// must poll.  `None` on Windows: nothing stops there.
+    #[cfg(unix)]
+    watcher: Option<std::thread::JoinHandle<()>>,
     stop: Arc<StageStop>,
     cancel: CancelScope,
     wake: Arc<Wake>,
@@ -26,13 +32,6 @@ pub(super) struct ThreadStage {
 }
 
 impl ThreadStage {
-    /// This stage's own interior stop — a child it spawned itself stopping —
-    /// read from `StagePark`'s cell, independent of whether the thread has
-    /// finished: readiness arrives only by [`super::collect::Event::Settled`].
-    pub(super) fn stopped(&self) -> Option<Signal> {
-        self.stop.get()
-    }
-
     pub(super) fn cancel(&self, cause: CancelCause) {
         self.cancel.cancel(cause);
     }
@@ -56,23 +55,27 @@ impl ThreadStage {
         }
     }
 
-    pub(super) fn resume(&self) {
-        self.stop.set(None);
-    }
-
     /// This stage's `Settled` event has already arrived by channel — the
     /// thread is already returning, so this reclaims it rather than waiting
-    /// for it.
+    /// for it.  The watcher closed itself the moment `StageStop::close` ran,
+    /// the stage's own last act before that same `Settled` was sent, so its
+    /// join is just as immediate.
     pub(super) fn join_after_settled(mut self) {
         if let Some(join) = self.join.take() {
             let _ = join.join();
+        }
+        #[cfg(unix)]
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
         }
     }
 
     /// This stage's sender was dropped by an unwind rather than a send: a
     /// disconnect alone carries no message, so only `join` can recover it.
     /// Surfaces as an `Error` carrying this stage's span, since the stage's
-    /// own stack carries none of its own to attribute it to.
+    /// own stack carries none of its own to attribute it to.  The panic
+    /// skipped the closure's own `StageStop::close`, so this closes it —
+    /// otherwise the watcher would block on an edge that will never come.
     pub(super) fn recover_panic(mut self) -> super::collect::StageObservation {
         let join = self
             .join
@@ -81,6 +84,11 @@ impl ThreadStage {
         let payload = join
             .join()
             .expect_err("a disconnected sender implies its thread unwound rather than returned");
+        self.stop.close();
+        #[cfg(unix)]
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
+        }
         let msg = payload
             .downcast_ref::<&str>()
             .map(|s| (*s).to_string())
@@ -95,7 +103,9 @@ impl ThreadStage {
 impl Drop for ThreadStage {
     /// A stage never observed — an aborted launch, a panic elsewhere in the
     /// pipeline unwinding past it — is cancelled, interrupted, and joined
-    /// rather than abandoned.
+    /// rather than abandoned.  The watcher is closed and joined alongside:
+    /// otherwise it would outlive the pipeline, blocked on an edge that will
+    /// never come.
     fn drop(&mut self) {
         if self.join.is_none() {
             return;
@@ -104,6 +114,11 @@ impl Drop for ThreadStage {
         self.interrupt();
         if let Some(join) = self.join.take() {
             let _ = join.join();
+        }
+        self.stop.close();
+        #[cfg(unix)]
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
         }
     }
 }
@@ -125,7 +140,7 @@ pub(super) fn launch_thread_stage(
     gate: &Arc<StageGate>,
     ix: usize,
     is_last: bool,
-    tx: std::sync::mpsc::Sender<super::collect::Event>,
+    tx: std::sync::mpsc::Sender<super::collect::Report>,
 ) -> Settled<ThreadStage> {
     let wake = Wake::new().map_err(|e| {
         let mut err = Error::new(format!("could not create a pipeline stage's wake: {e}"), 1);
@@ -165,6 +180,17 @@ pub(super) fn launch_thread_stage(
     let stop = Arc::clone(&park.stop);
     let span = spec.span;
 
+    #[cfg(unix)]
+    let watcher = {
+        let stop = Arc::clone(&stop);
+        let tx = tx.clone();
+        std::thread::Builder::new()
+            .name("ral pipeline stage interior-stop watcher".to_string())
+            .spawn(move || watch_interior_stop(&stop, &tx, ix))
+            .ok()
+    };
+
+    let closure_stop = Arc::clone(&stop);
     let spawned = cx.shell.spawn_thread(
         mooring,
         "ral pipeline stage",
@@ -180,10 +206,18 @@ pub(super) fn launch_thread_stage(
                     .with_audit(audit),
                 Err(br) => super::collect::StageObservation::from_break(br).with_audit(audit),
             };
-            // The stage's last act, and `tx`'s only other exit is this
-            // closure unwinding: a sender dropped with no `Settled` sent is
-            // the disconnect the collector reads as this stage's panic.
-            let _ = tx.send(super::collect::Event::Settled(ix, obs));
+            // Release the interior-stop watcher before this stage's own last
+            // act: once `Settled` is filed the collector may drop the
+            // receiver at any time, and the watcher must not be found still
+            // blocked on an edge that will never come.
+            closure_stop.close();
+            // `tx`'s only other exit is this closure unwinding: a sender
+            // dropped with no `Settled` sent is the disconnect the collector
+            // reads as this stage's panic.
+            let _ = tx.send(super::collect::Report::Settled(
+                ix,
+                super::collect::Settlement::Thread(obs),
+            ));
         },
     );
     let (join, cancel) = spawned.map_err(|e| {
@@ -194,11 +228,36 @@ pub(super) fn launch_thread_stage(
 
     Ok(ThreadStage {
         join: Some(join),
+        #[cfg(unix)]
+        watcher,
         stop,
         cancel,
         wake,
         span,
     })
+}
+
+/// This stage's own interior stop, watched off [`StageStop`]'s condvar one
+/// edge at a time — `Report::Stopped`/`Report::Continued` — rather than
+/// polled.  Exits once [`StageStop::close`] runs (the stage thread's own
+/// last act) or the collector's receiver is gone.
+#[cfg(unix)]
+fn watch_interior_stop(stop: &StageStop, tx: &std::sync::mpsc::Sender<super::collect::Report>, ix: usize) {
+    let mut last = None;
+    loop {
+        let next = stop.wait_for_change(last);
+        if stop.is_closed() {
+            return;
+        }
+        last = next;
+        let report = match next {
+            Some(sig) => super::collect::Report::Stopped(ix, sig),
+            None => super::collect::Report::Continued(ix),
+        };
+        if tx.send(report).is_err() {
+            return;
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -266,8 +325,11 @@ mod tests {
         reader.read_to_end(&mut out).expect("read stage stdout");
         assert_eq!(out, b"hi\n");
 
-        let super::super::collect::Event::Settled(ix, obs) =
-            rx.recv().expect("the stage sends its own Settled");
+        let super::super::collect::Report::Settled(ix, super::super::collect::Settlement::Thread(obs)) =
+            rx.recv().expect("the stage sends its own Settled")
+        else {
+            panic!("a thread stage must settle as Settlement::Thread");
+        };
         assert_eq!(ix, 0);
         assert!(obs.break_.is_none(), "echo hi must not fail");
     }
@@ -304,9 +366,12 @@ mod tests {
         handle.interrupt();
 
         let start = Instant::now();
-        let super::super::collect::Event::Settled(_, obs) = rx
+        let super::super::collect::Report::Settled(_, super::super::collect::Settlement::Thread(obs)) = rx
             .recv_timeout(Duration::from_millis(500))
-            .expect("a cancelled stage sends its own Settled within 500ms");
+            .expect("a cancelled stage sends its own Settled within 500ms")
+        else {
+            panic!("a thread stage must settle as Settlement::Thread");
+        };
         assert!(start.elapsed() < Duration::from_millis(500));
         assert!(obs.break_.is_some(), "a killed stage must not settle Ok");
     }
@@ -320,6 +385,8 @@ mod tests {
             .expect("spawn");
         ThreadStage {
             join: Some(join),
+            #[cfg(unix)]
+            watcher: None,
             stop: StageStop::new(),
             cancel: CancelScope::root(),
             wake: Wake::new().expect("wake"),

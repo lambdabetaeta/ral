@@ -35,7 +35,9 @@ pub(crate) use cancel::TEARDOWN_GRACE;
 
 pub use gate::{StageGate, StagePark, StageStop, StopPolicy};
 
-pub(crate) use signal::KillTarget;
+pub(crate) use signal::{KillTarget, kill_stage_by_pid};
+#[cfg(unix)]
+pub(crate) use signal::cont_stage_by_pid;
 pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};
 
 pub use spawn_lock::{cloexec_pipe, output, spawn, status};

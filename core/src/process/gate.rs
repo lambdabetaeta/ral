@@ -74,19 +74,70 @@ impl StageGate {
 /// joining collector at once, having reported the stop to its own stage.
 /// Whether the stage has *ended* is not here: that is `JoinHandle::is_finished`,
 /// which an unwinding panic cannot skip.
-pub struct StageStop(Mutex<Option<Signal>>);
+///
+/// The condvar turns this into a producer the pipeline collector's dedicated
+/// interior-stop watcher thread can block on — [`Self::wait_for_change`] —
+/// rather than a cell the collector must still poll each pass.
+struct StopState {
+    signal: Option<Signal>,
+    /// Set once by [`StageStop::close`], the stage thread's own last act
+    /// before it sends its `Settled` event: the watcher's sole way to learn
+    /// there will be no further edge to wait for.
+    closed: bool,
+}
+
+pub struct StageStop(Mutex<StopState>, Condvar);
 
 impl StageStop {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self(Mutex::new(None)))
+        Arc::new(Self(
+            Mutex::new(StopState {
+                signal: None,
+                closed: false,
+            }),
+            Condvar::new(),
+        ))
     }
 
     pub fn get(&self) -> Option<Signal> {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).signal
     }
 
     pub fn set(&self, sig: Option<Signal>) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = sig;
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).signal = sig;
+        self.1.notify_all();
+    }
+
+    /// The stage thread's own last act, before it sends its `Settled` event:
+    /// wake [`Self::wait_for_change`] a final time so its watcher thread
+    /// leaves rather than blocking on an edge that will never come.
+    pub fn close(&self) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).closed = true;
+        self.1.notify_all();
+    }
+
+    /// Block until the signal differs from `last`, or [`Self::close`] has run
+    /// — `None` for either a resume back to `None` or a close, which the
+    /// caller tells apart by nothing needing to: a watcher that wakes to
+    /// `last` unchanged and closed simply stops.
+    pub fn wait_for_change(&self, last: Option<Signal>) -> Option<Signal> {
+        let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if guard.closed || guard.signal != last {
+                return guard.signal;
+            }
+            guard = self
+                .1
+                .wait(guard)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Whether [`Self::close`] has run — the interior-stop watcher's own exit
+    /// check, since a resume (`signal` returning to `None`) and a close both
+    /// wake [`Self::wait_for_change`] with the same `None` result.
+    pub fn is_closed(&self) -> bool {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).closed
     }
 }
 
