@@ -322,8 +322,7 @@ desugars it to `spawn { cmd }` (`core/src/elaborator.rs:578`, "pure sugar"). So
 surviving the command, reaped by completion / `cancel` / the host lifetime policy
 / root abort or session exit. There is no second "task" vocabulary to reconcile.
 
-The Unix `JobTable` (`jobs` / `fg` / `bg` / `disown`, see
-[[map/repl/jobs|repl/jobs]]) is **not** a management layer over `&` or `spawn`.
+The Unix `JobTable` (`jobs` / `fg` / `bg` / `disown`) is **not** a management layer over `&` or `spawn`.
 It tracks foreground process groups that the kernel stopped and the evaluator
 reported as `Escape::Stopped`; `ral/src/jobs.rs` explicitly says an
 `&`-backgrounded pipeline is an in-process `spawn` handle and is not tracked

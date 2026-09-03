@@ -272,5 +272,5 @@ deferred survivor warning), [[decisions/260629_agent-binding-reaping|agent-bindi
 (why `fg` is a host affordance), [[decisions/260614_structural-bug-prevention|structural-bug-prevention]]
 (keep distinct things distinct by type — the capability argument),
 [[invariants/probe-convention|probe-convention]] (the probe facet as a
-checkable rule), [[map/repl/jobs|repl/jobs]], [[map/exarch/agent|agent]],
+checkable rule), [[map/exarch/agent|agent]],
 [[map/core/builtins|map: builtins]], and `docs/SPEC.md` §11 and §11.6.

@@ -1549,7 +1549,7 @@ ral itself ends a non-final stage once its reader stage is gone — SIGKILL on U
 
 A stage whose own redirect statically sends every byte of its stdout to a file, never to the interior edge, is exempt from this kill: its reader's death is none of its business, since nothing it produces was ever owed to that reader. Killing it anyway would not merely be unforgiven-for-nothing — it would sever whatever the stage was still doing on the redirect's own account (an atomic write's pending rename, say), and the forgiveness that follows would launder that loss into a silent success. `cmd > file | next` therefore runs `cmd`'s redirect to completion regardless of when `next` settles.
 
-The kill is exact rather than a race because a non-final stage has no other way to observe its reader's death: ral holds a duplicate of each interior edge's read end until that edge's writer stage is reaped or joined, so no interior edge ever delivers a broken-pipe signal or a write error to the stage that writes it. Collection observes stages as they end, in whatever order that happens; a stage whose reader has been reaped is killed, so the kill cascades tail-ward, and a stage that stops parks the whole pipeline at once. An exit status, once recorded, is never overwritten: the kill precedes the wait, and a kill landing on an already-exited stage changes nothing. This is one rule, stated once, true on both platforms.
+The kill is exact rather than a race because a non-final stage has no other way to observe its reader's death: ral holds a duplicate of each interior edge's read end until that edge's writer stage is reaped or joined, so no interior edge ever delivers a broken-pipe signal or a write error to the stage that writes it. Collection observes stages as they end, in whatever order that happens; a stage whose reader has been reaped is killed, so the kill cascades tail-ward. An exit status, once recorded, is never overwritten: the kill precedes the wait, and a kill landing on an already-exited stage changes nothing. This is one rule, stated once, true on both platforms.
 
 A producer that exits on its own account keeps that status, whatever the cause: on Unix, `python … | head -1` still fails with Python's status where `yes | head -1` still succeeds, now for the same reason on both platforms rather than a broken-pipe signal on one and an exit-order reading on the other. A producer that must run to completion regardless of whether anything reads it can no longer lean on a broken pipe being survivable — run it as its own statement, or `spawn` it, so it is never a pipeline stage whose reader can disappear.
 
@@ -1674,9 +1674,9 @@ type, and each runs in a fresh lexical scope. Compatibility uses the joined
 output behavior of the whole chain: when the chain's selected arm writes bytes,
 a raw `()` result is observed as the captured `String` at a binding boundary.
 
-Control escapes are not alternatives. In particular, `exit`, a stopped job,
-and internal tail-call control pass through a fallback chain rather than
-selecting its next arm. Cancellation is checked between arms.
+Control escapes are not alternatives. In particular, `exit` and internal
+tail-call control pass through a fallback chain rather than selecting its
+next arm. Cancellation is checked between arms.
 
 ### 8.5. Raising failure
 
@@ -1740,10 +1740,10 @@ standard error continue through the surrounding byte pipes. The error record's
 `message` is the structured failure message; it is not captured stderr. Use
 `audit` when command bytes and the full audit trail are required.
 
-A handler that succeeds recovers the failure and leaves status 0. `exit`, a
-stopped job, and internal tail-call control bypass the handler. Cancellation
-may be observed as a recoverable error inside the body, but cancellation is
-sticky: recovering it cannot make the enclosing run complete successfully.
+A handler that succeeds recovers the failure and leaves status 0. `exit` and
+internal tail-call control bypass the handler. Cancellation may be observed
+as a recoverable error inside the body, but cancellation is sticky:
+recovering it cannot make the enclosing run complete successfully.
 
 ### 8.7. Cleanup with `guard`
 
@@ -1762,7 +1762,7 @@ cleanup completes, the body's own outcome stands: `guard` returns the body's
 value, or its failure remains the result after cleanup.
 
 A cleanup that does not complete pre-empts that outcome, an ordinary failure
-exactly as a control escape such as `exit` or a stopped job. If both the body
+exactly as a control escape such as `exit`. If both the body
 and the cleanup halt, the cleanup's signal is the result. A cleanup whose own
 failure is not to fail the computation says so: `guard { … } { attempt { … } }`
 suppresses it, and `guard { … } { try { … } { |err| … } }` reports it and
@@ -1835,7 +1835,7 @@ force-exit ladder.
 Other hosts translate their native gestures into the same structured causes.
 For example, an active exarch request treats Ctrl-C or Escape as a foreground
 interrupt, while an idle key may instead close its interface. Windows uses its
-console and process-group facilities rather than Unix job-control signals, but
+console and process-group facilities rather than Unix signals, but
 preserves the observable cancellation messages and statuses where applicable.
 
 ## 9. Scoped execution and handlers
@@ -2505,7 +2505,6 @@ waiting and `cancel` for termination; Ctrl-C ends what Ctrl-Z used to park.
 | `watch` | optional | yes | yes | no |
 | `service` | optional | no | no | yes |
 | `detach` | optional, Unix only | no | no | Unix sessions that enable it |
-| `jobs`, `fg`, `bg`, `disown` | no | yes | no | no |
 
 Handles are local runtime values. They may be stored, passed to functions, and
 returned through locally evaluated blocks, but they cannot cross a serialized
@@ -3078,8 +3077,8 @@ observation.
 `audit` handles an ordinary runtime error as data. Its returned report carries
 the failure status and message, and evaluating the `audit` expression itself
 succeeds with that record. It also records that status as the shell's.
-Control escapes are different: `exit` and a stopped computation propagate out
-instead of being converted into a returned audit report.
+Control escapes are different: `exit` propagates out instead of being
+converted into a returned audit report.
 
 #### Capability checks
 
@@ -3438,8 +3437,8 @@ more names before user code is typechecked; those names then appear in that
 shell's `help` and `explain` output.
 
 The ral command-line host provides `watch`. Its interactive form also supplies
-job-control and plugin-lifecycle commands and private editor interfaces. A
-plugin may install validated aliases, hooks, and keybindings; those are session
+plugin-lifecycle commands and private editor interfaces. A plugin may install
+validated aliases, hooks, and keybindings; those are session
 extensions, not portable standard names.
 
 Exarch installs its agent operations, the durable `service` operation, and a
@@ -3466,8 +3465,7 @@ registered as commands that can never run.
 Interactive editing is a service of the `ral` program, not part of the core
 language. A portable ral program may rely on values, commands, byte pipelines,
 types, and the core builtin surface. It must not assume that its
-host has a prompt, history, completion, job control, plugins, or editor
-builtins.
+host has a prompt, history, completion, plugins, or editor builtins.
 
 The `ral` executable adds those facilities when it creates an interactive
 session. It installs their builtin signatures before checking startup files or
@@ -3540,9 +3538,10 @@ concurrent sessions do not erase each other's history.
 In a full frontend, Ctrl-C at the prompt abandons the current input and redraws;
 Ctrl-D on an empty prompt exits cleanly. Ctrl-D within non-empty input performs
 the editor's ordinary delete operation. Ctrl-C while a command is running
-interrupts that foreground run. Unix Ctrl-Z and job-control behaviour are
-specified with concurrency and jobs; ordinary application and bind have no
-process group to stop. Windows has no Unix stopped-job path.
+interrupts that foreground run. Unix Ctrl-Z is specified with concurrency
+(§11.6): a stopped process is resumed at once, so Ctrl-Z has no visible
+effect; ordinary application and bind have no process group to stop at all.
+Windows has no such signal.
 
 ### 15.3. Startup files and RC configuration
 
@@ -3613,8 +3612,7 @@ Plugin prompt hooks then transform the base prompt in plugin load order.
 
 Parse, type, read, and runtime failures in a startup file are reported without
 preventing the interactive shell from starting. `exit` stops the current
-startup file and boot continues. Startup files cannot park Unix jobs: a stop
-that escapes an RC or startup block is reported.
+startup file and boot continues.
 
 RC and profile evaluation is trusted session bootstrap. Command-line
 `--recursion-limit`, `--surface`, and capability profiles are applied
@@ -3634,7 +3632,7 @@ commands are informational: a missing query prints a message and leaves status
 zero.
 
 Because help is assembled from the live shell, it describes host additions
-such as `jobs` and `load-plugin` only where they are actually installed.
+such as `watch` and `load-plugin` only where they are actually installed.
 
 ### 15.5. Plugins
 
@@ -3823,15 +3821,14 @@ ral host:
 - persisted history, completion, terminal titles, and the three frontends;
 - startup profiles and RC discovery;
 - plugins, `_ed-*`, `load-plugin`, and `unload-plugin`;
-- `jobs`, `fg`, `bg`, and `disown`;
 - terminal signal handling and crash-time terminal restoration.
 
-Full stopped-job control depends on Unix process groups and a controlling
-terminal. Windows provides console interruption but no Ctrl-Z stopped-job
-table. The minimal frontend uses canonical input and offers no raw editor
-surface. Batch execution and embedded hosts may omit all these facilities;
-portable code must discover optional installed commands rather than assuming
-them.
+Foreground terminal ownership depends on Unix process groups and a
+controlling terminal; Windows has no such handoff and supervises pipeline
+members as one console job instead. The minimal frontend uses canonical
+input and offers no raw editor surface. Batch execution and embedded hosts
+may omit all these facilities; portable code must discover optional
+installed commands rather than assuming them.
 
 ## 16. Invocation, interoperability, and platforms
 
@@ -3914,8 +3911,7 @@ At runtime:
 
 - a normal completion exits 0;
 - `exit N` returns `N`;
-- a raised runtime error prints a source-labelled diagnostic and returns that error’s status;
-- on Unix, an escaped stopped job returns 1.
+- a raised runtime error prints a source-labelled diagnostic and returns that error’s status.
 
 The final process status is clamped to `0..=255`. With `--audit`, the runtime failure is represented in the JSON tree and the duplicate ordinary diagnostic is suppressed.
 
@@ -3983,9 +3979,9 @@ On Unix, install `ral-sh` as the login shell instead. It interprets no source; i
 
 ### 16.8. Platform distinctions and limits
 
-**Unix.** Terminal detection selects a bare REPL or stdin-script mode. Login-shell `argv[0]`, process-group job control, stop/resume behavior, and `ral-sh` are Unix facilities. Signals are translated into cancellation and conventional process statuses; the shell restores terminal ownership after foreground children.
+**Unix.** Terminal detection selects a bare REPL or stdin-script mode. Login-shell `argv[0]`, process-group foreground ownership, immediate resume-on-stop (§11.6), and `ral-sh` are Unix facilities. Signals are translated into cancellation and conventional process statuses; the shell restores terminal ownership after foreground children.
 
-**Windows.** A bare invocation defaults to the interactive mode because the CLI does not infer stdin-script mode from Windows terminal state; use `-s` for source redirected on stdin. ral enables virtual-terminal processing where available. Unix job-control and stopped-job behavior do not exist. Direct execution refuses `.bat` and `.cmd` images because their additional `cmd.exe` quoting pass has no safe general argument encoding; invoke `cmd.exe` explicitly only if that risk is acceptable. `ral-sh` is a Unix login-shell bridge and is not a usable Windows shell dispatcher.
+**Windows.** A bare invocation defaults to the interactive mode because the CLI does not infer stdin-script mode from Windows terminal state; use `-s` for source redirected on stdin. ral enables virtual-terminal processing where available. Unix process groups and stop signals do not exist. Direct execution refuses `.bat` and `.cmd` images because their additional `cmd.exe` quoting pass has no safe general argument encoding; invoke `cmd.exe` explicitly only if that risk is acceptable. `ral-sh` is a Unix login-shell bridge and is not a usable Windows shell dispatcher.
 
 On every host, external commands communicate through operating-system byte
 pipes. A pipeline has no typed-value wire format: values cross only through the
@@ -4595,7 +4591,7 @@ X / κ, Σ                          (climbs to the first frame whose rule catche
   `Apply` frame consumes a `lambda` by β; every other frame's hole wants a
   value, and meeting a `lambda` there is a case the checker excludes by
   η-expanding every arrow-typed computation into a thunked λ.
-- `X` has two shapes, `error e` and `escape q` (`q ::= exit n | stopped job`).
+- `X` has two shapes, `error e` and `escape q` (`q ::= exit n`).
   A break climbs `κ` past every frame whose rule does not catch it, each
   frame's own rule running once on the way up to close what it opened — a
   redirect settled, a handler frame popped, an audit scope closed. `try` and

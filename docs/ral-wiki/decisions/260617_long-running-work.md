@@ -70,7 +70,7 @@ ownership, listing, cancellation, and lifetime policy," and it **rejected a
   from [[decisions/260617_watch-repl-builtin|watch-repl-builtin]]: **core supplies
   the spawn mechanism, the host registers the affordance.** The REPL does not get
   it — the REPL has its own POSIX job control (`jobs`/`fg`/`bg`/`disown`,
-  `ral/src/jobs.rs`, [[map/repl/jobs|repl/jobs]]); durable agent jobs are exarch's
+  `ral/src/jobs.rs`); durable agent jobs are exarch's
   concern. Because `disown` already names REPL job control, it is unavailable as a
   spelling here.
 
@@ -143,5 +143,4 @@ the root/foreground split the death-clock rides),
 host-affordance registration principle this reuses),
 [[decisions/260629_agent-binding-reaping|agent-binding-reaping]] (a born-durable
 handle must be pinned against the reaper),
-[[map/repl/jobs|repl/jobs]] (the REPL's POSIX job control this is distinct from),
 [[map/core/builtins|map: builtins]], and `docs/SPEC.md` §11.

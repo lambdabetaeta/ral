@@ -1,6 +1,17 @@
 ---
-status: active
+status: superseded
+superseded_by: decisions/260903_ral-does-not-suspend
 ---
+
+> Superseded, in part, by
+> [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]: the
+> forgiven-death rule below is unchanged, but the two clauses that describe a
+> *parked* pipeline — a stage's stop wedging its collector until `fg` (the
+> "answered at once… the collector parks a foreground pipeline as a resumable
+> job" clause), and a parked pipeline abandoning its held read ends on
+> `SIGTSTP` — no longer hold. There is no park, no job table, and no `fg`; a
+> stopped child is resumed at once by whoever waits on it, foreground or not,
+> and collection never stops watching an interior edge on that account.
 
 # A stage ral stopped has no failure
 

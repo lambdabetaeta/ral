@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 14b304fa
-generated_at_date: 2026-09-02
+generated_at_commit: 0c6ec335
+generated_at_date: 2026-09-03
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -143,8 +143,7 @@ order, and exits 124:
    remedy the ending offered, because the record is owed by the failure and not
    by the deadline (a call that staged its `reply` and then died on a command's
    non-zero exit, or chose `exit 2`, made that reply stand just as surely).
-   `Break::Stopped` is job control rather than an ending, and a stopped call's
-   transcript shows what landed, so it files nothing. This
+   This
    is the one exception to core's own trail: the desk authors the shared
    `Observation` vocabulary from the *host* side, into a per-call fragment
    joined at render — never into the engine's trail, because a wire seat's
@@ -170,9 +169,7 @@ order, and exits 124:
 4. **the workers that outlived the call**, named. A `defer`red worker is
    moored by `Mooring::for_worker` onto the session root precisely so a
    foreground cancel cannot reach it, so a raise, the wall, or an `exit`
-   leaves the work running — but not `Stopped`, which is no ending and whose
-   transcript shows what landed, so a stopped call draws neither this sentence
-   nor the audit one. What the sentence reports is reachability, and that
+   leaves the work running. What the sentence reports is reachability, and that
    splits: a handle bound by a step that *completed* before the failure is
    still bound, so the `recovery:` line's `await $h` reaches it; one the
    failing step would have bound never landed — `bind_pattern` is

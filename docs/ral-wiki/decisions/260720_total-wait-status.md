@@ -16,7 +16,7 @@ makes `EINTR` unobservable to lifecycle code.**
   own `NOHANG`, so an impossible idle result cannot leak into a blocking
   caller.
 - The doors retry `EINTR` internally. A signal delivery therefore cannot look
-  like `ECHILD` and erase a live [[map/repl/jobs|job]].
+  like `ECHILD` and erase a live job.
 - Consumers classify through `WaitStatus`'s bit-test accessors. Unclassifiable
   and continued statuses retain their raw code where the surrounding outcome
   vocabulary has no dedicated case.
@@ -40,4 +40,4 @@ preserves that law.
 - Error rendering is unchanged: rustix `Errno` converts to the same OS error
   text at the existing `std::io::Result` boundary.
 
-See [[map/core/io-process|core IO/process]] and [[map/repl/jobs|REPL jobs]].
+See [[map/core/io-process|core IO/process]].

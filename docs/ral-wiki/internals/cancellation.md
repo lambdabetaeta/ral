@@ -1,6 +1,6 @@
 ---
-verified_at_commit: fcf36a94
-verified_at_date: 2026-08-27
+verified_at_commit: 0c6ec335
+verified_at_date: 2026-09-03
 anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, ChromeKind, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
@@ -183,11 +183,12 @@ exponential backoff (5 ms → 100 ms cap). On each iteration it `try_wait`s
 - **`RootAbort`** → an immediate group SIGKILL, no grace.
 
 Every external wait goes through this one loop — the interactive REPL
-foreground included (`StopPolicy::Escape` there makes a SIGSTOP *classify* as
-a parked job instead of a kill-and-reap, and only while nothing is ending the
-child; it does not select a different, blocking wait). A foreground external
-still gets its Ctrl-C from the kernel
-directly — it owns the terminal (see [[map/repl/jobs|jobs]]) — but a SIGTERM
+foreground included. ral does not suspend
+([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]): a `Stopped`
+poll result is always answered with `SIGCONT` inline and the loop continues
+waiting on the same child, whichever cause is or isn't in force — a stop is
+never itself a cause for teardown. A foreground external still gets its
+Ctrl-C from the kernel directly — it owns the terminal — but a SIGTERM
 delivered to *ral* now preempts even that wait through the root cause.
 
 ## The gestures, per host
@@ -209,8 +210,8 @@ The same two mechanisms are driven by different keys on different surfaces.
 
 ### ral interactive signal dispositions
 
-`jobs::setup_signals` then `boot::setup_signals` (`ral/src/repl/session/boot.rs`)
-fix the interactive dispositions:
+`boot::setup_signals` (`ral/src/repl/session/boot.rs`)
+fixes the interactive dispositions:
 
 - **SIGINT → relay** (`sigint_relay`). The relay keeps the controlling tty with
   the shell while a *mixed* pipeline (internal threads + external processes) runs,
@@ -228,8 +229,10 @@ fix the interactive dispositions:
   removed.)
 - **SIGTERM/SIGHUP → `handler`** — translates to a root `Terminate` (the whole
   session unwinds, the REPL loop exits 143) and walks the escalation ladder;
-  **SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE → `SIG_IGN`** (the shell drives job control by
-  `waitpid` and rewrites terminal state without being stopped).
+  **SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE → `SIG_IGN`** — the shell answers a stop
+  reaching one of its own children through `waitpid`/`SIGCONT` rather than
+  ever being stopped itself, and rewrites terminal state without being
+  stopped ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
 ### exarch: the chained handler and the per-agent token
 
@@ -328,6 +331,7 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
 - [[internals/output-capture-and-detachment|output-capture-and-detachment]] and
   [[internals/pipeline-execution|pipeline-execution]] — the foreground-deadline and
   group-teardown paths that read the scope.
-- [[map/core/io-process|io-process]] (signals, process groups), [[map/repl/jobs|jobs]]
-  (relay, fg/bg), [[map/exarch/agent|agent]] (the attend loop the token wraps),
+- [[map/core/io-process|io-process]] (signals, process groups),
+  [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]] (the relay),
+  [[map/exarch/agent|agent]] (the attend loop the token wraps),
   and `core/src/process/signal.rs` itself.

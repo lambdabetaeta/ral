@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 0c6ec335
+generated_at_date: 2026-09-03
 covers_paths: [ral/src/]
 ---
 
@@ -8,8 +8,8 @@ covers_paths: [ral/src/]
 
 `ral/` is the `ral` binary — a thin interactive frontend over
 [[map/core|ral-core]]. **It is argv dispatch into a run through core's framed
-door, driving one of three selectable frontends over the REPL session,
-plugins, and Unix jobs;** the language, evaluator, and capability machinery all
+door, driving one of three selectable frontends over the REPL session and
+plugins;** the language, evaluator, and capability machinery all
 live in core.
 
 - *Argv dispatch.* `cli.rs` resolves argv to a `Mode` — interactive,
@@ -51,12 +51,11 @@ REPL makes that state the thing the loop threads.
   (`ral/src/repl/frontend*`, `completion.rs`, `complete.rs`, `worksheet.rs`,
   `cursor.rs`, `highlight_style.rs`).
 - [[map/repl/plugins|plugins]] — the plugin runtime, the `_ed-*` editor builtins,
-  the captured job/plugin commands, and the one ordered keybinding router
+  the captured plugin-lifecycle commands, and the one ordered keybinding router
   (chord, guard, first match, built-in tail) every frontend dispatches
   through; plugin hooks run inside a framed run
   (`ral/src/repl/plugin*`, `plugin_ed_builtins.rs`, `host_handlers.rs`,
   `keybinding.rs`).
-- [[map/repl/jobs|jobs]] — process-group job control (`ral/src/jobs.rs`).
 
 ## Siblings
 

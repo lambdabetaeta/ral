@@ -291,8 +291,7 @@ is daemon-shaped; `detach` names the *act*, and the act is the entire content
 of the decision. (That ADR rejected `daemon` for Regime 1 precisely because it
 "connotes *survives process exit*" — a connotation correct for this regime, but
 correctness about the effect is worth less than directness about the cause.)
-`disown` remains unavailable: it names REPL job control (`ral/src/jobs.rs`,
-[[map/repl/jobs|repl/jobs]]).
+`disown` remains unavailable: it names REPL job control (`ral/src/jobs.rs`).
 
 **The one sentence that must appear wherever these four are introduced
 together:** the first three die when exarch dies; the fourth does not. That
@@ -533,7 +532,5 @@ that files nothing in it),
 [[design/residency|residency]] (the ledger whose `Resident` shape a detached
 process cannot take),
 [[invariants/fixed-arity|fixed-arity]] (why a variadic effect has no `$detach`),
-[[map/repl/jobs|repl/jobs]] (the REPL's sweep and survivor warning, the shape a
-shutdown sweep should copy),
 [[design/grant|grant]] (where the sandbox question lands), and `docs/SPEC.md`
 §13.4, §13.7.

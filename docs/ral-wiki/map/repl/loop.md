@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cd4b16e4
-generated_at_date: 2026-09-02
+generated_at_commit: 0c6ec335
+generated_at_date: 2026-09-03
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -10,9 +10,9 @@ covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, 
 `run_interactive`, which boots a `Session` and drives it to an `ExitCode`
 ([[map/repl/startup|startup]]). Builtins are shell-scoped: `Session::boot`
 hands the REPL's `ral_core::HostSurface` — the
-[[map/repl/plugins|`_ed-*` builtins]], `watch`, and the captured job/plugin
-commands — to `boot::boot_shell` before any rc file is checked, so the
-typechecker and the runtime see one surface by construction.
+[[map/repl/plugins|`_ed-*` builtins]], `watch`, and the captured
+plugin-lifecycle commands — to `boot::boot_shell` before any rc file is
+checked, so the typechecker and the runtime see one surface by construction.
 
 ## The session
 
@@ -23,15 +23,18 @@ behind.**
 
 `session::Session` (`session.rs`) owns the interactive state: an
 `IdentityTransport` wrapping the evaluator `Shell` (the in-process arm of
-the [[map/core/engine-protocol|engine protocol]]), the shared `Arc<Mutex<JobTable>>` and
+the [[map/core/engine-protocol|engine protocol]]), the shared
 `Arc<Mutex<PluginRuntime>>`, the boxed [[map/repl/frontend|`Frontend`]], a
 `pending` buffer queued for re-edit, and the exit code. On a `structural`
 build it also owns the `Worksheet` (`worksheet.rs`) — the retained
-binding-edge / effect-verdict model the structural surface projects.
+binding-edge / effect-verdict model the structural surface projects. There
+is no job table: ral does not suspend, so a stopped child is resumed at
+once by whoever waits on it rather than being tracked here
+([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
 - `run` loops `iterate` until it returns `Flow::Break` — a frontend `Eof` or
   an `exit` escaping the evaluator.
-- `iterate` is one cycle: reap children, break if the durable root has been
+- `iterate` is one cycle: break if the durable root has been
   cancelled (SIGTERM/SIGHUP or Ctrl-\ — cancellation is one-way, so exit
   with the cause's code rather than deal an unusable prompt),
   `process::clear` any residual interrupt, write the terminal title, render
@@ -39,17 +42,16 @@ binding-edge / effect-verdict model the structural surface projects.
   history and evaluates; `Read::Edit` becomes next iteration's `pending`;
   `Read::Interrupt` clears the signal, cancels the in-flight run, and
   continues; `Read::Eof` breaks. `read` is handed the live `Shell`, the
-  prompt, the pending buffer, the `JobTable`, and (structural) the
-  worksheet.
+  prompt, the pending buffer, and (structural) the worksheet.
 - `eval` runs one trimmed line through `exec::step`, recording an
   `exit` code so `run` breaks cleanly.
-- Teardown — transport detach, history flush, the
-  [[map/repl/jobs|survivor warning]], `JobTable::cleanup`, and
+- Teardown — transport detach, history flush, a one-time notice naming any
+  worker still running (`host_handlers::teardown_notice`), and
   `ral_core::sandbox::teardown_session` (deletes the session's per-projection
   AppContainer profiles on Windows; a no-op elsewhere) — lives in
   `Drop for Session`, so it covers a panic unwinding through the owned
-  `Session` as well as the orderly exit; a crash mid-iteration neither
-  orphans a stopped group nor loses history.
+  `Session` as well as the orderly exit; a crash mid-iteration does not lose
+  history.
 
 `session/boot.rs` does the one-shot setup: `setup_signals` (the whole Unix
 disposition table in one place — SIGINT relay, SIGQUIT root-abort,
@@ -71,9 +73,8 @@ with, so an alias or function it defines keeps naming the rc for the whole
 session. Both failing `CompileOutcome` arms — `Parse` and `Types` — are
 *reported and skipped*: the file has no runnable annotation, while the boot
 always survives
-([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]); a
-stop signal escaping rc sourcing is reported, not swallowed, so it cannot
-orphan a process group. An rc `startup` block registers as the
+([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
+An rc `startup` block registers as the
 `Session/"startup"` hook and runs through a **framed hook run** under
 `Denied` terminal authority — a fresh frame whose `let`s do not leak —
 never an in-place apply.
@@ -106,12 +107,13 @@ It matches the one flat `Report`:
 
 - `Static` — a parse, type, or host failure that never reached evaluation; its
   `rendered` is the whole caret report, printed verbatim.
-- `Ran` — a run that compiled. `Ok` prints via `print_result` (and, on a
-  `structural` build, records the bind into the worksheet);
-  `Break::Exit` ends the loop (clamped through `platform::exit_byte`);
-  `Break::Error` prints the diagnostic already rendered at the transport
-  seam; `Break::Stopped` (Unix)
-  parks the pipeline in the [[map/repl/jobs|job table]].
+- `Ran` — a run that compiled, matched on its `Ending`: `Settled` prints via
+  `print_result` (and, on a `structural` build, records the bind into the
+  worksheet); `Raised` and `Walled` print the diagnostic already rendered at
+  the transport seam; `Exited(code)` ends the loop (clamped through
+  `platform::exit_byte`). There is no `Stopped` arm — a stopped child is
+  resumed inline by whoever waited on it, never reaches the REPL as an
+  outcome ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
 The mobile-state install on every outcome is core's contract — a top-level
 run is a resume point ([[map/core/evaluator|evaluator]]). The same door

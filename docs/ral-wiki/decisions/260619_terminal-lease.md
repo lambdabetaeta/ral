@@ -447,5 +447,4 @@ the bad state unconstructable with a type; lint as backstop),
 [[decisions/260618_run-turn-is-host-api|run-turn-is-host-api]] (`TurnRequest` is
 the host-intent seam requested terminal access and `TurnStdin` join),
 [[internals/pipeline-execution|pipeline-execution]],
-[[map/core/io-process|io-process]], [[map/core/runtime|runtime]],
-[[map/repl/jobs|jobs]].
+[[map/core/io-process|io-process]], [[map/core/runtime|runtime]].

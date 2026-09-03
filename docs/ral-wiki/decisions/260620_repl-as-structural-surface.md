@@ -47,7 +47,7 @@ computes on the way are **discarded unless they constitute an error**:
   (`types/value.rs`) track every spawned computation; `SurfaceBuffer` holds
   the deferred surface events replayed on `await` / `race`
   ([[map/core/io-process|io-process]]); `JobTable` (`repl/jobs.rs`) holds
-  pgid-parked groups ([[map/repl/jobs|jobs]]). The REPL exposes these only
+  pgid-parked groups. The REPL exposes these only
   through the `jobs` / `fg` / `bg` commands — a table the user queries, not a
   surface the user watches.
 
@@ -743,5 +743,5 @@ lifetimes the Worksheet's snapshot isolation rests on),
 (the REPL/builtin boundary the projection layer respects),
 [[design/types|types]], [[design/pipelines|pipelines]],
 [[design/scoping|scoping]], [[map/repl|repl]], [[map/repl/frontend|frontend]],
-[[map/repl/loop|loop]], [[map/repl/jobs|jobs]], [[map/core/typecheck|typecheck]],
+[[map/repl/loop|loop]], [[map/core/typecheck|typecheck]],
 [[map/core/io-process|io-process]], [[map/exarch/frontend|exarch frontend]].

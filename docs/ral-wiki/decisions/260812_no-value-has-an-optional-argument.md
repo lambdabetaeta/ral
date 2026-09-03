@@ -157,6 +157,6 @@ to its native list, and its "variadic or optional" arity reads "an open argv"),
 [[invariants/fixed-arity|fixed-arity]] (the invariant this makes exhaustive),
 [[invariants/optionality-via-variants|optionality-via-variants]] (where an
 absent argument goes instead — into the value, as an open variant),
-[[design/builtins|builtins]], [[internals/builtins-registry|builtins-registry]],
-[[map/repl/jobs|jobs]]; `docs/SPEC.md` §10.2 (`cd path`), §11.6, §11.7,
+[[design/builtins|builtins]], [[internals/builtins-registry|builtins-registry]];
+`docs/SPEC.md` §10.2 (`cd path`), §11.6, §11.7,
 §14.6.

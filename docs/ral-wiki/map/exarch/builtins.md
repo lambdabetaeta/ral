@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a6117cb1
-generated_at_date: 2026-09-02
+generated_at_commit: 0c6ec335
+generated_at_date: 2026-09-03
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -140,8 +140,8 @@ not ground) — it exists to be composed with an eliminator in the same run:
 
 Carried only on `builtins::host_surface()`, alongside the search/edit
 atoms above: a bare REPL shell, whose boot never carries `EXARCH_BUILTINS` (nor
-`SERVICE_BUILTIN`), has neither `service` nor `service-handle` — its own job
-control is [[map/repl/jobs|repl/jobs]].
+`SERVICE_BUILTIN`), has neither `service` nor `service-handle`; background
+work there is `spawn`, as everywhere else.
 
 ## ral helpers — `agent.ral`
 

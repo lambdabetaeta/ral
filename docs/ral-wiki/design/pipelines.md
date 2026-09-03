@@ -112,12 +112,15 @@ lives exactly as long as its reader needs it
 ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
 
 The terminal-handoff and process-containment machinery is transport detail, not
-surface semantics. Unix uses process groups, a foreground guard claimed before
-any stage runs, and a Ctrl-Z gate every stage thread polls cooperatively;
-Windows uses Job Objects and a creation-time launch path to close its
-handle-inheritance window. The moving parts live in the
-[[map/core/runtime|runtime]]'s `pipeline/` and [[map/core/io-process|process]]
-maps.
+surface semantics. Unix uses process groups and a foreground guard claimed
+before any stage runs; ral does not suspend, so a stopped child — by
+`SIGTSTP`, `SIGTTIN`, `SIGTTOU`, or an external `kill -STOP` — is answered
+with `SIGCONT` at once by whoever is waiting on it, the same rule for a
+direct external and a stage thread's own child alike
+([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). Windows uses
+Job Objects and a creation-time launch path to close its handle-inheritance
+window. The moving parts live in the [[map/core/runtime|runtime]]'s
+`pipeline/` and [[map/core/io-process|process]] maps.
 
 See also [[design/types|types]], [[design/cbpv|cbpv]],
 [[design/codecs|codecs]], [[design/scoping|scoping]].

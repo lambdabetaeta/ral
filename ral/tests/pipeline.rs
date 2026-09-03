@@ -710,7 +710,7 @@ fn parse_tagged_field(text: &str, prefix: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-// ── Stopped pipeline children ────────────────────────────────────────────────
+// ── Exit-status classification and group edge cases ──────────────────────────
 
 #[test]
 fn normal_exit_137_is_not_reported_as_sigkill() {
@@ -1527,8 +1527,8 @@ mod pty_helper {
     }
 }
 
-/// A live pty-backed `ral -i --norc` REPL, for job-control tests that need
-/// more than one round of input (Ctrl-Z, then a line, then `fg`, …).
+/// A live pty-backed `ral -i --norc` REPL, for tests that need more than one
+/// round of input (a line, then a signal, then more input, …).
 /// `run_pty_repl_until` is the single-shot case built on top of it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 struct PtySession {
@@ -1605,11 +1605,13 @@ impl PtySession {
         writeln!(self.input, "{s}")
     }
 
-    /// Ctrl-Z: 0x1a. Unused by the job-control tests below: under this
-    /// container's virtualized tty line discipline, writing VSUSP never
-    /// raises SIGTSTP (`ISIG` is on and VSUSP maps to 0x1a, but the child
-    /// stays `S` forever), so those tests signal the pipeline's process
-    /// group directly instead. Kept for a real tty.
+    /// Ctrl-Z: 0x1a. Unused below: under this container's virtualized tty
+    /// line discipline, writing VSUSP never raises SIGTSTP (`ISIG` is on and
+    /// VSUSP maps to 0x1a, but the child stays `S` forever), so a real
+    /// SIGTSTP has to be sent to the pipeline's process group directly
+    /// instead. Kept for a real tty, where it would exercise ral's
+    /// answer-every-stop-with-SIGCONT rule (no job control: Ctrl-Z is
+    /// visibly a no-op).
     #[allow(dead_code)]
     fn send_ctrl_z(&mut self) -> std::io::Result<()> {
         use std::io::Write;

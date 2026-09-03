@@ -14,15 +14,14 @@ non-`Bool` condition as a type error; branching on *success* is `try`'s.
 
 **`?` is a fallback chain: the first success wins.** `a ? b ? c` tries each arm
 left to right, returns the first that does not fail, and skips the rest; only a
-*failure* falls through to the next arm. A non-failure escape — `exit`, a
-job-control stop — propagates out immediately instead of being caught. If every arm fails the last error propagates, and all arms must
+*failure* falls through to the next arm. A non-failure escape — `exit` — propagates out immediately instead of being caught. If every arm fails the last error propagates, and all arms must
 share one return type.
 
 **`try` turns failure into data, and is ral's only `||`.** `try B H` runs `B`;
 on success it returns `B`'s value, on failure it calls the handler `H` with an
 error record `[status, cmd, message, line, col]` and returns *its* value,
 unifying both outcomes into one type. It catches recoverable runtime errors and
-nothing else — `exit` and job-control stops, the two `Escape`s, bypass it. When a
+nothing else — `exit`, `Escape`'s one variant, bypasses it. When a
 command encodes its result in its exit status rather than a value — an external
 `grep -q`, say — `try` is how that success drives a branch:
 `try { grep -q p f; echo found } { |_| echo missing }`. There is no

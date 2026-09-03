@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 5afa1c81
-verified_at_date: 2026-08-12
+verified_at_commit: 0c6ec335
+verified_at_date: 2026-09-03
 anchors: [builtin_registry, CORE_BUILTINS, WATCH_BUILTIN, BuiltinEntry, fixed_arity, native_value, seed_natives_and_base, coreutils_invoke]
 ---
 
@@ -78,8 +78,8 @@ sibling helpers.
 core and core never inspects them
 ([[decisions/260514_repl-builtins-stay-in-repl|repl-builtins-stay-in-repl]]), and
 they seed through the same two installs, so a host contributes natives as well
-as base frames: the REPL's `jobs`/`fg`/`bg`/`disown` are natives, `detach` a
-base frame on a host that arms the policy. Three core-implemented entries
+as base frames: the REPL's `_ed-*` family and `load-plugin`/`unload-plugin`
+are natives; `detach` is a base frame on a host that arms the policy. Three core-implemented entries
 register this way too — `WATCH_BUILTIN`, `SERVICE_BUILTIN`, and
 `DETACH_BUILTIN`, each a public one-entry wrapper over a private body — so a
 host whose streams are capture buffers, or whose leases reap ordinary workers,

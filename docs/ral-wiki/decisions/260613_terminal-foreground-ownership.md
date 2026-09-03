@@ -49,7 +49,7 @@ the child parked, and ral tore the pipeline down with `[R0001]`.
   still receive the inherited-or-default SIGTTOU disposition through
   `reset_child_signals`.
 - **Parking decouples from foreground.** Only an interactive REPL has a
-  [[map/repl/jobs|job table]] to `fg` a parked job, so `park_on_stop =
+  job table to `fg` a parked job, so `park_on_stop =
   want_fg && interactive` (`runtime/command/foreground.rs`). A foreground child
   of a *non-interactive* script is kill-and-reaped on `SIGTSTP`/`SIGSTOP`, never
   parked — there is no session to resume it, and parking would strand it holding

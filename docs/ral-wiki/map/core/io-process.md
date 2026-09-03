@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6104758c
-generated_at_date: 2026-09-02
+generated_at_commit: 0c6ec335
+generated_at_date: 2026-09-03
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -89,19 +89,6 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   actually caused, keeps no failure; every other status is kept, because the
   kill precedes the wait and cannot rewrite a recorded status
   ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
-- `gate.rs` (Unix) — `StageGate`, the one Ctrl-Z park per pipeline, shared by
-  every stage thread it holds (`pause`/`resume`/`is_paused` behind an atomic
-  fast path plus a `Condvar` for the blocking wait); `StageStop`, a stage's
-  outstanding stop and nothing besides — one `Option<Signal>`, written by the
-  stage or by an external it waits on and cleared by the collector holding its
-  handle, while whether the stage has *ended* is read off
-  `JoinHandle::is_finished`, which an unwinding panic cannot skip;
-  `StagePark { gate, stop }`, the pair that travels
-  on `Mooring::park` so a nested pipeline's stages inherit the gate and a
-  detached `spawn` worker, minted a fresh park-free `Mooring`, does not; and
-  `StopPolicy` (`KillAndReap` / `Escape` / `Park(StagePark)`), what becomes of
-  a stop nobody else claimed — a pipeline stage's stop is the collector's to
-  classify, since only it holds the group's role.
 - `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
   stdout write from another thread: a self-pipe polled beside the stage's own
   fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle

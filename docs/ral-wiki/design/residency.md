@@ -1,7 +1,7 @@
 # residency: a session is a ledger of residents
 
-**Everything that stays alive between runs — a detached worker, a stopped
-pgid group, a sub-agent, a schedule, a top-level binding — is a *resident*,
+**Everything that stays alive between runs — a detached worker, a sub-agent,
+a schedule, a top-level binding — is a *resident*,
 and a resident has exactly four facets: an identity in the session's
 ownership tree, a typed capability that reaches it, a lease, and a probe.**
 The session keeps one *ledger* of residents, in chapters that keep their own
@@ -20,13 +20,13 @@ independently, the wart this dissolves, why the deep fusion is refused — is
   agent tree, the shell that spawned the worker, the session that armed the
   schedule). Ownership is what cancellation cascades along.
 - **Capability** — the typed value that reaches and controls the resident: a
-  `Value::Handle` for a worker, a pgid job spec for a stopped pipeline, an
+  `Value::Handle` for a worker, an
   `AgentId` for an agent, a schedule id for a wakeup, a top-level *name* for
   a binding. Capabilities are deliberately not unified — they are the honest
   variance between chapters, never flattened into one value.
 - **Lease** — a clock, an idle bound, a renewal signal, an optional
-  backstop — including the degenerate cases: "none; legibility is the
-  bound" (a `service`) and "none; a human owns it" (a stopped job).
+  backstop — including the degenerate case "none; legibility is the
+  bound" (a `service`).
   leases-and-budgets is where the
   lease machinery itself lives; residency is the frame it sits inside.
 - **Probe** — what the resident costs now, for the `/resources` fold.
@@ -56,30 +56,30 @@ capability; the distinction says where state comes from, never who may reach it.
 ## The residency order
 
 Residency states are graded by independence from the session — a *graded
-partial order*, not a lattice: a backgrounded pgid group and a detached
-handle sit at the same grade with incomparable capabilities, and no join is
-claimed.
+partial order*, not a lattice: two residents can sit at the same grade with
+incomparable capabilities, and no join is claimed. There is no *stopped*
+grade: ral does not suspend, so a stopped child is resumed at once by
+whoever waits on it rather than parked as a resident of its own
+([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 
 | grade | state | population | entered by | left by |
 |---|---|---|---|---|
 | 0 | foreground | the run in progress | evaluation | completion, the wall, interrupt |
-| 1 | stopped | pgid groups | kernel SIGTSTP | `fg`, `bg`, exit sweep |
-| 2 | background | pgid groups (`bg`) · detached handles (`spawn`) | `bg` · birth | completion, `cancel`, lease reap, exit |
-| 3 | durable | `service` workers | birth | completion, `cancel`, `/clear`, process exit |
-| 4 | survives exit | disowned groups · future Regime 2 processes | `disown` · birth | outside the session's story |
+| 1 | background | detached handles (`spawn`) | birth | completion, `cancel`, lease reap, exit |
+| 2 | durable | `service` workers | birth | completion, `cancel`, `/clear`, process exit |
+| 3 | survives exit | `detach`ed processes | birth | outside the session's story |
 
 Leases are the downward pressure — everything drifts toward reclamation
-unless renewed. Explicit verbs move work up: `bg` **is** promotion, and
-`disown` **is** the survives-exit flip.
+unless renewed.
 
 ## Two traversal disciplines, one order
 
 - **Interactive work discovers its lifetime.** A human cannot know at
-  launch that this build wants backgrounding; intent is revealed late, so
-  the REPL's verbs move work *mid-flight*: Ctrl-Z suspends, `bg` promotes,
-  `fg` demotes, `disown` promotes to grade 4.
+  launch that this build wants backgrounding; intent is revealed late, so a
+  REPL user reaches for `spawn` once that becomes clear, or Ctrl-C and
+  re-runs under `spawn` for work that was already in the foreground.
 - **Agent work declares its lifetime.** A model states intent at birth —
-  `spawn` is born at grade 2, `service` at grade 3 — and mid-flight movement
+  `spawn` is born at grade 1, `service` at grade 2 — and mid-flight movement
   (`promote`) stays deferred until a concrete need.
 
 *Birth, not promote* is not a universal law; it is the declaration
@@ -91,21 +91,19 @@ differ only in when a resident's grade is decided.
 
 The chapters keep their own representations, locks, and homes
 ([[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]):
-the worker registry beside core's handles, the job table in the REPL
-binary, the agent tree and schedules in exarch. What is shared is the
+the worker registry beside core's handles, the agent tree and schedules in
+exarch. What is shared is the
 small resident signature — identity, population, capability kind, lease
 row, state label, cancel, defined once in
 [[map/core/shell-state|`core/src/types/resident.rs`]] — and the folds
 written against it:
 
-- **list** — project a set of chapters into one table. The REPL's `jobs`
-  folds the pgid `JobTable` and the shell's registered worker handles into
-  one listing, marked by kind in a designator namespace of its own (`[wN]`
-  beside `[n]`) so the two can never collide.
-- **warn** — the exit story: what survives, what is swept, what is named.
-  Shell exit is warn-then-sweep: undisowned pgid groups are swept as
-  always, and any worker handle still running is named first — it dies
-  with the process, so naming it is its only farewell.
+- **list** — project a set of chapters into one table, marked by kind in a
+  designator namespace of its own (`[wN]`) so different chapters can never
+  collide.
+- **warn** — the exit story: what survives, what is named. Shell exit
+  names any worker handle still running first — it dies with the process,
+  so naming it is its only farewell.
 - **cascade** — cancellation follows ownership edges regardless of
   population. Cancelling a resident cancels what it owns: an agent's
   teardown reaches its own workers through its shell's durable root (a
@@ -134,19 +132,15 @@ resident through its capability, never scanning past it.
 
 The interface is the unification; a single registry struct would be the
 flattening. Fusing the chapters — one struct, one lock order, one capability
-type — is rejected because the substrates genuinely differ: pgid plus
-terminal versus thread plus result channel, a kernel-driven state machine
-that can re-stop versus a monotone running-to-settled, tty inheritance
-versus bounded capture. The deep version of this — Ctrl-Z minting a
-`Value::Handle`, `fg` becoming a handle's `await` — is refused for the same
-reason `jobs` and `spawn` were kept apart in the first place
-([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]):
-`fg` needs the [[decisions/260619_terminal-lease|terminal-lease]], a host
-affordance no eliminator should grow, and fusion would put a `Stopped` arm
-in `HandleState` that only one host can produce. `fg`/`bg`/`disown` stay
-strictly pgid-typed; a handle's own eliminators are its analogues — `await`
-is its `fg`, `cancel` its kill — never a shared verb pretending both
-populations are one.
+type — is rejected because the substrates genuinely differ: thread plus
+result channel versus agent tree plus mailbox versus schedule plus wakeup,
+each with its own ownership shape and its own probe. A prior draft of this
+refusal also weighed fusing a pgid job chapter into the handle model — `fg`
+becoming a handle's `await` — but ral does not suspend
+([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]), so there is
+no pgid chapter left to fuse against; a handle's own eliminators (`await`,
+`cancel`) are simply what they are, never analogues of a job verb that no
+longer exists.
 
 Not every chapter implements the resident signature, either, and that is
 the same refusal at a smaller scale: exarch's agent tree, schedules,
@@ -173,5 +167,7 @@ layer), [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]
 (the schedules chapter), [[decisions/260619_terminal-lease|terminal-lease]]
 (why `fg` is a host affordance), [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]]
 (why the chapters keep separate homes), [[invariants/probe-convention|probe-convention]]
-(the probe facet as a checkable rule), [[map/repl/jobs|repl/jobs]],
-[[map/exarch/agent|agent]], [[map/core/shell-state|core/shell-state]].
+(the probe facet as a checkable rule),
+[[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]] (why there is
+no stopped grade), [[map/exarch/agent|agent]],
+[[map/core/shell-state|core/shell-state]].

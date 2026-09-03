@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 0c6ec335
+generated_at_date: 2026-09-03
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/plugin_editor.rs, ral/src/repl/plugin_ed_builtins.rs, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -163,8 +163,8 @@ once, so the frontends cannot disagree.
 
 ## Captured session commands
 
-`host_handlers.rs::build` returns the six captured builtins the REPL's
+`host_handlers.rs::build` returns the two captured builtins the REPL's
 `HostSurface` installs at boot, each closing over the shared `Arc<Mutex<…>>`
-state: `jobs`, `fg`, `bg`, `disown` ([[map/repl/jobs|jobs]]), and
-`load-plugin` / `unload-plugin`. They are captured rather than static because
-they mutate long-lived runtime state the static descriptor cannot reach.
+state: `load-plugin` and `unload-plugin`. They are captured rather than
+static because they mutate long-lived runtime state the static descriptor
+cannot reach.
