@@ -6,7 +6,6 @@
 //! on a [`CancelScope`], observed at the evaluator's poll points via [`check`].
 
 pub mod cancel;
-pub mod gate;
 pub mod jail;
 pub mod launch;
 pub mod lease;
@@ -32,8 +31,6 @@ pub use cancel::{
 };
 #[cfg(unix)]
 pub(crate) use cancel::TEARDOWN_GRACE;
-
-pub use gate::{StageGate, StagePark, StageStop, StopPolicy};
 
 pub(crate) use signal::{KillTarget, kill_stage_by_pid};
 #[cfg(unix)]

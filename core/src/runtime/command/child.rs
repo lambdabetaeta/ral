@@ -4,7 +4,7 @@
 //! twice" unwritable.
 
 use crate::io::Sink;
-use crate::process::{CancelCause, Ending, EndingCell, KillTarget, StopPolicy};
+use crate::process::{CancelCause, Ending, EndingCell, KillTarget};
 use crate::types::{Break, Error, Settled};
 
 /// Who releases the Windows group registered in `win_groups`
@@ -49,11 +49,6 @@ pub(crate) struct RunningChild {
     /// stdout by `2>&1` — nothing to pump in any of those cases.
     pub stderr_pump: Option<std::thread::JoinHandle<()>>,
     pub name: String,
-    /// Read by nothing: every stop `wait` and `run_pipeline_stage` see is
-    /// answered inline with `SIGCONT`, whatever this holds.  Kept for
-    /// `StopPolicy`'s own removal to take alongside it.
-    #[allow(dead_code)]
-    pub stop: StopPolicy,
     pub group_owner: GroupOwner,
     /// Polled by `wait`, because a blocking `waitpid` / `WaitForSingleObject`
     /// consults nothing: without the poll an upstream cancel (exarch's tool
@@ -105,7 +100,6 @@ impl RunningChild {
         child: crate::process::ChildHandle,
         name: String,
         plumbing: ExternalPlumbing,
-        stop: StopPolicy,
         group_owner: GroupOwner,
         cancel: crate::process::CancelScope,
         jail: Option<crate::process::jail::JailCgroup>,
@@ -123,7 +117,6 @@ impl RunningChild {
             pump,
             stderr_pump,
             name,
-            stop,
             group_owner,
             cancel,
             ending: EndingCell::default(),
@@ -640,7 +633,6 @@ mod tests {
                 stdout_pump: None,
                 stderr_pump: None,
             },
-            StopPolicy::KillAndReap,
             GroupOwner::Standalone(pgid.expect("NewLeader yields a tracked pgid")),
             scope.clone(),
             None,
@@ -709,9 +701,6 @@ mod tests {
                 stdout_pump: None,
                 stderr_pump: None,
             },
-            // No parking: a stop here would be killed and reaped, not
-            // turned into a job.
-            StopPolicy::KillAndReap,
             GroupOwner::Standalone(pgid.expect("NewLeader yields a tracked pgid")),
             scope.clone(),
             None,
@@ -760,12 +749,10 @@ mod tests {
         );
     }
 
-    /// `StopPolicy::Park` behind a fresh, never-paused gate — the shape a
-    /// detached `spawn` worker's pipeline carries, with no owner above it to
-    /// ever open the gate.  `wait` must revive the child itself rather than
-    /// loop forever behind a gate nobody will open.
+    /// A stop is answered with `SIGCONT` at once by whoever waits on it —
+    /// the one rule, with no owner above it and nothing tracking the stop.
     #[test]
-    fn park_with_an_unpaused_gate_revives_its_own_child() {
+    fn wait_revives_an_ownerless_sigstopped_child() {
         let mut cmd = std::process::Command::new("/bin/sleep");
         cmd.arg("0.2");
         let (child, pgid) = spawn_with_pgid(&mut cmd, PgidPolicy::NewLeader)
@@ -774,10 +761,6 @@ mod tests {
         rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::STOP)
             .expect("SIGSTOP the sleep");
 
-        let park = StagePark {
-            gate: StageGate::new(),
-            stop: StageStop::new(),
-        };
         let running = RunningChild::assemble_with_owner(
             crate::process::ChildHandle::from_std(child),
             "sleep".to_string(),
@@ -785,7 +768,6 @@ mod tests {
                 stdout_pump: None,
                 stderr_pump: None,
             },
-            StopPolicy::Park(park),
             GroupOwner::Standalone(pgid),
             CancelScope::root(),
             None,
@@ -798,7 +780,7 @@ mod tests {
 
         assert!(
             elapsed.as_secs() < 5,
-            "an ownerless park must not hang behind a gate nobody opens: took {elapsed:?}"
+            "a SIGSTOP'd child must be revived rather than hung: took {elapsed:?}"
         );
     }
 }

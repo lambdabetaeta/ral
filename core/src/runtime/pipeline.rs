@@ -13,7 +13,6 @@ mod route;
 mod thread;
 
 use crate::ir::{Comp, PipeYield};
-use crate::process::StageGate;
 use crate::types::{Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 use std::time::Instant;
@@ -36,7 +35,6 @@ pub(crate) struct PipeNode {
     /// must still be the anchor's — a reaped leader's pid may be reused once
     /// its group is empty.
     collect: CollectState,
-    gate: Arc<StageGate>,
     group: PipelineGroup,
     yields: PipeYield,
 }
@@ -73,24 +71,15 @@ impl PipeNode {
         // spawns so a kernel deny logged by a stage falls inside it.
         let started = Instant::now();
 
-        // Two independent axes: whether this pipeline owns its pgid or joins
-        // an enclosing stage's, and whether its Ctrl-Z gate is fresh or that
-        // stage's own.  Every combination is meaningful — a `spawn` worker
-        // inside a stage joins the group but carries no park.
+        // Whether this pipeline owns its pgid or joins an enclosing stage's.
         let group = match shell.io.launch_role.stage_group() {
             Some(g) => PipelineGroup::joining(g),
-            None => PipelineGroup::prepare(plan.terminal, shell)?,
-        };
-        let gate = match &mooring.park {
-            Some(p) => Arc::clone(&p.gate),
-            None => StageGate::new(),
+            None => PipelineGroup::prepare(shell)?,
         };
 
-        let (group, collect) =
-            launch_pipeline(stages, &plan, env, mooring, shell, group, &gate, started)?;
+        let (group, collect) = launch_pipeline(stages, &plan, env, mooring, shell, group, started)?;
         Ok(Self {
             collect,
-            gate,
             group,
             yields: plan.yields,
         })
@@ -99,10 +88,9 @@ impl PipeNode {
     /// Wait on every stage and fold the outcome into one value.
     ///
     /// The last stage carries its value home directly, on the `JoinHandle` or
-    /// the OS wait alike; collect reads it only after waiting on the stage,
-    /// since one blocked on a stopped upstream would deadlock us.
+    /// the OS wait alike; collect reads it only after waiting on the stage.
     pub(crate) fn join(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        self.collect.drive(&self.group, &self.gate, shell);
+        self.collect.drive(&self.group, shell);
         self.collect.fold(mooring, shell).finish(self.yields)
     }
 }

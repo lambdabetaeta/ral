@@ -13,7 +13,7 @@ use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::source::Span;
 use crate::types::{Break, Closure, Error, Mooring, Settled};
-use crate::process::{CancelCause, CancelScope, Ending, EndingCell, StageGate, StagePark, StageStop, Wake};
+use crate::process::{CancelCause, CancelScope, Ending, EndingCell, Wake};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
@@ -104,16 +104,11 @@ impl Drop for ThreadStage {
     clippy::needless_pass_by_value,
     reason = "LaunchCx bundles unique `&mut` borrows; by-value transfers them so this fn gets mutable access — a shared `&LaunchCx` cannot yield `&mut`"
 )]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one launch call per stage; its index, finality, and sender have nowhere else to ride"
-)]
 pub(super) fn launch_thread_stage(
     stage: &Arc<Comp>,
     spec: &StageSpec,
     route: StageRoute,
     cx: LaunchCx<'_>,
-    gate: &Arc<StageGate>,
     ix: usize,
     is_last: bool,
     tx: std::sync::mpsc::Sender<super::collect::Report>,
@@ -134,12 +129,8 @@ pub(super) fn launch_thread_stage(
     };
     let stderr = cx.shell.io.stderr.clone();
 
-    let park = StagePark {
-        gate: Arc::clone(gate),
-        stop: StageStop::new(),
-    };
     let policy = cx.shell.local.audit.active_policy();
-    let mooring = Mooring::for_stage_thread(cx.mooring, park);
+    let mooring = Mooring::for_stage_thread(cx.mooring);
 
     let io = Io {
         stdin,
@@ -196,7 +187,7 @@ pub(super) fn launch_thread_stage(
 mod tests {
     use super::*;
     use super::super::group::PipelineGroup;
-    use super::super::resolve::{StageLaunch, TerminalPlan};
+    use super::super::resolve::StageLaunch;
     use super::super::route::ByteIn;
     use crate::types::{Shell, TerminalAccess};
     use std::io::Read;
@@ -224,7 +215,7 @@ mod tests {
     }
 
     fn prepared_group() -> PipelineGroup {
-        PipelineGroup::prepare(TerminalPlan::NoTerminal, &Shell::default()).expect("anchor spawns")
+        PipelineGroup::prepare(&Shell::default()).expect("anchor spawns")
     }
 
     #[test]
@@ -242,7 +233,6 @@ mod tests {
             held: None,
         };
         let mooring = Mooring::adrift();
-        let gate = StageGate::new();
         let cx = LaunchCx {
             mooring: &mooring,
             shell: &mut shell,
@@ -250,8 +240,7 @@ mod tests {
             group: &mut group,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let _handle =
-            launch_thread_stage(&stage, &spec, route, cx, &gate, 0, true, tx).expect("launch");
+        let _handle = launch_thread_stage(&stage, &spec, route, cx, 0, true, tx).expect("launch");
 
         let mut out = Vec::new();
         reader.read_to_end(&mut out).expect("read stage stdout");
@@ -283,7 +272,6 @@ mod tests {
             held: None,
         };
         let mooring = Mooring::adrift();
-        let gate = StageGate::new();
         let cx = LaunchCx {
             mooring: &mooring,
             shell: &mut shell,
@@ -292,7 +280,7 @@ mod tests {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let mut handle =
-            launch_thread_stage(&stage, &spec, route, cx, &gate, 0, true, tx).expect("launch");
+            launch_thread_stage(&stage, &spec, route, cx, 0, true, tx).expect("launch");
 
         handle.cancel(CancelCause::ReaderGone);
         handle.interrupt();
@@ -338,11 +326,7 @@ mod tests {
             "precondition: the outer mooring holds a lease"
         );
 
-        let park = StagePark {
-            gate: StageGate::new(),
-            stop: StageStop::new(),
-        };
-        let stage_mooring = Mooring::for_stage_thread(&outer, park);
+        let stage_mooring = Mooring::for_stage_thread(&outer);
         assert!(
             parent.terminal_lease(&stage_mooring).is_none(),
             "a stage thread's mooring denies terminal access outright"

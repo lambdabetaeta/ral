@@ -231,13 +231,6 @@ pub fn check(mooring: &crate::types::Mooring) -> Result<(), crate::types::Break>
             cause.exit_code(),
         )));
     }
-    if let Some(p) = &mooring.park
-        && p.gate.is_paused()
-    {
-        p.gate.wait(mooring.cancel.as_scope()).map_err(|c| {
-            crate::types::Break::Error(crate::types::Error::new(c.message(), c.exit_code()))
-        })?;
-    }
     Ok(())
 }
 
@@ -358,35 +351,3 @@ pub(crate) enum KillTarget {
     Pid,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::process::gate::{StageGate, StagePark, StageStop};
-    use std::sync::Arc;
-
-    /// `check` consults the mooring's park after its cause check: a paused
-    /// gate blocks the call until `resume`, then returns `Ok`.
-    #[test]
-    fn check_blocks_while_paused_and_returns_when_resumed() {
-        let gate = StageGate::new();
-        gate.pause();
-        let mut mooring = crate::types::Mooring::adrift();
-        mooring.park = Some(StagePark {
-            gate: Arc::clone(&gate),
-            stop: StageStop::new(),
-        });
-
-        let resumer = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            gate.resume();
-        });
-
-        let start = std::time::Instant::now();
-        assert!(check(&mooring).is_ok(), "check must return once resumed");
-        assert!(
-            start.elapsed() >= std::time::Duration::from_millis(40),
-            "check must actually have blocked on the pause"
-        );
-        resumer.join().expect("resumer thread");
-    }
-}

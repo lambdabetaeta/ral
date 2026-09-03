@@ -129,7 +129,6 @@ pub(crate) fn run(
     // pgroup.
     let _fg_guard = fg.acquire(child_pid, shell, mooring);
 
-    let stop = fg.stop_policy(mooring);
     // A tracked leader pgid is exactly what there is to release on
     // Windows; an `Inherit` child has no group at all. A `Join` child
     // borrowed a group it does not own.
@@ -148,7 +147,6 @@ pub(crate) fn run(
             stdout_pump: stdout_plan,
             stderr_pump,
         },
-        stop,
         group_owner,
         mooring.cancel.as_scope().clone(),
         jail,

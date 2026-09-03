@@ -6,11 +6,13 @@
 use super::super::command;
 use super::collect::{CollectState, Report, SettleOnDrop, Settlement, StageObservation};
 use super::group::PipelineGroup;
-use super::resolve::{ExternalStage as ExternalStageSpec, PipelinePlan, StageLaunch, StageSpec};
+use super::resolve::{
+    ExternalStage as ExternalStageSpec, PipelinePlan, StageLaunch, StageSpec, TerminalPlan,
+};
 use super::route::{ByteIn, ByteOut, StageRoute, open_stage_routes};
 use super::thread::{ThreadStage, launch_thread_stage};
 use crate::io::{Sink, Source, SourceReader};
-use crate::process::{CancelCause, CancelScope, Ending, StageGate, StopPolicy};
+use crate::process::{CancelCause, CancelScope, Ending};
 use crate::types::{Break, Env, Error, Mooring, Settled, Shell};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -84,8 +86,7 @@ impl StageHandle {
     /// and feeding the pipe — `step` has already checked.  The **one**
     /// place that raises the forgiven ending on either record: a thread's
     /// `ThreadStage::ending`, or an external's `kill_cause`.  No other kill
-    /// on this stage may claim a death nothing sent it.  See
-    /// [`Self::kill_stopped`] for the other kill, which must not.
+    /// on this stage may claim a death nothing sent it.
     pub(super) fn kill_now(&mut self) {
         match &mut self.kind {
             StageKind::External(e) => {
@@ -99,21 +100,10 @@ impl StageHandle {
         }
     }
 
-    /// [`super::collect::Effect::KillStoppedStage`]'s mechanical action: a
-    /// background group's stop-then-kill, fired before the group's own
-    /// `SIGCONT` could wake the child.  Only ever reached for an external.
-    /// Raises nothing on either record — the subsequent `CancelAll(Terminate)`
-    /// still stamps this stage's `Ending` via its own `cancel_stages`.
-    #[cfg(unix)]
-    pub(super) fn kill_stopped(&self) {
-        self.kill_by_pid();
-    }
-
     /// Kill this stage's pid alone if it is a live external — a joining
     /// collector's `cancel_all`, with no pgid of its own to kill, reaching
-    /// what it launched directly.  Raises nothing on either record, like
-    /// [`Self::kill_stopped`]: a thread stage was already cancelled and
-    /// woken by [`Self::cancel`].
+    /// what it launched directly.  Raises nothing on either record: a
+    /// thread stage was already cancelled and woken by [`Self::cancel`].
     pub(super) fn kill_by_pid(&self) {
         if let StageKind::External(e) = &self.kind {
             crate::process::kill_stage_by_pid(e.pid);
@@ -141,16 +131,6 @@ impl StageHandle {
                 t.interrupt();
             }
         }
-    }
-
-    /// Whether this is a thread stage: `step`'s only use of the kind that
-    /// isn't itself dispatched by a [`StageHandle`] method — the reader-gone
-    /// cascade skips a background group's stop-then-kill for a thread, whose
-    /// own settlement, via `CancelAll`, already covers it.  Unused now that
-    /// nothing in `step` names it.
-    #[allow(dead_code)]
-    pub(super) fn is_thread(&self) -> bool {
-        matches!(self.kind, StageKind::Thread(_))
     }
 
     /// Whether this stage's stdout can still reach the interior edge — the
@@ -224,19 +204,6 @@ impl StageHandle {
             }),
             held_edge: None,
             feeds_pipe: true,
-        }
-    }
-
-    /// This stage's waiter's own `kill_cause`, for `step`'s transition-table
-    /// tests to assert on directly — whether a kill attributed itself there.
-    /// Its only caller compares `kill_now` against `kill_stopped`, which is
-    /// itself `cfg(unix)`; unreachable for a thread, which this test never
-    /// builds.
-    #[cfg(all(test, unix))]
-    pub(super) fn kill_cause_for_test(&self) -> Option<CancelCause> {
-        match &self.kind {
-            StageKind::External(e) => e.kill_cause.cause(),
-            StageKind::Thread(_) => unreachable!("the test only builds externals"),
         }
     }
 }
@@ -395,10 +362,7 @@ pub(super) fn wire_stage_stdio(
 }
 
 /// Spawn `cmd` into `group` and assemble the [`command::RunningChild`] for a
-/// direct external stage.  `StopPolicy::KillAndReap` is inert here — its own
-/// dedicated waiter thread ([`spawn_external_waiter`]) never consults it,
-/// reporting every stop and answering none — but `RunningChild` carries no
-/// "no policy" shape, so the field must still hold something.
+/// direct external stage.
 pub(super) fn spawn_into_group(
     group: &PipelineGroup,
     cmd: &mut crate::process::Launch,
@@ -419,7 +383,6 @@ pub(super) fn spawn_into_group(
         child,
         name,
         plumbing,
-        StopPolicy::KillAndReap,
         // Windows group release belongs to `PipelineGroup::drop`.
         command::GroupOwner::BorrowedByPipeline,
         mooring.cancel.as_scope().clone(),
@@ -452,7 +415,6 @@ fn spawn_stage(
     spec: &StageSpec,
     mut route: StageRoute,
     cx: LaunchCx<'_>,
-    gate: &Arc<StageGate>,
     ix: usize,
     is_last: bool,
     tx: Sender<Report>,
@@ -464,9 +426,9 @@ fn spawn_stage(
                 launch_external_stage_direct(ext, route, cx.mooring, cx.shell, cx.group)?;
             StageKind::External(spawn_external_waiter(running, ix, tx))
         }
-        StageLaunch::Thread => StageKind::Thread(launch_thread_stage(
-            stage, spec, route, cx, gate, ix, is_last, tx,
-        )?),
+        StageLaunch::Thread => {
+            StageKind::Thread(launch_thread_stage(stage, spec, route, cx, ix, is_last, tx)?)
+        }
     };
     Ok(StageHandle {
         kind,
@@ -493,19 +455,20 @@ struct PipelineResources {
 /// foreground decision is settled.
 struct PipelineBuild {
     resources: PipelineResources,
-    gate: Arc<StageGate>,
 }
 
 impl PipelineBuild {
     fn new(
         mut group: PipelineGroup,
-        gate: Arc<StageGate>,
+        terminal: TerminalPlan,
         routes: VecDeque<StageRoute>,
         shell: &Shell,
         mooring: &Mooring,
         started: std::time::Instant,
     ) -> Self {
-        group.claim_foreground(shell, mooring);
+        if matches!(terminal, TerminalPlan::ForegroundExternalGroup) {
+            group.claim_foreground(shell, mooring);
+        }
         let collect = CollectState::new(&mut group, mooring, started);
         Self {
             resources: PipelineResources {
@@ -513,7 +476,6 @@ impl PipelineBuild {
                 collect,
                 group,
             },
-            gate,
         }
     }
 
@@ -539,7 +501,7 @@ impl PipelineBuild {
             env,
             group: &mut self.resources.group,
         };
-        let handle = spawn_stage(stage, spec, route, cx, &self.gate, ix, is_last, tx)?;
+        let handle = spawn_stage(stage, spec, route, cx, ix, is_last, tx)?;
         self.resources.collect.push(handle);
         Ok(())
     }
@@ -617,10 +579,6 @@ fn spawn_all_stages(
 
 /// Launch every stage into `group`.  A mid-launch error drops `build`, whose
 /// field order is the teardown.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one launch call per pipeline; splitting it would just scatter the same parameters across a builder"
-)]
 pub(super) fn launch_pipeline(
     stages: &[Arc<crate::ir::Comp>],
     plan: &PipelinePlan,
@@ -628,11 +586,10 @@ pub(super) fn launch_pipeline(
     mooring: &Mooring,
     shell: &mut Shell,
     group: PipelineGroup,
-    gate: &Arc<StageGate>,
     started: std::time::Instant,
 ) -> Result<(PipelineGroup, CollectState), Break> {
     let routes = open_stage_routes(plan)?.into();
-    let mut build = PipelineBuild::new(group, Arc::clone(gate), routes, shell, mooring, started);
+    let mut build = PipelineBuild::new(group, plan.terminal, routes, shell, mooring, started);
     spawn_all_stages(&mut build, stages, plan, env, mooring, shell)?;
     Ok(build.finish())
 }

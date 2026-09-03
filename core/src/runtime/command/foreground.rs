@@ -8,7 +8,7 @@
 //! spawned *from inside* a stage still comes through here and joins the
 //! stage's group.
 
-use crate::process::{ForegroundGuard, Pgid, PgidPolicy, StopPolicy};
+use crate::process::{ForegroundGuard, Pgid, PgidPolicy};
 use crate::types::{Mooring, Shell};
 
 /// Whether a freshly-spawned standalone external takes the controlling
@@ -19,12 +19,6 @@ pub(super) struct ForegroundDecision {
     /// group the child must stay consistent with, so it may lead its own
     /// group and let a cancel tree-kill it.
     own_group_when_background: bool,
-    /// Whether a stop signal should be answered with `SIGCONT` and waited
-    /// out — an interactive foreground child — rather than killed and
-    /// reaped on the spot.  Fed into [`StopPolicy::for_external`] via
-    /// [`Self::stop_policy`], which also parks on a pipeline's gate when
-    /// this run is a stage thread.
-    escapes: bool,
     /// The pipeline group this run's stage thread belongs to, if any.
     stage_group: Option<Pgid>,
 }
@@ -51,7 +45,6 @@ impl ForegroundDecision {
         Self {
             want_fg,
             own_group_when_background: shell.io.launch_role.is_top_level() && !shell.io.interactive,
-            escapes: want_fg && shell.io.interactive,
             stage_group: shell.io.launch_role.stage_group(),
         }
     }
@@ -90,11 +83,6 @@ impl ForegroundDecision {
     #[cfg(debug_assertions)]
     pub(super) fn want_fg(&self) -> bool {
         self.want_fg
-    }
-
-    /// The [`StopPolicy`] a spawn under this decision should wait with.
-    pub(super) fn stop_policy(&self, mooring: &Mooring) -> StopPolicy {
-        StopPolicy::for_external(mooring, self.escapes)
     }
 
     /// Hand the controlling terminal to the freshly-spawned child.
@@ -140,7 +128,6 @@ mod tests {
         let decision = ForegroundDecision {
             want_fg: false,
             own_group_when_background: false,
-            escapes: false,
             stage_group: Some(Pgid::from_raw(1).expect("1 is positive")),
         };
         assert!(matches!(decision.pgid_policy(), PgidPolicy::Join(_)));

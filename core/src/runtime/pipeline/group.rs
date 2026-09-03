@@ -20,7 +20,6 @@
 //! see (a bare `kill -STOP`, say) its own waiter answers with `SIGCONT`
 //! inline, the one rule applied to the anchor like any other waiter.
 
-use super::resolve::TerminalPlan;
 #[cfg(unix)]
 use super::collect::Report;
 #[cfg(unix)]
@@ -30,36 +29,23 @@ use crate::types::{Break, Mooring, Settled, Shell};
 #[cfg(unix)]
 use std::sync::mpsc::Sender;
 
-/// What this group owns.  The fourth combination the two booleans it
-/// replaces could spell — a joining group that owns the terminal — does not
-/// exist: a nested pipeline is never foreground.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum GroupRole {
-    /// Owns the pgid and was launched into the terminal foreground.
-    Foreground,
-    /// Owns the pgid with no foreground of its own — batch mode, a capture,
-    /// a pipeline inside a `spawn` worker.
-    Background,
-    /// Joined an enclosing stage's group: it may not signal, kill, or escape
-    /// on its own account.
-    Joining,
-}
-
 /// Pgid lifecycle for one pipeline: the anchor, the foreground guard and the
-/// SIGINT relay slot, all released together on drop.  The Ctrl-Z gate stage
-/// threads wait on lives beside this, on `PipeNode`, not here.
+/// SIGINT relay slot, all released together on drop.
 pub(super) struct PipelineGroup {
-    role: GroupRole,
+    /// Whether this group owns the pgid (the anchor spawned it) or joined an
+    /// enclosing stage's: a joining group may not signal, kill, or claim the
+    /// foreground on its own account.
+    owned: bool,
     leader: Pgid,
     /// The terminal handoff *actually held*: `None` when `tcsetpgrp` failed,
-    /// and `None` again once a park hands the terminal back.
+    /// or when this group never claimed it at all.
     foreground: Option<crate::process::ForegroundGuard>,
     /// Held for its `Drop` alone: nothing reads it back, but it must outlive
     /// every stage so a relayed Ctrl-C keeps reaching the group.
     #[cfg(unix)]
     #[allow(dead_code)]
     relay: Option<crate::process::PipelineRelay>,
-    /// `Some` exactly when `role` is not `Joining`; taken by `Drop`.
+    /// `Some` exactly when `owned`; taken by `Drop`.
     anchor: Option<AnchorProcess>,
 }
 
@@ -75,14 +61,11 @@ pub(super) enum Witnessed {
 impl PipelineGroup {
     /// An owning group: the anchor, then the relay — safe to install now
     /// because the anchor is a member that no relayed signal can remove.
-    pub(super) fn prepare(terminal: TerminalPlan, shell: &Shell) -> Settled<Self> {
+    pub(super) fn prepare(shell: &Shell) -> Settled<Self> {
         let anchor = AnchorProcess::spawn(shell)?;
         let leader = anchor.pgid;
         Ok(Self {
-            role: match terminal {
-                TerminalPlan::ForegroundExternalGroup => GroupRole::Foreground,
-                TerminalPlan::NoTerminal => GroupRole::Background,
-            },
+            owned: true,
             leader,
             foreground: None,
             #[cfg(unix)]
@@ -95,7 +78,7 @@ impl PipelineGroup {
     /// owning one.
     pub(super) fn joining(group: Pgid) -> Self {
         Self {
-            role: GroupRole::Joining,
+            owned: false,
             leader: group,
             foreground: None,
             #[cfg(unix)]
@@ -104,12 +87,8 @@ impl PipelineGroup {
         }
     }
 
-    pub(super) fn role(&self) -> GroupRole {
-        self.role
-    }
-
     pub(super) fn owned(&self) -> bool {
-        self.role != GroupRole::Joining
+        self.owned
     }
 
     /// Whether this group actually holds the controlling terminal — the guard
@@ -135,11 +114,12 @@ impl PipelineGroup {
         Ok((child, jail))
     }
 
+    /// Called only when the pipeline's frozen `TerminalPlan` wants foreground
+    /// — `launch::PipelineBuild::new`'s own gate, not repeated here.
     pub(super) fn claim_foreground(&mut self, shell: &Shell, mooring: &Mooring) {
         // `resolve_terminal_plan` already gated the foreground plan on the
         // lease; re-borrowing it here is the proof `try_acquire` demands.
-        if self.role == GroupRole::Foreground
-            && self.foreground.is_none()
+        if self.foreground.is_none()
             && let Some(lease) = shell.terminal_lease(mooring)
         {
             self.foreground =
@@ -192,8 +172,7 @@ impl PipelineGroup {
 
 impl Drop for PipelineGroup {
     /// The anchor last, after every stage handle has gone (`PipelineResources`
-    /// and `PipeNode` both order their fields to guarantee it): a stage parked
-    /// on its gate must be able to leave before the anchor is waited on.
+    /// and `PipeNode` both order their fields to guarantee it).
     fn drop(&mut self) {
         // The Windows group release lives inside this arm, so it cannot be
         // guarded on an ownership fact this same statement has consumed.
@@ -309,14 +288,15 @@ impl AnchorProcess {
     /// Close the release pipe and join the witness threads — the anchor's own
     /// reap is the waiter thread's, not this one's.
     ///
-    /// A parked pipeline leaves the anchor stopped too, so a bare wait would
-    /// block forever; `SIGCONT` goes to its pid alone — `-pgid` would wake
-    /// the parked stages with it.  POSIX will not recycle a leader's pid while
-    /// the group is non-empty, so the pgid stays addressable meanwhile.  The
-    /// report reader's own read end closes only once it sees EOF — the
-    /// anchor's own exit closing its write end — so it is never dropped
-    /// while the anchor could still `SIGPIPE` on a stray write into it, with
-    /// no manual ordering to get right.
+    /// An external `kill -STOP` on the group (unrelated to anything ral
+    /// itself does) can still catch the anchor stopped, so `SIGCONT` goes to
+    /// its pid before the wait, lest closing `release` go unnoticed.  POSIX
+    /// will not recycle a leader's pid while the group is non-empty, so the
+    /// pgid stays addressable meanwhile.  The report reader's own read end
+    /// closes only once it sees EOF — the anchor's own exit closing its
+    /// write end — so it is never dropped while the anchor could still
+    /// `SIGPIPE` on a stray write into it, with no manual ordering to get
+    /// right.
     #[cfg(unix)]
     fn finish(self) {
         let Self {
@@ -400,20 +380,18 @@ mod tests {
     #[test]
     fn prepare_yields_a_leader_on_every_platform() {
         let shell = Shell::default();
-        let group = PipelineGroup::prepare(TerminalPlan::NoTerminal, &shell).expect("anchor spawns");
+        let group = PipelineGroup::prepare(&shell).expect("anchor spawns");
         assert!(group.owned());
         assert!(group.leader_pgid().as_raw() > 0);
     }
 
     /// A default shell mints no terminal lease, so `claim_foreground` acquires
-    /// nothing: the plan stands, the fact does not.
+    /// nothing even when called.
     #[test]
     fn a_group_that_never_acquired_the_terminal_does_not_claim_it() {
         let shell = Shell::default();
-        let mut group = PipelineGroup::prepare(TerminalPlan::ForegroundExternalGroup, &shell)
-            .expect("anchor spawns");
+        let mut group = PipelineGroup::prepare(&shell).expect("anchor spawns");
         group.claim_foreground(&shell, &Mooring::adrift());
-        assert_eq!(group.role(), GroupRole::Foreground);
         assert!(!group.holds_terminal());
     }
 
@@ -421,7 +399,7 @@ mod tests {
     #[test]
     fn a_completed_group_releases_its_windows_job() {
         let shell = Shell::default();
-        let group = PipelineGroup::prepare(TerminalPlan::NoTerminal, &shell).expect("anchor spawns");
+        let group = PipelineGroup::prepare(&shell).expect("anchor spawns");
         let leader = group.leader_pgid().as_raw();
         assert!(crate::process::is_known_group(leader));
         drop(group);
@@ -444,8 +422,7 @@ mod tests {
     #[test]
     fn a_signalled_anchor_reports_the_cause_and_lives_on() {
         let shell = Shell::default();
-        let mut group =
-            PipelineGroup::prepare(TerminalPlan::NoTerminal, &shell).expect("anchor spawns");
+        let mut group = PipelineGroup::prepare(&shell).expect("anchor spawns");
         let (tx, rx) = std::sync::mpsc::channel();
         group.start_witness_threads(tx);
         assert!(
