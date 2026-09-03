@@ -141,6 +141,13 @@ pub fn try_run_test_helper() -> Option<u8> {
             }
         }
         let _ = std::io::stderr().write_all(buf.as_bytes());
+        // A reader stage that exits before its writer is done makes ral end
+        // that writer (SPEC §7.6), so the probe holds its stdin open to EOF
+        // rather than racing its own upstream's report.  A tty never sees
+        // EOF; `/dev/null` sees it at once.
+        if !std::io::stdin().is_terminal() {
+            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+        }
         Some(0)
     }
     #[cfg(not(unix))]
