@@ -80,7 +80,7 @@ fn sweep_hatched() {
     table.retain_mut(|child| {
         !matches!(
             child.try_wait_handling_stop(),
-            Ok(Some(o)) if !matches!(o, crate::process::WaitOutcome::Stopped(_))
+            Ok(Some(o)) if !matches!(o, crate::process::WaitPoll::Stopped(_))
         )
     });
 }

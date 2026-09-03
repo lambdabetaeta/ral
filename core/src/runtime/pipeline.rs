@@ -8,16 +8,12 @@ mod collect;
 mod group;
 pub(crate) mod helper;
 mod launch;
-#[cfg(unix)]
-pub(crate) mod parked;
 pub(crate) mod resolve;
 mod route;
 mod thread;
 
 use crate::ir::{Comp, PipeYield};
 use crate::process::StageGate;
-#[cfg(unix)]
-use crate::types::{Break, Escape};
 use crate::types::{Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 use std::time::Instant;
@@ -43,8 +39,6 @@ pub(crate) struct PipeNode {
     gate: Arc<StageGate>,
     group: PipelineGroup,
     yields: PipeYield,
-    /// The pipeline's rendered source, for `ParkedPipeline`'s job-table name.
-    cmd: String,
 }
 
 impl PipeNode {
@@ -91,7 +85,6 @@ impl PipeNode {
             Some(p) => Arc::clone(&p.gate),
             None => StageGate::new(),
         };
-        let cmd = render_cmd(shell, stages);
 
         let (group, collect) =
             launch_pipeline(stages, &plan, env, mooring, shell, group, &gate, started)?;
@@ -100,7 +93,6 @@ impl PipeNode {
             gate,
             group,
             yields: plan.yields,
-            cmd,
         })
     }
 
@@ -108,62 +100,11 @@ impl PipeNode {
     ///
     /// The last stage carries its value home directly, on the `JoinHandle` or
     /// the OS wait alike; collect reads it only after waiting on the stage,
-    /// since one blocked on a stopped upstream would deadlock us. A stop
-    /// parks the pipeline instead of returning: the terminal goes back to the
-    /// shell, the state is deposited under its pgid, and `Escape::Stopped`
-    /// propagates exactly as a foreground external's stop would.
+    /// since one blocked on a stopped upstream would deadlock us.
     pub(crate) fn join(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        // `cmd` names a parked pipeline's job entry — Unix only, since there
-        // is no park to name off Unix.
-        #[cfg(not(unix))]
-        let _ = &self.cmd;
-        match self.collect.drive(&self.group, &self.gate, shell) {
-            collect::Drive::Done => self.collect.fold(mooring, shell).finish(self.yields),
-            #[cfg(unix)]
-            collect::Drive::Parked(signal) => {
-                let Self {
-                    collect,
-                    gate,
-                    mut group,
-                    yields,
-                    cmd,
-                } = self;
-                group.release_foreground_and_relay();
-                let pgid = group.leader_pgid();
-                shell.park_pipeline(parked::ParkedPipeline {
-                    collect,
-                    gate,
-                    group,
-                    yields,
-                    cmd: cmd.clone(),
-                });
-                Err(Break::Escape(Escape::Stopped {
-                    pgid,
-                    signal,
-                    cmd,
-                    pending: Vec::new(),
-                }))
-            }
-        }
+        self.collect.drive(&self.group, &self.gate, shell);
+        self.collect.fold(mooring, shell).finish(self.yields)
     }
-}
-
-/// The pipeline's own source text, spanning its first stage's start to its
-/// last stage's end, for a parked job's display name; `"ral pipeline"`
-/// when a stage carries no span or its file is unregistered.
-fn render_cmd(shell: &Shell, stages: &[Arc<Comp>]) -> String {
-    let bounds = stages
-        .first()
-        .and_then(|s| s.span)
-        .zip(stages.last().and_then(|s| s.span));
-    bounds
-        .and_then(|(first, last)| {
-            let source = shell.session.sources.get(first.file)?;
-            let text = source.as_str();
-            let end = (last.end as usize).min(text.len());
-            text.get(first.start as usize..end)
-        })
-        .map_or_else(|| "ral pipeline".to_string(), ToString::to_string)
 }
 
 /// Attach a kernel-denial diagnostic to a failed pipeline stage's error.

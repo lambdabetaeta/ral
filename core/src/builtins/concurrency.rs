@@ -732,13 +732,10 @@ pub(super) fn builtin_race(args: &[Value], mooring: &Mooring, shell: &Shell) -> 
     project_completed(completed)
 }
 
-/// An `Escape`'s exit code: `exit code`'s own, or 1 for a job-control stop.
+/// An `Escape`'s exit code: `exit code`'s own.
 fn escape_exit_code(esc: &Escape) -> i32 {
-    match esc {
-        Escape::Exit(code) => *code,
-        #[cfg(unix)]
-        Escape::Stopped { .. } => 1,
-    }
+    let Escape::Exit(code) = esc;
+    *code
 }
 
 /// `poll`'s `` `err `` payload — the same `{cmd, status, message, line, col}`
@@ -760,8 +757,6 @@ fn break_record(e: &Break, shell: &Shell) -> Value {
         Break::Escape(esc) => {
             let message = match esc {
                 Escape::Exit(_) => "block exited".to_string(),
-                #[cfg(unix)]
-                Escape::Stopped { .. } => "block stopped".to_string(),
             };
             error_record("<runtime>", escape_exit_code(esc), &message, 0, 0)
         }

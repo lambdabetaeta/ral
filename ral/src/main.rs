@@ -9,7 +9,6 @@ use std::process::ExitCode;
 
 mod batch;
 mod cli;
-mod jobs;
 mod platform;
 mod repl;
 
@@ -20,10 +19,11 @@ use cli::{BatchOpts, Cli, InteractiveOpts, Mode, inject_arg_terminator};
 pub(crate) static PRELUDE: ral_core::boot::BakedPrelude = ral_core::baked_prelude!();
 
 /// The tag the REPL's `Transport::attach` names as its builtin installer.
-/// The REPL captures its host builtins (`jobs`/`fg`/`bg`/…) as boot-time
-/// closures over co-resident state (`repl::host_handlers`), which a wire
-/// engine child cannot construct — so this tag maps to the empty surface,
-/// the honest absence the bare REPL already gives every other host facility.
+/// The REPL captures its host builtins (`load-plugin`/`unload-plugin`/…) as
+/// boot-time closures over co-resident state (`repl::host_handlers`), which a
+/// wire engine child cannot construct — so this tag maps to the empty
+/// surface, the honest absence the bare REPL already gives every other host
+/// facility.
 #[cfg(unix)]
 pub(crate) const ENGINE_INSTALLER_TAG: &str = "repl";
 

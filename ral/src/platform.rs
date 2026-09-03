@@ -65,8 +65,8 @@ pub(crate) fn exit_byte(code: i32) -> u8 {
 /// The composition mechanism (load, `meet`-fold, freeze, push) lives in
 /// [`ral_core::capability::apply_session_profiles`]. A load failure is
 /// attributed to the flag that supplied the profiles and yields exit 2; an
-/// escape raised while a profile evaluates (`exit`, a stopped child) propagates
-/// to the same process exit it would from any other script.
+/// escape raised while a profile evaluates (`exit`) propagates to the same
+/// process exit it would from any other script.
 pub(crate) fn apply_session_capabilities(
     shell: &mut Shell,
     paths: &[std::path::PathBuf],
@@ -80,7 +80,5 @@ pub(crate) fn apply_session_capabilities(
             Err(ExitCode::from(2))
         }
         Err(Break::Escape(Escape::Exit(code))) => Err(ExitCode::from(exit_byte(code))),
-        #[cfg(unix)]
-        Err(Break::Escape(Escape::Stopped { .. })) => Err(ExitCode::from(1)),
     }
 }

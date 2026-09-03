@@ -104,11 +104,6 @@ fn try_does_not_swallow_exit() {
              be classified as a runtime error.",
             e.message
         ),
-        #[cfg(unix)]
-        Err(other) => panic!(
-            "expected Break::Escape(Escape::Exit(7)), got {other:?}; `try` must \
-             propagate Exit verbatim"
-        ),
         Ok(v) => panic!(
             "expected Break::Escape(Escape::Exit(7)); got Ok({v:?}). This is the \
              exact pre-refactor bug: `try` swallowed `exit` and returned \

@@ -976,7 +976,7 @@ impl Machine {
                 let mut state = *state;
                 let commits = state.tear_down(shell);
                 match state.settle_writes(WriteFate::Commit, mooring, shell) {
-                    Ok(_unfinished) => match command::commit_atomics(commits) {
+                    Ok(()) => match command::commit_atomics(commits) {
                         Ok(()) => Focus::Return(t),
                         Err(b) => Focus::Halt(b),
                     },
@@ -1070,11 +1070,13 @@ impl Machine {
 
             Frame::Redirect(state) => {
                 let mut state = *state;
-                let fate = if s.is_stop() { WriteFate::Defer } else { WriteFate::Abort };
-                let mut commits = state.tear_down(shell);
-                let settled = state.settle_writes(fate, mooring, shell);
-                commits.extend(settled.unwrap_or_default());
-                Focus::Halt(command::defer_to_stop(s, commits))
+                let commits = state.tear_down(shell);
+                let _ = state.settle_writes(WriteFate::Abort, mooring, shell);
+                // Every staged write, fd-level and sink-level alike, falls out
+                // of scope here — which is how `PendingWrite`'s own `Drop`
+                // abandons it.
+                drop(commits);
+                Focus::Halt(s)
             }
 
             Frame::Unmask { frame } => {

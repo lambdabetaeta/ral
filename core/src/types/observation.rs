@@ -121,9 +121,6 @@ pub enum WriteOutcome {
     /// The body broke before commit: an atomic temp is discarded, but a
     /// non-atomic target may be left partly written.
     Aborted,
-    /// The body stopped before commit: the staged bytes are alive and the
-    /// target still holds its old contents, pending the job's own end.
-    Deferred,
     /// The open never succeeded, or the atomic rename failed at commit.
     Failed,
 }
@@ -178,7 +175,6 @@ impl WriteOutcome {
         match self {
             Self::Committed => "committed",
             Self::Aborted => "aborted",
-            Self::Deferred => "deferred",
             Self::Failed => "failed",
         }
     }
@@ -187,7 +183,6 @@ impl WriteOutcome {
         Some(match s {
             "committed" => Self::Committed,
             "aborted" => Self::Aborted,
-            "deferred" => Self::Deferred,
             "failed" => Self::Failed,
             _ => return None,
         })

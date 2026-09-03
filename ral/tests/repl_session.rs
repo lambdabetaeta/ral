@@ -142,56 +142,6 @@ fn rc_plugin_installs_an_alias_and_unload_removes_it() {
     );
 }
 
-// ── Workers at the prompt ──────────────────────────────────────────────────
-
-/// `jobs` renders the session's live workers, and leaving the session reports
-/// the ones still running.  Both read the real `Shell::workers()` snapshot.
-#[test]
-fn jobs_renders_a_live_worker_and_exit_reports_it() {
-    let out = repl(&["-i", "--norc"], &[], "let h = spawn { sleep 3 }\njobs\n");
-    assert!(
-        out.stderr.contains("[w0] running (worker)"),
-        "jobs must show the live worker: {}",
-        out.stderr
-    );
-    assert!(
-        out.stderr.contains("taking down 1 still-running worker"),
-        "leaving the session must report the worker: {}",
-        out.stderr
-    );
-}
-
-/// Each job verb names the job it acts on, so a bare one is an arity error
-/// before anything runs — and the diagnostic names the verb.  These builtins
-/// belong to the REPL host's table, not the core one, so a live session is the
-/// only place they are typed at all.
-#[test]
-fn a_bare_job_verb_is_an_arity_error_naming_the_verb() {
-    let out = repl(&["-i", "--norc"], &[], "fg\nbg\ndisown\n");
-    for verb in ["fg", "bg", "disown"] {
-        let want = format!("`{verb}` expected 1 argument, got 0");
-        assert!(
-            out.stderr.contains(&want),
-            "expected {want:?} in: {}",
-            out.stderr
-        );
-    }
-}
-
-/// `fg` on an unknown job does not merely fail: it explains that fg/bg are
-/// pgid-only and names the worker-handle eliminator that stands in for it.
-#[test]
-fn fg_on_an_unknown_job_names_the_handle_correspondence() {
-    let out = repl(&["-i", "--norc"], &[], "fg 99\n");
-    for want in ["fg: no such job", "pgid-only", "`await`"] {
-        assert!(
-            out.stderr.contains(want),
-            "expected {want:?} in: {}",
-            out.stderr
-        );
-    }
-}
-
 // ── `-s` beats `-i` ────────────────────────────────────────────────────────
 
 /// `-s` forces stdin to be read as a batch script even under `-i`.  The two

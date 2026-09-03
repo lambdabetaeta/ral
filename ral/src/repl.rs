@@ -21,8 +21,8 @@
 //!   type-erased `Box<dyn Any>` core stores in `ReplScratch`) and the
 //!   `_ed-*` builtin family (`plugin::ed_builtins`), carried on the
 //!   session's boot surface.
-//! - [`host_handlers`] -- Captured builtins for job-control and
-//!   plugin-lifecycle commands; carried on the session's boot surface.
+//! - [`host_handlers`] -- Captured builtins for plugin-lifecycle commands;
+//!   carried on the session's boot surface.
 //! - [`prompt`]   -- Prompt construction and thunk evaluation.
 //! - [`session`]  -- The REPL state machine driving the loop.
 //! - [`theme`]    -- REPL value-output styling (configurable from rc).

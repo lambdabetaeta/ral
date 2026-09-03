@@ -5,24 +5,21 @@
 
 use crate::io::Sink;
 use crate::process::{CancelCause, Ending, EndingCell, KillTarget, StopPolicy};
-#[cfg(unix)]
-use crate::types::Escape;
 use crate::types::{Break, Error, Settled};
 
 /// Who releases the Windows group registered in `win_groups`
 /// (`process::signal::windows`), which unlike a Unix pgid does not vanish when
-/// its members exit.  `Standalone` releases its own once `wait` returns;
-/// `BorrowedByPipeline` leaves it to `PipelineGroup` in `runtime::pipeline`, so
-/// a `RunningChild::Drop` racing that owner's `Drop` cannot double-close;
+/// its members exit.  `Standalone` releases its own once `wait` returns and
+/// carries the pgid to do it with; `BorrowedByPipeline` leaves it to
+/// `PipelineGroup` in `runtime::pipeline`, so a `RunningChild::Drop` racing
+/// that owner's `Drop` cannot double-close, and needs no pgid of its own;
 /// `None` is a child spawned with `PgidPolicy::Inherit` and has no group at
-/// all.  The pgid rides along with the variant that has one, so
-/// `(pgid: Some, GroupOwner::None)` is unrepresentable.
+/// all.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum GroupOwner {
     None,
     Standalone(crate::process::Pgid),
-    #[cfg_attr(windows, allow(dead_code))]
-    BorrowedByPipeline(crate::process::Pgid),
+    BorrowedByPipeline,
 }
 
 /// A spawned external child plus the threads draining its piped stdout/stderr;
@@ -52,9 +49,10 @@ pub(crate) struct RunningChild {
     /// stdout by `2>&1` — nothing to pump in any of those cases.
     pub stderr_pump: Option<std::thread::JoinHandle<()>>,
     pub name: String,
-    /// What a stop `wait` itself sees means: `Escape` surfaces
-    /// `Escape::Stopped` so the REPL can register the pgid as a job; `Park`
-    /// waits on a pipeline's gate; `KillAndReap` kills and reaps on the spot.
+    /// Read by nothing: every stop `wait` and `run_pipeline_stage` see is
+    /// answered inline with `SIGCONT`, whatever this holds.  Kept for
+    /// `StopPolicy`'s own removal to take alongside it.
+    #[allow(dead_code)]
     pub stop: StopPolicy,
     pub group_owner: GroupOwner,
     /// Polled by `wait`, because a blocking `waitpid` / `WaitForSingleObject`
@@ -139,7 +137,7 @@ impl RunningChild {
     fn kill_target(&self) -> KillTarget {
         match self.group_owner {
             GroupOwner::Standalone(p) => KillTarget::Group(p),
-            GroupOwner::BorrowedByPipeline(_) | GroupOwner::None => KillTarget::Pid,
+            GroupOwner::BorrowedByPipeline | GroupOwner::None => KillTarget::Pid,
         }
     }
 
@@ -181,15 +179,21 @@ impl RunningChild {
         }
     }
 
-    /// Poll for the leader until `deadline`; `None` on timeout.
+    /// Poll for the leader until `deadline`, answering a stop inline with
+    /// `SIGCONT`; `None` on timeout.
     #[cfg(unix)]
     fn grace_poll(
         child: &mut crate::process::ChildHandle,
         deadline: std::time::Instant,
     ) -> Option<crate::process::WaitOutcome> {
+        let pid = child.id();
         while std::time::Instant::now() < deadline {
             match child.try_wait_handling_stop() {
-                Ok(Some(o)) => return Some(o),
+                Ok(Some(crate::process::WaitPoll::Stopped(_))) => {
+                    crate::process::cont_stage_by_pid(pid);
+                    continue;
+                }
+                Ok(Some(crate::process::WaitPoll::Done(o))) => return Some(o),
                 Err(_) => break,
                 Ok(None) => {}
             }
@@ -266,13 +270,9 @@ impl RunningChild {
     /// Wait for the child to terminate, consuming `self`; the returned
     /// `WaitedChild` is from here on the only handle on the drainer threads.
     ///
-    /// Under `StopPolicy::Escape` a stop short-circuits to `Escape::Stopped`:
-    /// the process stays alive in stopped state with the pumps still on its
-    /// pipes, for the REPL to register as a job.  Under `StopPolicy::Park` a
-    /// stop instead records itself on the park's status and blocks on its
-    /// gate, then resumes waiting on the same child — this method never
-    /// returns for that case until the child truly ends.  `Drop`'s kill is
-    /// already disarmed by then.
+    /// Every stop is answered with `SIGCONT` at once and the wait resumes on
+    /// the same child — this method never returns while the child is merely
+    /// stopped.  `Drop`'s kill is already disarmed by then.
     pub fn wait(mut self) -> Settled<WaitedChild> {
         // Taking the child disarms `Drop` for the success path.
         let mut child = self.child.take().expect("RunningChild has no child");
@@ -295,8 +295,8 @@ impl RunningChild {
         //
         // `try_wait_handling_stop`, not `Child::try_wait`, so a SIGSTOP'd child
         // is seen (WUNTRACED): plain `try_wait` reports `Ok(None)` on a stop
-        // and the loop would spin forever.  A `Park` stop waits at the gate
-        // here; every other outcome leaves the loop and is classified below.
+        // and the loop would spin forever.  Every stop is `SIGCONT`ed here;
+        // only a terminal outcome leaves the loop, to be classified below.
         let early_outcome: Option<crate::process::WaitOutcome> = {
             // Snappy for short-lived children, gentle on CPU for long ones.
             let mut interval = std::time::Duration::from_millis(5);
@@ -309,46 +309,22 @@ impl RunningChild {
                     polls += 1;
                 }
                 match child.try_wait_handling_stop() {
-                    Ok(Some(crate::process::WaitOutcome::Stopped(sig)))
-                        if let StopPolicy::Park(park) = &self.stop =>
-                    {
-                        park.stop.set(Some(sig));
+                    Ok(Some(crate::process::WaitPoll::Stopped(sig))) => {
+                        // The one rule: a stop is resumed at once by whoever
+                        // waits on it, every role.
                         crate::dbg_trace!(
                             "wait",
-                            "parked name={} pid={} polls={} elapsed={:?} signal={sig:?}",
+                            "stopped-cont name={} pid={} polls={} elapsed={:?} signal={sig:?}",
                             self.name,
                             pid,
                             polls,
                             t_enter.elapsed(),
                         );
-                        match park.gate.wait(&self.cancel) {
-                            Ok(()) => {
-                                // The owner's resume CONTs the group; a gate
-                                // that was never paused has no owner, so the
-                                // waiter revives its own child (a no-op after
-                                // an owner's CONT).
-                                #[cfg(unix)]
-                                {
-                                    #[allow(
-                                        clippy::cast_possible_wrap,
-                                        reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
-                                    )]
-                                    let _ = rustix::process::kill_process(
-                                        rustix::process::Pid::from_raw(pid as i32).unwrap(),
-                                        rustix::process::Signal::CONT,
-                                    );
-                                }
-                                // The resume edge: the watcher turns this into `Continued`.
-                                park.stop.set(None);
-                                continue;
-                            }
-                            Err(cause) => {
-                                self.ending.raise(Ending::RalEnded(cause));
-                                break self.terminate_group(&mut child, cause);
-                            }
-                        }
+                        #[cfg(unix)]
+                        crate::process::cont_stage_by_pid(pid);
+                        continue;
                     }
-                    Ok(Some(o)) => {
+                    Ok(Some(crate::process::WaitPoll::Done(o))) => {
                         crate::dbg_trace!(
                             "wait",
                             "exit-via-try_wait name={} pid={} polls={} elapsed={:?} outcome={:?}",
@@ -402,7 +378,8 @@ impl RunningChild {
             // Reached only when the poll broke via cancel without the grace
             // peek reaping: the group kill is already in flight, so this blocks
             // only as long as a dying child takes.  Traced on both sides so a
-            // hang in waitpid / WaitForSingleObject is visible.
+            // hang in waitpid / WaitForSingleObject is visible.  A stop seen
+            // here is answered the same as the poll loop's own, inline.
             crate::dbg_trace!(
                 "wait",
                 "blocking-wait name={} pid={} elapsed={:?}",
@@ -410,12 +387,18 @@ impl RunningChild {
                 pid,
                 t_enter.elapsed(),
             );
-            let out = match child.wait_handling_stop() {
-                Ok(out) => out,
-                Err(e) => {
-                    // Re-arm `Drop`, as in the poll loop's error arm.
-                    self.child = Some(child);
-                    return Err(Break::Error(Error::new(format!("{}: {e}", self.name), 1)));
+            let out = loop {
+                match child.wait_handling_stop() {
+                    Ok(crate::process::WaitPoll::Stopped(_)) => {
+                        #[cfg(unix)]
+                        crate::process::cont_stage_by_pid(pid);
+                    }
+                    Ok(crate::process::WaitPoll::Done(o)) => break o,
+                    Err(e) => {
+                        // Re-arm `Drop`, as in the poll loop's error arm.
+                        self.child = Some(child);
+                        return Err(Break::Error(Error::new(format!("{}: {e}", self.name), 1)));
+                    }
                 }
             };
             crate::dbg_trace!(
@@ -433,43 +416,6 @@ impl RunningChild {
         let outcome = match self.ending.get() {
             Ending::RalEnded(cause) => outcome.attribute_to(cause),
             Ending::OwnAccord => outcome,
-        };
-        // A stop is job control's business only while nothing is ending this
-        // child; once ral is, it is a corpse to be.  `Park` never arrives
-        // here: the poll loop above loops back onto the same child.
-        #[cfg(unix)]
-        let outcome = match outcome {
-            crate::process::WaitOutcome::Stopped(signal) => {
-                match (&self.stop, self.ending.get(), self.group_owner) {
-                    // A group is what a job is keyed by, so a child without one
-                    // cannot become one however its policy reads.
-                    (
-                        StopPolicy::Escape,
-                        Ending::OwnAccord,
-                        GroupOwner::Standalone(pgid) | GroupOwner::BorrowedByPipeline(pgid),
-                    ) => {
-                        // Detach the pumps rather than join them: the stopped
-                        // child still holds its pipes open.
-                        drop((self.pump.take(), self.stderr_pump.take()));
-                        return Err(Break::Escape(Escape::Stopped {
-                            pgid,
-                            signal,
-                            cmd: self.name.clone(),
-                            // Empty at birth: the frames that staged writes
-                            // hang them on the escape as it passes them.
-                            pending: Vec::new(),
-                        }));
-                    }
-                    _ => match child.kill_and_reap_stopped(signal, self.kill_target()) {
-                        Ok(out) => out,
-                        Err(e) => {
-                            self.child = Some(child);
-                            return Err(Break::Error(Error::new(format!("{}: {e}", self.name), 1)));
-                        }
-                    },
-                }
-            }
-            other => other,
         };
         // Let the Job Object's whole-job completion drain any descendants before
         // the handle goes.  A pipeline stage never lands here: its release
@@ -529,14 +475,9 @@ impl RunningChild {
     /// wait from here on: nothing else may `waitpid` / `WaitForSingleObject`
     /// it once this starts, which is what makes pid reuse a non-issue.
     ///
-    /// `on_edge` fires for every `Stopped`/`Continued` transition; the caller
-    /// (`runtime::pipeline`) translates each into its own event, since this
-    /// module — a sibling of `pipeline`, not a parent — cannot name
-    /// `pipeline::collect::Event` itself.  A signal death immediately
-    /// following a reported stop, with no `Continued` between, is
-    /// reclassified as `StoppedThenKilled`: the collector's own kill of a
-    /// stopped member (`end_stopped`'s old job) arrives this way now, no
-    /// different from any other signal that finds the child still stopped.
+    /// A stop is answered with `SIGCONT` inline, the same rule as
+    /// [`Self::wait`]'s: the collector never hears of it, and nothing here
+    /// tracks a stop across the loop.
     ///
     /// Never called for a standalone (non-pipeline) command, whose own
     /// [`Self::wait`] keeps polling for [`Self::cancel`] — this stage's own
@@ -553,41 +494,26 @@ impl RunningChild {
     pub(crate) fn run_pipeline_stage(
         mut self,
         kill_cause: &crate::process::CancelScope,
-        mut on_edge: impl FnMut(crate::process::WaitOutcome),
     ) -> (String, Settled<Option<crate::process::CommandFailure>>) {
         let mut child = self.child.take().expect("RunningChild has no child");
         let name = self.name.clone();
-        let mut last_stop: Option<crate::process::Signal> = None;
+        #[cfg(unix)]
+        let pid = child.id();
         let terminal = loop {
-            let outcome = match child.wait_tracking_stops() {
-                Ok(o) => o,
+            match child.wait_handling_stop() {
+                Ok(crate::process::WaitPoll::Stopped(_)) => {
+                    #[cfg(unix)]
+                    crate::process::cont_stage_by_pid(pid);
+                }
+                Ok(crate::process::WaitPoll::Done(o)) => break o,
                 Err(e) => {
                     let msg = format!("{name}: {e}");
                     return (name, Err(Break::Error(Error::new(msg, 1))));
                 }
-            };
-            match outcome {
-                crate::process::WaitOutcome::Stopped(sig) => {
-                    last_stop = Some(sig);
-                    on_edge(outcome);
-                }
-                crate::process::WaitOutcome::Continued => {
-                    last_stop = None;
-                    on_edge(outcome);
-                }
-                terminal => break terminal,
             }
         };
         let cause = kill_cause.cause();
-        let outcome = match (last_stop, terminal) {
-            (Some(stopped_by), crate::process::WaitOutcome::Signaled(killed_by)) => {
-                crate::process::WaitOutcome::StoppedThenKilled {
-                    stopped_by,
-                    killed_by,
-                }
-            }
-            (_, o) => cause.map_or(o, |c| o.attribute_to(c)),
-        };
+        let outcome = cause.map_or(terminal, |c| terminal.attribute_to(c));
         let ending = cause.map_or(Ending::OwnAccord, Ending::RalEnded);
         #[cfg(target_os = "linux")]
         if let Some(jail) = &self.jail {

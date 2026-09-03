@@ -13,8 +13,6 @@ use super::workers::ReapCause;
 use crate::exit_hints::ExitHints;
 use crate::io::{Sink, TerminalState};
 use crate::process::{DurableRoot, ForegroundScope, TerminalLease};
-#[cfg(unix)]
-use crate::runtime::pipeline::parked::ParkedPipeline;
 use crate::source::SourceDb;
 use crate::types::{
     AuditFragment, BuiltinEntry, Convention, ReapNotice, Value, WorkerEntry, WorkerId,
@@ -395,19 +393,6 @@ impl Shell {
                 self.session.terminal_lease.as_ref()
             }
         }
-    }
-
-    /// Deposit a pipeline `PipeNode::join` just parked, keyed by its pgid —
-    /// the job table takes it back with [`Self::take_parked`].
-    #[cfg(unix)]
-    pub fn park_pipeline(&mut self, parked: ParkedPipeline) {
-        self.session.parked.insert(parked.pgid(), parked);
-    }
-
-    /// Take back a pipeline parked under `pgid`, for the job table to drive.
-    #[cfg(unix)]
-    pub fn take_parked(&mut self, pgid: crate::process::Pgid) -> Option<ParkedPipeline> {
-        self.session.parked.remove(&pgid)
     }
 
     /// The active stack cap (§2.1, §6.3 of the CEK plan): frames, not host

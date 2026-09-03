@@ -247,8 +247,6 @@ pub(crate) fn run_batch(
                 )
             }
         }
-        #[cfg(unix)]
-        Err(Break::Escape(Escape::Stopped { .. })) => 1,
     };
 
     if audit {

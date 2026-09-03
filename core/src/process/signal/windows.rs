@@ -670,8 +670,7 @@ mod win_groups {
 /// Release the Job Object backing the group led by `leader`.
 ///
 /// Surviving members die with it.  Idempotent, and needs to be —
-/// `PipelineGroup::Drop`, `JobTable::cleanup` and a standalone `RunningChild`
-/// all reach for it.
+/// `PipelineGroup::Drop` and a standalone `RunningChild` both reach for it.
 pub fn release_win_group(leader: i32) {
     win_groups::release(leader);
 }
@@ -725,14 +724,14 @@ pub(crate) fn register_prepared_group(
     win_groups::register(prepared, child).and_then(Pgid::from_raw)
 }
 
-// ── Job-table primitives ───────────────────────────────────────────────────
+// ── Group wait/signal primitives ────────────────────────────────────────────
 //
-// The Windows analogues of `kill(-pgid, …)` / `waitpid(-pgid, …)`, for the
-// cross-platform `JobTable` over in the `ral` crate.  Each takes a leader pid
-// (the `Pgid` value) and consults `win_groups::GROUPS`; an unknown leader means
-// "already gone", matching the Unix path's tolerance of `ESRCH`.
+// The Windows analogues of `kill(-pgid, …)` / `waitpid(-pgid, …)`.  Each
+// takes a leader pid (the `Pgid` value) and consults `win_groups::GROUPS`; an
+// unknown leader means "already gone", matching the Unix path's tolerance of
+// `ESRCH`.
 
-/// Reap-poll outcome for a job-table leader.
+/// Reap-poll outcome for a group leader.
 pub enum ReapStatus {
     /// Never registered, or already released.
     Unknown,
@@ -749,7 +748,7 @@ pub fn wait_leader_blocking(pgid: Pgid) -> ReapStatus {
 }
 
 /// Non-blocking poll of the whole-job completion [`wait_leader_blocking`] blocks
-/// on; `JobTable::reap` drives it.
+/// on.
 pub fn try_reap_leader(pgid: Pgid) -> ReapStatus {
     win_groups::wait_job(pgid.as_raw(), 0)
 }
@@ -759,8 +758,8 @@ pub fn kill_pipeline_group(pgid: Pgid) {
     win_groups::kill_group(pgid.as_raw());
 }
 
-/// `SIGTERM` analogue: `CTRL_BREAK_EVENT` to every member — the grace
-/// `JobTable::cleanup` gives before escalating to [`kill_pipeline_group`].
+/// `SIGTERM` analogue: `CTRL_BREAK_EVENT` to every member — the grace given
+/// before escalating to [`kill_pipeline_group`].
 pub fn break_pipeline_group(pgid: Pgid) {
     win_groups::break_group(pgid.as_raw());
 }
@@ -772,15 +771,15 @@ pub fn disown_pipeline_group(pgid: Pgid) {
 
 // ── Wait handling ──────────────────────────────────────────────────────────
 
-/// Windows has no SIGTSTP, so the plain `Child::wait` is enough.  Reached only
-/// through `ChildHandle::wait_handling_stop`.
+/// Windows has no SIGTSTP, so the plain `Child::wait` is enough — never a
+/// stop.  Reached only through `ChildHandle::wait_handling_stop`.
 #[allow(clippy::disallowed_methods)]
 pub(super) fn wait_handling_stop(
     child: &mut std::process::Child,
-) -> std::io::Result<crate::process::WaitOutcome> {
-    child
-        .wait()
-        .map(crate::process::WaitOutcome::from_exit_status)
+) -> std::io::Result<crate::process::WaitPoll> {
+    child.wait().map(|status| {
+        crate::process::WaitPoll::Done(crate::process::WaitOutcome::from_exit_status(status))
+    })
 }
 
 /// Non-blocking peer of `wait_handling_stop`, keeping the Unix counterpart's
@@ -788,10 +787,12 @@ pub(super) fn wait_handling_stop(
 #[allow(clippy::disallowed_methods)]
 pub(super) fn try_wait_handling_stop(
     child: &mut std::process::Child,
-) -> std::io::Result<Option<crate::process::WaitOutcome>> {
-    child
-        .try_wait()
-        .map(|opt| opt.map(crate::process::WaitOutcome::from_exit_status))
+) -> std::io::Result<Option<crate::process::WaitPoll>> {
+    child.try_wait().map(|opt| {
+        opt.map(|status| {
+            crate::process::WaitPoll::Done(crate::process::WaitOutcome::from_exit_status(status))
+        })
+    })
 }
 
 /// Terminate `process` with the collector's own exit code, so

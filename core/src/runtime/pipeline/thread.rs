@@ -13,21 +13,12 @@ use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::source::Span;
 use crate::types::{Break, Closure, Error, Mooring, Settled};
-use crate::process::{
-    CancelCause, CancelScope, Ending, EndingCell, StageGate, StagePark, StageStop, Wake,
-};
+use crate::process::{CancelCause, CancelScope, Ending, EndingCell, StageGate, StagePark, StageStop, Wake};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
 pub(super) struct ThreadStage {
     join: Option<std::thread::JoinHandle<()>>,
-    /// Reports this stage's own interior stop — a child it spawned itself
-    /// stopping — as `Report::Stopped`/`Report::Continued`, one edge at a
-    /// time, off [`StageStop`]'s condvar rather than a cell the collector
-    /// must poll.  `None` on Windows: nothing stops there.
-    #[cfg(unix)]
-    watcher: Option<std::thread::JoinHandle<()>>,
-    stop: Arc<StageStop>,
     cancel: CancelScope,
     wake: Arc<Wake>,
     /// Private to this module: only `cancel` (via `StageHandle::kill_now`
@@ -69,16 +60,10 @@ impl ThreadStage {
 
     /// This stage's `Settled` event has already arrived by channel — the
     /// thread is already returning, so this reclaims it rather than waiting
-    /// for it.  The watcher closed itself the moment `StageStop::close` ran,
-    /// the stage's own last act before that same `Settled` was sent, so its
-    /// join is just as immediate.
+    /// for it.
     pub(super) fn join_after_settled(mut self) {
         if let Some(join) = self.join.take() {
             let _ = join.join();
-        }
-        #[cfg(unix)]
-        if let Some(watcher) = self.watcher.take() {
-            let _ = watcher.join();
         }
     }
 }
@@ -101,9 +86,7 @@ fn panic_error(payload: &(dyn std::any::Any + Send), span: Option<Span>) -> Erro
 impl Drop for ThreadStage {
     /// A stage never observed — an aborted launch, a panic elsewhere in the
     /// pipeline unwinding past it — is cancelled, interrupted, and joined
-    /// rather than abandoned.  The watcher is closed and joined alongside:
-    /// otherwise it would outlive the pipeline, blocked on an edge that will
-    /// never come.
+    /// rather than abandoned.
     fn drop(&mut self) {
         if self.join.is_none() {
             return;
@@ -112,11 +95,6 @@ impl Drop for ThreadStage {
         self.interrupt();
         if let Some(join) = self.join.take() {
             let _ = join.join();
-        }
-        self.stop.close();
-        #[cfg(unix)]
-        if let Some(watcher) = self.watcher.take() {
-            let _ = watcher.join();
         }
     }
 }
@@ -161,7 +139,7 @@ pub(super) fn launch_thread_stage(
         stop: StageStop::new(),
     };
     let policy = cx.shell.local.audit.active_policy();
-    let mooring = Mooring::for_stage_thread(cx.mooring, park.clone());
+    let mooring = Mooring::for_stage_thread(cx.mooring, park);
 
     let io = Io {
         stdin,
@@ -175,20 +153,8 @@ pub(super) fn launch_thread_stage(
 
     let env = cx.env.clone();
     let comp = Arc::clone(stage);
-    let stop = Arc::clone(&park.stop);
     let span = spec.span;
 
-    #[cfg(unix)]
-    let watcher = {
-        let stop = Arc::clone(&stop);
-        let tx = tx.clone();
-        std::thread::Builder::new()
-            .name("ral pipeline stage interior-stop watcher".to_string())
-            .spawn(move || watch_interior_stop(&stop, &tx, ix))
-            .ok()
-    };
-
-    let closure_stop = Arc::clone(&stop);
     let settle = super::collect::SettleOnDrop::new(ix, tx);
     let spawned = cx.shell.spawn_thread(
         mooring,
@@ -209,11 +175,6 @@ pub(super) fn launch_thread_stage(
                     .with_audit(child.local.audit.take_fragment()),
                 Err(payload) => super::collect::StageObservation::failure(panic_error(&*payload, span)),
             };
-            // Release the interior-stop watcher before this stage's own last
-            // act: once `Settled` is filed the collector may drop the
-            // receiver at any time, and the watcher must not be found still
-            // blocked on an edge that will never come.
-            closure_stop.close();
             settle.send(super::collect::Settlement::Thread(obs));
         },
     );
@@ -225,36 +186,10 @@ pub(super) fn launch_thread_stage(
 
     Ok(ThreadStage {
         join: Some(join),
-        #[cfg(unix)]
-        watcher,
-        stop,
         cancel,
         wake,
         ending: EndingCell::default(),
     })
-}
-
-/// This stage's own interior stop, watched off [`StageStop`]'s condvar one
-/// edge at a time — `Report::Stopped`/`Report::Continued` — rather than
-/// polled.  Exits once [`StageStop::close`] runs (the stage thread's own
-/// last act) or the collector's receiver is gone.
-#[cfg(unix)]
-fn watch_interior_stop(stop: &StageStop, tx: &std::sync::mpsc::Sender<super::collect::Report>, ix: usize) {
-    let mut last = None;
-    loop {
-        let next = stop.wait_for_change(last);
-        if stop.is_closed() {
-            return;
-        }
-        last = next;
-        let report = match next {
-            Some(sig) => super::collect::Report::Stopped(ix, sig),
-            None => super::collect::Report::Continued(ix),
-        };
-        if tx.send(report).is_err() {
-            return;
-        }
-    }
 }
 
 #[cfg(all(test, unix))]

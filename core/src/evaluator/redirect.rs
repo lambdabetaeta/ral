@@ -17,9 +17,6 @@ pub(crate) enum WriteFate {
     Commit,
     /// The body broke: leave every target exactly as it was.
     Abort,
-    /// The body stopped: the writes are unfinished and belong to the job now,
-    /// so the frame surrenders them rather than deciding for it.
-    Defer,
 }
 
 /// An fd-1/2 file target opened in the frame, held until settle so its
@@ -206,16 +203,15 @@ impl RedirectState {
     /// Fires each atomic commit once the body result is known and the
     /// sinks are back, surfaces one write observation per intent, and
     /// returns the first commit failure. A failed body abandons every
-    /// intent's temp; a stopped one hands the staged writes back for the
-    /// caller to put on the escape.
+    /// intent's temp — dropped here, which is what unlinks its staging
+    /// file.
     pub(crate) fn settle_writes(
         &mut self,
         fate: WriteFate,
         mooring: &Mooring,
         shell: &mut Shell,
-    ) -> Settled<Vec<command::PendingWrite>> {
+    ) -> Settled<()> {
         let mut commit_err: Settled<()> = Ok(());
-        let mut unfinished = Vec::new();
         for intent in std::mem::take(&mut self.write_intents) {
             let outcome;
             let new_bytes;
@@ -224,12 +220,8 @@ impl RedirectState {
                 WriteFate::Abort => {
                     outcome = WriteOutcome::Aborted;
                     new_bytes = None;
-                    command::abandon_all(intent.commit);
-                }
-                WriteFate::Defer => {
-                    outcome = WriteOutcome::Deferred;
-                    new_bytes = None;
-                    unfinished.extend(intent.commit);
+                    // `intent.commit` drops at the end of this iteration,
+                    // which is what unlinks the staged temp.
                 }
                 WriteFate::Commit => {
                     if let Some(commit) = intent.commit {
@@ -265,7 +257,7 @@ impl RedirectState {
                 },
             );
         }
-        commit_err.map(|()| unfinished)
+        commit_err
     }
 
     /// Flushes, restores the sinks and stdin, and hands back the pending
@@ -346,7 +338,6 @@ where
     };
     let fate = match &result {
         Ok(_) => WriteFate::Commit,
-        Err(brk) if brk.is_stop() => WriteFate::Defer,
         Err(_) => WriteFate::Abort,
     };
     // Restore before either the commits fire or the error propagates, so
@@ -359,15 +350,11 @@ where
             command::commit_atomics(commits)?;
             Ok(v)
         }
-        // A stop takes every staged write with it, fd-level and sink-level
-        // alike; any other break leaves them to fall out of scope, which is
-        // how a `PendingWrite` without a destructor abandons a temp.
+        // Every staged write, fd-level and sink-level alike, falls out of
+        // scope here — which is how `PendingWrite`'s own `Drop` abandons it.
         Err(brk) => {
-            let unfinished = settled.unwrap_or_default();
-            Err(command::defer_to_stop(
-                brk,
-                commits.into_iter().chain(unfinished),
-            ))
+            drop(commits);
+            Err(brk)
         }
     }
 }

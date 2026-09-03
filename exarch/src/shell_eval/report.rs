@@ -24,8 +24,8 @@ const NAMED: usize = 5;
 /// `trail` and `workers` are read-only, boundary-legal snapshots: the
 /// dispatch's own [`Observed::Worker`] births, and the `` `workers `` probe
 /// taken at the run boundary.  The audit and the orphan sentence never draw
-/// on a [`Ending::Settled`] or [`Ending::Stopped`] ending — neither leaves the
-/// model unable to see from the transcript what landed.
+/// on a [`Ending::Settled`] ending — it leaves the model well able to see
+/// from the transcript what landed.
 pub(crate) fn render(
     ending: &Ending,
     trail: &[FOValue],
@@ -36,7 +36,6 @@ pub(crate) fn render(
     let mut out = String::new();
     let exit = match ending {
         Ending::Settled { .. } => return (out, 0),
-        Ending::Stopped { .. } => return (out, 1),
         Ending::Walled { rendered, .. } => {
             out.push_str(rendered);
             out.push_str(&timeout_tip(timeout_secs));
@@ -196,35 +195,11 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    fn stopped_ending() -> Ending {
-        Ending::Stopped {
-            pgid: 1,
-            signal: 20,
-            signal_name: "SIGTSTP".into(),
-            pending: Vec::new(),
-        }
-    }
-
     #[test]
     fn a_returning_call_says_nothing() {
         let (out, exit) = render(&settled_ending(), &[], &ActFragment::default(), &[], 30);
         assert!(out.is_empty(), "a settled ending composes nothing: {out:?}");
         assert_eq!(exit, 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stopped_draws_neither_audit_nor_orphan() {
-        let trail = vec![worker_birth(1, "sleep 20")];
-        let fragment = ActFragment::from_acts(vec![committed_act("reply", None)]);
-        let workers = vec![worker_row(1, "sleep 20", true)];
-        let (out, exit) = render(&stopped_ending(), &trail, &fragment, &workers, 5);
-        assert!(
-            out.is_empty(),
-            "job control's transcript already shows what landed: {out:?}"
-        );
-        assert_eq!(exit, 1);
     }
 
     #[test]
@@ -311,7 +286,6 @@ mod tests {
     /// The full ending matrix: audit and orphan draw only on an ending whose
     /// transcript does not otherwise show what landed, and only when there is
     /// something to say.
-    #[cfg(unix)]
     #[test]
     fn ending_matrix_gates_audit_and_orphan_on_unshown_effects() {
         let births = vec![worker_birth(3, "job")];
@@ -319,7 +293,7 @@ mod tests {
         let committed = ActFragment::from_acts(vec![committed_act("spawn", Some("helper"))]);
         let refused = ActFragment::default();
 
-        let endings: [(&str, Ending, i32); 5] = [
+        let endings: [(&str, Ending, i32); 4] = [
             ("ok", settled_ending(), 0),
             (
                 "raise",
@@ -340,11 +314,10 @@ mod tests {
                 124,
             ),
             ("exit", Ending::Exited(3), 3),
-            ("stopped", stopped_ending(), 1),
         ];
 
         for (name, ending, want_exit) in &endings {
-            let effects_unshown = !matches!(ending, Ending::Settled { .. } | Ending::Stopped { .. });
+            let effects_unshown = !matches!(ending, Ending::Settled { .. });
             for (births_label, trail) in [("present", births.clone()), ("absent", Vec::new())] {
                 for (acts_label, fragment) in [("committed", &committed), ("refused", &refused)] {
                     let (out, exit) = render(ending, &trail, fragment, &live, 5);

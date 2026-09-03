@@ -12,13 +12,19 @@ pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
 
 /// Hold the pipeline pgid open: block reading stdin to EOF — the parent's
 /// `AnchorProcess::finish` closing its release pipe.  Every termination
-/// signal is swallowed and reported instead (see `group.rs`); `SIGTSTP` keeps
-/// its default disposition, so the anchor stops with the rest of the group.
+/// signal is swallowed and reported instead (see `group.rs`); the three stop
+/// signals are ignored outright, so the anchor never stops and never needs
+/// resuming.
 #[cfg(unix)]
 fn serve_anchor() -> u8 {
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
         unsafe {
             libc::signal(sig, report_signal as *const () as libc::sighandler_t);
+        }
+    }
+    for sig in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
+        unsafe {
+            libc::signal(sig, libc::SIG_IGN);
         }
     }
     let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());

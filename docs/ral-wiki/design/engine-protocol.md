@@ -241,15 +241,15 @@ words, rather than inferred from an EOF three frames later.
 ## Platform neutrality
 
 The frame algebra is data, identical on every platform that can serialise
-it; only its *producers* are gated. `Ending::Stopped` — a job-control
-outcome only a Unix engine can ever produce — carries no platform gate on
-its own type or decode path, so a Windows front-end decoding a Linux guest's
-`Stopped` report at equal `PROTOCOL_VERSION` succeeds exactly as any other
-arm would; only the code that *renders* it locally, where stopping a local
-job means something, is gated. The wire's own stream abstraction is std's
-generic owner of a connected stream socket — one end of a socketpair, a
-vsock or Hyper-V socket into a guest — never a name for one address family,
-so a new transport is a constructor, not a rewrite.
+it; only its *producers* are gated. A wire type carries no platform `cfg` of
+its own even when only a Unix engine can ever construct one particular
+value of it, so a Windows front-end decoding a Linux guest's report at equal
+`PROTOCOL_VERSION` succeeds exactly as any other value would; only the code
+that *produces* or *acts on* the Unix-only value locally is gated. The
+wire's own stream abstraction is std's generic owner of a connected stream
+socket — one end of a socketpair, a vsock or Hyper-V socket into a guest —
+never a name for one address family, so a new transport is a constructor,
+not a rewrite.
 
 ## Why not gRPC, JSON-RPC, or Cap'n Proto
 

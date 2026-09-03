@@ -1225,18 +1225,25 @@ mod windows {
             clippy::needless_pass_by_ref_mut,
             reason = "mirrors `ChildHandle::wait_handling_stop`, whose `std::process::Child` arm dispatches beside this one and does need `&mut`; a wait is exclusive by contract even where Windows reaches the exit status through a shared handle"
         )]
-        pub(crate) fn wait_handling_stop(&mut self) -> io::Result<crate::process::WaitOutcome> {
-            self.wait_and_exit_status()
-                .map(crate::process::WaitOutcome::from_exit_status)
+        pub(crate) fn wait_handling_stop(&mut self) -> io::Result<crate::process::WaitPoll> {
+            self.wait_and_exit_status().map(|status| {
+                crate::process::WaitPoll::Done(crate::process::WaitOutcome::from_exit_status(
+                    status,
+                ))
+            })
         }
 
         pub(crate) fn try_wait_handling_stop(
             &mut self,
-        ) -> io::Result<Option<crate::process::WaitOutcome>> {
+        ) -> io::Result<Option<crate::process::WaitPoll>> {
             match unsafe { WaitForSingleObject(self.raw_process_handle(), 0) } {
                 WAIT_OBJECT_0 => self
                     .exit_status()
-                    .map(crate::process::WaitOutcome::from_exit_status)
+                    .map(|status| {
+                        crate::process::WaitPoll::Done(crate::process::WaitOutcome::from_exit_status(
+                            status,
+                        ))
+                    })
                     .map(Some),
                 WAIT_TIMEOUT => Ok(None),
                 _ => Err(io::Error::last_os_error()),

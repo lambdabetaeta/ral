@@ -53,8 +53,8 @@ enum StageKind {
 }
 
 /// Spawn the dedicated waiter thread that owns `running`'s wait exclusively:
-/// a blocking loop reporting `Stopped`/`Continued` edges and, on the
-/// terminal one, `Settled` — never a probe the collector calls into.
+/// a blocking run to the stage's own end, answering every stop it sees
+/// inline, then `Settled` — never a probe the collector calls into.
 fn spawn_external_waiter(running: command::RunningChild, ix: usize, tx: Sender<Report>) -> ExternalWaiter {
     let kill_cause = CancelScope::root();
     let pid = running
@@ -67,24 +67,7 @@ fn spawn_external_waiter(running: command::RunningChild, ix: usize, tx: Sender<R
         .name("ral pipeline external waiter".to_string())
         .spawn(move || {
             let settle = SettleOnDrop::new(ix, tx);
-            let edge_tx = settle.sender().clone();
-            let on_edge = move |outcome: crate::process::WaitOutcome| {
-                #[cfg(unix)]
-                let report = match outcome {
-                    crate::process::WaitOutcome::Stopped(sig) => Some(Report::Stopped(ix, sig)),
-                    crate::process::WaitOutcome::Continued => Some(Report::Continued(ix)),
-                    _ => None,
-                };
-                #[cfg(not(unix))]
-                let report: Option<Report> = {
-                    let _ = outcome;
-                    None
-                };
-                if let Some(report) = report {
-                    let _ = edge_tx.send(report);
-                }
-            };
-            let (name, failure) = running.run_pipeline_stage(&waiter_kill_cause, on_edge);
+            let (name, failure) = running.run_pipeline_stage(&waiter_kill_cause);
             settle.send(Settlement::External { name, failure });
         })
         .expect("spawn the pipeline's external waiter thread");
@@ -119,10 +102,8 @@ impl StageHandle {
     /// [`super::collect::Effect::KillStoppedStage`]'s mechanical action: a
     /// background group's stop-then-kill, fired before the group's own
     /// `SIGCONT` could wake the child.  Only ever reached for an external.
-    /// Raises nothing on either record — the waiter's own
-    /// `StoppedThenKilled` classification is the verdict here.  The
-    /// subsequent `CancelAll(Terminate)` still stamps this stage's `Ending`
-    /// via its own `cancel_stages`.
+    /// Raises nothing on either record — the subsequent `CancelAll(Terminate)`
+    /// still stamps this stage's `Ending` via its own `cancel_stages`.
     #[cfg(unix)]
     pub(super) fn kill_stopped(&self) {
         self.kill_by_pid();
@@ -136,19 +117,6 @@ impl StageHandle {
     pub(super) fn kill_by_pid(&self) {
         if let StageKind::External(e) = &self.kind {
             crate::process::kill_stage_by_pid(e.pid);
-        }
-    }
-
-    /// The ownerless-stop rule: no group `SIGCONT` is coming, so the member
-    /// itself is revived.  A real signal for an external, addressed by pid;
-    /// a no-op for a thread, whose own interior member is revived by that
-    /// member's own wait loop (`RunningChild::wait`'s unpaused-gate case),
-    /// two levels down from this collector.  `cfg(unix)`: nothing stops on
-    /// Windows, so `Effect::SigcontMember` never fires there.
-    #[cfg(unix)]
-    pub(super) fn sigcont_member(&self) {
-        if let StageKind::External(e) = &self.kind {
-            crate::process::cont_stage_by_pid(e.pid);
         }
     }
 
@@ -177,9 +145,10 @@ impl StageHandle {
 
     /// Whether this is a thread stage: `step`'s only use of the kind that
     /// isn't itself dispatched by a [`StageHandle`] method — the reader-gone
-    /// cascade skips a background group's stop-then-kill for a thread (its
-    /// own settlement, via `CancelAll`, already covers it; there is no
-    /// `WaitOutcome::StoppedThenKilled` for a `Break`).
+    /// cascade skips a background group's stop-then-kill for a thread, whose
+    /// own settlement, via `CancelAll`, already covers it.  Unused now that
+    /// nothing in `step` names it.
+    #[allow(dead_code)]
     pub(super) fn is_thread(&self) -> bool {
         matches!(self.kind, StageKind::Thread(_))
     }
@@ -239,9 +208,9 @@ impl StageHandle {
 
     /// A `StageHandle` around no process at all, for `step`'s own
     /// transition-table tests: they drive events by hand, so all this needs
-    /// to support is `kill_now`/`sigcont_member`'s mechanical dispatch —
-    /// which lands on a pid nothing ever spawned, an `ESRCH` no different
-    /// from signalling a process that already exited.
+    /// to support is `kill_now`'s mechanical dispatch — which lands on a pid
+    /// nothing ever spawned, an `ESRCH` no different from signalling a
+    /// process that already exited.
     #[cfg(test)]
     pub(super) fn fake_external_for_step_test() -> Self {
         Self {
@@ -263,7 +232,7 @@ impl StageHandle {
     /// Its only caller compares `kill_now` against `kill_stopped`, which is
     /// itself `cfg(unix)`; unreachable for a thread, which this test never
     /// builds.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn kill_cause_for_test(&self) -> Option<CancelCause> {
         match &self.kind {
             StageKind::External(e) => e.kill_cause.cause(),
@@ -452,7 +421,7 @@ pub(super) fn spawn_into_group(
         plumbing,
         StopPolicy::KillAndReap,
         // Windows group release belongs to `PipelineGroup::drop`.
-        command::GroupOwner::BorrowedByPipeline(leader),
+        command::GroupOwner::BorrowedByPipeline,
         mooring.cancel.as_scope().clone(),
         jail,
     ))

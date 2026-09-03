@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 #[cfg(unix)]
 use super::outcome::Signal;
-use super::outcome::WaitOutcome;
+use super::outcome::WaitPoll;
 
 #[cfg(unix)]
 mod unix;
@@ -124,12 +124,12 @@ impl ChildHandle {
         }
     }
 
-    /// Blocking wait that returns on a stop too, as [`WaitOutcome::Stopped`];
-    /// what the stop means is the holder's decision, never the wait's.
+    /// Blocking wait that returns on a stop too, as [`WaitPoll::Stopped`];
+    /// what to do about a stop is the caller's decision, never the wait's.
     ///
     /// # Errors
     /// Returns `Err` if the wait fails.
-    pub(crate) fn wait_handling_stop(&mut self) -> std::io::Result<WaitOutcome> {
+    pub(crate) fn wait_handling_stop(&mut self) -> std::io::Result<WaitPoll> {
         #[cfg(unix)]
         {
             let ChildRepr::Std(child) = &mut self.0;
@@ -149,7 +149,7 @@ impl ChildHandle {
     ///
     /// # Errors
     /// Returns `Err` if the poll fails.
-    pub(crate) fn try_wait_handling_stop(&mut self) -> std::io::Result<Option<WaitOutcome>> {
+    pub(crate) fn try_wait_handling_stop(&mut self) -> std::io::Result<Option<WaitPoll>> {
         #[cfg(unix)]
         {
             let ChildRepr::Std(child) = &mut self.0;
@@ -162,49 +162,6 @@ impl ChildHandle {
                 ChildRepr::RawWindows(child) => child.try_wait_handling_stop(),
             }
         }
-    }
-
-    /// Blocking wait that reports both edges of a stop — `Stopped` and
-    /// `Continued` — so a holder that tracks "stopped" as a level between
-    /// them never has to remember one edge and clear it by convention, the
-    /// way [`Self::wait_handling_stop`]'s callers otherwise must.  The
-    /// pipeline collector's dedicated external waiter thread is this child's
-    /// *sole* waiter, so blocking here costs nothing but that one thread; a
-    /// standalone child's own wait must not see `Continued` and keeps polling
-    /// the plain variant, since its wait is not the only thing it must do.
-    ///
-    /// # Errors
-    /// Returns `Err` if the wait fails.
-    pub(crate) fn wait_tracking_stops(&mut self) -> std::io::Result<WaitOutcome> {
-        #[cfg(unix)]
-        {
-            let ChildRepr::Std(child) = &mut self.0;
-            unix::wait_tracking_stops(child)
-        }
-        #[cfg(windows)]
-        {
-            // Nothing stops on Windows, so the tracking wait is the plain one.
-            match &mut self.0 {
-                ChildRepr::Std(child) => windows::wait_handling_stop(child),
-                ChildRepr::RawWindows(child) => child.wait_handling_stop(),
-            }
-        }
-    }
-
-    /// Kill this stopped child and reap the terminal status, reporting the
-    /// stop that preceded it.  The caller has already decided that this stop
-    /// means death; `target` is who the kill addresses.
-    ///
-    /// # Errors
-    /// Returns `Err` if the reaping wait fails.
-    #[cfg(unix)]
-    pub(crate) fn kill_and_reap_stopped(
-        &mut self,
-        stopped_by: Signal,
-        target: KillTarget,
-    ) -> std::io::Result<WaitOutcome> {
-        let ChildRepr::Std(child) = &mut self.0;
-        unix::kill_and_reap_stopped(child, stopped_by, target)
     }
 
     /// Blocking reap after a confirmed SIGKILL, which terminates even a stopped

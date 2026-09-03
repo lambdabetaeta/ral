@@ -155,7 +155,6 @@ impl Frontend for RustylineFrontend {
         shell: &mut Shell,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
-        #[cfg(unix)] _jobs: &Arc<Mutex<crate::jobs::JobTable>>,
         #[cfg(feature = "structural")] _worksheet: &crate::repl::worksheet::Worksheet,
     ) -> Read {
         // Pre-readline housekeeping: partial-line marker, plugin sync,

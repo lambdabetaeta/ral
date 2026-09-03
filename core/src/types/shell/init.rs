@@ -37,8 +37,6 @@ impl Shell {
                 ),
                 guest_jail: None,
                 stack_limit: super::DEFAULT_STACK_LIMIT,
-                #[cfg(unix)]
-                parked: std::collections::HashMap::new(),
             },
             local: LocalState::default(),
         };

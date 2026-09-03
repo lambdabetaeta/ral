@@ -33,11 +33,11 @@ is a wire-seat child's spawn machinery.** The why is
   and the attach-time terminal conveyance (`TerminalEndpoint.lease` is
   `#[serde(skip)]`).
 - `Report` / `Ending` — the terminal frame: `Static { rendered, status }` or
-  `Ran { ending, captured, trail }`; `Ending::Stopped` carries no platform
-  `cfg` — the wire type is data, identical everywhere, only its producer
-  (`render_ending`) is Unix. `Report::host_fault` is the engine's own refusal
-  (a panicked worker, a busy engine) shaped as a `Static`, so a host never has
-  to tell it from a run's own failure.
+  `Ran { ending, captured, trail }`; `Ending` has no stop arm — ral does not
+  suspend, so every ending is `Settled`/`Raised`/`Walled`/`Exited`.
+  `Report::host_fault` is the engine's own refusal (a panicked worker, a busy
+  engine) shaped as a `Static`, so a host never has to tell it from a run's
+  own failure.
 - `render_ending` / `RunReport::into_report` — project the engine's own
   `run::Ending`/`RunReport` onto these wire shapes. Every diagnostic renders
   here, runtime errors against the `SourceDb` and static ones against the

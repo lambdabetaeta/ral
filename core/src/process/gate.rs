@@ -158,8 +158,8 @@ pub struct StagePark {
 pub enum StopPolicy {
     /// Batch mode: kill and reap on the spot.
     KillAndReap,
-    /// A top-level foreground external the REPL's job table owns: surface
-    /// `Escape::Stopped`.
+    /// A top-level foreground external: answered with `SIGCONT`, exactly as
+    /// `Park` is.
     Escape,
     /// An external inside a stage thread: record the signal in `park.stop`,
     /// wait on `park.gate`, then continue waiting on the same child (it is
@@ -169,9 +169,8 @@ pub enum StopPolicy {
 
 impl StopPolicy {
     /// The one rule for every external ral waits on.  Inside a stage thread it
-    /// parks on the pipeline's gate; outside one, `escapes` (a foreground the
-    /// job table can resume) surfaces the stop, and anything else kills and
-    /// reaps.
+    /// parks on the pipeline's gate; outside one, `escapes` (a foreground)
+    /// answers with `SIGCONT`, and anything else kills and reaps.
     pub fn for_external(mooring: &crate::types::Mooring, escapes: bool) -> Self {
         match &mooring.park {
             Some(p) => Self::Park(p.clone()),

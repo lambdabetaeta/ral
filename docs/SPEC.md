@@ -2485,77 +2485,16 @@ detached process's death. Exarch currently permits 16 births per session.
 Neither interactive nor batch `ral` installs `detach`; Windows has no such
 command.
 
-### 11.6. Interactive job control
+### 11.6. Stop signals
 
-REPL job control is separate from handles. On Unix, pressing Ctrl-Z while a
-foreground external command or byte-pipe process pipeline runs stops its whole
-process group. ral returns the terminal to the shell, records the group, and
-prints a notice such as:
-
-```text
-[1] stopped	vim notes.txt (SIGTSTP)
-```
-
-When any stage of a byte-pipe process pipeline stops, ral stops the remaining
-stages so the pipeline is parked as one job. Ordinary application and bind have
-no pipeline process group to stop.
-
-An external stage stops the instant the kernel delivers SIGTSTP. A ral-written
-stage parks only at its next evaluation step — a stage mid-builtin finishes
-that call first, and a stage writing to the terminal may emit one more step's
-output before parking — so Ctrl-Z stops ral-written code at its next machine
-step, not at the instruction the kernel happened to interrupt. A pipeline with
-no external stage at all still parks, and still ends on Ctrl-C: ral holds one
-process open for the whole life of every multi-stage pipeline expressly to
-witness a stop or an interrupt the stages themselves cannot report.
-
-The interactive builtins are:
-
-| Command | Contract |
-|---|---|
-| `jobs` | List process-group jobs and session workers without changing either population. |
-| `fg id` | Resume a process-group job in the foreground and wait until it exits or stops again. |
-| `bg id` | Resume a stopped process-group job in the background. |
-| `disown id` | Remove a process-group job without signalling it; the session no longer owns it. |
-
-`fg`, `bg`, and `disown` each require their id: they take one argument, and no
-value has an optional one. `jobs` prints the designators to name. Job
-designators are decimal integers. There is no `%1`, `%+`, or `%-` syntax.
-
-`disown` refuses a job whose stages are ral-written pipeline stages: those run
-as threads of this shell, not as a process group any external signal could
-revive, so nothing would actually detach. The job stays in the table and
-`disown` names `spawn` as the verb that does make a detachable worker. A job
-whose stages are all external processes disowns as above.
-
-`jobs` folds two kinds of residents into one listing. Process groups use `[N]`
-and report `running` or `stopped`, their pgid, and original command. Workers
-created by `spawn` or `watch` use `[wN]` and report `running
-(worker)` or `done (worker)`. Listing renews no worker lease and removes
-nothing.
-
-`fg`, `bg`, and `disown` accept only process-group job ids; they do not accept
-`wN`. The corresponding handle operations are `await` for foreground waiting
-and `cancel` for termination. A worker is already detached from the foreground
-and has no `bg` operation.
-
-The REPL does not splice asynchronous “Done” messages into the prompt and does
-not refuse exit because jobs exist. State is observed explicitly with `jobs`.
-On exit, every undisowned process-group job receives a polite termination
-request and five seconds to exit; survivors are killed. On Unix a stopped
-group is continued after the termination signal so it can perform cleanup.
-Disowned process groups are outside this sweep.
-
-Workers follow the session teardown rule instead: the REPL names running
-workers once, cancels them, and waits briefly and boundedly for teardown.
-There is no `disown` for a handle. To create work intended to outlive the
-process, use a host that provides `detach` and accept its receipt-only contract.
-
-Job parking requires an interactive terminal. In scripts, captured-output
-contexts, and other non-foreground runs, a stopped external pipeline is killed
-and reported as an error because there is no job table or terminal to return
-to. Windows has process-group bookkeeping for teardown but no SIGTSTP analogue,
-so a live Windows REPL cannot acquire stopped jobs through Ctrl-Z.
+ral does not suspend. There is no job table, no `fg`/`bg`/`jobs`/`disown`, and
+no Ctrl-Z gate: a stopped child — by SIGTSTP, SIGTTIN, SIGTTOU, or an external
+`kill -STOP` — is resumed at once by whoever waits on it, the same rule for
+every role and every platform that has stops. Ctrl-Z in an interactive command
+such as `vim` therefore does nothing visible: the program stops and is
+resumed before the terminal can register the gap. Work meant to run in the
+background is `spawn`, whose handle already carries `await` for foreground
+waiting and `cancel` for termination; Ctrl-C ends what Ctrl-Z used to park.
 
 ### 11.7. Availability summary
 

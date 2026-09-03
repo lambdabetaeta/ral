@@ -90,30 +90,6 @@ impl Signal {
         }
     }
 
-    /// SIGTTIN: a background process tried to read the controlling terminal.
-    pub fn is_background_tty_input(self) -> bool {
-        #[cfg(unix)]
-        {
-            self.number == libc::SIGTTIN
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
-    }
-
-    /// SIGTTOU: a background process tried to reconfigure the controlling terminal.
-    pub fn is_background_tty_config(self) -> bool {
-        #[cfg(unix)]
-        {
-            self.number == libc::SIGTTOU
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
-    }
-
     pub fn is_sigkill(self) -> bool {
         #[cfg(unix)]
         {
@@ -155,11 +131,8 @@ impl Signal {
     }
 }
 
-/// What the OS reported when a process stopped or exited.
-///
-/// `Stopped` is a live suspended child: the wait layer reports every stop as
-/// one, and whoever holds the child decides what it means — parking its pgid
-/// as a job, or killing and reaping it into `StoppedThenKilled`.
+/// What the OS reported when a process ended.  Never a stop: [`WaitPoll`] is
+/// the type a stop can inhabit, so a terminal reader cannot be handed one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitOutcome {
     Exited(i32),
@@ -173,15 +146,19 @@ pub enum WaitOutcome {
         cause: CancelCause,
         signal: Signal,
     },
-    Stopped(Signal),
-    /// A stopped child resumed — reported only by the stop-tracking wait
-    /// (`ChildHandle::try_wait_tracking_stops`), never by `try_wait_handling_stop`.
-    Continued,
-    StoppedThenKilled {
-        stopped_by: Signal,
-        killed_by: Signal,
-    },
     NativeCode(i32),
+}
+
+/// One `waitpid` / `WaitForSingleObject` poll.
+///
+/// A stop, which every caller answers with `SIGCONT` and keeps waiting on the
+/// same child, or a terminal [`WaitOutcome`].  Split from `WaitOutcome`
+/// itself so a stop cannot reach a terminal-outcome reader — the type, not a
+/// caller's discipline, is what makes that unwritable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitPoll {
+    Stopped(Signal),
+    Done(WaitOutcome),
 }
 
 impl WaitOutcome {
@@ -223,15 +200,7 @@ impl WaitOutcome {
     pub fn to_user_exit_code(self) -> i32 {
         match self {
             Self::Exited(code) | Self::NativeCode(code) => code,
-            Self::Signaled(sig) | Self::Stopped(sig) | Self::Cancelled { signal: sig, .. } => {
-                sig.user_exit_code()
-            }
-            Self::StoppedThenKilled { stopped_by, .. } => stopped_by.user_exit_code(),
-            Self::Continued => unreachable!(
-                "WaitOutcome::Continued must be intercepted by the stop-tracking wait's \
-                 one caller (the pipeline collector's external waiter thread) before \
-                 reaching a terminal-outcome reader"
-            ),
+            Self::Signaled(sig) | Self::Cancelled { signal: sig, .. } => sig.user_exit_code(),
         }
     }
 
@@ -278,10 +247,6 @@ pub enum CommandFailure {
     Cancelled {
         cause: CancelCause,
         signal: Signal,
-    },
-    StoppedByJobControl {
-        stop_signal: Signal,
-        killed_by: Signal,
     },
     Spawn(SpawnFailure),
 }
@@ -336,23 +301,6 @@ impl CommandFailure {
             WaitOutcome::Exited(code) | WaitOutcome::NativeCode(code) => Some(Self::ExitCode(code)),
             WaitOutcome::Signaled(sig) => Some(Self::Signal(sig)),
             WaitOutcome::Cancelled { cause, signal } => Some(Self::Cancelled { cause, signal }),
-            WaitOutcome::Stopped(_) => unreachable!(
-                "WaitOutcome::Stopped must be intercepted by the caller \
-                 (RunningChild::wait) and surfaced as Escape::Stopped \
-                 before reaching CommandFailure::from_outcome"
-            ),
-            WaitOutcome::Continued => unreachable!(
-                "WaitOutcome::Continued must be intercepted by the caller \
-                 (the pipeline collector's external waiter thread), the only consumer \
-                 of the stop-tracking wait, before reaching CommandFailure::from_outcome"
-            ),
-            WaitOutcome::StoppedThenKilled {
-                stopped_by,
-                killed_by,
-            } => Some(Self::StoppedByJobControl {
-                stop_signal: stopped_by,
-                killed_by,
-            }),
         }
     }
 
@@ -363,26 +311,6 @@ impl CommandFailure {
             Self::Cancelled { cause, .. } => {
                 format!("{cmd}: stopped because {}", cause.event())
             }
-            Self::StoppedByJobControl { stop_signal, .. }
-                if stop_signal.is_background_tty_input() =>
-            {
-                format!(
-                    "{cmd}: stopped by signal {} while reading from the terminal",
-                    stop_signal.display()
-                )
-            }
-            Self::StoppedByJobControl { stop_signal, .. }
-                if stop_signal.is_background_tty_config() =>
-            {
-                format!(
-                    "{cmd}: stopped by signal {} while configuring the terminal",
-                    stop_signal.display()
-                )
-            }
-            Self::StoppedByJobControl { stop_signal, .. } => format!(
-                "{cmd}: stopped by signal {}; ral killed the pipeline",
-                stop_signal.display()
-            ),
             Self::Spawn(SpawnFailure::NotFound) => not_found_hint(cmd),
             Self::Spawn(SpawnFailure::PermissionDenied) => format!("{cmd}: permission denied"),
             Self::Spawn(SpawnFailure::Io(msg)) => format!("{cmd}: {msg}"),
@@ -408,20 +336,6 @@ impl CommandFailure {
                 "ral stopped it with signal {}, so the status is that signal's and not an exit code {cmd} chose",
                 signal.display()
             )),
-            Self::StoppedByJobControl { stop_signal, .. } if stop_signal.is_background_tty_input() => Some(
-                format!(
-                    "ral killed the pipeline because {cmd} tried to read the terminal from a background process group. Is an earlier stage internal, an alias, a handler, or a builtin? Use `explain {cmd}` to inspect command resolution."
-                ),
-            ),
-            Self::StoppedByJobControl { stop_signal, .. } if stop_signal.is_background_tty_config() => Some(
-                format!(
-                    "ral killed the pipeline because {cmd} tried to configure the terminal from a background process group. This often means an interactive tail ran in a mixed pipeline."
-                ),
-            ),
-            Self::StoppedByJobControl { .. } => Some(
-                "ral's job control doesn't reach inside a pipeline; stopping one stage still tears the whole pipeline down."
-                    .to_string(),
-            ),
         }
     }
 
@@ -430,7 +344,6 @@ impl CommandFailure {
         match self {
             Self::ExitCode(code) => *code,
             Self::Signal(sig) | Self::Cancelled { signal: sig, .. } => sig.user_exit_code(),
-            Self::StoppedByJobControl { stop_signal, .. } => stop_signal.user_exit_code(),
             Self::Spawn(SpawnFailure::NotFound | SpawnFailure::Io(_)) => 127,
             Self::Spawn(SpawnFailure::PermissionDenied) => 126,
         }
@@ -458,19 +371,6 @@ mod tests {
             CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), Ending::OwnAccord),
             Some(CommandFailure::Signal(Signal::new(9)))
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stopped_then_killed_reports_the_stop_status() {
-        let outcome = WaitOutcome::StoppedThenKilled {
-            stopped_by: Signal::new(libc::SIGSTOP),
-            killed_by: Signal::new(libc::SIGKILL),
-        };
-        assert_eq!(outcome.to_user_exit_code(), 128 + libc::SIGSTOP);
-        let failure = CommandFailure::from_outcome(outcome, Ending::OwnAccord).unwrap();
-        assert!(failure.message("cmd").contains("stopped by signal"));
-        assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGSTOP);
     }
 
     /// The words change with the cause; the status does not.  A cause-killed

@@ -17,9 +17,9 @@
 //! `read` and left before the line is returned, so the session evaluates and
 //! prints command output to the ordinary screen between reads.
 //!
-//! The worksheet is read-only and the handles matrix spans both env-held spawn
-//! handles and pgid jobs (Ctrl-Z, Unix only); every projection here reads
-//! runtime state and never mutates it.
+//! The worksheet and the handles matrix are both read-only projections of
+//! env-held spawn handles; every projection here reads runtime state and
+//! never mutates it.
 
 use ral_core::Shell;
 use ral_core::ir::{Comp, CompKind, Phrase, Toplevel};
@@ -47,8 +47,6 @@ use std::time::Duration;
 
 use super::super::prompt::PromptText;
 use super::{EditBuffer, Frontend, History, Read};
-#[cfg(unix)]
-use crate::jobs::JobTable;
 use crate::repl::completion::{self, SourceCache};
 use crate::repl::highlight_style::style_ratatui;
 use crate::repl::keybinding::{KeybindingOutcome, dispatch_keybinding};
@@ -143,7 +141,6 @@ impl StructuralFrontend {
         shell: &mut Shell,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
-        #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
         worksheet: &Worksheet,
     ) -> io::Result<Read> {
         // Completion state, refreshed once here and read per Tab below.  Only
@@ -154,18 +151,11 @@ impl StructuralFrontend {
         // The worksheet and matrix read the env, which does not change while
         // the user composes (no evaluation happens here), so build them once.
         // Both project the same user bindings, so fold the scope once and
-        // derive both from that single snapshot.  The matrix also takes a
-        // snapshot of the pgid jobs (the session reaps the table each iteration
-        // before `read`), copied out under a brief lock that is dropped before
-        // rendering.
+        // derive both from that single snapshot.
         let baseline = self.baseline.get_or_insert_with(|| binding_names(shell));
         let user = user_bindings(shell, baseline);
         let ws_rows = worksheet_rows(&user, shell, worksheet);
-        #[cfg(unix)]
-        let jobs_snapshot = job_rows(jobs);
-        #[cfg(not(unix))]
-        let jobs_snapshot = Vec::new();
-        let matrix = matrix_rows(&user, jobs_snapshot);
+        let matrix = matrix_rows(&user);
 
         // The styled prompt, parsed into spans once and split on its newlines:
         // ansi-to-tui turns the SGR escapes into ratatui styling.  A parse
@@ -536,17 +526,9 @@ impl Frontend for StructuralFrontend {
         shell: &mut Shell,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
-        #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
         #[cfg(feature = "structural")] worksheet: &Worksheet,
     ) -> Read {
-        if let Ok(r) = self.compose(
-            shell,
-            prompt,
-            pending,
-            #[cfg(unix)]
-            jobs,
-            worksheet,
-        ) {
+        if let Ok(r) = self.compose(shell, prompt, pending, worksheet) {
             r
         } else {
             // A terminal IO failure mid-session: leave raw mode and end
@@ -731,19 +713,13 @@ struct WsRow {
     effectful: bool,
 }
 
-/// One matrix row's lifecycle state, unifying the two kinds of live work the
-/// matrix projects: env-held [`Value::Handle`] spawns (a [`HandleState`]) and
-/// pgid jobs parked or resumed by the kernel (a [`crate::jobs::JobState`],
-/// Unix only).  Sharing one enum keeps a single render loop and glyph map.
+/// One matrix row's lifecycle state: an env-held [`Value::Handle`] spawn's
+/// own [`HandleState`].
 #[derive(Clone, Copy)]
 enum MxState {
     Running,
     Completed,
     Cancelled,
-    /// Only ever constructed by the Unix `From<JobState>` conversion below
-    /// (Windows has no SIGTSTP analogue to park a job in this state).
-    #[cfg_attr(windows, allow(dead_code))]
-    Stopped,
 }
 
 impl From<HandleState> for MxState {
@@ -756,18 +732,8 @@ impl From<HandleState> for MxState {
     }
 }
 
-#[cfg(unix)]
-impl From<crate::jobs::JobState> for MxState {
-    fn from(s: crate::jobs::JobState) -> Self {
-        match s {
-            crate::jobs::JobState::Running => Self::Running,
-            crate::jobs::JobState::Stopped => Self::Stopped,
-        }
-    }
-}
-
-/// One matrix row: a unit of live work — an env-held spawn handle or a pgid
-/// job — with its lifecycle state and a label.
+/// One matrix row: an env-held spawn handle, with its lifecycle state and a
+/// label.
 struct MxRow {
     name: String,
     state: MxState,
@@ -901,10 +867,9 @@ fn worksheet_rows(user: &[(String, Value)], shell: &Shell, model: &Worksheet) ->
     rows
 }
 
-/// The matrix rows: the user's live env-held spawn handles followed by the
-/// session's pgid jobs (`job_rows`, empty off Unix).  Handles sort by binding
-/// name; jobs follow in job-id order, the order `jobs`/`fg`/`bg` use.
-fn matrix_rows(user: &[(String, Value)], mut job_rows: Vec<MxRow>) -> Vec<MxRow> {
+/// The matrix rows: the user's live env-held spawn handles, sorted by
+/// binding name.
+fn matrix_rows(user: &[(String, Value)]) -> Vec<MxRow> {
     let mut rows: Vec<MxRow> = user
         .iter()
         .filter_map(|(name, value)| match value {
@@ -921,28 +886,7 @@ fn matrix_rows(user: &[(String, Value)], mut job_rows: Vec<MxRow>) -> Vec<MxRow>
         })
         .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
-    rows.append(&mut job_rows);
     rows
-}
-
-/// The session's pgid jobs as matrix rows, in job-id order.  Locks the table
-/// briefly, copies each job's id / command / state into an owned row, and
-/// drops the guard before returning so nothing is held across rendering.
-/// Labelled `%id` after the shell's job-spec syntax.
-#[cfg(unix)]
-fn job_rows(jobs: &Arc<Mutex<JobTable>>) -> Vec<MxRow> {
-    let guard = jobs
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    guard
-        .list()
-        .into_iter()
-        .map(|j| MxRow {
-            name: format!("%{}", j.id),
-            state: j.state.into(),
-            cmd: j.cmd.clone(),
-        })
-        .collect()
 }
 
 /// A one-line value preview, truncated.
@@ -1471,7 +1415,7 @@ fn render_projections(
             let (glyph, hue) = match r.state {
                 MxState::Running => ("●", HANDLE_RUN),
                 MxState::Completed => ("✓", NAME_HUE),
-                MxState::Cancelled | MxState::Stopped => ("○", SLATE),
+                MxState::Cancelled => ("○", SLATE),
             };
             mx_lines.push(Line::from(vec![
                 Span::styled(format!("{glyph} {}", r.name), Style::default().fg(hue)),

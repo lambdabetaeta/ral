@@ -11,12 +11,14 @@
 //!
 //! The anchor is also the group's witness.  The shell is not a member of the
 //! pgid, so while the terminal belongs to the group the shell never hears a
-//! Ctrl-C or Ctrl-Z the tty delivers to it: the kernel stops the anchor with
-//! the group (default `SIGTSTP`), and the anchor swallows every termination
+//! Ctrl-C the tty delivers to it: the anchor swallows every termination
 //! signal and reports its number on its stdout — a pipe one dedicated thread
 //! blocks reading, alongside another blocked `waitpid`-ing the anchor itself
-//! for its own stop or death; both report [`Witnessed`] on the collector's
-//! channel, never polled.
+//! for its own death; both report [`Witnessed`] on the collector's channel,
+//! never polled.  The anchor additionally ignores `SIGTSTP`/`SIGTTIN`/
+//! `SIGTTOU` outright, so it rarely stops at all; on the rare stop it does
+//! see (a bare `kill -STOP`, say) its own waiter answers with `SIGCONT`
+//! inline, the one rule applied to the anchor like any other waiter.
 
 use super::resolve::TerminalPlan;
 #[cfg(unix)]
@@ -28,21 +30,18 @@ use crate::types::{Break, Mooring, Settled, Shell};
 #[cfg(unix)]
 use std::sync::mpsc::Sender;
 
-/// What this group owns, and therefore what a stop of it means.  The fourth
-/// combination the two booleans it replaces could spell — a joining group
-/// that owns the terminal — does not exist: a nested pipeline is never
-/// foreground.
+/// What this group owns.  The fourth combination the two booleans it
+/// replaces could spell — a joining group that owns the terminal — does not
+/// exist: a nested pipeline is never foreground.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GroupRole {
-    /// Owns the pgid and was launched into the terminal foreground, so a
-    /// stop parks it as a job the REPL can resume.  Survives the park: the
-    /// foreground guard is handed back on the way in, the role is not.
+    /// Owns the pgid and was launched into the terminal foreground.
     Foreground,
-    /// Owns the pgid with nothing to resume a stop — batch mode, a capture, a
-    /// pipeline inside a `spawn` worker — so a stop cancels it.
+    /// Owns the pgid with no foreground of its own — batch mode, a capture,
+    /// a pipeline inside a `spawn` worker.
     Background,
-    /// Joined an enclosing stage's group: it may not signal, kill, park or
-    /// escape on its own account, and forwards a stop to the owner.
+    /// Joined an enclosing stage's group: it may not signal, kill, or escape
+    /// on its own account.
     Joining,
 }
 
@@ -55,21 +54,21 @@ pub(super) struct PipelineGroup {
     /// The terminal handoff *actually held*: `None` when `tcsetpgrp` failed,
     /// and `None` again once a park hands the terminal back.
     foreground: Option<crate::process::ForegroundGuard>,
+    /// Held for its `Drop` alone: nothing reads it back, but it must outlive
+    /// every stage so a relayed Ctrl-C keeps reaching the group.
     #[cfg(unix)]
+    #[allow(dead_code)]
     relay: Option<crate::process::PipelineRelay>,
     /// `Some` exactly when `role` is not `Joining`; taken by `Drop`.
     anchor: Option<AnchorProcess>,
 }
 
-/// What the anchor saw happen to the group.
+/// What the anchor saw happen to the group.  A stop is never among these: the
+/// anchor's own waiter answers it with `SIGCONT` inline and keeps waiting, so
+/// only a death is ever witnessed.
 #[derive(Clone, Copy)]
 #[cfg(unix)]
 pub(super) enum Witnessed {
-    Stopped(Signal),
-    /// The anchor resumed — reported so the collector can track the
-    /// anchor's own stop as a level from its two edges, exactly as a
-    /// member's is, rather than a one-shot cell nothing ever clears.
-    Continued,
     Cancelled(CancelCause),
 }
 
@@ -177,14 +176,6 @@ impl PipelineGroup {
             return;
         }
         self.leader.kill();
-    }
-
-    /// Give the terminal back to the shell and drop the relay, keeping the
-    /// anchor so the pgid stays joinable across a park.
-    #[cfg(unix)]
-    pub(super) fn release_foreground_and_relay(&mut self) {
-        self.foreground = None;
-        self.relay = None;
     }
 
     /// Start this group's two anchor-witness threads — a no-op on a joining
@@ -378,31 +369,28 @@ fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Report>) {
     }
 }
 
-/// Blocking `waitpid(WUNTRACED | WCONTINUED)` on the anchor, the sole reaper
-/// of its pid: a stop reports `Witnessed::Stopped` and loops on, a resume
-/// `Witnessed::Continued` and loops on — the anchor is a member of the group
-/// like any other, so its own stop is a level tracked from its two edges,
-/// never a cell nothing ever clears — and a death — by signal (attributed
-/// exactly as a reported swallow would be), or however else it left —
-/// reports `Witnessed::Cancelled` and ends the loop.  An anchor that
+/// Blocking `waitpid(WUNTRACED)` on the anchor, the sole reaper of its pid: a
+/// stop is answered with `SIGCONT` inline and the wait resumes on the same
+/// pid, the one rule applied to the anchor itself — and a death, by signal
+/// (attributed exactly as a reported swallow would be) or however else it
+/// left, reports `Witnessed::Cancelled` and ends the loop.  An anchor that
 /// has died has cost the group its join target, so any death cancels the
 /// pipeline, expected (`AnchorProcess::finish`'s own teardown, where `tx`
 /// has nobody listening) or not.
 #[cfg(unix)]
 fn wait_anchor(mut child: crate::process::ChildHandle, tx: &Sender<Report>) {
-    use crate::process::WaitOutcome;
-    loop {
-        let witnessed = match child.wait_tracking_stops() {
-            Ok(WaitOutcome::Stopped(sig)) => Witnessed::Stopped(sig),
-            Ok(WaitOutcome::Continued) => Witnessed::Continued,
-            Ok(WaitOutcome::Signaled(sig)) => Witnessed::Cancelled(cancel_cause(sig.number())),
-            Ok(_) | Err(_) => Witnessed::Cancelled(CancelCause::Terminate),
-        };
-        let terminal = !matches!(witnessed, Witnessed::Stopped(_) | Witnessed::Continued);
-        if tx.send(Report::Witnessed(witnessed)).is_err() || terminal {
-            return;
+    use crate::process::{WaitOutcome, WaitPoll};
+    let pid = child.id();
+    let witnessed = loop {
+        match child.wait_handling_stop() {
+            Ok(WaitPoll::Stopped(_)) => crate::process::cont_stage_by_pid(pid),
+            Ok(WaitPoll::Done(WaitOutcome::Signaled(sig))) => {
+                break Witnessed::Cancelled(cancel_cause(sig.number()));
+            }
+            Ok(WaitPoll::Done(_)) | Err(_) => break Witnessed::Cancelled(CancelCause::Terminate),
         }
-    }
+    };
+    let _ = tx.send(Report::Witnessed(witnessed));
 }
 
 #[cfg(test)]
@@ -475,8 +463,6 @@ mod tests {
             match witnessed_within_2s(&rx) {
                 Some(Witnessed::Cancelled(c)) if c == cause => {}
                 Some(Witnessed::Cancelled(c)) => panic!("signal {signal} witnessed as {c:?}"),
-                Some(Witnessed::Stopped(_)) => panic!("signal {signal} witnessed as a stop"),
-                Some(Witnessed::Continued) => panic!("signal {signal} witnessed as a resume"),
                 None => panic!("signal {signal} was never reported"),
             }
         }

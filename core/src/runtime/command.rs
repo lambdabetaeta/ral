@@ -26,11 +26,10 @@ pub(crate) use child::{ExternalPlumbing, GroupOwner, RunningChild};
 pub(crate) use detach::detach;
 pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
-pub use redirect::PendingWrite;
 pub(crate) use redirect::{
-    EvalRedirect, EvalRedirectV, RedirectGuard, StdinRedirectGuard, abandon_all, apply_redirects,
-    atomic_write, commit_atomics, defer_to_stop, install_stdin_redirect, open_file,
-    restore_redirects, stderr_mode,
+    EvalRedirect, EvalRedirectV, PendingWrite, RedirectGuard, StdinRedirectGuard, apply_redirects,
+    atomic_write, commit_atomics, install_stdin_redirect, open_file, restore_redirects,
+    stderr_mode,
 };
 use stdio::classify_redirects;
 pub(crate) use stdio::{StdinRoute, TtyInputPermit};
@@ -135,7 +134,7 @@ pub(crate) fn run(
     // Windows; an `Inherit` child has no group at all. A `Join` child
     // borrowed a group it does not own.
     let group_owner = match (wait_pgid, fg.pgid_policy()) {
-        (Some(p), crate::process::PgidPolicy::Join(_)) => GroupOwner::BorrowedByPipeline(p),
+        (Some(_), crate::process::PgidPolicy::Join(_)) => GroupOwner::BorrowedByPipeline,
         (Some(p), _) => GroupOwner::Standalone(p),
         (None, _) => GroupOwner::None,
     };
@@ -155,30 +154,8 @@ pub(crate) fn run(
         jail,
     );
 
-    let waited: WaitedChild = match running.wait() {
-        Ok(waited) => waited,
-        // A stop parks the child alive with the staged temp still open, so
-        // the uncommitted write leaves with the escape instead of dying here,
-        // and the card says `deferred` rather than claiming either end.
-        Err(brk) => {
-            if brk.is_stop()
-                && let Some((path, mode)) = plan.stdout_file.as_ref()
-            {
-                observe(
-                    shell,
-                    mooring,
-                    Observed::Write {
-                        path: path.clone(),
-                        mode: *mode,
-                        outcome: WriteOutcome::Deferred,
-                        new_bytes: None,
-                        old_bytes: None,
-                    },
-                );
-            }
-            return Err(defer_to_stop(brk, atomic_commit.take()));
-        }
-    };
+    // `atomic_commit`'s own `Drop` abandons the staged write on an early `?`.
+    let waited: WaitedChild = running.wait()?;
     let (outcome, ending) = (waited.outcome, waited.ending);
 
     // Held rather than `?`-propagated: the drain below must still run for a

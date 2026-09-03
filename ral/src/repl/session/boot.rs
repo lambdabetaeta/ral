@@ -430,10 +430,6 @@ fn run_startup(path: &str, block: Value, shell: &mut Shell) -> Result<(), String
         RunReport::Ran { ending, .. } => match ending.into_result() {
             Ok(_) | Err(Break::Escape(Escape::Exit(_))) => Ok(()),
             Err(Break::Error(e)) => Err(format!("{path}: startup: {}", e.message)),
-            #[cfg(unix)]
-            Err(Break::Escape(Escape::Stopped { .. })) => Err(format!(
-                "{path}: startup: a stop signal escaped — rc files cannot park jobs"
-            )),
         },
         RunReport::Static { .. } => {
             unreachable!("a thunk startup block never compiles source")
@@ -490,14 +486,6 @@ fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>,
         Err(Break::Error(e)) => Err(format!("{path}: {}", e.message)),
         // `exit` in a startup file: stop sourcing it, boot continues.
         Err(Break::Escape(Escape::Exit(_))) => Ok(None),
-        // A stop signal (Ctrl-Z during a slow startup command) parks a
-        // process group the REPL job table never learned about — never
-        // resumed, never reaped.  Report it like the `startup:` arm in
-        // `source_rc_inner` rather than silently orphaning the group.
-        #[cfg(unix)]
-        Err(Break::Escape(Escape::Stopped { .. })) => Err(format!(
-            "{path}: a stop signal escaped — startup files cannot park jobs"
-        )),
     }
 }
 

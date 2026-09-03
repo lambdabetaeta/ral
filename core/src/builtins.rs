@@ -523,10 +523,6 @@ pub fn register(shell: &mut Shell, prelude_top: &crate::ir::Toplevel) {
             let msg = match &e {
                 Break::Error(err) => err.to_string(),
                 Break::Escape(Escape::Exit(code)) => format!("exit {code}"),
-                #[cfg(unix)]
-                Break::Escape(Escape::Stopped { signal, cmd, .. }) => {
-                    format!("{cmd}: stopped by signal {}", signal.display())
-                }
             };
             diagnostic::cmd_error("prelude", &msg);
         }

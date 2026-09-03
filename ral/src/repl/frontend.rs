@@ -27,15 +27,11 @@ pub(super) use rustyline::RustylineFrontend;
 pub(super) use structural::StructuralFrontend;
 
 use ral_core::Shell;
-#[cfg(unix)]
-use std::sync::{Arc, Mutex};
 
 use super::config::dirs_history;
 use super::prompt::PromptText;
 #[cfg(feature = "structural")]
 use super::worksheet::Worksheet;
-#[cfg(unix)]
-use crate::jobs::JobTable;
 
 // ── Surface selection ───────────────────────────────────────────────────────
 
@@ -56,9 +52,10 @@ pub(crate) enum Surface {
     /// suggested text and highlighting. This is the default.
     #[default]
     Readline,
-    /// Show live types, bindings and running jobs around the prompt. This needs
-    /// a build with the `structural` feature and a terminal that supports raw
-    /// mode. Ral falls back to readline if either is unavailable.
+    /// Show live types, bindings and running workers around the prompt. This
+    /// needs a build with the `structural` feature and a terminal that
+    /// supports raw mode. Ral falls back to readline if either is
+    /// unavailable.
     Structural,
 }
 
@@ -207,27 +204,17 @@ pub(super) trait Frontend {
     /// keybinding dispatch, continuation reads, line-erase escapes, and
     /// flushing deferred plugin diagnostics before returning.
     ///
-    /// `jobs` is the session's shared `JobTable` (Unix only — pgid jobs
-    /// are a Unix concept), threaded so the structural surface can project
-    /// stopped/running pgid jobs in its handles matrix alongside the
-    /// env-held [`Value::Handle`](ral_core::Value::Handle) spawns.  Passed
-    /// as the shared `Arc<Mutex<…>>` rather than a held guard, mirroring
-    /// [`super::exec::step`]: the frontend takes its own short-lived lock,
-    /// copies what it renders, and drops the guard before drawing.  The
-    /// line-editor backends ignore it.
-    ///
     /// `worksheet` is the session's [`Worksheet`] model (the `structural`
     /// build only), threaded so the structural surface can draw each user
     /// binding's dependency edges and pure/effectful verdict — the data the
     /// live env cannot reconstruct.  The session owns it so it accumulates
     /// across runs; the frontend reads it.  The line-editor backends ignore
-    /// it, exactly as they ignore `jobs`.
+    /// it.
     fn read(
         &mut self,
         shell: &mut Shell,
         prompt: &PromptText,
         pending: Option<EditBuffer>,
-        #[cfg(unix)] jobs: &Arc<Mutex<JobTable>>,
         #[cfg(feature = "structural")] worksheet: &Worksheet,
     ) -> Read;
 

@@ -12,7 +12,7 @@ use rustix::io::Errno;
 use rustix::process::{Pid, WaitOptions, WaitStatus};
 use rustix::termios::{OptionalActions, Termios};
 
-use super::{ESCALATION, KillTarget, Pgid, PgidPolicy};
+use super::{ESCALATION, Pgid, PgidPolicy};
 use crate::process::cancel::{CancelCause, request_foreground_cancel, request_root_cancel};
 
 // ── Termination handler ────────────────────────────────────────────────────
@@ -356,7 +356,14 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
             Ok(())
         })?;
     drop(handshake);
-    let born = wait_handling_stop(&intermediate)?;
+    let born = loop {
+        match wait_handling_stop(&intermediate)? {
+            crate::process::WaitPoll::Stopped(_) => {
+                crate::process::cont_stage_by_pid(intermediate.id());
+            }
+            crate::process::WaitPoll::Done(o) => break o,
+        }
+    };
     if born != crate::process::WaitOutcome::Exited(0) {
         return Err(std::io::Error::other(format!(
             "could not detach: the intermediate process ended as {born:?} instead of exiting 0, so nothing here knows the pid of what it started"
@@ -378,14 +385,14 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
 // `Child::wait()` returns only on termination, so a child stopped by SIGTSTP,
 // SIGSTOP or SIGTTIN hangs ral with the tty still owned by the stopped pgid;
 // `WaitOptions::UNTRACED` makes the wait return on a stop as well.  The stop
-// surfaces as `Stopped` and nothing more: what it means — a job to park, a
-// gate to wait on, a child to kill and reap — belongs to whoever holds the
-// child, never to the wait.
+// surfaces as `Stopped` and nothing more: what it means — `SIGCONT` and keep
+// waiting, a gate to wait on, a child to kill and reap — belongs to whoever
+// holds the child, never to the wait.
 
 /// Wait for `child` to terminate or stop.
 pub(super) fn wait_handling_stop(
     child: &std::process::Child,
-) -> std::io::Result<crate::process::WaitOutcome> {
+) -> std::io::Result<crate::process::WaitPoll> {
     let (_, status) = waitpid_eintr(Pid::from_child(child), WaitOptions::UNTRACED)?;
     Ok(classify_wait_status(status))
 }
@@ -444,48 +451,36 @@ fn wait_blocking_eintr(
 /// "still running" and the pre-wait poll in `RunningChild::wait` spins forever.
 pub(super) fn try_wait_handling_stop(
     child: &std::process::Child,
-) -> std::io::Result<Option<crate::process::WaitOutcome>> {
+) -> std::io::Result<Option<crate::process::WaitPoll>> {
     let Some((_, status)) = try_waitpid_eintr(Pid::from_child(child), WaitOptions::UNTRACED)? else {
         return Ok(None);
     };
     Ok(Some(classify_wait_status(status)))
 }
 
-/// Blocking wait reporting both edges of a stop, for the pipeline
-/// collector's dedicated external waiter thread; see
-/// [`crate::process::ChildHandle::wait_tracking_stops`].
-pub(super) fn wait_tracking_stops(
-    child: &std::process::Child,
-) -> std::io::Result<crate::process::WaitOutcome> {
-    let options = WaitOptions::UNTRACED | WaitOptions::CONTINUED;
-    let (_, status) = waitpid_eintr(Pid::from_child(child), options)?;
-    Ok(classify_wait_status(status))
-}
-
-/// Translate a `waitpid` status into a `WaitOutcome`, shared by the blocking and
-/// polling paths.  `WaitStatus` is a total, transparent view of the kernel bits,
-/// so termination by a real-time signal classifies with no fallible enum between.
-fn classify_wait_status(status: WaitStatus) -> crate::process::WaitOutcome {
+/// Translate a `waitpid` status into a [`crate::process::WaitPoll`], shared by
+/// the blocking and polling paths.  `WaitStatus` is a total, transparent view
+/// of the kernel bits, so termination by a real-time signal classifies with no
+/// fallible enum between.
+fn classify_wait_status(status: WaitStatus) -> crate::process::WaitPoll {
+    use crate::process::{WaitOutcome, WaitPoll};
     if let Some(signal) = status.stopping_signal() {
-        return crate::process::WaitOutcome::Stopped(crate::process::Signal::new(signal));
-    }
-    if status.continued() {
-        return crate::process::WaitOutcome::Continued;
+        return WaitPoll::Stopped(crate::process::Signal::new(signal));
     }
     if let Some(code) = status.exit_status() {
-        return crate::process::WaitOutcome::Exited(code);
+        return WaitPoll::Done(WaitOutcome::Exited(code));
     }
     if let Some(signal) = status.terminating_signal() {
-        return crate::process::WaitOutcome::Signaled(crate::process::Signal::new(signal));
+        return WaitPoll::Done(WaitOutcome::Signaled(crate::process::Signal::new(signal)));
     }
-    crate::process::WaitOutcome::NativeCode(status.as_raw())
+    WaitPoll::Done(WaitOutcome::NativeCode(status.as_raw()))
 }
 
 /// SIGKILL a pipeline external stage by pid alone, from outside the thread
 /// that owns its wait: the reader-gone cascade, and a background group's
 /// stop-then-kill (fired before the group's own `SIGCONT` could wake it).
 /// Async-signal-safe, no reap — the stage's own dedicated waiter thread
-/// reaps it and reports the death, wherever it is in `wait_tracking_stops`.
+/// reaps it and reports the death, wherever it is in its own wait.
 pub(super) fn kill_stage_by_pid(pid: u32) {
     #[allow(
         clippy::cast_possible_wrap,
@@ -532,43 +527,6 @@ pub(super) fn cont_stage_by_pid(pid: u32) {
     unsafe {
         libc::kill(pid as i32, libc::SIGCONT);
     }
-}
-
-/// SIGKILL `target` and reap the terminal status, reporting the stop that
-/// preceded it.
-pub(super) fn kill_and_reap_stopped(
-    child: &mut std::process::Child,
-    stopped_by: crate::process::Signal,
-    target: KillTarget,
-) -> std::io::Result<crate::process::WaitOutcome> {
-    let pid = Pid::from_child(child);
-    crate::dbg_trace!(
-        "fg",
-        "pid {pid} stopped (signal {}); killing {target:?}",
-        stopped_by.display(),
-    );
-    match target {
-        KillTarget::Group(group) => {
-            let _ =
-                rustix::process::kill_process_group(group.as_pid(), rustix::process::Signal::KILL);
-        }
-        KillTarget::Pid => {
-            let _ = child.kill();
-        }
-    }
-    let (_, status) = waitpid_eintr(pid, WaitOptions::empty())?;
-    if let Some(signal) = status.terminating_signal() {
-        return Ok(crate::process::WaitOutcome::StoppedThenKilled {
-            stopped_by,
-            killed_by: crate::process::Signal::new(signal),
-        });
-    }
-    if let Some(code) = status.exit_status() {
-        // The child raced the kill and exited on its own in the stop→kill
-        // window: report that, not a signal the kernel never delivered.
-        return Ok(crate::process::WaitOutcome::Exited(code));
-    }
-    Ok(crate::process::WaitOutcome::NativeCode(status.as_raw()))
 }
 
 /// Capture stdin's line-discipline state; `None` when stdin is not a tty.  The

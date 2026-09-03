@@ -7,8 +7,8 @@
 //! `post-exec`) fire around the dispatch through
 //! [`IdentityTransport::with_shell`].
 //!
-//! Job-control and plugin-lifecycle commands are handled by the captured
-//! builtins installed at boot (see [`super::host_handlers`]).
+//! Plugin-lifecycle commands are handled by the captured builtins installed
+//! at boot (see [`super::host_handlers`]).
 
 use ral_core::protocol::{self, IdentityTransport, Program, Report, Run};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
@@ -104,17 +104,9 @@ fn post_exec(
 /// Parse, typecheck, and evaluate one trimmed REPL input through the
 /// transport, running pre-exec and post-exec hooks around evaluation.
 /// Returns `Some(code)` when the shell should exit.
-///
-/// `job_table` is threaded as the shared `Arc<Mutex<…>>` rather than a
-/// held lock: the captured builtins (`fg`, `bg`, `disown`, `jobs`)
-/// take their own short-lived lock during evaluation, so holding the
-/// guard across the evaluator body would self-deadlock.  The only
-/// post-eval mutation — recording a stopped job — locks just for the
-/// `jt.add` call.
 pub(super) fn execute_input(
     trimmed: &str,
     transport: &IdentityTransport,
-    #[cfg(unix)] job_table: &Arc<Mutex<crate::jobs::JobTable>>,
     runtime: &Arc<Mutex<PluginRuntime>>,
     #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
 ) -> Option<u8> {
@@ -167,32 +159,6 @@ pub(super) fn execute_input(
                     None
                 }
                 protocol::Ending::Exited(code) => Some(crate::platform::exit_byte(code)),
-                #[cfg(unix)]
-                protocol::Ending::Stopped {
-                    pgid,
-                    signal_name,
-                    pending,
-                    ..
-                } => {
-                    let parked = transport.with_shell(|shell| {
-                        let typed = ral_core::process::Pgid::from_raw(pgid)
-                            .expect("a stopped job's pgid is positive");
-                        shell.take_parked(typed)
-                    });
-                    let id = job_table.lock().unwrap().add(
-                        pgid,
-                        trimmed.to_string(),
-                        crate::jobs::JobState::Stopped,
-                        pending,
-                        parked,
-                    );
-                    eprintln!("[{id}] stopped\t{trimmed} ({signal_name})");
-                    None
-                }
-                #[cfg(not(unix))]
-                protocol::Ending::Stopped { .. } => {
-                    unreachable!("an in-process engine stops no job on this platform")
-                }
             };
 
             // Fire post-exec hook.
@@ -207,15 +173,12 @@ pub(super) fn execute_input(
 pub(super) fn step(
     trimmed: &str,
     transport: &IdentityTransport,
-    #[cfg(unix)] job_table: &Arc<Mutex<crate::jobs::JobTable>>,
     runtime: &Arc<Mutex<PluginRuntime>>,
     #[cfg(feature = "structural")] worksheet: &mut super::worksheet::Worksheet,
 ) -> Step {
     match execute_input(
         trimmed,
         transport,
-        #[cfg(unix)]
-        job_table,
         runtime,
         #[cfg(feature = "structural")]
         worksheet,

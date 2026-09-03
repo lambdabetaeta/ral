@@ -6,20 +6,6 @@ use super::error::Error;
 #[derive(Debug, Clone)]
 pub enum Escape {
     Exit(i32),
-    /// A foreground job frozen by SIGTSTP, on its way to the job table.
-    ///
-    /// `pending` carries the atomic writes the stopped frames staged but could
-    /// not finish: the child is alive with each temp still open, so the writes
-    /// belong to the job now, and its end decides between the rename and the
-    /// unlink.  They travel as paths precisely so this stays a `Clone` datum —
-    /// an escape describes a control transfer, it never owns a resource.
-    #[cfg(unix)]
-    Stopped {
-        pgid: crate::process::Pgid,
-        signal: crate::process::Signal,
-        cmd: String,
-        pending: Vec<crate::runtime::command::PendingWrite>,
-    },
 }
 
 /// What `try` decides about: `Error` is catchable; `Escape` propagates.
@@ -27,17 +13,6 @@ pub enum Escape {
 pub enum Break {
     Error(Error),
     Escape(Escape),
-}
-
-impl Break {
-    /// True for the one break that leaves a live job behind it, so what the
-    /// frame staged is unfinished rather than abandoned.
-    pub(crate) fn is_stop(&self) -> bool {
-        #[cfg(unix)]
-        return matches!(self, Self::Escape(Escape::Stopped { .. }));
-        #[cfg(not(unix))]
-        return false;
-    }
 }
 
 /// A capability-policy decode/freeze failure.

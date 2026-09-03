@@ -1,9 +1,9 @@
 //! REPL session state machine.
 //!
 //! [`Session`] owns the long-lived state of an interactive shell — the
-//! evaluator [`Shell`](ral_core::Shell), the [`JobTable`](crate::jobs::JobTable), the
-//! line-editing [`Frontend`], any pending buffer queued for re-edit, and
-//! the exit code that will be returned to the OS.
+//! evaluator [`Shell`](ral_core::Shell), the line-editing [`Frontend`], any
+//! pending buffer queued for re-edit, and the exit code that will be
+//! returned to the OS.
 //!
 //! Bootstrap (signals, terminal probe, builtins, profile/RC sourcing,
 //! capability narrowing, frontend construction) lives in the [`boot`]
@@ -20,8 +20,6 @@ use super::frontend::{EditBuffer, Frontend, Read};
 use super::plugin::PluginRuntime;
 use super::prompt::{render as render_prompt, write_terminal_title};
 
-use crate::jobs;
-
 /// Per-iteration loop control: stay in the loop, or break out and return
 /// the recorded exit code.
 pub(super) enum Flow {
@@ -36,9 +34,6 @@ pub(super) enum Flow {
 /// must not orphan a stopped process group or lose the session's history.
 pub(super) struct Session {
     transport: ral_core::protocol::IdentityTransport,
-    /// Job table shared with captured builtins installed at boot so
-    /// `jobs`, `fg`, `bg`, and `disown` can mutate it from closures.
-    jobs: Arc<Mutex<jobs::JobTable>>,
     frontend: Box<dyn Frontend>,
     /// Plugin runtime: lives here so REPL pre-eval handlers, lifecycle-
     /// hook fold, and the prompt fold can all reach it without
@@ -73,12 +68,11 @@ impl Session {
     ) -> Result<Self, ExitCode> {
         boot::setup_signals();
         let (interactive_mode, terminal) = crate::platform::probe_terminal(true);
-        let jobs = Arc::new(Mutex::new(jobs::JobTable::new()));
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
         // The host surface — the editor (`_ed-*`) builtins, `watch`, and the
-        // captured job-control/plugin-lifecycle commands — rides the boot:
-        // the typechecker reads this shell's builtin table, and plugins
-        // loaded from rc are checked against it.
+        // captured plugin-lifecycle commands — rides the boot: the
+        // typechecker reads this shell's builtin table, and plugins loaded
+        // from rc are checked against it.
         let mut shell = ral_core::boot::boot_shell(
             terminal,
             &crate::PRELUDE,
@@ -87,7 +81,7 @@ impl Session {
                     super::plugin::ed_builtins::ED_BUILTINS,
                     ral_core::builtins::WATCH_BUILTIN,
                 ],
-                captured: vec![super::host_handlers::build(jobs.clone(), runtime.clone())],
+                captured: vec![super::host_handlers::build(runtime.clone())],
             },
         );
         shell.set_exit_hints(crate::platform::load_exit_hints());
@@ -127,7 +121,6 @@ impl Session {
 
         Ok(Self {
             transport,
-            jobs,
             frontend,
             runtime,
             pending: None,
@@ -151,19 +144,10 @@ impl Session {
         ExitCode::from(self.exit_code)
     }
 
-    /// Run one iteration: reap children, draw prompt, read, eval.
-    /// Returns `Break` when the frontend hits EOF, the evaluator
-    /// returns an exit code, or the session's durable root has been
-    /// cancelled.
+    /// Run one iteration: draw prompt, read, eval.  Returns `Break` when the
+    /// frontend hits EOF, the evaluator returns an exit code, or the
+    /// session's durable root has been cancelled.
     fn iterate(&mut self) -> Flow {
-        {
-            let mut guard = self.transport.shell_mut();
-            self.jobs
-                .lock()
-                .unwrap()
-                .reap(&ral_core::types::Mooring::adrift(), &mut guard.shell);
-        }
-
         // A cancelled durable root ends the session.  Cancellation is
         // one-way — the root can never be un-cancelled — so after a
         // SIGTERM/SIGHUP (`Terminate`) or a Ctrl-\ (`RootAbort`) every
@@ -194,8 +178,6 @@ impl Session {
                 &mut guard.shell,
                 &prompt,
                 self.pending.take(),
-                #[cfg(unix)]
-                &self.jobs,
                 #[cfg(feature = "structural")]
                 &self.worksheet,
             )
@@ -228,8 +210,6 @@ impl Session {
         match step(
             trimmed,
             &self.transport,
-            #[cfg(unix)]
-            &self.jobs,
             &self.runtime,
             #[cfg(feature = "structural")]
             &mut self.worksheet,
@@ -244,10 +224,10 @@ impl Session {
 }
 
 impl Drop for Session {
-    /// Flush history and take down remaining jobs.  Runs on both the
+    /// Flush history and take down remaining workers.  Runs on both the
     /// orderly `run` return and a panic unwinding through the owned
-    /// `Session`, so a crash mid-iteration neither orphans a stopped process
-    /// group nor drops the session's history.
+    /// `Session`, so a crash mid-iteration does not lose the session's
+    /// history.
     ///
     /// Name, then sweep: a still-running worker is announced here, once, and
     /// taken down — external children and all — when the transport's shell
@@ -258,16 +238,6 @@ impl Drop for Session {
         let workers = self.transport.shell_mut().shell.workers();
         if let Some(notice) = super::host_handlers::teardown_notice(&workers) {
             eprintln!("{notice}");
-        }
-        // A panic that poisons the JobTable still leaves it structurally
-        // valid for a best-effort SIGTERM/SIGKILL sweep; recover the guard
-        // rather than re-panicking into a process abort during unwind.
-        {
-            let mut guard = self.transport.shell_mut();
-            self.jobs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .cleanup(&ral_core::types::Mooring::adrift(), &mut guard.shell);
         }
         // Windows-only, no-op elsewhere: reverts this session's AppContainer
         // grant ACEs and deletes its profile.

@@ -1,32 +1,22 @@
-//! Captured builtin entries for job-control and plugin-lifecycle commands.
+//! Captured builtin entries for plugin-lifecycle commands.
 //!
-//! [`build`] returns the six entries installed into the session builtin
+//! [`build`] returns the two entries installed into the session builtin
 //! table at REPL boot.  The closures receive the `args` slice verbatim,
 //! with no handler argv packing.
 
 use ral_core::diagnostic;
 use ral_core::typecheck::builtins::scheme;
-use ral_core::types::{
-    Break, BuiltinBody, BuiltinEntry, HandleState, Mooring, Resident, WorkerEntry,
-};
+use ral_core::types::{Break, BuiltinBody, BuiltinEntry, HandleState, Mooring, Resident, WorkerEntry};
 use ral_core::{Shell, Value};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use super::plugin::PluginRuntime;
 
-/// Build the six session builtin entries, capturing `jobs` and
-/// `runtime` by `Arc<Mutex<…>>` so each closure owns its share of the
-/// long-lived state.
-pub fn build(
-    jobs: Arc<Mutex<crate::jobs::JobTable>>,
-    runtime: Arc<Mutex<PluginRuntime>>,
-) -> Arc<[BuiltinEntry]> {
+/// Build the two session builtin entries, capturing `runtime` by
+/// `Arc<Mutex<…>>` so each closure owns its share of the long-lived state.
+pub fn build(runtime: Arc<Mutex<PluginRuntime>>) -> Arc<[BuiltinEntry]> {
     vec![
-        build_jobs(jobs.clone()),
-        build_fg(jobs.clone()),
-        build_bg(jobs.clone()),
-        build_disown(jobs),
         build_load_plugin(runtime.clone()),
         build_unload_plugin(runtime),
     ]
@@ -41,61 +31,6 @@ pub fn build(
 /// `cmd_error` rather than a raised fault.
 fn plugin_name_arg(args: &[Value]) -> Option<String> {
     args.first().map(std::string::ToString::to_string)
-}
-
-/// The job id a `fg`/`bg`/`disown` invocation names.  The checker guarantees
-/// one Int argument, so there is nothing to default to and nothing to refuse:
-/// a negative id simply resolves no job, which `NOT_A_PGID_JOB` already covers.
-fn job_id_arg(args: &[Value]) -> usize {
-    usize::try_from(args[0].as_int().unwrap_or(-1)).unwrap_or(usize::MAX)
-}
-
-/// The "no such job" elaboration for `fg`/`bg`/`disown`, which are pgid-only:
-/// a worker handle has no SIGCONT, terminal, or kernel-stopped state, so an id
-/// that resolves no pgid job is pointed at the handle's own eliminators rather
-/// than left as a dead end for a user who tried a `[wN]` designator.
-const NOT_A_PGID_JOB: &str = "no such job — fg/bg/disown are pgid-only; a worker handle's own \
-     eliminators are its analogues: `await` is its fg, `cancel` its kill (see `jobs`)";
-
-// ── jobs ─────────────────────────────────────────────────────────────────────
-
-/// Render the `jobs` listing as one fold over both populations the session
-/// backgrounds work into: `jt`'s pgid groups, then this shell's registered
-/// worker handles (`spawn`/`watch`/`&`), marked `[wN]` — a designator
-/// namespace of its own so it can never collide with a pgid's `[n]`.
-/// A worker renders `running (worker)` while its handle is live and
-/// `done (worker)` once settled but unclaimed — the POSIX-`Done` analogue —
-/// until an eliminator observes it away, at which point it is simply no
-/// longer in the registry and this fold never sees it again: no separate
-/// retention state lives here, and no lease is renewed by listing
-/// (`Shell::workers()` already guarantees both).
-fn render_jobs(jt: &crate::jobs::JobTable, workers: &[WorkerEntry]) -> Vec<String> {
-    // The designator and state word come from the resident signature — the
-    // one thing every population answers alike; `pgid`/`cmd` stay direct
-    // field reads, the honest per-chapter variance the trait deliberately
-    // leaves unflattened.
-    let mut lines: Vec<String> = jt
-        .list()
-        .into_iter()
-        .map(|job| {
-            format!(
-                "[{}] {} {}\t{}",
-                job.designator(),
-                job.state_label(),
-                job.pgid,
-                job.cmd
-            )
-        })
-        .collect();
-    lines.extend(workers.iter().map(|entry| {
-        format!(
-            "[{}] {}\t{}",
-            entry.designator(),
-            entry.state_label(),
-            entry.cmd
-        )
-    }));
-    lines
 }
 
 /// Compose the shell-exit notice: one compact line naming every worker handle
@@ -117,115 +52,6 @@ pub(crate) fn teardown_notice(workers: &[WorkerEntry]) -> Option<String> {
         if running.len() == 1 { "" } else { "s" },
         running.join(", ")
     ))
-}
-
-fn build_jobs(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
-    BuiltinEntry::new(
-        Cow::Borrowed("jobs"),
-        scheme::terminal_control,
-        "jobs  — list active background and stopped jobs: pgid groups, and this shell's \
-              detached worker handles (spawn/watch/&) marked [wN], done once settled until \
-              observed.",
-        BuiltinBody::Captured(Arc::new(move |_args, _mooring, shell| {
-            let jt = jobs.lock().unwrap();
-            let workers = shell.workers();
-            for line in render_jobs(&jt, &workers) {
-                eprintln!("{line}");
-            }
-            Ok(Value::Unit)
-        })),
-    )
-}
-
-// ── fg ────────────────────────────────────────────────────────────────────────
-
-fn build_fg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
-    BuiltinEntry::new(
-        Cow::Borrowed("fg"),
-        scheme::int_to_unit,
-        "fg <id>  — bring pgid job <id> to the foreground. \
-              pgid-only: a worker handle has no foreground — `await` is its fg.",
-        BuiltinBody::Captured(Arc::new(move |args, mooring, shell| {
-            let id = job_id_arg(args);
-            let mut jt = jobs.lock().unwrap();
-            match jt.resume(id) {
-                Some(pgid) => {
-                    let job = jt.get_mut(id).expect("resume just found this id");
-                    let wait = crate::jobs::wait_foreground(job, mooring, shell);
-                    if wait.stopped() {
-                        jt.stop(pgid);
-                        eprintln!("[stopped]");
-                    } else {
-                        jt.settle(id, wait.completed);
-                    }
-                }
-                None => diagnostic::cmd_error("fg", NOT_A_PGID_JOB),
-            }
-            drop(jt);
-            Ok(Value::Unit)
-        })),
-    )
-}
-
-// ── bg ────────────────────────────────────────────────────────────────────────
-
-fn build_bg(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
-    BuiltinEntry::new(
-        Cow::Borrowed("bg"),
-        scheme::int_to_unit,
-        "bg <id>  — resume pgid job <id> in the background. \
-              pgid-only: a worker handle already runs detached — see `jobs`.",
-        BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
-            let resumed = {
-                let mut jt = jobs.lock().unwrap();
-                jt.resume_in_background(job_id_arg(args))
-            };
-            if resumed.is_none() {
-                diagnostic::cmd_error("bg", NOT_A_PGID_JOB);
-            }
-            Ok(Value::Unit)
-        })),
-    )
-}
-
-// ── disown ───────────────────────────────────────────────────────────────────
-
-fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
-    BuiltinEntry::new(
-        Cow::Borrowed("disown"),
-        scheme::int_to_unit,
-        "disown <id>  — detach pgid job <id> from the shell. \
-              pgid-only: a worker handle has no disown — `cancel` is its kill.",
-        BuiltinBody::Captured(Arc::new(move |args, _mooring, _shell| {
-            let id = job_id_arg(args);
-            let disowned = {
-                let mut jt = jobs.lock().unwrap();
-                jt.disown(id)
-            };
-            match disowned {
-                // Windows keeps its pipeline groups in a side registry, so
-                // disowning must let go of that entry too.  Elsewhere,
-                // dropping the row *is* the disown.
-                #[cfg(windows)]
-                Ok(pgid) => ral_core::process::disown_pipeline_group(pgid),
-                #[cfg(not(windows))]
-                Ok(_) => {}
-                Err(crate::jobs::DisownRefusal::NoSuchJob) => {
-                    diagnostic::cmd_error("disown", NOT_A_PGID_JOB);
-                }
-                #[cfg(unix)]
-                Err(crate::jobs::DisownRefusal::ThreadStaged) => diagnostic::cmd_error(
-                    "disown",
-                    &format!(
-                        "job [{id}] is a ral pipeline: its stages are threads of this shell \
-                         and cannot be detached. Did you mean spawn, which makes a detachable \
-                         worker?"
-                    ),
-                ),
-            }
-            Ok(Value::Unit)
-        })),
-    )
 }
 
 // ── load-plugin ───────────────────────────────────────────────────────────────
@@ -277,25 +103,13 @@ fn build_unload_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jobs::{JobState, JobTable};
-
-    /// J7: `fg`/`bg`/`disown` act on the job their argument names, and consult
-    /// no table to find it.  An id naming no job is left to `jt.resume` and
-    /// friends to report, so an out-of-range or negative one still resolves —
-    /// to a `usize` that matches nothing.
-    #[test]
-    fn job_id_arg_is_the_argument() {
-        assert_eq!(job_id_arg(&[Value::Int(1)]), 1);
-        assert_eq!(job_id_arg(&[Value::Int(2)]), 2);
-        assert_eq!(job_id_arg(&[Value::Int(-1)]), usize::MAX);
-    }
 
     /// A minimal registered-worker fixture, `running` toggling
     /// [`HandleState::Running`] vs [`HandleState::Completed`] — enough to
-    /// exercise [`render_jobs`] and [`teardown_notice`] without a real
-    /// `spawn`.  Building `HandleInner` field by field is legitimate here:
-    /// core's representation is sealed against exarch, not against a sibling
-    /// crate, and core's own concurrency tests construct it the same way.
+    /// exercise [`teardown_notice`] without a real `spawn`.  Building
+    /// `HandleInner` field by field is legitimate here: core's representation
+    /// is sealed against exarch, not against a sibling crate, and core's own
+    /// concurrency tests construct it the same way.
     fn fake_worker(id: u64, cmd: &str, running: bool) -> WorkerEntry {
         let state = if running {
             HandleState::Running
@@ -321,32 +135,6 @@ mod tests {
                 cancel: ral_core::process::CancelScope::default(),
             },
         }
-    }
-
-    /// `render_jobs` lists pgid jobs first, then `[wN]`-marked worker handles
-    /// (`running`/`done (worker)`), and an observed-away worker never reappears.
-    #[test]
-    fn render_jobs_folds_pgid_and_worker_populations() {
-        let mut jt = JobTable::new();
-        jt.add(1001, "vim".into(), JobState::Stopped, Vec::new(), #[cfg(unix)] None);
-        let workers = vec![
-            fake_worker(3, "spawn { long_task }", true),
-            fake_worker(7, "watch { tail }", false),
-        ];
-
-        let lines = render_jobs(&jt, &workers);
-        assert_eq!(lines.len(), 3, "one pgid job plus two worker handles");
-        assert!(lines[0].starts_with("[1] stopped 1001\tvim"));
-        assert_eq!(lines[1], "[w3] running (worker)\tspawn { long_task }");
-        assert_eq!(lines[2], "[w7] done (worker)\twatch { tail }");
-
-        // Once observed away, a worker is simply absent from the next
-        // snapshot — no separate "done" bookkeeping survives it here.
-        let lines_after_observe = render_jobs(&jt, &[fake_worker(3, "spawn { long_task }", true)]);
-        assert!(
-            !lines_after_observe.iter().any(|l| l.contains("[w7]")),
-            "an observed-away worker never renders again"
-        );
     }
 
     /// `teardown_notice` names every still-running worker in one line and is
@@ -379,105 +167,5 @@ mod tests {
         );
         assert!(notice.contains("[w9] service { daemon }"), "got: {notice}");
         assert!(!notice.contains("[w1]"), "the settled worker is not named");
-    }
-
-    /// `fg`/`bg`/`disown` are strictly pgid-typed: an id that resolves no
-    /// pgid job is met with the correspondence to a worker handle's own
-    /// eliminators, never a bare "no such job" that strands a `[wN]` user.
-    #[test]
-    fn not_a_pgid_job_names_the_handle_correspondence() {
-        assert!(NOT_A_PGID_JOB.contains("pgid-only"));
-        assert!(NOT_A_PGID_JOB.contains("`await`"), "fg's analogue");
-        assert!(NOT_A_PGID_JOB.contains("`cancel`"), "the kill analogue");
-    }
-
-    /// Vet refusal: `alias jobs …` on a REPL-dressed table is rejected, not
-    /// silently installed to shadow `jobs` at dispatch.  [`build`] yields
-    /// the six captured entries `Session::boot`'s surface carries
-    /// (`repl/session.rs`), so `jobs` sits on the table exactly as it would
-    /// in a booted REPL session; `install_alias` reads that same table via
-    /// `HandlerEntry::vet`.  Aliasing `jobs` installs — no name admission —
-    /// shadowed at the bare head (env-first) and live under `^jobs`.
-    #[test]
-    fn alias_over_a_captured_builtin_installs_and_resolution_order_governs() {
-        let mut shell = Shell::new(ral_core::io::TerminalState::default());
-        shell.install_captured_builtins(&build(
-            Arc::new(Mutex::new(crate::jobs::JobTable::new())),
-            Arc::new(Mutex::new(PluginRuntime::default())),
-        ));
-
-        let thunk = match shell.run(ral_core::RunRequest {
-            run: ral_core::protocol::Run {
-                program: ral_core::protocol::Program::Source("{ |args| return 1 }".to_string()),
-                script_name: "<test>".to_string(),
-                caps: ral_core::types::Capabilities::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: ral_core::RunIo::Inherit,
-                terminal: ral_core::RequestedTerminalAccess::Leased,
-                stdin: ral_core::RunStdin::Inherit,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-            lifecycle: Box::new(()),
-        }) {
-            ral_core::RunReport::Ran { ending, .. } => ending.into_result().unwrap(),
-            ral_core::RunReport::Static { .. } => panic!("well-formed source must run"),
-        };
-
-        shell
-            .install_alias("jobs".to_string(), thunk)
-            .expect("a native's name is not admission-checked; the alias installs");
-
-        assert_eq!(
-            run_source(&mut shell, "jobs"),
-            Value::Unit,
-            "the bare head is an env hit on the native; the alias sits shadowed there"
-        );
-        assert_eq!(
-            run_source(&mut shell, "^jobs"),
-            Value::Int(1),
-            "`^jobs` skips the env and reaches the alias frame"
-        );
-    }
-
-    /// Run `src` as one capturing top-level run on a shell the caller
-    /// dressed.  Panics on a static failure or a runtime error: every source
-    /// here is expected to compile and succeed.
-    fn run_source(shell: &mut Shell, src: &str) -> Value {
-        use ral_core::protocol::{Program, Run};
-        use ral_core::types::Capabilities;
-        use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
-        let req = RunRequest {
-            run: Run {
-                program: Program::Source(src.into()),
-                script_name: "<test>".into(),
-                caps: Capabilities::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: None,
-                io: RunIo::Capture,
-                terminal: RequestedTerminalAccess::Denied,
-                stdin: RunStdin::Empty,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-            lifecycle: Box::new(()),
-        };
-        match shell.run(req) {
-            RunReport::Ran { ending, .. } => {
-                ending.into_result().expect("a well-formed source must run")
-            }
-            RunReport::Static { .. } => {
-                panic!("well-formed source must run, not fail statically: {src:?}")
-            }
-        }
     }
 }

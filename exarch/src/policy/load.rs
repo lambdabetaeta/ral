@@ -12,8 +12,8 @@ use ral_core::path::NormalizedPrefix;
 ///
 /// Sigils freeze against `ctx` here, so a bad `xdg:` fails at the profile that
 /// names it even where a later `meet` would have discarded the grant, and an
-/// `exit` or stopped child inside the profile flattens into the error string:
-/// a profile is configuration, not control flow.
+/// `exit` inside the profile flattens into the error string: a profile is
+/// configuration, not control flow.
 pub(super) fn load_capabilities_ral(
     mooring: &Mooring,
     shell: &mut Shell,
@@ -31,10 +31,6 @@ pub(super) fn load_capabilities_ral(
         let detail = match e {
             Break::Error(err) => err.message,
             Break::Escape(Escape::Exit(code)) => format!("exit {code}"),
-            #[cfg(unix)]
-            Break::Escape(Escape::Stopped { signal, cmd, .. }) => {
-                format!("{cmd}: stopped by signal {}", signal.display())
-            }
         };
         format!("{flag} {}: {detail}", path.display())
     })

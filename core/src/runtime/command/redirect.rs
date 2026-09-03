@@ -47,49 +47,51 @@ use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
 };
 
-/// An atomic `>` staged in a temp file beside its target.
+/// An atomic `>` staged in a temp file beside its target, until
+/// [`commit`](Self::commit) renames it or [`abandon`](Self::abandon) unlinks
+/// it — and `Drop` does the latter too, for whichever of the two nobody
+/// called: a staged temp never outlives the frame that staged it.
 ///
-/// It waits for someone to say how it ends: [`commit`](Self::commit) renames,
-/// [`abandon`](Self::abandon) unlinks, and no destructor answers for it.
-///
-/// It is data — two paths — because a write can outlive the frame that opened
-/// it.  A job stopped by SIGTSTP keeps its temp open in a live child, so the
-/// write rides the `Escape` out to the job table, and that job's end decides
-/// it.  Only [`open_atomic`]'s own body holds the write as a guarded resource,
-/// from the moment the temp exists to the moment it hands the paths back.
+/// The `Option` is the commit-by-value latch: `commit`/`abandon` each take
+/// `self` and empty it first, so the `Drop` that follows sees `None` and
+/// does nothing on the path that already decided.
 ///
 /// The rename mints a fresh inode: hardlinks to the old one keep the old
 /// contents, and owner, xattrs and ACLs fall to kernel inheritance.  It also
 /// needs write permission on the *parent directory*, not just on the file.
 /// Concurrent writers race as usual — this buys crash safety, not exclusion.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PendingWrite {
-    pub tmp: std::path::PathBuf,
-    pub target: std::path::PathBuf,
+pub(crate) struct PendingWrite(Option<Staged>);
+
+struct Staged {
+    tmp: std::path::PathBuf,
+    target: std::path::PathBuf,
 }
 
 impl PendingWrite {
+    fn new(tmp: std::path::PathBuf, target: std::path::PathBuf) -> Self {
+        Self(Some(Staged { tmp, target }))
+    }
+
     /// Finish the write: flush the staged bytes, rename onto the target, then
     /// fsync the directory entry.  Any failure unlinks the temp, so the target
     /// is either replaced whole or left exactly as it was.
     ///
     /// # Errors
     /// Returns the first I/O error of the flush or the rename.
-    pub fn commit(self) -> std::io::Result<()> {
-        if let Err(e) = self.rename_durable() {
-            self.abandon();
+    pub(crate) fn commit(mut self) -> std::io::Result<()> {
+        let staged = self.0.take().expect("commit consumes a freshly staged write");
+        if let Err(e) = staged.rename_durable() {
+            staged.unlink();
             return Err(e);
         }
         Ok(())
     }
 
     /// Drop the staged bytes, leaving the target as it was.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:silent:atomic-abandon] Reasoned-silent rollback of the atomic `>` write door: unlink the staged temp for a write that will not land. The aborted write card is the surface; this removal raises none of its own."
-    )]
-    pub fn abandon(&self) {
-        let _ = std::fs::remove_file(&self.tmp);
+    pub(crate) fn abandon(mut self) {
+        if let Some(staged) = self.0.take() {
+            staged.unlink();
+        }
     }
 
     /// The whole staged file: what will land at `target` if `commit` succeeds.
@@ -103,10 +105,11 @@ impl PendingWrite {
         reason = "[io-door:surface:atomic-temp-read] Sub-step of the atomic `>` write door's preview surface: stat and read the tmp file before the rename commits it. The write card surfaces when the redirect frame settles; this read is not a separate model operation."
     )]
     pub(crate) fn new_snapshot_for_diff(&self) -> Option<Vec<u8>> {
-        if std::fs::metadata(&self.tmp).ok()?.len() > PREVIEW_CAP {
+        let staged = self.0.as_ref()?;
+        if std::fs::metadata(&staged.tmp).ok()?.len() > PREVIEW_CAP {
             return None;
         }
-        std::fs::read(&self.tmp).ok()
+        std::fs::read(&staged.tmp).ok()
     }
 
     /// The target's content before the rename — untouched until `commit`, so
@@ -124,11 +127,31 @@ impl PendingWrite {
         reason = "[io-door:surface:atomic-old-read] Sub-step of the atomic `>` write door's diff-eligibility check: stat and read the target's pre-existing content before the rename commits it, exactly mirroring new_snapshot_for_diff's read of the new side. Not a separate model operation — the write/diff card surfaces when the redirect frame settles."
     )]
     pub(crate) fn old_snapshot_for_diff(&self) -> Option<Vec<u8>> {
-        match std::fs::metadata(&self.target) {
+        let staged = self.0.as_ref()?;
+        match std::fs::metadata(&staged.target) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
-            Ok(m) if m.len() <= PREVIEW_CAP => std::fs::read(&self.target).ok(),
+            Ok(m) if m.len() <= PREVIEW_CAP => std::fs::read(&staged.target).ok(),
             _ => None,
         }
+    }
+}
+
+impl Drop for PendingWrite {
+    fn drop(&mut self) {
+        if let Some(staged) = self.0.take() {
+            staged.unlink();
+        }
+    }
+}
+
+impl Staged {
+    /// Drop the staged bytes, leaving the target as it was.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:atomic-abandon] Reasoned-silent rollback of the atomic `>` write door: unlink the staged temp for a write that will not land. The aborted write card is the surface; this removal raises none of its own."
+    )]
+    fn unlink(&self) {
+        let _ = std::fs::remove_file(&self.tmp);
     }
 
     #[allow(
@@ -237,7 +260,7 @@ fn open_atomic(
     // Past every fallible step: disarm the unlink and hand the write on as
     // paths, for a caller that must now say how it ends.
     let (_, tmp) = tmp.keep().map_err(|e| io_error(path, &e.error))?;
-    Ok((file, PendingWrite { tmp, target }))
+    Ok((file, PendingWrite::new(tmp, target)))
 }
 
 /// Open a redirect target.  `>` to a regular file returns a [`PendingWrite`]
@@ -390,8 +413,9 @@ impl Drop for RedirectGuard {
 }
 
 impl RedirectGuard {
+    /// Each drained write's own `Drop` unlinks its temp.
     fn abandon_unsettled(&mut self) {
-        abandon_all(self.commits.drain(..));
+        self.commits.clear();
     }
 }
 
@@ -595,71 +619,6 @@ pub(crate) fn commit_atomics(commits: Vec<PendingWrite>) -> Settled<()> {
             .map_err(|e| Break::Error(Error::new(format!("atomic write: {e}"), 1)))?;
     }
     Ok(())
-}
-
-/// Say how a break ends the writes a frame staged: a stop hands them on, and
-/// anything else abandons them.
-///
-/// A stop is a pause, not an abort.  The staged bytes belong to the job, not
-/// to the frame that opened the redirect, and the job's end is what decides
-/// between the rename and the unlink — so the writes ride the escape out to
-/// the job table rather than dying with the call frame.
-pub(crate) fn defer_to_stop(brk: Break, commits: impl IntoIterator<Item = PendingWrite>) -> Break {
-    #[cfg(unix)]
-    {
-        let mut brk = brk;
-        if let Break::Escape(crate::types::Escape::Stopped { pending, .. }) = &mut brk {
-            pending.extend(commits);
-        } else {
-            abandon_all(commits);
-        }
-        brk
-    }
-    #[cfg(not(unix))]
-    {
-        abandon_all(commits);
-        brk
-    }
-}
-
-/// End every staged write unfinished: each target keeps what it had.
-pub(crate) fn abandon_all(commits: impl IntoIterator<Item = PendingWrite>) {
-    for write in commits {
-        write.abandon();
-    }
-}
-
-/// A staged write its opener still owns.  [`take`](Self::take) hands it to
-/// whoever settles it; whatever is still here when the frame unwinds is
-/// abandoned, because nothing downstream of that unwind knows the temp exists.
-///
-/// [`PendingWrite`] has no destructor on purpose — it crosses escapes and
-/// process boundaries, where a destructor would answer for a job it cannot
-/// see.  A holder whose own life really is the write's life says so by holding
-/// it here, and `command::run` between the open and the wait is the one such
-/// stretch: a failed spawn there must not leave a dotfile beside the target.
-pub(crate) struct StagedWrite(Option<PendingWrite>);
-
-impl StagedWrite {
-    pub(crate) fn new(write: Option<PendingWrite>) -> Self {
-        Self(write)
-    }
-
-    pub(crate) fn take(&mut self) -> Option<PendingWrite> {
-        self.0.take()
-    }
-
-    /// True for a streaming shape — `>>`, `>~`, a tty — which has no temp to
-    /// settle, so its write is already whole.
-    pub(crate) fn is_streaming(&self) -> bool {
-        self.0.is_none()
-    }
-}
-
-impl Drop for StagedWrite {
-    fn drop(&mut self) {
-        abandon_all(self.0.take());
-    }
 }
 
 /// Park the fd-0 redirect — `< file` or the here-string `<< str` — on

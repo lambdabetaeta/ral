@@ -19,11 +19,11 @@ pub(super) struct ForegroundDecision {
     /// group the child must stay consistent with, so it may lead its own
     /// group and let a cancel tree-kill it.
     own_group_when_background: bool,
-    /// Whether a stop signal should surface as a resumable job — an
-    /// interactive REPL foreground child, which has a job table to `fg` it
-    /// back — rather than being killed and reaped.  Fed into
-    /// [`StopPolicy::for_external`] via [`Self::stop_policy`], which also
-    /// parks on a pipeline's gate when this run is a stage thread.
+    /// Whether a stop signal should be answered with `SIGCONT` and waited
+    /// out — an interactive foreground child — rather than killed and
+    /// reaped on the spot.  Fed into [`StopPolicy::for_external`] via
+    /// [`Self::stop_policy`], which also parks on a pipeline's gate when
+    /// this run is a stage thread.
     escapes: bool,
     /// The pipeline group this run's stage thread belongs to, if any.
     stage_group: Option<Pgid>,

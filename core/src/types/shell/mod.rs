@@ -44,8 +44,6 @@ use super::mooring::{Fork, Mooring, NurseryId, TerminalAccess};
 use crate::diagnostic::CallSite;
 use crate::io::Io;
 use crate::process::{DurableRoot, ForegroundScope};
-#[cfg(unix)]
-use crate::runtime::pipeline::parked::ParkedPipeline;
 use crate::source::{FileId, Source, SourceDb, Span};
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -139,11 +137,6 @@ pub struct SessionState {
     /// frames, not host stack frames; `--recursion-limit`/rc's
     /// `recursion_limit:` key set it.
     pub(crate) stack_limit: usize,
-    /// Pipelines stopped mid-flight, keyed by their pgid: `PipeNode::join`
-    /// deposits one on a park, `fg`/`bg`/the sweep drive it from the
-    /// job table.  No stop to park from off Unix.
-    #[cfg(unix)]
-    pub(crate) parked: std::collections::HashMap<crate::process::Pgid, ParkedPipeline>,
 }
 
 /// Host-local scratch whose members each carry their own flow rule — not a
