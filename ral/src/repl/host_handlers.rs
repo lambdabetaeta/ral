@@ -213,6 +213,7 @@ fn build_disown(jobs: Arc<Mutex<crate::jobs::JobTable>>) -> BuiltinEntry {
                 Err(crate::jobs::DisownRefusal::NoSuchJob) => {
                     diagnostic::cmd_error("disown", NOT_A_PGID_JOB);
                 }
+                #[cfg(unix)]
                 Err(crate::jobs::DisownRefusal::ThreadStaged) => diagnostic::cmd_error(
                     "disown",
                     &format!(

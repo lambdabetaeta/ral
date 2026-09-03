@@ -78,7 +78,10 @@ pub enum JobState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisownRefusal {
     NoSuchJob,
-    /// The job's stages are threads of this shell.
+    /// The job's stages are threads of this shell.  `cfg(unix)` with the
+    /// park that raises it: nothing parks on Windows, so no job there is
+    /// thread-staged.
+    #[cfg(unix)]
     ThreadStaged,
 }
 
