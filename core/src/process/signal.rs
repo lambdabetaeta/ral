@@ -215,7 +215,7 @@ pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 ///
 /// Fires when the mooring's foreground scope, or any ancestor, is cancelled:
 /// a translated signal (SIGINT → foreground `Interrupt`, SIGTERM / SIGHUP →
-/// root `Terminate`), a deadline ([`reaper`](crate::process::reaper)), an
+/// root `Terminate`), a deadline ([`deadline`](crate::process::deadline)), an
 /// explicit `cancel <handle>`, or a Ctrl-\ root abort.  The return is `Break`
 /// rather than the richer `Control` because a cancellation never carries a
 /// tail call, and the error is unspanned: the break path stamps the innermost

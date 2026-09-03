@@ -6,6 +6,7 @@
 //! on a [`CancelScope`], observed at the evaluator's poll points via [`check`].
 
 pub mod cancel;
+pub mod deadline;
 pub mod jail;
 pub mod launch;
 pub mod lease;
@@ -23,7 +24,8 @@ pub use outcome::{CommandFailure, Ending, EndingCell, Signal, SpawnFailure, Wait
 pub use launch::{Launch, StdioSpec};
 pub use lease::TerminalLease;
 
-pub use reaper::{Deadline, arm_callback, arm_lifetime};
+pub use deadline::{Deadline, arm_callback, arm_lifetime};
+pub use reaper::{Reaper, Watch};
 
 pub use cancel::{
     CancelCause, CancelScope, DurableRoot, ForegroundScope, request_foreground_cancel,

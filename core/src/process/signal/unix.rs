@@ -30,6 +30,7 @@ pub fn install_handlers() {
         libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
         libc::signal(libc::SIGHUP, handler as *const () as libc::sighandler_t);
     }
+    crate::process::reaper::ensure_installed();
 }
 
 extern "C" fn handler(sig: libc::c_int) {
