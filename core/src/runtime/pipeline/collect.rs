@@ -29,7 +29,6 @@ use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Observed, Settled,
     Shell, Value, epoch_us,
 };
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 
 /// The fragment is empty when audit is inactive at the parent.
@@ -372,9 +371,12 @@ pub(super) struct CollectState {
     /// reads clear again.
     #[cfg(unix)]
     parked: bool,
-    /// Keeps the cancel-timer thread alive; dropping this collector lets it
-    /// notice within one tick and leave, rather than living on unbounded.
-    _alive: Arc<()>,
+    /// Disconnecting this wakes the cancel timer's `recv_timeout` at once,
+    /// rather than leaving it to notice on its own next tick.
+    quit: Option<Sender<std::convert::Infallible>>,
+    /// Joined in `Drop`, after `quit` is dropped, so the timer thread is
+    /// gone before the collector is.
+    timer: Option<std::thread::JoinHandle<()>>,
 }
 
 /// This collector's own scope, once `check` has also parked a joining
@@ -382,14 +384,19 @@ pub(super) struct CollectState {
 /// re-check of `scope.cause()` until scopes grow their own notification.
 /// Runs on its own thread, since every other producer here is a blocking
 /// wait and this is the one thing with nothing to block on.
-fn spawn_cancel_timer(scope: crate::process::CancelScope, tx: Sender<Report>, alive: std::sync::Weak<()>) {
+fn spawn_cancel_timer(
+    scope: crate::process::CancelScope,
+    tx: Sender<Report>,
+    quit: Receiver<std::convert::Infallible>,
+) -> Option<std::thread::JoinHandle<()>> {
     let spawned = std::thread::Builder::new()
         .name("ral pipeline cancel timer".to_string())
         .spawn(move || {
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                if alive.upgrade().is_none() {
-                    return;
+                match quit.recv_timeout(std::time::Duration::from_millis(200)) {
+                    Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Ok(never) => match never {},
                 }
                 if let Some(cause) = scope.cause() {
                     let _ = tx.send(Report::Cancelled(cause));
@@ -400,7 +407,7 @@ fn spawn_cancel_timer(scope: crate::process::CancelScope, tx: Sender<Report>, al
     // A spawn failure here costs only the stopgap's own coverage — every
     // other cancellation path (a signal handler's cause, `check`'s own poll
     // points) still works — so it is not worth failing pipeline launch over.
-    drop(spawned);
+    spawned.ok()
 }
 
 impl CollectState {
@@ -410,12 +417,8 @@ impl CollectState {
         if group.owned() {
             group.start_witness_threads(tx.clone());
         }
-        let alive = Arc::new(());
-        spawn_cancel_timer(
-            mooring.cancel.as_scope().clone(),
-            tx.clone(),
-            Arc::downgrade(&alive),
-        );
+        let (quit_tx, quit_rx) = std::sync::mpsc::channel();
+        let timer = spawn_cancel_timer(mooring.cancel.as_scope().clone(), tx.clone(), quit_rx);
         Self {
             stages: Vec::new(),
             observed: Vec::new(),
@@ -432,7 +435,8 @@ impl CollectState {
             anchor_stopped: false,
             #[cfg(unix)]
             parked: false,
-            _alive: alive,
+            quit: Some(quit_tx),
+            timer,
         }
     }
 
@@ -460,7 +464,8 @@ impl CollectState {
             anchor_stopped: false,
             #[cfg(unix)]
             parked: false,
-            _alive: Arc::new(()),
+            quit: None,
+            timer: None,
         }
     }
 
@@ -894,6 +899,10 @@ impl Drop for CollectState {
                 Some(pgid) => pgid.kill(),
                 None => self.kill_live_externals(),
             }
+        }
+        self.quit.take();
+        if let Some(timer) = self.timer.take() {
+            let _ = timer.join();
         }
     }
 }

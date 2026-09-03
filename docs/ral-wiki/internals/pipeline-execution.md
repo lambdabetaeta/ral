@@ -304,8 +304,12 @@ it as its last act; a direct external's own waiter thread
 exclusively — the collector never calls `waitpid` on a pipeline stage at
 all — and reports `Stopped`/`Continued` per edge, `Settled` on the terminal
 one; the anchor's two threads report `Witnessed`; a low-frequency timer, the
-one left, re-checks the mooring's scope and reports `Cancelled` — the
-stopgap until scopes grow their own notification, existing to be deleted.
+one left, blocks on `recv_timeout` against a quit channel the collector holds
+the sending half of and re-checks the mooring's scope on each wake, reporting
+`Cancelled` — the stopgap until scopes grow their own notification, existing
+to be deleted. `CollectState::drop` drops that sender, which wakes the timer
+at once rather than on its next tick, and joins the timer thread before
+returning, so no straggler outlives its collector.
 Every index-owning producer — a stage thread's closure, an external's
 waiter — carries its own `SettleOnDrop`, so its `Settled` reaches the
 channel by its own send or by that guard's drop; the cancel timer and the

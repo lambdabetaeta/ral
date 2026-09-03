@@ -202,12 +202,11 @@ it, indistinguishable in `StageObservation` from an ordinary one.
   process about to be `SIGTSTP`'d by the same delivery), and getting this
   fully ordered again needs the anchor to fold both into one report
   itself — a change to the anchor's own protocol, out of scope here.
-- **A leaked producer thread outliving its pipeline would be a defect, and
-  the cancel timer is the one intentional exception.** Every other producer
-  terminates on its own terminal event or a failed send; the timer alone
-  waits out its own tick (at most 200 ms) after the collector is dropped
-  before noticing and leaving. Bounded, not unbounded — but not instant
-  either, unlike everything else this phase deletes a timer to achieve.
+- **A leaked producer thread outliving its pipeline would be a defect.** The
+  cancel timer waits on a `Receiver` instead of sleeping blind: the
+  collector's `Drop` drops the paired `Sender`, which wakes the timer's
+  `recv_timeout` immediately instead of on its next tick, and `Drop` joins
+  the thread before returning. No straggler outlives the collector.
 - **Thread count grows by one waiter per direct external stage, one watcher
   per thread stage, and two per owned group's anchor**, on top of the stage
   threads phase 1 already counts. Bounded by stage count, the same order the
