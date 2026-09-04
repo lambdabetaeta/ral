@@ -4,23 +4,7 @@
 //! twice" unwritable.
 
 use crate::io::Sink;
-use crate::process::{CancelCause, KillTarget};
-use crate::types::{Break, Error, Settled};
-
-/// Who releases the Windows group registered in `win_groups`
-/// (`process::signal::windows`), which unlike a Unix pgid does not vanish when
-/// its members exit.  `Standalone` releases its own once `wait` returns and
-/// carries the pgid to do it with; `BorrowedByPipeline` leaves it to
-/// `PipelineGroup` in `runtime::pipeline`, so a `RunningChild::Drop` racing
-/// that owner's `Drop` cannot double-close, and needs no pgid of its own;
-/// `None` is a child spawned with `PgidPolicy::Inherit` and has no group at
-/// all.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum GroupOwner {
-    None,
-    Standalone(crate::process::Pgid),
-    BorrowedByPipeline,
-}
+use crate::process::CancelCause;
 
 /// The two drainer threads over a child's piped stdout/stderr — the one
 /// spelling of join-or-detach, shared by [`WaitedChild::settle`] and the
@@ -62,36 +46,53 @@ impl Pumps {
     }
 }
 
-/// A spawned external child plus the threads draining its piped stdout/stderr;
-/// the shared core of standalone exec and pipeline external stages.
+/// What `RunningChild::wait` hears from the reaper's `Watch` or from a
+/// cancel: the wire type for its own single-child fold.
+enum ChildEvent {
+    Ended(crate::process::WaitOutcome),
+    Cancelled(CancelCause),
+}
+
+/// A spawned external child, watched by the reaper, plus the threads
+/// draining its piped stdout/stderr; the shared core of standalone exec and
+/// pipeline external stages.
 ///
 /// There is no `RunningChild::drain`, so "join the pumps while the pipe is
 /// still open" has no spelling; `wait` consumes self, so neither does "wait
-/// twice".  The `Option` around `child` is `Drop`'s disarm latch: `wait` takes
-/// it and never puts it back, so the abort path short-circuits once `wait` ran.
-/// Holding the pgid rather than the pid means that abort-path SIGKILL reaches
-/// descendants — `/bin/sh -c 'sleep 999'` leaves no orphan behind — but only
-/// for `GroupOwner::Standalone`, the only variant a kill may address by group.
+/// twice".  The `Option` around `watch` is `Drop`'s disarm latch: `wait` takes
+/// it and never puts it back, so the abort path short-circuits once `wait`
+/// ran.  Holding the pgid rather than the pid means that abort-path SIGKILL
+/// reaches descendants — `/bin/sh -c 'sleep 999'` leaves no orphan behind —
+/// but only when `owned_group` is `Some`, the only case a kill may address by
+/// group; `None` covers both a child with no group at all and one borrowing a
+/// pipeline's group, which only the pipeline's own `PipelineGroup` may
+/// address as a whole.
 ///
 /// Audit-agnostic: byte capture belongs to the caller.  A standalone external
 /// is teed at dispatch level by `evaluator::with_audit_capture`; a direct-spawn
 /// pipeline stage writes into the next stage's pipe and gets a synthesised node
 /// with empty stdout from `runtime::pipeline::collect`.
 pub(crate) struct RunningChild {
-    pub child: Option<crate::process::ChildHandle>,
+    watch: Option<crate::process::Watch>,
+    events: std::sync::mpsc::Receiver<ChildEvent>,
+    tx: std::sync::mpsc::Sender<ChildEvent>,
+    /// The pgid to release on Windows and to signal/kill as a whole, iff this
+    /// child owns its group outright.  `None` is a child spawned with
+    /// `PgidPolicy::Inherit`, or one that only joined a pipeline's group.
+    owned_group: Option<crate::process::Pgid>,
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.  Teardown
     /// prefers it over the pgid: a grandchild that `setsid()`'d away escapes
     /// `kill(-pgid, …)` but cannot leave its cgroup.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub jail: Option<crate::process::jail::JailCgroup>,
+    jail: Option<crate::process::jail::JailCgroup>,
     pumps: Pumps,
-    pub name: String,
-    pub group_owner: GroupOwner,
-    /// Polled by `wait`, because a blocking `waitpid` / `WaitForSingleObject`
-    /// consults nothing: without the poll an upstream cancel (exarch's tool
-    /// timeout, a signal the platform handler translated into a cause) could
-    /// not preempt a child that never exits on its own.
-    pub cancel: crate::process::CancelScope,
+    name: String,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pid: u32,
+    /// Polled through `watch_cancel` in `wait`, so a cancel — exarch's tool
+    /// timeout, a signal the platform handler translated into a cause — can
+    /// preempt a child that never exits on its own.
+    cancel: crate::process::CancelScope,
     /// How this child's life ended, once ral itself ended it: the cancel
     /// branch of `wait` is the only writer.  Sole input to forgiveness and to
     /// whether the drainers are joined; two writers each ending the same
@@ -127,8 +128,7 @@ pub(crate) struct ExternalPlumbing {
 impl RunningChild {
     /// The one place a `RunningChild` is built: [`super::run`] and the stage
     /// launcher in `runtime::pipeline::launch` both come here, so the wait and
-    /// `Drop` rules are never re-derived per call site.  See [`GroupOwner`] for
-    /// what `group_owner` obliges each of them to.
+    /// `Drop` rules are never re-derived per call site.
     #[allow(
         clippy::too_many_arguments,
         reason = "the single assembly point for every field RunningChild carries; splitting it would just scatter the same parameters across a builder"
@@ -137,93 +137,49 @@ impl RunningChild {
         child: crate::process::ChildHandle,
         name: String,
         plumbing: ExternalPlumbing,
-        group_owner: GroupOwner,
+        owned_group: Option<crate::process::Pgid>,
         cancel: crate::process::CancelScope,
         jail: Option<crate::process::jail::JailCgroup>,
     ) -> Self {
         let mut child = child;
+        let pid = child.id();
         let pumps = Pumps::spawn(plumbing, &mut child);
+        let (tx, events) = std::sync::mpsc::channel();
+        let watch = child.into_watch(tx.clone(), ChildEvent::Ended);
         Self {
-            child: Some(child),
+            watch: Some(watch),
+            events,
+            tx,
+            owned_group,
             jail,
             pumps,
             name,
-            group_owner,
+            pid,
             cancel,
             sent: None,
         }
     }
 
-    /// Who a signal this child sends addresses: its whole group, iff it owns
-    /// one outright, else its own pid alone.  A stage borrowing a pipeline's
-    /// group (`BorrowedByPipeline`) may never address that group — only the
-    /// owning `PipelineGroup` may.
-    fn kill_target(&self) -> KillTarget {
-        match self.group_owner {
-            GroupOwner::Standalone(p) => KillTarget::Group(p),
-            GroupOwner::BorrowedByPipeline | GroupOwner::None => KillTarget::Pid,
-        }
-    }
-
     /// SIGKILL the process group this child owns outright, or the child alone
-    /// — [`Self::kill_target`] says which.  Idempotent on both platforms, so
-    /// [`Self::wait`]'s cancel branch and [`Drop`] may each call it without
-    /// coordinating.  It does not release the Windows group bookkeeping:
-    /// `wait` does that after `wait_leader_blocking`, `Drop` inline.
+    /// via its `Watch` — [`Self::owned_group`] says which.  Idempotent on
+    /// both platforms, so [`Self::wait`]'s cancel branch and [`Drop`] may
+    /// each call it without coordinating.  It does not release the Windows
+    /// group bookkeeping: `wait` does that after `wait_leader_blocking`,
+    /// `Drop` inline.
     ///
     /// A tracked jail cgroup wins over the pgid, because `cgroup.kill` reaches a
     /// grandchild that `setsid()`'d out of the group and the jail's
     /// unprivileged uid cannot write `cgroup.procs` to escape.
-    fn kill_group(&self, child: &mut crate::process::ChildHandle) {
+    fn kill_group(&self, watch: &crate::process::Watch) {
         #[cfg(target_os = "linux")]
         if let Some(cgroup) = &self.jail {
             crate::process::jail::linux::kill(cgroup);
             return;
         }
-        #[cfg(unix)]
-        match self.kill_target() {
-            KillTarget::Group(group) => {
-                let _ = rustix::process::kill_process_group(
-                    group.as_pid(),
-                    rustix::process::Signal::KILL,
-                );
-            }
-            KillTarget::Pid => {
-                let _ = child.kill();
-            }
+        match self.owned_group {
+            Some(group) => group.kill(),
+            None => watch.kill(),
         }
-        #[cfg(windows)]
-        match self.kill_target() {
-            KillTarget::Group(p) => {
-                crate::process::kill_pipeline_group(p);
-            }
-            KillTarget::Pid => {
-                let _ = child.kill();
-            }
-        }
-    }
-
-    /// Poll for the leader until `deadline`, answering a stop inline with
-    /// `SIGCONT`; `None` on timeout.
-    #[cfg(unix)]
-    fn grace_poll(
-        child: &mut crate::process::ChildHandle,
-        deadline: std::time::Instant,
-    ) -> Option<crate::process::WaitOutcome> {
-        let pid = child.id();
-        while std::time::Instant::now() < deadline {
-            match child.try_wait_handling_stop() {
-                Ok(Some(crate::process::WaitPoll::Stopped(_))) => {
-                    crate::process::cont_stage_by_pid(pid);
-                    continue;
-                }
-                Ok(Some(crate::process::WaitPoll::Done(o))) => return Some(o),
-                Err(_) => break,
-                Ok(None) => {}
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        None
     }
 
     /// Cancel-path teardown: signal the group by cause — SIGINT for an
@@ -232,59 +188,46 @@ impl RunningChild {
     /// Signalling the group rather than the leader also takes out forked
     /// grandchildren, closing the stdout pipe the pumps are waiting on.
     ///
-    /// `Some(outcome)` means the grace peek already reaped the leader and the
-    /// caller must not wait again; `None` leaves the reaping to the caller's
-    /// blocking `wait_handling_stop`.
+    /// `Some(outcome)` means the grace wait already caught the exit and the
+    /// caller must not wait again; `None` leaves that to the caller's own
+    /// blocking `recv`.
     ///
     /// The grace signal addresses the same target [`Self::kill_group`] would
     /// kill — a grandchild that `setsid()`'d away would miss it either way —
     /// but the final kill goes through [`Self::kill_group`], where
-    /// `cgroup.kill` does catch it.
-    fn terminate_group(
+    /// `cgroup.kill` does catch it.  Windows has no non-lethal signal, so
+    /// there the whole ladder collapses to the one kill.
+    fn terminate(
         &self,
-        child: &mut crate::process::ChildHandle,
-        cause: crate::process::CancelCause,
+        watch: &crate::process::Watch,
+        cause: CancelCause,
     ) -> Option<crate::process::WaitOutcome> {
         #[cfg(unix)]
         {
             // A root abort skips the grace ladder outright, addressed or not.
-            if cause == crate::process::CancelCause::RootAbort {
-                self.kill_group(child);
+            if cause == CancelCause::RootAbort {
+                self.kill_group(watch);
                 return None;
             }
-            let signal = if cause == crate::process::CancelCause::Interrupt {
-                rustix::process::Signal::INT
-            } else {
-                rustix::process::Signal::TERM
-            };
-            match self.kill_target() {
-                KillTarget::Pid => {
-                    #[allow(
-                        clippy::cast_possible_wrap,
-                        reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
-                    )]
-                    let _ = rustix::process::kill_process(
-                        rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
-                        signal,
-                    );
-                }
-                KillTarget::Group(pgid) => {
-                    let _ = rustix::process::kill_process_group(pgid.as_pid(), signal);
-                }
+            let signal = crate::process::Signal::new(crate::process::cause_signal(cause));
+            match self.owned_group {
+                Some(pgid) => pgid.signal_group(signal),
+                None => watch.signal(signal),
             }
-            let deadline = std::time::Instant::now() + crate::process::TEARDOWN_GRACE;
-            let reaped = Self::grace_poll(child, deadline);
-            // `Child::kill` on an already-reaped child is an already-ignored
-            // error, so this always runs — harmless on a tree that already
-            // left, decisive against a grandchild that trapped the signal and
-            // still holds the pipe.
-            self.kill_group(child);
+            let reaped = match self.events.recv_timeout(crate::process::TEARDOWN_GRACE) {
+                Ok(ChildEvent::Ended(o)) => Some(o),
+                Ok(ChildEvent::Cancelled(_)) | Err(_) => None,
+            };
+            // Idempotent on an already-reaped child, so this always runs —
+            // harmless on a tree that already left, decisive against a
+            // grandchild that trapped the signal and still holds the pipe.
+            self.kill_group(watch);
             reaped
         }
         #[cfg(not(unix))]
         {
             let _ = cause;
-            self.kill_group(child);
+            self.kill_group(watch);
             None
         }
     }
@@ -294,145 +237,38 @@ impl RunningChild {
     /// Wait for the child to terminate, consuming `self`; the returned
     /// `WaitedChild` is from here on the only handle on the drainer threads.
     ///
-    /// Every stop is answered with `SIGCONT` at once and the wait resumes on
-    /// the same child — this method never returns while the child is merely
-    /// stopped.  `Drop`'s kill is already disarmed by then.
-    pub fn wait(mut self) -> Settled<WaitedChild> {
-        // Taking the child disarms `Drop` for the success path.
-        let mut child = self.child.take().expect("RunningChild has no child");
-        let pid = child.id();
+    /// One `recv`, no poll and no sleep: the reaper posts the exit directly,
+    /// and a cancel arrives the same way through `watch_cancel`.  A stop
+    /// never reaches here at all — the reaper answers it with `SIGCONT`
+    /// itself, the one rule in one place.
+    pub fn wait(mut self) -> WaitedChild {
+        // Taking the watch disarms `Drop` for the success path.
+        let watch = self.watch.take().expect("RunningChild has no watch");
+        let pid = self.pid;
         let t_enter = std::time::Instant::now();
-        crate::dbg_trace!(
-            "wait",
-            "enter name={} pid={} group={:?} has_pump={} has_stderr_pump={}",
-            self.name,
-            pid,
-            self.group_owner,
-            self.pumps.stdout.is_some(),
-            self.pumps.stderr.is_some(),
-        );
-        // Every external wait polls, because `wait_handling_stop` blocks in a
-        // syscall that consults nothing: a blocking wait could be preempted
-        // neither by a watchdog cancel (exarch's tool timeout on a `find`
-        // chewing through node_modules) nor by a signal the platform handler
-        // translated into a cause.
-        //
-        // `try_wait_handling_stop`, not `Child::try_wait`, so a SIGSTOP'd child
-        // is seen (WUNTRACED): plain `try_wait` reports `Ok(None)` on a stop
-        // and the loop would spin forever.  Every stop is `SIGCONT`ed here;
-        // only a terminal outcome leaves the loop, to be classified below.
-        let early_outcome: Option<crate::process::WaitOutcome> = {
-            // Snappy for short-lived children, gentle on CPU for long ones.
-            let mut interval = std::time::Duration::from_millis(5);
-            let cap = std::time::Duration::from_millis(100);
-            #[cfg(debug_assertions)]
-            let mut polls: u32 = 0;
-            loop {
-                #[cfg(debug_assertions)]
-                {
-                    polls += 1;
+        crate::dbg_trace!("wait", "enter name={} pid={}", self.name, pid);
+
+        let tx = self.tx.clone();
+        let _cancel = crate::process::watch_cancel(self.cancel.clone(), move |cause| {
+            let _ = tx.send(ChildEvent::Cancelled(cause));
+        });
+
+        let outcome = match self.events.recv().expect("tx outlives this recv") {
+            ChildEvent::Ended(o) => o,
+            ChildEvent::Cancelled(cause) => {
+                crate::dbg_trace!("wait", "cancel name={} pid={} cause={cause:?}", self.name, pid);
+                self.sent = self.sent.max(Some(cause));
+                match self.terminate(&watch, cause) {
+                    Some(o) => o,
+                    None => loop {
+                        if let ChildEvent::Ended(o) =
+                            self.events.recv().expect("tx outlives this recv")
+                        {
+                            break o;
+                        }
+                    },
                 }
-                match child.try_wait_handling_stop() {
-                    Ok(Some(crate::process::WaitPoll::Stopped(sig))) => {
-                        // The one rule: a stop is resumed at once by whoever
-                        // waits on it, every role.
-                        crate::dbg_trace!(
-                            "wait",
-                            "stopped-cont name={} pid={} polls={} elapsed={:?} signal={sig:?}",
-                            self.name,
-                            pid,
-                            polls,
-                            t_enter.elapsed(),
-                        );
-                        #[cfg(unix)]
-                        crate::process::cont_stage_by_pid(pid);
-                        continue;
-                    }
-                    Ok(Some(crate::process::WaitPoll::Done(o))) => {
-                        crate::dbg_trace!(
-                            "wait",
-                            "exit-via-try_wait name={} pid={} polls={} elapsed={:?} outcome={:?}",
-                            self.name,
-                            pid,
-                            polls,
-                            t_enter.elapsed(),
-                            o,
-                        );
-                        break Some(o);
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        crate::dbg_trace!(
-                            "wait",
-                            "try_wait err name={} pid={} polls={} elapsed={:?} err={e}",
-                            self.name,
-                            pid,
-                            polls,
-                            t_enter.elapsed(),
-                        );
-                        // Hand the child back to re-arm `Drop`; an unwaited
-                        // child would otherwise leak with its pumps.
-                        self.child = Some(child);
-                        return Err(Break::Error(Error::new(format!("{}: {e}", self.name), 1)));
-                    }
-                }
-                if let Some(cause) = self.cancel.cause() {
-                    crate::dbg_trace!(
-                        "wait",
-                        "cancel-fired name={} pid={} polls={} elapsed={:?} cause={cause:?}",
-                        self.name,
-                        pid,
-                        polls,
-                        t_enter.elapsed(),
-                    );
-                    // A reaped leader carries its outcome straight out, so we
-                    // never wait on a dead pid.  The Windows group release is
-                    // not part of teardown; the `Standalone` branch below still
-                    // performs it on the way out.
-                    self.sent = self.sent.max(Some(cause));
-                    break self.terminate_group(&mut child, cause);
-                }
-                std::thread::sleep(interval);
-                interval = (interval * 2).min(cap);
             }
-        };
-        let outcome = if let Some(o) = early_outcome {
-            o
-        } else {
-            // Reached only when the poll broke via cancel without the grace
-            // peek reaping: the group kill is already in flight, so this blocks
-            // only as long as a dying child takes.  Traced on both sides so a
-            // hang in waitpid / WaitForSingleObject is visible.  A stop seen
-            // here is answered the same as the poll loop's own, inline.
-            crate::dbg_trace!(
-                "wait",
-                "blocking-wait name={} pid={} elapsed={:?}",
-                self.name,
-                pid,
-                t_enter.elapsed(),
-            );
-            let out = loop {
-                match child.wait_handling_stop() {
-                    Ok(crate::process::WaitPoll::Stopped(_)) => {
-                        #[cfg(unix)]
-                        crate::process::cont_stage_by_pid(pid);
-                    }
-                    Ok(crate::process::WaitPoll::Done(o)) => break o,
-                    Err(e) => {
-                        // Re-arm `Drop`, as in the poll loop's error arm.
-                        self.child = Some(child);
-                        return Err(Break::Error(Error::new(format!("{}: {e}", self.name), 1)));
-                    }
-                }
-            };
-            crate::dbg_trace!(
-                "wait",
-                "blocking-wait-done name={} pid={} elapsed={:?}",
-                self.name,
-                pid,
-                t_enter.elapsed(),
-            );
-            out
         };
         // A death by a signal on our own ladder is our doing, so the report
         // names the cause rather than the number; anything else the child met in
@@ -441,52 +277,38 @@ impl RunningChild {
             Some(cause) => outcome.attribute_to(cause),
             None => outcome,
         };
-        // Let the Job Object's whole-job completion drain any descendants before
-        // the handle goes.  A pipeline stage never lands here: its release
-        // belongs to `PipelineGroup::Drop`.
-        #[cfg(windows)]
-        if let GroupOwner::Standalone(group) = self.group_owner {
-            crate::dbg_trace!(
-                "wait",
-                "win-job-drain-begin name={} pid={} leader={} elapsed={:?}",
-                self.name,
-                pid,
-                group,
-                t_enter.elapsed(),
-            );
-            let _ = crate::process::wait_leader_blocking(group);
-            crate::process::release_win_group(group.as_raw());
-            crate::dbg_trace!(
-                "wait",
-                "win-job-drain-end name={} pid={} elapsed={:?}",
-                self.name,
-                pid,
-                t_enter.elapsed(),
-            );
-        }
-        // The leader is dead here — the `Stopped` branch already returned — so
-        // finish the cgroup lest a straggler outlive the command.  Windows
-        // releases its own group bookkeeping at this same point.
-        #[cfg(target_os = "linux")]
-        if let Some(jail) = &self.jail {
-            jail.finish();
-        }
         crate::dbg_trace!(
             "wait",
-            "ready-for-drain name={} pid={} elapsed={:?} outcome={:?}",
+            "ended name={} pid={} elapsed={:?} outcome={:?}",
             self.name,
             pid,
             t_enter.elapsed(),
             outcome,
         );
-        Ok(WaitedChild {
+        // Let the Job Object's whole-job completion drain any descendants before
+        // the handle goes.  A pipeline stage never lands here: its release
+        // belongs to `PipelineGroup::Drop`.
+        #[cfg(windows)]
+        if let Some(group) = self.owned_group {
+            let _ = crate::process::wait_leader_blocking(group);
+            crate::process::release_win_group(group.as_raw());
+        }
+        // The leader is dead here, so finish the cgroup lest a straggler
+        // outlive the command.  Windows releases its own group bookkeeping at
+        // this same point.
+        #[cfg(target_os = "linux")]
+        if let Some(jail) = &self.jail {
+            jail.finish();
+        }
+        let _ = watch.reap();
+        WaitedChild {
             outcome,
             sent: self.sent,
             pumps: std::mem::take(&mut self.pumps),
             name: self.name.clone(),
             pid,
             t_enter,
-        })
+        }
     }
 }
 
@@ -515,17 +337,19 @@ impl WaitedChild {
 
 impl Drop for RunningChild {
     /// Abort path: SIGKILL the group, join the drainers, reap.  A no-op once
-    /// `wait` has taken the child — that is the success path's disarm.  A
-    /// Windows `Standalone` releases its `win_groups` entry inline here, the
-    /// job `wait` does after `wait_leader_blocking`; the kill is idempotent, so
-    /// a `BorrowedByPipeline` stage racing the group owner's `Drop` is safe.
+    /// `wait` has taken the watch — that is the success path's disarm.  A
+    /// Windows owner releases its `win_groups` entry inline here, the job
+    /// `wait` does after `wait_leader_blocking`; the kill is idempotent, so a
+    /// borrowed-group stage racing the group owner's `Drop` is safe.  The
+    /// kill runs before the pump join it frees: killing before joining is
+    /// what makes the joins terminate.
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else {
+        let Some(watch) = self.watch.take() else {
             return;
         };
-        self.kill_group(&mut child);
+        self.kill_group(&watch);
         #[cfg(windows)]
-        if let GroupOwner::Standalone(group) = self.group_owner {
+        if let Some(group) = self.owned_group {
             crate::process::release_win_group(group.as_raw());
         }
         #[cfg(target_os = "linux")]
@@ -535,7 +359,8 @@ impl Drop for RunningChild {
         // The abort path always joins, never detaches: nothing has decided
         // this child's remaining bytes are owed to nobody.
         std::mem::take(&mut self.pumps).settle(false);
-        let _ = child.reap();
+        // `Watch::drop` reaps.
+        drop(watch);
     }
 }
 
@@ -567,7 +392,7 @@ mod tests {
                 stdout_pump: None,
                 stderr_pump: None,
             },
-            GroupOwner::Standalone(pgid.expect("NewLeader yields a tracked pgid")),
+            Some(pgid.expect("NewLeader yields a tracked pgid")),
             scope.clone(),
             None,
         );
@@ -576,7 +401,7 @@ mod tests {
             scope.cancel(CancelCause::Deadline);
         });
 
-        let waited = running.wait().expect("wait should not error");
+        let waited = running.wait();
         let failure = crate::process::CommandFailure::from_outcome(waited.outcome, waited.sent)
             .expect("a torn-down child is a failure");
         waited.settle();
@@ -635,7 +460,7 @@ mod tests {
                 stdout_pump: None,
                 stderr_pump: None,
             },
-            GroupOwner::Standalone(pgid.expect("NewLeader yields a tracked pgid")),
+            Some(pgid.expect("NewLeader yields a tracked pgid")),
             scope.clone(),
             None,
         );
@@ -648,7 +473,7 @@ mod tests {
         });
 
         let t0 = std::time::Instant::now();
-        let waited = running.wait().expect("wait should not error");
+        let waited = running.wait();
         let elapsed = t0.elapsed();
         waited.settle();
         canceller.join().expect("canceller thread");
@@ -702,13 +527,13 @@ mod tests {
                 stdout_pump: None,
                 stderr_pump: None,
             },
-            GroupOwner::Standalone(pgid),
+            Some(pgid),
             CancelScope::root(),
             None,
         );
 
         let t0 = std::time::Instant::now();
-        let waited = running.wait().expect("wait should not error");
+        let waited = running.wait();
         let elapsed = t0.elapsed();
         waited.settle();
 

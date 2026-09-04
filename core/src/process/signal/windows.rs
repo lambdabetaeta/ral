@@ -774,6 +774,9 @@ pub fn disown_pipeline_group(pgid: Pgid) {
 /// Windows has no SIGTSTP, so the plain `Child::wait` is enough — never a
 /// stop.  Reached only through `ChildHandle::wait_handling_stop`.
 #[allow(clippy::disallowed_methods)]
+// `ChildHandle::wait_handling_stop`'s `Std` arm, this fn's one caller, is
+// itself reached only by the Windows sandbox session test.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn wait_handling_stop(
     child: &mut std::process::Child,
 ) -> std::io::Result<crate::process::WaitPoll> {
@@ -785,6 +788,10 @@ pub(super) fn wait_handling_stop(
 /// Non-blocking peer of `wait_handling_stop`, keeping the Unix counterpart's
 /// shape.  Reached only through `ChildHandle::try_wait_handling_stop`.
 #[allow(clippy::disallowed_methods)]
+// `ChildHandle::try_wait_handling_stop`'s `Std` arm, this fn's one caller, is
+// reached in production only by a Linux guest's hatch sweep, and `hatch`
+// never compiles for Windows: this arm has no caller on this platform.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn try_wait_handling_stop(
     child: &mut std::process::Child,
 ) -> std::io::Result<Option<crate::process::WaitPoll>> {

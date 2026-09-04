@@ -1225,6 +1225,9 @@ mod windows {
             clippy::needless_pass_by_ref_mut,
             reason = "mirrors `ChildHandle::wait_handling_stop`, whose `std::process::Child` arm dispatches beside this one and does need `&mut`; a wait is exclusive by contract even where Windows reaches the exit status through a shared handle"
         )]
+        // Reached only by the Windows sandbox session test, through
+        // `ChildHandle::wait_handling_stop`'s `RawWindows` arm.
+        #[cfg_attr(not(test), allow(dead_code))]
         pub(crate) fn wait_handling_stop(&mut self) -> io::Result<crate::process::WaitPoll> {
             self.wait_and_exit_status().map(|status| {
                 crate::process::WaitPoll::Done(crate::process::WaitOutcome::from_exit_status(
@@ -1233,6 +1236,10 @@ mod windows {
             })
         }
 
+        // A Linux guest's hatch sweep is `try_wait_handling_stop`'s one
+        // production caller, and `hatch` never compiles for Windows: this
+        // `RawWindows` arm has no caller on this platform.
+        #[cfg_attr(not(test), allow(dead_code))]
         pub(crate) fn try_wait_handling_stop(
             &mut self,
         ) -> io::Result<Option<crate::process::WaitPoll>> {

@@ -53,8 +53,13 @@ pub(crate) use windows::{
 // "still running" and `wait` blocks forever.  `clippy.toml` disallows the raw
 // pair outside `ChildHandle`; the few exceptions carry an `#[allow]`.
 
-/// A spawned child, waitable only through the stop-aware
-/// [`Self::wait_handling_stop`] / [`Self::try_wait_handling_stop`].
+/// A spawned child.
+///
+/// [`Self::into_watch`] is the door to the reaper, which owns the wait on
+/// both platforms; [`Self::try_wait_handling_stop`] is the non-blocking peer
+/// `hatch.rs`'s table polls directly.  The blocking, stop-aware
+/// [`Self::wait_handling_stop`] survives only on Windows, for the sandbox
+/// session test — Unix's last caller moved onto the reaper.
 pub struct ChildHandle(ChildRepr);
 
 enum ChildRepr {
@@ -127,29 +132,34 @@ impl ChildHandle {
 
     /// Blocking wait that returns on a stop too, as [`WaitPoll::Stopped`];
     /// what to do about a stop is the caller's decision, never the wait's.
+    /// Windows only: its one caller left is the sandbox session test, which
+    /// has no stop to see (Windows has none) but keeps the shape the Unix
+    /// door once shared.
     ///
     /// # Errors
     /// Returns `Err` if the wait fails.
+    #[cfg(windows)]
+    // Reached only by the Windows sandbox session test (`#[cfg(test)]`); a
+    // plain, non-test build of this crate calls it from nowhere.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn wait_handling_stop(&mut self) -> std::io::Result<WaitPoll> {
-        #[cfg(unix)]
-        {
-            let ChildRepr::Std(child) = &mut self.0;
-            unix::wait_handling_stop(child)
-        }
-        #[cfg(windows)]
-        {
-            match &mut self.0 {
-                ChildRepr::Std(child) => windows::wait_handling_stop(child),
-                ChildRepr::RawWindows(child) => child.wait_handling_stop(),
-            }
+        match &mut self.0 {
+            ChildRepr::Std(child) => windows::wait_handling_stop(child),
+            ChildRepr::RawWindows(child) => child.wait_handling_stop(),
         }
     }
 
-    /// Non-blocking peer of [`Self::wait_handling_stop`]; `Ok(None)` when
-    /// nothing is pending.
+    /// Non-blocking, stop-aware poll; `Ok(None)` when nothing is pending.
+    /// `hatch.rs`'s table is its production caller, on Linux alone — `hatch`
+    /// itself is `#[cfg(unix)]` but only a real Linux guest reaches it.
     ///
     /// # Errors
     /// Returns `Err` if the poll fails.
+    // Reached in production only by a Linux guest's hatch sweep
+    // (`hatch::sweep_hatched`).  Off Linux, `hatch` itself compiles on Unix
+    // alone (`#[cfg(unix)]`), so only its own tests reach this there, under
+    // `test`; on Windows, where `hatch` never compiles, nothing does.
+    #[cfg_attr(not(any(target_os = "linux", all(unix, test))), allow(dead_code))]
     pub(crate) fn try_wait_handling_stop(&mut self) -> std::io::Result<Option<WaitPoll>> {
         #[cfg(unix)]
         {
@@ -344,17 +354,5 @@ pub enum PgidPolicy {
     NewSession,
     /// Join an existing pgid as a non-leader (`setpgid(0, leader)`).
     Join(Pgid),
-}
-
-/// Who a signal a `RunningChild` sends addresses.
-///
-/// Only a child that owns its group outright (`GroupOwner::Standalone`) may
-/// have that group signalled; a stage borrowing a pipeline's group signals
-/// its own pid alone — the pipeline itself is the only thing that may bring
-/// the whole group down. `Pid` also covers a child with no group at all.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum KillTarget {
-    Group(Pgid),
-    Pid,
 }
 

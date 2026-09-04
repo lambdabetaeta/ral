@@ -21,7 +21,7 @@ mod redirect;
 mod stdio;
 mod vet;
 
-pub(crate) use child::{ExternalPlumbing, GroupOwner, Pumps, RunningChild};
+pub(crate) use child::{ExternalPlumbing, Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
 pub(crate) use identity::CommandIdentity;
@@ -129,14 +129,11 @@ pub(crate) fn run(
     // pgroup.
     let _fg_guard = fg.acquire(child_pid, shell, mooring);
 
-    // A tracked leader pgid is exactly what there is to release on
-    // Windows; an `Inherit` child has no group at all. A `Join` child
-    // borrowed a group it does not own.
-    let group_owner = match (wait_pgid, fg.pgid_policy()) {
-        (Some(_), crate::process::PgidPolicy::Join(_)) => GroupOwner::BorrowedByPipeline,
-        (Some(p), _) => GroupOwner::Standalone(p),
-        (None, _) => GroupOwner::None,
-    };
+    // A tracked leader pgid is exactly what there is to release on Windows
+    // and to signal/kill as a whole; an `Inherit` child has no group at all,
+    // and a `Join` child borrowed a group it does not own — both read as
+    // `None`.
+    let owned_group = wait_pgid.filter(|_| !matches!(fg.pgid_policy(), crate::process::PgidPolicy::Join(_)));
     // Nothing fallible may run between `spawn` and this assembly: until
     // `RunningChild` owns it the bare child leaks on an early return,
     // whereas afterwards its `Drop` SIGKILLs the pgid and reaps.
@@ -147,13 +144,12 @@ pub(crate) fn run(
             stdout_pump: stdout_plan,
             stderr_pump,
         },
-        group_owner,
+        owned_group,
         mooring.cancel.as_scope().clone(),
         jail,
     );
 
-    // `atomic_commit`'s own `Drop` abandons the staged write on an early `?`.
-    let waited: WaitedChild = running.wait()?;
+    let waited: WaitedChild = running.wait();
     let (outcome, sent) = (waited.outcome, waited.sent);
 
     // Held rather than `?`-propagated: the drain below must still run for a

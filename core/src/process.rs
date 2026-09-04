@@ -34,7 +34,6 @@ pub use cancel::{
 #[cfg(unix)]
 pub(crate) use cancel::TEARDOWN_GRACE;
 
-pub(crate) use signal::KillTarget;
 #[cfg(unix)]
 pub(crate) use signal::cont_stage_by_pid;
 #[cfg(unix)]
