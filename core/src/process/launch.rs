@@ -635,7 +635,7 @@ mod windows {
     use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
         CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-        WAIT_OBJECT_0, WAIT_TIMEOUT,
+        WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Security::SECURITY_CAPABILITIES;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -1211,50 +1211,13 @@ mod windows {
                 .map(|stderr| Box::new(stderr) as Box<dyn std::io::Read + Send>)
         }
 
-        /// Block until exit and read the status: [`Self::wait_handling_stop`]
-        /// and [`Self::reap`] differ only in how they map it onward.
+        /// Block until exit and read the status.
         fn wait_and_exit_status(&self) -> io::Result<std::process::ExitStatus> {
             let r = unsafe { WaitForSingleObject(self.raw_process_handle(), INFINITE) };
             if r != WAIT_OBJECT_0 {
                 return Err(io::Error::last_os_error());
             }
             self.exit_status()
-        }
-
-        #[allow(
-            clippy::needless_pass_by_ref_mut,
-            reason = "mirrors `ChildHandle::wait_handling_stop`, whose `std::process::Child` arm dispatches beside this one and does need `&mut`; a wait is exclusive by contract even where Windows reaches the exit status through a shared handle"
-        )]
-        // Reached only by the Windows sandbox session test, through
-        // `ChildHandle::wait_handling_stop`'s `RawWindows` arm.
-        #[cfg_attr(not(test), allow(dead_code))]
-        pub(crate) fn wait_handling_stop(&mut self) -> io::Result<crate::process::WaitPoll> {
-            self.wait_and_exit_status().map(|status| {
-                crate::process::WaitPoll::Done(crate::process::WaitOutcome::from_exit_status(
-                    status,
-                ))
-            })
-        }
-
-        // A Linux guest's hatch sweep is `try_wait_handling_stop`'s one
-        // production caller, and `hatch` never compiles for Windows: this
-        // `RawWindows` arm has no caller on this platform.
-        #[cfg_attr(not(test), allow(dead_code))]
-        pub(crate) fn try_wait_handling_stop(
-            &mut self,
-        ) -> io::Result<Option<crate::process::WaitPoll>> {
-            match unsafe { WaitForSingleObject(self.raw_process_handle(), 0) } {
-                WAIT_OBJECT_0 => self
-                    .exit_status()
-                    .map(|status| {
-                        crate::process::WaitPoll::Done(crate::process::WaitOutcome::from_exit_status(
-                            status,
-                        ))
-                    })
-                    .map(Some),
-                WAIT_TIMEOUT => Ok(None),
-                _ => Err(io::Error::last_os_error()),
-            }
         }
 
         #[allow(

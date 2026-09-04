@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 #[cfg(unix)]
 use super::outcome::Signal;
-use super::outcome::{WaitOutcome, WaitPoll};
+use super::outcome::WaitOutcome;
 use super::reaper::{Reaper, Watch};
 
 #[cfg(unix)]
@@ -28,7 +28,7 @@ mod unix;
 pub use unix::{
     ForegroundGuard, PipelineRelay, install_handlers, interrupt_foreground_child, quit_handler,
     relay_handler, reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after,
-    term_handler, termios_snapshot, try_waitpgid_eintr, waitpgid_eintr,
+    term_handler, termios_snapshot,
 };
 #[cfg(unix)]
 pub(crate) use unix::cause_signal;
@@ -56,10 +56,9 @@ pub(crate) use windows::{
 /// A spawned child.
 ///
 /// [`Self::into_watch`] is the door to the reaper, which owns the wait on
-/// both platforms; [`Self::try_wait_handling_stop`] is the non-blocking peer
-/// `hatch.rs`'s table polls directly.  The blocking, stop-aware
-/// [`Self::wait_handling_stop`] survives only on Windows, for the sandbox
-/// session test — Unix's last caller moved onto the reaper.
+/// both platforms; [`Self::reap`] is the blocking wait after a confirmed
+/// kill, and [`Self::try_reap`] the non-blocking peer `hatch.rs`'s table
+/// polls directly.
 pub struct ChildHandle(ChildRepr);
 
 enum ChildRepr {
@@ -130,49 +129,20 @@ impl ChildHandle {
         }
     }
 
-    /// Blocking wait that returns on a stop too, as [`WaitPoll::Stopped`];
-    /// what to do about a stop is the caller's decision, never the wait's.
-    /// Windows only: its one caller left is the sandbox session test, which
-    /// has no stop to see (Windows has none) but keeps the shape the Unix
-    /// door once shared.
-    ///
-    /// # Errors
-    /// Returns `Err` if the wait fails.
-    #[cfg(windows)]
-    // Reached only by the Windows sandbox session test (`#[cfg(test)]`); a
-    // plain, non-test build of this crate calls it from nowhere.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn wait_handling_stop(&mut self) -> std::io::Result<WaitPoll> {
-        match &mut self.0 {
-            ChildRepr::Std(child) => windows::wait_handling_stop(child),
-            ChildRepr::RawWindows(child) => child.wait_handling_stop(),
-        }
-    }
-
-    /// Non-blocking, stop-aware poll; `Ok(None)` when nothing is pending.
-    /// `hatch.rs`'s table is its production caller, on Linux alone — `hatch`
-    /// itself is `#[cfg(unix)]` but only a real Linux guest reaches it.
+    /// Non-blocking reap: `Ok(None)` when nothing has exited yet.  Plain
+    /// `try_wait`, no `WUNTRACED`, so a stopped child reads as still
+    /// running — exactly what `hatch.rs`'s table wants, since the reaper
+    /// answers the stop on its own and the table is not watching this pid.
     ///
     /// # Errors
     /// Returns `Err` if the poll fails.
-    // Reached in production only by a Linux guest's hatch sweep
-    // (`hatch::sweep_hatched`).  Off Linux, `hatch` itself compiles on Unix
-    // alone (`#[cfg(unix)]`), so only its own tests reach this there, under
-    // `test`; on Windows, where `hatch` never compiles, nothing does.
-    #[cfg_attr(not(any(target_os = "linux", all(unix, test))), allow(dead_code))]
-    pub(crate) fn try_wait_handling_stop(&mut self) -> std::io::Result<Option<WaitPoll>> {
-        #[cfg(unix)]
-        {
-            let ChildRepr::Std(child) = &mut self.0;
-            unix::try_wait_handling_stop(child)
-        }
-        #[cfg(windows)]
-        {
-            match &mut self.0 {
-                ChildRepr::Std(child) => windows::try_wait_handling_stop(child),
-                ChildRepr::RawWindows(child) => child.try_wait_handling_stop(),
-            }
-        }
+    #[cfg(unix)]
+    #[allow(clippy::disallowed_methods)]
+    pub(crate) fn try_reap(&mut self) -> std::io::Result<Option<WaitOutcome>> {
+        let ChildRepr::Std(child) = &mut self.0;
+        child
+            .try_wait()
+            .map(|opt| opt.map(WaitOutcome::from_exit_status))
     }
 
     /// Blocking reap after a confirmed SIGKILL, which terminates even a stopped
@@ -205,17 +175,6 @@ impl ChildHandle {
         drop(self);
         watch
     }
-}
-
-/// `SIGCONT` a pipeline external stage by pid alone — the ownerless-stop
-/// rule (a detached member deaf to job control revives itself).  By pid
-/// rather than through a [`ChildHandle`], because the handle itself lives
-/// on the stage's own dedicated waiter thread, the sole owner of its wait.
-/// `cfg(unix)`: nothing stops on Windows, so there is no stop to revive
-/// from there.
-#[cfg(unix)]
-pub(crate) fn cont_stage_by_pid(pid: u32) {
-    unix::cont_stage_by_pid(pid);
 }
 
 // ── Escalation ladder ──────────────────────────────────────────────────────

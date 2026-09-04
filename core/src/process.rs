@@ -19,7 +19,7 @@ pub mod spawn_lock;
 pub mod wake;
 
 pub(crate) use outcome::not_found_hint;
-pub use outcome::{CommandFailure, Signal, SpawnFailure, WaitOutcome, WaitPoll};
+pub use outcome::{CommandFailure, Signal, SpawnFailure, WaitOutcome};
 
 pub use launch::{Launch, StdioSpec};
 pub use lease::TerminalLease;
@@ -35,8 +35,6 @@ pub use cancel::{
 pub(crate) use cancel::TEARDOWN_GRACE;
 
 #[cfg(unix)]
-pub(crate) use signal::cont_stage_by_pid;
-#[cfg(unix)]
 pub(crate) use signal::cause_signal;
 pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};
 
@@ -49,7 +47,7 @@ pub use wake::Wake;
 pub use signal::{
     ForegroundGuard, PipelineRelay, install_handlers, interrupt_foreground_child, quit_handler,
     relay_handler, reset_child_signals, spawn_with_pgid, spawn_with_pgid_after, term_handler,
-    termios_snapshot, try_waitpgid_eintr, waitpgid_eintr,
+    termios_snapshot,
 };
 
 #[cfg(unix)]

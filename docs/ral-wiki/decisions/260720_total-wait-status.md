@@ -4,6 +4,16 @@ status: active
 
 # Wait status is total
 
+> The **pid** side is superseded by
+> [[decisions/260904_one-reaper-one-fold|one-reaper-one-fold]]: `waitpid_eintr`,
+> `try_waitpid_eintr`, `wait_blocking_eintr`, and `classify_wait_status` go with
+> `RunningChild::wait`'s last poll loop, folded into the reaper's own
+> `waitid`/`WNOWAIT` scan and `blocking_reap` — one funnel now, not a pid door
+> beside it. `waitpgid_eintr`/`try_waitpgid_eintr`, unreferenced since job
+> control left, go too. The **pgid** side is untouched: `Pgid` still admits
+> only positive identifiers, and `Pgid::signal_group` still sends by
+> `kill(-pgid, …)` with no wait behind it.
+
 **Unix wait results remain typed without ceasing to be total: rustix's
 transparent `WaitStatus` carries every kernel status, while one retrying funnel
 makes `EINTR` unobservable to lifecycle code.**

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use nix::sys::signal::{SigSet, SigmaskHow};
 use rustix::io::Errno;
-use rustix::process::{Pid, WaitOptions, WaitStatus};
+use rustix::process::Pid;
 use rustix::termios::{OptionalActions, Termios};
 
 use super::{ESCALATION, Pgid, PgidPolicy};
@@ -357,14 +357,18 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
             Ok(())
         })?;
     drop(handshake);
-    let born = loop {
-        match wait_handling_stop(&intermediate)? {
-            crate::process::WaitPoll::Stopped(_) => {
-                crate::process::cont_stage_by_pid(intermediate.id());
-            }
-            crate::process::WaitPoll::Done(o) => break o,
-        }
-    };
+    let pid = intermediate.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let watch = crate::process::reaper::Reaper::global().watch(pid, tx, std::convert::identity);
+    // Dropping a `std::process::Child` neither kills nor reaps: the watch
+    // above is what now owns its wait.
+    drop(intermediate);
+    let born = rx.recv().map_err(|_| {
+        std::io::Error::other(
+            "could not detach: the reaper never reported the intermediate's exit",
+        )
+    })?;
+    watch.reap()?;
     if born != crate::process::WaitOutcome::Exited(0) {
         return Err(std::io::Error::other(format!(
             "could not detach: the intermediate process ended as {born:?} instead of exiting 0, so nothing here knows the pid of what it started"
@@ -381,102 +385,6 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
     })
 }
 
-// ── Wait handling for stopped children ─────────────────────────────────────
-//
-// `Child::wait()` returns only on termination, so a child stopped by SIGTSTP,
-// SIGSTOP or SIGTTIN hangs ral with the tty still owned by the stopped pgid;
-// `WaitOptions::UNTRACED` makes the wait return on a stop as well.  The stop
-// surfaces as `Stopped` and nothing more: what it means — `SIGCONT` and keep
-// waiting, a gate to wait on, a child to kill and reap — belongs to whoever
-// holds the child, never to the wait.
-
-/// Wait for `child` to terminate or stop.
-pub(super) fn wait_handling_stop(
-    child: &std::process::Child,
-) -> std::io::Result<crate::process::WaitPoll> {
-    let (_, status) = waitpid_eintr(Pid::from_child(child), WaitOptions::UNTRACED)?;
-    Ok(classify_wait_status(status))
-}
-
-/// Wait for `pid`, retrying after `EINTR` so a signal delivery can never be
-/// mistaken for `ECHILD` and flip a live child to "gone".  `NOHANG` is excluded
-/// by construction; [`try_waitpid_eintr`] owns the optional result.
-fn waitpid_eintr(pid: Pid, options: WaitOptions) -> rustix::io::Result<(Pid, WaitStatus)> {
-    wait_blocking_eintr(|| {
-        rustix::process::waitpid(Some(pid), options.difference(WaitOptions::NOHANG))
-    })
-}
-
-/// Poll `pid`, retrying after `EINTR`.
-fn try_waitpid_eintr(
-    pid: Pid,
-    options: WaitOptions,
-) -> rustix::io::Result<Option<(Pid, WaitStatus)>> {
-    rustix::io::retry_on_intr(|| rustix::process::waitpid(Some(pid), options | WaitOptions::NOHANG))
-}
-
-/// Wait for a member of `pgid`, retrying after `EINTR`.  `NOHANG` is excluded
-/// by construction; [`try_waitpgid_eintr`] owns the optional result.
-///
-/// # Errors
-/// Returns any terminal wait error, including `ECHILD`.
-pub fn waitpgid_eintr(pgid: Pgid, options: WaitOptions) -> rustix::io::Result<(Pid, WaitStatus)> {
-    wait_blocking_eintr(|| {
-        rustix::process::waitpgid(pgid.as_pid(), options.difference(WaitOptions::NOHANG))
-    })
-}
-
-/// Poll a member of `pgid`, retrying after `EINTR`; `Ok(None)` means no member
-/// has a requested status ready.
-///
-/// # Errors
-/// Returns any terminal wait error, including `ECHILD`.
-pub fn try_waitpgid_eintr(
-    pgid: Pgid,
-    options: WaitOptions,
-) -> rustix::io::Result<Option<(Pid, WaitStatus)>> {
-    rustix::io::retry_on_intr(|| {
-        rustix::process::waitpgid(pgid.as_pid(), options | WaitOptions::NOHANG)
-    })
-}
-
-fn wait_blocking_eintr(
-    wait: impl FnMut() -> rustix::io::Result<Option<(Pid, WaitStatus)>>,
-) -> rustix::io::Result<(Pid, WaitStatus)> {
-    rustix::io::retry_on_intr(wait)
-        .map(|status| status.expect("wait without NOHANG returns a status"))
-}
-
-/// Non-blocking peer of `wait_handling_stop`, returning `Ok(None)` when nothing
-/// is pending.  It must keep `UNTRACED`: without it a SIGSTOP'd child reads as
-/// "still running" and the pre-wait poll in `RunningChild::wait` spins forever.
-pub(super) fn try_wait_handling_stop(
-    child: &std::process::Child,
-) -> std::io::Result<Option<crate::process::WaitPoll>> {
-    let Some((_, status)) = try_waitpid_eintr(Pid::from_child(child), WaitOptions::UNTRACED)? else {
-        return Ok(None);
-    };
-    Ok(Some(classify_wait_status(status)))
-}
-
-/// Translate a `waitpid` status into a [`crate::process::WaitPoll`], shared by
-/// the blocking and polling paths.  `WaitStatus` is a total, transparent view
-/// of the kernel bits, so termination by a real-time signal classifies with no
-/// fallible enum between.
-fn classify_wait_status(status: WaitStatus) -> crate::process::WaitPoll {
-    use crate::process::{WaitOutcome, WaitPoll};
-    if let Some(signal) = status.stopping_signal() {
-        return WaitPoll::Stopped(crate::process::Signal::new(signal));
-    }
-    if let Some(code) = status.exit_status() {
-        return WaitPoll::Done(WaitOutcome::Exited(code));
-    }
-    if let Some(signal) = status.terminating_signal() {
-        return WaitPoll::Done(WaitOutcome::Signaled(crate::process::Signal::new(signal)));
-    }
-    WaitPoll::Done(WaitOutcome::NativeCode(status.as_raw()))
-}
-
 /// The cause's signal: `SIGINT` for `Interrupt`, else `SIGTERM` — shared with
 /// `PipelineGroup::signal`, whose own pgid-wide send this pid-wide one
 /// mirrors.
@@ -485,18 +393,6 @@ pub(crate) fn cause_signal(cause: CancelCause) -> i32 {
         libc::SIGINT
     } else {
         libc::SIGTERM
-    }
-}
-
-/// `SIGCONT` a pipeline external stage by pid alone; see
-/// [`crate::process::signal::cont_stage_by_pid`].
-pub(super) fn cont_stage_by_pid(pid: u32) {
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "a live OS pid is positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
-    )]
-    unsafe {
-        libc::kill(pid as i32, libc::SIGCONT);
     }
 }
 

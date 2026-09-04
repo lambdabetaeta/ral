@@ -76,13 +76,8 @@ fn sweep_hatched() {
     let mut table = table()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // A stopped child is still alive and still ours to reap later.
-    table.retain_mut(|child| {
-        !matches!(
-            child.try_wait_handling_stop(),
-            Ok(Some(o)) if !matches!(o, crate::process::WaitPoll::Stopped(_))
-        )
-    });
+    // A stopped child reads as still running: `try_reap` never sees the stop.
+    table.retain_mut(|child| !matches!(child.try_reap(), Ok(Some(_))));
 }
 
 /// Called once, from `engine_session`'s teardown. Anything still running is

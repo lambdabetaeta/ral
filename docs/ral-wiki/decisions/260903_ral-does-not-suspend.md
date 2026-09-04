@@ -67,19 +67,10 @@ The anchor goes one step further and ignores `SIGTSTP`/`SIGTTIN`/`SIGTTOU`
 outright (`core/src/runtime/pipeline/group.rs`), so it essentially never
 stops and never needs resuming — one fewer party the one rule has to reach.
 
-What remains of "stop" in the code is exactly two answers to the same
-question, not a subsystem:
-
-- `RunningChild::wait` (`core/src/runtime/command/child.rs:269`) answers a
-  stop with `SIGCONT` inline and keeps polling; the same shape covers
-  `run_pipeline_stage` (`child.rs:487`) for a stage inside a pipeline.
-- `WaitOutcome` (`core/src/process/outcome.rs:137`) says how a child ended;
-  the adjacent `WaitPoll` (`outcome.rs:159`) is the poll-time sum,
-  `Stopped(Signal) | Done(WaitOutcome)` — a stop is a value a poll can
-  return, structurally excluded from ever being a value a wait *settles*
-  on. The impossible arm — a completed wait reporting a stop — no longer
-  type-checks into existence; it was previously reached only by
-  `unreachable!()`.
+**Correction, 2026-09-04:** what remains of "stop" in the code is one arm,
+once, not two — `reaper::scan_one` (`core/src/process/reaper/unix.rs`)
+answers a stop with `SIGCONT` and posts nothing for it, so no subscriber,
+pipeline or standalone, ever sees one.
 
 ## Consequences
 

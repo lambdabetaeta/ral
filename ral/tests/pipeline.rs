@@ -2063,9 +2063,10 @@ fn a_cancelled_pipeline_stages_grandchild_does_not_survive() {
 
 /// Every other cancellation fixture honours `SIGTERM`, so nothing else in the
 /// suite reaches the branch *after* a grace deadline expires.  This one covers
-/// the stage's own: `terminate_group` signals the pid, `grace_poll` waits out
-/// `TEARDOWN_GRACE`, and the `SIGKILL` that follows is what ends a stage that
-/// blocks in the shell itself — no child for the signal to fell instead.
+/// the stage's own: `RunningChild::terminate` signals the pid, then blocks on
+/// one `recv_timeout(TEARDOWN_GRACE)`, and the `SIGKILL` that follows is what
+/// ends a stage that blocks in the shell itself — no child for the signal to
+/// fell instead.
 #[test]
 fn a_cancelled_stage_that_ignores_sigterm_dies_when_the_grace_expires() {
     let gate = fresh_tmp_path("ral_pipeline_grace_expiry", "gate");

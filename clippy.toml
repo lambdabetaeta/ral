@@ -70,16 +70,17 @@
 # that spelling is reserved for the two `host` accessors and is enforced
 # by review, like `PathBuf::from` above.
 #
-# Child-wait discipline: `std::process::Child::wait` / `try_wait` call
-# the kernel without `WUNTRACED`, so a SIGSTOP'd child looks "still
-# running" to `try_wait` and blocks forever in `wait`.  Every
-# ral-managed child goes through `crate::process::ChildHandle`, which
-# exposes `wait_handling_stop` / `try_wait_handling_stop` — both pass
-# `WUNTRACED` on Unix and classify the result into `WaitOutcome`.  The
-# few legitimate raw waiters (post-SIGKILL reap inside `ChildHandle`,
-# one-shot sandbox/bwrap respawn, anchor subprocess waited after
-# SIGCONT, test harnesses) carry an `#[allow]` with a reason at the
-# call site.
+# Child-wait discipline: every ral-managed child goes through
+# `crate::process::ChildHandle`.  `into_watch` hands the wait to the
+# process-wide reaper, which answers a stop with `SIGCONT` on its own and
+# never lets one reach a subscriber; `reap` is the blocking reap after a
+# confirmed kill, `try_reap` the non-blocking poll `hatch.rs`'s table
+# uses directly.  A raw `Child::try_wait` reports a stopped child as
+# still running (no `WUNTRACED`), which is exactly `try_reap`'s point —
+# the reaper, not the poller, owns the stop.  The few legitimate raw
+# waiters (post-SIGKILL reap inside `ChildHandle`, one-shot sandbox/bwrap
+# respawn, test harnesses) carry an `#[allow]` with a reason at the call
+# site.
 #
 # Apple spawn-lock discipline: see `core/src/process/spawn_lock.rs`'s module
 # doc. Doors carry an `#[allow]` with a reason at the call site.
@@ -115,8 +116,8 @@ disallowed-methods = [
     { path = "std::env::current_dir", reason = "Use Shell::cwd() — process CWD must not be cached in any shell-scoped store; that's how PWD went stale across thunks." },
     { path = "std::env::set_current_dir", reason = "ral's `cd` mutates Shell::logical_cwd, not the process cwd. Process-cwd writes are reserved for the pipeline helper subprocess and the in-process uutils save/restore — both carry an explicit #[allow]." },
     { path = "std::path::Path::new", reason = "Use a named helper in crate::path (is_absolute / exists / basename / path_within_str / …) so the path-construction rule lives in one place. FFI glue and env-var lifting may #[allow] at the call site with a reason." },
-    { path = "std::process::Child::wait", reason = "Use crate::process::ChildHandle::wait_handling_stop — Child::wait blocks forever on a SIGSTOP'd child (no WUNTRACED). Sandbox respawn, anchor-after-SIGCONT, and tests #[allow] explicitly." },
-    { path = "std::process::Child::try_wait", reason = "Use crate::process::ChildHandle::try_wait_handling_stop — Child::try_wait reports a stopped child as still running (no WUNTRACED), so cancel-aware polling spins forever." },
+    { path = "std::process::Child::wait", reason = "Use crate::process::ChildHandle::{into_watch, reap} — the reaper owns the wait and answers a stop itself; reap is the blocking reap after a confirmed kill. Sandbox respawn and tests #[allow] explicitly." },
+    { path = "std::process::Child::try_wait", reason = "Use crate::process::ChildHandle::try_reap — hatch.rs's table is its one caller; a stopped child reading as still running is the point, since the reaper answers the stop for any pid it watches." },
     { path = "std::env::var_os", reason = "An XDG basedir read goes through crate::path::basedir::resolve_xdg, which ignores relative overrides per the spec. Other path-valued env reads (terminal/sandbox/PATH probes, helper env snapshot, tests) #[allow] explicitly with a reason." },
     { path = "ral_core::host::home", reason = "Host-only $HOME read — a `within [env: …]` overlay does not apply. Inside language semantics, thread the shell's overlay through crate::path::home; genuine host-level reads (boot seeding, ral's own config/state locations, other binaries) #[allow] with a reason." },
     { path = "ral_core::host::user", reason = "Host-only $USER read — a `within [env: …]` overlay does not apply. Inside language semantics, thread the shell's overlay through crate::path::user_name; host-level reads #[allow] with a reason." },

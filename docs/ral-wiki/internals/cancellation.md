@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 77f7bf14
+verified_at_commit: 4957c6c4
 verified_at_date: 2026-09-04
-anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, ChromeKind, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
+anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, ChromeKind, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, watch_cancel, escalation_pending]
 ---
 
 # Cancellation
@@ -169,27 +169,29 @@ builtin) is not interruptible by the scope path — the contract is *cooperative
 
 ### External children: teardown by cause
 
-A blocked `waitpid` does not consult the scope, so `RunningChild::wait`
-(`runtime/command/child.rs`) wraps it in a cancel-aware poll loop with
-exponential backoff (5 ms → 100 ms cap). On each iteration it `try_wait`s
-(WUNTRACED, so a SIGSTOP'd child is seen, not spun on) and reads
-`self.cancel.cause()`. The teardown is *cause-directed*:
+A blocked wait does not consult the scope, so nothing here polls at all: the
+process-wide reaper ([[map/core/io-process|io-process]]) posts a child's exit
+straight onto `RunningChild::wait`'s own channel, and `watch_cancel` posts a
+cancel onto the same channel the instant the scope's cause is set — one
+blocking `recv`, no interval, no backoff. The teardown is *cause-directed*:
 
-- **`Interrupt`** → SIGINT-first, a 500 ms grace, then a group SIGKILL — a child
-  that traps SIGINT still dies, and its grandchildren with it.
-- **`Explicit` / `Deadline` / `Terminate`** → SIGTERM-first with the same grace
-  then group SIGKILL — decisive, without pretending to be a user keystroke; a
-  `Terminate` hands the tree the very signal the supervisor sent ral.
-- **`RootAbort`** → an immediate group SIGKILL, no grace.
+- **`Interrupt`** → SIGINT-first, a bounded `TEARDOWN_GRACE` (500 ms), then a
+  group (or, ungrouped, pid-`Watch`) SIGKILL — a child that traps SIGINT
+  still dies, and its grandchildren with it.
+- **`Explicit` / `Deadline` / `Terminate`** → SIGTERM-first with the same
+  grace then the same kill — decisive, without pretending to be a user
+  keystroke; a `Terminate` hands the tree the very signal the supervisor sent
+  ral.
+- **`RootAbort`** → an immediate kill, no grace.
 
-Every external wait goes through this one loop — the interactive REPL
-foreground included. ral does not suspend
-([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]): a `Stopped`
-poll result is always answered with `SIGCONT` inline and the loop continues
-waiting on the same child, whichever cause is or isn't in force — a stop is
-never itself a cause for teardown. A foreground external still gets its
-Ctrl-C from the kernel directly — it owns the terminal — but a SIGTERM
-delivered to *ral* now preempts even that wait through the root cause.
+Every external wait goes through this one `recv`/`terminate` shape — the
+interactive REPL foreground included. ral does not suspend
+([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]): a stop
+never reaches this channel at all, since the reaper answers it with
+`SIGCONT` on its own before any subscriber sees one — a stop is never itself
+a cause for teardown. A foreground external still gets its Ctrl-C from the
+kernel directly — it owns the terminal — but a SIGTERM delivered to *ral*
+now preempts even that wait through the root cause.
 
 ## The gestures, per host
 

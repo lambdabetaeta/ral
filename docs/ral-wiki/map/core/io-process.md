@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 77f7bf14
+generated_at_commit: 4957c6c4
 generated_at_date: 2026-09-04
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
@@ -74,20 +74,18 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 
 ## Process — `core/src/process/`
 
-- `outcome.rs` — `Signal`, `WaitOutcome`, `Ending`, and the user-facing
-  `SpawnFailure` / `CommandFailure` the evaluator surfaces. A death ral itself
-  caused is its own variant (`Cancelled`, carrying the `CancelCause` and the
+- `outcome.rs` — `Signal`, `WaitOutcome`, and the user-facing `SpawnFailure` /
+  `CommandFailure` the evaluator surfaces. A death ral itself caused is its
+  own `WaitOutcome` variant (`Cancelled`, carrying the `CancelCause` and the
   signal we sent), so a torn-down child reports the cause — an expired time
   limit, a `cancel`, an interrupt, a shutdown — while a signal from outside ral
-  still reports its number. *`Ending`* is how a child's or a stage's life ended:
-  `OwnAccord`, or `RalEnded(CancelCause)`. It is recorded on the child and on
-  the stage handle rather than read back off a status, and it is ordered, so two
-  parties that each ended the same one join by `max` and a cancellation in force
-  outranks the collector's reader-gone kill by the order rather than by a
-  special case. It is the sole input to forgiveness and to whether a child's
-  drainers are joined: only `RalEnded(ReaderGone)`, and only a death that kill
-  actually caused, keeps no failure; every other status is kept, because the
-  kill precedes the wait and cannot rewrite a recorded status
+  still reports its number. `CommandFailure::from_outcome` takes `sent: Option<
+  CancelCause>`, the strongest cause anything sent the child, joined by `max`
+  where two parties each ended it — a cancellation in force outranks the
+  collector's reader-gone kill by that order rather than by a special case. It
+  is the sole input to forgiveness: only `Some(ReaderGone)`, and only a death
+  that kill actually caused, keeps no failure; every other status is kept,
+  because the kill precedes the wait and cannot rewrite a recorded status
   ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
 - `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
   stdout write from another thread: a self-pipe polled beside the stage's own
@@ -134,17 +132,21 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   inside its own `Run`, fired outside the heap lock so it cannot deadlock
   ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-primitives]]).
-- `reaper.rs` — the platform child-watch: a `SIGCHLD` handler on Unix
-  (`reaper/unix.rs`) whose whole body is a write to a self-pipe, and a
-  thread that per wake asks each watched pid two `waitid` questions — a
-  stop, consumed so it is not re-reported on every wake, and an exit,
-  observed with `WNOWAIT` and left as a zombie until `Watch::reap`, since
-  the pid would otherwise be free for reuse while its owner may still
-  signal it. *Not reaping is the point*: holding the zombie is what closes
-  pid reuse structurally, rather than by care. Windows watches the same
-  shape (`reaper/windows.rs`) via `RegisterWaitForSingleObject`. Subscribers
-  name their own event type; the reaper speaks `WaitPoll`, one poll's worth
-  of news. Nothing subscribes yet.
+- `reaper.rs` — the process-wide child watch, the one door onto a wait:
+  `ChildHandle::into_watch` is how a spawned child reaches it, `Reaper::
+  watch` how a bare pid does. A `SIGCHLD` handler on Unix (`reaper/unix.rs`)
+  whose whole body is a write to a self-pipe, and a thread that per wake
+  asks each watched pid two `waitid` questions — a stop, consumed and
+  answered with `SIGCONT` on the spot so it never reaches a subscriber and
+  is never re-reported on every wake, and an exit, observed with `WNOWAIT`
+  and left as a zombie until `Watch::reap`, since the pid would otherwise be
+  free for reuse while its owner may still signal it. *Not reaping is the
+  point*: holding the zombie is what closes pid reuse structurally, rather
+  than by care. Windows watches the same shape (`reaper/windows.rs`) via
+  `RegisterWaitForSingleObject`, where a stop cannot arise. Every subscriber
+  names its own event type — the pipeline collector's `Event::Ended`, the
+  standalone command's `ChildEvent::Ended`, `spawn_detached`'s own channel —
+  over `WaitOutcome`, the reaper's one wire type.
 - `cancel.rs` — the cause-bearing `CancelScope` tree (`DurableRoot` /
   `ForegroundScope`, `CancelCause`) for structured-concurrency cancellation,
   polled cooperatively in hot loops
@@ -175,11 +177,11 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
   external group, `relay_handler` fans SIGINT to active external pgids, and
   `quit_handler` is the Ctrl-`\` root abort. Platform handlers live in
-  `signal/unix.rs` and `signal/windows.rs`. Unix child and process-group waits
-  pass through typed blocking / polling funnels for pids and pgids: rustix owns
-  pid and total status types, while the funnel shape owns optionality and makes
-  `EINTR` invisible without conflating `NOHANG` with `ECHILD`
-  ([[decisions/260720_total-wait-status|total-wait-status]]). The Windows side
+  `signal/unix.rs` and `signal/windows.rs`. Every Unix child wait now goes
+  through the reaper's `waitid`, the one funnel; a pgid is signalled directly
+  by `kill(-pgid, …)`, never waited on
+  ([[decisions/260720_total-wait-status|total-wait-status]], superseded on
+  the pid side). The Windows side
   carries the console-control escalation ladder (`CTRL_BREAK_EVENT` fan-out, then
   `TerminateJobObject`, then exit), `relay_interrupt` — `relay_handler`'s
   non-escalating twin, whose fan-out skips a detached worker's group — and

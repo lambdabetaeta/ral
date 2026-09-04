@@ -546,7 +546,7 @@ mod tests {
     fn confined_child_writes_inside_the_grant_and_not_outside() {
         let _env = crate::test_env::env_guard();
         use crate::process::cancel::CancelScope;
-        use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome, WaitPoll};
+        use crate::process::{Launch, PgidPolicy, StdioSpec, WaitOutcome};
         use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
         use std::path::Path;
 
@@ -601,13 +601,8 @@ mod tests {
             let (mut child, _pgid, _) = launch
                 .spawn(PgidPolicy::Inherit)
                 .expect("CreateProcessW must accept the derived capability SIDs");
-            match child
-                .wait_handling_stop()
-                .expect("wait for the confined child")
-            {
-                WaitPoll::Done(outcome) => outcome,
-                WaitPoll::Stopped(_) => unreachable!("Windows has no stops"),
-            }
+            let status = child.reap().expect("wait for the confined child");
+            WaitOutcome::from_exit_status(status)
         };
 
         let ended_inside = run_echo_to("ok.txt");

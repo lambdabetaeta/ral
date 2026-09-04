@@ -131,8 +131,9 @@ impl Signal {
     }
 }
 
-/// What the OS reported when a process ended.  Never a stop: [`WaitPoll`] is
-/// the type a stop can inhabit, so a terminal reader cannot be handed one.
+/// What the OS reported when a process ended.  Never a stop: the reaper
+/// answers every stop itself, with `SIGCONT`, and posts nothing for it, so
+/// no terminal reader is ever handed one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitOutcome {
     Exited(i32),
@@ -147,18 +148,6 @@ pub enum WaitOutcome {
         signal: Signal,
     },
     NativeCode(i32),
-}
-
-/// One `waitpid` / `WaitForSingleObject` poll.
-///
-/// A stop, which every caller answers with `SIGCONT` and keeps waiting on the
-/// same child, or a terminal [`WaitOutcome`].  Split from `WaitOutcome`
-/// itself so a stop cannot reach a terminal-outcome reader — the type, not a
-/// caller's discipline, is what makes that unwritable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WaitPoll {
-    Stopped(Signal),
-    Done(WaitOutcome),
 }
 
 impl WaitOutcome {

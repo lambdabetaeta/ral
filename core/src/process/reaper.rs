@@ -14,9 +14,10 @@
 //! its owner says otherwise.
 //!
 //! [`crate::process::ChildHandle::into_watch`] is the one door from a spawned
-//! child to a watch.  Standalone as of this module: nothing outside its own
-//! tests calls it yet.  `RunningChild::wait`, the pipeline collector, and
-//! `hatch.rs` still run their own poll loops.
+//! child to a watch: `RunningChild::wait`, the pipeline collector, and
+//! `spawn_detached`'s intermediate all watch through it.  `hatch.rs`'s table
+//! is the one caller that does not — it polls `ChildHandle::try_reap`
+//! directly, being a table swept on demand rather than a subscriber.
 
 #[cfg(unix)]
 mod unix;

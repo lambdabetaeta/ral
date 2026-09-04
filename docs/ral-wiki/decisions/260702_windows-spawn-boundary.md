@@ -179,7 +179,10 @@ Windows `PROCESS_INFORMATION`, so raw `CreateProcessW` cannot honestly return
 - Windows variant: owns the process handle, pid, optional `ChildStdout` and
   `ChildStderr` handles, and any thread handle that must be closed after resume.
 - Public methods stay the current small set: `id`, `kill`, `take_stdout`,
-  `take_stderr`, `wait_handling_stop`, `try_wait_handling_stop`, and `reap`.
+  `take_stderr`, and `reap` — plus, since
+  [[decisions/260904_one-reaper-one-fold|one-reaper-one-fold]], `into_watch`,
+  which hands the wait to the process-wide reaper and replaced the
+  `wait_handling_stop`/`try_wait_handling_stop` pair this list first named.
 
 Then migrate `RunningChild::assemble_with_owner`, `PipelineGroup::spawn`,
 `spawn_with_pgid`, transport child storage, and the Windows group registry to

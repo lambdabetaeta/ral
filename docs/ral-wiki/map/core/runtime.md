@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0c6ec335
-generated_at_date: 2026-09-03
+generated_at_commit: 4957c6c4
+generated_at_date: 2026-09-04
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -145,22 +145,21 @@ recursion is irreducible; the evaluator reaches it at
   - `launch.rs` (`PipelineBuild` owns launch; a failed launch is its drop, the
     collector it carries killing the group before any stage handle joins;
     `StageHandle` dispatches `kill_now`/`kill_by_pid`/`cancel` over its two
-    kinds, `External`/`Thread` — `kill_now` (the reader-gone cascade) is the
-    one place permitted to raise the forgiven `Ending`; `kill_by_pid` is a
-    joining collector's own teardown reaching what it launched directly, with
-    no pgid of its own to kill — an `External` is an
-    `ExternalWaiter`, the handle onto that stage's own dedicated waiter
-    thread (`spawn_external_waiter`, wrapping
-    `command::RunningChild::run_pipeline_stage`), which owns that child's
-    wait exclusively and answers every stop that child sees with `SIGCONT`
-    inline, invisible to the collector
-    ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]); the
-    collector never probes or `waitpid`s a pipeline
-    stage at all, every settlement arriving as its own `Report::Settled`.
-    `file_settled` is total over both kinds — an external's already-resolved
-    observation just reclaims its waiter's join handle, a thread's is
-    forgiven if its `Ending` says `ReaderGone` — carrying the one `Ending`
-    every later decision about that stage reads); `group.rs`
+    kinds, `External`/`Thread` — `kill_now` is the reader-gone cascade,
+    `kill_by_pid` a joining collector's own teardown reaching what it
+    launched directly, with no pgid of its own to kill — an `External` is a
+    `crate::process::Watch` alone, the reaper's own subscription: no
+    dedicated waiter thread, since `ChildHandle::into_watch`'s closure posts
+    the exit straight onto the collector's channel as `Event::Ended(ix, _)`,
+    and a stop never reaches the collector at all — the reaper answers it
+    with `SIGCONT` before any subscriber sees one
+    ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
+    `StageEnd` carries a `Thread`'s already-built `StageObservation` or an
+    `External`'s raw outcome and still-unsettled pumps; on an external's own
+    `Event::Ended`, `StageHandle::file_external_end` reaps the watch — after
+    the stage has left `stages`, so no later `KillStage` can ever name a
+    reaped pid — then finishes the jail and releases the held-open edge);
+    `group.rs`
     (`PipelineGroup::prepare` spawns the pgid anchor —
     `--ral-pipeline-anchor`, ignoring `SIGTSTP`/`SIGTTIN`/`SIGTTOU` outright
     and immune to termination signals — on every
@@ -170,40 +169,49 @@ recursion is irreducible; the evaluator reaches it at
     `holds_terminal` reports the handoff actually held
     rather than the plan it was launched under; `PipelineGroup::joining` is the
     no-anchor, no-relay, may-not-signal shape a nested pipeline inside a stage
-    thread gets instead. `start_witness_threads` (called once the collector's
-    channel exists, since the anchor spawns before it does) starts the
-    anchor's two dedicated threads — a report reader blocking to EOF on its
-    stdout, an anchor waiter the sole reaper of its pid, answering its own
-    rare stop with `SIGCONT` inline exactly as any other waiter does — both
-    reporting only `Report::Witnessed(Cancelled(..))`, since a stop is never
-    witnessed; `AnchorProcess::finish` joins them rather than
-    reaping directly. The group's whole verb set is `signal` and `kill`, both
-    `&self`; `CollectState::cancel_all` spells signal, a bounded blocking
-    `recv_timeout` grace, kill, a further blocking drain, while
+    thread gets instead. `start_witness` (called once the collector's channel
+    exists, since the anchor spawns before it does) starts one dedicated
+    thread, a report reader blocking to EOF on the anchor's stdout, and hands
+    the anchor's own `ChildHandle` to the reaper as a `Watch` (`Anchored::
+    Spawned` → `Anchored::Watched`), whose posting closure maps the exit to
+    `Event::Cancelled`; the anchor's own rare stop is answered by the reaper
+    like any other watched pid's, with no thread of the anchor's own
+    involved. `AnchorProcess::finish` joins the report reader and drops the
+    watch, whose `Drop` reaps. The group's whole verb set is `signal` and
+    `kill`, both `&self`; `CollectState::cancel_all` spells signal, a bounded
+    blocking `recv_timeout` grace, kill, a further blocking drain, while
     `CollectState::drop` kills whenever it is dropped with a stage still
     unobserved); `thread.rs` (`launch_thread_stage` wires a `Thread`
     stage's `Io` from its `StageRoute`, and its closure — given its own index,
     finality, and a sender clone — builds its own `StageObservation` and
-    sends `Report::Settled(ix, Settlement::Thread(obs))` as its last act, the
-    sender bound in the closure's outermost frame so an unwind drops it too;
+    sends `Event::Returned(ix, obs)` as its last act, the sender bound in the
+    closure's outermost frame so an unwind drops it too;
     `ThreadStage` is the collector's handle onto the running thread, kept
-    only to join once its `Settled` event has arrived, or to recover a
-    panic's message when it never does — a stage thread's own interior stop,
-    a child *it* spawned stopping, is answered inline by that child's own
-    `RunningChild::wait`, structurally invisible to the collector, so there
-    is no interior-stop watcher left to hold a handle onto); `collect.rs`
+    only to join once its `Returned` event has arrived, or to recover a
+    panic's message when it never does — a stage thread's own interior wait,
+    for whatever child *it* spawned, answers a stop inline exactly as
+    `RunningChild::wait` always does, structurally invisible to the
+    collector); `collect.rs`
     (`CollectState` owns the
     stage handles from the first one launched, an `mpsc` channel every
-    producer thread feeds — stage threads, external waiters, the anchor's two
-    threads, a low-frequency cancel-scope timer, the one left — resolved
-    (`resolve`, the one place `&Shell` reaches an external's settlement) into
-    the `Event`s the pure fold `step` folds over — `Settled`, `Witnessed`,
-    `Cancelled`, with no `Stopped`/`Continued` event at all — returning the
-    `Effect`s a thin interpreter (`run`) performs — `KillStage`, `CancelAll`,
-    `Done`; `drive` is
+    producer feeds — the reaper (through a stage's own `Watch`), a stage
+    thread's own report, the anchor's witness, a `watch_cancel` on the
+    mooring's scope — carrying `Event::{Ended, Returned, Cancelled}`, with no
+    `Stopped`/`Continued` variant at all, which the pure fold `step` folds
+    over, returning the `Effect`s a thin interpreter (`CollectState::run`)
+    performs — `KillStage`, `CancelAll`, `Done`. Attribution lives in the
+    fold too: `sent: Vec<Option<CancelCause>>` records the strongest cause
+    this collector ever sent each stage, and `CollectState::fold` — the one
+    place `&mut Shell` reaches an external's settlement (audit synthesis,
+    exit-hint lookup, sandbox-denial augmentation, via
+    `finish_external_settlement`) — is the one place that reads it back
+    against what actually happened, forgiveness being `sent[ix] ==
+    Some(ReaderGone)` and, for an external, `outcome.is_stage_kill()` too;
+    `drive`/`cancel_all`/`step` take no `&Shell` at all. `drive` is
     `loop { for e in step(&mut st, rx.recv()?) { run(e) } }`, no interval, no
     backoff, and its own `Drive` sum is just `Done`, since nothing parks
-    any more). `helper.rs` is the hidden
+    any more; `PipeNode::join` is `drive(&group); fold(mooring, shell).
+    finish(yields)`). `helper.rs` is the hidden
     `--ral-pipeline-anchor` / `--ral-bundled-tool` child entrypoints — the only
     two multicall flags left here, since a ral-written stage no longer
     re-execs at all. On Windows every external a stage thread spawns still

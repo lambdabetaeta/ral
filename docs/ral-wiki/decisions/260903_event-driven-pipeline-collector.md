@@ -4,6 +4,19 @@ status: active
 
 # Event-driven pipeline collector
 
+> The **producer** side is superseded by
+> [[decisions/260904_one-reaper-one-fold|one-reaper-one-fold]]: a stage's
+> settlement, an external's stop, and the anchor's witness no longer each get
+> their own dedicated blocking-wait thread — the reaper is the one thread
+> that owns every child wait, process-wide, and a stop never reaches this
+> collector's channel at all. `Report`/`Settlement`, `SettleOnDrop`'s
+> external-waiter twin, `Witnessed`, `wait_anchor`, `ExternalWaiter`,
+> `run_pipeline_stage`, and the collector's own cancel timer all go with it.
+> The fold and `Effect` below survive untouched: `step` is still pure over
+> `CollectState` and one `Event`, still returns the same `KillStage`/
+> `CancelAll`/`Done`, and `drive` is still `loop { for e in step(&mut st,
+> rx.recv()?) { run(e) } }` — only what feeds the channel changed.
+
 **Every event in a pipeline's lifecycle is an edge — a stop reported once, a
 byte written once, a thread returning once — so the collector that used to
 poll for them is now a pure fold over one channel.** `CollectState::step`
