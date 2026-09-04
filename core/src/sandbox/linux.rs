@@ -347,7 +347,8 @@ pub(super) fn respawn_under_bwrap(
         }
     })?;
     // A bootstrap helper no user code can name, hence never SIGSTOP, so
-    // `ChildHandle`'s WUNTRACED ceremony would buy nothing.
+    // routing this wait through the reaper — whose only extra service is
+    // answering a stop with SIGCONT — would buy nothing.
     #[allow(clippy::disallowed_methods)]
     let status = child
         .wait()

@@ -11,7 +11,9 @@ Unix and `RegisterWaitForSingleObject` on Windows, and every real shell owns
 exactly one of it.** A single process-wide reaper now owns every child wait;
 a subscriber never blocks a thread on its own child, and a stop never
 reaches one at all — the reaper answers it with `SIGCONT` itself, the one
-rule in one place.
+rule in one place. Accepted exception: `hatch.rs`'s table is swept on demand
+rather than watched, so a stop on a hatched child is never answered and the
+child stays stopped.
 
 ## Why
 

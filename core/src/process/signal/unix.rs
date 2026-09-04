@@ -359,7 +359,7 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
     drop(handshake);
     let pid = intermediate.id();
     let (tx, rx) = std::sync::mpsc::channel();
-    let watch = crate::process::reaper::Reaper::global().watch(pid, tx, std::convert::identity);
+    let watch = crate::process::reaper::watch(pid, tx, std::convert::identity);
     // Dropping a `std::process::Child` neither kills nor reaps: the watch
     // above is what now owns its wait.
     drop(intermediate);

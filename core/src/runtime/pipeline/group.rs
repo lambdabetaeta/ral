@@ -165,6 +165,11 @@ impl Drop for PipelineGroup {
     /// The anchor last, after every stage handle has gone (`PipelineResources`
     /// and `PipeNode` both order their fields to guarantee it).
     fn drop(&mut self) {
+        // The relay drops first, still naming a pgid the anchor zombie pins:
+        // reaping the anchor before the relay is gone would leave the pgid
+        // it signals unpinned for the span between the two.
+        #[cfg(unix)]
+        drop(self.relay.take());
         // The Windows group release lives inside this arm, so it cannot be
         // guarded on an ownership fact this same statement has consumed.
         let Some(anchor) = self.anchor.take() else {

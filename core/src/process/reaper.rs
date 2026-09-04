@@ -2,7 +2,7 @@
 //! `RegisterWaitForSingleObject`, so a subscriber never blocks a thread on
 //! its own child.
 //!
-//! [`Reaper::watch`] delivers a pid's exit to the subscriber's own channel,
+//! [`watch`] delivers a pid's exit to the subscriber's own channel,
 //! shaped by the subscriber's own closure — the pipeline collector receives
 //! its own event enum, [`crate::process::ChildHandle`]'s future caller
 //! whatever it likes.  A stop never reaches a subscriber: the reaper answers
@@ -22,14 +22,14 @@
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{Reaper, Watch};
+pub use unix::{Watch, watch};
 #[cfg(unix)]
 pub(crate) use unix::{ensure_installed, kick};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{Reaper, Watch};
+pub use windows::{Watch, watch};
 
 /// No self-pipe on Windows: the console handler already runs on an ordinary
 /// thread, so a kick simply scans the cancel table itself.

@@ -212,9 +212,6 @@ impl EnquiryError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Control {
     Cancel(DispatchId),
-    /// SIGTSTP semantics.
-    Suspend,
-    Resume,
     Resize(Winsize),
 }
 
@@ -964,8 +961,8 @@ impl ControlSender {
                     }
                 }
             }
-            Control::Suspend | Control::Resume | Control::Resize(_) => {
-                // The process-level signal machinery already handles these.
+            Control::Resize(_) => {
+                // The process-level signal machinery already handles this.
             }
         }
     }

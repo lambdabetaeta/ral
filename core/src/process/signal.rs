@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(unix)]
 use super::outcome::Signal;
 use super::outcome::WaitOutcome;
-use super::reaper::{Reaper, Watch};
+use super::reaper::{Watch, watch};
 
 #[cfg(unix)]
 mod unix;
@@ -131,8 +131,9 @@ impl ChildHandle {
 
     /// Non-blocking reap: `Ok(None)` when nothing has exited yet.  Plain
     /// `try_wait`, no `WUNTRACED`, so a stopped child reads as still
-    /// running — exactly what `hatch.rs`'s table wants, since the reaper
-    /// answers the stop on its own and the table is not watching this pid.
+    /// running.  Accepted exception to the one SIGCONT rule: `hatch.rs`'s
+    /// table is swept on demand rather than watched, so a `kill -STOP` on a
+    /// hatched child is never answered and the child stays stopped.
     ///
     /// # Errors
     /// Returns `Err` if the poll fails.
@@ -168,7 +169,7 @@ impl ChildHandle {
         f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
     ) -> Watch {
         let pid = self.id();
-        let watch = Reaper::global().watch(pid, tx, f);
+        let watch = watch(pid, tx, f);
         // Dropping a `std::process::Child` neither kills nor reaps on Unix,
         // and on Windows only closes std's own handle — the watch opened its
         // own while registering.

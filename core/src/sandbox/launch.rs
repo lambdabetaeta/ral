@@ -379,8 +379,9 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = cmd.spawn().expect("spawn sandboxed child");
-        // A one-shot child no user code can SIGSTOP, so `ChildHandle`'s
-        // WUNTRACED dance would buy nothing.
+        // A one-shot child no user code can SIGSTOP, so routing this wait
+        // through the reaper — whose only extra service is answering a
+        // stop with SIGCONT — would buy nothing.
         #[allow(clippy::disallowed_methods)]
         let status = child.wait().expect("wait for sandboxed child");
         status.success()

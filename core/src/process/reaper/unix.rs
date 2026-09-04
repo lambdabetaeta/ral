@@ -185,37 +185,24 @@ fn outcome_from_waitid(status: WaitIdStatus) -> WaitOutcome {
 
 // ── Public API ───────────────────────────────────────────────────────────
 
-/// Process-wide capability to watch children for exit and stop.
-pub struct Reaper;
-
-impl Reaper {
-    /// The one reaper, started on first use.
-    pub fn global() -> &'static Self {
-        ensure_installed();
-        static SINGLETON: Reaper = Reaper;
-        &SINGLETON
-    }
-
-    /// Deliver `pid`'s exit to `tx`, shaped by `f`, exactly once.
-    pub fn watch<E: Send + 'static>(
-        &self,
-        pid: u32,
-        tx: Sender<E>,
-        f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
-    ) -> Watch {
-        ensure_installed();
-        let poster: Box<dyn FnOnce(WaitOutcome) + Send> = Box::new(move |outcome| {
-            let _ = tx.send(f(outcome));
-        });
-        let mut table = subs().lock().unwrap_or_else(PoisonError::into_inner);
-        let entry = table.entry(pid).or_insert(Entry { poster: Some(poster) });
-        // A stop or exit that raced ahead of this registration raised its
-        // `SIGCHLD` before the table knew to look; catch it here rather
-        // than waiting for a wake that may never come.
-        scan_one(pid, entry);
-        drop(table);
-        Watch { pid }
-    }
+/// Deliver `pid`'s exit to `tx`, shaped by `f`, exactly once.
+pub fn watch<E: Send + 'static>(
+    pid: u32,
+    tx: Sender<E>,
+    f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
+) -> Watch {
+    ensure_installed();
+    let poster: Box<dyn FnOnce(WaitOutcome) + Send> = Box::new(move |outcome| {
+        let _ = tx.send(f(outcome));
+    });
+    let mut table = subs().lock().unwrap_or_else(PoisonError::into_inner);
+    let entry = table.entry(pid).or_insert(Entry { poster: Some(poster) });
+    // A stop or exit that raced ahead of this registration raised its
+    // `SIGCHLD` before the table knew to look; catch it here rather
+    // than waiting for a wake that may never come.
+    scan_one(pid, entry);
+    drop(table);
+    Watch { pid }
 }
 
 /// A subscription on one watched pid. Dropping it unsubscribes and reaps;
@@ -314,7 +301,7 @@ mod tests {
         let mut child = spawn_sleep("0");
         let pid = child.id();
         let (tx, rx) = channel();
-        let watch = Reaper::global().watch(pid, tx, std::convert::identity);
+        let watch = watch(pid, tx, std::convert::identity);
 
         assert!(recv_timeout(&rx).is_success(), "sleep 0 exits cleanly");
         watch.reap().expect("reap");
@@ -329,7 +316,7 @@ mod tests {
         let mut child = spawn_sleep("5");
         let pid = child.id();
         let (tx, rx) = channel();
-        let watch = Reaper::global().watch(pid, tx, std::convert::identity);
+        let watch = watch(pid, tx, std::convert::identity);
 
         watch.signal(Signal::new(libc::SIGSTOP));
         watch.kill();
@@ -346,7 +333,7 @@ mod tests {
         let mut child = spawn_sleep("0");
         let pid = child.id();
         let (tx, rx) = channel();
-        let watch = Reaper::global().watch(pid, tx, std::convert::identity);
+        let watch = watch(pid, tx, std::convert::identity);
 
         assert!(recv_timeout(&rx).is_success());
         assert_eq!(
@@ -368,8 +355,8 @@ mod tests {
         let pid_b = b.id();
         let (tx_a, rx_a) = channel();
         let (tx_b, rx_b) = channel();
-        let watch_a = Reaper::global().watch(pid_a, tx_a, std::convert::identity);
-        let watch_b = Reaper::global().watch(pid_b, tx_b, std::convert::identity);
+        let watch_a = watch(pid_a, tx_a, std::convert::identity);
+        let watch_b = watch(pid_b, tx_b, std::convert::identity);
 
         assert!(recv_timeout(&rx_a).is_success());
         assert!(recv_timeout(&rx_b).is_success());

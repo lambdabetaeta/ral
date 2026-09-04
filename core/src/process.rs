@@ -25,7 +25,7 @@ pub use launch::{Launch, StdioSpec};
 pub use lease::TerminalLease;
 
 pub use deadline::{Deadline, arm_callback, arm_lifetime};
-pub use reaper::{Reaper, Watch};
+pub use reaper::{Watch, watch};
 
 pub use cancel::{
     CancelCause, CancelScope, CancelWatch, DurableRoot, ForegroundScope, request_foreground_cancel,

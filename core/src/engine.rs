@@ -676,7 +676,6 @@ fn engine_session(
             Frame::Control(Control::Resize(_winsize)) => {
                 // No terminal fds reach the engine, so it has nothing to resize.
             }
-            Frame::Control(Control::Suspend | Control::Resume) => {}
             Frame::Ping(seq) => {
                 armed = true;
                 let _ = engine_write(&writer, &wire_fault, &Frame::Pong(seq));

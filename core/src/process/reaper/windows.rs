@@ -46,53 +46,42 @@ unsafe extern "system" fn wait_callback<E: Send + 'static>(
     let _ = ctx.tx.send((ctx.f)(outcome));
 }
 
-/// Process-wide capability to watch children for exit.
-pub struct Reaper;
+/// Deliver `pid`'s exit to `tx`, shaped by `f`, exactly once.
+pub fn watch<E: Send + 'static>(
+    pid: u32,
+    tx: Sender<E>,
+    f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
+) -> Watch {
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+            0,
+            pid,
+        )
+    };
+    assert!(!handle.is_null(), "OpenProcess for a watched pid must not fail");
 
-impl Reaper {
-    pub fn global() -> &'static Self {
-        static SINGLETON: Reaper = Reaper;
-        &SINGLETON
+    let ctx = Box::into_raw(Box::new(CallbackCtx { handle, tx, f: Box::new(f) }));
+    let mut wait_handle: HANDLE = std::ptr::null_mut();
+    let ok = unsafe {
+        RegisterWaitForSingleObject(
+            &mut wait_handle,
+            handle,
+            Some(wait_callback::<E>),
+            ctx.cast(),
+            INFINITE,
+            WT_EXECUTEONLYONCE,
+        )
+    };
+    if ok == 0 {
+        // The callback will never run to reclaim `ctx`; reclaim it here.
+        drop(unsafe { Box::from_raw(ctx) });
+        panic!("RegisterWaitForSingleObject for a watched pid must not fail");
     }
 
-    /// Deliver `pid`'s exit to `tx`, shaped by `f`, exactly once.
-    pub fn watch<E: Send + 'static>(
-        &self,
-        pid: u32,
-        tx: Sender<E>,
-        f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
-    ) -> Watch {
-        let handle = unsafe {
-            OpenProcess(
-                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-                0,
-                pid,
-            )
-        };
-        assert!(!handle.is_null(), "OpenProcess for a watched pid must not fail");
-
-        let ctx = Box::into_raw(Box::new(CallbackCtx { handle, tx, f: Box::new(f) }));
-        let mut wait_handle: HANDLE = std::ptr::null_mut();
-        let ok = unsafe {
-            RegisterWaitForSingleObject(
-                &mut wait_handle,
-                handle,
-                Some(wait_callback::<E>),
-                ctx.cast(),
-                INFINITE,
-                WT_EXECUTEONLYONCE,
-            )
-        };
-        if ok == 0 {
-            // The callback will never run to reclaim `ctx`; reclaim it here.
-            drop(unsafe { Box::from_raw(ctx) });
-            panic!("RegisterWaitForSingleObject for a watched pid must not fail");
-        }
-
-        Watch {
-            handle,
-            wait_handle: Mutex::new(Some(wait_handle)),
-        }
+    Watch {
+        handle,
+        wait_handle: Mutex::new(Some(wait_handle)),
     }
 }
 

@@ -29,7 +29,8 @@ use super::super::plugin::{PluginRuntime, framed_run_request};
 ///   foreground run and every detached worker — instead of core-dumping)
 /// - SIGTERM/SIGHUP → term handler (cancels the durable root with `Terminate`;
 ///   the third delivery force-exits via the escalation ladder)
-/// - SIGTSTP → `SIG_IGN`  (shell handles Ctrl+Z via waitpid, not self-stop)
+/// - SIGTSTP → `SIG_IGN`  (the shell never suspends; a stop is answered with
+///   `SIGCONT` by the reaper)
 /// - SIGTTOU → `SIG_IGN`  (shell writes terminal settings without being stopped)
 /// - SIGTTIN → `SIG_IGN`  (shell reads stdin without being stopped if not fg)
 /// - SIGPIPE → `SIG_IGN`  (writing to a closed pipe yields an error, not death)
@@ -72,9 +73,10 @@ pub(super) fn setup_signals() {
             let term = ral_core::process::term_handler() as *const () as libc::sighandler_t;
             libc::signal(libc::SIGTERM, term);
             libc::signal(libc::SIGHUP, term);
-            // Ignore SIGTSTP (Ctrl+Z handled via waitpid) and SIGTTOU/SIGTTIN
-            // so the shell manipulates the terminal and reads stdin without
-            // being stopped when backgrounded.
+            // Ignore SIGTSTP (the shell never suspends; a stop is answered
+            // with SIGCONT by the reaper) and SIGTTOU/SIGTTIN so the shell
+            // manipulates the terminal and reads stdin without being stopped
+            // when backgrounded.
             libc::signal(libc::SIGTSTP, libc::SIG_IGN);
             libc::signal(libc::SIGTTOU, libc::SIG_IGN);
             libc::signal(libc::SIGTTIN, libc::SIG_IGN);

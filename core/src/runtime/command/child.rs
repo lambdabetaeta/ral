@@ -465,8 +465,8 @@ mod tests {
             None,
         );
 
-        // Fire once `wait` is inside its poll loop; the backoff starts at 5 ms,
-        // so the cause is observed promptly after.
+        // `wait` is a single blocking `recv`, so any delay past the sleep
+        // still lands well inside it.
         let canceller = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
             scope.cancel(CancelCause::Interrupt);
@@ -508,8 +508,8 @@ mod tests {
         );
     }
 
-    /// A stop is answered with `SIGCONT` at once by whoever waits on it —
-    /// the one rule, with no owner above it and nothing tracking the stop.
+    /// A stop is answered with `SIGCONT` at once by the reaper — the one
+    /// rule, with no owner above it and nothing tracking the stop.
     #[test]
     fn wait_revives_an_ownerless_sigstopped_child() {
         let mut cmd = std::process::Command::new("/bin/sleep");
