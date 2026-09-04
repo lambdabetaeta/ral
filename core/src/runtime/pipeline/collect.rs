@@ -95,6 +95,7 @@ pub(super) enum StageEnd {
     External {
         name: String,
         outcome: crate::process::WaitOutcome,
+        jail: Option<crate::process::jail::JailCgroup>,
         pumps: command::Pumps,
     },
 }
@@ -278,11 +279,6 @@ impl PipelineCollector {
     }
 }
 
-/// `drive`'s one outcome: every stage observed.
-pub(super) enum Drive {
-    Done,
-}
-
 /// Live collector state: every stage still running or already observed.
 pub(super) struct CollectState {
     stages: Vec<Option<StageHandle>>,
@@ -393,9 +389,9 @@ impl CollectState {
     }
 
     /// An external's own terminal event: file it as a [`StageEnd::External`]
-    /// — [`StageHandle::file_external_end`] reaps the watch, finishes the
-    /// jail, and settles the pumps by this stage's own `sent` — then the
-    /// reader-gone cascade.
+    /// — [`StageHandle::file_external_end`] reaps the watch, carrying the
+    /// jail and the pumps out for [`Self::fold`] to finish and settle by
+    /// this stage's own `sent` — then the reader-gone cascade.
     fn on_ended(&mut self, ix: usize, outcome: crate::process::WaitOutcome) -> Vec<Effect> {
         let handle = self.stages[ix]
             .take()
@@ -443,7 +439,7 @@ impl CollectState {
     /// Perform one [`Effect`]: a kill, or the whole group's cancel.  `Some`
     /// when it decides `drive`'s outcome; the caller returns at once rather
     /// than folding whatever else the same event's effect list still holds.
-    fn run(&mut self, effect: Effect, group: &PipelineGroup) -> Option<Drive> {
+    fn run(&mut self, effect: Effect, group: &PipelineGroup) -> Option<()> {
         match effect {
             Effect::KillStage(ix) => {
                 if let Some(handle) = self.stages[ix].as_mut() {
@@ -453,23 +449,23 @@ impl CollectState {
             }
             Effect::CancelAll(cause) => {
                 self.cancel_all(group, cause);
-                Some(Drive::Done)
+                Some(())
             }
-            Effect::Done => Some(Drive::Done),
+            Effect::Done => Some(()),
         }
     }
 
     /// Fold events until every stage is observed —
     /// `loop { for e in step(&mut st, rx.recv()?) { run(e) } }`, no interval,
     /// no backoff, exact latency, zero idle CPU.
-    pub(super) fn drive(&mut self, group: &PipelineGroup) -> Drive {
+    pub(super) fn drive(&mut self, group: &PipelineGroup) {
         loop {
             let Some(ev) = self.recv() else {
-                return Drive::Done;
+                return;
             };
             for effect in step(self, ev) {
-                if let Some(drive) = self.run(effect, group) {
-                    return drive;
+                if self.run(effect, group).is_some() {
+                    return;
                 }
             }
         }
@@ -570,11 +566,11 @@ impl CollectState {
     /// what happened: an external's pumps are joined, or detached when this
     /// collector's own reader-gone kill ended it, and its outcome folds
     /// through [`finish_external_settlement`]; a thread's own observation is
-    /// [`StageObservation::forgiven`] under that same kill.  The pumps join
-    /// here and not when the stage's end was filed because a join blocks on
-    /// whatever still holds the pipe — a descendant a pid-addressed kill
-    /// missed — and only `cancel_all`'s group kill, which precedes this, can
-    /// end that.
+    /// [`StageObservation::forgiven`] under that same kill.  The pumps join,
+    /// and the jail's cgroup comes down, here and not when the stage's end
+    /// was filed: a join blocks on whatever still holds the pipe, and the
+    /// jail's `rmdir` polls while descendants are still dying — both wait on
+    /// `cancel_all`'s group kill, which precedes this.
     pub(super) fn fold(&mut self, mooring: &Mooring, shell: &mut Shell) -> PipelineCollector {
         let n = self.observed.len();
         let sent = std::mem::take(&mut self.sent);
@@ -587,8 +583,15 @@ impl CollectState {
                 StageEnd::External {
                     name,
                     outcome,
+                    jail,
                     pumps,
                 } => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(jail) = &jail {
+                        jail.finish();
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = jail;
                     pumps.settle(sent[ix] == Some(CancelCause::ReaderGone));
                     finish_external_settlement(&name, outcome, sent[ix], shell, self.started)
                 }
@@ -718,7 +721,7 @@ mod tests {
         collect.push(StageHandle::for_test(&collect, spawn_exiting(0)));
         collect.push(StageHandle::for_test(&collect, spawn_exiting(1)));
 
-        let Drive::Done = collect.drive(&group);
+        collect.drive(&group);
         let folded = collect.fold(&mooring, &mut shell);
         match folded.break_ {
             Some(Break::Error(error)) => assert_ne!(error.exit_code(), 0),
@@ -829,7 +832,7 @@ mod tests {
 
         let mut collect = CollectState::new(&mut group, &mooring, std::time::Instant::now());
         collect.push(StageHandle::for_test(&collect, child));
-        let Drive::Done = collect.drive(&group);
+        collect.drive(&group);
         drop(collect);
 
         assert!(
@@ -1060,7 +1063,7 @@ mod tests {
             panic!("boom");
         });
 
-        let Drive::Done = collect.drive(&group);
+        collect.drive(&group);
         let _ = handle.join();
 
         let folded = collect.fold(&mooring, &mut shell);

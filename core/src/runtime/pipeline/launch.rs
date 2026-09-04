@@ -38,7 +38,6 @@ struct ExternalStage {
     watch: crate::process::Watch,
     name: String,
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     jail: Option<crate::process::jail::JailCgroup>,
     pumps: command::Pumps,
 }
@@ -110,27 +109,25 @@ impl StageHandle {
 
     /// An external's own terminal event: reap the watch — after this stage
     /// has already left the collector's `stages`, so no `KillStage` can ever
-    /// name a reaped pid — finish the jail, then release the held-open read
-    /// end, only now that the writer is reaped so any descendant of that edge
-    /// still blocked writing into it is freed.  The pumps are *not* settled
-    /// here: a descendant that survived the stage's pid-addressed kill still
-    /// holds the pipe a pump reads, and only the group's own kill, which
-    /// `cancel_all` fires after this walk's grace, frees it — so the join is
-    /// the fold's, after the walk, and this stays non-blocking.
+    /// name a reaped pid — then release the held-open read end, only now
+    /// that the writer is reaped so any descendant of that edge still
+    /// blocked writing into it is freed.  Neither the jail nor the pumps are
+    /// settled here: the jail's `rmdir` polls while descendants are still
+    /// dying, and a descendant that survived the stage's pid-addressed kill
+    /// still holds the pipe a pump reads — both wait on `cancel_all`'s group
+    /// kill, so both are the fold's to finish, after the walk, and this
+    /// stays non-blocking.
     pub(super) fn file_external_end(self, outcome: crate::process::WaitOutcome) -> StageEnd {
         let Self { held_edge, kind, .. } = self;
         let StageKind::External(e) = kind else {
             panic!("Event::Ended named a stage that was not spawned as an external");
         };
         let _ = e.watch.reap();
-        #[cfg(target_os = "linux")]
-        if let Some(jail) = &e.jail {
-            jail.finish();
-        }
         drop(held_edge);
         StageEnd::External {
             name: e.name,
             outcome,
+            jail: e.jail,
             pumps: e.pumps,
         }
     }
