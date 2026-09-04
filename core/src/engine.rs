@@ -198,8 +198,8 @@ impl EnquiryDesk for WireDesk {
             return Err(Error::new("enquiry lost: the host connection is down", 1));
         }
 
-        // The park raises `CancelCause`'s own words, so a cancelled enquiry
-        // reads like every other cancelled poll point (`process::check`).
+        // The park mints its error through `Error::cancelled`, as every
+        // poll point does.
         let mut slots = self.slots.lock_ignore_poison();
         loop {
             if let Some(Some(_)) = slots.get(&eid) {
@@ -208,7 +208,7 @@ impl EnquiryDesk for WireDesk {
             }
             if let Some(cause) = cancel.cause() {
                 slots.remove(&eid);
-                return Err(Error::new(cause.message(), cause.exit_code()));
+                return Err(Error::cancelled(cause));
             }
             slots = self
                 .answered

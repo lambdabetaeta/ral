@@ -198,17 +198,17 @@ pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 /// tail call, and the error is unspanned: the break path stamps the innermost
 /// node it unwinds through.
 ///
+/// Mints through `Error::cancelled`, as every poll point does, so a break
+/// carrying a `Status::Cancelled` is the cancel's own whichever point raised
+/// it.
+///
 /// # Errors
 /// Returns `Err` carrying the strongest cause's message and exit code when the
 /// chain is cancelled.
 pub fn check(mooring: &crate::types::Mooring) -> Result<(), crate::types::Break> {
-    if let Some(cause) = mooring.cancel.cause() {
-        return Err(crate::types::Break::Error(crate::types::Error::new(
-            cause.message(),
-            cause.exit_code(),
-        )));
-    }
-    Ok(())
+    mooring.cancel.cause().map_or(Ok(()), |cause| {
+        Err(crate::types::Break::Error(crate::types::Error::cancelled(cause)))
+    })
 }
 
 /// Reset the escalation ladder at an acknowledgment boundary — the REPL

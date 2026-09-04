@@ -211,6 +211,13 @@ impl StageObservation {
     pub(super) fn forgiven(self) -> Self {
         Self::ok().with_audit(self.audit)
     }
+
+    /// Whether this stage's break is a `cause`-cancellation's own — the
+    /// thread analogue of `WaitOutcome::is_stage_kill`, since only
+    /// `Error::cancelled` mints a `Status::Cancelled`.
+    pub(super) fn ended_by(&self, cause: CancelCause) -> bool {
+        matches!(&self.break_, Some(Break::Error(e)) if e.cancelled_by() == Some(cause))
+    }
 }
 
 pub(super) struct PipelineCollector {
@@ -566,7 +573,9 @@ impl CollectState {
     /// what happened: an external's pumps are joined, or detached when this
     /// collector's own reader-gone kill ended it, and its outcome folds
     /// through [`finish_external_settlement`]; a thread's own observation is
-    /// [`StageObservation::forgiven`] under that same kill.  The pumps join,
+    /// [`StageObservation::forgiven`] only when its break is that cancel's
+    /// own — the thread analogue of `is_stage_kill`, since only
+    /// `Error::cancelled` mints one.  The pumps join,
     /// and the jail's cgroup comes down, here and not when the stage's end
     /// was filed: a join blocks on whatever still holds the pipe, and the
     /// jail's `rmdir` polls while descendants are still dying — both wait on
@@ -578,7 +587,12 @@ impl CollectState {
         for (ix, end) in std::mem::take(&mut self.observed).into_iter().enumerate() {
             let Some(end) = end else { continue };
             let obs = match end {
-                StageEnd::Thread(obs) if sent[ix] == Some(CancelCause::ReaderGone) => obs.forgiven(),
+                StageEnd::Thread(obs)
+                    if sent[ix] == Some(CancelCause::ReaderGone)
+                        && obs.ended_by(CancelCause::ReaderGone) =>
+                {
+                    obs.forgiven()
+                }
                 StageEnd::Thread(obs) => obs,
                 StageEnd::External {
                     name,
@@ -976,6 +990,69 @@ mod tests {
         assert!(
             matches!(folded.break_, Some(Break::Error(_))),
             "the very same death, unsent, must be kept as a real failure"
+        );
+    }
+
+    /// The losing order, forced: the reader's `Returned` reaches the
+    /// collector before the writer's own honest exit does, so the writer is
+    /// killed on paper (`sent`) — but its break is its own `exit 3`, not the
+    /// cancel's, so `fold` must not forgive it.
+    #[test]
+    fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
+        let mut shell = Shell::default();
+        let mooring = Mooring::adrift();
+        let mut state = CollectState::for_step_test();
+        state.push(StageHandle::fake_thread_for_step_test());
+        state.push(StageHandle::fake_thread_for_step_test());
+
+        let effects = step(&mut state, Event::Returned(1, StageObservation::ok()));
+        assert!(
+            effects.contains(&Effect::KillStage(0)),
+            "the reader settling first must cascade a kill onto its writer: {effects:?}"
+        );
+
+        let _ = step(
+            &mut state,
+            Event::Returned(0, StageObservation::failure(Error::new("boom", 3))),
+        );
+
+        let folded = state.fold(&mooring, &mut shell);
+        match folded.break_ {
+            Some(Break::Error(e)) => assert_eq!(e.exit_code(), 3),
+            other => panic!("expected the writer's own exit 3 to survive, got {other:?}"),
+        }
+    }
+
+    /// The same losing order, but the writer's break really is the cancel's
+    /// own — `Error::cancelled(ReaderGone)`, as `process::check` would mint
+    /// it — so `fold` forgives it, order notwithstanding.
+    #[test]
+    fn a_thread_writer_the_cancel_ended_is_forgiven() {
+        let mut shell = Shell::default();
+        let mooring = Mooring::adrift();
+        let mut state = CollectState::for_step_test();
+        state.push(StageHandle::fake_thread_for_step_test());
+        state.push(StageHandle::fake_thread_for_step_test());
+
+        let effects = step(&mut state, Event::Returned(1, StageObservation::ok()));
+        assert!(
+            effects.contains(&Effect::KillStage(0)),
+            "the reader settling first must cascade a kill onto its writer: {effects:?}"
+        );
+
+        let _ = step(
+            &mut state,
+            Event::Returned(
+                0,
+                StageObservation::failure(Error::cancelled(CancelCause::ReaderGone)),
+            ),
+        );
+
+        let folded = state.fold(&mooring, &mut shell);
+        assert!(
+            folded.break_.is_none(),
+            "a writer the reader-gone cancel actually ended must be forgiven: {:?}",
+            folded.break_
         );
     }
 

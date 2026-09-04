@@ -88,8 +88,12 @@ anything else was doing by hand what the kernel already does once.
   fold` — the one place `&mut Shell` reaches an external's settlement,
   since no reaper-posting closure may hold one — reads it back against what
   actually happened. Forgiveness is `sent[ix] == Some(ReaderGone)` and, for
-  an external, `outcome.is_stage_kill()` too; a thread stage forgives the
-  same way over its own `Break`. `drive` and `cancel_all` therefore take no
+  an external, `outcome.is_stage_kill()` too; a thread stage is forgiven when
+  `sent` says the collector killed it *and* its break is the cancel's own
+  (`StageObservation::ended_by`, reading `Error::cancelled_by()` back against
+  the one door — `Error::cancelled` — that mints a `Status::Cancelled`),
+  since a thread's `Break` carries no wait status a kill could rewrite.
+  `drive` and `cancel_all` therefore take no
   `&Shell` at all. `Ending`/`EndingCell`, `kill_cause`, `run_pipeline_stage`,
   `Report`, `Settlement`, `Witnessed`, and the old `resolve` are gone with
   it. The standalone command's own `RunningChild::wait` shrank the same way:

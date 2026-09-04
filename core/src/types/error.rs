@@ -1,6 +1,6 @@
 //! The runtime error type.
 
-use crate::process::CommandFailure;
+use crate::process::{CancelCause, CommandFailure};
 use crate::source::Span;
 use std::fmt;
 
@@ -19,6 +19,9 @@ pub struct Error {
 pub enum Status {
     Code(i32),
     Process(CommandFailure),
+    /// ral's own cancellation, minted at a poll point; `Process(CommandFailure::Cancelled)`
+    /// is the same fact reported by a child ral tore down.
+    Cancelled(CancelCause),
 }
 
 impl Error {
@@ -28,6 +31,29 @@ impl Error {
             status: Status::Code(status),
             span: None,
             hint: None,
+        }
+    }
+
+    /// A poll point is any site that reads `CancelScope::cause()` (or
+    /// `is_cancelled()`) and answers `Some` by ending the evaluation with an
+    /// error; every such site mints that error through `Error::cancelled(cause)`.
+    pub fn cancelled(cause: CancelCause) -> Self {
+        Self {
+            message: cause.message().into(),
+            status: Status::Cancelled(cause),
+            span: None,
+            hint: None,
+        }
+    }
+
+    /// The cancellation this error reports, from either door: minted here by
+    /// `Error::cancelled`, or reported by a child ral tore down.
+    pub fn cancelled_by(&self) -> Option<CancelCause> {
+        match self.status {
+            Status::Cancelled(cause) | Status::Process(CommandFailure::Cancelled { cause, .. }) => {
+                Some(cause)
+            }
+            _ => None,
         }
     }
 
@@ -75,6 +101,7 @@ impl Error {
         match &self.status {
             Status::Code(code) => *code,
             Status::Process(failure) => failure.to_user_exit_code(),
+            Status::Cancelled(cause) => cause.exit_code(),
         }
     }
 
@@ -83,6 +110,7 @@ impl Error {
         match &self.status {
             Status::Code(0) | Status::Process(_) => None,
             Status::Code(code) => Some(*code),
+            Status::Cancelled(cause) => Some(cause.exit_code()),
         }
     }
 }

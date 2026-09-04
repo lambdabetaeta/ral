@@ -61,6 +61,10 @@ impl CancelCause {
 
     /// The word every poll point and every host's parked wait reports this
     /// cause with, so the phrasing cannot drift between them.
+    ///
+    /// For rendering a cancellation that already exists — the `Display`
+    /// impl, the process exit byte — never for minting one; minting is
+    /// `Error::cancelled(cause)`'s alone.
     pub fn message(self) -> &'static str {
         match self {
             Self::ReaderGone => "its reader ended",

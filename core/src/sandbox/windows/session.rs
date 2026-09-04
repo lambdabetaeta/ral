@@ -456,12 +456,12 @@ fn io_break(context: &str, e: &std::io::Error) -> Break {
     Break::Error(Error::new(format!("{context}: {e}"), 1))
 }
 
-/// A cancel mid-stamp is not a sandbox failure, so it surfaces as the cause's
-/// own word and status — the same pair every other poll point raises
-/// ([`crate::process::check`]) — and never as `sandbox: fs grant failed`.
+/// A cancel mid-stamp is not a sandbox failure, so it mints through
+/// `Error::cancelled`, as every poll point does, and never as
+/// `sandbox: fs grant failed`.
 fn dacl_break(e: &DaclError) -> Break {
     if let DaclError::Cancelled(cause) = e {
-        return Break::Error(Error::new(cause.message(), cause.exit_code()));
+        return Break::Error(Error::cancelled(*cause));
     }
     Break::Error(Error::new(format!("sandbox: fs grant failed: {e}"), 1))
 }

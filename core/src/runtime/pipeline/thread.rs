@@ -295,7 +295,11 @@ mod tests {
             panic!("a thread stage must settle as Event::Returned");
         };
         assert!(start.elapsed() < Duration::from_millis(500));
-        assert!(obs.break_.is_some(), "a killed stage must not settle Ok");
+        assert!(
+            matches!(&obs.break_, Some(Break::Error(e)) if e.cancelled_by() == Some(CancelCause::ReaderGone)),
+            "a real cancelled thread's break must carry the cancel's own mark: {:?}",
+            obs.break_
+        );
     }
 
     /// `panic_error` converts a caught payload to an error carrying the

@@ -197,11 +197,20 @@ external (if it has one) is torn down by pid inside that stage's own
 `RunningChild::wait`. A nested pipeline's stages are cancelled transitively
 this way, each stage's own wake ending only that stage's own I/O. Forgiveness differs in one respect from an external's: a
 process's wait status says whether the kill or its own `exit` ended it, a
-thread's `Break` does not, so a killed thread is forgiven *whatever* it
-returned — which is why `step`'s reader-gone rule fires `Effect::KillStage`
-only for a writer still `Some` (unsettled) when its reader's own terminal
-event arrives: a thread that has already finished keeps its outcome, and
-`!{ echo a; exit 3 } | head -1` stays honest. Its audit fragment is folded
+thread's `Break` does not carry that fact on its own — so forgiveness names
+it instead. `Error::cancelled` is the one constructor of a
+`Status::Cancelled(cause)` (read back by `StageObservation::ended_by`), and
+every poll point mints through it — `process::check`, the enquiry park in
+`WireDesk::enquire`, and the Windows `dacl_break` — so a thread's break carries
+`cancelled_by() == Some(ReaderGone)` iff a `ReaderGone` cancel on its scope is
+what ended its evaluation, independent of when its `Returned` reaches the
+channel — the thread analogue of `WaitOutcome::is_stage_kill`. A killed
+thread is forgiven only when `sent[ix]` says this collector killed it *and*
+its break is that cancel's own; a thread that raced its own honest exit past
+the kill keeps it. This is also why `step`'s reader-gone rule fires
+`Effect::KillStage` only for a writer still `Some` (unsettled) when its
+reader's own terminal event arrives: a thread that has already finished
+keeps its outcome, and `!{ echo a; exit 3 } | head -1` stays honest. Its audit fragment is folded
 either way: the verdict is the collector's doing, what the stage observed
 still happened. A stage thread's end is its own `Event::Returned`, sent as
 its last act; a panic in the body is caught around the evaluation
