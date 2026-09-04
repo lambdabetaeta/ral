@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 0c6ec335
-verified_at_date: 2026-09-03
+verified_at_commit: 77f7bf14
+verified_at_date: 2026-09-04
 anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, ChromeKind, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, escalation_pending]
 ---
 
@@ -69,7 +69,7 @@ cancellation is a *join*:**
   |---|---|---|---|
   | `Interrupt` | 1 | user asked the foreground to stop | Ctrl-C / Esc / batch SIGINT |
   | `Explicit` | 2 | a targeted worker teardown | `cancel <handle>`, `race` loser |
-  | `Deadline` | 3 | a wall-clock / lifetime ceiling expired | `process::reaper` |
+  | `Deadline` | 3 | a wall-clock / lifetime ceiling expired | `process::deadline` |
   | `Terminate` | 4 | the process was asked to shut down | SIGTERM / SIGHUP |
   | `RootAbort` | 5 | the session root is being reaped | Ctrl-`\` |
 

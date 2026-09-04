@@ -1,7 +1,7 @@
 ---
-verified_at_commit: be7c59e3
-verified_at_date: 2026-08-26
-anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::reaper, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, swap_ambient_stdout]
+verified_at_commit: 77f7bf14
+verified_at_date: 2026-09-04
+anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, swap_ambient_stdout]
 ---
 
 # Output capture and detachment
@@ -72,8 +72,8 @@ A captured stream is a `Sink::Buffer` fed by a *pump* — see [[map/core/io-proc
 - A server holds its stdout open for its whole life, so the pump's `io::copy`
   never sees EOF and the foreground command blocks indefinitely.
 - The release is the *foreground deadline*. exarch arms a 30 s wall as a
-  disarmable entry on the shared `process::reaper` (deadlines-as-data); on expiry
-  the worker's child-wait loop fires `terminate_group`.
+  disarmable entry on the shared `process::deadline` scheduler (deadlines-as-data);
+  on expiry the worker's child-wait loop fires `terminate_group`.
 - A non-interactive exarch external leads its own process group
   (`PgidPolicy::NewLeader`, `core/src/runtime/command/foreground.rs`, gated by
   [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]]),
@@ -159,7 +159,7 @@ The escape is detachment — the *handle* is its evidence
   `exarch/src/shell_eval.rs`); the REPL grants none, so its spawns never reap.
   Age alone no longer kills a worker: a build babysat every run via `poll`
   renews indefinitely, up to the backstop.
-- The mechanism is the reaper's own re-arming `Run` deadline
+- The mechanism is the deadline scheduler's own re-arming `Run` entry
   (`process::arm_callback`, `lease_fire` in `core/src/builtins/concurrency.rs`):
   each firing checks the backstop first, then the idle bound off the handle's
   shared last-observed cell, and either reaps or re-arms itself for the sooner

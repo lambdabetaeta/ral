@@ -52,6 +52,10 @@ pub(crate) fn ensure_installed() {
 fn subs() -> &'static Mutex<HashMap<u32, Entry>> {
     SUBS.get_or_init(|| {
         let (reader, writer) = cloexec_pipe().expect("create reaper self-pipe");
+        // Nonblocking write end: a full pipe means a wake is already pending
+        // and unread, so the handler drops the byte instead of blocking.
+        rustix::fs::fcntl_setfl(&writer, rustix::fs::OFlags::NONBLOCK)
+            .expect("set reaper pipe write end nonblocking");
         WAKE_WRITE_FD.store(writer.as_raw_fd(), Ordering::Release);
         // Leaked deliberately: the self-pipe lives for the process, like the
         // handler itself — there is no shutdown path.

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 68f1964e
-generated_at_date: 2026-08-26
+generated_at_commit: 77f7bf14
+generated_at_date: 2026-09-04
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 
@@ -107,7 +107,7 @@ Bodies are grouped by concern, one submodule each:
   the wait while the root-scoped worker survives
   ([[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-detached-vs-structured]]).
   Under a frame that grants a `WorkerLease`, `spawn` arms a self-re-arming
-  `process::reaper` callback — the idle-observation lease chain: a
+  `process::deadline` callback — the idle-observation lease chain: a
   still-running worker unobserved for `idle` is reaped, where every `poll`
   and every `await`/`race` sweep renews the handle's `last_observed` cell,
   under an absolute `backstop` no polling extends; a worker that finished

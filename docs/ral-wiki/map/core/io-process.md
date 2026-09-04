@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0c6ec335
-generated_at_date: 2026-09-03
+generated_at_commit: 77f7bf14
+generated_at_date: 2026-09-04
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -114,9 +114,9 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   that foregrounds — `ForegroundGuard::try_acquire`, which is *uninvocable*
   without the borrow. The type lives at [[map/core/shell-state|shell-state]];
   the rationale at [[decisions/260619_terminal-lease|terminal-lease]].
-- `reaper.rs` — one lazily started, process-global daemon (`ral-reaper`) owning
-  a min-ordered heap of `(when, action)` entries, firing each at its `Instant`.
-  *Deadlines are data*, not a thread per worker: `arm_lifetime` /
+- `deadline.rs` — one lazily started, process-global daemon (`ral-deadline`)
+  owning a min-ordered heap of `(when, action)` entries, firing each at its
+  `Instant`. *Deadlines are data*, not a thread per worker: `arm_lifetime` /
   `arm_callback` push an entry and return a `#[must_use]` `Deadline` guard —
   dropped, the entry disarms; `keep`-consumed, it fires regardless (the
   fire-and-forget mode a detached worker's lease needs, since the worker
@@ -128,12 +128,23 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   loop, a detached agent worker arms a `Run` that cancels its own token at
   its ceiling, and a detached `spawn` worker's idle-observation lease chain
   ([[map/core/builtins|builtins]]) is a `keep`-ed `Run` that re-arms itself
-  until it reaps or the worker settles. The reaper stays ignorant of
+  until it reaps or the worker settles. The scheduler stays ignorant of
   prompts, cron, and sessions;
-  recurrence is not a reaper concept — a recurring producer re-arms from inside
-  its own `Run`, fired outside the heap lock so it cannot deadlock
+  recurrence is not a scheduler concept — a recurring producer re-arms from
+  inside its own `Run`, fired outside the heap lock so it cannot deadlock
   ([[decisions/260617_scheduled-wakeups|scheduled-wakeups]],
   [[decisions/260616_concurrency-primitives-detached-vs-structured|concurrency-primitives]]).
+- `reaper.rs` — the platform child-watch: a `SIGCHLD` handler on Unix
+  (`reaper/unix.rs`) whose whole body is a write to a self-pipe, and a
+  thread that per wake asks each watched pid two `waitid` questions — a
+  stop, consumed so it is not re-reported on every wake, and an exit,
+  observed with `WNOWAIT` and left as a zombie until `Watch::reap`, since
+  the pid would otherwise be free for reuse while its owner may still
+  signal it. *Not reaping is the point*: holding the zombie is what closes
+  pid reuse structurally, rather than by care. Windows watches the same
+  shape (`reaper/windows.rs`) via `RegisterWaitForSingleObject`. Subscribers
+  name their own event type; the reaper speaks `WaitPoll`, one poll's worth
+  of news. Nothing subscribes yet.
 - `cancel.rs` — the cause-bearing `CancelScope` tree (`DurableRoot` /
   `ForegroundScope`, `CancelCause`) for structured-concurrency cancellation,
   polled cooperatively in hot loops
