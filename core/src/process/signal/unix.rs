@@ -477,21 +477,6 @@ fn classify_wait_status(status: WaitStatus) -> crate::process::WaitPoll {
     WaitPoll::Done(WaitOutcome::NativeCode(status.as_raw()))
 }
 
-/// SIGKILL a pipeline external stage by pid alone, from outside the thread
-/// that owns its wait: the reader-gone cascade, and a background group's
-/// stop-then-kill (fired before the group's own `SIGCONT` could wake it).
-/// Async-signal-safe, no reap — the stage's own dedicated waiter thread
-/// reaps it and reports the death, wherever it is in its own wait.
-pub(super) fn kill_stage_by_pid(pid: u32) {
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "a live OS pid is positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
-    )]
-    unsafe {
-        libc::kill(pid as i32, libc::SIGKILL);
-    }
-}
-
 /// The cause's signal: `SIGINT` for `Interrupt`, else `SIGTERM` — shared with
 /// `PipelineGroup::signal`, whose own pgid-wide send this pid-wide one
 /// mirrors.
@@ -500,21 +485,6 @@ pub(crate) fn cause_signal(cause: CancelCause) -> i32 {
         libc::SIGINT
     } else {
         libc::SIGTERM
-    }
-}
-
-/// Signal a pipeline external stage by pid alone, then `SIGCONT`: the pair
-/// `PipelineGroup::signal` sends the whole group, for a joining group with
-/// no pgid of its own to signal — a stopped process cannot act on the cause
-/// signal until it runs.
-pub(crate) fn signal_stage_by_pid(pid: u32, cause: CancelCause) {
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "a live OS pid is positive and well below i32::MAX, so the u32→pid_t reinterpretation never wraps"
-    )]
-    unsafe {
-        libc::kill(pid as i32, cause_signal(cause));
-        libc::kill(pid as i32, libc::SIGCONT);
     }
 }
 

@@ -45,6 +45,17 @@ pub struct JailCgroup {
     path: PathBuf,
 }
 
+impl JailCgroup {
+    /// Kill everything left in this jail's cgroup, then remove it — the one
+    /// spelling of a jail's teardown, shared by `RunningChild::wait`'s tail
+    /// and a pipeline external stage's own end.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn finish(&self) {
+        linux::kill(self);
+        linux::remove(self);
+    }
+}
+
 /// One exec's whole jail decision, reached without touching the kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JailPlan {

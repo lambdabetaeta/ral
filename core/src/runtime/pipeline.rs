@@ -90,7 +90,7 @@ impl PipeNode {
     /// The last stage carries its value home directly, on the `JoinHandle` or
     /// the OS wait alike; collect reads it only after waiting on the stage.
     pub(crate) fn join(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        self.collect.drive(&self.group, shell);
+        self.collect.drive(&self.group);
         self.collect.fold(mooring, shell).finish(self.yields)
     }
 }

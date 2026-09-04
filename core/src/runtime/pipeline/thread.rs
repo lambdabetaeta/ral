@@ -13,7 +13,7 @@ use crate::io::{Io, Sink};
 use crate::ir::Comp;
 use crate::source::Span;
 use crate::types::{Break, Closure, Error, Mooring, Settled};
-use crate::process::{CancelCause, CancelScope, Ending, EndingCell, Wake};
+use crate::process::{CancelCause, CancelScope, Wake};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
@@ -21,22 +21,11 @@ pub(super) struct ThreadStage {
     join: Option<std::thread::JoinHandle<()>>,
     cancel: CancelScope,
     wake: Arc<Wake>,
-    /// Private to this module: only `cancel` (via `StageHandle::kill_now`
-    /// and `StageHandle::cancel`) raises this, and `file_settled` is its only
-    /// reader.
-    ending: EndingCell,
 }
 
 impl ThreadStage {
-    pub(super) fn cancel(&mut self, cause: CancelCause) {
-        self.ending.raise(Ending::RalEnded(cause));
+    pub(super) fn cancel(&self, cause: CancelCause) {
         self.cancel.cancel(cause);
-    }
-
-    /// This stage's own `Ending`, read by `file_settled` alone: whether a
-    /// kill raised the forgiven one.
-    pub(super) fn ending(&self) -> Ending {
-        self.ending.get()
     }
 
     /// Fire the wake; on Windows also `CancelSynchronousIo` the stage
@@ -58,7 +47,7 @@ impl ThreadStage {
         }
     }
 
-    /// This stage's `Settled` event has already arrived by channel — the
+    /// This stage's `Returned` event has already arrived by channel — the
     /// thread is already returning, so this reclaims it rather than waiting
     /// for it.
     pub(super) fn join_after_settled(mut self) {
@@ -66,9 +55,23 @@ impl ThreadStage {
             let _ = join.join();
         }
     }
+
+    /// A `ThreadStage` around no real thread, for `collect.rs`'s own
+    /// transition-table tests: they drive a producer's own panic through a
+    /// separate, unconnected `std::thread::spawn`, sharing only the index and
+    /// sender with this handle, so all this needs to support is
+    /// `join_after_settled`'s no-op join.
+    #[cfg(test)]
+    pub(super) fn fake_for_step_test() -> Self {
+        Self {
+            join: None,
+            cancel: CancelScope::root(),
+            wake: Wake::new().expect("create a wake"),
+        }
+    }
 }
 
-/// Turn a caught panic's payload into the `Error` a stage's own `Settled`
+/// Turn a caught panic's payload into the `Error` a stage's own `Returned`
 /// carries: downcast the usual `&str`/`String` shapes, else name it unknown,
 /// and stamp the stage's own span, since the panicking thread's stack
 /// carries none of its own to attribute it to.
@@ -111,7 +114,7 @@ pub(super) fn launch_thread_stage(
     cx: LaunchCx<'_>,
     ix: usize,
     is_last: bool,
-    tx: std::sync::mpsc::Sender<super::collect::Report>,
+    tx: std::sync::mpsc::Sender<super::collect::Event>,
 ) -> Settled<ThreadStage> {
     let wake = Wake::new().map_err(|e| {
         let mut err = Error::new(format!("could not create a pipeline stage's wake: {e}"), 1);
@@ -166,7 +169,7 @@ pub(super) fn launch_thread_stage(
                     .with_audit(child.local.audit.take_fragment()),
                 Err(payload) => super::collect::StageObservation::failure(panic_error(&*payload, span)),
             };
-            settle.send(super::collect::Settlement::Thread(obs));
+            settle.send(obs);
         },
     );
     let (join, cancel) = spawned.map_err(|e| {
@@ -179,7 +182,6 @@ pub(super) fn launch_thread_stage(
         join: Some(join),
         cancel,
         wake,
-        ending: EndingCell::default(),
     })
 }
 
@@ -246,10 +248,10 @@ mod tests {
         reader.read_to_end(&mut out).expect("read stage stdout");
         assert_eq!(out, b"hi\n");
 
-        let super::super::collect::Report::Settled(ix, super::super::collect::Settlement::Thread(obs)) =
-            rx.recv().expect("the stage sends its own Settled")
+        let super::super::collect::Event::Returned(ix, obs) =
+            rx.recv().expect("the stage sends its own Returned")
         else {
-            panic!("a thread stage must settle as Settlement::Thread");
+            panic!("a thread stage must settle as Event::Returned");
         };
         assert_eq!(ix, 0);
         assert!(obs.break_.is_none(), "echo hi must not fail");
@@ -279,18 +281,18 @@ mod tests {
             group: &mut group,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut handle =
+        let handle =
             launch_thread_stage(&stage, &spec, route, cx, 0, true, tx).expect("launch");
 
         handle.cancel(CancelCause::ReaderGone);
         handle.interrupt();
 
         let start = Instant::now();
-        let super::super::collect::Report::Settled(_, super::super::collect::Settlement::Thread(obs)) = rx
+        let super::super::collect::Event::Returned(_, obs) = rx
             .recv_timeout(Duration::from_millis(500))
-            .expect("a cancelled stage sends its own Settled within 500ms")
+            .expect("a cancelled stage sends its own Returned within 500ms")
         else {
-            panic!("a thread stage must settle as Settlement::Thread");
+            panic!("a thread stage must settle as Event::Returned");
         };
         assert!(start.elapsed() < Duration::from_millis(500));
         assert!(obs.break_.is_some(), "a killed stage must not settle Ok");

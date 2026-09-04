@@ -31,7 +31,7 @@ pub use unix::{
     term_handler, termios_snapshot, try_waitpgid_eintr, waitpgid_eintr,
 };
 #[cfg(unix)]
-pub(crate) use unix::{cause_signal, signal_stage_by_pid};
+pub(crate) use unix::cause_signal;
 
 #[cfg(windows)]
 mod windows;
@@ -197,23 +197,12 @@ impl ChildHandle {
     }
 }
 
-/// Kill a pipeline external stage by pid alone: the reader-gone cascade, and
-/// a background group's stop-then-kill fired before the group's own
-/// `SIGCONT` could wake it.  By pid rather than through a [`ChildHandle`]
-/// because the handle itself lives on the stage's own dedicated waiter
-/// thread, the sole owner of its wait.
-pub(crate) fn kill_stage_by_pid(pid: u32) {
-    #[cfg(unix)]
-    unix::kill_stage_by_pid(pid);
-    #[cfg(windows)]
-    windows::kill_stage_by_pid(pid);
-}
-
 /// `SIGCONT` a pipeline external stage by pid alone — the ownerless-stop
-/// rule (a detached member deaf to job control revives itself), for the
-/// same reason [`kill_stage_by_pid`] is by pid: the `ChildHandle` lives on
-/// the stage's own dedicated waiter thread.  `cfg(unix)`: nothing stops on
-/// Windows, so there is no stop to revive from there.
+/// rule (a detached member deaf to job control revives itself).  By pid
+/// rather than through a [`ChildHandle`], because the handle itself lives
+/// on the stage's own dedicated waiter thread, the sole owner of its wait.
+/// `cfg(unix)`: nothing stops on Windows, so there is no stop to revive
+/// from there.
 #[cfg(unix)]
 pub(crate) fn cont_stage_by_pid(pid: u32) {
     unix::cont_stage_by_pid(pid);

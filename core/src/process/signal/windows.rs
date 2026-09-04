@@ -795,41 +795,6 @@ pub(super) fn try_wait_handling_stop(
     })
 }
 
-/// Terminate `process` with the collector's own exit code, so
-/// `WaitOutcome::is_stage_kill` can read the kill back off the status.
-/// Terminating an already-exited handle fails harmlessly, which is what
-/// keeps a recorded status from ever being overwritten.
-pub(crate) fn terminate_for_stage_kill(process: HANDLE) {
-    use windows_sys::Win32::System::Threading::TerminateProcess;
-    unsafe {
-        #[allow(
-            clippy::cast_sign_loss,
-            reason = "STAGE_KILL_EXIT_CODE's bit pattern is the point; TerminateProcess takes it as a raw u32"
-        )]
-        TerminateProcess(
-            process,
-            crate::process::outcome::STAGE_KILL_EXIT_CODE as u32,
-        );
-    }
-}
-
-/// [`terminate_for_stage_kill`] by pid alone, from outside the thread that
-/// owns the stage's own `HANDLE`: the reader-gone cascade, and a background
-/// group's stop-then-kill.  `OpenProcess` failing means the process is
-/// already gone, which is exactly the outcome a kill wants.
-pub(super) fn kill_stage_by_pid(pid: u32) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE};
-    unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if handle.is_null() {
-            return;
-        }
-        terminate_for_stage_kill(handle);
-        CloseHandle(handle);
-    }
-}
-
 // ── Foreground ownership ───────────────────────────────────────────────────
 
 /// Windows shares one console across every attached process, so there is nothing

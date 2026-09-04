@@ -21,7 +21,7 @@ mod redirect;
 mod stdio;
 mod vet;
 
-pub(crate) use child::{ExternalPlumbing, GroupOwner, RunningChild};
+pub(crate) use child::{ExternalPlumbing, GroupOwner, Pumps, RunningChild};
 #[cfg(unix)]
 pub(crate) use detach::detach;
 pub(crate) use identity::CommandIdentity;
@@ -154,7 +154,7 @@ pub(crate) fn run(
 
     // `atomic_commit`'s own `Drop` abandons the staged write on an early `?`.
     let waited: WaitedChild = running.wait()?;
-    let (outcome, ending) = (waited.outcome, waited.ending);
+    let (outcome, sent) = (waited.outcome, waited.sent);
 
     // Held rather than `?`-propagated: the drain below must still run for a
     // command that did run, even when its commit failed.
@@ -222,7 +222,7 @@ pub(crate) fn run(
     // A command inside a pipeline stage cannot take SIGPIPE from an interior
     // edge — the parent holds that edge's read end — so any SIGPIPE it
     // suffers is from a pipe of its own making and is its own failure.
-    match crate::process::CommandFailure::from_outcome(outcome, ending) {
+    match crate::process::CommandFailure::from_outcome(outcome, sent) {
         None => Ok(Value::Unit),
         Some(failure) => {
             let err = Error::from_command_failure(&cmd_name, failure, shell);

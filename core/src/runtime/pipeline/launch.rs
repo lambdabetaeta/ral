@@ -4,7 +4,7 @@
 //! unconsumed routes — so a leaked pipe end is a borrow error.
 
 use super::super::command;
-use super::collect::{CollectState, Report, SettleOnDrop, Settlement, StageObservation};
+use super::collect::{CollectState, Event, StageEnd, StageObservation};
 use super::group::PipelineGroup;
 use super::resolve::{
     ExternalStage as ExternalStageSpec, PipelinePlan, StageLaunch, StageSpec, TerminalPlan,
@@ -12,7 +12,7 @@ use super::resolve::{
 use super::route::{ByteIn, ByteOut, StageRoute, open_stage_routes};
 use super::thread::{ThreadStage, launch_thread_stage};
 use crate::io::{Sink, Source, SourceReader};
-use crate::process::{CancelCause, CancelScope, Ending};
+use crate::process::CancelCause;
 use crate::types::{Break, Env, Error, Mooring, Settled, Shell};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -30,69 +30,34 @@ pub(super) struct StageHandle {
     feeds_pipe: bool,
 }
 
-/// The collector's handle onto a direct external stage's own dedicated
-/// waiter thread — the sole owner of that child's wait from spawn to
-/// terminal event.  Everything else the collector once read off the child
-/// directly (`try_settle`, a stop level) is now the waiter's own business,
-/// reported as events; only the pid (a raw signal target) and `kill_cause`
-/// still cross back to this side.
-///
-/// `kill_cause` is its own fresh scope, never the mooring's: the mooring's
-/// cancel scope is shared with every sibling stage (and beyond), so raising
-/// `ReaderGone` on it to attribute *this* stage's own kill would cancel them
-/// too.  [`command::RunningChild::run_pipeline_stage`] reads it instead of
-/// the `RunningChild`'s own `cancel` field, which a pipeline external's
-/// waiter never consults.
-struct ExternalWaiter {
-    join: Option<std::thread::JoinHandle<()>>,
-    kill_cause: CancelScope,
-    pid: u32,
+/// The collector's handle onto a direct external stage: no dedicated waiter
+/// thread — the reaper's own [`crate::process::Watch`] owns this child's
+/// wait, and `into_watch`'s closure posts its outcome straight onto the
+/// collector's channel as [`Event::Ended`].
+struct ExternalStage {
+    watch: crate::process::Watch,
+    name: String,
+    /// Transient guest-jail cgroup, `None` outside a real Linux guest.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    jail: Option<crate::process::jail::JailCgroup>,
+    pumps: command::Pumps,
 }
 
 enum StageKind {
-    External(ExternalWaiter),
+    External(ExternalStage),
     Thread(ThreadStage),
-}
-
-/// Spawn the dedicated waiter thread that owns `running`'s wait exclusively:
-/// a blocking run to the stage's own end, answering every stop it sees
-/// inline, then `Settled` — never a probe the collector calls into.
-fn spawn_external_waiter(running: command::RunningChild, ix: usize, tx: Sender<Report>) -> ExternalWaiter {
-    let kill_cause = CancelScope::root();
-    let pid = running
-        .child
-        .as_ref()
-        .expect("a freshly spawned RunningChild holds its child")
-        .id();
-    let waiter_kill_cause = kill_cause.clone();
-    let join = std::thread::Builder::new()
-        .name("ral pipeline external waiter".to_string())
-        .spawn(move || {
-            let settle = SettleOnDrop::new(ix, tx);
-            let (name, failure) = running.run_pipeline_stage(&waiter_kill_cause);
-            settle.send(Settlement::External { name, failure });
-        })
-        .expect("spawn the pipeline's external waiter thread");
-    ExternalWaiter {
-        join: Some(join),
-        kill_cause,
-        pid,
-    }
 }
 
 impl StageHandle {
     /// [`super::collect::Effect::KillStage`]'s mechanical action: the
     /// reader-gone cascade alone, whose guard — this stage still running
-    /// and feeding the pipe — `step` has already checked.  The **one**
-    /// place that raises the forgiven ending on either record: a thread's
-    /// `ThreadStage::ending`, or an external's `kill_cause`.  No other kill
-    /// on this stage may claim a death nothing sent it.
+    /// and feeding the pipe — `step` has already checked, and whose
+    /// attribution `step` has already recorded in the collector's own
+    /// `sent`.  Unchanged for a thread: its own cancel scope still needs
+    /// cancelling and waking, which is real cancellation, not attribution.
     pub(super) fn kill_now(&mut self) {
         match &mut self.kind {
-            StageKind::External(e) => {
-                e.kill_cause.cancel(CancelCause::ReaderGone);
-                crate::process::kill_stage_by_pid(e.pid);
-            }
+            StageKind::External(e) => e.watch.kill(),
             StageKind::Thread(t) => {
                 t.cancel(CancelCause::ReaderGone);
                 t.interrupt();
@@ -102,29 +67,32 @@ impl StageHandle {
 
     /// Kill this stage's pid alone if it is a live external — a joining
     /// collector's `cancel_all`, with no pgid of its own to kill, reaching
-    /// what it launched directly.  Raises nothing on either record: a
-    /// thread stage was already cancelled and woken by [`Self::cancel`].
+    /// what it launched directly.  A no-op for a thread stage, already
+    /// cancelled and woken by [`Self::cancel`].
     pub(super) fn kill_by_pid(&self) {
         if let StageKind::External(e) = &self.kind {
-            crate::process::kill_stage_by_pid(e.pid);
+            e.watch.kill();
         }
     }
 
     /// End this stage as part of the pipeline's teardown; the caller signals
     /// and kills the group separately.  A thread is also woken, which ends
-    /// the read or write it is blocked in.  An external's `kill_cause` is
-    /// set for its waiter's ending attribution, and the cause signal is
-    /// delivered to its pid directly — cancellation reaches what this
-    /// collector launched whether or not it owns a group to signal; a
-    /// stage's own kill reaches its pid alone, and descendants are the group
-    /// owner's to end.  For an owned group this duplicates the group's own
-    /// signal on the same pid, which is harmless.
+    /// the read or write it is blocked in.  The cause signal is delivered to
+    /// an external's pid directly — cancellation reaches what this collector
+    /// launched whether or not it owns a group to signal; a stage's own kill
+    /// reaches its pid alone, and descendants are the group owner's to end.
+    /// For an owned group this duplicates the group's own signal on the same
+    /// pid, which is harmless.  Windows has no non-lethal signal, so an
+    /// external stage's own `cancel` is a no-op there — the group's own
+    /// eventual kill finishes it off.
     pub(super) fn cancel(&mut self, cause: CancelCause) {
         match &mut self.kind {
             StageKind::External(e) => {
-                e.kill_cause.cancel(cause);
                 #[cfg(unix)]
-                crate::process::signal_stage_by_pid(e.pid, cause);
+                e.watch
+                    .signal(crate::process::Signal::new(crate::process::cause_signal(cause)));
+                #[cfg(windows)]
+                let _ = (e, cause);
             }
             StageKind::Thread(t) => {
                 t.cancel(cause);
@@ -140,68 +108,106 @@ impl StageHandle {
         self.feeds_pipe
     }
 
-    /// Reduce this stage's own `Settled` event to its final observation, then
-    /// release the held-open read end — only now that the writer is reaped,
-    /// so any descendant of that edge still blocked writing into it is freed.
-    /// Total over both kinds, not a match with an `External` no-op standing
-    /// in for "nothing left to do": an external's `obs` already carries
-    /// everything (`CollectState::resolve` built it, `&Shell` and all), so
-    /// only its waiter thread wants reclaiming; a thread's `Break` carries no
-    /// mark of whether the kill or its own code ended it, so a killed one is
-    /// forgiven whatever it returned.
-    pub(super) fn file_settled(self, obs: StageObservation) -> StageObservation {
+    /// An external's own terminal event: reap the watch — after this stage
+    /// has already left the collector's `stages`, so no `KillStage` can ever
+    /// name a reaped pid — finish the jail, then release the held-open read
+    /// end, only now that the writer is reaped so any descendant of that edge
+    /// still blocked writing into it is freed.  The pumps are *not* settled
+    /// here: a descendant that survived the stage's pid-addressed kill still
+    /// holds the pipe a pump reads, and only the group's own kill, which
+    /// `cancel_all` fires after this walk's grace, frees it — so the join is
+    /// the fold's, after the walk, and this stays non-blocking.
+    pub(super) fn file_external_end(self, outcome: crate::process::WaitOutcome) -> StageEnd {
         let Self { held_edge, kind, .. } = self;
-        let obs = match kind {
-            StageKind::External(e) => {
-                if let Some(join) = e.join {
-                    let _ = join.join();
-                }
-                obs
-            }
-            StageKind::Thread(t) => {
-                let ending = t.ending();
-                t.join_after_settled();
-                match ending {
-                    Ending::RalEnded(CancelCause::ReaderGone) => obs.forgiven(),
-                    _ => obs,
-                }
-            }
+        let StageKind::External(e) = kind else {
+            panic!("Event::Ended named a stage that was not spawned as an external");
         };
+        let _ = e.watch.reap();
+        #[cfg(target_os = "linux")]
+        if let Some(jail) = &e.jail {
+            jail.finish();
+        }
         drop(held_edge);
-        obs
+        StageEnd::External {
+            name: e.name,
+            outcome,
+            pumps: e.pumps,
+        }
+    }
+
+    /// A thread stage's own terminal event: its `Returned` has already
+    /// arrived by channel, so this reclaims the join rather than waiting for
+    /// it, then releases the held-open read end.  A killed thread's `Break`
+    /// carries no mark of whether the kill or its own code ended it —
+    /// forgiveness by `sent` is the fold's, not this method's.
+    pub(super) fn file_thread_end(self, obs: StageObservation) -> StageEnd {
+        let Self { held_edge, kind, .. } = self;
+        let StageKind::Thread(t) = kind else {
+            panic!("Event::Returned named a stage that was not a thread stage");
+        };
+        t.join_after_settled();
+        drop(held_edge);
+        StageEnd::Thread(obs)
     }
 
     /// A `StageHandle` around an already-running external, for `collect.rs`'s
-    /// own tests: wires its own dedicated waiter thread into `collect`'s
-    /// channel exactly as `spawn_stage` does, without a whole pipeline launch
-    /// to set one up.
+    /// own tests: wires it into `collect`'s channel exactly as `spawn_stage`
+    /// does, without a whole pipeline launch to set one up.
     #[cfg(test)]
-    pub(super) fn for_test(collect: &CollectState, child: command::RunningChild) -> Self {
+    pub(super) fn for_test(collect: &CollectState, child: crate::process::ChildHandle) -> Self {
         let ix = collect.next_index();
-        let waiter = spawn_external_waiter(child, ix, collect.sender());
+        let watch = child.into_watch(collect.sender(), move |o| Event::Ended(ix, o));
         Self {
-            kind: StageKind::External(waiter),
+            kind: StageKind::External(ExternalStage {
+                watch,
+                name: "test".to_string(),
+                jail: None,
+                pumps: command::Pumps::default(),
+            }),
             held_edge: None,
             feeds_pipe: true,
         }
     }
 
-    /// A `StageHandle` around no process at all, for `step`'s own
-    /// transition-table tests: they drive events by hand, so all this needs
-    /// to support is `kill_now`'s mechanical dispatch — which lands on a pid
-    /// nothing ever spawned, an `ESRCH` no different from signalling a
-    /// process that already exited.
+    /// A `StageHandle` around a real child nobody watches for, for `step`'s
+    /// own transition-table tests: they drive events by hand rather than
+    /// waiting on a real exit, so all this needs to support is `kill_now`'s
+    /// mechanical dispatch and, once a test synthesizes this stage's own
+    /// `Event::Ended`, a real (already-dead) pid for `Watch::reap` to
+    /// consume.  Spawned and killed at once, as the reaper's own tests do.
     #[cfg(test)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:test] test process scaffolding"
+    )]
     pub(super) fn fake_external_for_step_test() -> Self {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a fake stage's child");
+        let _ = child.kill();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let watch = crate::process::ChildHandle::from_std(child)
+            .into_watch(tx, std::convert::identity);
         Self {
-            kind: StageKind::External(ExternalWaiter {
-                join: None,
-                kill_cause: CancelScope::root(),
-                // Comfortably past any real pid on every platform ral runs
-                // on, and never `-1`/`0`, which `kill` reads as "every
-                // process in a group" rather than "no such process".
-                pid: i32::MAX as u32,
+            kind: StageKind::External(ExternalStage {
+                watch,
+                name: "fake".to_string(),
+                jail: None,
+                pumps: command::Pumps::default(),
             }),
+            held_edge: None,
+            feeds_pipe: true,
+        }
+    }
+
+    /// A `StageHandle` around no real thread, for `collect.rs`'s own
+    /// `SettleOnDrop` test: a thread-kind fake, so an `Event::Returned` for
+    /// it is the shape a real thread stage's own end would be.
+    #[cfg(test)]
+    pub(super) fn fake_thread_for_step_test() -> Self {
+        Self {
+            kind: StageKind::Thread(ThreadStage::fake_for_step_test()),
             held_edge: None,
             feeds_pipe: true,
         }
@@ -361,33 +367,37 @@ pub(super) fn wire_stage_stdio(
     })
 }
 
-/// Spawn `cmd` into `group` and assemble the [`command::RunningChild`] for a
-/// direct external stage.
-pub(super) fn spawn_into_group(
+/// Spawn `cmd` into `group`, wire its pumps, and watch it: the sole assembly
+/// point for a direct external stage.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the single assembly point for an external stage; splitting it would just scatter the same parameters across a builder"
+)]
+fn spawn_into_group(
     group: &PipelineGroup,
     cmd: &mut crate::process::Launch,
     name: String,
     plumbing: command::ExternalPlumbing,
-    mooring: &Mooring,
     shell: &Shell,
+    ix: usize,
+    tx: Sender<Event>,
     spawn_error: impl FnOnce(std::io::Error) -> Break,
-) -> Settled<command::RunningChild> {
-    let (child, jail) = group.spawn(cmd).map_err(spawn_error)?;
+) -> Settled<ExternalStage> {
+    let (mut child, jail) = group.spawn(cmd).map_err(spawn_error)?;
     let leader = group.leader_pgid();
     if shell.has_active_capabilities() {
         // Windows routes the limits through the pipeline's own job rather
         // than a second per-child one; on Unix `pre_exec` did it already.
         crate::sandbox::apply_child_limits_in_pipeline(&child, leader);
     }
-    Ok(command::RunningChild::assemble_with_owner(
-        child,
+    let pumps = command::Pumps::spawn(plumbing, &mut child);
+    let watch = child.into_watch(tx, move |o| Event::Ended(ix, o));
+    Ok(ExternalStage {
+        watch,
         name,
-        plumbing,
-        // Windows group release belongs to `PipelineGroup::drop`.
-        command::GroupOwner::BorrowedByPipeline,
-        mooring.cancel.as_scope().clone(),
         jail,
-    ))
+        pumps,
+    })
 }
 
 pub(super) struct LaunchCx<'a> {
@@ -417,14 +427,13 @@ fn spawn_stage(
     cx: LaunchCx<'_>,
     ix: usize,
     is_last: bool,
-    tx: Sender<Report>,
+    tx: Sender<Event>,
 ) -> Settled<StageHandle> {
     let held_edge = route.held.take();
     let kind = match &spec.launch {
         StageLaunch::Direct(ext) => {
-            let running =
-                launch_external_stage_direct(ext, route, cx.mooring, cx.shell, cx.group)?;
-            StageKind::External(spawn_external_waiter(running, ix, tx))
+            let stage = launch_external_stage_direct(ext, route, cx.mooring, cx.shell, cx.group, ix, tx)?;
+            StageKind::External(stage)
         }
         StageLaunch::Thread => {
             StageKind::Thread(launch_thread_stage(stage, spec, route, cx, ix, is_last, tx)?)
@@ -524,13 +533,19 @@ impl PipelineBuild {
 
 /// Spawn an external stage with no thread hosting it.  Admitted by
 /// `resolve::direct_spawnable` alone: no redirect, no byte-capturing audit.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one dispatch call per external stage; ix and tx have nowhere else to ride"
+)]
 fn launch_external_stage_direct(
     ext: &ExternalStageSpec,
     route: StageRoute,
     mooring: &Mooring,
     shell: &mut Shell,
     group: &PipelineGroup,
-) -> Result<command::RunningChild, Break> {
+    ix: usize,
+    tx: Sender<Event>,
+) -> Result<ExternalStage, Break> {
     let rc = command::vet(&ext.id, &ext.args, shell)?;
     let mut cmd = command::build_command(
         &rc,
@@ -553,8 +568,9 @@ fn launch_external_stage_direct(
         &mut cmd,
         rc.shown.clone(),
         plumbing,
-        mooring,
         shell,
+        ix,
+        tx,
         |e| command::spawn_error(confinement, &rc.shown, &e),
     )
 }

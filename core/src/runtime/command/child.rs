@@ -4,7 +4,7 @@
 //! twice" unwritable.
 
 use crate::io::Sink;
-use crate::process::{CancelCause, Ending, EndingCell, KillTarget};
+use crate::process::{CancelCause, KillTarget};
 use crate::types::{Break, Error, Settled};
 
 /// Who releases the Windows group registered in `win_groups`
@@ -20,6 +20,46 @@ pub(crate) enum GroupOwner {
     None,
     Standalone(crate::process::Pgid),
     BorrowedByPipeline,
+}
+
+/// The two drainer threads over a child's piped stdout/stderr — the one
+/// spelling of join-or-detach, shared by [`WaitedChild::settle`] and the
+/// pipeline collector's fold.  A reader-gone kill's remaining bytes are owed
+/// to nobody, and a descendant that survived that pid-addressed kill still
+/// holds the pipe the pump reads, so joining it would never return; every
+/// other ending joins — after whatever kill frees the pipe, never before.
+#[derive(Default)]
+pub(crate) struct Pumps {
+    stdout: Option<std::thread::JoinHandle<()>>,
+    stderr: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Pumps {
+    /// Spawn the drainers `plumbing` asks for, taking `child`'s piped
+    /// stdout/stderr for them.
+    pub(crate) fn spawn(plumbing: ExternalPlumbing, child: &mut crate::process::ChildHandle) -> Self {
+        let ExternalPlumbing {
+            stdout_pump,
+            stderr_pump,
+        } = plumbing;
+        Self {
+            stdout: stdout_pump.and_then(|sink| child.take_stdout().map(|s| sink.pump(s))),
+            stderr: stderr_pump.and_then(|sink| child.take_stderr().map(|s| sink.pump(s))),
+        }
+    }
+
+    /// Join both drainers, or detach them when `detach`.
+    pub(crate) fn settle(self, detach: bool) {
+        if detach {
+            return;
+        }
+        if let Some(jh) = self.stdout {
+            let _ = jh.join();
+        }
+        if let Some(jh) = self.stderr {
+            let _ = jh.join();
+        }
+    }
 }
 
 /// A spawned external child plus the threads draining its piped stdout/stderr;
@@ -44,10 +84,7 @@ pub(crate) struct RunningChild {
     /// `kill(-pgid, …)` but cannot leave its cgroup.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub jail: Option<crate::process::jail::JailCgroup>,
-    pub pump: Option<std::thread::JoinHandle<()>>,
-    /// `None` when stderr was inherited, redirected to a file, or dup'd onto
-    /// stdout by `2>&1` — nothing to pump in any of those cases.
-    pub stderr_pump: Option<std::thread::JoinHandle<()>>,
+    pumps: Pumps,
     pub name: String,
     pub group_owner: GroupOwner,
     /// Polled by `wait`, because a blocking `waitpid` / `WaitForSingleObject`
@@ -56,10 +93,11 @@ pub(crate) struct RunningChild {
     /// not preempt a child that never exits on its own.
     pub cancel: crate::process::CancelScope,
     /// How this child's life ended, once ral itself ended it: the cancel
-    /// branch of `wait` and the pipeline collector's reader-gone kill are the
-    /// only writers.  Sole input to forgiveness and to whether the drainers
-    /// are joined.
-    ending: EndingCell,
+    /// branch of `wait` is the only writer.  Sole input to forgiveness and to
+    /// whether the drainers are joined; two writers each ending the same
+    /// child would join by `max`, though `wait`'s own cancel branch is the
+    /// only one this type ever sees.
+    sent: Option<CancelCause>,
 }
 
 /// A child observed dead, holding its outcome and its not-yet-joined drainers.
@@ -67,9 +105,8 @@ pub(crate) struct RunningChild {
 /// status interpretation carry a borrow-check proof that the child has exited.
 pub(crate) struct WaitedChild {
     pub outcome: crate::process::WaitOutcome,
-    pub ending: Ending,
-    pump: Option<std::thread::JoinHandle<()>>,
-    stderr_pump: Option<std::thread::JoinHandle<()>>,
+    pub sent: Option<CancelCause>,
+    pumps: Pumps,
     /// Trace context carried from the `RunningChild` so `settle`'s pump-join
     /// timings attribute to the same command instance.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
@@ -105,21 +142,15 @@ impl RunningChild {
         jail: Option<crate::process::jail::JailCgroup>,
     ) -> Self {
         let mut child = child;
-        let ExternalPlumbing {
-            stdout_pump,
-            stderr_pump,
-        } = plumbing;
-        let pump = stdout_pump.and_then(|sink| child.take_stdout().map(|s| sink.pump(s)));
-        let stderr_pump = stderr_pump.and_then(|sink| child.take_stderr().map(|s| sink.pump(s)));
+        let pumps = Pumps::spawn(plumbing, &mut child);
         Self {
             child: Some(child),
             jail,
-            pump,
-            stderr_pump,
+            pumps,
             name,
             group_owner,
             cancel,
-            ending: EndingCell::default(),
+            sent: None,
         }
     }
 
@@ -277,8 +308,8 @@ impl RunningChild {
             self.name,
             pid,
             self.group_owner,
-            self.pump.is_some(),
-            self.stderr_pump.is_some(),
+            self.pumps.stdout.is_some(),
+            self.pumps.stderr.is_some(),
         );
         // Every external wait polls, because `wait_handling_stop` blocks in a
         // syscall that consults nothing: a blocking wait could be preempted
@@ -358,7 +389,7 @@ impl RunningChild {
                     // never wait on a dead pid.  The Windows group release is
                     // not part of teardown; the `Standalone` branch below still
                     // performs it on the way out.
-                    self.ending.raise(Ending::RalEnded(cause));
+                    self.sent = self.sent.max(Some(cause));
                     break self.terminate_group(&mut child, cause);
                 }
                 std::thread::sleep(interval);
@@ -406,9 +437,9 @@ impl RunningChild {
         // A death by a signal on our own ladder is our doing, so the report
         // names the cause rather than the number; anything else the child met in
         // the grace window stays its own and is reported as such.
-        let outcome = match self.ending.get() {
-            Ending::RalEnded(cause) => outcome.attribute_to(cause),
-            Ending::OwnAccord => outcome,
+        let outcome = match self.sent {
+            Some(cause) => outcome.attribute_to(cause),
+            None => outcome,
         };
         // Let the Job Object's whole-job completion drain any descendants before
         // the handle goes.  A pipeline stage never lands here: its release
@@ -434,12 +465,11 @@ impl RunningChild {
             );
         }
         // The leader is dead here — the `Stopped` branch already returned — so
-        // kill the cgroup lest a straggler outlive the command, then remove it.
-        // Windows releases its own group bookkeeping at this same point.
+        // finish the cgroup lest a straggler outlive the command.  Windows
+        // releases its own group bookkeeping at this same point.
         #[cfg(target_os = "linux")]
         if let Some(jail) = &self.jail {
-            crate::process::jail::linux::kill(jail);
-            crate::process::jail::linux::remove(jail);
+            jail.finish();
         }
         crate::dbg_trace!(
             "wait",
@@ -451,9 +481,8 @@ impl RunningChild {
         );
         Ok(WaitedChild {
             outcome,
-            ending: self.ending.get(),
-            pump: self.pump.take(),
-            stderr_pump: self.stderr_pump.take(),
+            sent: self.sent,
+            pumps: std::mem::take(&mut self.pumps),
             name: self.name.clone(),
             pid,
             t_enter,
@@ -461,111 +490,19 @@ impl RunningChild {
     }
 }
 
-impl RunningChild {
-    /// Run this external pipeline stage to its own end, on the caller's own
-    /// dedicated waiter thread — meant to *be* that thread, spawned once per
-    /// stage by `runtime::pipeline::launch`.  The sole owner of this child's
-    /// wait from here on: nothing else may `waitpid` / `WaitForSingleObject`
-    /// it once this starts, which is what makes pid reuse a non-issue.
-    ///
-    /// A stop is answered with `SIGCONT` inline, the same rule as
-    /// [`Self::wait`]'s: the collector never hears of it, and nothing here
-    /// tracks a stop across the loop.
-    ///
-    /// Never called for a standalone (non-pipeline) command, whose own
-    /// [`Self::wait`] keeps polling for [`Self::cancel`] — this stage's own
-    /// end instead arrives as a real signal (the reader-gone cascade, a
-    /// background group's stop-then-kill, the group's own teardown kill),
-    /// which the blocking wait sees structurally, no poll needed.
-    ///
-    /// `kill_cause` — not [`Self::cancel`] — is what attributes the ending:
-    /// `cancel` is the *mooring's* scope, shared with every sibling stage
-    /// (and beyond), so reading it here would let one stage's own kill
-    /// misattribute a death the mooring never actually asked for; `kill_cause`
-    /// is this stage's own, set only by the collector's own `kill_now`/
-    /// `cancel`, one waiter's business alone.
-    pub(crate) fn run_pipeline_stage(
-        mut self,
-        kill_cause: &crate::process::CancelScope,
-    ) -> (String, Settled<Option<crate::process::CommandFailure>>) {
-        let mut child = self.child.take().expect("RunningChild has no child");
-        let name = self.name.clone();
-        #[cfg(unix)]
-        let pid = child.id();
-        let terminal = loop {
-            match child.wait_handling_stop() {
-                Ok(crate::process::WaitPoll::Stopped(_)) => {
-                    #[cfg(unix)]
-                    crate::process::cont_stage_by_pid(pid);
-                }
-                Ok(crate::process::WaitPoll::Done(o)) => break o,
-                Err(e) => {
-                    let msg = format!("{name}: {e}");
-                    return (name, Err(Break::Error(Error::new(msg, 1))));
-                }
-            }
-        };
-        let cause = kill_cause.cause();
-        let outcome = cause.map_or(terminal, |c| terminal.attribute_to(c));
-        let ending = cause.map_or(Ending::OwnAccord, Ending::RalEnded);
-        #[cfg(target_os = "linux")]
-        if let Some(jail) = &self.jail {
-            crate::process::jail::linux::kill(jail);
-            crate::process::jail::linux::remove(jail);
-        }
-        let failure = crate::process::CommandFailure::from_outcome(outcome, ending);
-        // A reader-gone kill's remaining bytes are owed to nobody, and a
-        // descendant that survived that pid-addressed kill still holds the
-        // pipe the pump reads, so joining it would never return — mirrors
-        // `WaitedChild::settle`'s same rule for the standalone path.
-        if ending == Ending::RalEnded(CancelCause::ReaderGone) {
-            drop((self.pump.take(), self.stderr_pump.take()));
-        } else {
-            if let Some(jh) = self.pump.take() {
-                let _ = jh.join();
-            }
-            if let Some(jh) = self.stderr_pump.take() {
-                let _ = jh.join();
-            }
-        }
-        (name, Ok(failure))
-    }
-}
-
 impl WaitedChild {
     /// Join the drainer threads — or, for a child ral killed because its
-    /// reader was gone, detach them.  Its remaining bytes are owed to nobody,
-    /// and a descendant that survived that pid-addressed kill still holds the
-    /// pipe the pump reads, so the join would never return.  Every other
-    /// ending still joins: a group teardown kills the whole tree before
-    /// anything is observed (`PipelineGroup::kill`), and a standalone child's
-    /// own teardown addresses its group, so in both the pumps are already at
-    /// EOF and the capture is complete.
-    pub fn settle(mut self) {
-        if self.ending == Ending::RalEnded(CancelCause::ReaderGone) {
-            drop((self.pump.take(), self.stderr_pump.take()));
-            return;
-        }
-        if let Some(jh) = self.pump.take() {
-            let _ = jh.join();
-            crate::dbg_trace!(
-                "wait",
-                "drain-stdout-joined name={} pid={} elapsed={:?}",
-                self.name,
-                self.pid,
-                self.t_enter.elapsed(),
-            );
-        }
-        if let Some(jh) = self.stderr_pump.take() {
-            let _ = jh.join();
-            crate::dbg_trace!(
-                "wait",
-                "drain-stderr-joined name={} pid={} elapsed={:?}",
-                self.name,
-                self.pid,
-                self.t_enter.elapsed(),
-            );
-        }
+    /// reader was gone, detach them; see [`Pumps::settle`].
+    pub fn settle(self) {
+        let detach = self.sent == Some(CancelCause::ReaderGone);
+        crate::dbg_trace!(
+            "wait",
+            "drain-begin name={} pid={} elapsed={:?} detach={detach}",
+            self.name,
+            self.pid,
+            self.t_enter.elapsed(),
+        );
+        self.pumps.settle(detach);
         crate::dbg_trace!(
             "wait",
             "drain-end name={} pid={} elapsed={:?}",
@@ -595,12 +532,9 @@ impl Drop for RunningChild {
         if let Some(jail) = &self.jail {
             crate::process::jail::linux::remove(jail);
         }
-        if let Some(jh) = self.pump.take() {
-            let _ = jh.join();
-        }
-        if let Some(jh) = self.stderr_pump.take() {
-            let _ = jh.join();
-        }
+        // The abort path always joins, never detaches: nothing has decided
+        // this child's remaining bytes are owed to nobody.
+        std::mem::take(&mut self.pumps).settle(false);
         let _ = child.reap();
     }
 }
@@ -643,7 +577,7 @@ mod tests {
         });
 
         let waited = running.wait().expect("wait should not error");
-        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, waited.ending)
+        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, waited.sent)
             .expect("a torn-down child is a failure");
         waited.settle();
         canceller.join().expect("canceller thread");

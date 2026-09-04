@@ -209,10 +209,9 @@ impl WaitOutcome {
     }
 
     /// Whether this death reads as ral's own kill of a stage.  The attributed
-    /// form counts: which *reason* the kill had is the [`Ending`]'s to say,
-    /// not this predicate's — a cancellation in force outranks forgiveness by
-    /// the `Ending` order, since a stronger cause displaces `ReaderGone`
-    /// there.
+    /// form counts: which *reason* the kill had is `sent`'s to say, not this
+    /// predicate's — a cancellation in force outranks forgiveness, since
+    /// `Option<CancelCause>` orders a stronger cause above `ReaderGone`.
     pub fn is_stage_kill(self) -> bool {
         #[cfg(unix)]
         {
@@ -251,49 +250,16 @@ pub enum CommandFailure {
     Spawn(SpawnFailure),
 }
 
-/// How a child's or a stage's life ended: on its own accord, or because ral
-/// ended it, for a cause.
-///
-/// The sole input to forgiveness, to whether a child's drainers are joined,
-/// and to the verdict a pipeline stage folds.  [`CancelCause::ReaderGone`] —
-/// the collector reclaiming a producer whose reader is already observed — is
-/// the one death a pipeline forgives; every other cause is kept.
-///
-/// Ordered, so two parties that each ended the same child join by `max`: the
-/// collector's reader-gone kill and a cancellation that arrived alongside it
-/// cannot lose to each other, and a cancellation in force outranks
-/// forgiveness by the order rather than by a special case.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Ending {
-    /// Nothing ral did ended it; whatever it reports is its own.
-    #[default]
-    OwnAccord,
-    /// ral ended it, for `cause`.
-    RalEnded(CancelCause),
-}
-
-/// An ending that is only ever raised: a cause in force outranks a milder one,
-/// so no site can lower one already recorded.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct EndingCell(Ending);
-
-impl EndingCell {
-    pub fn raise(&mut self, to: Ending) {
-        self.0 = self.0.max(to);
-    }
-
-    pub fn get(&self) -> Ending {
-        self.0
-    }
-}
-
 impl CommandFailure {
-    /// The failure an outcome amounts to, or `None` for success.  Forgiveness
+    /// The failure an outcome amounts to, or `None` for success.  `sent` is
+    /// the strongest cause anything sent this child, joined by `max` where
+    /// two parties each ended it — a cancellation in force outranks
+    /// forgiveness by that order rather than by a special case. Forgiveness
     /// reaches only the collector's own kill of a producer whose reader was
     /// gone, and only a death that kill actually caused — never an exit
     /// status, which killing a zombie cannot rewrite.
-    pub fn from_outcome(outcome: WaitOutcome, ending: Ending) -> Option<Self> {
-        if ending == Ending::RalEnded(CancelCause::ReaderGone) && outcome.is_stage_kill() {
+    pub fn from_outcome(outcome: WaitOutcome, sent: Option<CancelCause>) -> Option<Self> {
+        if sent == Some(CancelCause::ReaderGone) && outcome.is_stage_kill() {
             return None;
         }
         match outcome {
@@ -364,11 +330,11 @@ mod tests {
     #[test]
     fn ordinary_exit_and_signal_death_stay_distinct() {
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(137), Ending::OwnAccord),
+            CommandFailure::from_outcome(WaitOutcome::Exited(137), None),
             Some(CommandFailure::ExitCode(137))
         );
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), Ending::OwnAccord),
+            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), None),
             Some(CommandFailure::Signal(Signal::new(9)))
         );
     }
@@ -392,7 +358,7 @@ mod tests {
                 outcome.to_user_exit_code(),
                 WaitOutcome::Signaled(term).to_user_exit_code()
             );
-            let failure = CommandFailure::from_outcome(outcome, Ending::OwnAccord).unwrap();
+            let failure = CommandFailure::from_outcome(outcome, None).unwrap();
             assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGTERM);
             assert_eq!(
                 failure.message("sleep"),
@@ -420,7 +386,7 @@ mod tests {
         let segv = Signal::new(libc::SIGSEGV);
         let outcome = WaitOutcome::Signaled(segv).attribute_to(CancelCause::Deadline);
         assert_eq!(outcome, WaitOutcome::Signaled(segv));
-        let failure = CommandFailure::from_outcome(outcome, Ending::OwnAccord).unwrap();
+        let failure = CommandFailure::from_outcome(outcome, None).unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 11 (SIGSEGV)");
         assert_eq!(
             failure.default_hint("sh").as_deref(),
@@ -435,7 +401,7 @@ mod tests {
     fn a_foreign_signal_is_still_reported_as_a_signal() {
         let failure = CommandFailure::from_outcome(
             WaitOutcome::Signaled(Signal::new(libc::SIGKILL)),
-            Ending::OwnAccord,
+            None,
         )
         .unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 9 (SIGKILL)");
@@ -452,8 +418,8 @@ mod tests {
     #[test]
     fn a_stage_kill_is_forgiven() {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
-        let ending = Ending::RalEnded(CancelCause::ReaderGone);
-        assert_eq!(CommandFailure::from_outcome(outcome, ending), None);
+        let sent = Some(CancelCause::ReaderGone);
+        assert_eq!(CommandFailure::from_outcome(outcome, sent), None);
     }
 
     /// The very same death, which nothing in ral caused, is an ordinary
@@ -464,7 +430,7 @@ mod tests {
     fn the_same_death_unsent_is_kept() {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
         assert_eq!(
-            CommandFailure::from_outcome(outcome, Ending::OwnAccord),
+            CommandFailure::from_outcome(outcome, None),
             Some(CommandFailure::Signal(Signal::new(libc::SIGKILL)))
         );
     }
@@ -476,10 +442,7 @@ mod tests {
     #[test]
     fn an_exit_status_is_kept_even_when_ral_ended_the_stage() {
         assert_eq!(
-            CommandFailure::from_outcome(
-                WaitOutcome::Exited(3),
-                Ending::RalEnded(CancelCause::ReaderGone)
-            ),
+            CommandFailure::from_outcome(WaitOutcome::Exited(3), Some(CancelCause::ReaderGone)),
             Some(CommandFailure::ExitCode(3))
         );
     }
@@ -491,30 +454,26 @@ mod tests {
     #[test]
     fn a_sigpipe_death_is_kept_under_every_ending() {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
-        for ending in [
-            Ending::RalEnded(CancelCause::ReaderGone),
-            Ending::OwnAccord,
-        ] {
+        for sent in [Some(CancelCause::ReaderGone), None] {
             assert_eq!(
-                CommandFailure::from_outcome(outcome, ending),
+                CommandFailure::from_outcome(outcome, sent),
                 Some(CommandFailure::Signal(Signal::new(libc::SIGPIPE)))
             );
         }
     }
 
-    /// A cancellation in force outranks forgiveness, by the `Ending` order:
-    /// the stronger cause displaces `ReaderGone`, so the SIGKILL death it
+    /// A cancellation in force outranks forgiveness: `Option<CancelCause>`
+    /// orders the stronger cause above `ReaderGone`, so the SIGKILL death it
     /// attributes is kept rather than forgiven.
     #[cfg(unix)]
     #[test]
     fn a_stronger_ending_outranks_forgiveness() {
-        let ending = Ending::RalEnded(CancelCause::ReaderGone)
-            .max(Ending::RalEnded(CancelCause::RootAbort));
-        assert_eq!(ending, Ending::RalEnded(CancelCause::RootAbort));
+        let sent = Some(CancelCause::ReaderGone).max(Some(CancelCause::RootAbort));
+        assert_eq!(sent, Some(CancelCause::RootAbort));
         let outcome = WaitOutcome::Cancelled {
             cause: CancelCause::RootAbort,
             signal: Signal::new(libc::SIGKILL),
         };
-        assert!(CommandFailure::from_outcome(outcome, ending).is_some());
+        assert!(CommandFailure::from_outcome(outcome, sent).is_some());
     }
 }

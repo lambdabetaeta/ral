@@ -19,7 +19,7 @@ pub mod spawn_lock;
 pub mod wake;
 
 pub(crate) use outcome::not_found_hint;
-pub use outcome::{CommandFailure, Ending, EndingCell, Signal, SpawnFailure, WaitOutcome, WaitPoll};
+pub use outcome::{CommandFailure, Signal, SpawnFailure, WaitOutcome, WaitPoll};
 
 pub use launch::{Launch, StdioSpec};
 pub use lease::TerminalLease;
@@ -34,11 +34,11 @@ pub use cancel::{
 #[cfg(unix)]
 pub(crate) use cancel::TEARDOWN_GRACE;
 
-pub(crate) use signal::{KillTarget, kill_stage_by_pid};
+pub(crate) use signal::KillTarget;
 #[cfg(unix)]
 pub(crate) use signal::cont_stage_by_pid;
 #[cfg(unix)]
-pub(crate) use signal::{cause_signal, signal_stage_by_pid};
+pub(crate) use signal::cause_signal;
 pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};
 
 pub use spawn_lock::{cloexec_pipe, output, spawn, status};

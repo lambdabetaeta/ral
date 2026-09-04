@@ -13,17 +13,17 @@
 //! pgid, so while the terminal belongs to the group the shell never hears a
 //! Ctrl-C the tty delivers to it: the anchor swallows every termination
 //! signal and reports its number on its stdout — a pipe one dedicated thread
-//! blocks reading, alongside another blocked `waitpid`-ing the anchor itself
-//! for its own death; both report [`Witnessed`] on the collector's channel,
-//! never polled.  The anchor additionally ignores `SIGTSTP`/`SIGTTIN`/
-//! `SIGTTOU` outright, so it rarely stops at all; on the rare stop it does
-//! see (a bare `kill -STOP`, say) its own waiter answers with `SIGCONT`
-//! inline, the one rule applied to the anchor like any other waiter.
+//! blocks reading, posting [`Event::Cancelled`] on the collector's channel.
+//! The anchor's own death comes through the reaper like any watched child's,
+//! via the same [`crate::process::Watch`] its own `into_watch` mints, so no
+//! dedicated thread waits on it. The anchor additionally ignores
+//! `SIGTSTP`/`SIGTTIN`/`SIGTTOU` outright, so it rarely stops at all; on the
+//! rare stop it does see (a bare `kill -STOP`, say) the reaper answers with
+//! `SIGCONT` itself, the one rule applied to the anchor like any other
+//! watched pid.
 
 #[cfg(unix)]
-use super::collect::Report;
-#[cfg(unix)]
-use crate::process::Signal;
+use super::collect::Event;
 use crate::process::{CancelCause, Pgid, PgidPolicy};
 use crate::types::{Break, Mooring, Settled, Shell};
 #[cfg(unix)]
@@ -47,15 +47,6 @@ pub(super) struct PipelineGroup {
     relay: Option<crate::process::PipelineRelay>,
     /// `Some` exactly when `owned`; taken by `Drop`.
     anchor: Option<AnchorProcess>,
-}
-
-/// What the anchor saw happen to the group.  A stop is never among these: the
-/// anchor's own waiter answers it with `SIGCONT` inline and keeps waiting, so
-/// only a death is ever witnessed.
-#[derive(Clone, Copy)]
-#[cfg(unix)]
-pub(super) enum Witnessed {
-    Cancelled(CancelCause),
 }
 
 impl PipelineGroup {
@@ -137,8 +128,8 @@ impl PipelineGroup {
         #[cfg(unix)]
         {
             self.leader
-                .signal_group(Signal::new(crate::process::cause_signal(cause)));
-            self.leader.signal_group(Signal::new(libc::SIGCONT));
+                .signal_group(crate::process::Signal::new(crate::process::cause_signal(cause)));
+            self.leader.signal_group(crate::process::Signal::new(libc::SIGCONT));
         }
         #[cfg(windows)]
         let _ = cause;
@@ -158,14 +149,14 @@ impl PipelineGroup {
         self.leader.kill();
     }
 
-    /// Start this group's two anchor-witness threads — a no-op on a joining
-    /// group, which has no anchor of its own.  Called once the collector's
-    /// channel exists, since the anchor spawns before it does
-    /// ([`Self::prepare`] runs before [`super::collect::CollectState::new`]).
+    /// Start this group's anchor witness — a no-op on a joining group, which
+    /// has no anchor of its own.  Called once the collector's channel
+    /// exists, since the anchor spawns before it does ([`Self::prepare`]
+    /// runs before [`super::collect::CollectState::new`]).
     #[cfg(unix)]
-    pub(super) fn start_witness_threads(&mut self, tx: Sender<Report>) {
+    pub(super) fn start_witness(&mut self, tx: Sender<Event>) {
         if let Some(anchor) = self.anchor.as_mut() {
-            anchor.start_witness_threads(tx);
+            anchor.start_witness(tx);
         }
     }
 }
@@ -185,31 +176,32 @@ impl Drop for PipelineGroup {
     }
 }
 
+/// The anchor's own wait, on Unix: spawned and not yet witnessed, or handed
+/// off to the reaper's `Watch` once [`AnchorProcess::start_witness`] runs.
+#[cfg(unix)]
+enum Anchored {
+    Spawned(crate::process::ChildHandle),
+    /// Held for its `Drop` alone, which reaps: nothing reads it back.
+    Watched(#[allow(dead_code)] crate::process::Watch),
+}
+
 struct AnchorProcess {
-    /// `None` on Unix once [`AnchorProcess::start_witness_threads`] has moved
-    /// it onto the waiter thread — the sole reaper of its pid from then on;
-    /// always `Some` on Windows, which starts no such thread.
     #[cfg(unix)]
-    child: Option<crate::process::ChildHandle>,
+    child: Option<Anchored>,
     #[cfg(windows)]
     child: crate::process::ChildHandle,
     pgid: Pgid,
     /// The anchor reads this to EOF; closing it is how `finish` ends it.
     release: os_pipe::PipeWriter,
     /// The anchor's stdout: one byte per signal it swallowed.  `None` once
-    /// [`AnchorProcess::start_witness_threads`] has moved it onto the report
-    /// reader thread.
+    /// [`AnchorProcess::start_witness`] has moved it onto the report reader
+    /// thread.
     #[cfg(unix)]
     report: Option<os_pipe::PipeReader>,
     /// Blocks reading [`Self::report`] to EOF, one swallowed signal at a
     /// time.
     #[cfg(unix)]
     reporter: Option<std::thread::JoinHandle<()>>,
-    /// Blocks `waitpid`-ing the anchor for its own stop or death — the sole
-    /// owner of its wait once started, exactly as an external stage's own
-    /// waiter owns its child's.
-    #[cfg(unix)]
-    waiter: Option<std::thread::JoinHandle<()>>,
 }
 
 fn anchor_error(e: impl std::fmt::Display) -> Break {
@@ -253,7 +245,7 @@ impl AnchorProcess {
         };
         Ok(Self {
             #[cfg(unix)]
-            child: Some(child),
+            child: Some(Anchored::Spawned(child)),
             #[cfg(windows)]
             child,
             pgid,
@@ -262,58 +254,57 @@ impl AnchorProcess {
             report: Some(report),
             #[cfg(unix)]
             reporter: None,
-            #[cfg(unix)]
-            waiter: None,
         })
     }
 
-    /// Start this anchor's two witness threads, once the collector's channel
-    /// exists.  `child`/`report` are `Some` exactly once, so a second call
-    /// (there is none) would be the bug `expect` catches.
+    /// Start this anchor's witness: the report reader thread, and a
+    /// [`crate::process::Watch`] on the anchor's own pid, replacing its
+    /// `Anchored::Spawned` handle.  `child`/`report` are `Some` exactly
+    /// once, so a second call (there is none) would be the bug `expect`
+    /// catches.
     #[cfg(unix)]
-    fn start_witness_threads(&mut self, tx: Sender<Report>) {
+    fn start_witness(&mut self, tx: Sender<Event>) {
         let report = self.report.take().expect("started once");
         let report_tx = tx.clone();
         self.reporter = std::thread::Builder::new()
             .name("ral pipeline anchor report reader".to_string())
             .spawn(move || read_anchor_reports(report, &report_tx))
             .ok();
-        let child = self.child.take().expect("started once");
-        self.waiter = std::thread::Builder::new()
-            .name("ral pipeline anchor waiter".to_string())
-            .spawn(move || wait_anchor(child, &tx))
-            .ok();
+        let Some(Anchored::Spawned(child)) = self.child.take() else {
+            panic!("AnchorProcess::start_witness called more than once");
+        };
+        let watch = child.into_watch(tx, |o| {
+            Event::Cancelled(match o {
+                crate::process::WaitOutcome::Signaled(sig) => cancel_cause(sig.number()),
+                _ => CancelCause::Terminate,
+            })
+        });
+        self.child = Some(Anchored::Watched(watch));
     }
 
-    /// Close the release pipe and join the witness threads — the anchor's own
-    /// reap is the waiter thread's, not this one's.
-    ///
-    /// An external `kill -STOP` on the group (unrelated to anything ral
-    /// itself does) can still catch the anchor stopped, so `SIGCONT` goes to
-    /// its pid before the wait, lest closing `release` go unnoticed.  POSIX
-    /// will not recycle a leader's pid while the group is non-empty, so the
-    /// pgid stays addressable meanwhile.  The report reader's own read end
-    /// closes only once it sees EOF — the anchor's own exit closing its
-    /// write end — so it is never dropped while the anchor could still
-    /// `SIGPIPE` on a stray write into it, with no manual ordering to get
-    /// right.
+    /// Close the release pipe, join the report reader, and drop the anchor's
+    /// watch — its own `Drop` reaps.  An external `kill -STOP` on the group
+    /// (unrelated to anything ral itself does) can still catch the anchor
+    /// stopped, but the reaper answers that itself, the same rule applied to
+    /// every watched pid; nothing here need resume it.  POSIX will not
+    /// recycle a leader's pid while the group is non-empty, so the pgid
+    /// stays addressable meanwhile.  The report reader's own read end closes
+    /// only once it sees EOF — the anchor's own exit closing its write end —
+    /// so it is never dropped while the anchor could still `SIGPIPE` on a
+    /// stray write into it, with no manual ordering to get right.
     #[cfg(unix)]
     fn finish(self) {
         let Self {
-            pgid,
             release,
-            waiter,
             reporter,
+            child,
             ..
         } = self;
         drop(release);
-        let _ = rustix::process::kill_process(pgid.as_pid(), rustix::process::Signal::CONT);
-        if let Some(waiter) = waiter {
-            let _ = waiter.join();
-        }
         if let Some(reporter) = reporter {
             let _ = reporter.join();
         }
+        drop(child);
     }
 
     #[cfg(windows)]
@@ -328,49 +319,25 @@ impl AnchorProcess {
 }
 
 /// Block-read the anchor's report pipe to EOF, one swallowed signal at a
-/// time.  EOF means the anchor died; the waiter thread's own wait reports
-/// that with the cause a bare EOF cannot carry, so this simply leaves —
+/// time.  EOF means the anchor died; the anchor's own watch reports that
+/// with the cause a bare EOF cannot carry, so this simply leaves —
 /// including the ordinary case, `AnchorProcess::finish`'s own teardown,
 /// where nothing is listening on `tx` any more anyway.
 #[cfg(unix)]
-fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Report>) {
+fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Event>) {
     use std::io::Read;
     let mut byte = [0u8; 1];
     loop {
         match report.read(&mut byte) {
             Ok(1) => {
                 let cause = cancel_cause(i32::from(byte[0]));
-                if tx.send(Report::Witnessed(Witnessed::Cancelled(cause))).is_err() {
+                if tx.send(Event::Cancelled(cause)).is_err() {
                     return;
                 }
             }
             _ => return,
         }
     }
-}
-
-/// Blocking `waitpid(WUNTRACED)` on the anchor, the sole reaper of its pid: a
-/// stop is answered with `SIGCONT` inline and the wait resumes on the same
-/// pid, the one rule applied to the anchor itself — and a death, by signal
-/// (attributed exactly as a reported swallow would be) or however else it
-/// left, reports `Witnessed::Cancelled` and ends the loop.  An anchor that
-/// has died has cost the group its join target, so any death cancels the
-/// pipeline, expected (`AnchorProcess::finish`'s own teardown, where `tx`
-/// has nobody listening) or not.
-#[cfg(unix)]
-fn wait_anchor(mut child: crate::process::ChildHandle, tx: &Sender<Report>) {
-    use crate::process::{WaitOutcome, WaitPoll};
-    let pid = child.id();
-    let witnessed = loop {
-        match child.wait_handling_stop() {
-            Ok(WaitPoll::Stopped(_)) => crate::process::cont_stage_by_pid(pid),
-            Ok(WaitPoll::Done(WaitOutcome::Signaled(sig))) => {
-                break Witnessed::Cancelled(cancel_cause(sig.number()));
-            }
-            Ok(WaitPoll::Done(_)) | Err(_) => break Witnessed::Cancelled(CancelCause::Terminate),
-        }
-    };
-    let _ = tx.send(Report::Witnessed(witnessed));
 }
 
 #[cfg(test)]
@@ -407,9 +374,9 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn witnessed_within_2s(rx: &std::sync::mpsc::Receiver<Report>) -> Option<Witnessed> {
+    fn cancelled_within_2s(rx: &std::sync::mpsc::Receiver<Event>) -> Option<CancelCause> {
         match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(Report::Witnessed(w)) => Some(w),
+            Ok(Event::Cancelled(cause)) => Some(cause),
             Ok(_) | Err(_) => None,
         }
     }
@@ -424,7 +391,7 @@ mod tests {
         let shell = Shell::default();
         let mut group = PipelineGroup::prepare(&shell).expect("anchor spawns");
         let (tx, rx) = std::sync::mpsc::channel();
-        group.start_witness_threads(tx);
+        group.start_witness(tx);
         assert!(
             rx.recv_timeout(std::time::Duration::from_millis(200))
                 .is_err(),
@@ -436,10 +403,12 @@ mod tests {
             (libc::SIGINT, CancelCause::Interrupt),
             (libc::SIGTERM, CancelCause::Terminate),
         ] {
-            group.leader_pgid().signal_group(Signal::new(signal));
-            match witnessed_within_2s(&rx) {
-                Some(Witnessed::Cancelled(c)) if c == cause => {}
-                Some(Witnessed::Cancelled(c)) => panic!("signal {signal} witnessed as {c:?}"),
+            group
+                .leader_pgid()
+                .signal_group(crate::process::Signal::new(signal));
+            match cancelled_within_2s(&rx) {
+                Some(c) if c == cause => {}
+                Some(c) => panic!("signal {signal} witnessed as {c:?}"),
                 None => panic!("signal {signal} was never reported"),
             }
         }
