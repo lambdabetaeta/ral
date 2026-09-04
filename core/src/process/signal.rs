@@ -19,7 +19,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 #[cfg(unix)]
 use super::outcome::Signal;
-use super::outcome::WaitPoll;
+use super::outcome::{WaitOutcome, WaitPoll};
+use super::reaper::{Reaper, Watch};
 
 #[cfg(unix)]
 mod unix;
@@ -176,6 +177,23 @@ impl ChildHandle {
             #[cfg(windows)]
             ChildRepr::RawWindows(child) => child.reap(),
         }
+    }
+
+    /// The one door from a spawned child to a [`Watch`]: consumes the
+    /// handle, so no later `wait` on this pid is writable behind the
+    /// reaper's back.  The stdio ends must already be taken.
+    pub fn into_watch<E: Send + 'static>(
+        self,
+        tx: std::sync::mpsc::Sender<E>,
+        f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
+    ) -> Watch {
+        let pid = self.id();
+        let watch = Reaper::global().watch(pid, tx, f);
+        // Dropping a `std::process::Child` neither kills nor reaps on Unix,
+        // and on Windows only closes std's own handle — the watch opened its
+        // own while registering.
+        drop(self);
+        watch
     }
 }
 

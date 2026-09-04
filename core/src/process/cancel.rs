@@ -12,7 +12,8 @@
 //! it is a monotone watermark read against a frame's birth instant, and a run
 //! born after a Ctrl-C is deaf to it by construction.
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// Why a [`CancelScope`] was cancelled.
 ///
@@ -127,16 +128,19 @@ static STAMPED: [AtomicU64; CancelCause::RootAbort as usize] =
 /// Raise `cause` on the interrupt watermark, reaching the foreground of every
 /// run already in flight and of none born after this instant.
 ///
-/// Async-signal-safe: two atomic read-modify-writes, no allocation, no lock.
+/// Async-signal-safe: two atomic read-modify-writes and a reaper `kick` —
+/// itself one `write(2)` on Unix — no allocation, no lock.
 pub fn request_foreground_cancel(cause: CancelCause) {
     let now = CLOCK.fetch_add(1, Ordering::Relaxed) + 1;
     STAMPED[cause as usize - 1].fetch_max(now, Ordering::Release);
+    super::reaper::kick();
 }
 
 /// Deliver `cause` to the signal-facing session's durable root, reaching its
 /// foreground run and every detached worker parented under it.
 pub fn request_root_cancel(cause: CancelCause) {
     REQUESTED_ROOT.fetch_max(cause as u8, Ordering::Release);
+    super::reaper::kick();
 }
 
 /// Hand the shutdown request back, which no host ever does.  The ral-core test
@@ -199,9 +203,11 @@ impl CancelScope {
         Self::mint(Hears::Nothing, Some(self.0.clone()))
     }
 
-    /// Raise this scope's flag to `cause`, never downgrading.
+    /// Raise this scope's flag to `cause`, never downgrading, then fire every
+    /// [`CancelWatch`] whose cause is now in force.
     pub fn cancel(&self, cause: CancelCause) {
         self.0.flag.fetch_max(cause as u8, Ordering::Release);
+        scan_cancels();
     }
 
     /// The join of every flag on this scope's chain with the ambient causes
@@ -243,6 +249,99 @@ impl CancelScope {
 impl Default for CancelScope {
     fn default() -> Self {
         Self::root()
+    }
+}
+
+// ── Cancel watchers ─────────────────────────────────────────────────────────
+//
+// A registration table beside the scope tree, for a subscriber with no poll
+// point of its own: the pipeline collector, `RunningChild::wait`, the engine
+// enquiry park.  `request_foreground_cancel`/`request_root_cancel` run inside
+// signal handlers and are documented async-signal-safe, so they cannot lock
+// this table directly — they kick the reaper thread, whose own wake ends by
+// scanning it.  `CancelScope::cancel` scans synchronously instead, since a
+// direct call is never a signal handler.
+
+type OnCancel = Box<dyn FnOnce(CancelCause) + Send>;
+
+struct WatchEntry {
+    scope: CancelScope,
+    on_cancel: OnCancel,
+    armed: Arc<AtomicBool>,
+}
+
+static WATCHES: OnceLock<Mutex<Vec<WatchEntry>>> = OnceLock::new();
+
+fn watches() -> &'static Mutex<Vec<WatchEntry>> {
+    WATCHES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Run `on_cancel` once, with the cause, as soon as `scope.cause()` is
+/// `Some`.  Dropping the returned [`CancelWatch`] disarms it.
+pub fn watch_cancel(
+    scope: CancelScope,
+    on_cancel: impl FnOnce(CancelCause) + Send + 'static,
+) -> CancelWatch {
+    // So a kick from a signal handler always has a pipe to land in.
+    #[cfg(unix)]
+    super::reaper::ensure_installed();
+
+    let armed = Arc::new(AtomicBool::new(true));
+    let mut table = watches().lock().unwrap_or_else(PoisonError::into_inner);
+    table.push(WatchEntry {
+        scope,
+        on_cancel: Box::new(on_cancel),
+        armed: armed.clone(),
+    });
+    // Insert, then check this entry alone: a cause raised between a caller's
+    // own check and this registration is not missed, since both this check
+    // and `scan_cancels` take the same lock this insert just released.
+    let idx = table.len() - 1;
+    let fired = table[idx]
+        .scope
+        .cause()
+        .map(|cause| (table.swap_remove(idx).on_cancel, cause));
+    drop(table);
+    if let Some((on_cancel, cause)) = fired {
+        on_cancel(cause);
+    }
+    CancelWatch { armed }
+}
+
+/// Fire and remove every armed registration whose cause is now `Some` —
+/// under the table lock, entries are only taken out; their closures run
+/// after the lock is released, so a closure may itself cancel a scope
+/// without deadlocking on this same table.
+pub(crate) fn scan_cancels() {
+    let mut fired: Vec<(OnCancel, CancelCause)> = Vec::new();
+    {
+        let mut table = watches().lock().unwrap_or_else(PoisonError::into_inner);
+        let mut i = 0;
+        while i < table.len() {
+            if !table[i].armed.load(Ordering::Acquire) {
+                table.swap_remove(i);
+                continue;
+            }
+            match table[i].scope.cause() {
+                Some(cause) => fired.push((table.swap_remove(i).on_cancel, cause)),
+                None => i += 1,
+            }
+        }
+    }
+    for (on_cancel, cause) in fired {
+        on_cancel(cause);
+    }
+}
+
+/// A registered [`watch_cancel`]; dropping it disarms the registration.
+#[must_use]
+pub struct CancelWatch {
+    armed: Arc<AtomicBool>,
+}
+
+impl Drop for CancelWatch {
+    fn drop(&mut self) {
+        self.armed.store(false, Ordering::Release);
     }
 }
 
@@ -599,5 +698,63 @@ mod tests {
             "a session that faces no signals is deaf to both ambient causes"
         );
         clear_root_request();
+    }
+
+    /// A cause raised before registration is not missed: `watch_cancel`
+    /// checks its own entry once, right after inserting.
+    #[test]
+    fn a_watch_registered_after_the_cause_fires_at_once() {
+        let scope = CancelScope::root();
+        scope.cancel(CancelCause::Explicit);
+        let seen = Arc::new(Mutex::new(None));
+        let recorded = seen.clone();
+        let _watch = watch_cancel(scope, move |cause| {
+            *recorded.lock().unwrap_or_else(PoisonError::into_inner) = Some(cause);
+        });
+        assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), Some(CancelCause::Explicit));
+    }
+
+    /// A watch registered before the cause fires when `cancel` scans.
+    #[test]
+    fn a_watch_registered_before_fires_on_cancel() {
+        let scope = CancelScope::root();
+        let seen = Arc::new(Mutex::new(None));
+        let recorded = seen.clone();
+        let _watch = watch_cancel(scope.clone(), move |cause| {
+            *recorded.lock().unwrap_or_else(PoisonError::into_inner) = Some(cause);
+        });
+        assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), None);
+        scope.cancel(CancelCause::Deadline);
+        assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), Some(CancelCause::Deadline));
+    }
+
+    /// Dropping the guard disarms the registration: a later cancel never
+    /// fires it.
+    #[test]
+    fn a_dropped_guard_never_fires() {
+        let scope = CancelScope::root();
+        let fired = Arc::new(AtomicBool::new(false));
+        let flag = fired.clone();
+        drop(watch_cancel(scope.clone(), move |_| {
+            flag.store(true, Ordering::Release);
+        }));
+        scope.cancel(CancelCause::Interrupt);
+        assert!(!fired.load(Ordering::Acquire), "a disarmed watch must not fire");
+    }
+
+    /// Two watches on one scope both fire: the table holds independent
+    /// entries, not one slot per scope.
+    #[test]
+    fn two_watches_on_one_scope_both_fire() {
+        let scope = CancelScope::root();
+        let fired_a = Arc::new(AtomicBool::new(false));
+        let fired_b = Arc::new(AtomicBool::new(false));
+        let flag_a = fired_a.clone();
+        let flag_b = fired_b.clone();
+        let _watch_a = watch_cancel(scope.clone(), move |_| flag_a.store(true, Ordering::Release));
+        let _watch_b = watch_cancel(scope.clone(), move |_| flag_b.store(true, Ordering::Release));
+        scope.cancel(CancelCause::Interrupt);
+        assert!(fired_a.load(Ordering::Acquire), "the first watch must fire");
+        assert!(fired_b.load(Ordering::Acquire), "the second watch must fire");
     }
 }

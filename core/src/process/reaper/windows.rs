@@ -23,12 +23,12 @@ use windows_sys::Win32::System::Threading::{
     WT_EXECUTEONLYONCE, WaitForSingleObject,
 };
 
-use crate::process::outcome::{STAGE_KILL_EXIT_CODE, Signal, WaitOutcome, WaitPoll};
+use crate::process::outcome::{STAGE_KILL_EXIT_CODE, WaitOutcome};
 
 struct CallbackCtx<E: Send + 'static> {
     handle: HANDLE,
     tx: Sender<E>,
-    f: Box<dyn Fn(WaitPoll) -> E + Send>,
+    f: Box<dyn FnOnce(WaitOutcome) -> E + Send>,
 }
 
 /// The callback `RegisterWaitForSingleObject` invokes on a thread-pool
@@ -43,7 +43,7 @@ unsafe extern "system" fn wait_callback<E: Send + 'static>(
     unsafe { GetExitCodeProcess(ctx.handle, &mut code) };
     let outcome =
         WaitOutcome::from_exit_status(std::os::windows::process::ExitStatusExt::from_raw(code));
-    let _ = ctx.tx.send((ctx.f)(WaitPoll::Done(outcome)));
+    let _ = ctx.tx.send((ctx.f)(outcome));
 }
 
 /// Process-wide capability to watch children for exit.
@@ -55,12 +55,12 @@ impl Reaper {
         &SINGLETON
     }
 
-    /// Deliver `pid`'s exit to `tx`, shaped by `f`.
+    /// Deliver `pid`'s exit to `tx`, shaped by `f`, exactly once.
     pub fn watch<E: Send + 'static>(
         &self,
         pid: u32,
         tx: Sender<E>,
-        f: impl Fn(WaitPoll) -> E + Send + 'static,
+        f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
     ) -> Watch {
         let handle = unsafe {
             OpenProcess(
@@ -111,29 +111,21 @@ unsafe impl Send for Watch {}
 unsafe impl Sync for Watch {}
 
 impl Watch {
-    /// The Windows counterpart of `signal`: no job control exists here, so
-    /// the only sanctioned act is termination, with ral's own stage-kill
-    /// exit code.
-    ///
-    /// # Errors
-    /// Returns `Err` if `TerminateProcess` fails.
-    pub fn signal(&self, _sig: Signal) -> io::Result<()> {
-        let ok = unsafe { TerminateProcess(self.handle, STAGE_KILL_EXIT_CODE as u32) };
-        if ok == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+    /// No job control exists here, so the only sanctioned act is
+    /// termination, with ral's own stage-kill exit code — Unix has signals,
+    /// Windows has this.
+    pub fn kill(&self) {
+        unsafe { TerminateProcess(self.handle, STAGE_KILL_EXIT_CODE as u32) };
     }
 
-    /// Block for the child's exit, unregister the callback, and read the
-    /// exit code.
+    /// Block for the child's exit, unregister the callback, and discard the
+    /// exit code: every subscriber has already received it through `watch`'s
+    /// `f`.
     ///
     /// # Errors
-    /// Returns `Err` if the wait or the exit-code read fails.
-    pub fn reap(self) -> io::Result<WaitOutcome> {
-        block_until_exit(self.handle)?;
-        read_exit_code(self.handle)
+    /// Returns `Err` if the wait fails.
+    pub fn reap(self) -> io::Result<()> {
+        block_until_exit(self.handle)
         // `self` drops here: unregistering is then a formality, the
         // callback having already fired on the same signalled handle.
     }
@@ -148,17 +140,6 @@ fn block_until_exit(handle: HANDLE) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
-}
-
-fn read_exit_code(handle: HANDLE) -> io::Result<WaitOutcome> {
-    let mut code: u32 = 0;
-    let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(WaitOutcome::from_exit_status(
-        std::os::windows::process::ExitStatusExt::from_raw(code),
-    ))
 }
 
 impl Drop for Watch {

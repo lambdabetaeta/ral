@@ -28,8 +28,8 @@ pub use deadline::{Deadline, arm_callback, arm_lifetime};
 pub use reaper::{Reaper, Watch};
 
 pub use cancel::{
-    CancelCause, CancelScope, DurableRoot, ForegroundScope, request_foreground_cancel,
-    request_root_cancel,
+    CancelCause, CancelScope, CancelWatch, DurableRoot, ForegroundScope, request_foreground_cancel,
+    request_root_cancel, watch_cancel,
 };
 #[cfg(unix)]
 pub(crate) use cancel::TEARDOWN_GRACE;

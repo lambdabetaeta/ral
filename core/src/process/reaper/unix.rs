@@ -4,8 +4,9 @@
 //! reaper thread blocks reading the pipe and, per wake, scans every watched
 //! pid with two `waitid` calls:
 //!
-//! 1. `WSTOPPED | WNOHANG` — a stop is *consumed* and posted, or it would be
-//!    re-reported on every wake.
+//! 1. `WSTOPPED | WNOHANG` — a stop is *consumed* and answered with
+//!    `kill(pid, SIGCONT)` on the spot, or it would be re-reported on every
+//!    wake.  A stop never reaches a subscriber.
 //! 2. `WEXITED | WNOHANG | WNOWAIT` — an exit is posted once and the pid
 //!    marked; the zombie is left for [`Watch::reap`], or the pid would be
 //!    free for reuse while its owner may still signal it.
@@ -27,15 +28,12 @@ use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal as NixSign
 use rustix::process::{Pid as RawPid, WaitId, WaitIdOptions, WaitIdStatus};
 
 use crate::process::cloexec_pipe;
-use crate::process::outcome::{Signal, WaitOutcome, WaitPoll};
-
-type Poster = Box<dyn Fn(WaitPoll) + Send>;
+use crate::process::outcome::{Signal, WaitOutcome};
 
 struct Entry {
-    poster: Poster,
-    /// Set once `Done` has been posted, so a scan stops calling `waitid` for
-    /// a pid whose exit is already reported and just awaiting `reap`.
-    exited: bool,
+    /// `None` once the exit has been posted — the `Option` *is* the
+    /// "already exited, awaiting reap" mark, so no separate flag is needed.
+    poster: Option<Box<dyn FnOnce(WaitOutcome) + Send>>,
 }
 
 static SUBS: OnceLock<Mutex<HashMap<u32, Entry>>> = OnceLock::new();
@@ -74,7 +72,7 @@ fn install_sigchld() {
 
 /// Async-signal-safe: one relaxed load and one `write(2)`, ignoring both the
 /// fd not yet being set and the write's own result.
-extern "C" fn sigchld_handler(_sig: libc::c_int) {
+fn wake() {
     let fd = WAKE_WRITE_FD.load(Ordering::Relaxed);
     if fd >= 0 {
         let byte: u8 = 0;
@@ -82,6 +80,17 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
             libc::write(fd, std::ptr::addr_of!(byte).cast(), 1);
         }
     }
+}
+
+extern "C" fn sigchld_handler(_sig: libc::c_int) {
+    wake();
+}
+
+/// Wake the reaper thread without a `SIGCHLD`: the same async-signal-safe
+/// `write` the handler does, so a cancel raised from a signal handler can
+/// have its cause scanned on the reaper thread without locking here.
+pub(crate) fn kick() {
+    wake();
 }
 
 fn spawn_reaper_thread(reader: os_pipe::PipeReader) {
@@ -117,32 +126,39 @@ fn scan_all() {
     for (&pid, entry) in table.iter_mut() {
         scan_one(pid, entry);
     }
+    drop(table);
+    // Cancels last: a kick may have coalesced with a pid's own wake.
+    crate::process::cancel::scan_cancels();
 }
 
 /// A stop or exit already pending when `pid` is registered raised its
 /// `SIGCHLD` before the table knew about it, so no later wake will re-report
 /// it — `watch` calls this once, synchronously, right after inserting.
 fn scan_one(pid: u32, entry: &mut Entry) {
-    if entry.exited {
+    if entry.poster.is_none() {
         return;
     }
-    if let Some(sig) = poll_stop(pid) {
-        (entry.poster)(WaitPoll::Stopped(sig));
+    if poll_stop(pid) {
+        // Sound here and nowhere else: `pid` is alive (it just reported a
+        // stop) and cannot be recycled, since only `Watch::reap` reaps, under
+        // the same lock this scan holds.
+        unsafe { libc::kill(pid.cast_signed(), libc::SIGCONT) };
     }
-    if let Some(outcome) = poll_exit(pid) {
-        entry.exited = true;
-        (entry.poster)(WaitPoll::Done(outcome));
+    if let Some(outcome) = poll_exit(pid)
+        && let Some(poster) = entry.poster.take()
+    {
+        poster(outcome);
     }
 }
 
-fn poll_stop(pid: u32) -> Option<Signal> {
-    let target = RawPid::from_raw(pid.cast_signed())?;
-    let status = rustix::process::waitid(
-        WaitId::Pid(target),
-        WaitIdOptions::STOPPED | WaitIdOptions::NOHANG,
+fn poll_stop(pid: u32) -> bool {
+    let Some(target) = RawPid::from_raw(pid.cast_signed()) else {
+        return false;
+    };
+    matches!(
+        rustix::process::waitid(WaitId::Pid(target), WaitIdOptions::STOPPED | WaitIdOptions::NOHANG),
+        Ok(Some(_))
     )
-    .ok()??;
-    status.stopping_signal().map(Signal::new)
 }
 
 fn poll_exit(pid: u32) -> Option<WaitOutcome> {
@@ -180,19 +196,19 @@ impl Reaper {
         &SINGLETON
     }
 
-    /// Deliver `pid`'s events to `tx`, shaped by `f`.
+    /// Deliver `pid`'s exit to `tx`, shaped by `f`, exactly once.
     pub fn watch<E: Send + 'static>(
         &self,
         pid: u32,
         tx: Sender<E>,
-        f: impl Fn(WaitPoll) -> E + Send + 'static,
+        f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
     ) -> Watch {
         ensure_installed();
-        let poster: Poster = Box::new(move |poll| {
-            let _ = tx.send(f(poll));
+        let poster: Box<dyn FnOnce(WaitOutcome) + Send> = Box::new(move |outcome| {
+            let _ = tx.send(f(outcome));
         });
         let mut table = subs().lock().unwrap_or_else(PoisonError::into_inner);
-        let entry = table.entry(pid).or_insert(Entry { poster, exited: false });
+        let entry = table.entry(pid).or_insert(Entry { poster: Some(poster) });
         // A stop or exit that raced ahead of this registration raised its
         // `SIGCHLD` before the table knew to look; catch it here rather
         // than waiting for a wake that may never come.
@@ -203,7 +219,7 @@ impl Reaper {
 }
 
 /// A subscription on one watched pid. Dropping it unsubscribes and reaps;
-/// [`Self::reap`] does the same explicitly, returning the outcome.
+/// [`Self::reap`] does the same explicitly.
 #[must_use]
 pub struct Watch {
     pid: u32,
@@ -212,23 +228,22 @@ pub struct Watch {
 impl Watch {
     /// Signal the watched child — the only sanctioned way to, since a bare
     /// pid held outside a `Watch` is racy against reuse.
-    ///
-    /// # Errors
-    /// Returns `Err` if the platform `kill` fails.
-    pub fn signal(&self, sig: Signal) -> io::Result<()> {
-        let ret = unsafe { libc::kill(self.pid as libc::pid_t, sig.number()) };
-        if ret == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+    pub fn signal(&self, sig: Signal) {
+        unsafe { libc::kill(self.pid.cast_signed(), sig.number()) };
+    }
+
+    /// `SIGKILL` — the terminal escalation, on both platforms.
+    pub fn kill(&self) {
+        unsafe { libc::kill(self.pid.cast_signed(), libc::SIGKILL) };
     }
 
     /// Unsubscribe and block for the child's exit, consuming its zombie.
+    /// Every subscriber has already received the outcome through `watch`'s
+    /// `f`, so this discards it.
     ///
     /// # Errors
     /// Returns `Err` if the reaping wait fails.
-    pub fn reap(self) -> io::Result<WaitOutcome> {
+    pub fn reap(self) -> io::Result<()> {
         let pid = self.pid;
         std::mem::forget(self);
         finish(pid)
@@ -241,7 +256,7 @@ impl Drop for Watch {
     }
 }
 
-fn finish(pid: u32) -> io::Result<WaitOutcome> {
+fn finish(pid: u32) -> io::Result<()> {
     subs()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -253,7 +268,7 @@ fn finish(pid: u32) -> io::Result<WaitOutcome> {
 /// after unsubscribing so the reaper thread's own `WNOWAIT` scan cannot race
 /// it for the same pid's exit status. By raw pid, not through a
 /// `std::process::Child`, since this module never holds one.
-fn blocking_reap(pid: u32) -> io::Result<WaitOutcome> {
+fn blocking_reap(pid: u32) -> io::Result<()> {
     let mut status: libc::c_int = 0;
     loop {
         let ret = unsafe { libc::waitpid(pid as libc::pid_t, &raw mut status, 0) };
@@ -266,8 +281,7 @@ fn blocking_reap(pid: u32) -> io::Result<WaitOutcome> {
         }
         break;
     }
-    use std::os::unix::process::ExitStatusExt;
-    Ok(WaitOutcome::from_exit_status(std::process::ExitStatus::from_raw(status)))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -302,44 +316,31 @@ mod tests {
         let (tx, rx) = channel();
         let watch = Reaper::global().watch(pid, tx, std::convert::identity);
 
-        match recv_timeout(&rx) {
-            WaitPoll::Done(outcome) => assert!(outcome.is_success(), "sleep 0 exits cleanly"),
-            other @ WaitPoll::Stopped(_) => panic!("expected an exit, got {other:?}"),
-        }
+        assert!(recv_timeout(&rx).is_success(), "sleep 0 exits cleanly");
         watch.reap().expect("reap");
         let _ = child.kill();
     }
 
-    /// A stop is delivered, and `signal(CONT)` resumes the child: the sleep
-    /// keeps running afterwards, rather than staying parked.
+    /// A stop is answered by the reaper itself with `SIGCONT` and never
+    /// reaches the subscriber: the only event this watch ever sees is the
+    /// kill's own exit, proving the stop did not wedge the entry.
     #[test]
-    fn stop_then_cont_resumes() {
+    fn a_sigstopped_watched_child_is_running_again_when_killed() {
         let mut child = spawn_sleep("5");
         let pid = child.id();
         let (tx, rx) = channel();
         let watch = Reaper::global().watch(pid, tx, std::convert::identity);
 
-        watch.signal(Signal::new(libc::SIGSTOP)).expect("SIGSTOP");
-        match recv_timeout(&rx) {
-            WaitPoll::Stopped(sig) => assert_eq!(sig.number(), libc::SIGSTOP),
-            other @ WaitPoll::Done(_) => panic!("expected a stop, got {other:?}"),
-        }
-
-        watch.signal(Signal::new(libc::SIGCONT)).expect("SIGCONT");
-        // No further event: SIGCONT is an answer, not an exit. Kill to end
-        // the test and confirm the child was actually running, not parked.
-        watch.signal(Signal::new(libc::SIGKILL)).expect("SIGKILL");
-        match recv_timeout(&rx) {
-            WaitPoll::Done(outcome) => assert!(!outcome.is_success()),
-            other @ WaitPoll::Stopped(_) => panic!("expected the kill's exit, got {other:?}"),
-        }
+        watch.signal(Signal::new(libc::SIGSTOP));
+        watch.kill();
+        assert!(!recv_timeout(&rx).is_success(), "SIGKILL is not a clean exit");
         watch.reap().expect("reap");
         let _ = child.kill();
     }
 
     /// Exit-then-`reap` pins the pid: `kill(pid, 0)` still succeeds between
-    /// `Done` and `reap`, proving the zombie is held rather than reaped by
-    /// the scanner itself.
+    /// the posted exit and `reap`, proving the zombie is held rather than
+    /// reaped by the scanner itself.
     #[test]
     fn exit_then_reap_pins_the_pid() {
         let mut child = spawn_sleep("0");
@@ -347,10 +348,7 @@ mod tests {
         let (tx, rx) = channel();
         let watch = Reaper::global().watch(pid, tx, std::convert::identity);
 
-        match recv_timeout(&rx) {
-            WaitPoll::Done(outcome) => assert!(outcome.is_success()),
-            other @ WaitPoll::Stopped(_) => panic!("expected an exit, got {other:?}"),
-        }
+        assert!(recv_timeout(&rx).is_success());
         assert_eq!(
             unsafe { libc::kill(pid as libc::pid_t, 0) },
             0,
@@ -373,14 +371,8 @@ mod tests {
         let watch_a = Reaper::global().watch(pid_a, tx_a, std::convert::identity);
         let watch_b = Reaper::global().watch(pid_b, tx_b, std::convert::identity);
 
-        match recv_timeout(&rx_a) {
-            WaitPoll::Done(outcome) => assert!(outcome.is_success()),
-            other @ WaitPoll::Stopped(_) => panic!("expected a's exit, got {other:?}"),
-        }
-        match recv_timeout(&rx_b) {
-            WaitPoll::Done(outcome) => assert!(outcome.is_success()),
-            other @ WaitPoll::Stopped(_) => panic!("expected b's exit, got {other:?}"),
-        }
+        assert!(recv_timeout(&rx_a).is_success());
+        assert!(recv_timeout(&rx_b).is_success());
         watch_a.reap().expect("reap a");
         watch_b.reap().expect("reap b");
         let _ = a.kill();

@@ -24,12 +24,14 @@ use super::group::Witnessed;
 use super::group::PipelineGroup;
 use super::launch::StageHandle;
 use crate::evaluator::audit::observe_stamped;
-use crate::process::{CancelCause, CommandFailure, Pgid};
+use crate::process::{CancelCause, CancelWatch, CommandFailure, Pgid, watch_cancel};
 use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Observed, Settled,
     Shell, Value, epoch_us,
 };
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+#[cfg(unix)]
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{Receiver, Sender};
 
 /// The fragment is empty when audit is inactive at the parent.
 fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) -> AuditFragment {
@@ -295,7 +297,7 @@ pub(super) struct CollectState {
     /// collector, whose owner's teardown does it.
     owned_group: Option<Pgid>,
     /// Every producer's [`Report`] arrives here: stage threads, external
-    /// waiters, the anchor's two witness threads, the cancel timer.
+    /// waiters, the anchor's two witness threads, the cancel watch.
     rx: Receiver<Report>,
     /// This collector's own clone, held only while stages are still being
     /// launched: [`Self::all_stages_launched`] drops it, so the channel can
@@ -303,43 +305,9 @@ pub(super) struct CollectState {
     /// as `Settled` — by its own send, or by its [`SettleOnDrop`] when the
     /// producer thread unwinds first.
     tx: Option<Sender<Report>>,
-    /// Disconnecting this wakes the cancel timer's `recv_timeout` at once,
-    /// rather than leaving it to notice on its own next tick.
-    quit: Option<Sender<std::convert::Infallible>>,
-    /// Joined in `Drop`, after `quit` is dropped, so the timer thread is
-    /// gone before the collector is.
-    timer: Option<std::thread::JoinHandle<()>>,
-}
-
-/// This collector's own scope has no other way to reach `drive`'s blocking
-/// `recv` — a low-frequency re-check of `scope.cause()` until scopes grow
-/// their own notification.  Runs on its own thread, since every other
-/// producer here is a blocking wait and this is the one thing with nothing
-/// to block on.
-fn spawn_cancel_timer(
-    scope: crate::process::CancelScope,
-    tx: Sender<Report>,
-    quit: Receiver<std::convert::Infallible>,
-) -> Option<std::thread::JoinHandle<()>> {
-    let spawned = std::thread::Builder::new()
-        .name("ral pipeline cancel timer".to_string())
-        .spawn(move || {
-            loop {
-                match quit.recv_timeout(std::time::Duration::from_millis(200)) {
-                    Err(RecvTimeoutError::Disconnected) => return,
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Ok(never) => match never {},
-                }
-                if let Some(cause) = scope.cause() {
-                    let _ = tx.send(Report::Cancelled(cause));
-                    return;
-                }
-            }
-        });
-    // A spawn failure here costs only the stopgap's own coverage — every
-    // other cancellation path (a signal handler's cause, `check`'s own poll
-    // points) still works — so it is not worth failing pipeline launch over.
-    spawned.ok()
+    /// The mooring scope, posting [`Report::Cancelled`] the instant it is
+    /// cancelled; dropping this disarms it.
+    _cancel: CancelWatch,
 }
 
 impl CollectState {
@@ -349,8 +317,10 @@ impl CollectState {
         if group.owned() {
             group.start_witness_threads(tx.clone());
         }
-        let (quit_tx, quit_rx) = std::sync::mpsc::channel();
-        let timer = spawn_cancel_timer(mooring.cancel.as_scope().clone(), tx.clone(), quit_rx);
+        let cancel_tx = tx.clone();
+        let cancel = watch_cancel(mooring.cancel.as_scope().clone(), move |cause| {
+            let _ = cancel_tx.send(Report::Cancelled(cause));
+        });
         Self {
             stages: Vec::new(),
             observed: Vec::new(),
@@ -358,19 +328,20 @@ impl CollectState {
             owned_group: group.owned().then(|| group.leader_pgid()),
             rx,
             tx: Some(tx),
-            quit: Some(quit_tx),
-            timer,
+            _cancel: cancel,
         }
     }
 
     /// A `CollectState` for `step`'s own transition-table tests: no group, no
-    /// anchor, no cancel timer, no processes — just the state `step` folds
-    /// over, with a real channel so `push`ed [`StageHandle`]s (built with
+    /// anchor, no processes — just the state `step` folds over, with a real
+    /// channel so `push`ed [`StageHandle`]s (built with
     /// [`StageHandle::fake_external_for_step_test`]) still have somewhere to
     /// send from, unused by the tests that construct events by hand instead.
+    /// The watch is held on a fresh root scope nothing ever cancels.
     #[cfg(test)]
     pub(super) fn for_step_test() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = watch_cancel(crate::process::CancelScope::root(), |_| {});
         Self {
             stages: Vec::new(),
             observed: Vec::new(),
@@ -378,8 +349,7 @@ impl CollectState {
             owned_group: None,
             rx,
             tx: Some(tx),
-            quit: None,
-            timer: None,
+            _cancel: cancel,
         }
     }
 
@@ -620,10 +590,6 @@ impl Drop for CollectState {
                 Some(pgid) => pgid.kill(),
                 None => self.kill_live_externals(),
             }
-        }
-        self.quit.take();
-        if let Some(timer) = self.timer.take() {
-            let _ = timer.join();
         }
     }
 }
