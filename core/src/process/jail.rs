@@ -58,6 +58,10 @@ impl JailCgroup {
     /// Nothing to finish: no cgroup was ever created off Linux, so callers
     /// need no `cfg` of their own.
     #[cfg(not(target_os = "linux"))]
+    #[allow(
+        clippy::unused_self,
+        reason = "shape, not use: the receiver is what makes this the same call as the Linux arm above, which is the whole point of the pair"
+    )]
     pub(crate) fn finish(&self) {}
 }
 

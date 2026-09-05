@@ -74,6 +74,15 @@ return [
   # Exec mirrors `reasonable` — the agent has the same toolset.
   # Unlike `read-only`, the write set includes `cwd:` so file
   # mutations succeed.
+  #
+  # And unlike either, no directory this profile can *write* is
+  # admitted here: `reasonable`'s `cwd:/`, `/tmp/` and `tempdir:/`
+  # admits are absent.  A directory that is both writable and
+  # exec-admitted makes every deny below advisory — `cp $(which git)
+  # ./g` and run `./g`, a copy no name veto and no `#"/git$"` regex
+  # ever sees.  An editing agent runs tools, not the tree it edits, so
+  # the admits cost nothing here and their absence is what lets the
+  # denies mean something.
   exec: [
     'xdg:bin/':            'allow',
     'system:':             'allow',   # the platform's tool roots — see core/src/path/sigil.rs
@@ -81,9 +90,6 @@ return [
     '/usr/local/sbin/':    'allow',
     '/usr/sbin/':          'allow',
     '/sbin/':              'allow',
-    'cwd:/':               'allow',
-    '/tmp/':               'allow',
-    'tempdir:/':           'allow',
 
     # Coreutils
     base64:    'allow',
@@ -150,8 +156,12 @@ return [
     powershell: 'deny',
     pwsh:       'deny',
 
-    # Version control.  `git` is denied — the agent edits files
-    # directly; committing is a human decision.  Use ral builtins
+    # Version control.  `git` is denied so that committing stays a
+    # human decision: no admitted directory is writable (see above),
+    # so there is nowhere to put a copy of it that this profile would
+    # then run.  The veto is still a veto over *names*, not over what
+    # a binary does — an admitted tool that shells out to a library
+    # rather than to `git` is not what it stops.  Use ral builtins
     # (`grep-files`, `view-text`, `edit-replace`) for code exploration and
     # modification; use `gh pr view` or `curl` to fetch remote context.
     # `gh` remains admitted for PR review and issue fetching.

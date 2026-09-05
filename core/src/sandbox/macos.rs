@@ -62,6 +62,10 @@ fn apply_profile(profile: &str) -> std::io::Result<()> {
 /// than `format!()` strings.
 const BASE_PROFILE: &str = include_str!("macos-base.sbpl");
 
+/// The `net: true` rules — the wholesale socket allow and the resolver and
+/// trust-evaluation Mach doors that ride the same bit.
+const NET_PROFILE: &str = include_str!("macos-net.sbpl");
+
 pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String> {
     let mut lines: Vec<String> = vec![BASE_PROFILE.to_string()];
     let rendered = policy.rendered()?;
@@ -75,7 +79,11 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
         }
     }
 
-    emit_exec_rules(&mut lines, &rendered.exec)?;
+    // A veto under an fs nobody restricted is hollow unless the allow-set is
+    // frozen — see `emit_exec_rules`.
+    let freeze_admitted_set =
+        matches!(rendered.fs, FsProjection::Unrestricted) && rendered.exec.carries_veto();
+    emit_exec_rules(&mut lines, &rendered.exec, freeze_admitted_set)?;
 
     // After the broad allows: Seatbelt is last-match-wins.  `subpath` so a
     // denied directory covers everything under it; `file-link` (Seatbelt
@@ -109,7 +117,7 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
         ));
     }
     if policy.net {
-        lines.push("(allow network*)".to_string());
+        lines.push(NET_PROFILE.to_string());
     }
 
     Ok(lines.join("\n"))
@@ -157,10 +165,31 @@ fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) -> Res
 /// inside one, so a denied command cannot be re-execed through the covering
 /// subpath by an interpreter the gate never sees.
 ///
+/// `freeze_admitted_set` denies writes to everything the rule admits: no
+/// writing to a directory whose contents this profile will run.  Its caller
+/// asks for it where `(allow file-write*)` would otherwise make every veto
+/// hollow — copy the denied binary under a fresh name into an admitted
+/// directory, or drop any binary at all into the unconditionally admitted
+/// `/opt/homebrew/bin`, and run it from there.  Freezing contradicts no layer:
+/// none asked to write here.  It also restores the premise
+/// [`crate::capability::deputy`] reasons from, that an unrestricted `fs` is
+/// not "everything writable" — true of the folded grant, but false of this
+/// backend, which renders that `fs` as `(allow file-write*)`, until here.
+///
+/// A grant that *does* restrict fs is never frozen, even where its write set
+/// overlaps the allow-set, because there the overlap is a stance somebody took
+/// — `reasonable` admits `cwd:/` for exactly the scripts it lets the agent
+/// write — and a name veto has never been more than a narrowing of the allow
+/// set (see `identity.rs`).
+///
 /// `Err` when the platform base's or the self-exec path's own name-class
 /// expansion is not valid UTF-8, which [`render_paths`] refuses rather than
 /// approximates; the projection's own sets arrive already rendered.
-fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection<Rendered>) -> Result<(), String> {
+fn emit_exec_rules(
+    lines: &mut Vec<String>,
+    exec: &ExecProjection<Rendered>,
+    freeze_admitted_set: bool,
+) -> Result<(), String> {
     match exec {
         ExecProjection::Unrestricted => {
             lines.push("(allow process-exec)".to_string());
@@ -222,6 +251,20 @@ fn emit_exec_rules(lines: &mut Vec<String>, exec: &ExecProjection<Rendered>) -> 
             for name in deny_basenames {
                 let pattern = format!("/{}$", escape_regex(name));
                 lines.push(format!("(deny process-exec (regex #\"{pattern}\"))"));
+            }
+            if freeze_admitted_set {
+                for dir in allow_dirs.iter().chain(&system_dirs) {
+                    lines.push(format!(
+                        "(deny file-write* (subpath \"{}\"))",
+                        escape_path(dir)
+                    ));
+                }
+                for path in allow_paths.iter().chain(&self_exec) {
+                    lines.push(format!(
+                        "(deny file-write* (literal \"{}\"))",
+                        escape_path(path)
+                    ));
+                }
             }
         }
     }
@@ -357,6 +400,18 @@ mod tests {
     use crate::path::proper_ancestors;
     use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
 
+    /// The profile with its commentary dropped — what the kernel reads.  The
+    /// `.sbpl` files argue at length for what they leave *out*, so a test
+    /// asking whether a service is admitted must not read the argument as the
+    /// admission.
+    fn rules(profile: &str) -> String {
+        profile
+            .lines()
+            .filter(|l| !l.trim_start().starts_with(";;"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn mac_shell_profile_allows_general_exec_when_unrestricted() {
         let profile = build_profile(&SandboxProjection::default()).unwrap();
@@ -387,6 +442,49 @@ mod tests {
         assert!(
             !profile.contains("(allow process-exec)\n"),
             "wildcard process-exec leaked into restricted profile"
+        );
+    }
+
+    /// An exec veto under an unrestricted fs is otherwise hollow: the child
+    /// drops a binary into an admitted directory — `/opt/homebrew/bin` is
+    /// admitted unconditionally — and runs it from there under a name the
+    /// veto never mentions.
+    #[test]
+    fn mac_profile_freezes_the_admitted_set_when_a_veto_meets_unrestricted_fs() {
+        let vetoed = SandboxProjection {
+            fs: FsProjection::Unrestricted,
+            exec: ExecProjection::Restricted {
+                allow_paths: Vec::new(),
+                allow_dirs: vec!["/usr/bin".into()],
+                deny_paths: Vec::new(),
+                deny_dirs: Vec::new(),
+                deny_basenames: vec!["git".into()],
+            },
+            ..SandboxProjection::default()
+        };
+        let profile = build_profile(&vetoed).unwrap();
+        for dir in ["/usr/bin", "/usr"] {
+            assert!(
+                profile.contains(&format!("(deny file-write* (subpath \"{dir}\"))")),
+                "{dir} stayed writable under a veto:\n{profile}"
+            );
+        }
+        // Freezing is the veto's price, so a grant that vetoes nothing pays it
+        // not at all.
+        let open = SandboxProjection {
+            fs: FsProjection::Unrestricted,
+            exec: ExecProjection::Restricted {
+                allow_paths: Vec::new(),
+                allow_dirs: vec!["/usr/bin".into()],
+                deny_paths: Vec::new(),
+                deny_dirs: Vec::new(),
+                deny_basenames: Vec::new(),
+            },
+            ..SandboxProjection::default()
+        };
+        assert!(
+            !build_profile(&open).unwrap().contains("(deny file-write*"),
+            "a veto-free grant had its admitted set frozen"
         );
     }
 
@@ -594,10 +692,7 @@ mod tests {
             ..SandboxProjection::default()
         })
         .unwrap();
-        for rule in profile
-            .lines()
-            .filter(|l| !l.trim_start().starts_with(";;"))
-        {
+        for rule in rules(&profile).lines() {
             assert!(
                 !rule.contains("network"),
                 "net: false admitted a network rule: {rule}\n{profile}"
@@ -611,6 +706,41 @@ mod tests {
         assert!(
             open.contains("(allow network*)"),
             "net: true emitted no network rule, so the denial above proves nothing:\n{open}"
+        );
+    }
+
+    /// A wholesale `(allow mach-lookup)` hands out launchservicesd, and with
+    /// it `/usr/bin/open` — a spawn performed by launchd outside this profile,
+    /// which is an escape and, for a URL, an egress channel.  The door list is
+    /// therefore closed by name, and the resolver's doors ride the `net` bit
+    /// with the sockets.
+    #[test]
+    fn mac_profile_names_every_mach_service() {
+        let closed = rules(
+            &build_profile(&SandboxProjection {
+                net: false,
+                ..SandboxProjection::default()
+            })
+            .unwrap(),
+        );
+        assert!(
+            !closed.lines().any(|l| l.trim() == "(allow mach-lookup)"),
+            "wholesale mach-lookup:\n{closed}"
+        );
+        for name in ["launchservicesd", "com.apple.lsd", "pasteboard", "dnssd"] {
+            assert!(
+                !closed.contains(name),
+                "the base profile admits {name}:\n{closed}"
+            );
+        }
+        let open = build_profile(&SandboxProjection {
+            net: true,
+            ..SandboxProjection::default()
+        })
+        .unwrap();
+        assert!(
+            rules(&open).contains("com.apple.dnssd.service"),
+            "net: true emitted no resolver door:\n{open}"
         );
     }
 

@@ -76,14 +76,16 @@ tools available than `reasonable`.
 - It reads the project, common XDG directories, and common toolchain caches.
 - It writes only the project and scratch.
 - It keeps the network on for remote context.
-- It admits system tools, project and scratch executables, Python, search,
-  patch, archive, and network utilities.
+- It admits system tools, Python, search, patch, archive, and network
+  utilities — but no executable in the project or scratch, which is what makes
+  the denies below hold: a directory that is both writable and exec-admitted
+  can be handed a copy of a denied tool under another name.
 - It denies Git and interactive shells.
 
 The name describes the intended job, not a proof that no build can execute: a
-build tool under a system root, or an executable already in the project, may
-still run. If “no builds” is a hard requirement, add an explicit `--restrict`
-file for the executable surface you want.
+build tool under a system root still runs. If “no builds” is a hard
+requirement, add an explicit `--restrict` file for the executable surface you
+want.
 
 ### `read-only` — review and investigate
 
@@ -92,7 +94,8 @@ the project tree. Writes are limited to scratch.
 
 Git is available for `log`, `show`, and `diff`; commands such as `commit` fail
 at the filesystem boundary. Tools that insist on writing into the project may
-also fail and should be pointed at `$EXARCH_SCRATCH` where possible.
+also fail and should be pointed at `$EXARCH_SCRATCH` where possible — which is
+writable but not exec-admitted, so a binary written there cannot then be run.
 
 The profile still has network access and broad reads of config and toolchain
 caches. “Read-only” describes project mutation, not confidentiality or

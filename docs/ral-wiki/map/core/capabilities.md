@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d4d34afc
+generated_at_commit: 5ca433c4
 generated_at_date: 2026-09-05
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -285,6 +285,12 @@ state, so the Seatbelt profile cannot yet deny `/dev/tty` ioctls for ordinary
 Denied-terminal tool runs while admitting them for `_ed-tui`-style children.
 The notification-center carve-out is named in the POSIX shared-memory namespace
 (`ipc-posix-name "apple.shm.notification_center"`), matching Apple's profiles.
+`(allow signal (target same-sandbox))` scopes signalling to the envelope: the
+filter binds sending only, so an external kill *into* the sandbox (how a
+timeout lands) is unaffected, while `kill -STOP` back out at the host ral is
+not a denial-of-service a confined child can perform. Descendants share the
+instance; two per-command children of one grant do not, so signalling between
+sibling jobs is denied too.
 
 `net: false` on macOS is enforced by *absence*: `build_profile` emits `(allow
 network*)` only under `net: true`, and the base admits `network-outbound` for
@@ -292,10 +298,19 @@ nothing. That silence is what closes DNS, because `getaddrinfo` reaches
 mDNSResponder over the UNIX socket `/private/var/run/mDNSResponder`, which
 Seatbelt gates as `network-outbound` rather than as `mach-lookup` — measured on
 Darwin 25.5.0: denying `mach-lookup` outright still resolves names, and
-admitting that socket alone resolves them with `mach-lookup` denied. So the
-base's unfiltered `(allow mach-lookup)`, which dyld needs before `main()`, is
-not a resolver door and scoping it would buy nothing here. The invariant worth
-keeping is the narrower one: admit `network-outbound` for no local socket, or a
+admitting that socket alone resolves them with `mach-lookup` denied. So
+`mach-lookup` is not a *resolver* door, which is why the base once admitted it
+unfiltered — dyld needs it before `main()`. It is other doors, and the
+conclusion drawn from that measurement — that scoping it buys nothing — held
+only for the resolver: a Mach name is a door to a daemon that acts on your
+behalf *outside* the profile, so `(allow mach-lookup)` hands out
+launchservicesd, and with it `/usr/bin/open`, whose target launchd spawns
+unconfined (`open -a Terminal ./payload.command`), and whose URL form carries
+bytes out under `net: false`. Same door: the pasteboard server and securityd.
+The base now names the services dyld and libSystem need and no others,
+`macos-net.sbpl` carries the resolver and trust doors under `net: true` so DNS
+closes at both layers at once, and `mac_profile_names_every_mach_service` holds
+the shape. The invariant worth keeping is the narrower one: admit `network-outbound` for no local socket, or a
 hostname becomes an egress channel — an attacker-chosen query label leaves via
 the resolver daemon, which is outside the sandbox — while `net: false` still
 reads as closed. `mac_profile_denies_network_when_disabled` asserts it over

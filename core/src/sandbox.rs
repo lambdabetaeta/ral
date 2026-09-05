@@ -317,29 +317,25 @@ pub fn serve_sandbox_early_init() -> Option<u8> {
     }
 }
 
-/// Split `--sandbox-projection <json>` out of `raw`: the parsed policy, then
-/// the arguments that remain.
+/// Split a leading `--sandbox-projection <json>` off `raw`: the parsed policy,
+/// then the arguments that remain.
+///
+/// Leading by construction — [`launch`] emits it as the first argument of the
+/// confined re-exec — so a later occurrence is part of the `--ral-sandbox-exec`
+/// tail, an argument of the command the child is about to run, and must reach
+/// it verbatim rather than be read as a second projection.
 fn strip_policy_arg(raw: &[String]) -> Result<(Option<SandboxProjection>, Vec<String>), String> {
-    let mut args = Vec::new();
-    let mut policy = None;
-    let mut iter = raw.iter();
-    while let Some(arg) = iter.next() {
-        if arg != SANDBOX_PROJECTION_FLAG {
-            args.push(arg.clone());
-            continue;
+    match raw.split_first() {
+        Some((flag, tail)) if flag == SANDBOX_PROJECTION_FLAG => {
+            let (json, rest) = tail
+                .split_first()
+                .ok_or("ral: --sandbox-projection requires a JSON argument")?;
+            let policy = serde_json::from_str(json)
+                .map_err(|e| format!("ral: invalid sandbox policy JSON: {e}"))?;
+            Ok((Some(policy), rest.to_vec()))
         }
-        let json = iter
-            .next()
-            .ok_or("ral: --sandbox-projection requires a JSON argument")?;
-        if policy.is_some() {
-            return Err("ral: --sandbox-projection may only be provided once".into());
-        }
-        policy = Some(
-            serde_json::from_str(json)
-                .map_err(|e| format!("ral: invalid sandbox policy JSON: {e}"))?,
-        );
+        _ => Ok((None, raw.to_vec())),
     }
-    Ok((policy, args))
 }
 
 /// Install `pre_exec` hooks: no core dumps anywhere, plus a 512-process
@@ -390,7 +386,7 @@ pub fn make_command(name: &str, args: &[String], shell: &Shell) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use super::{net_enforced, projection_enforceable, strip_policy_arg};
+    use super::{SANDBOX_PROJECTION_FLAG, net_enforced, projection_enforceable, strip_policy_arg};
     use crate::types::SandboxProjection;
 
     #[test]
@@ -451,5 +447,18 @@ mod tests {
             })
         );
         assert_eq!(args, vec!["-c", "echo hi"]);
+    }
+
+    #[test]
+    fn strip_policy_arg_leaves_the_exec_tail_untouched() {
+        let tail = [
+            crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG.to_string(),
+            "rg".to_string(),
+            SANDBOX_PROJECTION_FLAG.to_string(),
+            "not json".to_string(),
+        ];
+        let (policy, args) = strip_policy_arg(&tail).expect("a tail is not a projection");
+        assert!(policy.is_none());
+        assert_eq!(args, tail);
     }
 }

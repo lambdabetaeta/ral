@@ -88,9 +88,11 @@ return [
     '/usr/local/sbin/':    'allow',
     '/usr/sbin/':          'allow',
     '/sbin/':              'allow',
-    'cwd:/':               'allow',
-    '/tmp/':               'allow',
-    'tempdir:/':           'allow',
+    'cwd:/':               'allow',   # read-only, so nothing can be dropped here to run
+    # No `/tmp/` or `tempdir:/`: those are this profile's only writable
+    # dirs, and a dir that is both writable and exec-admitted makes the
+    # denies below advisory — write a copy of `bash` into scratch under
+    # another name and the veto, a name veto, never sees it.
 
     # Coreutils
     base64:    'allow',

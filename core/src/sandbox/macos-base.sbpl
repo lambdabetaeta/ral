@@ -27,11 +27,13 @@
 (version 1)
 (deny default)
 
-;; Signals — without this even `process::exit` paths can hit a
-;; denial.  No target filter: the process must be able to send
-;; and receive signals for timeout cancellation (external kill into
-;; the sandbox) and child management (signals to descendants).
-(allow signal)
+;; Signals — without this even `process::exit` paths can hit a denial.
+;; The filter binds only sending, so timeout cancellation (an external
+;; kill *into* the sandbox) still lands; what it stops is `kill -STOP`
+;; back out at the host ral or the user's own shell.  Descendants share
+;; the instance, but two per-command children of one grant do not, so
+;; signalling between sibling jobs is denied with everything else.
+(allow signal (target same-sandbox))
 
 ;; Read sysctls — many runtimes (libdispatch, libmalloc) probe these on
 ;; init and abort if denied.  Read-only.
@@ -39,10 +41,35 @@
 
 ;; dyld talks to launchd over Mach to locate the dyld shared cache;
 ;; without it `(allow process-exec)` is not enough — the child aborts
-;; before main().  This is not a resolver door: `getaddrinfo` reaches
-;; mDNSResponder over the UNIX socket /private/var/run/mDNSResponder,
-;; which Seatbelt gates as `network-outbound`, not as `mach-lookup`.
-(allow mach-lookup)
+;; before main().  Named services rather than the wholesale form,
+;; because a Mach name is a door to a daemon that acts on your behalf
+;; *outside* this profile: launchservicesd would spawn whatever
+;; `/usr/bin/open` names as an unconfined child of launchd, making
+;; `open -a Terminal ./payload.command` a full escape and `open
+;; https://…` an exfil channel under `net: false`.  Hence no
+;; `com.apple.coreservices.launchservicesd` and no `com.apple.lsd.*`
+;; below — nor `com.apple.pasteboard.1` (pbpaste reads a clipboard no
+;; grant mentions) nor `com.apple.SecurityServer` (securityd hands out
+;; keychain items to `security find-generic-password`).
+;;
+;; This is not a resolver door: `getaddrinfo` reaches mDNSResponder
+;; over the UNIX socket /private/var/run/mDNSResponder, which Seatbelt
+;; gates as `network-outbound`, not as `mach-lookup`.  The services a
+;; resolver *does* want are emitted by `build_profile` under `net`.
+(allow mach-lookup
+  (global-name "com.apple.dyld")
+  ;; libnotify, on the first notify_register_* — libdispatch's, among others.
+  (global-name "com.apple.system.notification_center")
+  ;; getpwuid/getgrgid: `~` expansion, whoami, id, and every tool that
+  ;; asks who it is running as.
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.opendirectoryd.membership")
+  ;; os_log.  A denial here is survivable but every libSystem process
+  ;; hits it, so it would drown the denial log this profile's own
+  ;; diagnostics read (`sandbox::diag`).
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.logd")
+  (global-name "com.apple.diagnosticd"))
 
 ;; No network rule appears in this file, and that silence is what closes
 ;; DNS under `net: false`: with `network-outbound` denied by default the
@@ -50,7 +77,8 @@
 ;; as a query label.  Allowing that form for *any* local socket would
 ;; reopen the channel while `net: false` still reads as closed — hence
 ;; the profile admits `network-outbound` for nothing at all, and only
-;; `net: true` emits the wholesale `(allow network*)`.
+;; `net: true` appends `macos-net.sbpl`, which carries the wholesale
+;; `(allow network*)` and the resolver's own Mach doors.
 
 ;; process-exec without process-fork yields EPERM at spawn time:
 ;; Seatbelt gates fork() separately from execve().

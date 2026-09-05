@@ -246,6 +246,23 @@ impl<N> Default for ExecProjection<N> {
     }
 }
 
+impl<N> ExecProjection<N> {
+    /// Whether some layer denied a command rather than merely not admitting
+    /// one — the distinction between an allow-set that is narrow and one that
+    /// is narrowed on purpose, which is what a backend must protect.
+    pub fn carries_veto(&self) -> bool {
+        match self {
+            Self::Unrestricted => false,
+            Self::Restricted {
+                deny_paths,
+                deny_dirs,
+                deny_basenames,
+                ..
+            } => !(deny_paths.is_empty() && deny_dirs.is_empty() && deny_basenames.is_empty()),
+        }
+    }
+}
+
 /// The OS-renderable projection of the effective grant, produced by
 /// `sandbox_projection` in `core/src/capability/sandbox.rs` after meet-folding
 /// the whole stack.

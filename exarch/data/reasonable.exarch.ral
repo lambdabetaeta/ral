@@ -172,6 +172,14 @@ return [
     '/usr/local/sbin/':    'allow',
     '/usr/sbin/':          'allow',
     '/sbin/':              'allow',
+    # These three are writable as well as admitted, which is the whole
+    # point — a general agent builds and runs what it built — and is
+    # also why the `deny` keys further down are a narrowing of the
+    # allow set rather than a boundary: a denied tool copied into the
+    # project tree under another name would run.  The fs and net
+    # grants are what confine this profile; use `edit-only` or
+    # `read-only`, where no admitted directory is writable, when a
+    # deny has to hold against the agent rather than steer it.
     'cwd:/':               'allow',   # scripts the agent drops into the project tree
     '/tmp/':               'allow',   # scratch builds (autotools `./configure`, ad-hoc scripts)
     'tempdir:/':           'allow',   # `$TMPDIR` on macOS — distinct from /tmp

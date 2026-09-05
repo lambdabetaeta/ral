@@ -1,0 +1,21 @@
+;; ral macOS Seatbelt rules for `net: true`, appended by
+;; `core/src/sandbox/macos.rs::build_profile` and by nothing else.
+;;
+;; Seatbelt has no per-address network rules, so the socket half is one
+;; wholesale allow.  The Mach half is here rather than in the base
+;; profile because these daemons are exactly the network: configd
+;; answers "what are the proxies and the DNS servers", the dnssd port
+;; is the resolver's, and trustd evaluates TLS chains.  Under
+;; `net: false` a hostname therefore cannot carry bytes out even as a
+;; query label, at both layers at once.
+;;
+;; `com.apple.trustd`, not `com.apple.SecurityServer`: chain evaluation
+;; without the keychain — see the base profile's mach-lookup comment.
+
+(allow network*)
+
+(allow mach-lookup
+  (global-name "com.apple.SystemConfiguration.configd")
+  (global-name "com.apple.dnssd.service")
+  (global-name "com.apple.trustd")
+  (global-name "com.apple.trustd.agent"))

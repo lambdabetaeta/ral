@@ -73,6 +73,18 @@ writable" — but it reports rather than denies, and the overlap is not itself a
 escalation ([[design/grant|grant]] §Concessions,
 [[decisions/260806_a-head-has-three-identities|a-head-has-three-identities]]).
 
+That premise is true of the folded grant but was false of the macOS backend,
+which renders an unrestricted `fs` as `(allow file-write*)`: a grant that
+vetoed a command while holding no fs opinion could have its veto answered with
+a copy dropped into an admitted directory — `/opt/homebrew/bin` is admitted
+unconditionally. So `build_profile` freezes the exec allow-set (no writes to a
+directory whose contents the profile will run) exactly when a veto meets an
+unrestricted `fs`, which contradicts no layer, since none asked to write there.
+Where `fs` *is* restricted the overlap stays a stance somebody took, reported
+and not denied: `reasonable` admits `cwd:/` for the very scripts it lets the
+agent write, while `edit-only` and `read-only` admit no directory they can
+write, which is what lets their `git`/`bash` denies mean something.
+
 **The in-process gate covers what ral dispatches; the OS sandbox covers what a
 spawned process does on its own.**
 
