@@ -1,7 +1,6 @@
-//! Pipeline execution engine.  `resolve` freezes the terminal handoff and
-//! each stage's launch decision, `launch` places every stage in one process
-//! group, `join` folds their observations into one value.  [`PipeNode`] is
-//! the orchestrator; nothing more.
+//! Pipeline execution engine.  `resolve` freezes the terminal handoff and each
+//! stage's launch decision, `launch` places every stage in one process group,
+//! `join` folds their observations into one value.
 
 mod collect;
 mod group;
@@ -10,6 +9,7 @@ mod launch;
 pub(crate) mod resolve;
 mod route;
 mod sentinel;
+mod stage;
 mod thread;
 
 use crate::ir::{Comp, PipeYield};
@@ -17,10 +17,11 @@ use crate::types::{Env, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 use std::time::Instant;
 
-use collect::CollectState;
+use collect::{CollectState, Slot};
 use group::PipelineGroup;
-use launch::{PipelineStart, launch_pipeline};
-use resolve::resolve_pipeline;
+use launch::{LaunchCx, spawn_stage};
+use resolve::{TerminalPlan, resolve_pipeline};
+use route::open_stage_routes;
 
 /// A multi-stage pipeline between its launch and its join, its stages running
 /// in their own process group.
@@ -49,35 +50,55 @@ impl PipeNode {
         mooring: &Mooring,
         shell: &mut Shell,
     ) -> Settled<Self> {
-        // A top-level pipeline sits under no Bind, so this is its first
-        // signal-checked seam.
         crate::process::check(mooring)?;
         let plan = resolve_pipeline(stages, env, mooring, shell)?;
 
-        // Window start for the sandbox-denial reader: before any stage spawns,
-        // so a deny the kernel logs for one falls inside it.
+        // Window start for the sandbox-denial reader.
         let started = Instant::now();
         let (tx, rx) = std::sync::mpsc::channel();
 
-        // Whether this pipeline owns its pgid or joins an enclosing stage's.
-        let group = match shell.io.launch_role.stage_group() {
+        let mut group = match shell.io.launch_role.stage_group() {
             Some(g) => PipelineGroup::joining(g),
             None => PipelineGroup::prepare(shell, tx.clone())?,
         };
+        if plan.terminal == TerminalPlan::ForegroundExternalGroup {
+            group.claim_foreground(shell, mooring);
+        }
 
-        let start = PipelineStart {
+        let collect = CollectState::new(rx, &tx, group.owned_pgid(), mooring, started);
+        let mut node = Self {
+            collect,
             group,
             yields,
-            tx,
-            rx,
-            started,
         };
-        launch_pipeline(stages, &plan, start, env, mooring, shell)
+        // Declared after `node` so unconsumed routes close before it tears
+        // down: a half-wired neighbour must see EOF.
+        let routes = open_stage_routes(stages.len())?;
+
+        let mut cx = LaunchCx {
+            mooring,
+            shell,
+            env,
+            group: &node.group,
+        };
+        for (ix, ((stage, spec), route)) in stages.iter().zip(&plan.specs).zip(routes).enumerate() {
+            crate::process::check(mooring)?;
+            let handle = spawn_stage(stage, spec, route, &mut cx, Slot { ix, tx: tx.clone() })?;
+            node.collect.push(handle);
+        }
+        Ok(node)
     }
 
     /// Wait on every stage and fold their observations into one value.
-    pub(crate) fn join(mut self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-        self.collect.drive(&self.group);
-        self.collect.fold(mooring, shell).finish(self.yields)
+    pub(crate) fn join(self, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+        let Self {
+            mut collect,
+            group,
+            yields,
+        } = self;
+        collect.drive();
+        let value = collect.fold(mooring, shell, yields);
+        drop(group);
+        value
     }
 }

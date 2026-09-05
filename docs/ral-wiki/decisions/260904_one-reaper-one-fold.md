@@ -215,6 +215,14 @@ joining collector's per-pid cancel reads `grace_signal(cause)`, `cause_signal`'s
 current name and the one table `RunningChild::terminate` reads too, and it is
 skipped outright for a signal the anchor witnessed the kernel deliver.
 
+**Amended again** (`99226d37`), in carrier only: the `sent` vector is now one
+field per stage handle, `StageHandle::sent`, recorded by `cancel`/`cut` and
+carried onto that stage's `StageEnd`, so the fold reads `sent` beside the
+outcome it belongs to rather than by index; and `PipelineGroup::signal`/`kill`
+are now the collector's own `signal_live`/`kill_live`, which read `owned_group`
+for the pgid-or-per-pid fork. The pgid-wide `SIGCONT` after the grace signal
+stays where it was, in the owning arm.
+
 See [[decisions/260902_stages-are-threads|stages-are-threads]],
 [[decisions/260726_cancel-is-a-join|cancel-is-a-join]],
 [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]],

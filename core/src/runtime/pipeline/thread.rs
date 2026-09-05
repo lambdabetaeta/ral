@@ -1,20 +1,17 @@
-//! A stage thread: a ral-written pipeline stage evaluated on its own OS
-//! thread, sharing the pipeline's process group with whatever externals it
-//! spawns.  [`launch_thread_stage`] is the parent side — it wires the
-//! stage's `Io` from its [`StageRoute`] and hands the closure to
-//! [`Shell::spawn_thread`]; [`ThreadStage`] is the collector's handle onto
-//! the running thread.
+//! A ral-written pipeline stage evaluated on its own OS thread, sharing the
+//! pipeline's process group with whatever externals it spawns.
+//! [`ThreadStage`] is the collector's handle onto the running thread.
 
-use super::collect::Slot;
+use super::collect::{SettleOnDrop, Slot, StageObservation};
 use super::launch::LaunchCx;
 use super::resolve::StageSpec;
-use super::route::{ByteOut, StageRoute};
+use super::route::{ByteIn, ByteOut};
 use crate::evaluator::machine;
 use crate::io::{Io, Sink};
 use crate::ir::Comp;
+use crate::process::{CancelCause, CancelScope, Wake};
 use crate::source::Span;
 use crate::types::{Break, Closure, Error, Mooring, Settled};
-use crate::process::{CancelCause, CancelScope, Wake};
 use std::sync::Arc;
 
 /// The parent's handle onto a running stage thread.
@@ -25,14 +22,11 @@ pub(super) struct ThreadStage {
 }
 
 impl ThreadStage {
+    /// Cancel the scope and wake the thread.  Windows has no wake an fd poll
+    /// can see, so a blocked `ReadFile` is retried with `CancelSynchronousIo`
+    /// until the wake is acknowledged or the thread has finished on its own.
     pub(super) fn cancel(&self, cause: CancelCause) {
         self.cancel.cancel(cause);
-    }
-
-    /// Fire the wake; on Windows also `CancelSynchronousIo` the stage
-    /// thread's blocked `ReadFile`, retried until it acknowledges the wake
-    /// or the stage has already finished on its own.
-    pub(super) fn interrupt(&self) {
         self.wake.fire();
         #[cfg(windows)]
         {
@@ -48,9 +42,7 @@ impl ThreadStage {
         }
     }
 
-    /// This stage's `Returned` event has already arrived by channel — the
-    /// thread is already returning, so this reclaims it rather than waiting
-    /// for it.
+    /// Reclaims a thread already returning: its `Returned` has arrived.
     pub(super) fn join_after_settled(mut self) {
         if let Some(join) = self.join.take() {
             let _ = join.join();
@@ -69,33 +61,38 @@ impl ThreadStage {
     }
 }
 
-/// Turn a caught panic's payload into the `Error` a stage's own `Returned`
-/// carries, stamped with the stage's span — the panicking thread's stack has
-/// none of its own to attribute it to.
+impl Drop for ThreadStage {
+    /// A stage never observed is cancelled and joined, not abandoned.
+    fn drop(&mut self) {
+        if self.join.is_none() {
+            return;
+        }
+        self.cancel(CancelCause::Terminate);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// A parent-side error carrying the stage's own span.
+fn stage_error(message: String, span: Option<Span>) -> Break {
+    Break::Error(Error {
+        span,
+        ..Error::new(message, 1)
+    })
+}
+
+/// Stamped with the stage's span — the panicking thread's stack has none of
+/// its own to attribute it to.
 fn panic_error(payload: &(dyn std::any::Any + Send), span: Option<Span>) -> Error {
     let msg = payload
         .downcast_ref::<&str>()
         .map(|s| (*s).to_string())
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "unknown panic".to_string());
-    let mut err = Error::new(format!("ral pipeline stage panicked: {msg}"), 1);
-    err.span = span;
-    err
-}
-
-impl Drop for ThreadStage {
-    /// A stage never observed — an aborted launch, a panic elsewhere in the
-    /// pipeline unwinding past it — is cancelled, interrupted, and joined
-    /// rather than abandoned.
-    fn drop(&mut self) {
-        if self.join.is_none() {
-            return;
-        }
-        self.cancel(CancelCause::Terminate);
-        self.interrupt();
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+    Error {
+        span,
+        ..Error::new(format!("ral pipeline stage panicked: {msg}"), 1)
     }
 }
 
@@ -103,49 +100,52 @@ impl Drop for ThreadStage {
 pub(super) fn launch_thread_stage(
     stage: &Arc<Comp>,
     spec: &StageSpec,
-    route: StageRoute,
+    stdin: ByteIn,
+    stdout: ByteOut,
     cx: &LaunchCx<'_>,
     slot: Slot,
-    is_last: bool,
 ) -> Settled<ThreadStage> {
     let wake = Wake::new().map_err(|e| {
-        let mut err = Error::new(format!("could not create a pipeline stage's wake: {e}"), 1);
-        err.span = spec.span;
-        Break::Error(err)
+        stage_error(
+            format!("could not create a pipeline stage's wake: {e}"),
+            spec.span,
+        )
     })?;
-    let StageRoute { stdin, stdout, .. } = route;
     let stdin = super::launch::stage_stdin(stdin, cx.shell, &wake)?;
 
     let group = cx.group.leader_pgid();
 
-    let stdout = match stdout {
-        ByteOut::Downstream(w, edge) => Sink::Pipe {
-            writer: Arc::new(w),
-            wake: Arc::clone(&wake),
-            edge,
-        },
-        ByteOut::Parent => cx.shell.io.stdout.clone(),
+    // A non-final stage's ambient is its own pipe; the final stage's is the
+    // parent's, which `Io::ambient` requires never be a capture buffer.
+    let (stdout, ambient) = match stdout {
+        ByteOut::Downstream(w, edge) => {
+            let sink = Sink::Pipe {
+                writer: Arc::new(w),
+                wake: Arc::clone(&wake),
+                edge,
+            };
+            (sink.clone(), sink)
+        }
+        ByteOut::Parent => (cx.shell.io.stdout.clone(), cx.shell.io.ambient.clone()),
     };
-    let stderr = cx.shell.io.stderr.clone();
-
-    let policy = cx.shell.local.audit.active_policy();
-    let mooring = Mooring::for_stage_thread(cx.mooring);
 
     let io = Io {
         stdin,
-        stdout: stdout.clone(),
-        ambient: stdout,
-        stderr,
+        stdout,
+        ambient,
+        stderr: cx.shell.io.stderr.clone(),
         interactive: cx.shell.io.interactive,
         terminal: cx.shell.io.terminal,
         launch_role: crate::io::LaunchRole::PipelineStage(group),
     };
 
+    let policy = cx.shell.local.audit.active_policy();
+    let mooring = Mooring::for_stage_thread(cx.mooring);
     let env = cx.env.clone();
     let comp = Arc::clone(stage);
     let span = spec.span;
 
-    let settle = super::collect::SettleOnDrop::new(slot);
+    let settle = SettleOnDrop::new(slot);
     let spawned = cx.shell.spawn_thread(
         mooring,
         "ral pipeline stage",
@@ -156,21 +156,21 @@ pub(super) fn launch_thread_stage(
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine::evaluate(Closure { comp, env }, mooring, child)
             }));
-            let obs = match result {
-                Ok(Ok(v)) => super::collect::StageObservation::ok()
-                    .with_value(is_last.then_some(v))
-                    .with_audit(child.local.audit.take_fragment()),
-                Ok(Err(br)) => super::collect::StageObservation::from_break(br)
-                    .with_audit(child.local.audit.take_fragment()),
-                Err(payload) => super::collect::StageObservation::failure(panic_error(&*payload, span)),
+            let settled = match result {
+                Ok(settled) => settled,
+                Err(payload) => Err(Break::Error(panic_error(&*payload, span))),
             };
-            settle.send(obs);
+            settle.send(StageObservation {
+                settled,
+                audit: child.local.audit.take_fragment(),
+            });
         },
     );
     let (join, cancel) = spawned.map_err(|e| {
-        let mut err = Error::new(format!("could not start a pipeline stage thread: {e}"), 1);
-        err.span = span;
-        Break::Error(err)
+        stage_error(
+            format!("could not start a pipeline stage thread: {e}"),
+            span,
+        )
     })?;
 
     Ok(ThreadStage {
@@ -182,10 +182,9 @@ pub(super) fn launch_thread_stage(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::*;
     use super::super::group::PipelineGroup;
     use super::super::resolve::StageLaunch;
-    use super::super::route::ByteIn;
+    use super::*;
     use crate::io::Edge;
     use crate::types::{Shell, TerminalAccess};
     use std::io::Read;
@@ -218,30 +217,37 @@ mod tests {
             .expect("anchor spawns")
     }
 
-    #[test]
-    fn a_stage_writes_into_a_sink_pipe_and_finishes() {
+    fn shell_with_builtins() -> Shell {
         let mut shell = Shell::default();
         shell.install_builtins(crate::builtins::CORE_BASE_FRAMES);
+        shell
+    }
+
+    #[test]
+    fn a_stage_writes_into_a_sink_pipe_and_finishes() {
+        let mut shell = shell_with_builtins();
         let env = shell.env.clone();
-        let mut group = prepared_group();
+        let group = prepared_group();
         let stage = compile_one("echo hi");
         let spec = spec_for(&stage);
         let (mut reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
-        let route = StageRoute {
-            stdin: ByteIn::Parent,
-            stdout: ByteOut::Downstream(writer, Edge::new()),
-            held: None,
-        };
         let mooring = Mooring::adrift();
         let cx = LaunchCx {
             mooring: &mooring,
             shell: &mut shell,
             env: &env,
-            group: &mut group,
+            group: &group,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let _handle = launch_thread_stage(&stage, &spec, route, &cx, Slot { ix: 0, tx }, true)
-            .expect("launch");
+        let _handle = launch_thread_stage(
+            &stage,
+            &spec,
+            ByteIn::Parent,
+            ByteOut::Downstream(writer, Edge::new()),
+            &cx,
+            Slot { ix: 0, tx },
+        )
+        .expect("launch");
 
         let mut out = Vec::new();
         reader.read_to_end(&mut out).expect("read stage stdout");
@@ -253,38 +259,82 @@ mod tests {
             panic!("a thread stage must settle as Event::Returned");
         };
         assert_eq!(ix, 0);
-        assert!(obs.break_.is_none(), "echo hi must not fail");
+        assert!(obs.settled.is_ok(), "echo hi must not fail");
     }
 
+    /// A final stage's discarded statement writes to the parent's ambient
+    /// sink, never to the parent's stdout — which under a capture is a buffer.
     #[test]
-    fn a_cancelled_spinning_stage_ends_within_500ms() {
-        let mut shell = Shell::default();
-        shell.install_builtins(crate::builtins::CORE_BASE_FRAMES);
+    fn a_final_stages_discarded_statement_writes_to_the_parents_ambient() {
+        let mut shell = shell_with_builtins();
+        let (stdout_sink, stdout_buf) = crate::io::new_buffer();
+        let (ambient_sink, ambient_buf) = crate::io::new_buffer();
+        shell.io.stdout = stdout_sink;
+        shell.io.ambient = ambient_sink;
         let env = shell.env.clone();
-        let mut group = prepared_group();
-        // A self-recursive, argument-incrementing call with no base case:
-        // nothing but a cancel ends it.
-        let stage = compile_one("!{ let go = { |n| go $[$n + 1] }; go 0 }");
+        let group = prepared_group();
+        let stage = compile_one("!{ echo x; echo y }");
         let spec = spec_for(&stage);
-        let (_reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
-        let route = StageRoute {
-            stdin: ByteIn::Parent,
-            stdout: ByteOut::Downstream(writer, Edge::new()),
-            held: None,
-        };
         let mooring = Mooring::adrift();
         let cx = LaunchCx {
             mooring: &mooring,
             shell: &mut shell,
             env: &env,
-            group: &mut group,
+            group: &group,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let handle = launch_thread_stage(&stage, &spec, route, &cx, Slot { ix: 0, tx }, true)
-            .expect("launch");
+        let handle = launch_thread_stage(
+            &stage,
+            &spec,
+            ByteIn::Parent,
+            ByteOut::Parent,
+            &cx,
+            Slot { ix: 0, tx },
+        )
+        .expect("launch");
+
+        let super::super::collect::Event::Returned(_, obs) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the stage sends its own Returned")
+        else {
+            panic!("a thread stage must settle as Event::Returned");
+        };
+        assert!(obs.settled.is_ok(), "the stage must not fail");
+        handle.join_after_settled();
+
+        assert_eq!(crate::io::take_buffer(&stdout_buf), b"y\n");
+        assert_eq!(crate::io::take_buffer(&ambient_buf), b"x\n");
+    }
+
+    #[test]
+    fn a_cancelled_spinning_stage_ends_within_500ms() {
+        let mut shell = shell_with_builtins();
+        let env = shell.env.clone();
+        let group = prepared_group();
+        // A self-recursive, argument-incrementing call with no base case:
+        // nothing but a cancel ends it.
+        let stage = compile_one("!{ let go = { |n| go $[$n + 1] }; go 0 }");
+        let spec = spec_for(&stage);
+        let (_reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
+        let mooring = Mooring::adrift();
+        let cx = LaunchCx {
+            mooring: &mooring,
+            shell: &mut shell,
+            env: &env,
+            group: &group,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = launch_thread_stage(
+            &stage,
+            &spec,
+            ByteIn::Parent,
+            ByteOut::Downstream(writer, Edge::new()),
+            &cx,
+            Slot { ix: 0, tx },
+        )
+        .expect("launch");
 
         handle.cancel(CancelCause::ReaderGone);
-        handle.interrupt();
 
         let start = Instant::now();
         let super::super::collect::Event::Returned(_, obs) = rx
@@ -295,9 +345,9 @@ mod tests {
         };
         assert!(start.elapsed() < Duration::from_millis(500));
         assert!(
-            matches!(&obs.break_, Some(Break::Error(e)) if e.cancelled_by() == Some(CancelCause::ReaderGone)),
+            matches!(&obs.settled, Err(Break::Error(e)) if e.cancelled_by() == Some(CancelCause::ReaderGone)),
             "a real cancelled thread's break must carry the cancel's own mark: {:?}",
-            obs.break_
+            obs.settled
         );
     }
 

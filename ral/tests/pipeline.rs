@@ -1498,7 +1498,7 @@ fn pipeline_pgid_is_distinct_from_parent() {
 fn pipeline_mid_stage_launch_failure_does_not_hang() {
     // Stage 2 references a command that cannot be resolved, so its
     // launch fails after stage 1 has already spawned.  Dropping the
-    // launch's `PipelineBuild` must SIGKILL the pgid before its
+    // half-built `PipeNode` must SIGKILL the pgid before its
     // stage handles join and reap every already-spawned child.  If any
     // child leaks the wait() inside the harness will time out.
     let script = "/usr/bin/true | /no/such/binary_xyzzy | /usr/bin/cat";
@@ -1510,7 +1510,7 @@ fn pipeline_mid_stage_launch_failure_does_not_hang() {
 #[test]
 fn pipeline_mid_stage_launch_failure_with_long_producer_kills_it() {
     // Stage 1 is a long-running producer (`yes`); stage 2 fails to launch.
-    // The producer must be killed (SIGKILL) by the launch's `PipelineBuild`
+    // The producer must be killed (SIGKILL) by the half-built `PipeNode`'s
     // drop; otherwise it would keep writing to its now-orphaned pipe forever
     // and the test would time out.  This is the canonical Drop-chain regression.
     let script = "/usr/bin/yes | /no/such/binary_xyzzy";

@@ -1,13 +1,7 @@
-//! Interior edges of a process-staged pipeline are kernel byte pipes.
-//!
-//! Every edge is allocated before any stage spawns, and each end lives in
-//! exactly one [`StageRoute`] the launcher consumes whole, so a doubly-wired
-//! end is unrepresentable.  A non-final stage's route also carries the
-//! parent's own duplicate of its outbound read end ([`HeldEdge`]): while the
-//! parent holds it no EPIPE and no SIGPIPE ever reaches the writer, so the
-//! collector's sentinel is the only channel a dead reader reaches it by.
+//! Interior edges are kernel byte pipes, each end living in exactly one
+//! [`StageRoute`].  The parent's own duplicate of a non-final read end
+//! ([`HeldEdge`]) keeps EPIPE off every writer: the sentinel hears it instead.
 
-use super::resolve::PipelinePlan;
 use crate::io::Edge;
 use crate::types::{Break, Error, Settled};
 use std::sync::Arc;
@@ -18,30 +12,28 @@ pub(super) fn pipe_error(e: impl std::fmt::Display) -> Break {
 
 /// Stdin source for one stage.
 pub(super) enum ByteIn {
-    /// The pipeline's input boundary; `launch::route_stdin` resolves it
-    /// against the enclosing shell's stdin.
+    /// The pipeline's input boundary, resolved against the enclosing shell's
+    /// stdin.
     Parent,
     Upstream(os_pipe::PipeReader),
 }
 
 /// Stdout destination for one stage.
 pub(super) enum ByteOut {
-    /// The pipeline's output boundary; `launch::wire_stage_stdout` resolves it
-    /// against the shell's stdout sink.
+    /// The pipeline's output boundary, resolved against the shell's stdout
+    /// sink.
     Parent,
     Downstream(os_pipe::PipeWriter, Arc<Edge>),
 }
 
 /// The parent's hold on a non-final stage's outbound edge: its fate, and a
-/// duplicate of its read end.  `reader` is `None` exactly while the sentinel
-/// is reading it.
+/// duplicate of its read end, shared with the sentinel that reads it.
 pub(super) struct HeldEdge {
     pub(super) edge: Arc<Edge>,
-    pub(super) reader: Option<os_pipe::PipeReader>,
+    pub(super) reader: Arc<os_pipe::PipeReader>,
 }
 
-/// One stage's fully-wired byte endpoints, consumed by value at spawn. A
-/// directly spawned external carries the same route shape as a thread stage.
+/// One stage's fully-wired byte endpoints, consumed by value at spawn.
 pub(super) struct StageRoute {
     pub(super) stdin: ByteIn,
     pub(super) stdout: ByteOut,
@@ -49,34 +41,38 @@ pub(super) struct StageRoute {
     pub(super) held: Option<HeldEdge>,
 }
 
-/// Allocate every interior edge as a byte pipe, purely from stage position —
-/// every edge is the same kind of pipe regardless of what either side routes.
-pub(super) fn open_stage_routes(plan: &PipelinePlan) -> Settled<Vec<StageRoute>> {
-    let n = plan.specs.len();
-    let mut routes = Vec::with_capacity(n);
-    let mut inbound = None;
-    for i in 0..n {
-        let stdin = match inbound.take() {
-            Some(reader) => ByteIn::Upstream(reader),
-            None => ByteIn::Parent,
-        };
-        let (stdout, held) = if i + 1 < n {
-            let (r, w) = crate::process::cloexec_pipe().map_err(pipe_error)?;
-            let edge = Edge::new();
-            let held = HeldEdge {
-                edge: Arc::clone(&edge),
-                reader: Some(r.try_clone().map_err(pipe_error)?),
-            };
-            inbound = Some(r);
-            (ByteOut::Downstream(w, edge), Some(held))
-        } else {
-            (ByteOut::Parent, None)
-        };
-        routes.push(StageRoute {
+fn open_edge() -> Settled<((ByteOut, Option<HeldEdge>), ByteIn)> {
+    let (r, w) = crate::process::cloexec_pipe().map_err(pipe_error)?;
+    let edge = Edge::new();
+    Ok((
+        (
+            ByteOut::Downstream(w, Arc::clone(&edge)),
+            Some(HeldEdge {
+                edge,
+                reader: Arc::new(r.try_clone().map_err(pipe_error)?),
+            }),
+        ),
+        ByteIn::Upstream(r),
+    ))
+}
+
+/// Every edge is the same pipe, so position alone decides.
+pub(super) fn open_stage_routes(n: usize) -> Settled<Vec<StageRoute>> {
+    let (outs, ins): (Vec<_>, Vec<_>) = (1..n)
+        .map(|_| open_edge())
+        .collect::<Settled<Vec<_>>>()?
+        .into_iter()
+        .unzip();
+    let stdins = std::iter::once(ByteIn::Parent).chain(ins);
+    let stdouts = outs
+        .into_iter()
+        .chain(std::iter::once((ByteOut::Parent, None)));
+    Ok(stdins
+        .zip(stdouts)
+        .map(|(stdin, (stdout, held))| StageRoute {
             stdin,
             stdout,
             held,
-        });
-    }
-    Ok(routes)
+        })
+        .collect())
 }

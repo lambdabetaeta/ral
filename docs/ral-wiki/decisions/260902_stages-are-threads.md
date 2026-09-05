@@ -38,7 +38,9 @@ forced, and the boot-per-stage cost — is deleted.
   installs right after `prepare`: the anchor is a real, immune member, so a
   signal is never forwarded to a child-less pgid. The foreground is claimed
   in `PipelineBuild::new`, before any stage runs — collapsing the old
-  post-launch frame gate, which no longer has a job.
+  post-launch frame gate, which no longer has a job. (`PipelineBuild` is gone
+  as of `99226d37`: `PipeNode::launch` is itself the launch loop, and claims
+  the foreground there.)
 - **A stage's `Mooring` carries the park, not its `LaunchRole`.**
   `StagePark { gate: Arc<StageGate>, stop: Arc<StageStop> }` travels on
   `Mooring::park: Option<StagePark>`. A `spawn` worker started inside a stage

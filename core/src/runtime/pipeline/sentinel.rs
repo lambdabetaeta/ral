@@ -1,17 +1,15 @@
-//! The collector's own reader on a dead edge.
-//!
-//! An external stage cannot be asked whether it wrote; it can only be heard.
-//! So the parent reads the edge itself: the bytes already pending were owed
-//! to a reader that left, and the first byte after them is a write to a dead
-//! edge — which the collector answers with the kill.
+//! The collector's own reader on a dead edge.  An external cannot be asked
+//! whether it wrote, only heard: the bytes already pending were owed to a
+//! reader that left, and the first byte after them earns the kill.
 
 use super::collect::{Event, Slot};
 use std::io::Read;
+use std::sync::Arc;
 
 /// Bytes already in the edge's buffer when the reader ended.  A failed
 /// snapshot counts as zero: nothing was proved pending.
 #[cfg(unix)]
-fn pending_bytes(reader: &os_pipe::PipeReader) -> usize {
+fn pending_bytes(reader: &os_pipe::PipeReader) -> u64 {
     use std::os::fd::AsRawFd;
     let mut n: libc::c_int = 0;
     // SAFETY: `reader` owns an open fd for the call's duration, and FIONREAD
@@ -20,12 +18,12 @@ fn pending_bytes(reader: &os_pipe::PipeReader) -> usize {
     if rc < 0 {
         0
     } else {
-        usize::try_from(n).unwrap_or(0)
+        u64::try_from(n).unwrap_or(0)
     }
 }
 
 #[cfg(windows)]
-fn pending_bytes(reader: &os_pipe::PipeReader) -> usize {
+fn pending_bytes(reader: &os_pipe::PipeReader) -> u64 {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::Pipes::PeekNamedPipe;
     let mut avail: u32 = 0;
@@ -42,29 +40,22 @@ fn pending_bytes(reader: &os_pipe::PipeReader) -> usize {
             std::ptr::null_mut(),
         )
     };
-    if ok == 0 { 0 } else { avail as usize }
+    if ok == 0 { 0 } else { u64::from(avail) }
 }
 
 /// Discard the bytes owed to the departed reader, then hear the next write.
-/// The reader travels back to the collector with the news, so it is released
-/// at the writer's filing and not before.
-pub(super) fn listen(reader: os_pipe::PipeReader, slot: Slot) {
+/// The read end is shared with the [`HeldEdge`](super::route::HeldEdge), so the
+/// fd closes once both the writer's filing and this thread have let go.
+pub(super) fn listen(reader: Arc<os_pipe::PipeReader>, slot: Slot) {
     std::thread::spawn(move || {
-        let mut reader = reader;
-        let mut buf = [0u8; 8 * 1024];
-        let mut owed = pending_bytes(&reader);
-        while owed > 0 {
-            let want = owed.min(buf.len());
-            match reader.read(&mut buf[..want]) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => owed -= n,
-            }
+        let mut r = &*reader;
+        let owed = pending_bytes(&reader);
+        if std::io::copy(&mut r.by_ref().take(owed), &mut std::io::sink()).is_err() {
+            return;
         }
-        // EOF here means no writer is left, so there is nothing to cut.
-        if let Ok(n) = reader.read(&mut buf)
-            && n > 0
-        {
-            slot.send(Event::Wrote(slot.ix, reader));
+        // `UnexpectedEof` means no writer is left, so there is nothing to cut.
+        if r.read_exact(&mut [0u8; 1]).is_ok() {
+            slot.send(Event::Wrote(slot.ix));
         }
     });
 }

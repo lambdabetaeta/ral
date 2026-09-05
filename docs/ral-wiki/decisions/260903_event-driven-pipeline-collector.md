@@ -16,6 +16,11 @@ status: active
 > `CollectState` and one `Event`, still returns the same `KillStage`/
 > `CancelAll`/`Done`, and `drive` is still `loop { for e in step(&mut st,
 > rx.recv()?) { run(e) } }` — only what feeds the channel changed.
+>
+> **Superseded in part again** (`99226d37`): the purity rule stands, but the
+> shapes moved. `Effect::Done` is gone — completion is `!live()`, no stage
+> handle left — `step` returns `Option<Effect>` rather than a list, and `drive`
+> is `while live() { recv; step; run }`.
 
 **Every event in a pipeline's lifecycle is an edge — a stop reported once, a
 byte written once, a thread returning once — so the collector that used to

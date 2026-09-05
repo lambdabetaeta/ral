@@ -56,7 +56,7 @@ fn run(shell: &mut Shell, source: &str) -> Settled<Value> {
 /// The stack when the pipeline joins is `Try`, `Capture` — a pipeline
 /// sitting under a byte capture sitting under a handler.  `fail` in the
 /// second stage raises inside the child machine and crosses back as the
-/// pipeline's own error (`collect::PipelineCollector`); the `Pipeline` rule
+/// pipeline's own error (`CollectState::fold`); the `Pipeline` rule
 /// turns it into `Halt` on the spot; `Capture`'s `Halt` rule flushes
 /// whatever bytes `echo a` wrote and re-raises; `Try`'s `Halt` rule is what
 /// finally converts it into the handler's argument.  No step here is

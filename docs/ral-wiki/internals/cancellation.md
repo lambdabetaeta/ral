@@ -1,5 +1,5 @@
 ---
-verified_at_commit: ccb05833
+verified_at_commit: 99226d37
 verified_at_date: 2026-09-05
 anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, ChromeKind, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, process::check, RunningChild::wait, watch_cancel, escalation_pending]
 ---
@@ -101,8 +101,9 @@ discipline ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]).
   run's wall elapsing
   ([[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]]).
   **Pipelines mint no scope of their own** — they are bounded by
-  the foreground scope they run under and by `PipelineGroup::Drop`, which group-
-  SIGKILLs on teardown (see [[internals/pipeline-execution|pipeline-execution]]).
+  the foreground scope they run under and by `CollectState::drop`, which kills
+  whatever it still holds unobserved: the owned pgid, or each live external by
+  pid (see [[internals/pipeline-execution|pipeline-execution]]).
 
 ## The ambient causes
 

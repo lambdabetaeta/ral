@@ -33,7 +33,10 @@ stage-relative — a non-final stage's own stdout *is* the wire, and a stage run
 in a fresh child shell with no enclosing capture at all, so a flush there
 bottoms out at the wire rather than escaping the pipeline. `!{ echo a; return
 () } | cat` therefore writes `a` into `cat` by exactly this clause, with no
-pipeline rule involved.
+pipeline rule involved. The final stage has no wire, so its ambient is the
+*parent's* ambient — whatever visible stream lies outside the whole pipeline —
+and never the parent's stdout, which under `!{ … | … }` is the capture buffer
+this rule exists to pass.
 
 This is the load-bearing clause, and the one an implementation can get subtly
 wrong: routing a discarded write to the *immediately* enclosing sink agrees with

@@ -1,20 +1,17 @@
 //! Child side of ral's hidden multicall flags, entered before the CLI.
-//!
-//! `--ral-pipeline-anchor` holds the pipeline pgid open so a fast-exiting
-//! first stage cannot strand its successors — the only stage that still
-//! re-execs; a ral-written stage runs on a thread of the parent process.
-//! `--ral-bundled-tool` exchanges no frame at all: the inherited env, cwd,
-//! stdio, process group and sandbox are the whole execution context.
+//! `--ral-pipeline-anchor` holds the pipeline pgid open so a fast-exiting first
+//! stage cannot strand its successors.  `--ral-bundled-tool` exchanges no frame
+//! at all: the inherited env, cwd, stdio, process group and sandbox are the
+//! whole execution context.
 
 pub(crate) const ANCHOR_FLAG: &str = "--ral-pipeline-anchor";
 
 pub(crate) const BUNDLED_TOOL_FLAG: &str = "--ral-bundled-tool";
 
-/// Hold the pipeline pgid open: block reading stdin to EOF — the parent's
-/// `AnchorProcess::finish` closing its release pipe.  Every termination
-/// signal is swallowed and reported instead (see `group.rs`); the three stop
-/// signals are ignored outright, so the anchor never stops and never needs
-/// resuming.
+/// Block reading stdin to EOF — the parent's `AnchorProcess::finish` closing
+/// its release pipe.  Every termination signal is swallowed and reported
+/// instead; the three stop signals are ignored outright, so the anchor never
+/// stops and never needs resuming.
 #[cfg(unix)]
 fn serve_anchor() -> u8 {
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
@@ -85,9 +82,7 @@ pub fn try_run_pipeline_anchor() -> Option<u8> {
         crate::sandbox::register_self_for_helpers();
         // Before the mode check, so every argv-bearing ral gets it: Rust's
         // runtime ignores SIGPIPE, but a ral child producing under a foreign
-        // shell's pipeline must still die of it.  ral's own interior edges
-        // never deliver it — the parent holds each read end — and parent-side
-        // protocol writes mask it per write in `subprocess_codec`.
+        // shell's pipeline must still die of it.
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         }
@@ -95,12 +90,9 @@ pub fn try_run_pipeline_anchor() -> Option<u8> {
     (mode == ANCHOR_FLAG).then(serve_anchor)
 }
 
-/// Hidden bundled-tool dispatch from the binary entrypoint
-/// (`ral --ral-bundled-tool <tool> <args...>`).
-///
-/// `args` is the post-`early_init` argv sans the binary name, so the OS
-/// sandbox is already entered and the tool runs confined.  The exit code
-/// comes from `invoke_bundled`.
+/// Hidden bundled-tool dispatch (`ral --ral-bundled-tool <tool> <args...>`).
+/// `args` is the post-`early_init` argv sans the binary name, so the OS sandbox
+/// is already entered and the tool runs confined.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
 pub fn try_run_bundled_tool(args: &[String]) -> Option<u8> {
     use crate::uutils;

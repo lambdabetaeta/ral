@@ -21,22 +21,17 @@ pub(super) enum TerminalPlan {
     ForegroundExternalGroup,
 }
 
-/// Identity and pre-evaluated argv for a directly spawned external stage.  Args
-/// stay `Value`s so launch-time `command::vet` applies the same shape rejection
-/// single-command exec does.
-#[derive(Clone, Debug)]
-pub(super) struct ExternalStage {
-    pub(super) id: CommandIdentity,
-    pub(super) args: Vec<Value>,
-}
-
 /// One stage's launch decision, frozen here and read by launch rather than
-/// re-derived.  Argv is evaluated only on the `Direct` path, which consumes
-/// it: a `Thread` stage re-evaluates its own inside the thread, so doing it
-/// here too would run effectful arguments twice.
+/// re-derived.  Argv is evaluated only on the `Direct` path: a `Thread` stage
+/// re-evaluates its own inside the thread, so doing it here too would run
+/// effectful arguments twice.  Args stay `Value`s so launch-time
+/// `command::vet` applies the same shape rejection single-command exec does.
 #[derive(Clone, Debug)]
 pub(super) enum StageLaunch {
-    Direct(ExternalStage),
+    Direct {
+        id: CommandIdentity,
+        args: Vec<Value>,
+    },
     Thread,
 }
 
@@ -50,14 +45,10 @@ pub(super) struct StageSpec {
     pub(super) span: Option<Span>,
 }
 
-/// Freeze one stage's launch decision: a thread unless the head is an external
-/// with no redirect and no byte-capturing audit in force — a redirect needs a
-/// thread's fd table, a capture its accounting.
-///
-/// A bundled tool is not distinguished from a host binary, so `ls`, `cat`,
-/// `wc` behave alike everywhere.  Admission is `command::vet`'s at launch: a
-/// head the grant denies still routes through here and refuses as an ordinary
-/// error.
+/// A thread unless the head is an external with no redirect and no
+/// byte-capturing audit in force — a redirect needs a thread's fd table, a
+/// capture its accounting.  Admission is `command::vet`'s at launch, so a head
+/// the grant denies still routes through here and refuses as an ordinary error.
 fn resolve_launch(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageLaunch> {
     let CompKind::Exec(e) = &stage.item else {
         return Ok(StageLaunch::Thread);
@@ -70,10 +61,10 @@ fn resolve_launch(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageLaunch
     if !e.redirects.is_empty() || shell.local.audit.captures_bytes() {
         return Ok(StageLaunch::Thread);
     }
-    Ok(StageLaunch::Direct(ExternalStage {
+    Ok(StageLaunch::Direct {
         id,
         args: machine::close_args(&e.args, env)?,
-    }))
+    })
 }
 
 /// Frozen output of resolve, threaded through launch and collect.
