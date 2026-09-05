@@ -204,8 +204,10 @@ impl RunningChild {
     ) -> Option<crate::process::WaitOutcome> {
         #[cfg(unix)]
         {
-            // A root abort skips the grace ladder outright, addressed or not.
-            if cause == CancelCause::RootAbort {
+            // A root abort skips the grace ladder outright, addressed or not;
+            // so does a reader-gone end, whose catchable signal would hand
+            // the disposition back to the producer.
+            if matches!(cause, CancelCause::RootAbort | CancelCause::ReaderGone) {
                 self.kill_group(watch);
                 return None;
             }

@@ -1,13 +1,15 @@
 //! Unified stream plumbing: [`Io`], the per-`Shell` bundle of byte streams
 //! and terminal state.
 //!
-//! It sits over the [`source`] / [`sink`] / [`terminal`] submodules, whose
-//! public items are re-exported here as `crate::io::*`.
+//! It sits over the [`edge`] / [`source`] / [`sink`] / [`terminal`]
+//! submodules, whose public items are re-exported here as `crate::io::*`.
 
+mod edge;
 mod sink;
 mod source;
 mod terminal;
 
+pub use edge::{DeadEdge, Edge};
 pub use sink::{ByteBuffer, CapturedBytes, ChildStdioPlan, ExternalWrite, Sink};
 pub(crate) use sink::{
     SINK_BUFFER_CAP, buffer_overflowed, new_buffer, peek_buffer, str_strip_one_terminator,

@@ -4,9 +4,10 @@
 //! Observation order is the order stages actually end, not launch order: a
 //! non-final stage may outlive its reader (a child that stops itself, or one
 //! that keeps writing after the reader is long gone), so collection reacts to
-//! whichever stage ends next rather than blocking on one at a time. The kill
-//! cascade is tail-driven — a stage is killed once its reader has settled —
-//! and that kill is the one death forgiven. Verdict precedence — first
+//! whichever stage ends next rather than blocking on one at a time.  A stage
+//! is cut at its first write to a dead edge and nowhere else: a thread's own
+//! write raises the break, an external's is heard by the sentinel and
+//! answered with the kill — the one death forgiven. Verdict precedence — first
 //! failure wins, control outranks failure — folds in launch order, over
 //! observations buffered during the walk.  A stop never reaches this fold at
 //! all, whether a member's or the anchor's own: the reaper answers every stop
@@ -108,6 +109,9 @@ pub(super) enum Event {
     /// A thread stage's own report: its own send, or its [`SettleOnDrop`]
     /// when the producer thread unwound first.
     Returned(usize, StageObservation),
+    /// A stage wrote to its dead outbound edge, heard by the sentinel; the
+    /// read end travels back so the writer's own filing releases it.
+    Wrote(usize, os_pipe::PipeReader),
     /// The mooring scope, the anchor's report pipe, or the anchor's own
     /// death — every one of them tears the whole pipeline down.
     Cancelled(CancelCause),
@@ -154,8 +158,12 @@ impl Drop for SettleOnDrop {
 /// perform for one event's worth of consequences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Effect {
-    /// The reader-gone cascade's own kill: the one death forgiven.  Never
-    /// reused for any other kill — see [`StageHandle::kill_now`]'s doc.
+    /// This stage's outbound edge is dead: mark it, and set the sentinel
+    /// listening on the parent's duplicate of its read end.
+    ArmEdge(usize),
+    /// The reader-gone kill, the sentinel having heard the first write to a
+    /// dead edge: the one death forgiven.  Never reused for any other kill —
+    /// see [`StageHandle::kill_now`]'s doc.
     KillStage(usize),
     CancelAll(CancelCause),
     Done,
@@ -398,7 +406,7 @@ impl CollectState {
     /// An external's own terminal event: file it as a [`StageEnd::External`]
     /// — [`StageHandle::file_external_end`] reaps the watch, carrying the
     /// jail and the pumps out for [`Self::fold`] to finish and settle by
-    /// this stage's own `sent` — then the reader-gone cascade.
+    /// this stage's own `sent`.
     fn on_ended(&mut self, ix: usize, outcome: crate::process::WaitOutcome) -> Vec<Effect> {
         let handle = self.stages[ix]
             .take()
@@ -408,7 +416,7 @@ impl CollectState {
     }
 
     /// A thread stage's own terminal event: file it as a
-    /// [`StageEnd::Thread`], then the reader-gone cascade.
+    /// [`StageEnd::Thread`].
     fn on_returned(&mut self, ix: usize, obs: StageObservation) -> Vec<Effect> {
         let handle = self.stages[ix]
             .take()
@@ -417,25 +425,18 @@ impl CollectState {
         self.file_end(ix, end)
     }
 
-    /// The common tail once a stage's [`StageEnd`] is known: file it, then
-    /// the reader-gone cascade — identical in content to the old tail-first
-    /// rescan, fired now by the event that justifies it — and whether every
-    /// stage is now observed.  The cascade's own kill is recorded here, in
-    /// `sent`, the instant `step` decides to emit it: attribution is the
-    /// fold's, not the interpreter's.
+    /// The common tail once a stage's [`StageEnd`] is known: file it, arm the
+    /// edge its reader has just abandoned, and say whether every stage is now
+    /// observed.
     fn file_end(&mut self, ix: usize, end: StageEnd) -> Vec<Effect> {
         self.observed[ix] = Some(end);
 
         let mut effects = Vec::new();
         // A stage that already finished keeps its outcome — `!{ echo a;
-        // exit 3 } | head -1` must stay honest — so the writer is only
-        // killed while still running (`Some`).
-        if ix > 0
-            && let Some(writer) = self.stages[ix - 1].as_ref()
-            && writer.feeds_pipe()
-        {
-            self.sent[ix - 1] = self.sent[ix - 1].max(Some(CancelCause::ReaderGone));
-            effects.push(Effect::KillStage(ix - 1));
+        // exit 3 } | head -1` must stay honest — so only a writer still
+        // running (`Some`) has an edge left to arm.
+        if ix > 0 && self.stages[ix - 1].is_some() {
+            effects.push(Effect::ArmEdge(ix - 1));
         }
         if self.stages.iter().all(Option::is_none) {
             effects.push(Effect::Done);
@@ -443,11 +444,31 @@ impl CollectState {
         effects
     }
 
-    /// Perform one [`Effect`]: a kill, or the whole group's cancel.  `Some`
-    /// when it decides `drive`'s outcome; the caller returns at once rather
-    /// than folding whatever else the same event's effect list still holds.
+    /// The sentinel heard this stage write to its dead edge: take the read
+    /// end back, record the cause against the stage, and cut it.  A stage
+    /// that has already been filed keeps its outcome, and the returned reader
+    /// simply drops.
+    fn on_wrote(&mut self, ix: usize, reader: os_pipe::PipeReader) -> Vec<Effect> {
+        let Some(handle) = self.stages[ix].as_mut() else {
+            return Vec::new();
+        };
+        handle.regain(reader);
+        self.sent[ix] = self.sent[ix].max(Some(CancelCause::ReaderGone));
+        vec![Effect::KillStage(ix)]
+    }
+
+    /// Perform one [`Effect`]: arming an edge, a kill, or the whole group's
+    /// cancel.  `Some` when it decides `drive`'s outcome; the caller returns
+    /// at once rather than folding whatever else the same event's effect list
+    /// still holds.
     fn run(&mut self, effect: Effect, group: &PipelineGroup) -> Option<()> {
         match effect {
+            Effect::ArmEdge(ix) => {
+                if let Some(handle) = self.stages[ix].as_mut() {
+                    handle.arm(ix);
+                }
+                None
+            }
             Effect::KillStage(ix) => {
                 if let Some(handle) = self.stages[ix].as_mut() {
                     handle.kill_now();
@@ -531,7 +552,8 @@ impl CollectState {
     }
 
     /// `cancel_all`'s own drain: file a stage's own terminal event and
-    /// discard anything else — a further cancel, mid-teardown, is moot.
+    /// discard anything else — a further cancel, or a dead write whose reader
+    /// drops with the event, is moot once the whole group is already dying.
     fn file_terminal_only(&mut self, event: Event) {
         match event {
             Event::Ended(ix, outcome) => {
@@ -540,7 +562,7 @@ impl CollectState {
             Event::Returned(ix, obs) => {
                 let _ = self.on_returned(ix, obs);
             }
-            Event::Cancelled(_) => {}
+            Event::Wrote(..) | Event::Cancelled(_) => {}
         }
     }
 
@@ -587,12 +609,10 @@ impl CollectState {
         for (ix, end) in std::mem::take(&mut self.observed).into_iter().enumerate() {
             let Some(end) = end else { continue };
             let obs = match end {
-                StageEnd::Thread(obs)
-                    if sent[ix] == Some(CancelCause::ReaderGone)
-                        && obs.ended_by(CancelCause::ReaderGone) =>
-                {
-                    obs.forgiven()
-                }
+                // A `ReaderGone` break is minted only by a write to a dead
+                // edge or by a `ReaderGone` scope cancel, both this
+                // collector's own doing, so the break alone is the evidence.
+                StageEnd::Thread(obs) if obs.ended_by(CancelCause::ReaderGone) => obs.forgiven(),
                 StageEnd::Thread(obs) => obs,
                 StageEnd::External {
                     name,
@@ -624,6 +644,7 @@ pub(super) fn step(state: &mut CollectState, ev: Event) -> Vec<Effect> {
     match ev {
         Event::Ended(ix, outcome) => state.on_ended(ix, outcome),
         Event::Returned(ix, obs) => state.on_returned(ix, obs),
+        Event::Wrote(ix, reader) => state.on_wrote(ix, reader),
         Event::Cancelled(cause) => vec![Effect::CancelAll(cause)],
     }
 }
@@ -719,10 +740,8 @@ mod tests {
     }
 
     /// `drive` over two real children reaches `Done` and folds what they
-    /// settled.  The *final* stage carries the failure: a writer's own exit
-    /// is not assertable here, because a reader that settles first kills it
-    /// where it stands and that death is the one forgiven — precedence
-    /// between two surviving verdicts is
+    /// settled.  The *final* stage carries the failure; precedence between
+    /// two surviving verdicts is
     /// [`breaks_join_by_rank_earlier_stage_breaking_ties`]'s to state, over
     /// no processes at all.
     #[test]
@@ -916,43 +935,69 @@ mod tests {
         state
     }
 
-    /// The reader-gone cascade: a settled reader kills its still-running
-    /// writer, once — and an already-finished writer keeps its outcome,
-    /// exactly the honesty `!{ echo a; exit 3 } | head -1` needs.
+    /// A settled reader arms the edge its still-running writer holds — and an
+    /// already-finished writer has none left to arm, exactly the honesty
+    /// `!{ echo a; exit 3 } | head -1` needs.
     #[test]
-    fn settling_a_stage_kills_its_still_running_writer_but_spares_a_finished_one() {
+    fn settling_a_stage_arms_its_still_running_writers_edge_but_spares_a_finished_one() {
         let mut state = state_with(4);
-        // Stage 0 settles first — nothing upstream of it to cascade into.
+        // Stage 0 settles first — nothing upstream of it to arm.
         let effects = step(&mut state, Event::Ended(0, WaitOutcome::Exited(0)));
         assert!(
             !effects.contains(&Effect::Done),
             "one of four stages settling must not end the pipeline"
         );
         // Stage 1 settles: its writer (0) already settled, so it keeps its
-        // outcome rather than being killed again.
+        // outcome and nothing is armed against it.
         let effects = step(&mut state, Event::Ended(1, WaitOutcome::Exited(0)));
         assert!(
-            !effects.contains(&Effect::KillStage(0)),
-            "a writer that already settled must keep its outcome, not be killed again: {effects:?}"
+            !effects.contains(&Effect::ArmEdge(0)),
+            "a writer that already settled must keep its outcome, not be armed against: {effects:?}"
         );
-        // Stage 3 settles while its writer (2) is still running: killed —
-        // and stage 2 has not itself settled yet, so the pipeline is not done.
+        // Stage 3 settles while its writer (2) is still running: that edge is
+        // armed — and stage 2 has not settled, so the pipeline is not done.
         let effects = step(&mut state, Event::Ended(3, WaitOutcome::Exited(0)));
         assert!(
-            effects.contains(&Effect::KillStage(2)),
-            "a still-running writer whose reader just settled must be killed: {effects:?}"
+            effects.contains(&Effect::ArmEdge(2)),
+            "a still-running writer whose reader just settled must have its edge armed: {effects:?}"
         );
         assert!(
             !effects.contains(&Effect::Done),
-            "a killed writer is not yet observed, so the pipeline is not done: {effects:?}"
+            "an unobserved writer means the pipeline is not done: {effects:?}"
         );
-        // Stage 2, killed by the cascade above, now settles too: every stage
-        // is observed, so the pipeline ends.
+        // Stage 2 now settles too: every stage is observed, so the pipeline
+        // ends.
         let effects = step(&mut state, Event::Ended(2, WaitOutcome::Exited(0)));
         assert!(
             effects.contains(&Effect::Done),
             "the last stage settling must end the pipeline: {effects:?}"
         );
+    }
+
+    /// The sentinel's news is what cuts a stage: `Wrote` records the cause
+    /// against it and emits the one kill.
+    #[test]
+    fn a_write_to_a_dead_edge_kills_its_writer() {
+        let mut state = state_with(2);
+        let (reader, _writer) = crate::process::cloexec_pipe().expect("pipe");
+        let effects = step(&mut state, Event::Wrote(0, reader));
+        assert_eq!(effects, vec![Effect::KillStage(0)]);
+        assert_eq!(state.sent[0], Some(CancelCause::ReaderGone));
+    }
+
+    /// A stage that ended on its own account before the sentinel was heard
+    /// keeps its outcome: the news is dropped, and the reader with it.
+    #[test]
+    fn a_write_heard_after_its_writer_was_filed_is_ignored() {
+        let mut state = state_with(2);
+        let _ = step(&mut state, Event::Ended(0, WaitOutcome::Exited(3)));
+        let (reader, _writer) = crate::process::cloexec_pipe().expect("pipe");
+        let effects = step(&mut state, Event::Wrote(0, reader));
+        assert!(
+            effects.is_empty(),
+            "a filed stage must not be cut: {effects:?}"
+        );
+        assert_eq!(state.sent[0], None);
     }
 
     /// A cancel always tears down, whatever the cause or its source — the
@@ -993,10 +1038,9 @@ mod tests {
         );
     }
 
-    /// The losing order, forced: the reader's `Returned` reaches the
-    /// collector before the writer's own honest exit does, so the writer is
-    /// killed on paper (`sent`) — but its break is its own `exit 3`, not the
-    /// cancel's, so `fold` must not forgive it.
+    /// The reader's `Returned` reaches the collector before the writer's own
+    /// honest exit does, so its edge is armed — but the writer never wrote
+    /// again, and its break is its own `exit 3`, which `fold` must keep.
     #[test]
     fn a_thread_writers_honest_exit_survives_its_readers_earlier_end() {
         let mut shell = Shell::default();
@@ -1007,8 +1051,8 @@ mod tests {
 
         let effects = step(&mut state, Event::Returned(1, StageObservation::ok()));
         assert!(
-            effects.contains(&Effect::KillStage(0)),
-            "the reader settling first must cascade a kill onto its writer: {effects:?}"
+            effects.contains(&Effect::ArmEdge(0)),
+            "the reader settling first must arm its writer's edge: {effects:?}"
         );
 
         let _ = step(
@@ -1023,22 +1067,15 @@ mod tests {
         }
     }
 
-    /// The same losing order, but the writer's break really is the cancel's
-    /// own — `Error::cancelled(ReaderGone)`, as `process::check` would mint
-    /// it — so `fold` forgives it, order notwithstanding.
+    /// A `ReaderGone` break — as a dead edge's sink or a `ReaderGone` scope
+    /// cancel mints it — is forgiven on its own evidence, with nothing
+    /// recorded in `sent`.
     #[test]
     fn a_thread_writer_the_cancel_ended_is_forgiven() {
         let mut shell = Shell::default();
         let mooring = Mooring::adrift();
         let mut state = CollectState::for_step_test();
         state.push(StageHandle::fake_thread_for_step_test());
-        state.push(StageHandle::fake_thread_for_step_test());
-
-        let effects = step(&mut state, Event::Returned(1, StageObservation::ok()));
-        assert!(
-            effects.contains(&Effect::KillStage(0)),
-            "the reader settling first must cascade a kill onto its writer: {effects:?}"
-        );
 
         let _ = step(
             &mut state,
@@ -1047,6 +1084,7 @@ mod tests {
                 StageObservation::failure(Error::cancelled(CancelCause::ReaderGone)),
             ),
         );
+        assert_eq!(state.sent[0], None, "nothing was sent to this stage");
 
         let folded = state.fold(&mooring, &mut shell);
         assert!(

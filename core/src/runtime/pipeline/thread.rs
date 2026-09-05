@@ -127,7 +127,11 @@ pub(super) fn launch_thread_stage(
     let group = cx.group.leader_pgid();
 
     let stdout = match stdout {
-        ByteOut::Downstream(w) => Sink::Pipe(Arc::new(w), Arc::clone(&wake)),
+        ByteOut::Downstream(w, edge) => Sink::Pipe {
+            writer: Arc::new(w),
+            wake: Arc::clone(&wake),
+            edge,
+        },
         ByteOut::Parent => cx.shell.io.stdout.clone(),
     };
     let stderr = cx.shell.io.stderr.clone();
@@ -191,6 +195,7 @@ mod tests {
     use super::super::group::PipelineGroup;
     use super::super::resolve::StageLaunch;
     use super::super::route::ByteIn;
+    use crate::io::Edge;
     use crate::types::{Shell, TerminalAccess};
     use std::io::Read;
     use std::time::{Duration, Instant};
@@ -208,11 +213,10 @@ mod tests {
         comp.clone()
     }
 
-    fn spec_for(comp: &Comp, feeds_pipe: bool) -> StageSpec {
+    fn spec_for(comp: &Comp) -> StageSpec {
         StageSpec {
             launch: StageLaunch::Thread,
             span: comp.span,
-            feeds_pipe,
         }
     }
 
@@ -227,11 +231,11 @@ mod tests {
         let env = shell.env.clone();
         let mut group = prepared_group();
         let stage = compile_one("echo hi");
-        let spec = spec_for(&stage, true);
+        let spec = spec_for(&stage);
         let (mut reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
         let route = StageRoute {
             stdin: ByteIn::Parent,
-            stdout: ByteOut::Downstream(writer),
+            stdout: ByteOut::Downstream(writer, Edge::new()),
             held: None,
         };
         let mooring = Mooring::adrift();
@@ -266,11 +270,11 @@ mod tests {
         // A self-recursive, argument-incrementing call with no base case:
         // nothing but a cancel ends it.
         let stage = compile_one("!{ let go = { |n| go $[$n + 1] }; go 0 }");
-        let spec = spec_for(&stage, true);
+        let spec = spec_for(&stage);
         let (_reader, writer) = crate::process::cloexec_pipe().expect("route pipe");
         let route = StageRoute {
             stdin: ByteIn::Parent,
-            stdout: ByteOut::Downstream(writer),
+            stdout: ByteOut::Downstream(writer, Edge::new()),
             held: None,
         };
         let mooring = Mooring::adrift();

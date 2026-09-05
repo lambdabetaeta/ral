@@ -7,14 +7,14 @@ const CLEAR_SEQ: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
 /// `ESC c` (RIS): a terminal reset that leaves stty modes untouched.
 const RESET_SEQ: &[u8] = b"\x1bc";
 
-pub(super) fn builtin_clear(_args: &[Value], shell: &mut Shell) -> Value {
-    let _ = shell.write_stdout(CLEAR_SEQ);
-    Value::Unit
+pub(super) fn builtin_clear(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    shell.write_stdout(CLEAR_SEQ)?;
+    Ok(Value::Unit)
 }
 
-pub(super) fn builtin_reset(_args: &[Value], shell: &mut Shell) -> Value {
-    let _ = shell.write_stdout(RESET_SEQ);
-    Value::Unit
+pub(super) fn builtin_reset(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
+    shell.write_stdout(RESET_SEQ)?;
+    Ok(Value::Unit)
 }
 
 fn status_i32(who: &str, n: i64) -> Result<i32, Break> {
@@ -92,9 +92,7 @@ pub(super) fn builtin_surface(args: &[Value], mooring: &Mooring, _shell: &Shell)
 pub(super) fn builtin_warn(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     let mut line = super::util::arg0_str(args);
     line.push('\n');
-    shell
-        .write_stderr(line.as_bytes())
-        .map_err(|e| sig(format!("warn: {e}")))?;
+    shell.write_stderr(line.as_bytes())?;
     Ok(Value::Unit)
 }
 

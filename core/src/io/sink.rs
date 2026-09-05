@@ -5,6 +5,7 @@
 //! with the sink the caller must pump after spawn.  The buffer helpers below own
 //! the [`ByteBuffer`] idiom for captured bytes.
 
+use super::edge::{DeadEdge, Edge};
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -107,22 +108,33 @@ pub enum Sink {
         prefix: String,
         pending: Vec<u8>,
     },
-    /// A stage thread's interior edge, and the stage's wake.  Shared by
-    /// `stdout` and `ambient`, and duplicated into each child it spawns; the
-    /// edge closes when the last holder drops.  A blocked write ends when the
-    /// wake fires, as success: the parent still holds the edge's read end, so
-    /// no `EPIPE` — and no `SIGPIPE` to the whole shell — can reach a thread.
-    Pipe(Arc<os_pipe::PipeWriter>, Arc<crate::process::Wake>),
+    /// A stage thread's interior edge: the write end, the stage's wake, and
+    /// the edge's fate.  Shared by `stdout` and `ambient`, and duplicated
+    /// into each child it spawns; the edge closes when the last holder drops.
+    /// The parent holds the read end, so no `EPIPE` — and no `SIGPIPE` to the
+    /// whole shell — can reach a thread; a write to a dead edge ends the
+    /// stage instead.
+    Pipe {
+        writer: Arc<os_pipe::PipeWriter>,
+        wake: Arc<crate::process::Wake>,
+        edge: Arc<Edge>,
+    },
 }
 
 /// Write `bytes` in `PIPE_BUF` chunks, each after `poll` says it will not
-/// block, so the wake is consulted between chunks.  A fired wake ends the
-/// write as success: the stage is being cancelled and its next `check` says
-/// why.
+/// block, so the wake and the edge are consulted between chunks.
+///
+/// A chunk that lands on a dead edge is the stage's reader-gone break.  It is
+/// judged after landing, not refused before: the collector's sentinel reads
+/// the edge, so a relayed child's bytes are heard there too, and a write
+/// blocked on a full pipe is freed to reach the check.  A fired wake still
+/// ends the write as success: the stage is being cancelled and its next
+/// `check` says why.
 #[cfg(unix)]
 fn write_interruptible(
     w: &os_pipe::PipeWriter,
     wake: &crate::process::Wake,
+    edge: &Edge,
     mut bytes: &[u8],
 ) -> io::Result<()> {
     use crate::process::wake::Readiness;
@@ -138,6 +150,9 @@ fn write_interruptible(
                 bytes = &bytes[n..];
             }
         }
+        if edge.is_dead() {
+            return Err(io::Error::other(DeadEdge));
+        }
     }
     Ok(())
 }
@@ -146,6 +161,7 @@ fn write_interruptible(
 fn write_interruptible(
     w: &os_pipe::PipeWriter,
     wake: &crate::process::Wake,
+    edge: &Edge,
     bytes: &[u8],
 ) -> io::Result<()> {
     use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
@@ -160,6 +176,7 @@ fn write_interruptible(
             wake.acknowledge();
             Ok(())
         }
+        Ok(()) if edge.is_dead() => Err(io::Error::other(DeadEdge)),
         r => r,
     }
 }
@@ -226,9 +243,9 @@ impl Sink {
     /// ruled out: a `Pipe` hands the child the fd directly, everything else
     /// is pumped.
     fn child_stdio_plan(&self) -> io::Result<ChildStdioPlan> {
-        if let Self::Pipe(w, _) = self {
+        if let Self::Pipe { writer, .. } = self {
             return Ok(ChildStdioPlan {
-                stdio: crate::process::StdioSpec::from_pipe_writer(w.try_clone()?),
+                stdio: crate::process::StdioSpec::from_pipe_writer(writer.try_clone()?),
                 pump: None,
             });
         }
@@ -237,10 +254,23 @@ impl Sink {
 
     /// Spawn a thread draining `reader` into this sink, flushing its tail at
     /// EOF.  A capture buffer is only complete once the handle is joined.
-    pub fn pump(self, reader: impl Read + Send + 'static) -> std::thread::JoinHandle<()> {
+    /// The drain outlives any write failure: a child must never find its
+    /// relay pipe closed under it, and a dead edge still needs the bytes to
+    /// land for the sentinel to hear them.
+    pub fn pump(self, mut reader: impl Read + Send + 'static) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let mut sink = self;
-            let _ = io::copy(&mut { reader }, &mut sink);
+            let mut buf = [0u8; 8 * 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = sink.write_all(&buf[..n]);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
             let _ = sink.flush_pending();
         })
     }
@@ -265,7 +295,11 @@ impl Clone for Sink {
                 // would let two threads interleave halves of one.
                 pending: Vec::new(),
             },
-            Self::Pipe(w, wake) => Self::Pipe(w.clone(), wake.clone()),
+            Self::Pipe { writer, wake, edge } => Self::Pipe {
+                writer: writer.clone(),
+                wake: wake.clone(),
+                edge: edge.clone(),
+            },
         }
     }
 }
@@ -388,7 +422,7 @@ impl Write for Sink {
                 b.write_all(bytes)
             }
             Self::External(w) => w.write(bytes),
-            Self::Pipe(w, wake) => write_interruptible(w, wake, bytes),
+            Self::Pipe { writer, wake, edge } => write_interruptible(writer, wake, edge, bytes),
             Self::LineFramed {
                 inner,
                 prefix,
@@ -432,7 +466,7 @@ impl Write for Sink {
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::{Sink, str_strip_one_terminator, strip_trailing_newline};
+    use super::{Edge, Sink, str_strip_one_terminator, strip_trailing_newline};
     use crate::process::Wake;
 
     fn strip(input: &[u8]) -> Vec<u8> {
@@ -494,7 +528,11 @@ mod tests {
         use std::sync::Arc;
 
         let (mut reader, writer) = os_pipe::pipe().expect("pipe");
-        let mut sink = Sink::Pipe(Arc::new(writer), Wake::new().expect("wake"));
+        let mut sink = Sink::Pipe {
+            writer: Arc::new(writer),
+            wake: Wake::new().expect("wake"),
+            edge: Edge::new(),
+        };
         sink.write_all(b"hello").expect("write");
         drop(sink);
 
@@ -510,7 +548,11 @@ mod tests {
         use std::sync::Arc;
 
         let (mut reader, writer) = os_pipe::pipe().expect("pipe");
-        let sink = Sink::Pipe(Arc::new(writer), Wake::new().expect("wake"));
+        let sink = Sink::Pipe {
+            writer: Arc::new(writer),
+            wake: Wake::new().expect("wake"),
+            edge: Edge::new(),
+        };
         let plan = sink.child_stdout(false).expect("plan");
         assert!(plan.pump.is_none());
         drop(sink);
@@ -537,7 +579,11 @@ mod tests {
 
         let (mut reader, writer) = os_pipe::pipe().expect("pipe");
         let writer = Arc::new(writer);
-        let sink = Sink::Pipe(writer.clone(), Wake::new().expect("wake"));
+        let sink = Sink::Pipe {
+            writer: writer.clone(),
+            wake: Wake::new().expect("wake"),
+            edge: Edge::new(),
+        };
         let plan = sink.child_stdout(false).expect("plan");
 
         let mut child = crate::process::Launch::new("/bin/echo")

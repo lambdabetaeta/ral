@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 4957c6c4
-verified_at_date: 2026-09-04
-anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, Event, SettleOnDrop, Effect, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::sender, CollectState::all_stages_launched, CollectState::run, CollectState::drive, CollectState::cancel_all, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, PipelineGroup::start_witness, AnchorProcess, Anchored, ChildHandle, into_watch, watch_cancel, Watch, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline]
+verified_at_commit: e536d55d
+verified_at_date: 2026-09-05
+anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, Event, SettleOnDrop, Effect, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::sender, CollectState::all_stages_launched, CollectState::run, CollectState::drive, CollectState::cancel_all, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, PipelineGroup::start_witness, AnchorProcess, Anchored, ChildHandle, into_watch, watch_cancel, Watch, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Effect::ArmEdge, Event::Wrote]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -58,13 +58,28 @@ returned value is ever serialised onto an edge
 the collector keeps it only when `is_last` says to.
 
 **A non-final stage cannot observe its reader's death by EPIPE.** The parent
-holds a duplicate of each interior edge's read end until that edge's writer
-stage is killed or reaped, so no interior edge ever delivers a broken-pipe
-signal or a write error to the stage that writes it. Instead the collector
-kills a producer once its reader stage is reaped: `yes | !{ return 5 }`
-terminates by that kill, on Unix and on the Windows-supported paths alike.
-Neither endpoint of a pipe promises traffic, so a producer with nothing left
-to write for is the ordinary case, not an error path.
+holds a duplicate of each interior edge's read end — `route::HeldEdge { edge,
+reader }` — until that edge's writer stage is killed or reaped, so no interior
+edge ever delivers a broken-pipe signal or a write error to the stage that
+writes it: a dead edge is felt only through the mechanism below, at a write,
+never through the OS's own broken-pipe path. `crate::io::Edge` is the edge's
+own fate (`is_dead`/`mark_dead`), shared by the writer and the `HeldEdge` that
+watches it. `CollectState::file_end` emits `Effect::ArmEdge(ix)` when a reader
+stage is filed and its writer still runs: it marks the edge dead and starts
+`pipeline/sentinel.rs::listen(reader, ix, tx)` on the `HeldEdge`'s read end
+(`reader` moves out of the `HeldEdge`; it is `None` for as long as the
+sentinel holds it), whatever kind the writer is. A `Thread` stage's
+`Sink::Pipe { writer, wake, edge }` checks the same edge itself after each
+chunk it lands, and raises `DeadEdge` — read back by `Shell::write_sink` as
+`Error::cancelled(ReaderGone)` — so the break lands at the write, exactly;
+the sentinel hears the same chunk and its redundant `KillStage` finds a stage
+already unwinding. An external stage's write ral cannot see
+directly, so the sentinel is what hears it: it reads whatever bytes are
+already pending — owed to a reader that left, and discarded — and the first
+byte written after them is `Event::Wrote(ix, reader)`, handing the read end
+back. `yes | !{ return 5 }` terminates this way: `yes`'s own next write finds
+the edge dead. Neither endpoint of a pipe promises traffic, so a producer
+with nothing left to write for is the ordinary case, not an error path.
 
 **Bytes reach a stage thread through `Sink::Pipe` and a `SourceReader` with a
 wake.** A `Thread` stage's `Io` is built straight from its `StageRoute`:
@@ -169,50 +184,59 @@ A joining group's `signal`/`kill` still no-op on the pgid — only the owning
 top-level group may act on the whole group — and its own teardown reaches
 its own live externals by pid instead, as it always did.
 
-**Kill for a dead reader cancels a thread and wakes it; the wake ends a write
-as well as a read.** The collector's rule is unchanged in shape: a stage whose
-reader stage has been observed is ended, and only that ending is forgiven. The
-collector records this in `sent[ix]`, joined by `max` — `Some(ReaderGone)`,
-not a boolean — the instant `step` decides to emit the kill, and issues the
-kill only for a stage still running and still feeding the pipe, so a stage
-that already finished keeps its outcome and no exit status is ever forgiven.
-The kill addresses the stage's pid alone, so a descendant the stage forked
-outlives it and may still hold the pipe a pump of that stage reads; an
-external ended for a dead reader therefore *detaches* its pumps rather than
-joining them (`command::Pumps::settle(detach: bool)`, read from `sent[ix]` in
-the fold, after the walk) — its remaining bytes are owed to nobody, and the
-join would otherwise wait on the descendant. For
-a `Thread` stage "kill" is `cancel(ReaderGone)` plus `interrupt()` (fires the
-wake; Windows also `CancelSynchronousIo`). The held duplicate of the edge's
-read end is kept until the stage is observed, exactly as for an external —
-deliberately: ral runs with `SIGPIPE` at its default disposition (so that a
-ral producing under a foreign shell's pipeline dies of it like any other
-producer), and an `EPIPE` delivered to a *thread* of the shell would be a
-`SIGPIPE` to the whole shell. So a blocked write is ended the way a blocked
-read is: `Sink::Pipe` carries the stage's `Wake`, writes in `PIPE_BUF` chunks
-each after `poll` says the pipe will not block, and a fired wake ends the
-write *as success* — the bytes go nowhere, and the stage's next
-`process::check` says why. A blocked read returns EOF. The stage's own
-external (if it has one) is torn down by pid inside that stage's own
-`RunningChild::wait`. A nested pipeline's stages are cancelled transitively
-this way, each stage's own wake ending only that stage's own I/O. Forgiveness differs in one respect from an external's: a
-process's wait status says whether the kill or its own `exit` ended it, a
-thread's `Break` does not carry that fact on its own — so forgiveness names
-it instead. `Error::cancelled` is the one constructor of a
-`Status::Cancelled(cause)` (read back by `StageObservation::ended_by`), and
-every poll point mints through it — `process::check`, the enquiry park in
-`WireDesk::enquire`, and the Windows `dacl_break` — so a thread's break carries
-`cancelled_by() == Some(ReaderGone)` iff a `ReaderGone` cancel on its scope is
-what ended its evaluation, independent of when its `Returned` reaches the
-channel — the thread analogue of `WaitOutcome::is_stage_kill`. A killed
-thread is forgiven only when `sent[ix]` says this collector killed it *and*
-its break is that cancel's own; a thread that raced its own honest exit past
-the kill keeps it. This is also why `step`'s reader-gone rule fires
-`Effect::KillStage` only for a writer still `Some` (unsettled) when its
-reader's own terminal event arrives: a thread that has already finished
-keeps its outcome, and `!{ echo a; exit 3 } | head -1` stays honest. Its audit fragment is folded
-either way: the verdict is the collector's doing, what the stage observed
-still happened. A stage thread's end is its own `Event::Returned`, sent as
+**A thread stage cuts itself at its own next write; an external is heard by
+the sentinel and killed at the first byte after the discard.** Marking an
+edge dead (`Effect::ArmEdge`) changes nothing for a stage not currently
+writing — its own account continues regardless of writer kind. A `Thread`
+stage's own write needs no cancel and no wake to be cut: its `Sink::Pipe`
+checks `edge.is_dead()` after each chunk it lands — judged, not refused, so a
+child's bytes relayed through a pumped sink under `--audit` reach the edge
+and are heard by the sentinel like any external's, and a write already in
+flight when the edge dies finishes before it is judged — "a write not
+complete when the edge dies does not complete." A
+blocked write is never stranded, because something is always still reading
+the other end — the reader stage, or the sentinel once it is gone — so the
+write completes and is judged, never wedged waiting on a forced wake. The
+resulting `Error::cancelled(ReaderGone)` reaches the stage's evaluation
+exactly as any other error would, and its `Break` carries
+`cancelled_by() == Some(ReaderGone)` (`Error::cancelled` is the one
+constructor of a `Status::Cancelled(cause)`, read back by
+`StageObservation::ended_by`). The fold forgives a thread stage on that fact
+alone: a `ReaderGone` break is only ever a collector's own doing. A child the
+stage thread spawned holding the edge (`!{ sh -c … } | true`) is heard by
+the sentinel like any external; the `Effect::KillStage` that follows cancels
+the stage's scope with `ReaderGone`, and its `RunningChild::wait` kills the
+child by pid and mints the same break. A stage that never writes again after
+its edge dies is never cut and keeps running: `sleep 1000 | true` waits for
+the sleep.
+
+An `External` stage has no write ral can see, so
+`pipeline/sentinel.rs::listen(reader, ix, tx)` reads the held duplicate in its
+place, discards whatever bytes are already pending — owed to a reader that
+left — and turns the first byte written after them into
+`Event::Wrote(ix, reader)`,
+handing the read end back. Only then, not at the reader's own terminal event,
+does the process die: `step` records `sent[ix] = ReaderGone`, joined by
+`max`, and emits `Effect::KillStage(ix)`; `RunningChild::terminate` now kills
+outright for `ReaderGone` as for `RootAbort`. The kill addresses the stage's
+pid alone, so a descendant the stage forked outlives it and may still hold
+the pipe a pump of that stage reads; an external ended for a dead write
+therefore *detaches* its pumps rather than joining them
+(`command::Pumps::settle(detach: bool)`, read from `sent[ix]` in the fold,
+after the walk) — its remaining bytes are owed to nobody, and the join would
+otherwise wait on the descendant. Forgiveness for an external reads the wait
+status too, which a thread's `Break` does not carry on its own: `sent[ix] ==
+Some(ReaderGone)` and the death is the kill's own
+(`WaitOutcome::is_stage_kill`), as before. The stage's own external child (if
+it has one) is torn down by pid inside that stage's own `RunningChild::wait`.
+A nested pipeline's stages are cancelled transitively the same way, each
+stage's own edge check or sentinel ending only that stage's own write. This
+is also why the kill can never land on a stage that already finished:
+`Effect::ArmEdge` and the `Effect::KillStage` it can lead to both require the
+writer still `Some` (unsettled), so `!{ echo a; exit 3 } | head -1` stays
+honest. Its audit fragment is folded either way: the verdict is the
+collector's doing, what the stage observed still happened. A stage thread's
+end is its own `Event::Returned`, sent as
 its last act; a panic in the body is caught around the evaluation
 (`catch_unwind(AssertUnwindSafe(..))`) and turned into the same `Returned`,
 its payload becoming an `Error` carrying the stage's span. A `SettleOnDrop`
@@ -253,9 +277,10 @@ same `PgidPolicy::Join` resolution, assigned at creation under the suspended
 create → assign → resume path.
 
 **Collection is one channel, a pure fold, and a thin interpreter.** Every
-lifecycle edge — an external's raw exit, a stage settling, a cancel — arrives
-as one [`Event`] on one channel; a stop is not among them, answered and
-forgotten by the process-wide reaper before it could become one. A stage
+lifecycle edge — an external's raw exit, a stage settling, a cancel, a
+sentinel's dead write — arrives as one [`Event`] on one channel; a stop is
+not among them, answered and forgotten by the process-wide reaper before it
+could become one. A stage
 thread computes its own [`StageObservation`] and sends `Event::Returned` as
 its last act; a direct external needs no dedicated waiter thread at all —
 `ChildHandle::into_watch`'s own closure posts its raw
@@ -282,24 +307,27 @@ performs — so the whole corner-case space is a transition table, testable by
 feeding `step` a sequence of events and asserting the effects, no process,
 sleep, or retry loop needed. `drive` is
 `loop { for e in step(&mut st, rx.recv()?) { run(e) } }` — no interval, no
-backoff, exact latency, zero idle CPU. `step` folds only three kinds of
-event — `Ended`, `Returned`, `Cancelled` — a stop is not among them at all: it
-is answered and forgotten by the reaper's own scan, never reaching the
+backoff, exact latency, zero idle CPU. `step` folds four kinds of event —
+`Ended`, `Returned`, `Cancelled`, `Wrote` — a stop is not among them at all:
+it is answered and forgotten by the reaper's own scan, never reaching the
 channel ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
-`step`'s reader-gone rule — on a stage's own terminal event at index `ix`, if
-stage `ix - 1` still holds a stage handle and feeds the pipe, emit
-`Effect::KillStage(ix - 1)` — is unchanged in content from the old tail-first
-rescan, fired now by the event that justifies it: a stage that already
-finished keeps its outcome. The kill's own attribution is recorded on the
-spot, in `sent[ix - 1]`, joined by `max`; the shell-touching finish this
-implies — reading `sent` back against what happened, forgiving a `ReaderGone`
-kill — waits for [`CollectState::fold`], the one place `&mut Shell` reaches
-an external's settlement, since no reaper-posting closure or stage thread may
-hold one. Each interior edge's held-open read end drops once that edge's
-writer's observation completes, which also releases any descendant of that
-edge still blocked writing into it. Verdicts fold in launch order regardless
-of settle order, so which stage the collector kills when never changes which
-failure the fold reports.
+`step`'s reader-gone rule is two effects, one per event that justifies it: on
+a stage's own terminal event at index `ix`, if stage `ix - 1` still holds a
+stage handle, emit `Effect::ArmEdge(ix - 1)`; on
+`Event::Wrote(ix - 1, reader)` — the sentinel's report that `ix - 1`'s next
+write found the edge dead — record `sent[ix - 1] = ReaderGone`, joined by
+`max`, and emit `Effect::KillStage(ix - 1)`. Both check the writer is still
+`Some` (unsettled) before acting, so a stage that already finished keeps its
+outcome. The shell-touching finish this implies — reading `sent` back against
+what happened, forgiving a `ReaderGone` kill — waits for
+[`CollectState::fold`], the one place `&mut Shell` reaches an external's
+settlement, since no reaper-posting closure or stage thread may hold one.
+Each interior edge's held-open read end — handed back to the collector by
+`Event::Wrote` once the sentinel confirms a dead write — drops once that
+edge's writer's observation completes, which also releases any descendant of
+that edge still blocked writing into it. Verdicts fold in launch order
+regardless of settle order, so which stage the collector kills when never
+changes which failure the fold reports.
 
 **Teardown is kill-first.** A pipeline that ends before every stage has been
 observed ends by one of two mechanisms, and both put the death of what this
@@ -368,6 +396,7 @@ See also [[design/pipelines|pipelines]],
 [[internals/evaluator-machine|evaluator-machine]],
 [[internals/capability-enforcement|capability-enforcement]],
 [[decisions/260902_stages-are-threads|stages-are-threads]],
-[[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]; map
+[[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]],
+[[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]]; map
 [[map/core/runtime|runtime]], [[map/core/io-process|io-process]].
 `docs/SPEC.md` §7, §7.6, §11.6; RATIONALE §"The pipe is the operating system's".

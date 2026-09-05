@@ -39,11 +39,12 @@ use super::capability::GrantStack;
 use super::env::Env;
 use super::env::EnvVars;
 use super::error::Error;
+use super::flow::{Break, Settled};
 use super::handler::HandlerStack;
 use super::mooring::{Fork, Mooring, NurseryId, TerminalAccess};
 use crate::diagnostic::CallSite;
 use crate::io::Io;
-use crate::process::{DurableRoot, ForegroundScope};
+use crate::process::{CancelCause, DurableRoot, ForegroundScope};
 use crate::source::{FileId, Source, SourceDb, Span};
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -347,10 +348,9 @@ impl Shell {
     /// Write `bytes` to the current stdout sink.
     ///
     /// # Errors
-    /// Returns `Err` if the underlying write fails with anything other than
-    /// `BrokenPipe`, which is a clean shutdown rather than a fault.
-    pub fn write_stdout(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        Self::write_sink(&mut self.io.stdout, bytes)
+    /// See [`Self::write_sink`].
+    pub fn write_stdout(&mut self, bytes: &[u8]) -> Settled<()> {
+        Self::write_sink(&mut self.io.stdout, bytes, "stdout")
     }
 
     /// Write `bytes` to the ambient sink — the visible stream a discarded
@@ -358,32 +358,34 @@ impl Shell {
     /// bypassing whatever `stdout` currently is.
     ///
     /// # Errors
-    /// Returns `Err` if the underlying write fails with anything other than
-    /// `BrokenPipe`, which is a clean shutdown rather than a fault.
-    pub fn write_ambient(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        Self::write_sink(&mut self.io.ambient, bytes)
+    /// See [`Self::write_sink`].
+    pub fn write_ambient(&mut self, bytes: &[u8]) -> Settled<()> {
+        Self::write_sink(&mut self.io.ambient, bytes, "the surrounding stream")
     }
 
     /// Write `bytes` to the current stderr sink — where `warn` and the shell's
     /// own diagnostics land, and what `2> f` rebinds.
     ///
     /// # Errors
-    /// Returns `Err` if the underlying write fails with anything other than
-    /// `BrokenPipe`, which is a clean shutdown rather than a fault.
-    pub fn write_stderr(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        Self::write_sink(&mut self.io.stderr, bytes)
+    /// See [`Self::write_sink`].
+    pub fn write_stderr(&mut self, bytes: &[u8]) -> Settled<()> {
+        Self::write_sink(&mut self.io.stderr, bytes, "stderr")
     }
 
-    /// `BrokenPipe` is a clean shutdown, as it is for a Unix tool dying
-    /// silently on `SIGPIPE`: the reader has closed its end (`fzf` took a
-    /// selection, `head` its quota).  Report it and the pipeline supervisor
-    /// tears the pgid down with `SIGKILL`, surfacing status 137 on sibling
-    /// stages that had themselves exited cleanly.
-    fn write_sink(sink: &mut crate::io::Sink, bytes: &[u8]) -> std::io::Result<()> {
+    /// The one place a dead interior edge becomes the reader-gone break.
+    /// `BrokenPipe` is a clean shutdown, as for a Unix tool dying silently on
+    /// `SIGPIPE`: the reader closed its end (`fzf` took a selection).
+    fn write_sink(sink: &mut crate::io::Sink, bytes: &[u8], what: &str) -> Settled<()> {
         match sink.write_all(bytes) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-            Err(e) => Err(e),
+            Err(e) if matches!(e.get_ref(), Some(src) if src.is::<crate::io::DeadEdge>()) => {
+                Err(Break::Error(Error::cancelled(CancelCause::ReaderGone)))
+            }
+            Err(e) => Err(Break::Error(Error::new(
+                format!("could not write to {what}: {e}"),
+                1,
+            ))),
         }
     }
 

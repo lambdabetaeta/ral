@@ -27,7 +27,7 @@ not write, and an empty stream is still a byte stream:
 !{ echo hi; return () } | cat     # cat reads "hi"; the Unit goes nowhere
 cat f | from-bytes | grep x       # the returned Bytes is discarded; grep reads EOF
 echo hi | !{ return 5 }           # the consumer ignores stdin; the pipeline returns 5
-yes | !{ return 5 }               # terminates: ral kills yes once !{ return 5 } is reaped
+yes | !{ return 5 }               # terminates: yes's next write finds its reader gone
 ```
 
 **Two static rules, each about one stage.** A stage must have shape `F[ρ] A` — a
@@ -36,8 +36,8 @@ computation ready to run, not a function still waiting for an argument;
 than pipe into it. And a stage after a `|` may not bind standard input at its
 own root: `a | b < f` and `a | b << w` are refused, because the feed answers
 every read `b` makes for the stage's whole run and leaves `a` writing for
-nobody — a producer that, concurrently, blocks for nothing until ral kills it.
-Each rewrite keeps every command already written: drop the pipe, run the
+nobody — a producer that, concurrently, blocks for nothing until its next
+write finds its reader gone. Each rewrite keeps every command already written: drop the pipe, run the
 producer as its own statement, or `spawn` it. No rule relates a stage's *type*
 to its neighbour's.
 
@@ -100,16 +100,20 @@ controlling tty.
 Failure is a separate axis. A pipeline propagates a stage's failure, but the
 pipe never reacts to it: recovering from failure is `?`'s and `try`'s job, and
 branching is on `Bool`, never on command success
-([[design/failure|failure]]). **One stage is exempt, and the exemption is the
-dynamic completion of the stage-feed refusal above:** a stage feed that would
-leave a producer writing for nobody is refused before the pipeline runs; a
-producer whose reader has already ended is ended while the pipeline runs. ral
-itself kills a non-final stage once its reader stage is gone, and that kill is
-the pipeline's only forgiven death — every other exit status, whatever it is,
-is kept. Every semantic arrow in a pipeline already points tail-ward — value,
-route, report — and lifetime now points the same way: past a `|`, a stage
-lives exactly as long as its reader needs it
-([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
+([[design/failure|failure]]). **The stage-feed refusal above is static; the
+cut it anticipates is dynamic, and lands at the write.** An interior edge is
+dead once its reader stage has ended, and a stage feels that death at exactly
+one place — its next write to the dead edge — and nowhere else: everything it
+did before that write, on its own account, runs to completion regardless.
+That break is the pipeline's only forgiven death — every other exit status,
+whatever it is, is kept. A stage whose own redirect diverts every byte of its
+stdout to a file is a corollary of the same rule, not an exception to it: it
+never performs the write the cut watches for, so `cmd > file | next` runs
+`cmd`'s redirect to completion regardless of when `next` settles. Every
+semantic arrow in a pipeline already points tail-ward — value, route, report —
+and the cut points the same way: past a `|`, a stage speaks only while its
+reader is there to hear it, and is otherwise left to its own account
+([[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]]).
 
 The terminal-handoff and process-containment machinery is transport detail, not
 surface semantics. Unix uses process groups and a foreground guard claimed

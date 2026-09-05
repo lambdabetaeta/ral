@@ -285,13 +285,10 @@ fn pipeline_stage_redirect_to_file_is_honored() {
     );
 }
 
-/// A redirect stage's fd 1 is owed to a file, not to the reader beside it —
-/// the reader-gone kill (SPEC §7.6) must never fire on it just because a
-/// stdin-ignoring reader settles first.  Regression: the kill used to land
-/// mid-rename on the stage's own atomic write, before this fact was static
-/// at resolve time (`resolve::diverts_stdout`), and the pipeline reported
-/// success over a file that was never created — reproduces 5/5 without the
-/// fix.
+/// A stage whose stdout never reaches the edge never writes a dead one, so a
+/// stdin-ignoring reader settling first cannot cut it (SPEC §7.6).  The
+/// file must be complete: a cut landing mid-rename on the stage's own atomic
+/// write would report success over a file that was never created.
 #[test]
 fn a_redirect_stage_survives_a_reader_that_never_looks_at_stdin() {
     let path = fresh_tmp_path("ral_pipe_redir_fast_reader", "txt");
@@ -313,7 +310,7 @@ fn a_redirect_stage_survives_a_reader_that_never_looks_at_stdin() {
     );
 }
 
-/// The same exemption through a `Scope(Redirect)` frame — the carrier a
+/// The same corollary through a `Scope(Redirect)` frame — the carrier a
 /// closure call wraps its trailing redirect in, since it cannot fuse the
 /// redirect onto itself the way an `Exec` node does.
 #[test]
@@ -455,17 +452,15 @@ fn pipeline_stage_handler_redirect_to_file_is_honored() {
 
 // ── Reader-gone forgiveness ──────────────────────────────────────────────────
 //
-// ral holds a duplicate of each interior edge's read end until that edge's
-// writer stage is reaped, so no interior edge can ever deliver a broken-pipe
-// signal or a write error to the stage that writes it.  The collector kills
-// a non-final stage once its reader stage is gone and forgives exactly that
-// kill — SPEC §7.6.  The tests below exercise that boundary: a producer's
-// signal disposition cannot change the verdict, a producer that exits on
-// its own account keeps that status, a killed producer's own post-write
-// work is truncated, forgiveness is scoped per edge through a middle stage,
-// and a producer that never writes at all is still killed once its reader
-// is done — the pipeline's extent is its final stage's, not its slowest
-// producer's.
+// An interior edge is dead once its reader stage has ended; a stage is cut
+// at its first write to a dead edge, and nowhere else — SPEC §7.6.  ral's
+// own write raises the break at the write; an external's write is heard by
+// ral (it reads the dead edge itself) and answered with SIGKILL, which is
+// forgiven.  The tests below exercise that boundary: a producer's signal
+// disposition cannot change the verdict, a producer that exits on its own
+// account keeps its own status, everything a producer does before its first
+// dead write is certain, forgiveness is scoped per edge through a middle
+// stage, and a producer that never writes again is never cut at all.
 
 #[test]
 fn broken_pipe_very_large_count() {
@@ -485,12 +480,12 @@ fn broken_pipe_very_large_count() {
 fn a_firehose_into_a_non_reading_consumer_terminates() {
     // Neither side of a `|` promises traffic, and the producer's side of
     // that symmetry is the one with teeth: `yes` never stops writing, and
-    // `!{ return 5 }` returns without ever touching stdin.  ral holds a
-    // duplicate of the interior edge's read end until `yes` is reaped, so
-    // `yes` never sees a broken-pipe signal — it blocks once the pipe
-    // fills, and once the consumer finishes and is reaped, ral kills
-    // `yes` and forgives that kill.  The pipeline's value is the
-    // consumer's own `5`; not one byte of the firehose is in it.
+    // `!{ return 5 }` returns without ever touching stdin.  The edge dies
+    // the instant the consumer ends; `yes`'s next write into it — whether
+    // that write is still filling the pipe or blocked on a full one — is
+    // heard by ral and answered with SIGKILL, forgiven.  The pipeline's
+    // value is the consumer's own `5`; whatever `yes` wrote into the dead
+    // edge was never read and is not in it.
     let o = run_with_timeout(
         &[],
         "let n = !{ /usr/bin/yes | !{ return 5 } }\necho $n\n",
@@ -504,11 +499,10 @@ fn a_firehose_into_a_non_reading_consumer_terminates() {
 #[test]
 fn sigpipe_ignoring_producer_is_still_forgiven() {
     // A producer that traps SIGPIPE has no broken-pipe signal to take in
-    // the first place: ral holds the interior edge's read end open past
-    // `head`'s exit, so the producer only ever blocks on a full pipe.
-    // Once `head` is reaped, ral kills the producer and forgives that
-    // kill — the same verdict as an ordinary producer, because the
-    // forgiveness rule never reads the producer's signal disposition.
+    // the first place: it is cut at its first write past `head`'s exit —
+    // ral reads that dead edge itself and answers with SIGKILL, forgiven —
+    // the same verdict as an ordinary producer, whatever its signal
+    // disposition, because the cut is never keyed on it.
     let o = run_with_timeout(
         &[],
         r#"sh -c 'trap "" PIPE; while :; do echo x; done' | head -1"#,
@@ -521,9 +515,9 @@ fn sigpipe_ignoring_producer_is_still_forgiven() {
 
 #[test]
 fn producer_own_exit_status_survives_early_reader_exit() {
-    // Only a kill ral itself sent is forgiven.  `sh` exits on its own
-    // account before ral ever needs to send one, so its status is the
-    // pipeline's, exactly as an ordinary command's would be.
+    // A stage is cut only by a write to a dead edge.  `sh` never writes at
+    // all — it just exits — so it is never cut, and its own exit status is
+    // the pipeline's, exactly as an ordinary command's would be.
     let o = run_with_timeout(&[], "sh -c 'exit 7' | head -1", Duration::from_secs(5))
         .expect("producer-exit pipeline hung");
     assert_eq!(o.status, 7, "stderr: {}", o.stderr);
@@ -531,8 +525,9 @@ fn producer_own_exit_status_survives_early_reader_exit() {
 
 #[test]
 fn escape_inside_a_killed_producer_never_fires() {
-    // ral's kill lands mid-`yes`, before the block's `exit 5` statement
-    // is ever reached: the escape never occurs, and the pipeline's
+    // `yes`'s first write past `head`'s exit is a write to a dead edge, and
+    // the cut lands there — mid-`yes`, before the block's `exit 5`
+    // statement is ever reached: the escape never occurs, and the pipeline's
     // status is decided by `head`'s own (successful) exit, not by a
     // statement the killed stage never ran.
     let o = run_with_timeout(&[], "!{ yes ; exit 5 } | head -1", Duration::from_secs(10))
@@ -541,52 +536,131 @@ fn escape_inside_a_killed_producer_never_fires() {
 }
 
 #[test]
-fn producer_side_effect_after_reader_exit_is_truncated() {
-    // The producer writes one line, then does work that would leave a
-    // trace on disk.  `head -1` is done and reaped well within the
-    // sleep, so ral's kill lands before the marker file is created —
-    // the producer's post-write work never happens.
-    let path = fresh_tmp_path("ral_pipe_truncate_marker", "txt");
+fn a_producers_own_account_work_runs_after_its_reader_left() {
+    // `a` is delivered to a living `head -1`, which then exits; the
+    // producer never writes to the edge again, so it is never cut and its
+    // own account work — the marker file, the exit — runs to completion.
+    let path = fresh_tmp_path("ral_pipe_own_account_marker", "txt");
     let path_str = path.display().to_string();
     let _ = std::fs::remove_file(&path);
 
     let script = format!("sh -c 'echo a; sleep 0.3; : > {path_str}; exit 4' | head -1");
     let o =
-        run_with_timeout(&[], &script, Duration::from_secs(5)).expect("truncation pipeline hung");
+        run_with_timeout(&[], &script, Duration::from_secs(5)).expect("own-account pipeline hung");
+    let marker_exists = path.exists();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(o.status, 4, "stderr: {}", o.stderr);
+    assert!(
+        marker_exists,
+        "producer's own-account work after its reader left did not run"
+    );
+}
+
+#[test]
+fn a_dead_write_cuts_the_producer_there() {
+    // `a` reaches a living `head -1`; `head` then exits, and `b` is the
+    // producer's first write to the now-dead edge — the cut lands there,
+    // during the following sleep, before the marker file is ever created.
+    let path = fresh_tmp_path("ral_pipe_dead_write_marker", "txt");
+    let path_str = path.display().to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let script =
+        format!("sh -c 'echo a; sleep 0.3; echo b; sleep 0.3; : > {path_str}; exit 4' | head -1");
+    let o =
+        run_with_timeout(&[], &script, Duration::from_secs(5)).expect("dead-write pipeline hung");
     let marker_exists = path.exists();
     let _ = std::fs::remove_file(&path);
 
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert!(
         !marker_exists,
-        "producer's post-write side effect ran after its reader exited"
+        "producer ran past its first dead write instead of being cut there"
     );
 }
 
 #[test]
+fn effects_before_a_producers_first_dead_write_are_certain() {
+    // A dead-edge cut can only ever land at a write to the edge itself: a
+    // stderr write earlier in the same sequential stage completes before any
+    // such write is attempted, so it is certain regardless of the race with
+    // the reader's exit — for a direct external stage and for a ral block
+    // wrapping one alike.
+    for script in [
+        "sh -c 'echo world >&2; echo hello' | true",
+        "!{ sh -c 'echo world >&2; echo hello' } | true",
+    ] {
+        let o = run_with_timeout(&[], script, Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("{script}: pipeline hung"));
+        assert_eq!(o.status, 0, "{script}: stderr: {}", o.stderr);
+        assert!(o.stderr.contains("world"), "{script}: stderr: {}", o.stderr);
+    }
+}
+
+#[test]
+fn a_ral_stages_file_effect_before_its_first_write_is_certain() {
+    // `echo x > FILE` is a per-command redirect: its bytes never touch the
+    // edge, so the file write is certain regardless of the race between the
+    // block's later `echo hello` (a dead write, since the reader never
+    // touches stdin) and the reader's own exit.
+    let path = fresh_tmp_path("ral_pipe_stage_redirect_marker", "txt");
+    let path_str = path.display().to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let script = format!("!{{ echo x > '{path_str}'; echo hello }} | !{{ return () }}");
+    let o = run_with_timeout(&[], &script, Duration::from_secs(5))
+        .expect("ral-stage redirect pipeline hung");
+    let body = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(body.as_deref().map(str::trim_end), Some("x"));
+}
+
+#[test]
 fn middle_stage_forgiveness_is_per_edge() {
-    // Forgiveness is scoped per interior edge: `cat`'s edge to `yes` and
-    // its edge to `head` are each held open independently, so both `yes`
-    // and `cat` are killed and forgiven once `head` is done.
+    // Forgiveness is scoped per interior edge: `cat`'s edge to `yes` and its
+    // edge to `head` die independently once `head` exits, so `cat`'s next
+    // write into `head`'s dead edge, and then `yes`'s next write into
+    // `cat`'s now-dead edge, are each cut and forgiven in turn.
     let o = run_with_timeout(&[], "yes | cat | head -1", Duration::from_secs(10))
         .expect("middle-stage forgiveness pipeline hung");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
 }
 
 #[test]
-fn producer_that_only_computes_is_killed_once_reader_exits() {
-    // ral's kill is keyed on the reader being reaped, not on a write
-    // attempt: a producer that only computes, never writing a byte, is
-    // killed exactly like one that writes.  The pipeline's extent is its
-    // final stage's, not its slowest producer's.
+fn a_producer_that_never_writes_is_never_cut_and_keeps_its_status() {
+    // A stage is cut at its first write to a dead edge, and nowhere else:
+    // a producer that never writes again — however long it runs — is never
+    // cut, so its own exit status is the pipeline's, exactly as if the
+    // reader had never left.
     let o = run_with_timeout(
         &[],
-        "let n = !{ sh -c 'while :; do :; done' | !{ return 5 } }\necho $n\n",
-        Duration::from_secs(10),
+        "sh -c 'sleep 0.3; echo x >&2; exit 4' | !{ return 5 }",
+        Duration::from_secs(5),
     )
-    .expect("compute-only producer hung — the collector's kill did not fire");
-    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.trim(), "5", "stdout: {}", o.stdout);
+    .expect("never-writing producer hung");
+    assert_eq!(o.status, 4, "stderr: {}", o.stderr);
+    assert!(o.stderr.contains('x'), "stderr: {}", o.stderr);
+}
+
+#[test]
+fn a_never_writing_producers_failure_survives_a_fast_reader() {
+    // A reader that exits at once, without ever looking at the edge, still
+    // never turns the producer's own failure into forgiveness: the producer
+    // never writes, so it is never cut, and its exit status wins.
+    let o = run_with_timeout(&[], "sh -c 'exit 3' | true", Duration::from_secs(5))
+        .expect("never-writing producer hung");
+    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
+
+    let o = run_with_timeout(
+        &[],
+        "sh -c 'exit 3' | !{ return () }",
+        Duration::from_secs(5),
+    )
+    .expect("never-writing producer hung");
+    assert_eq!(o.status, 3, "stderr: {}", o.stderr);
 }
 
 // ── Concurrent spawned pipelines ─────────────────────────────────────────────
@@ -750,8 +824,8 @@ fn a_nested_pipeline_joins_its_stages_group() {
     // the outer pipeline's group rather than prepare its own: every stage
     // of `inner1 | inner2`, run from within the outer's first stage, and
     // the outer's own direct final stage, all share one anchor pgid.  The
-    // final stage drains its stdin first, so the inner stages have reported
-    // before their reader is gone and ral kills them.
+    // final stage drains its stdin first, so the inner stages have already
+    // reported and exited before their edge could ever die under them.
     let ral = ral_bin();
     let script = format!(
         "!{{ {r} --ral-test-pgid-check inner1 | {r} --ral-test-pgid-check inner2 }} \
@@ -820,18 +894,19 @@ fn real_sigkill_is_not_reported_as_plain_exit_137() {
     );
 }
 
-/// A stage's reader-gone kill addresses the stage's pid alone, so a
-/// backgrounded descendant survives it holding the stage's pumped stderr
-/// open; the pump must be detached, not joined, or the pipeline waits for
-/// the descendant.  Under `--audit` stderr is teed, hence pumped — the
-/// control without it already passed.  Two seconds discriminates: the
-/// descendant sleeps four.
+/// `sleep 4 &` is forked first and holds the pumped stderr open under
+/// `--audit`; `a` is a live write, delivered to `head` before it exits; `b`
+/// is the dead write that cuts `sh` there.  The stage's own reader-gone kill
+/// addresses its pid alone, so the backgrounded descendant survives it,
+/// still holding the stage's pumped stderr open — the pump must be
+/// detached, not joined, or the pipeline waits for the orphan.  Two seconds
+/// discriminates: the descendant sleeps four.
 #[test]
 fn a_pumped_descendant_does_not_outlive_the_reader_gone_kill() {
     for args in [&[][..], &["--audit"][..]] {
         let o = run_with_timeout(
             args,
-            "/bin/sh -c 'sleep 4 & wait' | /usr/bin/true",
+            "/bin/sh -c 'sleep 4 & echo a; sleep 0.5; echo b; wait' | head -1",
             Duration::from_secs(2),
         )
         .unwrap_or_else(|| panic!("{args:?}: the pipeline waited for the stage's descendant"));
@@ -923,9 +998,11 @@ fn sigint_kills_a_ral_stage_blocked_writing_to_a_full_edge() {
 
 #[test]
 fn a_killed_producer_blocked_in_a_full_edge_does_not_take_the_shell() {
-    // The reader drains past the pipe's capacity and exits with the producer
-    // blocked mid-write; the reader-gone kill must end that write through
-    // the wake, never by closing the edge under a thread of this process.
+    // The reader drains past the pipe's capacity and exits with the
+    // producer (a ral stage) blocked mid-write.  ral's own read of the
+    // now-dead edge frees that blocked write; the stage's sink then sees
+    // the dead edge and raises there — never an EPIPE surfacing under a
+    // thread of this process.
     let o = run_with_timeout(
         &[],
         "!{ let go = { |n| echo tick; go $[$n + 1] }; go 0 } | sh -c 'head -c 200000 >/dev/null'",

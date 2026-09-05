@@ -922,9 +922,9 @@ impl Machine {
                 );
                 if overflowed {
                     if !bytes.is_empty()
-                        && let Err(e) = shell.write_ambient(&bytes)
+                        && let Err(br) = shell.write_ambient(&bytes)
                     {
-                        return Focus::Halt(Break::Error(shell.err(format!("capture flush: {e}"), 1)));
+                        return Focus::Halt(br);
                     }
                     return Focus::Halt(stamp(
                         Break::Error(
@@ -1059,9 +1059,9 @@ impl Machine {
                 shell.io.stdout = prev;
                 let bytes = io::take_buffer(&buf);
                 if !bytes.is_empty()
-                    && let Err(e) = shell.write_ambient(&bytes)
+                    && let Err(br) = shell.write_ambient(&bytes)
                 {
-                    return Focus::Halt(Break::Error(shell.err(format!("capture flush: {e}"), 1)));
+                    return Focus::Halt(br);
                 }
                 Focus::Halt(s)
             }

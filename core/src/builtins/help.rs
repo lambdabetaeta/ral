@@ -7,7 +7,7 @@ use crate::ir::CommandName;
 use crate::prelude_manifest::PRELUDE_DOCS;
 use crate::runtime::command::CommandIdentity;
 use crate::typecheck::{builtin_type_hint, fmt_scheme};
-use crate::types::{Binding, Env, HandlerLookup, Shell, Value};
+use crate::types::{Binding, Env, HandlerLookup, Settled, Shell, Value};
 use std::fmt::{self, Write};
 use std::path::PathBuf;
 
@@ -157,7 +157,7 @@ fn fmt_line(
     )
 }
 
-pub(super) fn builtin_help(_args: &[Value], _env: &Env, shell: &mut Shell) -> Value {
+pub(super) fn builtin_help(_args: &[Value], _env: &Env, shell: &mut Shell) -> Settled<Value> {
     let colors = Colors::current();
     let Colors {
         bold, dim, reset, ..
@@ -176,17 +176,17 @@ pub(super) fn builtin_help(_args: &[Value], _env: &Env, shell: &mut Shell) -> Va
          {dim}Use `explain <name>` for the full type signature and source location of any entry.{reset}\n"
     );
 
-    let _ = shell.write_stdout(out.as_bytes());
-    Value::Unit
+    shell.write_stdout(out.as_bytes())?;
+    Ok(Value::Unit)
 }
 
-pub(super) fn builtin_explain(args: &[Value], env: &Env, shell: &mut Shell) -> Value {
+pub(super) fn builtin_explain(args: &[Value], env: &Env, shell: &mut Shell) -> Settled<Value> {
     let out = match args.first() {
         Some(arg) => explanation(&arg.to_string(), env, shell, Colors::current()),
         None => "explain: expected a name, e.g. `explain map`\n".to_string(),
     };
-    let _ = shell.write_stdout(out.as_bytes());
-    Value::Unit
+    shell.write_stdout(out.as_bytes())?;
+    Ok(Value::Unit)
 }
 
 /// What documents `name` over the frame that would run.  A name nothing binds
@@ -402,7 +402,7 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         let env = shell.env.clone();
-        builtin_help(&[], &env, &mut shell);
+        builtin_help(&[], &env, &mut shell).expect("a buffer sink cannot fail");
         let out = String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
             !out.contains("Library:"),
@@ -420,7 +420,7 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         let env = shell.env.clone();
-        builtin_help(&[], &env, &mut shell);
+        builtin_help(&[], &env, &mut shell).expect("a buffer sink cannot fail");
         let help_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
@@ -430,7 +430,8 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_explain(&[Value::String("frob".into())], &env, &mut shell);
+        builtin_explain(&[Value::String("frob".into())], &env, &mut shell)
+            .expect("a buffer sink cannot fail");
         let explain_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
         assert!(
@@ -451,7 +452,7 @@ mod tests {
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
         let env = shell.env.clone();
-        builtin_help(&[], &env, &mut shell);
+        builtin_help(&[], &env, &mut shell).expect("a buffer sink cannot fail");
         let help_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("help output is UTF-8");
         assert!(
@@ -461,7 +462,8 @@ mod tests {
 
         let (sink, buf) = crate::io::new_buffer();
         shell.set_stdout(sink);
-        builtin_explain(&[Value::String("frob".into())], &env, &mut shell);
+        builtin_explain(&[Value::String("frob".into())], &env, &mut shell)
+            .expect("a buffer sink cannot fail");
         let explain_out =
             String::from_utf8(crate::io::take_buffer(&buf)).expect("explain output is UTF-8");
         assert!(

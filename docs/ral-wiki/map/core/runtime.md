@@ -145,8 +145,9 @@ recursion is irreducible; the evaluator reaches it at
   - `launch.rs` (`PipelineBuild` owns launch; a failed launch is its drop, the
     collector it carries killing the group before any stage handle joins;
     `StageHandle` dispatches `kill_now`/`kill_by_pid`/`cancel` over its two
-    kinds, `External`/`Thread` — `kill_now` is the reader-gone cascade,
-    `kill_by_pid` a joining collector's own teardown reaching what it
+    kinds, `External`/`Thread` — `kill_now` is `Effect::KillStage`'s action
+    once the sentinel has heard a dead write, `kill_by_pid` a joining
+    collector's own teardown reaching what it
     launched directly, with no pgid of its own to kill — an `External` is a
     `crate::process::Watch` alone, the reaper's own subscription: no
     dedicated waiter thread, since `ChildHandle::into_watch`'s closure posts
@@ -205,8 +206,10 @@ recursion is irreducible; the evaluator reaches it at
     place `&mut Shell` reaches an external's settlement (audit synthesis,
     exit-hint lookup, sandbox-denial augmentation, via
     `finish_external_settlement`) — is the one place that reads it back
-    against what actually happened, forgiveness being `sent[ix] ==
-    Some(ReaderGone)` and, for an external, `outcome.is_stage_kill()` too;
+    against what actually happened: a thread's forgiveness reads its own
+    break alone (a `ReaderGone` break is only ever this collector's doing),
+    an external's reads `sent[ix] == Some(ReaderGone)` and
+    `outcome.is_stage_kill()` too;
     `drive`/`cancel_all`/`step` take no `&Shell` at all. `drive` is
     `loop { for e in step(&mut st, rx.recv()?) { run(e) } }`, no interval, no
     backoff, and its own `Drive` sum is just `Done`, since nothing parks

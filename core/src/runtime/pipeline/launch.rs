@@ -9,7 +9,8 @@ use super::group::PipelineGroup;
 use super::resolve::{
     ExternalStage as ExternalStageSpec, PipelinePlan, StageLaunch, StageSpec, TerminalPlan,
 };
-use super::route::{ByteIn, ByteOut, StageRoute, open_stage_routes};
+use super::route::{ByteIn, ByteOut, HeldEdge, StageRoute, open_stage_routes};
+use super::sentinel;
 use super::thread::{ThreadStage, launch_thread_stage};
 use crate::io::{Sink, Source, SourceReader};
 use crate::process::CancelCause;
@@ -18,16 +19,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-/// One stage's process — external or thread — paired with the parent's
-/// duplicate of its outbound edge's read end, in the collector's care until
-/// this stage's observation completes.
+/// One stage's process — external or thread — paired with the parent's hold
+/// on its outbound edge, in the collector's care until this stage's
+/// observation completes.
 pub(super) struct StageHandle {
     kind: StageKind,
-    held_edge: Option<os_pipe::PipeReader>,
-    /// Mirrors `StageSpec::feeds_pipe`: whether this stage's stdout can
-    /// still reach the interior edge, so the collector knows when a dead
-    /// reader downstream is none of this stage's business at all.
-    feeds_pipe: bool,
+    held: Option<HeldEdge>,
+    /// The collector's channel, for the sentinel [`Self::arm`] starts.
+    report: Sender<Event>,
 }
 
 /// The collector's handle onto a direct external stage: no dedicated waiter
@@ -48,12 +47,9 @@ enum StageKind {
 }
 
 impl StageHandle {
-    /// [`super::collect::Effect::KillStage`]'s mechanical action: the
-    /// reader-gone cascade alone, whose guard — this stage still running
-    /// and feeding the pipe — `step` has already checked, and whose
-    /// attribution `step` has already recorded in the collector's own
-    /// `sent`.  Unchanged for a thread: its own cancel scope still needs
-    /// cancelling and waking, which is real cancellation, not attribution.
+    /// [`super::collect::Effect::KillStage`]'s mechanical action, the
+    /// sentinel having heard this stage's first write to a dead edge.  The
+    /// attribution — the collector's own `sent` — is `step`'s.
     pub(super) fn kill_now(&mut self) {
         match &mut self.kind {
             StageKind::External(e) => e.watch.kill(),
@@ -100,30 +96,43 @@ impl StageHandle {
         }
     }
 
-    /// Whether this stage's stdout can still reach the interior edge — the
-    /// reader-gone cascade's other half of its guard, mirroring
-    /// `StageSpec::feeds_pipe`.
-    pub(super) fn feeds_pipe(&self) -> bool {
-        self.feeds_pipe
+    /// This stage's outbound edge is dead: mark it and hand the read end to
+    /// the sentinel.  Marked before the sentinel snapshots what is pending,
+    /// so a write completing between the two is caught by the sink's own
+    /// post-check rather than lost.
+    pub(super) fn arm(&mut self, ix: usize) {
+        if let Some(held) = &mut self.held
+            && let Some(reader) = held.reader.take()
+        {
+            held.edge.mark_dead();
+            sentinel::listen(reader, ix, self.report.clone());
+        }
+    }
+
+    /// The sentinel's read end, back from the news it carried.
+    pub(super) fn regain(&mut self, reader: os_pipe::PipeReader) {
+        if let Some(held) = &mut self.held {
+            held.reader = Some(reader);
+        }
     }
 
     /// An external's own terminal event: reap the watch — after this stage
     /// has already left the collector's `stages`, so no `KillStage` can ever
-    /// name a reaped pid — then release the held-open read end, only now
-    /// that the writer is reaped so any descendant of that edge still
-    /// blocked writing into it is freed.  Neither the jail nor the pumps are
-    /// settled here: the jail's `rmdir` polls while descendants are still
-    /// dying, and a descendant that survived the stage's pid-addressed kill
-    /// still holds the pipe a pump reads — both wait on `cancel_all`'s group
-    /// kill, so both are the fold's to finish, after the walk, and this
-    /// stays non-blocking.
+    /// name a reaped pid — then release the held-open read end, whether the
+    /// sentinel returned it or never took it, only now that the writer is
+    /// reaped so any descendant of that edge still blocked writing into it is
+    /// freed.  Neither the jail nor the pumps are settled here: the jail's
+    /// `rmdir` polls while descendants are still dying, and a descendant that
+    /// survived the stage's pid-addressed kill still holds the pipe a pump
+    /// reads — both wait on `cancel_all`'s group kill, so both are the fold's
+    /// to finish, after the walk, and this stays non-blocking.
     pub(super) fn file_external_end(self, outcome: crate::process::WaitOutcome) -> StageEnd {
-        let Self { held_edge, kind, .. } = self;
+        let Self { held, kind, .. } = self;
         let StageKind::External(e) = kind else {
             panic!("Event::Ended named a stage that was not spawned as an external");
         };
         let _ = e.watch.reap();
-        drop(held_edge);
+        drop(held);
         StageEnd::External {
             name: e.name,
             outcome,
@@ -134,16 +143,15 @@ impl StageHandle {
 
     /// A thread stage's own terminal event: its `Returned` has already
     /// arrived by channel, so this reclaims the join rather than waiting for
-    /// it, then releases the held-open read end.  A killed thread's `Break`
-    /// carries no mark of whether the kill or its own code ended it —
-    /// forgiveness by `sent` is the fold's, not this method's.
+    /// it, then releases the held-open read end, whether the sentinel
+    /// returned it or never took it.
     pub(super) fn file_thread_end(self, obs: StageObservation) -> StageEnd {
-        let Self { held_edge, kind, .. } = self;
+        let Self { held, kind, .. } = self;
         let StageKind::Thread(t) = kind else {
             panic!("Event::Returned named a stage that was not a thread stage");
         };
         t.join_after_settled();
-        drop(held_edge);
+        drop(held);
         StageEnd::Thread(obs)
     }
 
@@ -161,8 +169,8 @@ impl StageHandle {
                 jail: None,
                 pumps: command::Pumps::default(),
             }),
-            held_edge: None,
-            feeds_pipe: true,
+            held: None,
+            report: collect.sender(),
         }
     }
 
@@ -193,8 +201,8 @@ impl StageHandle {
                 jail: None,
                 pumps: command::Pumps::default(),
             }),
-            held_edge: None,
-            feeds_pipe: true,
+            held: None,
+            report: std::sync::mpsc::channel().0,
         }
     }
 
@@ -205,8 +213,8 @@ impl StageHandle {
     pub(super) fn fake_thread_for_step_test() -> Self {
         Self {
             kind: StageKind::Thread(ThreadStage::fake_for_step_test()),
-            held_edge: None,
-            feeds_pipe: true,
+            held: None,
+            report: std::sync::mpsc::channel().0,
         }
     }
 }
@@ -323,7 +331,9 @@ pub(super) fn wire_stage_stdout(
     shell: &Shell,
 ) -> Settled<Option<Sink>> {
     match stdout {
-        ByteOut::Downstream(writer) => {
+        // A process's writes are heard by the sentinel, so the edge's fate is
+        // none of this wiring's business.
+        ByteOut::Downstream(writer, _edge) => {
             cmd.stdout(crate::process::StdioSpec::from_pipe_writer(writer));
             Ok(None)
         }
@@ -426,21 +436,19 @@ fn spawn_stage(
     is_last: bool,
     tx: Sender<Event>,
 ) -> Settled<StageHandle> {
-    let held_edge = route.held.take();
+    let held = route.held.take();
+    let report = tx.clone();
     let kind = match &spec.launch {
         StageLaunch::Direct(ext) => {
-            let stage = launch_external_stage_direct(ext, route, cx.mooring, cx.shell, cx.group, ix, tx)?;
+            let stage =
+                launch_external_stage_direct(ext, route, cx.mooring, cx.shell, cx.group, ix, tx)?;
             StageKind::External(stage)
         }
-        StageLaunch::Thread => {
-            StageKind::Thread(launch_thread_stage(stage, spec, route, cx, ix, is_last, tx)?)
-        }
+        StageLaunch::Thread => StageKind::Thread(launch_thread_stage(
+            stage, spec, route, cx, ix, is_last, tx,
+        )?),
     };
-    Ok(StageHandle {
-        kind,
-        held_edge,
-        feeds_pipe: spec.feeds_pipe,
-    })
+    Ok(StageHandle { kind, held, report })
 }
 
 /// Partial-launch resources in teardown order: Rust drops fields top to

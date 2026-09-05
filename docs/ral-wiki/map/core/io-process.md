@@ -82,11 +82,13 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   still reports its number. `CommandFailure::from_outcome` takes `sent: Option<
   CancelCause>`, the strongest cause anything sent the child, joined by `max`
   where two parties each ended it — a cancellation in force outranks the
-  collector's reader-gone kill by that order rather than by a special case. It
-  is the sole input to forgiveness: only `Some(ReaderGone)`, and only a death
-  that kill actually caused, keeps no failure; every other status is kept,
-  because the kill precedes the wait and cannot rewrite a recorded status
-  ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]]).
+  collector's reader-gone kill (raised only once the sentinel hears a dead
+  write) by that order rather than by a special case. It is the sole input to
+  forgiveness for an external: only `Some(ReaderGone)`, and only a death that
+  kill actually caused, keeps no failure; every other status is kept, because
+  the kill precedes the wait and cannot rewrite a recorded status
+  ([[decisions/260820_a-stage-ral-stopped-has-no-failure|a-stage-ral-stopped-has-no-failure]],
+  [[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]]).
 - `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
   stdout write from another thread: a self-pipe polled beside the stage's own
   fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle

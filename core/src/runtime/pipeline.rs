@@ -10,6 +10,7 @@ pub(crate) mod helper;
 mod launch;
 pub(crate) mod resolve;
 mod route;
+mod sentinel;
 mod thread;
 
 use crate::ir::{Comp, PipeYield};

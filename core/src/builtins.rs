@@ -130,10 +130,10 @@ macro_rules! builtin_registry {
 builtin_registry! {
     Clear { names: ["clear"], ty: scheme::terminal_control,
         doc: "clear  — clear screen and scrollback (ESC[H ESC[2J ESC[3J). Shadows external `clear`; use `^clear` for the ncurses binary.",
-        call: |args, _mooring, shell| Ok(misc::builtin_clear(args, shell)), },
+        call: |args, _mooring, shell| misc::builtin_clear(args, shell), },
     Reset { names: ["reset"], ty: scheme::terminal_control,
         doc: "reset  — emit ESC c (RIS) to reset the terminal. Does not touch stty modes; use `^reset` for the full ncurses terminfo reset.",
-        call: |args, _mooring, shell| Ok(misc::builtin_reset(args, shell)), },
+        call: |args, _mooring, shell| misc::builtin_reset(args, shell), },
     Each { names: ["each"], ty: scheme::each_op,
         doc: "each <fn> <list>  — call fn on each element for side effects.",
         call: |args, mooring, shell| collections::builtin_each(args, mooring, shell), },
@@ -411,13 +411,13 @@ static CORE_HELP_BUILTINS_ARR: [BuiltinEntry; 2] = [
         Cow::Borrowed("help"),
         scheme::help,
         "help  — print an overview of builtins, prelude, and library; see also `explain`.",
-        BuiltinBody::Scoped(|args, env, _mooring, shell| Ok(help::builtin_help(args, env, shell))),
+        BuiltinBody::Scoped(|args, env, _mooring, shell| help::builtin_help(args, env, shell)),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("explain"),
         scheme::explain,
         "explain <name>  — print documentation for one name: doc, type signature, where the shell would find it, and what that shadows. Unlike `which`, which only searches PATH and so cannot see anything ral provides, this names the frame that would actually run.",
-        BuiltinBody::Scoped(|args, env, _mooring, shell| Ok(help::builtin_explain(args, env, shell))),
+        BuiltinBody::Scoped(|args, env, _mooring, shell| help::builtin_explain(args, env, shell)),
     ),
 ];
 pub static CORE_HELP_BUILTINS: &[BuiltinEntry] = &CORE_HELP_BUILTINS_ARR;

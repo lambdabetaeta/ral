@@ -13,6 +13,13 @@ superseded_by: decisions/260903_ral-does-not-suspend
 > stopped child is resumed at once by whoever waits on it, foreground or not,
 > and collection never stops watching an interior edge on that account.
 
+> Superseded, in part, by
+> [[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]]: the
+> forgiven death, the held read end, SIGKILL, and the verdict rules stand;
+> the *moment* of the kill does not. A stage is no longer ended when its
+> reader is gone but at its first write to the dead edge, and the redirect
+> exemption is gone as a clause because it follows from that.
+
 # A stage ral stopped has no failure
 
 **Past a `|`, a stage lives exactly as long as its reader needs it: ral itself
