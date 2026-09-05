@@ -63,7 +63,10 @@ Keychain because that service is reached outside the filesystem.
 whole home directory. It deliberately reads broad XDG config, data, and state
 surfaces. Known credential directories for `gh`, 1Password, and Google Cloud
 are denied, but if other home data must remain private, start from `minimal` or
-add a restriction.
+add a restriction. exarch's and synod's own credential files — the keychain
+fallback and the ChatGPT OAuth tokens under the XDG config and state homes —
+are denied too, by every profile that restricts the filesystem, so an agent
+cannot read the key that pays for its own session.
 
 ### `edit-only` — patch and refactor
 
@@ -173,7 +176,10 @@ working tree back, since that file sits in the tree the agent may write. A
 pointer nothing claims refuses the session and names both paths.
 
 A restriction file is itself added to the filesystem deny set, so the agent
-cannot rewrite the file that defines its boundary.
+cannot rewrite the file that defines its boundary. exarch's and synod's own
+credential files sit on the same footing: denied wherever the effective grant
+restricts the filesystem at all, so an agent can never read the key that pays
+for its own turn.
 
 A typical custom setup starts small, adds trusted build tools, then confines
 the result to the project:

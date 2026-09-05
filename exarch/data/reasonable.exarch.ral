@@ -145,6 +145,8 @@ return [
     # config), but a few well-known dirs hold OAuth tokens or session
     # secrets the agent should never see, even read-only.  These are
     # overlaid as denies; same shape as `.exarch.ral`'s self-deny.
+    # exarch's and synod's own credential files are denied in
+    # composition (`policy::for_invocation`), not here.
     deny: [
       'xdg:config/gh',      # gh CLI — hosts.yml has the GitHub OAuth token
       'xdg:config/op',      # 1Password CLI session

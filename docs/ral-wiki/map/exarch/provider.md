@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 3606091a
-generated_at_date: 2026-08-27
+generated_at_commit: 99226d37
+generated_at_date: 2026-09-05
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -145,6 +145,13 @@ for [[map/synod|synod]]'s sake — **exarch calls none of it**:
   sentence a window prints verbatim rather than implying a protection that is
   not there. A blank or control-bearing entry reads as *no key*, the rule
   `credential.rs` already applies to a key read from the environment.
+- `provider::credential_files` — every file on the computer holding one of our
+  credentials: each app in `bootstrap::APPS` contributing its keychain
+  fallback path plus `oauth::token_path`. `policy::for_invocation` denies all
+  of them to every grant that attenuates the filesystem at all, since the
+  base profiles read `xdg:config`/`xdg:state` wholesale and would otherwise
+  hand the agent the key that pays for its own turn — see
+  [[decisions/260905_a-grant-does-not-hand-out-its-own-key|a-grant-does-not-hand-out-its-own-key]].
 - `provider/secret_file.rs` — `write_private`, the owner-only writer the
   `ChatGPT` token store and that fallback file share: one implementation of
   the `0600`-at-`open` and owner-only-DACL-at-`CreateFileW` promise instead of

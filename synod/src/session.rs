@@ -34,7 +34,6 @@ use crate::grant::Grant;
 use crate::workspace;
 use baseline::Baseline;
 use exarch::agent::{Avatar, RecordedAccount};
-use exarch::bootstrap;
 use exarch::provider::{
     self, Engine, Provider,
     credential::{Credential, CredentialStore},
@@ -57,7 +56,11 @@ pub use signin::{SignInStep, SignedIn, sign_in};
 /// never write into an exarch run's logs, nor read its model selection.
 /// The agent's working area is not among these: it is the guest's own
 /// scratch tmpfs ([`crate::grant::GUEST_SCRATCH`]), no host directory.
-pub const SYNOD: bootstrap::App = bootstrap::App::new("synod");
+///
+/// The name is the engine's ([`exarch::bootstrap::SYNOD`]) because exarch's
+/// grant composition must deny these directories, and a second spelling here
+/// would let the two drift apart into a hole.
+pub use exarch::bootstrap::SYNOD;
 
 /// Resolve the credential store, once, at startup — see
 /// [`crate::accounts::prepare`], which is where synod's accounts actually

@@ -186,9 +186,6 @@ pub fn run() -> Result<(), String> {
 
     let (caps, restrict_files) =
         policy::for_invocation(&cwd, &c.base, c.extend_base.as_deref(), &c.restrict)?;
-    // The persisted selection lives under the XDG state home, outside the
-    // agent's cwd sandbox, so no deny-list entry is needed to keep tools off it.
-
     // A throwaway shell carrying the same grants, only so
     // `RAL_DUMP_SANDBOX_PROFILE` can print the profile an external child would
     // be sandboxed under.

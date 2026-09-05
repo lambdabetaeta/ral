@@ -62,6 +62,8 @@ return [
 
     # Same credential denies as `reasonable` — gh, op, gcloud tokens
     # should never be readable, even in an editing session.
+    # exarch's and synod's own credential files are denied in
+    # composition (`policy::for_invocation`), not here.
     deny: [
       'xdg:config/gh',
       'xdg:config/op',

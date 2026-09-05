@@ -138,7 +138,11 @@ impl Keychain {
         keyring::Entry::store_status().is_ok()
     }
 
-    fn fallback_path(self) -> PathBuf {
+    /// Where this app's keys land with no credential manager to hold them.
+    /// `pub(crate)` so [`super::credential_files`] can deny it: the file is a
+    /// plain `0600` JSON map, and a `0600` file is no protection from an agent
+    /// running as the user who owns it.
+    pub(crate) fn fallback_path(self) -> PathBuf {
         self.app
             .xdg_dir(ral_core::path::basedir::XdgKind::Config)
             .join(FALLBACK_FILE)

@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 /// meet run on already-resolved bundles.  Each restrict file's own path joins
 /// `fs.deny_paths`, putting the bytes that shape the agent's permissions beyond
 /// its reach; the extend-base file does not, since widening authority is a
-/// trust-source concern rather than a containment one.
+/// trust-source concern rather than a containment one.  On the same footing,
+/// and for the same reason, every attenuated grant denies
+/// [`provider::credential_files`](crate::provider::credential_files).
 ///
 /// # Errors
 /// Unknown `base_name`, or a profile that fails to load.
@@ -80,6 +82,17 @@ pub fn for_invocation(
 
     if !restricts.is_empty() {
         deny_paths(&mut caps, &restricts, &ctx)?;
+    }
+
+    // Our own credentials are the authority a grant is *made of*, never
+    // something it hands out — so they are carved out after composition, where
+    // no profile can forget them and no `--extend-base` can widen them back.
+    // Only where an fs policy exists: `dangerous` attenuates nothing by
+    // contract, and installing one there to hold these denies would silently
+    // confine every session that asked not to be, against an agent that can
+    // read the same bytes a hundred other ways.
+    if caps.fs.is_some() {
+        deny_paths(&mut caps, &crate::provider::credential_files(), &ctx)?;
     }
 
     lint_deputy_prefixes(&caps);

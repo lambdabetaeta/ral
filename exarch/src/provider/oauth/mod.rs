@@ -756,7 +756,9 @@ fn finalize(raw: RawTokens) -> Result<OAuthToken, String> {
     })
 }
 
-fn token_path() -> PathBuf {
+/// `pub(crate)` for [`super::credential_files`]: a signed-in `ChatGPT`
+/// account's tokens live here, so every grant has to carve this path out.
+pub(crate) fn token_path() -> PathBuf {
     crate::bootstrap::EXARCH
         .xdg_dir(ral_core::path::basedir::XdgKind::State)
         .join("oauth.json")

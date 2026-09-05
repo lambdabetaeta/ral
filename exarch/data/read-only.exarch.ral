@@ -66,6 +66,8 @@ return [
     # Same credential carve-outs as `reasonable`: these are present in
     # `xdg:config` (read above) but the contents are OAuth tokens and
     # session secrets the agent should never see, even read-only.
+    # exarch's and synod's own credential files are denied in
+    # composition (`policy::for_invocation`), not here.
     deny: [
       'xdg:config/gh',         # gh CLI — hosts.yml has the GitHub OAuth token
       'xdg:config/op',         # 1Password CLI session

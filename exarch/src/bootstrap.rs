@@ -346,8 +346,19 @@ fn reap_unheld(temp: &Path, prefix: &str, mine: &Path) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct App(&'static str);
 
-/// Exarch's own directories; synod names its own [`App`].
+/// Exarch's own directories.
 pub const EXARCH: App = App::new("exarch");
+
+/// Synod's, named here rather than in synod.
+///
+/// An agent exarch launches must not read *any* product's credential store, so
+/// [`APPS`] has to be able to say which directories those are
+/// ([`crate::provider::credential_files`]).
+pub const SYNOD: App = App::new("synod");
+
+/// Every product over this engine.  A grant carves all of them out at once —
+/// one app's agent reading another's keys is the same leak either way.
+pub const APPS: &[App] = &[EXARCH, SYNOD];
 
 impl App {
     #[must_use]

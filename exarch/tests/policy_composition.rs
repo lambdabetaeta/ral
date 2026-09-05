@@ -9,10 +9,11 @@
 //! grant is a fact about files, and the assertions here are worth only as much
 //! as the loader they went through.
 
-use exarch::bootstrap::{EXARCH, Scratch};
+use exarch::bootstrap::{EXARCH, SYNOD, Scratch};
 use exarch::policy::for_invocation;
 use exarch::prompt::host_section;
 use ral_core::path::NormalizedPrefix;
+use ral_core::path::basedir::XdgKind;
 use ral_core::types::{Break, ExecPolicy, Settled, Shell};
 use std::path::PathBuf;
 
@@ -173,6 +174,80 @@ fn a_restrict_file_is_refused_by_the_fs_gate_under_either_spelling() {
         sh.check_fs_write(&path)
             .expect("the deny is targeted: a sibling file stays writable");
     });
+}
+
+/// The key that pays for the turn is not a thing the turn may read back.
+/// `reasonable`, `read-only` and `edit-only` read `xdg:config` and `xdg:state`
+/// wholesale so tools find their configs, and our own credential files sit in
+/// exactly that reach — `cat` was the whole exploit.  Every attenuated base is
+/// checked, since a base that does not grant the read today may tomorrow.
+///
+/// The paths are spelled out here rather than taken from
+/// `provider::credential_files`, which would only agree with itself; and both
+/// halves are asserted, because being unreadable by *veto* is the claim — an
+/// unreadable path that is merely ungranted is one widening away from readable.
+#[test]
+fn no_attenuated_base_can_read_a_credential_file() {
+    let dir = Scratch::for_test(EXARCH, "credential-deny").expect("scratch dir");
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let secrets = [
+        EXARCH.xdg_dir(XdgKind::Config).join("keys.json"),
+        SYNOD.xdg_dir(XdgKind::Config).join("keys.json"),
+        EXARCH.xdg_dir(XdgKind::State).join("oauth.json"),
+    ];
+
+    for base in BASES.into_iter().filter(|b| *b != "dangerous") {
+        let (caps, _) = for_invocation(&cwd, base, None, &[]).expect("base composes");
+        let fs = caps
+            .fs
+            .clone()
+            .unwrap_or_else(|| panic!("{base} attenuates the filesystem"));
+        let mut shell = Shell::default();
+        shell.with_capabilities(caps, |sh| {
+            for secret in &secrets {
+                assert!(
+                    fs.deny_paths
+                        .iter()
+                        .any(|p| *p == *secret.to_string_lossy()),
+                    "{base} must veto {}, not merely leave it ungranted: {:?}",
+                    secret.display(),
+                    fs.deny_paths
+                );
+                let path = sh.resolve(&secret.to_string_lossy());
+                let message = refusal(sh.check_fs_read(&path));
+                assert!(
+                    message.contains("denied by grant"),
+                    "{base} should refuse to read {}, got: {message}",
+                    secret.display()
+                );
+            }
+        });
+    }
+}
+
+/// `dangerous` is ambient authority by contract, so it installs no fs policy
+/// at all — and two denies are not worth turning every unconfined session into
+/// a confined one against an agent that can reach the same bytes a hundred
+/// other ways.  Naming a restrict file *does* attenuate, and then the
+/// credential carve-out lands with it.
+#[test]
+fn dangerous_stays_ambient_until_something_attenuates_it() {
+    let dir = Scratch::for_test(EXARCH, "credential-deny-dangerous").expect("scratch dir");
+    let cwd = dir.path().to_string_lossy().into_owned();
+    let oauth = EXARCH.xdg_dir(XdgKind::State).join("oauth.json");
+
+    let (caps, _) = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
+    assert!(caps.fs.is_none(), "dangerous must attenuate nothing");
+
+    let restrict = profile(&dir, "restrict.ral", "return [net: false]\n");
+    let (caps, _) = for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&restrict))
+        .expect("dangerous composes with a restrict file");
+    let fs = caps.fs.expect("a restrict file installs the root policy");
+    assert!(
+        fs.deny_paths.iter().any(|p| *p == *oauth.to_string_lossy()),
+        "an attenuated dangerous must still carve out the tokens: {:?}",
+        fs.deny_paths
+    );
 }
 
 /// The summary is the model's only view of its own authority, so it has to

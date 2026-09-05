@@ -4,7 +4,7 @@
 — `$XDG_CONFIG_HOME/exarch/` — structurally outside the working tree the
 sandboxed agent can write, and distinct from the per-project *state* and *cache*
 homes.** Where a file lives is its trust level: the config home is the one place
-the [[design/grant|grant]] cannot reach, so what sits there is exactly what the
+no [[design/grant|grant]] makes writable, so what sits there is exactly what the
 agent must not be able to forge.
 
 ## The XDG split
@@ -43,9 +43,17 @@ to trust:
 
 **The config home is trusted precisely because it is never the working tree.**
 The sandboxed agent's [[design/grant|grant]] admits writes to `cwd` and the
-per-session scratch dir alone, so it cannot reach `$XDG_CONFIG_HOME` at all — the
-protection is *structural*, not a deny-list entry an oversight could omit
-([[map/exarch/policy|policy]]).
+per-session scratch dir alone, so no profile can make `$XDG_CONFIG_HOME`
+writable — the protection is *structural*, not a deny-list entry an oversight
+could omit ([[map/exarch/policy|policy]]).
+
+- **Structural covers write, and only write.** Most bases *read* `xdg:config`
+  and `xdg:state` whole, so tools find their own configuration — which is why
+  the files holding our credentials are denied by name, in composition, on the
+  same footing as a restrict file
+  ([[decisions/260905_a-grant-does-not-hand-out-its-own-key|a-grant-does-not-hand-out-its-own-key]]).
+  Everything else here the agent may read, and some of it it is meant to: the
+  global `AGENTS.md` and the skill roots are addressed to it.
 
 - **A trusted location still gets a no-authority evaluation.** `config.ral` is
   source, so it is *evaluated*, not parsed (`exarch/src/config.rs`) — under a

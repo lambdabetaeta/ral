@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c8af3823
-generated_at_date: 2026-09-02
+generated_at_commit: 99226d37
+generated_at_date: 2026-09-05
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -137,8 +137,11 @@ can inherit a live key.**
   `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`), with the
   legacy build-tool homes (`CARGO_HOME`, …) redirected
   into it so a write lands inside the grant rather than in a denied real cache.
-- **`App`** — the product identity (`EXARCH`; synod names its own) that owns
-  the directory conventions as methods: `App::xdg_dir` is the one spelling of
+- **`App`** — the product identity that owns the directory conventions as
+  methods, and the engine names every product itself (`EXARCH`, `SYNOD`, over
+  `APPS`) rather than each naming its own: composing a grant means carving out
+  every product's credential directories, so one place has to know which apps
+  there are. `App::xdg_dir` is the one spelling of
   `$XDG_<kind>_HOME/<app>/` that the project state, model cache, and trusted
   config home all build on ([[design/exarch-config-dir|exarch-config-dir]]);
   `App::project_dir` keys per-project state by a slug of the launch cwd

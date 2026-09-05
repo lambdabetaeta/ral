@@ -43,6 +43,24 @@ use models::{LiveSource, ModelCatalog};
 use std::sync::Arc;
 use transport::Transport;
 
+/// Every file on this computer holding one of our own credentials: each
+/// product's keychain fallback ([`keychain`]) and the `ChatGPT` tokens
+/// ([`oauth`], exarch's state dir wherever the login was made).
+///
+/// [`crate::policy::for_invocation`] denies these to every session whose grant
+/// attenuates the filesystem at all.  They need saying because the profiles
+/// read `xdg:config` and `xdg:state` wholesale so tools find their configs,
+/// and these sit in exactly that reach — the key that pays for the turn is not
+/// a thing the agent may read back.  Environment-borne keys need no entry:
+/// [`credential`] sweeps them out of the process before any session runs.
+pub(crate) fn credential_files() -> Vec<std::path::PathBuf> {
+    crate::bootstrap::APPS
+        .iter()
+        .map(|app| keychain::Keychain::for_app(*app).fallback_path())
+        .chain(std::iter::once(oauth::token_path()))
+        .collect()
+}
+
 /// A session's chosen model, tuning, and routing, plus the backend its
 /// requests run on.
 pub struct Provider {

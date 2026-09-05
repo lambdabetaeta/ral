@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 53eb1950
-generated_at_date: 2026-09-02
+generated_at_commit: 99226d37
+generated_at_date: 2026-09-05
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/protocol.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
@@ -175,7 +175,9 @@ synod ([[decisions/260725_windows-machine-broker|windows-machine-broker]]).
   because exarch is started from a shell; synod is double-clicked, inherits
   the desktop's environment, and faces someone with no `.zshrc` to export
   from. So there are two sources in one order: the computer's credential
-  manager (`exarch::provider::keychain`, entries named `(synod, account-id)`)
+  manager (`exarch::provider::keychain`, entries named `(synod, account-id)`,
+  the app being `bootstrap::SYNOD` re-exported from the engine so the
+  credential deny and synod's own directories cannot drift apart)
   first, because it is the one a person can see and change from inside
   synod, and the environment underneath it — the same sweep and scrub as
   exarch, still run first because it is the step that must happen while the
