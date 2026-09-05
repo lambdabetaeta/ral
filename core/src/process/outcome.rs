@@ -179,10 +179,20 @@ impl WaitOutcome {
     /// kernel or a third party felled with something off the ladder, a segfault
     /// or a broken pipe inside that same window.  A stop is job control's
     /// business either way.
-    fn attribute_to(self, cause: CancelCause) -> Self {
-        match self {
-            Self::Signaled(signal) if signal.is_teardown() => Self::Cancelled { cause, signal },
-            other => other,
+    ///
+    /// An `enveloped` child's `Exited(128 + n)` reads the same way: bwrap
+    /// reports its payload's signal death as its own exit, whereas an
+    /// unenveloped `Exited(143)` is the child's own choice.
+    fn attribute_to(self, cause: CancelCause, enveloped: bool) -> Self {
+        let signal = match self {
+            Self::Signaled(signal) => signal,
+            Self::Exited(code) if enveloped => Signal::new(code - 128),
+            _ => return self,
+        };
+        if signal.is_teardown() {
+            Self::Cancelled { cause, signal }
+        } else {
+            self
         }
     }
 
@@ -250,9 +260,14 @@ impl CommandFailure {
     ///
     /// Attribution is the same fact read the other way and so belongs here
     /// too: a death by a signal on ral's own ladder, with a cause in `sent`,
-    /// is ral's doing whichever teardown sent it.
-    pub fn from_outcome(outcome: WaitOutcome, sent: Option<CancelCause>) -> Option<Self> {
-        let outcome = sent.map_or(outcome, |cause| outcome.attribute_to(cause));
+    /// is ral's doing whichever teardown sent it — and, for an `enveloped`
+    /// child, so is bwrap's `128 + n` exit for the payload's death by `n`.
+    pub fn from_outcome(
+        outcome: WaitOutcome,
+        sent: Option<CancelCause>,
+        enveloped: bool,
+    ) -> Option<Self> {
+        let outcome = sent.map_or(outcome, |cause| outcome.attribute_to(cause, enveloped));
         if sent == Some(CancelCause::ReaderGone) && outcome.is_stage_kill() {
             return None;
         }
@@ -324,11 +339,11 @@ mod tests {
     #[test]
     fn ordinary_exit_and_signal_death_stay_distinct() {
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(137), None),
+            CommandFailure::from_outcome(WaitOutcome::Exited(137), None, false),
             Some(CommandFailure::ExitCode(137))
         );
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), None),
+            CommandFailure::from_outcome(WaitOutcome::Signaled(Signal::new(9)), None, false),
             Some(CommandFailure::Signal(Signal::new(9)))
         );
     }
@@ -347,12 +362,12 @@ mod tests {
             (CancelCause::Terminate, "ral was asked to shut down"),
             (CancelCause::RootAbort, "ral was aborted"),
         ] {
-            let outcome = WaitOutcome::Signaled(term).attribute_to(cause);
+            let outcome = WaitOutcome::Signaled(term).attribute_to(cause, false);
             assert_eq!(
                 outcome.to_user_exit_code(),
                 WaitOutcome::Signaled(term).to_user_exit_code()
             );
-            let failure = CommandFailure::from_outcome(outcome, None).unwrap();
+            let failure = CommandFailure::from_outcome(outcome, None, false).unwrap();
             assert_eq!(failure.to_user_exit_code(), 128 + libc::SIGTERM);
             assert_eq!(
                 failure.message("sleep"),
@@ -378,9 +393,9 @@ mod tests {
     #[test]
     fn a_signal_off_the_ladder_survives_the_cancel_branch() {
         let segv = Signal::new(libc::SIGSEGV);
-        let outcome = WaitOutcome::Signaled(segv).attribute_to(CancelCause::Deadline);
+        let outcome = WaitOutcome::Signaled(segv).attribute_to(CancelCause::Deadline, false);
         assert_eq!(outcome, WaitOutcome::Signaled(segv));
-        let failure = CommandFailure::from_outcome(outcome, None).unwrap();
+        let failure = CommandFailure::from_outcome(outcome, None, false).unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 11 (SIGSEGV)");
         assert_eq!(
             failure.default_hint("sh").as_deref(),
@@ -396,11 +411,12 @@ mod tests {
         let failure = CommandFailure::from_outcome(
             WaitOutcome::Signaled(Signal::new(libc::SIGKILL)),
             None,
+            false,
         )
         .unwrap();
         assert_eq!(failure.message("sh"), "sh: killed by signal 9 (SIGKILL)");
         assert_eq!(
-            WaitOutcome::Exited(3).attribute_to(CancelCause::Deadline),
+            WaitOutcome::Exited(3).attribute_to(CancelCause::Deadline, false),
             WaitOutcome::Exited(3)
         );
     }
@@ -413,7 +429,7 @@ mod tests {
     fn a_stage_kill_is_forgiven() {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
         let sent = Some(CancelCause::ReaderGone);
-        assert_eq!(CommandFailure::from_outcome(outcome, sent), None);
+        assert_eq!(CommandFailure::from_outcome(outcome, sent, false), None);
     }
 
     /// The very same death, which nothing in ral caused, is an ordinary
@@ -424,7 +440,7 @@ mod tests {
     fn the_same_death_unsent_is_kept() {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGKILL));
         assert_eq!(
-            CommandFailure::from_outcome(outcome, None),
+            CommandFailure::from_outcome(outcome, None, false),
             Some(CommandFailure::Signal(Signal::new(libc::SIGKILL)))
         );
     }
@@ -436,7 +452,11 @@ mod tests {
     #[test]
     fn an_exit_status_is_kept_even_when_ral_ended_the_stage() {
         assert_eq!(
-            CommandFailure::from_outcome(WaitOutcome::Exited(3), Some(CancelCause::ReaderGone)),
+            CommandFailure::from_outcome(
+                WaitOutcome::Exited(3),
+                Some(CancelCause::ReaderGone),
+                false
+            ),
             Some(CommandFailure::ExitCode(3))
         );
     }
@@ -450,7 +470,7 @@ mod tests {
         let outcome = WaitOutcome::Signaled(Signal::new(libc::SIGPIPE));
         for sent in [Some(CancelCause::ReaderGone), None] {
             assert_eq!(
-                CommandFailure::from_outcome(outcome, sent),
+                CommandFailure::from_outcome(outcome, sent, false),
                 Some(CommandFailure::Signal(Signal::new(libc::SIGPIPE)))
             );
         }
@@ -467,7 +487,8 @@ mod tests {
         assert_eq!(
             CommandFailure::from_outcome(
                 WaitOutcome::Signaled(term),
-                Some(CancelCause::Deadline)
+                Some(CancelCause::Deadline),
+                false
             ),
             Some(CommandFailure::Cancelled {
                 cause: CancelCause::Deadline,
@@ -477,7 +498,8 @@ mod tests {
         assert_eq!(
             CommandFailure::from_outcome(
                 WaitOutcome::Signaled(term),
-                Some(CancelCause::ReaderGone)
+                Some(CancelCause::ReaderGone),
+                false
             ),
             Some(CommandFailure::Cancelled {
                 cause: CancelCause::ReaderGone,
@@ -498,6 +520,38 @@ mod tests {
             cause: CancelCause::RootAbort,
             signal: Signal::new(libc::SIGKILL),
         };
-        assert!(CommandFailure::from_outcome(outcome, sent).is_some());
+        assert!(CommandFailure::from_outcome(outcome, sent, false).is_some());
+    }
+
+    /// An enveloped `Exited(143)` with a teardown cause in `sent` is bwrap
+    /// reporting its SIGTERM'd payload and reads as `Cancelled`; unenveloped,
+    /// or with no cause sent, it is the child's own exit.
+    #[cfg(unix)]
+    #[test]
+    fn a_propagated_exit_is_attributed_only_enveloped_and_with_a_cause() {
+        let code = 128 + libc::SIGTERM;
+        assert_eq!(
+            CommandFailure::from_outcome(
+                WaitOutcome::Exited(code),
+                Some(CancelCause::Explicit),
+                true
+            ),
+            Some(CommandFailure::Cancelled {
+                cause: CancelCause::Explicit,
+                signal: Signal::new(libc::SIGTERM)
+            })
+        );
+        assert_eq!(
+            CommandFailure::from_outcome(WaitOutcome::Exited(code), None, true),
+            Some(CommandFailure::ExitCode(code))
+        );
+        assert_eq!(
+            CommandFailure::from_outcome(
+                WaitOutcome::Exited(code),
+                Some(CancelCause::Explicit),
+                false
+            ),
+            Some(CommandFailure::ExitCode(code))
+        );
     }
 }

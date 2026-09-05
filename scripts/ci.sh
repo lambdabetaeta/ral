@@ -114,6 +114,12 @@ if [ "$MODE" = native ]; then
     just check-windows
 fi
 
+# The bwrap envelope on both arches.  `lint` compiles it for this host's alone,
+# and on macOS not at all, so this is the only step that reads the x32 guard and
+# the aarch64 filter in the same run.  Its targets are rust-toolchain.toml's, so
+# unlike check-windows it needs nothing the box does not already install.
+step check-linux
+
 # Always this host's python: the box's image carries neither uv nor the
 # tree-sitter CLI, and render-site.py has no highlighting fallback.
 banner 'just site'

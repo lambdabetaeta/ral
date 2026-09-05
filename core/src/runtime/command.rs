@@ -102,7 +102,8 @@ pub(crate) fn run(
         None
     };
 
-    let fg = ForegroundDecision::for_standalone(shell, needs_pump, mooring);
+    let confinement = command.confinement();
+    let fg = ForegroundDecision::for_standalone(shell, needs_pump, confinement.is_some(), mooring);
     let image_shown = match &rc.image {
         ExecImage::Host(p) => p.clone(),
         ExecImage::BundledTool { tool } => format!("ral --ral-bundled-tool {tool}"),
@@ -114,7 +115,6 @@ pub(crate) fn run(
     // Anchor the denial-log window before the spawn, so a kernel deny the
     // child logs falls inside what `sandbox::augment_failure` reads back.
     let started = std::time::Instant::now();
-    let confinement = command.confinement();
     let (child, wait_pgid, jail) = match spawn(&mut command, fg.pgid_policy(), shell) {
         Ok(pair) => pair,
         // `finish_command` builds the `Command{External}` observation from
@@ -226,7 +226,7 @@ pub(crate) fn run(
     // A command inside a pipeline stage cannot take SIGPIPE from an interior
     // edge — the parent holds that edge's read end — so any SIGPIPE it
     // suffers is from a pipe of its own making and is its own failure.
-    match crate::process::CommandFailure::from_outcome(outcome, sent) {
+    match crate::process::CommandFailure::from_outcome(outcome, sent, confinement.is_some()) {
         None => Ok(Value::Unit),
         Some(failure) => {
             let err = Error::from_command_failure(&cmd_name, failure, shell);

@@ -1268,6 +1268,63 @@ fn grant_fs_pipeline_stdin_forwarded() {
     assert_eq!(o.stdout.trim(), "piped");
 }
 
+/// The regression this closes: `launch_external_stage_direct` spawns a
+/// confined pipeline stage under `PgidPolicy::Join`, and until the collector
+/// also addresses that stage's own envelope group, the group-wide grace
+/// signal never reaches it — bwrap's monitor joins the pipeline group, the
+/// payload does not.  The fixture's `TERM` trap writing its own evidence
+/// file is the only honest witness: a trap that ends in `exit 0` exits
+/// cleanly, so the outcome carries no sign that a signal ever arrived.
+#[test]
+fn a_cancelled_confined_pipeline_stage_gets_its_grace_signal() {
+    if !sandbox_functional() {
+        return;
+    }
+    let gate = fresh_tmp_path("ral_pipeline_confined_grace", "gate");
+    let trapfile = fresh_tmp_path("ral_pipeline_confined_grace", "trap");
+    let fixture = fresh_tmp_path("ral_pipeline_confined_grace", "sh");
+    mkfifo(&gate);
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\ntrap 'echo GRACE > {}; exit 0' TERM\nsleep 30 &\n: > {}\nwait\n",
+            trapfile.display(),
+            gate.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Parked in `wait` before the gate opens: `sh` defers a trap while a
+    // foreground child runs, and a TERM in that child's fork→exec window is lost.
+    // No `exec:` clause: exec stays unrestricted, only `fs` is confined —
+    // the fixture and `cat` both run inside the grant's envelope, which must
+    // cover the temp dir itself: on macOS that is `$TMPDIR`, not `/tmp`.
+    let tmp = std::env::temp_dir();
+    let script = format!(
+        "let job = watch \"tests\" {{ grant [fs: [read: ['{0}'], write: ['{0}']]] {{ {1} | cat }} ; return `done }}\ncat {2}\ncancel $job\n",
+        tmp.display(),
+        fixture.display(),
+        gate.display(),
+    );
+    let out = run_with_timeout(&[], &script, Duration::from_secs(30));
+
+    let trapped = std::fs::read_to_string(&trapfile);
+    std::fs::remove_file(&fixture).ok();
+    std::fs::remove_file(&gate).ok();
+    std::fs::remove_file(&trapfile).ok();
+
+    let Some(out) = out else {
+        panic!("ral never exited: the confined stage's gate never opened");
+    };
+    assert_eq!(out.status, 0, "stderr: {}", out.stderr);
+    assert_eq!(
+        trapped.unwrap_or_default().trim(),
+        "GRACE",
+        "the confined stage's TERM trap never ran: its own envelope group was never signalled"
+    );
+}
+
 #[test]
 fn grant_exec_bare_name_denied_when_scoped_path_rebinds_command() {
     if !sandbox_functional() {

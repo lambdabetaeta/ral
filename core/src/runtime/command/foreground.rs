@@ -34,10 +34,19 @@ impl ForegroundDecision {
     /// SIGTTOU on their first `tcsetattr` from a background pgroup.  An
     /// exarch tool run installs `TerminalAccess::Denied`, so no lease borrow
     /// exists and the handoff cannot be constructed at all.
-    pub(super) fn for_standalone(shell: &Shell, needs_pump: bool, mooring: &Mooring) -> Self {
+    ///
+    /// An `enveloped` child never takes it: bwrap's `--new-session` puts the
+    /// payload in a session `tcsetpgrp` cannot name.
+    pub(super) fn for_standalone(
+        shell: &Shell,
+        needs_pump: bool,
+        enveloped: bool,
+        mooring: &Mooring,
+    ) -> Self {
         let want_fg = shell.io.launch_role.is_top_level()
             && shell.terminal_lease(mooring).is_some()
             && !needs_pump
+            && !enveloped
             && matches!(
                 shell.io.stdout,
                 crate::io::Sink::Terminal | crate::io::Sink::External(_)

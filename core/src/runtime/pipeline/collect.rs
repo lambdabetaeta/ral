@@ -57,10 +57,11 @@ fn finish_external_settlement(
     name: &str,
     outcome: WaitOutcome,
     sent: Option<CancelCause>,
+    enveloped: bool,
     shell: &Shell,
     started: Instant,
 ) -> StageObservation {
-    let err = CommandFailure::from_outcome(outcome, sent)
+    let err = CommandFailure::from_outcome(outcome, sent, enveloped)
         .map(|f| Error::from_command_failure(name, f, shell));
     let audit = synth_external_stage_audit(shell, name, err.as_ref());
     let settled = match err {
@@ -79,6 +80,7 @@ pub(super) enum StageEnd {
         jail: Option<crate::process::jail::JailCgroup>,
         pumps: command::Pumps,
         sent: Option<CancelCause>,
+        enveloped: bool,
     },
 }
 
@@ -96,13 +98,42 @@ impl StageEnd {
                 jail,
                 pumps,
                 sent,
+                enveloped,
             } => {
                 if let Some(jail) = &jail {
                     jail.finish();
                 }
                 pumps.settle(sent == Some(CancelCause::ReaderGone));
-                finish_external_settlement(&name, outcome, sent, shell, started)
+                finish_external_settlement(&name, outcome, sent, enveloped, shell, started)
             }
+        }
+    }
+}
+
+/// One thing a teardown signals or kills: a whole process group, or a lone
+/// external by pid.
+enum Address<'a> {
+    Group(Pgid),
+    Pid(&'a Watch),
+}
+
+impl Address<'_> {
+    /// `SIGCONT` after: a stopped member cannot act on the first until it runs.
+    #[cfg(unix)]
+    fn signal(&self, signal: crate::process::Signal) {
+        match self {
+            Self::Group(pgid) => {
+                pgid.signal_group(signal);
+                pgid.signal_group(crate::process::Signal::new(libc::SIGCONT));
+            }
+            Self::Pid(watch) => watch.signal(signal),
+        }
+    }
+
+    fn kill(&self) {
+        match self {
+            Self::Group(pgid) => pgid.kill(),
+            Self::Pid(watch) => watch.kill(),
         }
     }
 }
@@ -372,42 +403,43 @@ impl CollectState {
         }
     }
 
-    /// A thread stage has none — its cancel and wake are all teardown owes it.
-    fn live_externals(&self) -> impl Iterator<Item = &Watch> {
-        self.stages.iter().flatten().filter_map(StageHandle::watch)
+    /// Everything a teardown addresses: the pipeline's group when this
+    /// collector owns it, else each external by pid — a thread stage has
+    /// neither, its cancel and wake being all teardown owes it — and every
+    /// envelope, whose payload leads a session of its own (§3.2) that no
+    /// signal to the pipeline's group reaches.  `pipeline: false` leaves the
+    /// pipeline's own out, the kernel having already delivered to it.
+    fn addresses(&self, pipeline: bool) -> impl Iterator<Item = Address<'_>> {
+        let group = self.owned_group.filter(|_| pipeline).map(Address::Group);
+        let pids = (pipeline && self.owned_group.is_none()).then(|| {
+            self.stages
+                .iter()
+                .flatten()
+                .filter_map(StageHandle::watch)
+                .map(Address::Pid)
+        });
+        let envelopes = self
+            .stages
+            .iter()
+            .flatten()
+            .filter_map(StageHandle::envelope)
+            .map(Address::Group);
+        group
+            .into_iter()
+            .chain(pids.into_iter().flatten())
+            .chain(envelopes)
     }
 
-    /// `SIGCONT` after the grace signal: a stopped member cannot act on the
-    /// first until it runs.
-    #[cfg(unix)]
-    fn signal_live(&self, signal: crate::process::Signal) {
-        match self.owned_group {
-            Some(pgid) => {
-                pgid.signal_group(signal);
-                pgid.signal_group(crate::process::Signal::new(libc::SIGCONT));
-            }
-            None => {
-                for watch in self.live_externals() {
-                    watch.signal(signal);
-                }
-            }
-        }
-    }
-
-    /// A joining collector has no pgid of its own, so its externals die by pid.
     fn kill_live(&self) {
-        match self.owned_group {
-            Some(pgid) => pgid.kill(),
-            None => {
-                for watch in self.live_externals() {
-                    watch.kill();
-                }
-            }
+        for address in self.addresses(true) {
+            address.kill();
         }
     }
 
     /// Cancel, grace-signal unless `delivered`, kill, drain.  Idempotent, a
-    /// second cancel being free to race the first.
+    /// second cancel being free to race the first.  `delivered` speaks for
+    /// the pipeline's group alone: the kernel's signal to the foreground
+    /// group never reached an envelope's session.
     ///
     /// The kill precedes every pump join: a descendant that outlives its stage
     /// holds the pump's pipe, and no join on that pump returns while it does —
@@ -420,8 +452,8 @@ impl CollectState {
         }
         #[cfg(unix)]
         if let Some(signal) = crate::process::grace_signal(cause) {
-            if !delivered {
-                self.signal_live(signal);
+            for address in self.addresses(!delivered) {
+                address.signal(signal);
             }
             self.drain(Some(Instant::now() + crate::process::TEARDOWN_GRACE));
         }

@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 99226d37
 verified_at_date: 2026-09-05
-anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Witnessed, Event::Wrote, SettleOnDrop, Effect, Effect::ArmEdge, Effect::KillStage, Effect::CancelAll, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, signal_live, kill_live, stronger, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, owned_pgid, AnchorProcess, ChildHandle, into_watch, watch_cancel, Watch, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
+anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Witnessed, Event::Wrote, SettleOnDrop, Effect, Effect::ArmEdge, Effect::KillStage, Effect::CancelAll, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::addresses, Address, kill_live, stronger, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, owned_pgid, AnchorProcess, ChildHandle, into_watch, watch_cancel, Watch, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -385,20 +385,26 @@ thread's scope is cancelled and the thread woken, while an external is left
 untouched here, since a process hears a cancellation only as a signal;
 (2) that signal is `grace_signal(cause)` — `Interrupt` → `SIGINT`,
 `Explicit`/`Deadline`/`Terminate` → `SIGTERM`, `ReaderGone`/`RootAbort` →
-none at all, straight to the kill — sent **once per process** by `signal_live`:
-to the whole pgid (then `SIGCONT`, since a stopped member cannot act on the
-first until it runs) where `owned_group` is `Some`, or per pid via
-`Watch::signal` for a joining collector, which has no pgid of its own.
-`delivered` skips this step outright: a
-`Witnessed` cause is one the kernel already gave every member, and a second
-copy would be a second interrupt; (3) a bounded grace of at most
+none at all, straight to the kill — sent **once per process** to every
+`Address` the collector enumerates (`CollectState::addresses`): the whole
+pgid (then `SIGCONT`, since a stopped member cannot act on the first until it
+runs) where `owned_group` is `Some`, or per pid via `Watch::signal` for a
+joining collector, which has no pgid of its own — and, beside either, each
+confined stage's *envelope*, the payload group bwrap's `--new-session` put in
+a session of its own, which `Launch::spawn` learned from the `--info-fd` and
+`ExternalStage::envelope` kept. `delivered` leaves out the pipeline's own
+addresses, never the envelopes: a `Witnessed` cause is one the kernel already
+gave every member of the foreground group, and a second copy would be a
+second interrupt — but an envelope's session was never in that group; (3) a
+bounded grace of at most
 `TEARDOWN_GRACE` (500 ms, shared with the standalone command's own
 `terminate`) as a single blocking `recv_timeout` on the deadline, not a probe
 loop, filing only a stage's own terminal event (`Ended`/`Returned`) it drains
 — every other kind is moot once the whole group is already dying, and is
-discarded; (4) the kill — `kill_live`, the same fork read once more: `SIGKILL
+discarded; (4) the kill — `kill_live`, the same addresses once more: `SIGKILL
 -pgid` for an owned group, else a pid-wise `Watch::kill` over every stage still
-`Some`, a joining collector having no pgid to `SIGKILL` either; (5) a
+`Some`, a joining collector having no pgid to `SIGKILL` either, and every
+envelope by its own pgid; (5) a
 further blocking drain, unbounded, for whatever the grace did not already
 account for — a cancelled and killed member having nowhere left to block;
 (6) the anchor last, in `Drop`, after every stage handle has gone: its report

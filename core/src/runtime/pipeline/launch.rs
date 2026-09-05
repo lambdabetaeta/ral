@@ -196,17 +196,21 @@ fn launch_external_stage_direct(
     let plumbing = wire_stage_stdio(&mut cmd, stdin, stdout, cx.group, cx.shell)?;
 
     let confinement = cmd.confinement();
-    let (mut child, _leader, jail) = cmd
+    let (mut child, leader, jail) = cmd
         .spawn(PgidPolicy::Join(cx.group.leader_pgid()))
         .map_err(|e| command::spawn_error(confinement, &rc.shown, &e))?;
     if cx.shell.has_active_capabilities() {
         crate::sandbox::apply_child_limits_in_pipeline(&child, cx.group.leader_pgid());
     }
     let pumps = command::Pumps::spawn(plumbing, &mut child);
+    // Behind an envelope the payload leads a session of its own (§3.2), out
+    // of the pipeline group's reach, so its address is kept.
+    let envelope = confinement.and(leader);
     Ok(ExternalStage {
         watch: slot.watch(child),
         name: rc.shown,
         jail,
         pumps,
+        envelope,
     })
 }

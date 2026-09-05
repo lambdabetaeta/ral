@@ -45,6 +45,17 @@ lint $RUSTFLAGS=deny:
 check-windows $RUSTFLAGS=deny $CC_x86_64_pc_windows_msvc='cc-absent-use-blake3-pure-fallback':
     cargo check --workspace --exclude exarch --exclude synod --exclude guest-net --all-targets --target x86_64-pc-windows-msvc
 
+# Cross-check the Linux sandbox, which a macOS `lint` never compiles.
+#
+# Both arches because the seccomp filter is arch-conditional, and its x32 guard
+# is x86-64 only: one arch proves half of it. Both are rust-toolchain.toml's,
+# so no host needs a target it was not already going to install. Scoped to
+# ral-core: ral-ripgrep-core's tikv-jemallocator compiles jemalloc's C, which
+# needs a musl cross toolchain ("C compiler cannot create executables").
+check-linux $RUSTFLAGS=deny:
+    cargo check -p ral-core --all-targets --target aarch64-unknown-linux-musl
+    cargo check -p ral-core --all-targets --target x86_64-unknown-linux-musl
+
 # plugins/*.ral are left out: the `_ed-*` builtins they call live only on the
 # interactive shell's table, so a batch --check cannot type them — the REPL
 # checks each plugin as rc loads it. One shell for all hundred files: under

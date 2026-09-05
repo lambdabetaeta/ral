@@ -104,6 +104,19 @@ structurally: close is what turns stage inheritance back off.
 | desk acts | none — an *author* | — | contributes the host-side `ActFragment` |
 | sandbox / pipeline helpers | none — *authors* | inherited | contribute `AuditFragment`s (unchanged) |
 
+> **Amended 2026-09-05.** `try` has left the table. The dispatch that fails
+> stamps its own name on the `Error` (`Error.command`, innermost wins), so
+> `try` names the failure from the error and opens nothing — its `Frame::Try`
+> carries no scope, and `attempt`/`succeeds`/`retry` cost only their frame.
+> A name recovered by scanning observations was a guess about the cause; the
+> raising dispatch knows. `audit { }` is now the machine's `Audit` arm
+> (`Frame::Audit`, `core/src/evaluator/machine.rs`) and answers with
+> `report_value` (`core/src/types/audit.rs`): `[outcome: `` `ok v | `err E ``,
+> trail: [Observation]]`, `E` being the record `try` hands its handler — one
+> failure vocabulary across `try`, `poll`, and `audit`; `tree_value` is gone.
+> `ral --audit`'s root is that same report. Three clients delimit — `audit
+> { }`, the session, the run door — and the five laws are untouched.
+
 The session opener is the one client whose extent has no close: it stays open
 for the process's life and is drained per batch. The dispatch is the one
 client that cannot express its extent as a closure: `Shell::enter` holds its

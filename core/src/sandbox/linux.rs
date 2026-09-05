@@ -37,8 +37,8 @@ pub(super) const BWRAP: &str = "bwrap";
 /// `None` and let the re-exec'd ral thread cwd into its own children.
 ///
 /// `ownership` decides two ties between the session and the envelope:
-/// death (`--die-with-parent`) and address (`--info-fd`, the receipt read
-/// alongside this `Command`).  A surrendered (detached) launch carries
+/// death (`--die-with-parent`) and address (`--info-fd`, returned alongside
+/// this `Command`).  A surrendered (detached) launch carries
 /// neither: the survivor must not be killed by our death, and there is no
 /// session left here to address once we stop watching it.  Confinement
 /// itself — the mounts, the seccomp filter — is otherwise identical.
@@ -46,10 +46,8 @@ pub(super) const BWRAP: &str = "bwrap";
 /// The render is pure in `host`, so a test can assert an argv for a host it
 /// is not running on.
 ///
-/// The second element of the return is `Kept`'s receipt: our own read end of
-/// the `--info-fd` pipe, paired with the write end whose sole owning copy
-/// the caller must drop right after spawning — see
-/// [`crate::process::launch::Receipt`].
+/// The second element of the return is `Kept`'s `--info-fd` pipe, whose
+/// write end the caller must keep until it has spawned — see [`InfoFd`].
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
@@ -61,7 +59,7 @@ pub(crate) fn make_command_with_policy(
     chdir: Option<&str>,
     ownership: super::launch::Ownership,
     host: HostEnvelope,
-) -> Result<(Command, Option<(os_pipe::PipeReader, os_pipe::PipeWriter)>), String> {
+) -> Result<(Command, Option<InfoFd>), String> {
     let rendered = policy.rendered()?;
     let mut c = Command::new(BWRAP);
     // Empty when fs is `Unrestricted`: there the envelope binds `/` wholesale
@@ -87,9 +85,9 @@ pub(crate) fn make_command_with_policy(
     rw_binds.retain(|bind| crate::path::exists(bind.as_str()));
 
     c.arg("--new-session");
-    let receipt = if ownership == super::launch::Ownership::Kept {
+    let info_fd = if ownership == super::launch::Ownership::Kept {
         c.arg("--die-with-parent");
-        Some(open_receipt(&mut c)?)
+        Some(open_info_fd(&mut c)?)
     } else {
         None
     };
@@ -138,7 +136,7 @@ pub(crate) fn make_command_with_policy(
     c.arg("--");
     c.arg(name);
     c.args(args);
-    Ok((c, receipt))
+    Ok((c, info_fd))
 }
 
 /// The envelope's `/dev`: bwrap's `--dev`, or its shape by hand where the
@@ -177,21 +175,43 @@ fn render_dev(c: &mut Command, host: HostEnvelope) {
     c.args(["--tmpfs", "/dev/shm"]);
 }
 
-/// Fixed fd bwrap's `--info-fd` receipt travels on, chosen next to the
+/// Fixed fd bwrap's `--info-fd` document travels on, chosen next to the
 /// seccomp filter's 100.
 const INFO_FD: libc::c_int = 101;
+
+/// Both ends of a `Kept` launch's `--info-fd` pipe.  Our copy of the write
+/// end must outlive the fork that gives bwrap its own, then go: a read
+/// reaches EOF only once every write end is closed.
+pub(super) struct InfoFd {
+    reader: os_pipe::PipeReader,
+    writer: os_pipe::PipeWriter,
+}
+
+impl InfoFd {
+    /// The payload's process group — its pid, `--new-session` having made it
+    /// a leader — from bwrap's `child-pid`.  `None` if bwrap died before
+    /// writing it; never a block, since EOF follows bwrap's own close.
+    pub(super) fn payload_pgid(self) -> Option<crate::process::Pgid> {
+        #[derive(serde::Deserialize)]
+        struct Info {
+            #[serde(rename = "child-pid")]
+            child_pid: i32,
+        }
+        let Self { reader, writer } = self;
+        drop(writer);
+        let info: Info = serde_json::from_reader(reader).ok()?;
+        crate::process::Pgid::from_raw(info.child_pid)
+    }
+}
 
 /// Open the `--info-fd` pipe for a `Kept` launch and register the write
 /// end at [`INFO_FD`], `CLOEXEC` cleared so it survives into `bwrap` —
 /// the `apply_seccomp` pattern.  `--info-fd` itself is appended here so a
 /// caller cannot pass one without the other.
 ///
-/// The write end returned alongside the read end must outlive this call: the
-/// `pre_exec` closure only captures its raw fd, and `dup2` needs the
-/// original still open in the *parent* at fork time to inherit.  Only once
-/// the caller has actually spawned `c` may that copy be dropped — see
-/// [`crate::process::launch::Receipt`].
-fn open_receipt(c: &mut Command) -> Result<(os_pipe::PipeReader, os_pipe::PipeWriter), String> {
+/// The `pre_exec` closure captures only the raw fd, so the returned write
+/// end must still be open in the parent at fork time for `dup2` to find it.
+fn open_info_fd(c: &mut Command) -> Result<InfoFd, String> {
     let (reader, writer) = crate::process::cloexec_pipe().map_err(|e| e.to_string())?;
     let write_fd = std::os::fd::AsRawFd::as_raw_fd(&writer);
     unsafe {
@@ -210,7 +230,7 @@ fn open_receipt(c: &mut Command) -> Result<(os_pipe::PipeReader, os_pipe::PipeWr
         });
     }
     c.args(["--info-fd", &INFO_FD.to_string()]);
-    Ok((reader, writer))
+    Ok(InfoFd { reader, writer })
 }
 
 /// The mount that masks one denied path, bwrap having no negative path rule.
@@ -413,7 +433,7 @@ pub(super) fn respawn_under_bwrap(
     policy: &SandboxProjection,
 ) -> Result<u8, String> {
     // We wait on this one, so its envelope must not outlive an abrupt death.
-    let (mut cmd, receipt) = make_command_with_policy(
+    let (mut cmd, info_fd) = make_command_with_policy(
         exe.to_string_lossy().as_ref(),
         args,
         policy,
@@ -431,9 +451,8 @@ pub(super) fn respawn_under_bwrap(
             format!("ral: failed to enter sandbox: {e}")
         }
     })?;
-    // This blocking wait never reads the receipt, so drop it — the write end
-    // included — right away rather than leaking it for the wait's duration.
-    drop(receipt);
+    // Never read here; dropped rather than held open for the wait's duration.
+    drop(info_fd);
     // A bootstrap helper no user code can name, hence never SIGSTOP, so
     // routing this wait through the reaper — whose only extra service is
     // answering a stop with SIGCONT — would buy nothing.
@@ -650,7 +669,7 @@ mod tests {
         policy: &SandboxProjection,
         script: &str,
     ) -> Option<std::process::Output> {
-        let (mut cmd, receipt) = make_command_with_policy(
+        let (mut cmd, info_fd) = make_command_with_policy(
             "/bin/sh",
             &["-c".to_string(), script.to_string()],
             policy,
@@ -661,10 +680,8 @@ mod tests {
         .expect("ASCII paths render");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let out = cmd.output().ok();
-        // `output()` already forked by here, so our own copy of the write end
-        // is safe to drop now — kept open until then, or bwrap's `dup2` in
-        // `pre_exec` would inherit nothing.
-        drop(receipt);
+        // Kept open across the fork inside `output()` for `pre_exec`'s `dup2`.
+        drop(info_fd);
         out
     }
 
@@ -953,7 +970,7 @@ mod tests {
         );
         assert!(
             kept.windows(2).any(|w| w == ["--info-fd", "101"]),
-            "a kept launch must carry a receipt naming its own session: {kept:?}"
+            "a kept launch must carry an `--info-fd` naming its payload's session: {kept:?}"
         );
         assert!(
             !surrendered.contains(&"--die-with-parent".to_string()),
@@ -975,8 +992,8 @@ mod tests {
 
     /// T3 (design doc §6): the grace signal must reach the confined payload's
     /// own session, not bwrap's mortal monitor.  Spawns through the same
-    /// `Launch` + `RunningChild` path a real command takes, so the receipt
-    /// override in `Launch::spawn` is exercised end to end, then cancels with
+    /// `Launch` + `RunningChild` path a real command takes, so the `--info-fd`
+    /// leader in `Launch::spawn` is exercised end to end, then cancels with
     /// `Explicit` and checks the trap ran well inside `TEARDOWN_GRACE`.
     ///
     /// The trap's own `exit 0` (the plan's own script, §6) means `sh` catches

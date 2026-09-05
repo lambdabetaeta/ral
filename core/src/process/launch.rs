@@ -19,7 +19,20 @@ pub(crate) use windows::RawChild;
 pub struct Launch {
     cmd: std::process::Command,
     jail: Option<crate::process::jail::JailCgroup>,
-    confined_by: Option<&'static str>,
+    envelope: Option<Envelope>,
+}
+
+/// A confinement envelope: a separate binary that execs the target in turn.
+/// Only such a backend declares one — a failure to start the launch is then
+/// the envelope's, not the target's, and the two are otherwise
+/// indistinguishable at the spawn.  Windows has none: its confinement is
+/// creation-time state on the target itself.
+#[cfg(not(windows))]
+pub(crate) struct Envelope {
+    pub(crate) program: &'static str,
+    /// Asked once, after the fork, for the payload's own process group;
+    /// `None` when the envelope cannot say, leaving its own.
+    pub(crate) payload_pgid: Option<Box<dyn FnOnce() -> Option<crate::process::Pgid> + Send>>,
 }
 
 #[cfg(windows)]
@@ -34,7 +47,6 @@ pub struct Launch {
     creation_flags: u32,
     admitted_handles: Vec<std::os::windows::io::RawHandle>,
     security_capabilities: Option<SecurityCapabilitiesAttr>,
-    confined_by: Option<&'static str>,
 }
 
 /// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` payload, borrowing raw SID
@@ -160,15 +172,10 @@ impl StdioSpec {
 }
 
 impl Launch {
-    /// Declare that this launch execs `program` — a confinement envelope —
-    /// and that the envelope execs the target in turn.  Only a backend whose
-    /// envelope is a *separate* binary marks itself: a failure to start such a
-    /// launch is the envelope's failure, not the target's, and the two are
-    /// otherwise indistinguishable at the spawn.  Today that is bubblewrap
-    /// alone, so only the Linux backend has anything to declare.
+    /// Today bubblewrap alone, so only the Linux backend has one to declare.
     #[cfg(target_os = "linux")]
-    pub(crate) fn confined_by(&mut self, program: &'static str) -> &mut Self {
-        self.confined_by = Some(program);
+    pub(crate) fn envelope(&mut self, envelope: Envelope) -> &mut Self {
+        self.envelope = Some(envelope);
         self
     }
 
@@ -176,7 +183,14 @@ impl Launch {
     /// `None` means the launch execs the target itself, so a spawn failure is
     /// the target's to answer for.
     pub(crate) fn confinement(&self) -> Option<&'static str> {
-        self.confined_by
+        #[cfg(windows)]
+        {
+            None
+        }
+        #[cfg(not(windows))]
+        {
+            self.envelope.as_ref().map(|e| e.program)
+        }
     }
 }
 
@@ -191,7 +205,7 @@ impl Launch {
         Self {
             cmd,
             jail: None,
-            confined_by: None,
+            envelope: None,
         }
     }
 
@@ -202,7 +216,7 @@ impl Launch {
         Self {
             cmd,
             jail: None,
-            confined_by: None,
+            envelope: None,
         }
     }
 
@@ -307,6 +321,10 @@ impl Launch {
     /// process-group placement: child, leader pgid, and whatever jail cgroup
     /// `apply_guest_jail` staged.
     ///
+    /// An enveloped launch is placed `NewLeader` whatever was asked: the
+    /// envelope process is nobody's to address, so the group returned is
+    /// the payload's own where the envelope can name it.
+    ///
     /// # Errors
     /// The `fork`/`exec` itself, or the pre-exec `setpgid`/`setsid` that
     /// `process::signal::spawn_with_pgid` installs.
@@ -318,10 +336,20 @@ impl Launch {
         Option<crate::process::Pgid>,
         Option<crate::process::jail::JailCgroup>,
     )> {
-        let (child, pgid) = crate::process::spawn_with_pgid(&mut self.cmd, pgid)?;
+        let pgid = if self.envelope.is_some() {
+            crate::process::PgidPolicy::NewLeader
+        } else {
+            pgid
+        };
+        let (child, leader) = crate::process::spawn_with_pgid(&mut self.cmd, pgid)?;
+        let payload = self
+            .envelope
+            .as_mut()
+            .and_then(|e| e.payload_pgid.take())
+            .and_then(|ask| ask());
         Ok((
             crate::process::ChildHandle::from_std(child),
-            pgid,
+            payload.or(leader),
             self.jail.take(),
         ))
     }
@@ -359,7 +387,6 @@ impl Launch {
             creation_flags: 0,
             admitted_handles: Vec::new(),
             security_capabilities: None,
-            confined_by: None,
         }
     }
 

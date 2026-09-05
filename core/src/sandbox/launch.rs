@@ -22,8 +22,8 @@ pub(crate) enum LaunchTarget<'a> {
 
 /// Whether the session keeps owning what it launches.  Read only by the Linux
 /// backend, which decides two ties between the session and the envelope:
-/// death (bwrap's `--die-with-parent`) and address (`--info-fd`, the receipt
-/// naming the envelope's own session — see `linux::open_receipt`).
+/// death (bwrap's `--die-with-parent`) and address (`--info-fd`, naming the
+/// payload's own session — see `linux::open_info_fd`).
 /// `Surrendered` — the `detach` verb, whose child is meant to survive us —
 /// drops both: the survivor must not be killed by our death, and there is no
 /// session left here to address once we stop watching it.  No hole: the
@@ -66,13 +66,13 @@ pub(crate) fn sandboxed_command(
     let _ = cancel;
     #[cfg(target_os = "linux")]
     {
-        let (cmd, receipt) = linux_sandboxed_command(projection, target, args, ownership, shell)?;
+        let (cmd, info_fd) = linux_sandboxed_command(projection, target, args, ownership, shell)?;
         let mut launch = crate::process::Launch::from_command(cmd);
         // A host package rather than part of ral, so it may simply be absent.
-        launch.confined_by(super::linux::BWRAP);
-        if let Some((reader, writer)) = receipt {
-            launch.receipt(crate::process::launch::Receipt::new(reader, writer));
-        }
+        launch.envelope(crate::process::launch::Envelope {
+            program: super::linux::BWRAP,
+            payload_pgid: info_fd.map(|fd| Box::new(move || fd.payload_pgid()) as _),
+        });
         Ok(launch)
     }
     #[cfg(target_os = "macos")]
@@ -151,7 +151,7 @@ fn linux_sandboxed_command(
     args: &[String],
     ownership: Ownership,
     shell: &Shell,
-) -> Settled<(Command, Option<(os_pipe::PipeReader, os_pipe::PipeWriter)>)> {
+) -> Settled<(Command, Option<super::linux::InfoFd>)> {
     let cwd = shell.cwd().to_string_lossy().into_owned();
     match target {
         LaunchTarget::Host { program } => super::linux::make_command_with_policy(
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn linux_host_command_is_bwrap_with_chdir_and_target_tail() {
         let shell = Shell::default();
-        let (cmd, _receipt) = linux_sandboxed_command(
+        let (cmd, _info_fd) = linux_sandboxed_command(
             &restrictive(),
             LaunchTarget::Host { program: "/bin/sh" },
             &["-c".into(), "echo x > /etc/ral_denied".into()],

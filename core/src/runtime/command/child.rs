@@ -367,7 +367,7 @@ mod tests {
         });
 
         let waited = running.wait();
-        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, waited.sent)
+        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, waited.sent, false)
             .expect("a torn-down child is a failure");
         waited.settle();
         canceller.join().expect("canceller thread");

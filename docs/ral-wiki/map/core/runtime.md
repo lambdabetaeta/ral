@@ -198,8 +198,10 @@ recursion is irreducible; the evaluator reaches it at
     `leader_pgid`, `claim_foreground`, `Drop`: signalling and killing belong to
     the collector, which is what holds the live stages.
     `CollectState::cancel_all(cause, delivered)` spells cancel, one
-    grace signal (`signal_live`), a bounded blocking `recv_timeout` grace, the
-    kill (`kill_live`), a further
+    grace signal per `Address` the collector enumerates — the pipeline's
+    group or pids, unless `delivered`, and every confined stage's envelope
+    group regardless — a bounded blocking `recv_timeout` grace, the
+    kill (`kill_live`, the same addresses), a further
     blocking drain, while `CollectState::drop` kills whenever it is dropped
     with a stage still unobserved); `thread.rs` (`launch_thread_stage` wires a `Thread`
     stage's `Io` from its `StageRoute`, and its closure — given its

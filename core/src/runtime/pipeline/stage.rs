@@ -6,7 +6,7 @@ use super::collect::{Slot, StageEnd, StageObservation};
 use super::route::HeldEdge;
 use super::sentinel;
 use super::thread::ThreadStage;
-use crate::process::{CancelCause, WaitOutcome, Watch};
+use crate::process::{CancelCause, Pgid, WaitOutcome, Watch};
 use std::sync::Arc;
 
 pub(super) struct StageHandle {
@@ -25,6 +25,9 @@ pub(super) struct ExternalStage {
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.
     pub(super) jail: Option<crate::process::jail::JailCgroup>,
     pub(super) pumps: command::Pumps,
+    /// The payload's own process group behind a confining envelope; `None`
+    /// for an unconfined stage, which joined the pipeline's.
+    pub(super) envelope: Option<Pgid>,
 }
 
 pub(super) enum StageKind {
@@ -67,6 +70,14 @@ impl StageHandle {
         }
     }
 
+    /// `Some` only for an external stage confined behind an envelope.
+    pub(super) fn envelope(&self) -> Option<Pgid> {
+        match &self.kind {
+            StageKind::External(e) => e.envelope,
+            StageKind::Thread(_) => None,
+        }
+    }
+
     /// Mark the outbound edge dead and set the sentinel on its read end.
     /// Marked before the sentinel snapshots what is pending, so a write
     /// completing between the two is caught by the sink's own post-check.
@@ -94,6 +105,7 @@ impl StageHandle {
             jail: e.jail,
             pumps: e.pumps,
             sent,
+            enveloped: e.envelope.is_some(),
         }
     }
 
@@ -118,6 +130,7 @@ impl StageHandle {
                 name: "test".to_string(),
                 jail: None,
                 pumps: command::Pumps::default(),
+                envelope: None,
             }),
             None,
             slot,
@@ -149,6 +162,7 @@ impl StageHandle {
                 name: "fake".to_string(),
                 jail: None,
                 pumps: command::Pumps::default(),
+                envelope: None,
             }),
             None,
             slot,
