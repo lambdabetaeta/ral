@@ -77,7 +77,6 @@ fn witness_a() -> Capabilities {
         }),
         net: Some(true),
         detach: Some(true),
-        audit: false,
         editor: Some(EditorPolicy {
             read: true,
             write: true,
@@ -107,7 +106,6 @@ fn witness_b() -> Capabilities {
         }),
         net: Some(false),
         detach: Some(false),
-        audit: false,
         editor: Some(EditorPolicy {
             read: true,
             write: false,
@@ -131,7 +129,6 @@ fn witness_c() -> Capabilities {
         }),
         net: None,
         detach: None,
-        audit: false,
         editor: None,
         shell: None,
     }
@@ -1092,13 +1089,6 @@ fn decode_rejects_non_bool_shell_field() {
 }
 
 #[test]
-fn decode_rejects_non_bool_audit_field() {
-    let v = map(vec![("audit", Value::String("true".into()))]);
-    let err = break_msg(decode_capability_map(&v, "test", &test_ctx("/h")).unwrap_err());
-    assert!(err.contains("Bool"), "should name the expected type: {err}");
-}
-
-#[test]
 fn decode_accepts_bool_dimension_fields() {
     let v = map(vec![
         (
@@ -1111,7 +1101,6 @@ fn decode_accepts_bool_dimension_fields() {
         ),
         ("shell", map(vec![("chdir", Value::Bool(true))])),
         ("net", Value::Bool(false)),
-        ("audit", Value::Bool(true)),
     ]);
     let caps = decode_capability_map(&v, "test", &test_ctx("/h"))
         .expect("genuine Bools decode to policy fields");
@@ -1125,7 +1114,6 @@ fn decode_accepts_bool_dimension_fields() {
     );
     assert_eq!(caps.shell, Some(ShellPolicy { chdir: true }));
     assert_eq!(caps.net, Some(false));
-    assert!(caps.audit);
 }
 
 fn test_ctx(home: &str) -> crate::path::sigil::FreezeCtx<'_> {

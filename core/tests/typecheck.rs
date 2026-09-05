@@ -542,16 +542,35 @@ fn audit_consumes_piped_bytes() {
 
 #[test]
 fn audit_record_value_field_is_body_raw_value_not_invented() {
-    // The record's `value` field is `infer_audit`'s `alpha` — the body's
-    // own raw value type, unified with nothing else — so it tracks
-    // whatever the body actually returns rather than a synthesized String.
-    ok("let r = audit { return 42 }; return $[$r[value] + 1]");
-    // `echo`'s raw return is `Unit`, not `String`: if the record's value
-    // field invented a decoded String observation, this would typecheck.
+    // The `` `ok`` payload is `infer_audit`'s `alpha` — the body's own raw
+    // value type, unified with nothing else — so it tracks whatever the body
+    // actually returns rather than a synthesized String.
+    ok("let r = audit { return 42 }
+        case $r[outcome] [`ok: { |v| return $[$v + 1] }, `err: { |_| return 0 }]");
+    // `echo`'s raw return is `Unit`, not `String`: if the outcome's payload
+    // invented a decoded String observation, this would typecheck.
     has_error(
-        "let r = audit { echo hi }; return $[$r[value] + 1]",
+        "let r = audit { echo hi }
+         case $r[outcome] [`ok: { |v| return $[$v + 1] }, `err: { |_| return 0 }]",
         "couldn't match",
     );
+}
+
+#[test]
+fn a_reports_trail_reads_as_commands() {
+    // `commands` skips every non-command fact, so its elements are exactly
+    // the `` `command`` payloads: a status to compare and an argv to index.
+    ok("let r = audit { echo hi }
+        each { |c| if $[$c[status] == 0] { echo $c[argv][0] } } !{commands $r}");
+    // The same element carries its captured bytes beside its argv.
+    ok("let r = audit { echo hi }
+        each { |c| echo !{bytes-to-string $c[stdout]} $c[argv][0] } !{commands $r}");
+}
+
+#[test]
+fn succeeded_reads_a_reports_outcome_as_a_bool() {
+    ok("let r = audit { echo hi }
+        if !{succeeded $r} { return () } else { return () }");
 }
 
 /// Pins: `v` observes the record `audit` returns — its payload — not the
@@ -580,7 +599,7 @@ fn pipeline_ending_in_audit_binds_the_audit_record() {
         cur = rest;
     }
     labels.sort();
-    assert_eq!(labels, ["children", "error", "status", "value"]);
+    assert_eq!(labels, ["outcome", "trail"]);
 }
 
 #[test]

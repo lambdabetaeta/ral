@@ -9,9 +9,10 @@ unrepresentable: there is nowhere for one to exist.
 
 The type (`core/src/types/capability.rs`):
 
-- *`Capabilities`* — per-effect policies (`exec`, `fs`, `net`, `editor`, `shell`)
-  plus an `audit` flag. Path lists hold concrete absolute paths. The lattice
-  `meet` / `join` compose two of them into a third.
+- *`Capabilities`* — per-effect policies (`exec`, `fs`, `net`, `detach`,
+  `editor`, `shell`), and nothing else: every member is authority, so a bundle
+  carries no switch over what is recorded about it. Path lists hold concrete
+  absolute paths. The lattice `meet` / `join` compose two of them into a third.
 
 ## `decode` is the one-way door
 

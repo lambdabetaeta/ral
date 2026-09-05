@@ -12,6 +12,9 @@ pub struct Error {
     /// enclosing node's span.
     pub span: Option<Span>,
     pub hint: Option<String>,
+    /// The shown name of the command whose failure this is; `None` until
+    /// `evaluator::audit`'s `frame_call` stamps the innermost dispatch.
+    pub command: Option<String>,
 }
 
 /// An error's exit status: a bare code, or the process failure behind one.
@@ -31,6 +34,7 @@ impl Error {
             status: Status::Code(status),
             span: None,
             hint: None,
+            command: None,
         }
     }
 
@@ -43,6 +47,7 @@ impl Error {
             status: Status::Cancelled(cause),
             span: None,
             hint: None,
+            command: None,
         }
     }
 
@@ -72,6 +77,7 @@ impl Error {
             status: Status::Process(failure),
             span: None,
             hint,
+            command: None,
         }
     }
 
@@ -83,17 +89,6 @@ impl Error {
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
-    }
-
-    /// Message and hint as one line, for the forensic string `audit` records.
-    /// A rendered diagnostic prints the hint beneath the message; a report read
-    /// as data has one field for both, and dropping the hint there would make
-    /// the record say less than the terminal does about the same failure.
-    pub fn message_with_hint(&self) -> String {
-        match &self.hint {
-            Some(hint) => format!("{} — {hint}", self.message),
-            None => self.message.clone(),
-        }
     }
 
     /// Numeric exit code for process exit and `$status`.

@@ -45,7 +45,7 @@ fn kit_events(events: &[FOValue]) -> Vec<FOValue> {
     events
         .iter()
         .filter(
-            |ev| !matches!(ev, FOValue::Map { entries } if fo_map_get(entries, "kind").is_some()),
+            |ev| !matches!(ev, FOValue::Map { entries } if fo_map_get(entries, "what").is_some()),
         )
         .cloned()
         .collect()

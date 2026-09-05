@@ -310,7 +310,11 @@ stand in for an exit status, or an exit status to stand in for a proposition.
 - `try` turns a failure into an error record and chooses recovery;
 - `guard` runs cleanup and preserves the original failure, unless the cleanup
   halts in turn and pre-empts it;
-- `audit` turns execution, including failure, into structured data.
+- `audit` turns execution, including failure, into structured data: a report
+  pairing an `outcome` — `` `ok `` of the value, or `` `err `` of the very
+  record `try` would have handed a handler — with the `trail` of what
+  happened. One failure vocabulary serves `try`, `poll`, and `audit`, so a
+  reader learns it once.
 
 A predicate returning `false` succeeds with the value `false`. Conversely, an
 external tool whose exit status is data must be handled explicitly. This is why

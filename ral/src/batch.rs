@@ -12,26 +12,24 @@ use crate::PRELUDE;
 use crate::cli::{BatchOpts, RunOpts};
 use crate::platform::{apply_session_capabilities, exit_byte, load_exit_hints, probe_terminal};
 
-/// Serialise the run's outcome and collected tree to JSON and emit it on
-/// stderr.  `exit_code` is the process's exit status as the host resolved
-/// it, not the error's own code; an escape (`exit`) is not a failure, so it
-/// records no error.
-fn emit_audit_tree(
+/// Serialise the run's report envelope to JSON and emit it on stderr — the
+/// same envelope `audit { … }` returns, with the whole run as its body.  An
+/// escape (`exit`) is not a failure: the process still exits with its code,
+/// but the report reads `` `ok () ``.
+fn emit_audit_report(
     result: &Settled<ral_core::types::Value>,
-    exit_code: i32,
+    shell: &ral_core::types::Shell,
     fragment: ral_core::types::AuditFragment,
     pretty: bool,
 ) {
-    use ral_core::types::{Value, tree_value};
-    let (value, error) = match result {
-        Ok(v) => (v.clone(), None),
-        Err(Break::Error(e)) => (Value::Unit, Some(e.message.clone())),
-        Err(Break::Escape(_)) => (Value::Unit, None),
+    use ral_core::types::{Value, error_record_of, report_value};
+    let outcome = match result {
+        Ok(v) => Ok(v.clone()),
+        Err(Break::Error(e)) => Err(error_record_of(e, shell)),
+        Err(Break::Escape(_)) => Ok(Value::Unit),
     };
-    let json_val = ral_core::builtins::value_to_json_lossy_bytes(&tree_value(
-        exit_code,
-        value,
-        error,
+    let json_val = ral_core::builtins::value_to_json_lossy_bytes(&report_value(
+        outcome,
         &fragment.into_observations(),
     ));
     let json_str = if pretty {
@@ -45,8 +43,8 @@ fn emit_audit_tree(
 /// Execute `source` non-interactively (script or `-c` mode).
 ///
 /// Parses, elaborates, optionally typechecks, and evaluates the program. When
-/// `--audit` is active, wraps the entire execution in a traced tree and emits it
-/// as JSON on stderr.
+/// `--audit` is active, reports the whole execution as one report envelope and
+/// emits it as JSON on stderr.
 pub(crate) fn run_batch(
     name: &str,
     source: &str,
@@ -250,7 +248,7 @@ pub(crate) fn run_batch(
     };
 
     if audit {
-        emit_audit_tree(&result, exit_code, fragment, pretty);
+        emit_audit_report(&result, &shell, fragment, pretty);
     }
 
     ExitCode::from(exit_byte(exit_code))

@@ -46,7 +46,6 @@ fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) ->
             origin: CommandOrigin::External,
             io: AuditIo::default(),
             error: err.map(|e| e.message.clone()),
-            value: Value::Unit,
         },
     );
     AuditFragment::from_observations(vec![obs])

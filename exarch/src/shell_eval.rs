@@ -2155,7 +2155,6 @@ return !{{length $hits}}"
                 origin: CommandOrigin::External,
                 io: AuditIo::default(),
                 error: None,
-                value: RalValue::Unit,
             },
             "the one observation is a successful exec of the image"
         );
@@ -2236,7 +2235,6 @@ return !{{length $hits}}"
                 origin: CommandOrigin::External,
                 io: AuditIo::default(),
                 error: None,
-                value: RalValue::Unit,
             },
             "then cat execs over that stdin"
         );

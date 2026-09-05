@@ -1,0 +1,72 @@
+# Test: the audit trail (§13.3)
+
+# Basic audit: the report is `[outcome, trail]`, and `commands` picks the
+# `command` observations out of the trail
+let report = audit { echo 'step one'; echo 'step two' }
+echo !{succeeded $report}
+echo !{length !{commands $report}}
+echo !{commands $report}[0][argv][0]
+echo !{commands $report}[1][argv][1]
+
+# try is transparent: it observes nothing of its own, so the failing `fail`
+# and the handler's `echo` land directly in the audit's trail
+let report2 = audit {
+    try { fail [status: 1] } { |_| echo 'handled' }
+    echo 'continued'
+}
+echo !{succeeded $report2}
+echo !{length !{commands $report2}}
+echo !{commands $report2}[0][argv][0]
+echo !{commands $report2}[0][status]
+echo !{commands $report2}[1][argv][0]
+echo !{commands $report2}[2][argv][0]
+
+# for/map are transparent themselves — the loop observes nothing — but
+# `each` (the builtin `for` aliases to in the prelude) is a real builtin
+# call and is observed in its own right, recorded last because settlement
+# order puts a command after everything it ran
+let report3 = audit { for [a, b] { |x| echo $x } }
+echo !{succeeded $report3}
+echo !{length !{commands $report3}}
+echo !{commands $report3}[0][argv][0]
+echo !{commands $report3}[1][argv][0]
+echo !{commands $report3}[2][argv][0]
+
+# A failing body settles into `err`, carrying the same record `try` hands a
+# handler; the audit expression itself succeeds
+let failed = audit { fail [status: 3, message: 'no index'] }
+echo !{succeeded $failed}
+case $failed[outcome] [
+    `ok:  { |_| echo 'unreachable' },
+    `err: { |e| echo "$e[status] $e[message]" },
+]
+
+# Nested audit: the inner audit still returns its own report, but its real
+# commands also flatten into the outer audit's trail
+let outer = audit {
+    echo 'outer'
+    let inner = audit { echo 'inner' }
+}
+echo !{succeeded $outer}
+echo !{length !{commands $outer}}
+echo !{commands $outer}[0][argv][0]
+echo !{commands $outer}[1][argv][0]
+
+# grant is transparent — its body's command lands directly in the trail,
+# with no grant observation framing it
+let grant_report = audit { grant [exec: [echo: 'allow']] { echo 'inside' } }
+echo !{length !{commands $grant_report}}
+echo !{commands $grant_report}[0][argv][0]
+
+# within is transparent too
+let within_report = audit { within [dir: $CWD] { echo 'inside' } }
+echo !{length !{commands $within_report}}
+echo !{commands $within_report}[0][argv][0]
+
+# guard is transparent — both body and cleanup land directly in the trail
+let gr = audit { guard { echo 'body' } { echo 'cleanup' } }
+echo !{length !{commands $gr}}
+echo !{commands $gr}[0][argv][0]
+echo !{commands $gr}[1][argv][0]
+
+echo 'audit trail tests done'

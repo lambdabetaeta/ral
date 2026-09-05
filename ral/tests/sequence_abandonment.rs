@@ -3,7 +3,7 @@
 //! A sequence halts at its first failure, and the parts after it never run.
 //!
 //! That truncation is otherwise invisible: an enclosing `audit` reports a
-//! `children` list that stops short, which reads exactly like a sequence that
+//! `trail` that stops short, which reads exactly like a sequence that
 //! had fewer parts to begin with.  So the error says that later steps were
 //! abandoned — on the innermost sequence that abandoned them, only when there
 //! were any, and only when the failure has no more specific hint of its own.
@@ -71,25 +71,12 @@ fn a_more_specific_hint_survives() {
 }
 
 #[test]
-fn audit_records_the_hint_as_data() {
-    let out = run(
-        "ral_abandoned_in_audit",
-        "let result = audit { echo A; /usr/bin/false; echo B }\necho $result[error]\n",
-    );
-    assert!(
-        out.stdout.contains("later steps in this block did not run"),
-        "a report read as data must say what the rendered diagnostic says; stdout: {}",
-        out.stdout
-    );
-}
-
-#[test]
 fn attempt_runs_every_step_and_reports_on_each() {
     let out = run(
         "ral_attempt_battery",
         "let result = audit { attempt { echo A }; attempt { /usr/bin/false }; attempt { echo C } }\n\
-         echo $result[status]\n\
-         echo !{length $result[children]}\n",
+         echo !{succeeded $result}\n\
+         echo !{length $result[trail]}\n",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     let lines: Vec<&str> = out.stdout.lines().collect();
@@ -99,7 +86,7 @@ fn attempt_runs_every_step_and_reports_on_each() {
         out.stdout
     );
     assert!(
-        lines.contains(&"0") && lines.contains(&"3"),
+        lines.contains(&"true") && lines.contains(&"3"),
         "the block succeeded and observed all three steps; stdout: {}",
         out.stdout
     );

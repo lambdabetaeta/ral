@@ -5,8 +5,9 @@
 //! command completion door — a builtin dispatch never reaches the rail.
 //! These tests drive the public `Shell::run` door (exactly as
 //! `surface_effect.rs` does) with a recording sink and assert the emitted
-//! observation maps, tagged by `kind`.  Decoding these into cards is
-//! exarch's job and out of scope here — we only check the wire shape.
+//! observation records, each fact tagged by its `what` variant.  Decoding
+//! these into cards is exarch's job and out of scope here — we only check the
+//! wire shape.
 
 mod common;
 
@@ -75,23 +76,33 @@ fn run(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<Value>) {
     (result, events)
 }
 
-/// The single observation of `kind` among the captured events, asserting
-/// exactly one fired.  Core reports every dispatch it makes, so a door test
-/// names the kind it is about rather than counting the whole stream.
+/// The fact of the single observation tagged `kind` among the captured
+/// events, asserting exactly one fired.  Core reports every dispatch it makes,
+/// so a door test names the kind it is about rather than counting the whole
+/// stream.
 fn single_observation<'a>(events: &'a [Value], kind: &str) -> &'a ral_core::types::Map {
-    let observations: Vec<&Value> = events
+    let facts: Vec<&ral_core::types::Map> = events
         .iter()
-        .filter(|v| matches!(v, Value::Map(m) if m.get("kind") == Some(&s(kind))))
+        .filter_map(|v| match v {
+            Value::Map(m) => match m.get("what") {
+                Some(Value::Variant {
+                    label,
+                    payload: Some(fact),
+                }) if label == kind => match fact.as_ref() {
+                    Value::Map(fact) => Some(fact),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
         .collect();
     assert_eq!(
-        observations.len(),
+        facts.len(),
         1,
         "exactly one {kind} observation must fire, got {events:?}"
     );
-    match observations[0] {
-        Value::Map(m) => m,
-        _ => unreachable!("filtered to maps above"),
-    }
+    facts[0]
 }
 
 fn s(v: &str) -> Value {
@@ -122,7 +133,6 @@ fn stdin_redirect_emits_read_observation() {
     result.expect("stdin redirect read should succeed");
 
     let m = single_observation(&events, "read");
-    assert_eq!(m.get("kind"), Some(&s("read")));
     assert_eq!(m.get("path"), Some(&s(&path)));
     assert_eq!(m.get("outcome"), None, "read has no outcome field");
     let _ = std::fs::remove_dir_all(&dir);
@@ -142,7 +152,6 @@ fn write_redirect_emits_committed_observation() {
     result.expect("write redirect should succeed");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("path"), Some(&s(&path)));
     assert_eq!(m.get("mode"), Some(&s("write")));
     assert_eq!(m.get("outcome"), Some(&s("committed")));
@@ -161,7 +170,6 @@ fn append_redirect_emits_append_mode() {
     result.expect("append redirect should succeed");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("mode"), Some(&s("append")));
     assert_eq!(m.get("outcome"), Some(&s("committed")));
     let _ = std::fs::remove_dir_all(&dir);
@@ -178,7 +186,6 @@ fn stream_redirect_emits_stream_mode() {
     result.expect("stream redirect should succeed");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("mode"), Some(&s("stream")));
     assert_eq!(m.get("outcome"), Some(&s("committed")));
     let _ = std::fs::remove_dir_all(&dir);
@@ -203,7 +210,6 @@ fn write_with_failing_body_emits_aborted() {
     assert!(result.is_err(), "the failing body must surface its error");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("path"), Some(&s(&path)));
     assert_eq!(m.get("mode"), Some(&s("write")));
     assert_eq!(m.get("outcome"), Some(&s("aborted")));
@@ -228,7 +234,6 @@ fn write_with_failing_open_emits_failed() {
     assert!(result.is_err(), "a failed open must surface its error");
 
     let m = single_observation(&events, "write");
-    assert_eq!(m.get("kind"), Some(&s("write")));
     assert_eq!(m.get("path"), Some(&s(&path)));
     assert_eq!(m.get("mode"), Some(&s("write")));
     assert_eq!(m.get("outcome"), Some(&s("failed")));
@@ -251,7 +256,6 @@ fn external_success_emits_command_observation() {
     result.expect("/usr/bin/true should succeed");
 
     let m = single_observation(&events, "command");
-    assert_eq!(m.get("kind"), Some(&s("command")));
     assert_eq!(m.get("argv"), Some(&Value::list(vec![s("/usr/bin/true")])));
     assert_eq!(m.get("origin"), Some(&s("external")));
     assert_eq!(m.get("status"), Some(&Value::Int(0)));
@@ -267,7 +271,6 @@ fn external_failure_emits_command_observation() {
     assert!(result.is_err(), "/usr/bin/false exits nonzero");
 
     let m = single_observation(&events, "command");
-    assert_eq!(m.get("kind"), Some(&s("command")));
     assert_eq!(m.get("argv"), Some(&Value::list(vec![s("/usr/bin/false")])));
     assert_eq!(m.get("origin"), Some(&s("external")));
     assert_eq!(m.get("status"), Some(&Value::Int(1)));
@@ -283,7 +286,6 @@ fn external_argv_lists_program_then_args() {
     result.expect("/bin/echo should succeed");
 
     let m = single_observation(&events, "command");
-    assert_eq!(m.get("kind"), Some(&s("command")));
     assert_eq!(
         m.get("argv"),
         Some(&Value::list(vec![s("/bin/echo"), s("hi")]))
@@ -306,7 +308,6 @@ fn inline_bundled_emits_single_command_observation() {
     result.expect("bundled printf should succeed");
 
     let m = single_observation(&events, "command");
-    assert_eq!(m.get("kind"), Some(&s("command")));
     assert_eq!(m.get("argv"), Some(&Value::list(vec![s("printf"), s("")])));
     assert_eq!(m.get("origin"), Some(&s("external")));
     assert_eq!(m.get("status"), Some(&Value::Int(0)));

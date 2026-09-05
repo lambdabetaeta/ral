@@ -784,7 +784,10 @@ fn guard_body_bytes_flow_into_downstream_stage() {
 
 #[test]
 fn audit_receives_upstream_piped_bytes() {
-    let o = run_pipe("let result = !{ echo hi | audit { from-string } }\necho $result[value]");
+    let o = run_pipe(
+        "let result = !{ echo hi | audit { from-string } }\n\
+         case $result[outcome] [`ok: { |v| echo $v }, `err: { |_| return () }]",
+    );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "hi");
 }
@@ -799,9 +802,9 @@ fn audit_receives_upstream_piped_bytes() {
 /// other.
 #[test]
 fn pipeline_ending_in_audit_binds_the_audit_record() {
-    let o = run_pipe("let v = echo hi | audit { cat }\necho $v[status]");
+    let o = run_pipe("let v = echo hi | audit { cat }\necho !{succeeded $v}");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
-    assert_eq!(o.stdout.lines().collect::<Vec<_>>(), vec!["hi", "0"]);
+    assert_eq!(o.stdout.lines().collect::<Vec<_>>(), vec!["hi", "true"]);
 }
 
 #[test]

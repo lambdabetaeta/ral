@@ -9,21 +9,22 @@
 //! `Shell::audit_deputy_prefixes` have no [`Mooring`].
 //!
 //! `within`, `grant`, `guard`, `try`, and `audit` are all collection
-//! boundaries, not observations: none of them constructs one.  `try`/`audit`
-//! force collection on regardless of the surrounding state — `evaluator::machine`'s
-//! `Try`/`Audit` arms open a trail scope before their body runs and close it
-//! after — draining and closing the trail if the body is the one that opened
-//! it, reading a suffix and leaving it open otherwise (`Audit::open` /
-//! `Audit::close`, `core/src/types/audit.rs`). The opener owns closing on
-//! every exit, panics included.
+//! boundaries, not observations: none of them constructs one.  Only `audit`
+//! collects — `evaluator::machine`'s `Audit` arm opens a trail scope before
+//! its body runs and closes it after, draining and closing the trail if the
+//! body is the one that opened it, reading a suffix and leaving it open
+//! otherwise (`Audit::open` / `Audit::close`, `core/src/types/audit.rs`).
+//! The opener owns closing on every exit, panics included.  `try` names the
+//! failure it catches from the error itself, so it forces nothing on.
 //!
 //! With nobody listening the recorders are no-ops, so the dispatcher can call
 //! them unconditionally.
 
 use crate::types::{
-    AuditIo, Break, BuiltinEntry, CallSite, CapturePolicy, CommandOrigin, Decision, Env, Map,
-    Mooring, Observation, Observed, STDERR_CAP_BYTES, Settled, Shell, Value, epoch_us,
+    AuditIo, Break, BuiltinEntry, CallSite, CapturePolicy, CommandOrigin, Decision, Env, Mooring,
+    Observation, Observed, Settled, Shell, Value, epoch_us,
 };
+use std::collections::BTreeMap;
 
 /// Proof that a native body is running inside [`frame_call`]'s dynamic
 /// extent — mintable only in this module, so [`BuiltinEntry::call_body`]
@@ -39,9 +40,10 @@ pub(crate) struct AuditStart {
 }
 
 /// Report one observation to everyone listening: the surface sink and the
-/// open trail (`Mooring::surface` and `Audit::push` are each already a no-op
-/// when their consumer is absent).  Core does not judge what is worth
-/// hearing — the host filters the rail, and `audit { }` filters the trail.
+/// open trail (`Audit::push` is already a no-op with no trail open; the
+/// surface is asked first because projecting to a [`Value`] costs more than
+/// the question).  Core does not judge what is worth hearing — the host
+/// filters the rail, and `audit { }` filters the trail.
 ///
 /// It does judge what *happened*.  A redirect onto the [discard
 /// device](crate::path::ResolvedPath::is_discard) left the world as it found
@@ -56,12 +58,17 @@ pub(crate) fn observe_stamped(shell: &mut Shell, mooring: &Mooring, obs: Observa
     {
         return;
     }
-    mooring.surface(&obs.to_value());
+    if mooring.has_surface() {
+        mooring.surface(&obs.to_value());
+    }
     shell.local.audit.push(obs);
 }
 
 /// An instantaneous door: stamped now, at the current dispatch site.
 pub(crate) fn observe(shell: &mut Shell, mooring: &Mooring, what: Observed) {
+    if !listening(shell, mooring) {
+        return;
+    }
     let obs = Observation::instant(shell.call_site(), shell.context.principal(), what);
     observe_stamped(shell, mooring, obs);
 }
@@ -81,15 +88,11 @@ pub(crate) fn start(shell: &Shell, mooring: &Mooring) -> AuditStart {
 }
 
 /// Whether an observation would reach anyone: a trail collecting it, or a
-/// host on the other end of the sink.
-fn listening(shell: &Shell, mooring: &Mooring) -> bool {
+/// host on the other end of the sink.  Doors whose *facts* cost something to
+/// gather — the write door's before/after snapshots — ask this before
+/// gathering them.
+pub(crate) fn listening(shell: &Shell, mooring: &Mooring) -> bool {
     shell.local.audit.active() || mooring.has_surface()
-}
-
-fn cap_stderr(buf: &mut Vec<u8>) {
-    if buf.len() > STDERR_CAP_BYTES {
-        buf.truncate(STDERR_CAP_BYTES);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -102,7 +105,7 @@ fn finish_command(
     args: &[Value],
     result: &Settled<Value>,
     stdout: Vec<u8>,
-    mut stderr: Vec<u8>,
+    stderr: Vec<u8>,
 ) {
     if !listening(shell, mooring) {
         return;
@@ -113,14 +116,11 @@ fn finish_command(
     if cmd.starts_with('_') {
         return;
     }
-    let (status, value, error) = match result {
-        Ok(v) => (0, v.clone(), None),
-        Err(Break::Error(e)) => (e.exit_code(), Value::Unit, Some(e.message.clone())),
+    let (status, error) = match result {
+        Ok(_) => (0, None),
+        Err(Break::Error(e)) => (e.exit_code(), Some(e.message.clone())),
         Err(_) => return,
     };
-    if shell.local.audit.captures_bytes() {
-        cap_stderr(&mut stderr);
-    }
     let mut argv = Vec::with_capacity(args.len() + 1);
     argv.push(cmd.to_string());
     argv.extend(Value::render_argv(args));
@@ -135,7 +135,6 @@ fn finish_command(
             origin,
             io: AuditIo { stdout, stderr },
             error,
-            value,
         },
     );
     observe_stamped(shell, mooring, obs);
@@ -143,6 +142,11 @@ fn finish_command(
 
 /// Wrap a command body in the audit lifecycle: stamp the start, tee its
 /// stdout and stderr through the capture, finalize the observation.
+///
+/// It also names the failure: a body that errored without a command yet takes
+/// this dispatch's, so the innermost dispatch wins — the rule `stamp` uses for
+/// a span.  That naming is not an observation, and happens whether or not
+/// anyone is listening: `try`'s record needs it with no trail open.
 pub(crate) fn frame_call<F>(
     cmd: &str,
     args: &[Value],
@@ -155,8 +159,14 @@ where
     F: FnOnce(&mut Shell, &Frame) -> Settled<Value>,
 {
     let start = start(shell, mooring);
-    let (result, stdout, stderr) =
+    let (mut result, stdout, stderr) =
         super::with_audit_capture(shell, |shell| body(shell, &Frame(())));
+    if let Err(Break::Error(e)) = &mut result
+        && e.command.is_none()
+        && !cmd.starts_with('_')
+    {
+        e.command = Some(cmd.to_string());
+    }
     finish_command(
         shell, mooring, start, cmd, origin, args, &result, stdout, stderr,
     );
@@ -194,10 +204,16 @@ impl BuiltinEntry {
     }
 }
 
-/// Record a denied capability check.  The trail wants one only when some
-/// enclosing grants layer asked for `audit: true`, but the rail always does,
-/// so the gate sits on the push rather than on the observation.
-pub(crate) fn record_capability(shell: &mut Shell, mooring: &Mooring, resource: &str, fields: Map) {
+/// Record a denied capability check.  Both consumers want one, but each on
+/// its own terms, so neither the projection nor the push is unconditional:
+/// the rail hears a refusal whenever a host is listening, the trail whenever
+/// one is open.
+pub(crate) fn record_capability(
+    shell: &mut Shell,
+    mooring: &Mooring,
+    resource: &str,
+    fields: BTreeMap<String, String>,
+) {
     let obs = Observation::instant(
         shell.call_site(),
         shell.context.principal(),
@@ -207,17 +223,18 @@ pub(crate) fn record_capability(shell: &mut Shell, mooring: &Mooring, resource: 
             fields,
         },
     );
-    mooring.surface(&obs.to_value());
-    if shell.should_audit_capabilities() {
+    if mooring.has_surface() {
+        mooring.surface(&obs.to_value());
+    }
+    if shell.local.audit.active() {
         shell.local.audit.push(obs);
     }
 }
 
-/// Capture is monotonic: an inner `try`'s `Off` must not silence an outer
-/// `audit`'s `Bytes`, hence a merge rather than a plain swap.
-///
-/// `pub(crate)`: the run door composes the same way when a dispatch's own
-/// `Run.trail` opens onto a session already under `--audit`.
+/// Capture is monotonic: a nested request for `Off` must not silence an
+/// enclosing `audit`'s `Bytes`, hence a merge rather than a plain swap.  The
+/// run door composes the same way when a dispatch's own `Run.trail` opens
+/// onto a session already under `--audit`.
 pub(crate) fn merge_capture(saved: CapturePolicy, requested: CapturePolicy) -> CapturePolicy {
     match (saved, requested) {
         (CapturePolicy::Bytes, _) | (_, CapturePolicy::Bytes) => CapturePolicy::Bytes,

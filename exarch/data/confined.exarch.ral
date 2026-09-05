@@ -9,7 +9,6 @@
 # `--base confined --extend-base extra.ral` to widen for one tool.
 
 return [
-  audit: false,
   net:   false,                       # no network — confined.sb has the same default
 
   shell: [chdir: true],               # cd inside the tree is fine

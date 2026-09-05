@@ -222,7 +222,7 @@ fn audit_recording_survives_consecutive_audit_blocks() {
     let mut shell = fresh_shell();
     // First audit block: body runs through `with_scope` via `guard`.
     // Pre-fix this set the dispatcher flag.  We discard the returned
-    // tree — the bug it leaves behind is observable in the *next*
+    // report — the bug it leaves behind is observable in the *next*
     // block.
     let _ = top_level(&mut shell, "audit { guard { return () } { return () } }");
     // Second audit block: the first dispatched command inside the
@@ -231,14 +231,8 @@ fn audit_recording_survives_consecutive_audit_blocks() {
         Ok(v) => v,
         Err(e) => panic!("second `audit {{ echo hi }}` must succeed; got error: {e:?}"),
     };
-    let children = match &tree {
-        Value::Map(m) => match m.get("children") {
-            Some(Value::List(ch)) => ch.iter().cloned().collect::<Vec<_>>(),
-            other => panic!("audit tree must have a list `children` field; got {other:?}"),
-        },
-        other => panic!("audit {{ … }} must return a Map; got {other:?}"),
-    };
-    let has_echo = children.iter().any(|c| is_command(c, "echo"));
+    let trail = trail_of(&tree);
+    let has_echo = trail.iter().any(|o| is_command(o, "echo"));
     assert!(
         has_echo,
         "expected the second `audit {{ echo hi }}` to record echo's own \
@@ -247,7 +241,7 @@ fn audit_recording_survives_consecutive_audit_blocks() {
          second block (trail was inactive in between, so \
          `finish_command` couldn't consume it) and silently dropped \
          the first dispatched command in the next active trail.  \
-         children = {children:?}"
+         trail = {trail:?}"
     );
 }
 
@@ -407,20 +401,14 @@ fn audit_survives_a_spawn() {
              got error: {e:?}"
         ),
     };
-    let children = match &tree {
-        Value::Map(m) => match m.get("children") {
-            Some(Value::List(ch)) => ch.iter().cloned().collect::<Vec<_>>(),
-            other => panic!("audit tree must have a list `children` field; got {other:?}"),
-        },
-        other => panic!("audit {{ … }} must return a Map; got {other:?}"),
-    };
-    let echo_count = children.iter().filter(|c| is_command(c, "echo")).count();
+    let trail = trail_of(&tree);
+    let echo_count = trail.iter().filter(|o| is_command(o, "echo")).count();
     assert_eq!(
         echo_count, 2,
         "expected both foreground `echo` commands to be recorded around the \
          `spawn`; a fork that moves the audit trail out of the parent instead \
-         of cloning it loses the whole subtree, `echo one` included.  \
-         children = {children:?}"
+         of cloning it loses the whole trail, `echo one` included.  \
+         trail = {trail:?}"
     );
 }
 
@@ -493,7 +481,7 @@ fn guard_cleanup_error_pre_empts_the_body() {
 /// cleanup and return the body's value.  This pins that the fix did not
 /// over-rotate: the ordinary finalizer path is unchanged.  The body's
 /// value `7` is read from the `guard`'s own return; that the cleanup ran
-/// is read from the audit tree, where the cleanup `echo` shows up as a
+/// is read from the audit trail, where the cleanup `echo` shows up as a
 /// real command observation (`guard` is transparent — it owns no
 /// observation itself).
 #[test]
@@ -512,41 +500,54 @@ fn guard_normal_runs_cleanup_and_returns_body() {
     let tree = top_level(&mut shell, "audit { guard { return 7 } { echo cleaned } }")
         .expect("`audit { guard … }` must succeed");
     assert!(
-        audit_tree_has_command(&tree, "echo"),
+        audit_trail_has_command(&tree, "echo"),
         "the `guard` cleanup must have run on the normal path (recording \
          its `echo cleaned` observation); a normal guard returns the body \
          value but still executes its finalizer.  tree = {tree:?}"
     );
 }
 
-/// Whether `observation` is a `kind: "command"` projection whose `argv[0]`
-/// (the program) equals `name`.
+/// The observations an `audit { … }` report collected, in order.
+fn trail_of(report: &Value) -> Vec<Value> {
+    let Value::Map(m) = report else {
+        panic!("audit {{ … }} must return a record; got {report:?}")
+    };
+    match m.get("trail") {
+        Some(Value::List(trail)) => trail.iter().cloned().collect(),
+        other => panic!("an audit report must have a list `trail` field; got {other:?}"),
+    }
+}
+
+/// Whether `observation`'s fact is a `` `command`` whose `argv[0]` (the
+/// program) equals `name`.
 fn is_command(observation: &Value, name: &str) -> bool {
     let Value::Map(m) = observation else {
         return false;
     };
-    if !matches!(m.get("kind"), Some(Value::String(k)) if k == "command") {
-        return false;
-    }
-    matches!(
-        m.get("argv"),
-        Some(Value::List(argv)) if matches!(argv.get(0), Some(Value::String(s)) if s == name)
-    )
-}
-
-/// Depth-first search of an `audit` tree for a command observation whose
-/// `argv[0]` equals `name`.
-fn audit_tree_has_command(observation: &Value, name: &str) -> bool {
-    if is_command(observation, name) {
-        return true;
-    }
-    let Value::Map(m) = observation else {
+    let Some(Value::Variant {
+        label,
+        payload: Some(fact),
+    }) = m.get("what")
+    else {
         return false;
     };
-    match m.get("children") {
-        Some(Value::List(ch)) => ch.iter().any(|c| audit_tree_has_command(c, name)),
+    if label != "command" {
+        return false;
+    }
+    match fact.as_ref() {
+        Value::Map(fact) => matches!(
+            fact.get("argv"),
+            Some(Value::List(argv)) if matches!(argv.get(0), Some(Value::String(s)) if s == name)
+        ),
         _ => false,
     }
+}
+
+/// Whether an `audit` report's trail carries a command observation whose
+/// `argv[0]` equals `name`.  The trail is flat: there is no subtree to
+/// descend into.
+fn audit_trail_has_command(report: &Value, name: &str) -> bool {
+    trail_of(report).iter().any(|o| is_command(o, name))
 }
 
 // ── (7) handler self-masking survives a panic mid-body (finding E5; rec. A4) ──

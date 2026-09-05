@@ -53,6 +53,10 @@ pub use map::Map;
 mod error;
 pub use error::{Error, Status};
 
+// The projection of an `Error` into the record `try` and the report envelope
+// read; here because its two sides — the error and the record — are.
+pub use crate::evaluator::scope::error_record_of;
+
 mod flow;
 pub use flow::{Break, Escape, PolicyError, Settled};
 
@@ -67,10 +71,7 @@ pub use shell::modules::Modules;
 pub use shell::cwd::Cwd;
 
 mod audit;
-pub use audit::{
-    Audit, AuditFragment, AuditIo, CapturePolicy, STDERR_CAP_BYTES, TrailScope, epoch_us,
-    tree_value,
-};
+pub use audit::{Audit, AuditFragment, AuditIo, CapturePolicy, TrailScope, epoch_us, report_value};
 
 mod observation;
 pub use observation::{CommandOrigin, Decision, Observation, Observed, WriteOutcome};

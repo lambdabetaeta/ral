@@ -133,8 +133,8 @@ Internals:
   stage's closure) — the boundary itself always evaluates its body in
   process, OS confinement being per-child in `build_command`
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
-- `audit.rs` — execution-tree recording (`run_native`, the one audited call
-  site for every native).
+- `audit.rs` — trail recording (`run_native`, the one audited call site for
+  every native).
 - `observe.rs` — `observe`, the one reader of `ir::Register`
   ([[map/core/ir|ir]]): the five pseudo-variables (`$ENV`, `$ARGS`, `$NPROC`,
   `$CWD`, `$USER`) and a `~`-path awaiting `HOME`, as a total match rather

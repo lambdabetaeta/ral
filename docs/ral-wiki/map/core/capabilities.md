@@ -50,8 +50,9 @@ Submodules:
   exact `GIT` allow;
 - `decode.rs` — `decode_capability_map`, which walks a `grant [...]` /
   `--capabilities` `Value` map into a frozen `Capabilities`, one dimension
-  decoder per `exec` / `fs` / `net` / `detach` / `editor` / `shell` / `audit`
-  key; its
+  decoder per `exec` / `fs` / `net` / `detach` / `editor` / `shell` key —
+  every one of them authority, none of them a recording switch
+  ([[design/audit|audit]]); its
   exec-map freeze expands the two *exec-only* sigils `path:` (every `$PATH`
   component) and `system:` (the platform's tool roots,
   `sigil::system_tool_roots`), and drops bundled-tool grants for coreutils a

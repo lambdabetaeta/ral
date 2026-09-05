@@ -39,7 +39,7 @@ This is a deliberate mental-model fact, recorded so omission is never mistaken
 for an implicit cross-axis deny — see
 [[decisions/260601_reduced-authority-witness|reduced-authority-witness]] §B7.
 
-**Capability checks gate five dimensions:**
+**Capability checks gate four dimensions:**
 
 - **exec** over a three-valued lattice (Allow / Subcommands / Deny) — more
   expressive than orthodox object-capability, since a base profile can veto a
@@ -50,8 +50,14 @@ for an implicit cross-axis deny — see
   an action on a resource, and the one that reaches no OS profile: it decides
   whether a process the session stops owning may be born at all, never what
   that process may then do
-  ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]);
-- **audit** as a record of check events.
+  ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
+
+**Every dimension gates authority; none gates recording.** A grant says what
+its body may do, never what may be written down about it: whenever a trail is
+open, a *denial* is recorded as a `` `check `` observation
+([[design/audit|audit]]) and an allowed check never is. There is no flag to set
+and none to clear, so no inner grant can hide from its caller's trail a denial
+that caller's authority produced.
 
 Filesystem checks are alias-aware and resolve symlinks, so a directory scoped by
 `within [dir: ...]` inside a grant cannot escape its policy. The bundled

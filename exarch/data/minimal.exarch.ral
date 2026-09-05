@@ -26,7 +26,6 @@
 # `include_str!`.
 
 return [
-  audit: false,
   net:   true,
 
   shell: [chdir: true],

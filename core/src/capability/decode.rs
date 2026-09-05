@@ -184,7 +184,6 @@ pub(crate) fn decode_capability_map(
             "fs" => caps.fs = Some(decode_fs(v, &format!("{err_prefix} fs"), ctx)?),
             "net" => caps.net = Some(decode_bool(v, &format!("{err_prefix} net"))?),
             "detach" => caps.detach = Some(decode_bool(v, &format!("{err_prefix} detach"))?),
-            "audit" => caps.audit = decode_bool(v, &format!("{err_prefix} audit"))?,
             "editor" => caps.editor = Some(decode_editor(v, &format!("{err_prefix} editor"))?),
             "shell" => caps.shell = Some(decode_shell(v, &format!("{err_prefix} shell"))?),
             _ => return Err(PolicyError::new(format!("{err_prefix}: unknown key '{k}'"))),

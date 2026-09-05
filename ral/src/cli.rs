@@ -107,10 +107,13 @@ ENVIRONMENT
     RAL_TIMING            when present, print batch phase timings to stderr
 
 AUDIT
-    Use audit { ... } to record a trail of what the body did — commands, \
-redirect reads and writes, capability checks — each with its arguments, \
-status, output, timing, source location, and principal. Use --audit to emit \
-the trail as JSON.",
+    Use audit { ... } to get a report: how the body settled — `ok of its \
+value, or `err of the same error record try hands a handler — beside a trail \
+of what it did. The trail lists commands, redirect reads and writes, \
+capability denials and worker births, each with its arguments, status, \
+output, timing, source location, and principal, in the order they settled. \
+Read a report with succeeded and commands. Use --audit to emit the whole \
+run's report as JSON.",
 )]
 #[allow(clippy::struct_excessive_bools)] // clap flag struct: each bool is a distinct CLI switch.
 pub(crate) struct Cli {
@@ -122,17 +125,20 @@ pub(crate) struct Cli {
     #[arg(long, short = 'l')]
     login: bool,
 
-    /// Write a JSON audit trail to standard error after the program finishes.
+    /// Write the run's JSON audit report to standard error after the program
+    /// finishes.
     ///
-    /// The trail records commands, redirected reads and writes, capability
-    /// checks, results, timings, source locations and principals. You must also
-    /// give ral a script file or use `-c`.
+    /// The report pairs the run's outcome with a trail of what happened:
+    /// commands, redirected reads and writes, capability denials and worker
+    /// births, with their statuses, timings, source locations and principals.
+    /// It does not repeat the process exit status, which is unchanged. You must
+    /// also give ral a script file or use `-c`.
     #[arg(long)]
     audit: bool,
 
     /// Add indentation and line breaks to the JSON written by `--audit`.
     ///
-    /// This makes the audit easier to read but larger. You must also use
+    /// This makes the report easier to read but larger. You must also use
     /// `--audit`.
     #[arg(long, requires = "audit")]
     pretty: bool,

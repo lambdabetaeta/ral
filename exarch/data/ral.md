@@ -86,18 +86,27 @@ Do not write `cat access.log | from-lines | stream-to-list`: the second pipe exp
 
 ## Audit
 
-`audit { … }` evaluates its body and returns a report with four fields: exit `status`, the ral `value` the body returned, an `error` string, and `children`. `children` is a flat list of exec calls the body made, including its `argv`, exit `status`, `stdout` and `stderr`. `audit` turns any errors into record data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr. This is how you read a tool whose exit code is data, e.g. `grep` exit 1 meaning no match:
+`audit { … }` evaluates its body and returns a report with two fields: `outcome`, which is `` `ok `` of the value the body returned or `` `err `` of an error record, and `trail`, a flat list of everything the body did. `audit` turns any failure into data, so it never fails, and it keeps each command's stdout and stderr apart, so you need not `2>&1` to capture stderr.
 
-    let r      = audit { grep -c ERROR app.log }
-    let report = bytes-to-string $r[children][0][stdout]
-    if $[ $r[status] == 1 ] { #'no matches'# } else { $report }
+Read a report with two prelude functions: `succeeded $r` is a `Bool`, and `commands $r` gives the trail's exec calls in order, each with its own `argv`, exit `status`, `stdout`, `stderr` and `error`. This is how you read a tool whose exit code is data, e.g. `grep` exit 1 meaning no match:
+
+    let r   = audit { grep -c ERROR app.log }
+    let out = bytes-to-string !{commands $r}[0][stdout]
+    if !{succeeded $r} { $out } else { #'no matches'# }
+
+Prefer `!{commands $r}` to a `case` on the trail whenever only commands matter. When you want the failure itself, `case` on the outcome — the `` `err `` record is exactly what `try` hands its handler:
+
+    case $r[outcome] [
+      `ok:  { |v| $v },
+      `err: { |e| echo $e[message] },
+    ]
 
 ## Running several commands
 
 If an exec call in a script fails, it aborts the script. This may be stopped by wrapping a call in `audit { … }`. For example, to see if three tools exist and what status they return:
 
     let probe = audit { attempt { cat --version }; attempt { sed --version }; attempt { python3 --version } }
-    map { |c| [tool: $c[argv][0], status: $c[status]] } $probe[children]
+    map { |c| [tool: $c[argv][0], status: $c[status]] } !{commands $probe}
 
 One row per command, each with its own `argv`, `status`, `stdout` and `stderr`; always prefer this to one blob of text you must re-parse. `succeeds` answers a bare true/false:
 
@@ -195,7 +204,7 @@ A nullary tag still binds a value (`()`) — ignore it with `_`. An arm's body m
 
 A failed call ends a `ral` script, much like `set -euo pipefail` in `bash`. Definitions that completed before the failure are still bound. Resume from the step that failed; do not replay the script from the top, which re-runs the writes and spawns that already happened.
 
-`try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `cmd`, `message`, `line`, `col`:
+`try` catches a failed command; without it, a non-zero exit aborts the entire script. Its handler receives an error record with fields `status`, `cmd`, `message`, `line`, `col` — the same record an `audit` report's `` `err `` outcome carries, so failure reads the same either way:
 
     let log =
       try { sort in.txt 2>&1 | from-string } { |err| 
@@ -230,10 +239,13 @@ If you truly have nothing else to do, `await` the handle with a long timeout.
 `await` returns `[value, stdout, stderr]`. Its `stdout` and `stderr` are the thread's whole output, already merged across every command in it; its `value` is an `audit` report on the block, which you can examine to find what ran. An `audit` report has no top-level `stdout`; a thread's result does.
 
     let r = await $h
-    let ok         = $[$r[value][status] == 0]                       # did the block succeed?
-    let thread_out = bytes-to-string $r[stdout]                      # everything the thread printed
-    let cmd_stdout = bytes-to-string $r[value][children][0][stdout]  # stdout of first command
-    let result     = $r[value][value]                                # the block's own return value
+    let ok         = !{succeeded $r[value]}                             # did the block succeed?
+    let thread_out = bytes-to-string $r[stdout]                         # everything the thread printed
+    let cmd_stdout = bytes-to-string !{commands $r[value]}[0][stdout]   # stdout of first command
+    case $r[value][outcome] [                                           # the block's own return value
+      `ok:  { |v| $v },
+      `err: { |e| fail $e },
+    ]
 
 Like `audit`, deferred blocks turn errors into data. They are idempotent, so you can await the same handle across turns.
 

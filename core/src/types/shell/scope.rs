@@ -5,9 +5,10 @@
 
 use super::Shell;
 use crate::types::{
-    Binding, Capabilities, Decision, Env, HandlerEntry, HandlerRole, Map, Observation, Observed,
+    Binding, Capabilities, Decision, Env, HandlerEntry, HandlerRole, Observation, Observed,
     Settled, Value,
 };
+use std::collections::BTreeMap;
 
 impl Shell {
     /// The session's whole lexical environment, for a host that must hand it
@@ -43,16 +44,13 @@ impl Shell {
         self.audit_deputy_prefixes();
     }
 
-    /// Observe a `deputy` capability check when the stack just pushed,
-    /// meet-folded, is a confused deputy.
+    /// Observe a `deputy` capability check per flagged prefix of the stack
+    /// just pushed, meet-folded.
     /// [`crate::capability::deputy_prefixes`] demands the fold and only
-    /// reports, never denies; this is its one call site.  No-op unless audit
-    /// is live and some layer opted into capability auditing.
+    /// reports, never denies; this is its one call site.  No-op unless a trail
+    /// is open.
     pub(crate) fn audit_deputy_prefixes(&mut self) {
-        if !self
-            .context
-            .should_audit_capabilities(&self.local.audit)
-        {
+        if !self.local.audit.active() {
             return;
         }
         let Some(folded) = self
@@ -64,35 +62,24 @@ impl Shell {
         else {
             return;
         };
-        let prefixes = crate::capability::deputy_prefixes(&folded);
-        if prefixes.is_empty() {
-            return;
-        }
         let site = self.call_site();
         let principal = self.context.principal();
-        let mut fields = Map::new();
-        fields.insert(
-            "prefixes".into(),
-            Value::list(
-                prefixes
-                    .iter()
-                    .map(|p| Value::String(p.as_str().to_string()))
-                    .collect(),
-            ),
-        );
-        // Pushed rather than sent through `evaluator::audit::observe_stamped`: a
-        // `Flagged` decision has no rail branch in the policy table, so the
-        // trail is the whole of this observation's audience and no `Mooring`
-        // needs reaching this deep into the scope guards.
-        self.local.audit.push(Observation::instant(
-            site,
-            principal,
-            Observed::Capability {
-                resource: "deputy".into(),
-                decision: Decision::Flagged,
-                fields,
-            },
-        ));
+        for prefix in crate::capability::deputy_prefixes(&folded) {
+            let fields = BTreeMap::from([("prefix".to_string(), prefix.as_str().to_string())]);
+            // Pushed rather than sent through `evaluator::audit::observe_stamped`: a
+            // `Flagged` decision has no rail branch in the policy table, so the
+            // trail is the whole of this observation's audience and no `Mooring`
+            // needs reaching this deep into the scope guards.
+            self.local.audit.push(Observation::instant(
+                site.clone(),
+                principal.clone(),
+                Observed::Capability {
+                    resource: "deputy".into(),
+                    decision: Decision::Flagged,
+                    fields,
+                },
+            ));
+        }
     }
 
     /// True when a non-root capabilities layer is active.

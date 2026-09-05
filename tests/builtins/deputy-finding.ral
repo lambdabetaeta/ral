@@ -1,28 +1,46 @@
-# Test: a confused-deputy fold reaches the audit tree.
+# Test: a confused-deputy fold reaches the audit trail.
 #
 # An exec-granting frame and a write-granting frame are each innocent
 # alone; only the meet over the live grant stack names the same directory
-# as both writable and executable. The finding is a `capability-check`
-# node, never a denial.
+# as both writable and executable. The finding is a `check` observation
+# with `decision: flagged`, never a denial — and no grant asks for it:
+# whenever a trail is open, a check that is not an allowance is recorded.
+
+# The `check` payloads of a trail, in order.  `what`'s tag is the kind, so
+# this is a `case` over the whole row rather than a test on a field.
+let checks = { |trail|
+    fold { |acc o|
+        case $o[what] [
+            `check:   { |c| return [...$acc, $c] },
+            `command: { |_| return $acc },
+            `write:   { |_| return $acc },
+            `read:    { |_| return $acc },
+            `grep:    { |_| return $acc },
+            `worker:  { |_| return $acc },
+            `act:     { |_| return $acc },
+        ]
+    } [] $trail
+}
 
 let d = temp-dir
 let bindir = "$d/bin/"
 
 let deputy = audit {
-    grant [exec: [$bindir: 'allow'], audit: true] {
+    grant [exec: [$bindir: 'allow']] {
         grant [fs: [write: [$d]]] { echo x }
     }
 }
-echo !{length !{filter { |c| equal $c[kind] 'capability-check' } $deputy[children]}}
-echo $deputy[children][0][resource]
-echo $deputy[children][0][decision]
-echo !{length $deputy[children][0][prefixes]}
+let flagged = !{checks $deputy[trail]}
+echo !{length $flagged}
+echo $flagged[0][resource]
+echo $flagged[0][decision]
+echo !{has $flagged[0][fields] 'prefix'}
 
 # Control: with the fs dimension absent the same exec dir is innocent —
 # an unrestricted fs is not read as "everything writable".
 let innocent = audit {
-    grant [exec: [$bindir: 'allow'], audit: true] {
+    grant [exec: [$bindir: 'allow']] {
         grant [net: false] { echo x }
     }
 }
-echo !{length !{filter { |c| equal $c[kind] 'capability-check' } $innocent[children]}}
+echo !{length !{checks $innocent[trail]}}

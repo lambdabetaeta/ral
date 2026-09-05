@@ -1617,8 +1617,8 @@ fn lambda_to_external_is_error() {
 
 #[test]
 fn try_runtime_error_has_cmd_runtime() {
-    // A pure-evaluator failure (divide by zero) leaves no failing
-    // command in the audit subtree, so try's err.cmd reads the
+    // A pure-evaluator failure (divide by zero) passes through no command
+    // dispatch, so nothing stamps a name and try's err.cmd reads the
     // placeholder "<runtime>".
     let result = must_succeed(
         "let r = try { let _ = $[1 / 0]\n return 'unreached' } { |e| return $e[cmd] }\n\
@@ -2402,7 +2402,11 @@ fn interpolation_renders_unit_as_its_literal() {
 
 // (circular source requires files; tested via script tests)
 
-// ── §11.4  grant audit: capability-check recording ───────────────────────
+// ── §11.4  audit: capability-check recording ─────────────────────────────
+//
+// `audit { … }` returns a report `[outcome: `ok v | `err rec, trail: [obs]]`,
+// each observation `[script, line, col, start, end, principal, what: `tag […]]`
+// — so a fact is read by its tag, and the trail is flat.
 
 fn map_field(v: &Value, key: &str) -> Value {
     match v {
@@ -2411,36 +2415,34 @@ fn map_field(v: &Value, key: &str) -> Value {
     }
 }
 
-fn children_of(v: &Value) -> Vec<Value> {
-    match map_field(v, "children") {
-        Value::List(ch) => ch.into_iter().collect(),
+/// The observations one report collected, in order.
+fn trail_of(v: &Value) -> Vec<Value> {
+    match map_field(v, "trail") {
+        Value::List(obs) => obs.into_iter().collect(),
         _ => vec![],
     }
 }
 
-fn is_cap_check(v: &Value, resource: &str, decision: &str) -> bool {
-    map_field(v, "kind") == Value::String("capability-check".into())
-        && map_field(v, "resource") == Value::String(resource.into())
-        && map_field(v, "decision") == Value::String(decision.into())
+/// One field of an observation's fact, but only if the fact carries `tag`;
+/// `Unit` for any other kind, so a reader never mistakes one for another.
+fn fact_field(v: &Value, tag: &str, key: &str) -> Value {
+    match map_field(v, "what") {
+        Value::Variant { label, payload } if label == tag => {
+            payload.map_or(Value::Unit, |p| map_field(&p, key))
+        }
+        _ => Value::Unit,
+    }
 }
 
-/// A capability check always lands flat among the collecting audit's own
-/// children now — `grant`/`within`/`guard` are transparent, so nothing ever
-/// nests one a level deeper.  The recursive search stays anyway: it is the
-/// same "is this event present anywhere" question regardless of tree shape.
-fn has_cap_check(children: &[Value], resource: &str, decision: &str) -> bool {
-    children.iter().any(|c| {
-        is_cap_check(c, resource, decision) || has_cap_check(&children_of(c), resource, decision)
-    })
+fn is_cap_check(v: &Value, resource: &str, decision: &str) -> bool {
+    fact_field(v, "check", "resource") == Value::String(resource.into())
+        && fact_field(v, "check", "decision") == Value::String(decision.into())
 }
 
 /// `argv[0]` of a command observation, or `None` for anything else (a
 /// write, a read, a capability check).
 fn command_argv0(v: &Value) -> Option<String> {
-    if map_field(v, "kind") != Value::String("command".into()) {
-        return None;
-    }
-    match map_field(v, "argv") {
+    match fact_field(v, "command", "argv") {
         Value::List(argv) => argv.into_iter().next().and_then(|a| match a {
             Value::String(s) => Some(s),
             _ => None,
@@ -2449,14 +2451,75 @@ fn command_argv0(v: &Value) -> Option<String> {
     }
 }
 
+/// Every `fields` entry of the `check` observations naming `resource`.
+fn check_fields(children: &[Value], resource: &str) -> Vec<Value> {
+    children
+        .iter()
+        .filter(|c| fact_field(c, "check", "resource") == Value::String(resource.into()))
+        .map(|c| fact_field(c, "check", "fields"))
+        .collect()
+}
+
+/// An admitted check is nobody's evidence: a trail of every permitted read
+/// answers no question an auditor asked, so only refusals are recorded.
+#[cfg(unix)]
 #[test]
-fn audit_no_flag_no_recording() {
-    let tree = must_succeed("audit { grant [exec: ['/bin/true': 'allow']] { /bin/true } }");
-    let children = children_of(&tree);
+fn an_allowed_capability_check_is_never_recorded() {
+    let children = trail_of(&must_succeed(
+        "audit { grant [exec: ['/bin/true': 'allow']] { /bin/true } }",
+    ));
     assert!(
-        !has_cap_check(&children, "exec", "allowed"),
-        "expected no capability-check nodes without audit: true; children: {children:?}"
+        !children.iter().any(|c| is_cap_check(c, "exec", "allowed")),
+        "an admitted exec check must leave no trace on the trail: {children:?}"
     );
+    assert!(
+        children
+            .iter()
+            .any(|c| command_argv0(c).as_deref() == Some("/bin/true")),
+        "the command the grant admitted must still be recorded: {children:?}"
+    );
+}
+
+/// The grantor no longer votes on auditing: an open trail records a refusal
+/// whatever the grant that refused it says.  The body errors, so the report
+/// carries `` `err `` — and the trail all the same.
+#[cfg(unix)]
+#[test]
+fn a_denial_is_recorded_without_the_grant_asking() {
+    let report = must_succeed("audit { grant [exec: ['/bin/true': 'allow']] { /bin/false } }");
+    assert!(
+        matches!(map_field(&report, "outcome"), Value::Variant { label, .. } if label == "err"),
+        "a refused command fails its body: {report:?}"
+    );
+    let children = trail_of(&report);
+    assert!(
+        children.iter().any(|c| is_cap_check(c, "exec", "denied")),
+        "a refused exec must be recorded on the open trail: {children:?}"
+    );
+}
+
+/// `fields` is a map of strings, and its `name` names the refused command —
+/// the one detail an auditor reads a denial for.
+#[cfg(unix)]
+#[test]
+fn a_denials_fields_are_strings() {
+    let children = trail_of(&must_succeed(
+        "audit { grant [exec: ['/bin/true': 'allow']] { /bin/false } }",
+    ));
+    assert!(
+        check_fields(&children, "exec")
+            .iter()
+            .any(|f| map_field(f, "name") == Value::String("/bin/false".into())),
+        "the denial must name the command it refused, as a string: {children:?}"
+    );
+}
+
+/// Refusal does not depend on a trail: the same grant refuses with no
+/// `audit { … }` around it, and there is simply nobody to tell.
+#[cfg(unix)]
+#[test]
+fn a_denial_outside_a_trail_is_still_a_denial() {
+    must_fail("grant [exec: ['/bin/true': 'allow']] { /bin/false }");
 }
 
 // ── §2.4 !{…} hoisting: left-to-right evaluation order ──────────────────
@@ -2523,14 +2586,18 @@ fn audit_fs_write_denied_recorded() {
     // through `check_fs_op` before the write — no OS sandbox subprocess
     // is involved, so this runs on every host.
     let outside = format!("/nonexistent_ralaudit_test_{}/file.txt", std::process::id());
-    let script = format!(
-        "audit {{ grant [fs: [write: ['/tmp']], audit: true] {{ to-string 'x' > '{outside}' }} }}"
-    );
-    let tree = must_succeed(&script);
-    let children = children_of(&tree);
+    let script =
+        format!("audit {{ grant [fs: [write: ['/tmp']]] {{ to-string 'x' > '{outside}' }} }}");
+    let children = trail_of(&must_succeed(&script));
     assert!(
-        has_cap_check(&children, "fs", "denied"),
-        "expected denied fs capability-check in audit tree; children: {children:?}"
+        children.iter().any(|c| is_cap_check(c, "fs", "denied")),
+        "expected denied fs capability-check in the trail: {children:?}"
+    );
+    assert!(
+        check_fields(&children, "fs")
+            .iter()
+            .any(|f| map_field(f, "op") == Value::String("write".into())),
+        "the denial must name the operation it refused: {children:?}"
     );
 }
 
@@ -2542,15 +2609,17 @@ fn audit_fs_write_denied_recorded() {
 // lands as a direct child of the collecting audit, and no observation named
 // after the control operator itself ever appears.
 
+/// `grant` owns no observation, and the refusal it caused is a direct member
+/// of the collecting audit's trail rather than nested under anything.
 #[cfg(unix)]
 #[test]
-fn audit_grant_flattens_exec_capability_allowed_child() {
-    let tree =
-        must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/true } }");
-    let children = children_of(&tree);
+fn audit_grant_flattens_the_exec_denial_it_caused() {
+    let children = trail_of(&must_succeed(
+        "audit { grant [exec: ['/bin/true': 'allow']] { /bin/false } }",
+    ));
     assert!(
-        children.iter().any(|c| is_cap_check(c, "exec", "allowed")),
-        "exec/allowed capability-check must be a direct child of the audit root: {children:?}"
+        children.iter().any(|c| is_cap_check(c, "exec", "denied")),
+        "the exec denial must be a direct member of the trail: {children:?}"
     );
     assert!(
         !children
@@ -2560,38 +2629,56 @@ fn audit_grant_flattens_exec_capability_allowed_child() {
     );
 }
 
+/// An admitted fs read is not an event.  The `glob` that made it is, so the
+/// trail is not merely empty.
 #[cfg(unix)]
 #[test]
-fn audit_grant_flattens_exec_capability_denied_child() {
-    // /bin/false exits 1; the exec check is still allowed because the
-    // grant lists '/bin/false' implicitly via the prefix.  For an
-    // unambiguous "denied" event we issue a grant that does NOT include
-    // the requested binary.
-    let tree =
-        must_succeed("audit { grant [exec: ['/bin/true': 'allow'], audit: true] { /bin/false } }");
-    let children = children_of(&tree);
+fn audit_grant_records_no_admitted_fs_check() {
+    let children = trail_of(&must_succeed(
+        "audit { grant [fs: [read: ['/tmp']]] { glob '/tmp/*' } }",
+    ));
     assert!(
-        children.iter().any(|c| is_cap_check(c, "exec", "denied")),
-        "exec/denied capability-check must be a direct child of the audit root: {children:?}"
+        !children.iter().any(|c| is_cap_check(c, "fs", "allowed")),
+        "an admitted fs check must leave no trace on the trail: {children:?}"
+    );
+    assert!(
+        children
+            .iter()
+            .any(|c| command_argv0(c).as_deref() == Some("glob")),
+        "the builtin that made the admitted read must still be recorded: {children:?}"
     );
 }
 
+/// A confused deputy is flagged once per overlapping prefix, each observation
+/// naming its own `prefix` — not one observation carrying a list.
 #[cfg(unix)]
 #[test]
-fn audit_grant_flattens_sandboxed_fs_allowed_child() {
-    let tree =
-        must_succeed("audit { grant [fs: [read: ['/tmp']], audit: true] { glob '/tmp/*' } }");
-    let children = children_of(&tree);
-    assert!(
-        children.iter().any(|c| is_cap_check(c, "fs", "allowed")),
-        "fs/allowed event must be a direct child of the audit root: {children:?}"
+fn a_deputy_is_flagged_once_per_prefix() {
+    let children = trail_of(&must_succeed(
+        "audit { grant [exec: ['/tmp/bin/': 'allow', '/tmp/sbin/': 'allow'], \
+         fs: [write: ['/tmp']]] { return () } }",
+    ));
+    let named: Vec<Value> = children
+        .iter()
+        .filter(|c| is_cap_check(c, "deputy", "flagged"))
+        .map(|c| map_field(&fact_field(c, "check", "fields"), "prefix"))
+        .collect();
+    // `deputy_prefixes` yields its findings sorted, so the order is the
+    // prefixes' own rather than the grant map's.
+    assert_eq!(
+        named,
+        vec![
+            Value::String("/tmp/bin".into()),
+            Value::String("/tmp/sbin".into())
+        ],
+        "each overlapping prefix earns one observation naming just itself: {children:?}"
     );
 }
 
 #[test]
 fn audit_within_flattens_body_children() {
     let tree = must_succeed("audit { within [env: [X: 'y']] { /bin/true } }");
-    let children = children_of(&tree);
+    let children = trail_of(&tree);
     let cmd_names: Vec<String> = children.iter().filter_map(command_argv0).collect();
     assert!(
         cmd_names.iter().any(|n| n == "/bin/true"),
@@ -2606,7 +2693,7 @@ fn audit_within_flattens_body_children() {
 #[test]
 fn audit_guard_flattens_body_and_cleanup_children() {
     let tree = must_succeed("audit { guard { /bin/true } { /bin/echo cleaning } }");
-    let children = children_of(&tree);
+    let children = trail_of(&tree);
     let cmd_names: Vec<String> = children.iter().filter_map(command_argv0).collect();
     assert!(
         cmd_names.iter().any(|n| n == "/bin/true"),
@@ -2625,7 +2712,7 @@ fn audit_guard_flattens_body_and_cleanup_children() {
 #[test]
 fn audit_try_flattens_body_children() {
     let tree = must_succeed("audit { try { /bin/true | from-string } { |_e| return 'caught' } }");
-    let children = children_of(&tree);
+    let children = trail_of(&tree);
     let cmd_names: Vec<String> = children.iter().filter_map(command_argv0).collect();
     assert!(
         cmd_names.iter().any(|n| n == "/bin/true"),
@@ -2646,25 +2733,26 @@ fn audit_try_flattens_body_children() {
 #[test]
 fn caret_clear_resolves_external_not_the_native() {
     let tree = must_succeed("audit { try { ^clear | from-string } { |_e| return '' } }");
-    let children = children_of(&tree);
+    let children = trail_of(&tree);
     assert!(
         children.iter().any(|c| {
             command_argv0(c).as_deref() == Some("clear")
-                && map_field(c, "origin") == Value::String("external".into())
+                && fact_field(c, "command", "origin") == Value::String("external".into())
         }),
         "^clear must record a `clear` command observation with origin \"external\" as a direct child of the audit root: {children:?}"
     );
 }
 
+/// Nesting changes neither what is recorded nor where: the trail is the whole
+/// gate, so an inner grant that says nothing about auditing still has its
+/// refusal recorded, flat among the outer audit's own observations.
 #[cfg(unix)]
 #[test]
 fn audit_nested_grants_produce_no_grant_nodes() {
-    // SPEC §11.5: audit is logical OR — once enabled by an outer grant it
-    // stays enabled for nested grants even if they omit audit: true.
-    let tree = must_succeed(
-        "audit { grant [exec: ['/bin/true': 'allow'], audit: true] { grant [exec: ['/bin/true': 'allow']] { /bin/true } } }",
-    );
-    let children = children_of(&tree);
+    let children = trail_of(&must_succeed(
+        "audit { grant [exec: ['/bin/true': 'allow']] \
+         { grant [exec: ['/bin/true': 'allow']] { /bin/false } } }",
+    ));
     assert!(
         !children
             .iter()
@@ -2672,8 +2760,8 @@ fn audit_nested_grants_produce_no_grant_nodes() {
         "nested grants must not produce any `grant`-named observation: {children:?}"
     );
     assert!(
-        has_cap_check(&children, "exec", "allowed"),
-        "the exec/allowed event from either grant layer must still flatten into the audit root: {children:?}"
+        children.iter().any(|c| is_cap_check(c, "exec", "denied")),
+        "the refusal must still flatten into the audit root: {children:?}"
     );
 }
 
@@ -2684,7 +2772,7 @@ fn audit_nested_audit_flattens_into_outer_children() {
     // straight into the outer audit's children, and no `audit`-named
     // observation ever appears.
     let tree = must_succeed("audit { audit { /bin/true } }");
-    let names: Vec<String> = children_of(&tree)
+    let names: Vec<String> = trail_of(&tree)
         .iter()
         .filter_map(command_argv0)
         .collect();
@@ -2704,7 +2792,7 @@ fn audit_direct_external_pipeline_stage_appears_in_tree() {
     // off), so the first external stage takes the direct-spawn path.
     // The synthesised command observation must still show up.
     let tree = must_succeed("audit { /bin/echo hi | /bin/cat }");
-    let cmds: Vec<String> = children_of(&tree)
+    let cmds: Vec<String> = trail_of(&tree)
         .iter()
         .filter_map(command_argv0)
         .collect();
@@ -2774,7 +2862,7 @@ fn helper_stage_audit_observations_merge_into_parent_tree() {
         if let Some(n) = command_argv0(v) {
             out.push(n);
         }
-        for child in children_of(v) {
+        for child in trail_of(v) {
             collect_cmds(&child, out);
         }
     }
@@ -2817,29 +2905,23 @@ fn failing_bundled_byte_stage_surfaces_failure() {
     must_fail("printf 'a\\nb\\n' | wc /nonexistent/path");
 }
 
+/// `stderr` rides the same tee buffer as `stdout`, so nothing short of the
+/// buffer's own cap truncates it.
 #[test]
-fn audit_captures_stderr_and_caps_at_64kb() {
-    // `audit`'s capture policy is `Bytes`; the common finalisation
-    // path caps each node's stderr at 64 KB (SPEC §10.3).  Pipe
-    // exactly 80 KB of zero-bytes to stderr — bounded source so the
-    // tee buffer cannot grow without limit before head closes its
-    // input.
+fn audit_captures_stderr_in_full() {
     let script = "audit { /bin/sh -c 'head -c 80000 /dev/zero >&2' }";
-    let tree = must_succeed(script);
-    let children = children_of(&tree);
-    let stderr_buf = children.iter().find_map(|c| match map_field(c, "stderr") {
-        Value::Bytes(b) if !b.is_empty() => Some(b),
-        _ => None,
-    });
+    let report = must_succeed(script);
+    let stderr_buf = trail_of(&report)
+        .iter()
+        .find_map(|c| match fact_field(c, "command", "stderr") {
+            Value::Bytes(b) if !b.is_empty() => Some(b),
+            _ => None,
+        });
     // Some build environments lack /bin/sh or head; tolerate that.
     let Some(b) = stderr_buf else {
         return;
     };
-    assert!(
-        b.len() <= 64 * 1024,
-        "captured stderr must be capped at 64 KB; got {} bytes",
-        b.len()
-    );
+    assert_eq!(b.len(), 80_000, "captured stderr must not be truncated");
 }
 
 // ── Regression tests for CHANGELOG items ────────────────────────────────

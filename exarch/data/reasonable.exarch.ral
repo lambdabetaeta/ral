@@ -14,7 +14,6 @@
 # Default base when `--base` is omitted.
 
 return [
-  audit: false,
   net:   true,
 
   shell: [chdir: true],

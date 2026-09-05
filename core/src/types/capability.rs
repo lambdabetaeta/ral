@@ -1,7 +1,7 @@
 //! The capability lattice: one frame of typed authority, and the folds over it.
 //!
-//! A [`Capabilities`] frame bundles the per-effect policies plus an `audit`
-//! flag.  [`Capabilities::meet`] composes frames downward — [`Capabilities::root`]
+//! A [`Capabilities`] frame bundles the per-effect policies.
+//! [`Capabilities::meet`] composes frames downward — [`Capabilities::root`]
 //! is top, [`Capabilities::deny_all`] bottom — and [`Capabilities::join`] widens a
 //! base ceiling at load time.  Denies are sticky under both.
 //!
@@ -406,9 +406,9 @@ pub struct ShellPolicy {
     pub chdir: bool,
 }
 
-/// One layer of the dynamic grant stack — per-effect policies plus an `audit`
-/// flag, with every `~` / `xdg:` / `cwd:` / `tempdir:` sigil already resolved to
-/// a concrete path.
+/// One layer of the dynamic grant stack — the per-effect policies, with every
+/// `~` / `xdg:` / `cwd:` / `tempdir:` sigil already resolved to a concrete
+/// path.
 ///
 /// Resolved *by construction*: the only non-trivial constructor is
 /// `decode_capability_map` in `core/src/capability/decode.rs`, which resolves
@@ -430,8 +430,6 @@ pub struct Capabilities {
     /// attenuates fs says nothing about survivors.
     #[serde(default)]
     pub detach: Option<bool>,
-    #[serde(default)]
-    pub audit: bool,
     #[serde(default)]
     pub editor: Option<EditorPolicy>,
     #[serde(default)]
@@ -468,12 +466,6 @@ impl GrantStack {
     /// `Shell::has_active_capabilities` reports.
     pub fn is_restrictive(&self) -> bool {
         self.0.iter().any(Capabilities::is_restrictive)
-    }
-
-    /// True iff some layer opts into capability-check audit emission.  Only
-    /// half the gate — pair it with `Audit::active`.
-    pub fn any_audits(&self) -> bool {
-        self.0.iter().any(|ctx| ctx.audit)
     }
 
     pub fn push(&mut self, layer: Capabilities) {
@@ -550,7 +542,6 @@ impl Capabilities {
             detach: Some(false),
             editor: Some(EditorPolicy::default()),
             shell: Some(ShellPolicy::default()),
-            audit: false,
         }
     }
 
@@ -573,10 +564,10 @@ impl Capabilities {
 impl Capabilities {
     /// The most-authority capability below both sides.  Inner fields intersect
     /// (exec maps, fs prefixes) or AND (net, detach, editor, shell), while
-    /// `fs.deny_paths` unions — more denies is less authority.  `audit` sits
-    /// outside the lattice and propagates upward.  Prefix intersection goes
-    /// through [`meet_prefixes`], judged on the `resolved` form each
-    /// [`NormalizedPrefix`] already carries, so no disk is consulted here.
+    /// `fs.deny_paths` unions — more denies is less authority.  Prefix
+    /// intersection goes through [`meet_prefixes`], judged on the `resolved`
+    /// form each [`NormalizedPrefix`] already carries, so no disk is consulted
+    /// here.
     pub fn meet(self, other: Self) -> Self {
         Self {
             exec: self.exec.meet(other.exec),
@@ -585,7 +576,6 @@ impl Capabilities {
             detach: self.detach.meet(other.detach),
             editor: self.editor.meet(other.editor),
             shell: self.shell.meet(other.shell),
-            audit: self.audit || other.audit,
         }
     }
 
@@ -602,7 +592,6 @@ impl Capabilities {
             detach: self.detach.join(other.detach),
             editor: self.editor.join(other.editor),
             shell: self.shell.join(other.shell),
-            audit: self.audit || other.audit,
         }
     }
 }

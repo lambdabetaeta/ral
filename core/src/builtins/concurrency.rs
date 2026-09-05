@@ -11,7 +11,7 @@
 
 use crate::evaluator::audit::observe;
 use crate::evaluator::machine;
-use crate::evaluator::scope::error_record;
+use crate::evaluator::scope::{error_record, error_record_of};
 use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::serial::FOValue;
 use crate::types::{
@@ -739,21 +739,11 @@ fn escape_exit_code(esc: &Escape) -> i32 {
 }
 
 /// `poll`'s `` `err `` payload — the same `{cmd, status, message, line, col}`
-/// record `try` hands its handler thunk, via [`error_record`].  The position
-/// resolves the error's span against `shell`'s registry, and is zero when there
-/// is none or when an `Escape` carries no located message.
+/// record `try` hands its handler thunk.  An `Escape` carries no located
+/// message and names no command, so its position is zero.
 fn break_record(e: &Break, shell: &Shell) -> Value {
     match e {
-        Break::Error(err) => {
-            let site = shell.site_of(err.span);
-            error_record(
-                "<runtime>",
-                err.exit_code(),
-                &err.message,
-                site.line,
-                site.col,
-            )
-        }
+        Break::Error(err) => error_record_of(err, shell),
         Break::Escape(esc) => {
             let message = match esc {
                 Escape::Exit(_) => "block exited".to_string(),
@@ -1558,34 +1548,46 @@ mod tests {
         }
     }
 
-    /// The one `` `worker `` child of an `audit { }` tree, panicking if there
-    /// is not exactly one.
-    fn only_birth(children: &crate::types::List) -> Map {
-        let births: Vec<Map> = children
+    /// The observations an `audit { }` report collected.
+    fn trail_of(report: &Value) -> &crate::types::List {
+        match expect_map(report).get("trail") {
+            Some(Value::List(trail)) => trail,
+            other => panic!("expected a trail List, got {other:?}"),
+        }
+    }
+
+    /// The `` `worker `` facts of a trail — a birth is read by its tag.
+    fn births(trail: &crate::types::List) -> Vec<&Map> {
+        trail
             .iter()
-            .map(expect_map)
-            .filter(|&m| matches!(m.get("kind"), Some(Value::String(k)) if k == "worker"))
-            .cloned()
-            .collect();
-        match births.as_slice() {
-            [birth] => birth.clone(),
+            .filter_map(|o| match expect_map(o).get("what") {
+                Some(Value::Variant {
+                    label,
+                    payload: Some(fact),
+                }) if label == "worker" => Some(expect_map(fact)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one `` `worker `` fact of an `audit { }` report's trail, panicking
+    /// if there is not exactly one.
+    fn only_birth(trail: &crate::types::List) -> Map {
+        match births(trail).as_slice() {
+            [birth] => (*birth).clone(),
             other => panic!("expected exactly one worker birth, got {other:?}"),
         }
     }
 
-    /// `audit { spawn … }` records the birth among its children: kind
-    /// `worker`, the spawn's own `cmd` and `class`, and the minted `id` — so a
-    /// later reader can join the trail against the registry.
+    /// `audit { spawn … }` records the birth in its trail as a `` `worker ``
+    /// fact carrying the spawn's own `cmd` and `class` and the minted `id` —
+    /// so a later reader can join the trail against the registry.
     #[test]
     fn audit_over_spawn_carries_the_birth_id_and_all() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let tree = run_source(&mut shell, "audit { !{spawn { return 1 }} }")
+        let report = run_source(&mut shell, "audit { !{spawn { return 1 }} }")
             .expect("audit over a plain spawn must succeed");
-        let fields = expect_map(&tree);
-        let Some(Value::List(children)) = fields.get("children") else {
-            panic!("expected a children List, got {fields:?}");
-        };
-        let birth = only_birth(children);
+        let birth = only_birth(trail_of(&report));
         assert_eq!(birth.get("cmd"), Some(&Value::String("<block>".into())));
         assert_eq!(birth.get("class"), Some(&Value::String("worker".into())));
         assert!(
@@ -1600,23 +1602,20 @@ mod tests {
     #[test]
     fn cap_refused_spawn_observes_no_birth() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let tree = run_source_capped(&mut shell, "audit { !{spawn { return 1 }} }", 0)
+        let report = run_source_capped(&mut shell, "audit { !{spawn { return 1 }} }", 0)
             .expect("audit swallows the refusal as data, not an error");
-        let fields = expect_map(&tree);
+        let outcome = expect_map(&report)
+            .get("outcome")
+            .expect("a report carries its outcome");
         assert_eq!(
-            fields.get("status"),
+            expect_map(expect_variant(outcome, "err")).get("status"),
             Some(&Value::Int(1)),
             "the refused spawn's exit code"
         );
-        let Some(Value::List(children)) = fields.get("children") else {
-            panic!("expected a children List, got {fields:?}");
-        };
+        let trail = trail_of(&report);
         assert!(
-            children
-                .iter()
-                .map(expect_map)
-                .all(|m| !matches!(m.get("kind"), Some(Value::String(k)) if k == "worker")),
-            "a spawn refused at the cap must observe no birth: {children:?}"
+            births(trail).is_empty(),
+            "a spawn refused at the cap must observe no birth: {trail:?}"
         );
     }
 

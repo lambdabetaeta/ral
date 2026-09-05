@@ -1,12 +1,12 @@
 step one
 step two
-0
+true
 2
 echo
-()
+step two
 handled
 continued
-0
+true
 3
 fail
 1
@@ -14,14 +14,16 @@ echo
 echo
 a
 b
-0
+true
 3
 echo
 echo
 each
+false
+3 no index
 outer
 inner
-0
+true
 2
 echo
 echo
@@ -36,4 +38,4 @@ cleanup
 2
 echo
 echo
-audit tree tests done
+audit trail tests done

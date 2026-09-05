@@ -62,8 +62,8 @@ Failure propagates predictably through the rest of the grammar:
 
 - a sequence `a; b; c` halts at the first failure, and the error says how many
   later parts it abandoned — otherwise the truncation is legible only as a short
-  `children` list in an enclosing `audit`, which reads the same as a sequence
-  that had fewer parts;
+  `trail` in an enclosing `audit`, which reads the same as a sequence that had
+  fewer parts;
 - a [[design/pipelines|pipeline]] fails whole on any stage failure, bar a stage
   ral itself ended because its reader was gone;
 - `for` / `map` stop iterating on a failing body;

@@ -10,8 +10,8 @@
 
 use crate::ir::{CommandName, CommandWord};
 use crate::types::{
-    Break, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Map, Mooring, Settled,
-    Shell, Value,
+    Break, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Mooring, Settled, Shell,
+    Value,
 };
 
 use super::command::{self, CommandIdentity, EvalRedirectV};
@@ -113,8 +113,7 @@ fn refuse_head(id: &CommandIdentity, mooring: &Mooring, shell: &mut Shell) -> Br
             "install the command, or add it to the grant exec map if it lives elsewhere",
         ),
     };
-    let mut fields = Map::new();
-    fields.insert("name".into(), Value::String(id.shown.clone()));
+    let fields = std::collections::BTreeMap::from([("name".to_string(), id.shown.clone())]);
     audit::record_capability(shell, mooring, "exec", fields);
     shell.err_hint(msg, hint, 1).into()
 }

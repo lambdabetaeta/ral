@@ -1,5 +1,5 @@
 //! `impl Context`: verbs over the dynamic context — env overrides, `$HOME` /
-//! `$USER`, the audit gate, and the [`Resolver`] bound to the live home/cwd pair.
+//! `$USER`, and the [`Resolver`] bound to the live home/cwd pair.
 //!
 //! [`Context`] is the `Shell::context` field that `Shell::inherit_from` and
 //! `Shell::spawn_thread` clone into a child.  `PWD` / `OLDPWD` stay out of
@@ -8,7 +8,7 @@
 use super::Context;
 use super::cwd::Cwd;
 use crate::path::{Resolver, SearchCwd};
-use crate::types::{Audit, EnvVars, GrantStack, HandlerStack, Modules};
+use crate::types::{EnvVars, GrantStack, HandlerStack, Modules};
 use std::path::{Path, PathBuf};
 
 impl Context {
@@ -37,13 +37,6 @@ impl Context {
         for (k, v) in items {
             self.set_env_var(k, v);
         }
-    }
-
-    /// True when capability checks should emit an observation: an active
-    /// trail (`audit { … }` or `ral --audit`) and `audit: true` on some
-    /// grants layer.
-    pub fn should_audit_capabilities(&self, audit: &Audit) -> bool {
-        audit.active() && self.grants.any_audits()
     }
 
     /// Effective `$HOME` via [`crate::path::home`]: these overrides first, then

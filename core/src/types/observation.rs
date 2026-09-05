@@ -1,9 +1,12 @@
-//! One fact observed at a door, and the one map shape it reifies as.
+//! One fact observed at a door, and the one record shape it reifies as.
 //!
 //! The surface rail, the audit trail, `--audit`, and the wire all speak this
 //! vocabulary: [`Observation::to_value`] is the single projection, and
 //! [`Observation::from_value`] its inverse, so a host decodes exactly what
-//! core built.
+//! core built.  The envelope is a record of `script`, `line`, `col`, `start`,
+//! `end` and `principal`; the fact itself is `what`, a variant whose tag is
+//! the kind, so no separate `kind` field can disagree with the payload beside
+//! it.
 
 use super::audit::{AuditIo, epoch_us};
 use super::map::Map;
@@ -11,10 +14,11 @@ use super::shell::workers::{LeaseClass, WorkerId};
 use super::value::Value;
 use crate::diagnostic::CallSite;
 use crate::syntax::ast::RedirectMode;
+use std::collections::BTreeMap;
 
 /// One fact observed at a door: a command settled, a write committed, a
 /// redirect read opened, a capability check decided.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
     pub site: CallSite,
     /// Microseconds since the Unix epoch; equal to `end` at an instantaneous
@@ -28,7 +32,7 @@ pub struct Observation {
 
 /// What was observed.  A command carries one fact whether it was a builtin,
 /// an external, or a detached spawn; the door it passed through is `origin`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observed {
     Command {
         /// Shown name first, then its arguments.
@@ -42,8 +46,6 @@ pub enum Observed {
         /// the outcome was a runtime error.  `io` holds only what the child
         /// wrote; this field is the one place ral speaks in its own voice.
         error: Option<String>,
-        /// `Unit` for an external, which has no ral value to hand back.
-        value: Value,
     },
     Write {
         path: String,
@@ -70,9 +72,9 @@ pub enum Observed {
         /// The resource class checked — `exec`, `fs`, …
         resource: String,
         decision: Decision,
-        /// Per-resource detail, spliced into the projected map beside
-        /// `resource` and `decision`.
-        fields: Map,
+        /// Per-resource detail, a nested map beside `resource` and
+        /// `decision`.
+        fields: BTreeMap<String, String>,
     },
     /// A worker's birth, filed at `spawn_child` in the same breath as its
     /// registry entry — after the reservation succeeds, so a spawn the cap
@@ -104,10 +106,10 @@ pub enum CommandOrigin {
     Detached,
 }
 
-/// How a capability check settled.
+/// How a recorded capability check settled.  An admitted check is never
+/// recorded, so there is no `Allowed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
-    Allowed,
     Denied,
     /// Reported, not enforced: `capability::deputy_prefixes` names a confused
     /// deputy without refusing it, so the run continues either way.
@@ -147,22 +149,13 @@ impl CommandOrigin {
 impl Decision {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Allowed => "allowed",
             Self::Denied => "denied",
             Self::Flagged => "flagged",
         }
     }
 
-    /// An enforced check settles as `Denied` exactly when the policy refused
-    /// it; `Flagged` belongs to the advisory checks, which never take this
-    /// door.
-    pub fn of_allowed(allowed: bool) -> Self {
-        if allowed { Self::Allowed } else { Self::Denied }
-    }
-
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "allowed" => Self::Allowed,
             "denied" => Self::Denied,
             "flagged" => Self::Flagged,
             _ => return None,
@@ -225,11 +218,20 @@ fn lease_class_parse(s: &str) -> Option<LeaseClass> {
     })
 }
 
-/// The projected keys every observation carries, plus the ones a capability
-/// check owns — what [`Observed::Capability`]'s spliced `fields` must not
-/// shadow, and what `from_value` subtracts to recover them.
-const ENVELOPE_KEYS: [&str; 7] = ["kind", "script", "line", "col", "start", "end", "principal"];
-const CAPABILITY_KEYS: [&str; 2] = ["resource", "decision"];
+/// `` `just x `` for a field that has a value, `` `none `` for one that does
+/// not: an absent before-image is a fact of its own, not a missing key.
+fn optional(v: Option<Value>) -> Value {
+    match v {
+        Some(v) => Value::Variant {
+            label: "just".into(),
+            payload: Some(Box::new(v)),
+        },
+        None => Value::Variant {
+            label: "none".into(),
+            payload: None,
+        },
+    }
+}
 
 impl Observation {
     /// An instantaneous door: the observation is stamped now, and its window
@@ -263,19 +265,18 @@ impl Observation {
         }
     }
 
-    /// The one map shape, shared by the sink broadcast, `audit { }`'s
-    /// children, and `--audit`'s JSON.  `error` and `principal` render as
+    /// The one record shape, shared by the sink broadcast, `audit { }`'s
+    /// trail, and `--audit`'s JSON.  `error` and `principal` render as
     /// strings, empty when the command did not fail and when nothing named a
     /// principal — a record field is always present, and neither a runtime
-    /// error message nor a user name is ever legitimately empty.  A write's
-    /// byte fields are omitted keys rather than nulls when absent.
+    /// error message nor a user name is ever legitimately empty.  An absent
+    /// byte field or subject is `` `none ``, never a missing key.
     pub fn to_value(&self) -> Value {
         #[allow(
             clippy::cast_possible_wrap,
             reason = "line/col are source positions bounded by source size, far below i64::MAX"
         )]
-        let mut pairs = vec![
-            ("kind".into(), Value::String(self.what.kind().into())),
+        Value::map(vec![
             ("script".into(), Value::String(self.site.script.clone())),
             ("line".into(), Value::Int(self.site.line as i64)),
             ("col".into(), Value::Int(self.site.col as i64)),
@@ -285,116 +286,34 @@ impl Observation {
                 "principal".into(),
                 Value::String(self.principal.clone().unwrap_or_default()),
             ),
-        ];
-        match &self.what {
-            Observed::Command {
-                argv,
-                status,
-                origin,
-                io,
-                error,
-                value,
-            } => {
-                let argv_list = argv.iter().map(|a| Value::String(a.clone())).collect();
-                pairs.extend([
-                    ("argv".into(), Value::list(argv_list)),
-                    ("status".into(), Value::Int(i64::from(*status))),
-                    ("origin".into(), Value::String(origin.as_str().into())),
-                    ("stdout".into(), Value::Bytes(io.stdout.clone())),
-                    ("stderr".into(), Value::Bytes(io.stderr.clone())),
-                    (
-                        "error".into(),
-                        Value::String(error.clone().unwrap_or_default()),
-                    ),
-                    ("value".into(), value.clone()),
-                ]);
-            }
-            Observed::Write {
-                path,
-                mode,
-                outcome,
-                new_bytes,
-                old_bytes,
-            } => {
-                pairs.extend([
-                    ("path".into(), Value::String(path.clone())),
-                    ("mode".into(), Value::String(mode_str(*mode).into())),
-                    ("outcome".into(), Value::String(outcome.as_str().into())),
-                ]);
-                if let Some(b) = new_bytes {
-                    pairs.push(("new_bytes".into(), Value::Bytes(b.clone())));
-                }
-                if let Some(b) = old_bytes {
-                    pairs.push(("old_bytes".into(), Value::Bytes(b.clone())));
-                }
-            }
-            Observed::Read { path } => {
-                pairs.push(("path".into(), Value::String(path.clone())));
-            }
-            Observed::Grep { scope, pattern } => {
-                pairs.extend([
-                    ("scope".into(), Value::String(scope.clone())),
-                    ("pattern".into(), Value::String(pattern.clone())),
-                ]);
-            }
-            Observed::Capability {
-                resource,
-                decision,
-                fields,
-            } => {
-                pairs.extend([
-                    ("resource".into(), Value::String(resource.clone())),
-                    ("decision".into(), Value::String(decision.as_str().into())),
-                ]);
-                pairs.extend(fields.iter().map(|(k, v)| (k.clone(), v.clone())));
-            }
-            Observed::Worker { id, cmd, class } => {
-                #[allow(
-                    clippy::cast_possible_wrap,
-                    reason = "a worker id is minted from a process-global counter, far below i64::MAX"
-                )]
-                pairs.extend([
-                    ("id".into(), Value::Int(id.0 as i64)),
-                    ("cmd".into(), Value::String(cmd.clone())),
-                    (
-                        "class".into(),
-                        Value::String(lease_class_str(*class).into()),
-                    ),
-                ]);
-            }
-            Observed::Act {
-                verb,
-                subject,
-                payload,
-                refused,
-            } => {
-                pairs.push(("verb".into(), Value::String(verb.clone())));
-                if let Some(subject) = subject {
-                    pairs.push(("subject".into(), Value::String(subject.clone())));
-                }
-                pairs.extend([
-                    ("payload".into(), Value::String(payload.clone())),
-                    ("refused".into(), Value::Bool(*refused)),
-                ]);
-            }
-        }
-        Value::map(pairs)
+            (
+                "what".into(),
+                Value::Variant {
+                    label: self.what.kind().into(),
+                    payload: Some(Box::new(self.what.to_payload())),
+                },
+            ),
+        ])
     }
 
     /// The protocol-facing projection: total where [`Self::to_value`] is not.
-    /// Every handle or closure reachable through a `value` field crosses as a
-    /// placeholder instead of vanishing; nothing about the envelope or any
-    /// first-order field changes, so a host decoder built against
-    /// [`Self::from_value`] reads it unmodified.
+    /// Nothing about the envelope or any first-order field changes, so a host
+    /// decoder built against [`Self::from_value`] reads it unmodified.
     pub fn to_wire(&self) -> Value {
         crate::serial::scrub(&self.to_value(), &crate::serial::no_wire_form)
     }
 
-    /// Inverse of [`Self::to_value`]; `None` for anything that is not a map
+    /// Inverse of [`Self::to_value`]; `None` for anything that is not a record
     /// this module built, so a host decoder can try the next shape.
     pub fn from_value(v: &Value) -> Option<Self> {
         let Value::Map(m) = v else { return None };
-        let what = Observed::from_map(m)?;
+        let Value::Variant { label, payload } = m.get("what")? else {
+            return None;
+        };
+        let Value::Map(fact) = payload.as_deref()? else {
+            return None;
+        };
+        let what = Observed::from_payload(label, fact)?;
         #[allow(
             clippy::cast_sign_loss,
             clippy::cast_possible_truncation,
@@ -416,25 +335,121 @@ impl Observation {
 }
 
 impl Observed {
-    /// The `kind` tag naming this variant in the projected map.
+    /// The tag this fact carries in the projected `what`: the kind is the tag,
+    /// so there is no second place for it to be recorded.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Command { .. } => "command",
             Self::Write { .. } => "write",
             Self::Read { .. } => "read",
             Self::Grep { .. } => "grep",
-            Self::Capability { .. } => "capability-check",
+            Self::Capability { .. } => "check",
             Self::Worker { .. } => "worker",
             Self::Act { .. } => "act",
         }
     }
 
-    fn from_map(m: &Map) -> Option<Self> {
+    /// The tagged variant's payload: one closed record per kind.
+    fn to_payload(&self) -> Value {
+        match self {
+            Self::Command {
+                argv,
+                status,
+                origin,
+                io,
+                error,
+            } => {
+                let argv_list = argv.iter().map(|a| Value::String(a.clone())).collect();
+                Value::map(vec![
+                    ("argv".into(), Value::list(argv_list)),
+                    ("status".into(), Value::Int(i64::from(*status))),
+                    ("origin".into(), Value::String(origin.as_str().into())),
+                    ("stdout".into(), Value::Bytes(io.stdout.clone())),
+                    ("stderr".into(), Value::Bytes(io.stderr.clone())),
+                    (
+                        "error".into(),
+                        Value::String(error.clone().unwrap_or_default()),
+                    ),
+                ])
+            }
+            Self::Write {
+                path,
+                mode,
+                outcome,
+                new_bytes,
+                old_bytes,
+            } => Value::map(vec![
+                ("path".into(), Value::String(path.clone())),
+                ("mode".into(), Value::String(mode_str(*mode).into())),
+                ("outcome".into(), Value::String(outcome.as_str().into())),
+                (
+                    "new_bytes".into(),
+                    optional(new_bytes.clone().map(Value::Bytes)),
+                ),
+                (
+                    "old_bytes".into(),
+                    optional(old_bytes.clone().map(Value::Bytes)),
+                ),
+            ]),
+            Self::Read { path } => {
+                Value::map(vec![("path".into(), Value::String(path.clone()))])
+            }
+            Self::Grep { scope, pattern } => Value::map(vec![
+                ("scope".into(), Value::String(scope.clone())),
+                ("pattern".into(), Value::String(pattern.clone())),
+            ]),
+            Self::Capability {
+                resource,
+                decision,
+                fields,
+            } => Value::map(vec![
+                ("resource".into(), Value::String(resource.clone())),
+                ("decision".into(), Value::String(decision.as_str().into())),
+                (
+                    "fields".into(),
+                    Value::map(
+                        fields
+                            .iter()
+                            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                            .collect(),
+                    ),
+                ),
+            ]),
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "a worker id is minted from a process-global counter, far below i64::MAX"
+            )]
+            Self::Worker { id, cmd, class } => Value::map(vec![
+                ("id".into(), Value::Int(id.0 as i64)),
+                ("cmd".into(), Value::String(cmd.clone())),
+                (
+                    "class".into(),
+                    Value::String(lease_class_str(*class).into()),
+                ),
+            ]),
+            Self::Act {
+                verb,
+                subject,
+                payload,
+                refused,
+            } => Value::map(vec![
+                ("verb".into(), Value::String(verb.clone())),
+                (
+                    "subject".into(),
+                    optional(subject.clone().map(Value::String)),
+                ),
+                ("payload".into(), Value::String(payload.clone())),
+                ("refused".into(), Value::Bool(*refused)),
+            ]),
+        }
+    }
+
+    fn from_payload(tag: &str, m: &Map) -> Option<Self> {
         #[allow(
             clippy::cast_possible_truncation,
             reason = "an exit status was projected from i32 and round-trips exactly"
         )]
-        Some(match str_at(m, "kind")?.as_str() {
+        Some(match tag {
             "command" => Self::Command {
                 argv: strings_at(m, "argv"),
                 status: int_at(m, "status")? as i32,
@@ -444,14 +459,13 @@ impl Observed {
                     stderr: bytes_at(m, "stderr").unwrap_or_default(),
                 },
                 error: Some(str_at(m, "error")?).filter(|e| !e.is_empty()),
-                value: m.get("value")?.clone(),
             },
             "write" => Self::Write {
                 path: str_at(m, "path")?,
                 mode: mode_parse(&str_at(m, "mode")?)?,
                 outcome: WriteOutcome::parse(&str_at(m, "outcome")?)?,
-                new_bytes: bytes_at(m, "new_bytes"),
-                old_bytes: bytes_at(m, "old_bytes"),
+                new_bytes: optional_at(m, "new_bytes", bytes_of)?,
+                old_bytes: optional_at(m, "old_bytes", bytes_of)?,
             },
             "read" => Self::Read {
                 path: str_at(m, "path")?,
@@ -460,17 +474,10 @@ impl Observed {
                 scope: str_at(m, "scope")?,
                 pattern: str_at(m, "pattern")?,
             },
-            "capability-check" => Self::Capability {
+            "check" => Self::Capability {
                 resource: str_at(m, "resource")?,
                 decision: Decision::parse(&str_at(m, "decision")?)?,
-                fields: m
-                    .iter()
-                    .filter(|(k, _)| {
-                        !ENVELOPE_KEYS.contains(&k.as_str())
-                            && !CAPABILITY_KEYS.contains(&k.as_str())
-                    })
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
+                fields: string_map_at(m, "fields")?,
             },
             #[allow(
                 clippy::cast_sign_loss,
@@ -483,7 +490,7 @@ impl Observed {
             },
             "act" => Self::Act {
                 verb: str_at(m, "verb")?,
-                subject: str_at(m, "subject"),
+                subject: optional_at(m, "subject", string_of)?,
                 payload: str_at(m, "payload")?,
                 refused: bool_at(m, "refused")?,
             },
@@ -492,11 +499,22 @@ impl Observed {
     }
 }
 
-fn str_at(m: &Map, key: &str) -> Option<String> {
-    match m.get(key)? {
+fn string_of(v: &Value) -> Option<String> {
+    match v {
         Value::String(s) => Some(s.clone()),
         _ => None,
     }
+}
+
+fn bytes_of(v: &Value) -> Option<Vec<u8>> {
+    match v {
+        Value::Bytes(b) => Some(b.clone()),
+        _ => None,
+    }
+}
+
+fn str_at(m: &Map, key: &str) -> Option<String> {
+    string_of(m.get(key)?)
 }
 
 fn int_at(m: &Map, key: &str) -> Option<i64> {
@@ -514,10 +532,31 @@ fn bool_at(m: &Map, key: &str) -> Option<bool> {
 }
 
 fn bytes_at(m: &Map, key: &str) -> Option<Vec<u8>> {
+    bytes_of(m.get(key)?)
+}
+
+/// Inverse of [`optional`]: the outer `None` means the field was not the
+/// option [`Observation::to_value`] projects, the inner one the honest absence.
+#[allow(
+    clippy::option_option,
+    reason = "the two layers are different facts: a malformed field and an absent one"
+)]
+fn optional_at<T>(m: &Map, key: &str, of: fn(&Value) -> Option<T>) -> Option<Option<T>> {
     match m.get(key)? {
-        Value::Bytes(b) => Some(b.clone()),
+        Value::Variant { label, payload } if label == "just" => of(payload.as_deref()?).map(Some),
+        Value::Variant { label, payload: None } if label == "none" => Some(None),
         _ => None,
     }
+}
+
+fn string_map_at(m: &Map, key: &str) -> Option<BTreeMap<String, String>> {
+    let Value::Map(fields) = m.get(key)? else {
+        return None;
+    };
+    fields
+        .iter()
+        .map(|(k, v)| Some((k.clone(), string_of(v)?)))
+        .collect()
 }
 
 fn strings_at(m: &Map, key: &str) -> Vec<String> {
@@ -536,7 +575,6 @@ fn strings_at(m: &Map, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serial::OPAQUE_TAG;
 
     fn site() -> CallSite {
         CallSite {
@@ -552,6 +590,24 @@ mod tests {
         assert_eq!(back.as_ref(), Some(&obs));
     }
 
+    /// The tag and the record behind it, out of a projection's `what`.
+    fn fact_of(v: &Value) -> (String, Map) {
+        let Value::Map(m) = v else {
+            panic!("an observation projects as a record")
+        };
+        let Some(Value::Variant {
+            label,
+            payload: Some(fact),
+        }) = m.get("what")
+        else {
+            panic!("`what` is a tagged fact")
+        };
+        let Value::Map(fact) = fact.as_ref() else {
+            panic!("a fact projects as a record")
+        };
+        (label.clone(), fact.clone())
+    }
+
     #[test]
     fn every_variant_round_trips_through_its_projection() {
         round_trips(Observed::Command {
@@ -563,7 +619,6 @@ mod tests {
                 stderr: b"err".to_vec(),
             },
             error: Some("spawn failed".into()),
-            value: Value::Unit,
         });
         round_trips(Observed::Command {
             argv: vec!["len".into()],
@@ -571,7 +626,6 @@ mod tests {
             origin: CommandOrigin::Builtin,
             io: AuditIo::default(),
             error: None,
-            value: Value::Int(3),
         });
         round_trips(Observed::Write {
             path: "out.txt".into(),
@@ -598,8 +652,8 @@ mod tests {
             resource: "fs".into(),
             decision: Decision::Denied,
             fields: [
-                ("op".to_string(), Value::String("write".into())),
-                ("path".to_string(), Value::String("/etc/passwd".into())),
+                ("op".to_string(), "write".to_string()),
+                ("path".to_string(), "/etc/passwd".to_string()),
             ]
             .into_iter()
             .collect(),
@@ -634,154 +688,118 @@ mod tests {
         assert!(Observation::from_value(&Value::map(vec![])).is_none());
         assert!(
             Observation::from_value(&Value::map(vec![(
-                "kind".into(),
-                Value::String("teleport".into())
+                "what".into(),
+                Value::Variant {
+                    label: "teleport".into(),
+                    payload: Some(Box::new(Value::map(vec![]))),
+                }
             )]))
             .is_none()
         );
+        assert!(
+            Observation::from_value(&Value::map(vec![(
+                "what".into(),
+                Value::String("command".into())
+            )]))
+            .is_none(),
+            "an untagged `what` is not a fact"
+        );
     }
 
-    /// A `Handle` with no worker behind it — just enough to exercise
-    /// [`Observation::to_wire`]'s totality, never run.
-    fn dummy_handle() -> Value {
-        use crate::types::{HandleInner, HandleState};
-        use std::sync::{Arc, Mutex};
-        Value::Handle(Box::new(HandleInner {
-            result: Arc::new(Mutex::new(None)),
-            cached: Arc::new(Mutex::new(None)),
-            state: Arc::new(Mutex::new(HandleState::Running)),
-            stdout_buf: crate::io::ByteBuffer::default(),
-            stderr_buf: crate::io::ByteBuffer::default(),
-            surface_buf: Arc::new(Mutex::new(Vec::new())),
-            joined: Arc::new(Mutex::new(false)),
-            last_observed: Arc::new(Mutex::new(std::time::Instant::now())),
-            cmd: "<test>".into(),
-            cancel: crate::process::CancelScope::default(),
-        }))
-    }
-
-    /// A `Handle` reachable through `value` projects to its `opaque`
-    /// placeholder rather than vanishing, and the placeholder round-trips
-    /// through `from_value` as the tagged `Variant` it is.
+    /// The tag *is* the kind, so no `kind` field stands beside it to disagree
+    /// with the payload it labels.
     #[test]
-    fn to_wire_scrubs_a_handle_and_the_placeholder_round_trips() {
+    fn the_tag_is_the_kind_and_stands_alone() {
         let obs = Observation::instant(
             site(),
-            Some("alex".into()),
-            Observed::Command {
-                argv: vec!["spawn".into()],
-                status: 0,
-                origin: CommandOrigin::Builtin,
-                io: AuditIo::default(),
-                error: None,
-                value: dummy_handle(),
+            None,
+            Observed::Read {
+                path: "in.txt".into(),
             },
         );
-        let wire = obs.to_wire();
-        let Value::Map(m) = &wire else {
-            panic!("to_wire projects as a map")
+        let value = obs.to_value();
+        let (tag, fact) = fact_of(&value);
+        assert_eq!(tag, "read");
+        assert_eq!(fact.get("path"), Some(&Value::String("in.txt".into())));
+        let Value::Map(m) = &value else {
+            panic!("an observation projects as a record")
         };
+        assert!(!m.contains_key("kind"));
+    }
+
+    /// An absent before-image is `` `none ``, not a missing key: a reader must
+    /// tell "unknown" from "empty", and both round-trip.
+    #[test]
+    fn an_absent_byte_field_projects_as_none() {
+        let what = Observed::Write {
+            path: "out.txt".into(),
+            mode: RedirectMode::Write,
+            outcome: WriteOutcome::Committed,
+            new_bytes: Some(Vec::new()),
+            old_bytes: None,
+        };
+        let obs = Observation::instant(site(), None, what.clone());
+        let (_, fact) = fact_of(&obs.to_value());
         assert_eq!(
-            m.get("value"),
+            fact.get("new_bytes"),
             Some(&Value::Variant {
-                label: OPAQUE_TAG.to_string(),
-                payload: Some(Box::new(Value::map(vec![(
-                    "type".to_string(),
-                    Value::String("handle".to_string())
-                )])))
+                label: "just".into(),
+                payload: Some(Box::new(Value::Bytes(Vec::new()))),
+            }),
+            "an empty new side is known, and known-empty"
+        );
+        assert_eq!(
+            fact.get("old_bytes"),
+            Some(&Value::Variant {
+                label: "none".into(),
+                payload: None,
             })
         );
-        let back = Observation::from_value(&wire).expect("the placeholder decodes");
-        let Observed::Command { value, .. } = back.what else {
-            panic!("expected a command")
-        };
-        assert_eq!(value, m.get("value").unwrap().clone());
+        round_trips(what);
     }
 
     /// The record leg's full round trip, as `Display::Observation` retraces
     /// it on resume: `to_wire` scrubs, `FOValue::try_from` encodes,
     /// `serde_json` crosses the log, `FOValue`'s own `Deserialize` decodes,
-    /// and `from_value` rebuilds. Bytes and a variant survive intact; a
-    /// handle nested inside that same surviving variant still crosses as its
-    /// opaque placeholder, per `to_wire`'s totality.
+    /// and `from_value` rebuilds.  Bytes, the `what` tag, and both legs of an
+    /// optional byte field survive intact.
     #[test]
     fn survives_to_wire_fovalue_json_and_back() {
         use crate::serial::FOValue;
 
-        let obs = Observation::spanning(
-            site(),
-            10,
-            20,
-            Some("alex".into()),
+        for what in [
             Observed::Command {
-                argv: vec!["spawn".into()],
+                argv: vec!["git".into(), "status".into()],
                 status: 0,
-                origin: CommandOrigin::Builtin,
+                origin: CommandOrigin::External,
                 io: AuditIo {
                     stdout: b"out".to_vec(),
                     stderr: b"err".to_vec(),
                 },
                 error: None,
-                value: Value::Variant {
-                    label: "ok".into(),
-                    payload: Some(Box::new(dummy_handle())),
-                },
             },
-        );
-
-        let fo =
-            FOValue::try_from(&obs.to_wire()).expect("to_wire scrubs every leaf try_from rejects");
-        let json = serde_json::to_vec(&fo).expect("serialise FOValue");
-        let back_fo: FOValue = serde_json::from_slice(&json).expect("deserialise FOValue");
-        let back = Observation::from_value(&Value::from(back_fo)).expect("the wire form decodes");
-
-        let Observed::Command { io, value, .. } = &back.what else {
-            panic!("expected a command")
-        };
-        assert_eq!(io.stdout, b"out", "bytes survive the round trip");
-        assert_eq!(io.stderr, b"err", "bytes survive the round trip");
-        let Value::Variant { label, payload } = value else {
-            panic!("expected the outer variant to survive")
-        };
-        assert_eq!(label, "ok");
-        assert_eq!(
-            payload.as_deref(),
-            Some(&Value::Variant {
-                label: OPAQUE_TAG.to_string(),
-                payload: Some(Box::new(Value::map(vec![(
-                    "type".to_string(),
-                    Value::String("handle".to_string())
-                )])))
-            }),
-            "the handle crosses as its placeholder, nested inside the surviving variant"
-        );
-    }
-
-    /// A genuine string equal to the placeholder's own tag is never mistaken
-    /// for one: the placeholder is a tagged `Variant`, a string is a plain
-    /// leaf, and `to_wire` leaves the string untouched.
-    #[test]
-    fn a_genuine_string_cannot_impersonate_the_placeholder() {
-        let obs = Observation::instant(
-            site(),
-            Some("alex".into()),
-            Observed::Command {
-                argv: vec!["echo".into()],
-                status: 0,
-                origin: CommandOrigin::Builtin,
-                io: AuditIo::default(),
-                error: None,
-                value: Value::String(OPAQUE_TAG.to_string()),
+            Observed::Write {
+                path: "out.txt".into(),
+                mode: RedirectMode::Write,
+                outcome: WriteOutcome::Committed,
+                new_bytes: Some(b"new".to_vec()),
+                old_bytes: None,
             },
-        );
-        let Value::Map(m) = obs.to_wire() else {
-            panic!("to_wire projects as a map")
-        };
-        assert_eq!(m.get("value"), Some(&Value::String(OPAQUE_TAG.to_string())));
+        ] {
+            let obs = Observation::spanning(site(), 10, 20, Some("alex".into()), what);
+            let fo = FOValue::try_from(&obs.to_wire())
+                .expect("to_wire scrubs every leaf try_from rejects");
+            let json = serde_json::to_vec(&fo).expect("serialise FOValue");
+            let back_fo: FOValue = serde_json::from_slice(&json).expect("deserialise FOValue");
+            let back =
+                Observation::from_value(&Value::from(back_fo)).expect("the wire form decodes");
+            assert_eq!(back, obs);
+        }
     }
 
     /// A denied check's decision is a field of its own, never an exit status
-    /// standing in for one.
+    /// standing in for one, and its detail is a nested map rather than fields
+    /// spliced beside the envelope.
     #[test]
     fn a_capability_decision_projects_as_itself() {
         let obs = Observation::instant(
@@ -789,14 +807,20 @@ mod tests {
             Some("alex".into()),
             Observed::Capability {
                 resource: "exec".into(),
-                decision: Decision::of_allowed(false),
-                fields: Map::new(),
+                decision: Decision::Denied,
+                fields: BTreeMap::from([("name".to_string(), "curl".to_string())]),
             },
         );
-        let Value::Map(m) = obs.to_value() else {
-            panic!("an observation projects as a map")
-        };
-        assert_eq!(str_at(&m, "decision").as_deref(), Some("denied"));
-        assert!(!m.contains_key("status"));
+        let (tag, fact) = fact_of(&obs.to_value());
+        assert_eq!(tag, "check");
+        assert_eq!(str_at(&fact, "decision").as_deref(), Some("denied"));
+        assert!(!fact.contains_key("status"));
+        assert_eq!(
+            fact.get("fields"),
+            Some(&Value::map(vec![(
+                "name".into(),
+                Value::String("curl".into())
+            )]))
+        );
     }
 }

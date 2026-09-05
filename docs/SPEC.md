@@ -1732,15 +1732,19 @@ receives this record:
 ]
 ```
 
-`cmd` is the last failing execution call recorded for the body, including a
-builtin call, or `<runtime>` when no failing call was recorded. `line` and
-`col` identify the failure's source position. The body and handler must produce
+`cmd` names the command whose dispatch failed — a builtin call included — and
+is `<runtime>` when the failure came from no command. The dispatch stamps its
+own name on the error as the error passes through, so the innermost failing
+dispatch wins, exactly as the innermost source span does. `line` and `col`
+identify the failure's source position. The body and handler must produce
 compatible results.
 
-`try` is control flow, not output capture. Bytes written to standard output or
-standard error continue through the surrounding byte pipes. The error record's
-`message` is the structured failure message; it is not captured stderr. Use
-`audit` when command bytes and the full audit trail are required.
+`try` is control flow, not output capture, and it observes nothing: it reads no
+audit trail, retains no bytes, and costs no more than its own frame. Bytes
+written to standard output or standard error continue through the surrounding
+byte pipes. The error record's `message` is the structured failure message; it
+is not captured stderr. Use `audit` when command bytes and the full trail are
+required — its `` `err `` outcome carries this same record (§13.3).
 
 A handler that succeeds recovers the failure and leaves status 0. `exit` and
 internal tail-call control bypass the handler. Cancellation may be observed
@@ -2564,7 +2568,6 @@ A capability map accepts exactly these keys:
 - `fs`
 - `net`
 - `detach`
-- `audit`
 - `editor`
 - `shell`
 
@@ -2692,39 +2695,35 @@ whether the survivor may be born.
 
 The `detach` command is present only when the host installs it together with a birth budget.
 
-### 12.7. `audit`
+### 12.7. Recorded decisions
 
-`audit: true` asks ral to record capability decisions in an audit collection
-that is already active. It does not start collection by itself. Collection may
-come from the language-level `audit { ... }` form or from batch `--audit`.
+A grant has no dimension for recording. Whether a capability decision is
+recorded is decided by the decision, not by the grant that made it: whenever an
+audit trail is open — from the language-level `audit { ... }` form or from batch
+`--audit` — every `exec` and ral-owned `fs` **denial** is recorded as a
+`` `check `` observation (§13.3), and no allowed check ever is. There is
+nothing to ask for and nothing to switch off, so no grant can hide a denial
+from a trail its caller opened.
 
-When both conditions hold, ral records separate `capability-check` observations
-for `exec` and ral-owned `fs` decisions, including denials. A check is a leaf
-with no arguments, output, error, or children. Its `resource` is `exec` or
-`fs` and its `decision` is `allowed` or `denied`; both sit at the top level of
-the observation, beside whatever resource-specific fields the check carries —
-no field is duplicated into a separate `value`. Exec observations identify the
-command; a point-of-use check also carries its evaluated arguments and may
-include its resolved name, while an early head denial has no arguments yet.
-Filesystem observations identify the operation and path, and an allowed
-observation may include the granting prefix.
+An exec check identifies the command; a point-of-use check also carries its
+evaluated arguments and its resolved name, while an early head denial has no
+arguments yet. A filesystem check identifies the operation and the path. A
+denied head admission also reaches the surface rail, whether or not a trail is
+open.
 
-`grant` is transparent to the audit model: it does not contribute a wrapper
-node. Capability checks, the body's builtin, external, or bundled command
-calls, and any redirect reads or writes appear directly in the nearest
-language-level audit report or synthetic batch run root. Nested grants do not
-introduce additional tree levels.
+`grant` is transparent to the audit model: it contributes no observation of its
+own. Its body's checks, command calls, and redirect reads and writes land
+directly in the trail that lexically owns them, and nested grants add no
+levels.
 
-Entering a newly composed capability frame can also emit a `deputy` / `flagged`
-capability observation when an executable directory prefix is writable, since
-the body could replace or create a program there. Its `prefixes` field lists
-the overlapping regions. This finding reports the confused-deputy shape; it
-does not deny it.
+Entering a newly composed capability frame can also record a `deputy` /
+`flagged` check when an executable directory prefix is writable, since the body
+could replace or create a program there — one observation per flagged prefix,
+naming it in `fields[prefix]`. This finding reports the confused-deputy shape;
+it does not deny it.
 
-Audit enablement accumulates across nested grants: once any active layer has
-`audit: true`, inner layers continue to emit eligible checks even if they omit
-the flag. The `net`, `detach`, `editor`, and `shell` Boolean gates do not emit
-individual capability-check observations.
+The `net`, `detach`, `editor`, and `shell` Boolean gates record no individual
+checks.
 
 ### 12.8. `editor` and `shell`
 
@@ -2841,8 +2840,8 @@ ral keeps three kinds of evidence distinct:
 
 - a runtime error is a value-like description of failed computation;
 - a diagnostic explains that failure to a person, usually against source text;
-- an audit tree records what ran, what it returned, and which bytes crossed
-  its file descriptors.
+- an audit trail records what ran, how it settled, and which bytes crossed its
+  file descriptors.
 
 The distinctions matter. A command may write arbitrary bytes to fd 2 without
 failing. A command may fail without writing any bytes to fd 2. ral's explanation
@@ -2896,12 +2895,14 @@ do not abbreviate an error record.
 ]
 ```
 
-`cmd` names the last failing command in the recorded subtree when one exists,
-and is `<runtime>` when no command can be identified. `line` and `col` are
-one-based source coordinates, or zero when no position is available. The
-record deliberately contains no output bytes. The failed command's raw fd 1
-and fd 2 bytes have already followed their ordinary destinations; use `audit`
-when those bytes must also be retained as evidence.
+`cmd` is the name the failing dispatch stamped on the error, and `<runtime>`
+when no command was involved. `line` and `col` are one-based source
+coordinates, or zero when no position is available. The record deliberately
+contains no output bytes. The failed command's raw fd 1 and fd 2 bytes have
+already followed their ordinary destinations; use `audit` when those bytes must
+also be retained as evidence. This is the record `audit`'s `` `err `` outcome
+and `poll`'s settled `` `err `` outcome carry, so failure reads the same
+wherever it is met.
 
 Static checking rejects a literal `fail [status: 0]`. A dynamically computed
 zero is rejected at runtime with a suggestion to use `return` for a clean
@@ -2959,8 +2960,8 @@ standard error; they are never a payload and never pipeline traffic.
 
 ### 13.3. The audit trail
 
-`audit { body }` evaluates `body` in a fresh lexical audit collection and
-returns a structural report:
+`audit { body }` evaluates `body` with a fresh lexical trail active and
+returns a **report**:
 
 ```ral
 let report = audit {
@@ -2968,54 +2969,109 @@ let report = audit {
     verify-index
 }
 
-echo $report[status]
-echo $report[children][0][argv][0]
-```
-
-Auditing is observational. Captured output is teed into the tree while the
-same bytes continue to their ordinary fd 1 and fd 2 destinations. `audit`
-does not change where bytes go or turn a returned value into pipeline traffic.
-Process-staged pipeline fragments are transported back and merged into the
-surrounding collection; crossing a process boundary does not make a stage
-disappear from the nearest real audit parent.
-
-The report is not itself an observation. It has four fields:
-
-```text
-[
-    status:   Int,
-    value:    A,
-    error:    String,
-    children: [Observation],
+case $report[outcome] [
+    `ok:  { |value| return $value },
+    `err: { |error| echo $error[message] },
 ]
 ```
 
-`status`, `value`, and `error` describe the audited body's outcome. `error` is
-the empty string on success, and otherwise the failure's message followed by its
-hint, if it carries one, so that reading a report as data reveals no less than
-rendering the same failure as a diagnostic does. `children` is the flat list of
-observations made during the body's dynamic extent: commands, redirect reads
-and writes, and capability checks. It is not itself a tree — an observation
-carries no `children` of its own, so nesting comes only from where `audit`,
-`try`, `guard`, `grant`, and `within` collect, never from one observation
-wrapping another.
+Auditing is observational. Captured output is teed into the trail while the
+same bytes continue to their ordinary fd 1 and fd 2 destinations. `audit`
+does not change where bytes go or turn a returned value into pipeline traffic.
+Process-staged pipeline fragments are transported back and merged into the
+surrounding trail; crossing a process boundary does not make a stage disappear
+from the trail that lexically owns it.
+
+The report is not itself an observation. It has two fields:
+
+```text
+[
+    outcome: <`ok A | `err [cmd: String, status: Int, message: String,
+                            line: Int, col: Int]>,
+    trail:   [Observation],
+]
+```
+
+`outcome` says how the body settled. `` `ok `` carries the body's value.
+`` `err `` carries exactly the error record `try` hands its handler (§8.6), so
+one outcome vocabulary serves `try`, `poll` (§11.2), and `audit`: a reader who
+can read one can read all three. Its `message` is the runtime error's message
+alone — a hint is advice for a person, and `audit` returns data, so no hint is
+appended.
+
+`audit` therefore handles an ordinary runtime error as data: evaluating the
+`audit` expression succeeds, with the failure in `outcome`. Control escapes are
+different — `exit` propagates out of `audit` rather than being converted into a
+returned report.
+
+Two prelude functions read a report without a `case`:
+
+| Call | Result |
+|---|---|
+| `commands $report` | the `` `command `` payloads of `$report[trail]`, in order |
+| `succeeded $report` | `Bool`, true exactly when `$report[outcome]` is `` `ok `` |
+
+```ral
+let r = audit { grep -c ERROR app.log }
+if !{succeeded $r} {
+    echo !{bytes-to-string !{commands $r}[0][stdout]}
+} else {
+    echo 'search failed'
+}
+```
+
+#### Settlement order
+
+`trail` is the flat list of every observation the body's dynamic extent
+produced. It is not a tree: an observation carries no children of its own.
+
+Observations appear in **settlement order** — each is appended when the fact it
+records becomes true, not when the construct that produced it began. So a
+command's observation lands *after* the observations of everything that command
+ran, and a redirect's `write` lands when the write settles rather than when the
+redirect was parsed. The trail is thus a post-order traversal of what happened.
+
+Nesting is recovered from the timestamps, by containment: one observation's
+`start`–`end` interval contains another's exactly when the first's extent
+contained the second's. Containment is the only nesting the trail carries, and
+it needs no parent pointers, so a fragment transported back across a process
+boundary stays as readable as one recorded in place.
+
+#### Observations
 
 Every observation shares this common shape:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `kind` | `String` | `command`, `write`, `read`, `grep`, or `capability-check` |
 | `script` | `String` | source or run name |
 | `line` | `Int` | one-based source line; zero for a run root |
 | `col` | `Int` | one-based source column; zero for a run root |
 | `start` | `Int` | microseconds since the Unix epoch |
 | `end` | `Int` | microseconds since the Unix epoch |
 | `principal` | `String` | shell principal when the observation was recorded; empty where nothing named one |
+| `what` | `Variant` | which kind of fact this is, together with its own fields |
 
-`grep` is raised by host doors — exarch's `grep-files` — not by any door in
-core itself.
+There is no `kind` field. The tag of `what` *is* the kind, so a reader
+dispatches with `case` and the checker decides exhaustiveness (§8.3):
 
-A `command` observation — a builtin, external, or bundled call — adds:
+```text
+what: `command [argv: [String], status: Int, origin: String,
+                stdout: Bytes, stderr: Bytes, error: String]
+    | `write   [path: String, mode: String, outcome: String,
+                new_bytes: <`just Bytes | `none>,
+                old_bytes: <`just Bytes | `none>]
+    | `read    [path: String]
+    | `grep    [scope: String, pattern: String]
+    | `check   [resource: String, decision: String, fields: Map String]
+    | `worker  [id: Int, cmd: String, class: String]
+    | `act     [verb: String, subject: <`just String | `none>,
+                payload: String, refused: Bool]
+```
+
+`grep` and `act` are raised by host doors — exarch's `grep-files` and its
+committed harness acts — not by any door in core itself.
+
+A `` `command `` observation records a builtin, external, or bundled call:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3025,29 +3081,64 @@ A `command` observation — a builtin, external, or bundled call — adds:
 | `stdout` | `Bytes` | raw bytes observed on fd 1 |
 | `stderr` | `Bytes` | raw bytes observed on fd 2 |
 | `error` | `String` | ral's runtime error message, or the empty string |
-| `value` | any | returned value, or `Unit` for an external command |
 
-A `write` observation — a `>` / `>>` / `>~` redirect settling — adds `path`,
-`mode` (`write`, `append`, or `stream`), and `outcome` (`committed`, `aborted`,
-or `failed`), plus `new_bytes` on a commit and `old_bytes` on an atomic
-overwrite of existing content; both are omitted, not null, when there is
-nothing to show. A `read` observation — a `< file` redirect opening — adds
-only `path`.
+A command's returned value is not among them. `argv`, the status, and the bytes
+are the evidence a later reader can act on; a process-local or executable value
+has no honest projection, and an external command has no value to project.
+
+A `` `write `` observation records a `>` / `>>` / `>~` redirect settling:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | `String` | the redirect's resolved target |
+| `mode` | `String` | `write`, `append`, or `stream` |
+| `outcome` | `String` | `committed`, `aborted`, or `failed` |
+| `new_bytes` | optional `Bytes` | the committed content, on a commit |
+| `old_bytes` | optional `Bytes` | the replaced content, on an atomic overwrite of existing content |
+
+An optional field is a variant, `` `just `` of the value or `` `none ``. Both
+byte fields are always present: an absent image is `` `none ``, never a missing
+key, so a reader eliminates it with `case` rather than testing for a key, and
+"there was no before-image" stays a fact the trail states rather than one the
+reader infers from silence.
+
+A `` `read `` observation — a `< file` redirect opening — carries only `path`.
+A `` `grep `` observation carries the `scope` searched and the `pattern`
+searched for. A `` `check `` observation records a capability decision and is
+described below.
+
+A `` `worker `` observation records a worker's birth:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | `Int` | the worker's registry identifier |
+| `cmd` | `String` | what it was born to run |
+| `class` | `String` | `worker` or `durable` |
+
+An `` `act `` observation records an act the host committed:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `verb` | `String` | the act performed |
+| `subject` | optional `String` | what it acted on, where the act names one |
+| `payload` | `String` | the act's rendered argument |
+| `refused` | `Bool` | true when the host refused the act |
 
 When an atomic `>` commit fails after the command itself exited cleanly, the
-`command` observation reports the failed commit, not the child's own status:
-`status` is nonzero and `error` names the commit failure.
+`` `command `` observation reports the failed commit, not the child's own
+status: `status` is nonzero and `error` names the commit failure.
 
-An observation's `error` field is present even on success, where it is the
+A `` `command ``'s `error` field is present even on success, where it is the
 empty string. It is populated only from ral's runtime-error path; it is not
 copied from `stderr`, and a nonzero status need not imply a nonempty `error`.
 Conversely, `stderr` contains only bytes observed on fd 2. It never contains
 synthetic runtime prose merely because a command failed.
 
-Captured `stderr` is limited to the first 64 KiB per command observation.
-There is no truncation marker. Captured `stdout` has no corresponding cap.
-These are retention rules, not I/O limits: all bytes still stream to their
-ordinary destination.
+`stdout` and `stderr` are retained under one rule: each is capped at 16 MiB —
+the same capture cap a worker's buffers use (§11.3) — and at the cap ral
+appends one truncation marker and discards the rest. Neither stream is
+privileged over the other. These are retention rules, not I/O limits: every
+byte still streams to its ordinary destination.
 
 Command observations cover public builtins, external commands, bundled
 commands, and pipeline stages. Arguments are recorded after evaluation and
@@ -3062,43 +3153,56 @@ builtin call that performs an iteration, such as `each` or `map`, is still a
 real builtin call and is recorded once under the ordinary rule.
 
 Commands, reads, and writes performed inside a transparent function, form,
-scope, or iteration remain visible. They attach directly to the nearest real
-audit parent rather than to a synthetic wrapper. A function that only computes
-and returns a value may therefore add no observation at all. A nested `audit`
-returns its own report, while its own observations also merge directly into
-an enclosing audit collection.
+scope, or iteration remain visible. They land in the trail that lexically owns
+them rather than under a synthetic wrapper. A function that only computes and
+returns a value may therefore add no observation at all. A nested `audit`
+returns its own report, while its own observations also merge into an
+enclosing trail.
 
-`try` always forces enough collection to identify a failed command, but it
-does not request byte retention by itself. Inside an enclosing `audit`, byte
-capture remains enabled: an inner `try` cannot silence an outer audit. `try`
-names the failing command from the last `command` observation whose `status`
-is nonzero — a capability check is never returned as `try`'s failing command.
-`try` still returns the body or handler result and does not add its own
-observation.
-
-`audit` handles an ordinary runtime error as data. Its returned report carries
-the failure status and message, and evaluating the `audit` expression itself
-succeeds with that record. It also records that status as the shell's.
-Control escapes are different: `exit` propagates out instead of being
-converted into a returned audit report.
+`try` does not consult the trail. The name of the failing command is stamped
+on the error by the dispatch that failed, so the innermost failing dispatch
+wins, exactly as the innermost source span does. `try` therefore costs nothing
+beyond its own frame: it forces no collection, requests no byte retention, and
+adds no observation. Inside an enclosing `audit`, byte capture remains enabled
+— an inner `try` cannot silence an outer audit.
 
 #### Capability checks
 
-Capability checks are recorded only when an audit trail is active and an
-enclosing capability grant requested `audit: true`. They use
-`kind: 'capability-check'`, are leaves, contain no arguments or I/O, and have
-equal `start` and `end` timestamps.
+Capability decisions are recorded as `` `check `` observations whenever a trail
+is open. `grant` has no dimension for asking and none for withholding: the
+decision itself settles whether it is recorded.
 
-A capability check's `resource` (`exec`, `fs`, or `deputy`) and `decision`
-(`allowed`, `denied`, or the advisory `flagged`) sit at its top level,
-together with the resource-specific fields —
-nothing is duplicated into a nested `value`, and a denial is never encoded as
-a status. A denial does not manufacture raw `stderr` bytes.
+- A **denial** is always recorded. It is a fact about authority that nothing
+  else in the trail attests.
+- An **allowed** check is never recorded. Everything it would attest is
+  already attested by the command, read, or write it let through.
+
+A denied *head admission* also reaches the surface rail, whether or not a
+trail is open. An `fs` or full-argv denial reaches the trail alone; the command
+it refused still surfaces in its own right, as a failed `` `command ``
+observation carrying the denial message.
+
+A check's fields are:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `resource` | `String` | `exec`, `fs`, or `deputy` |
+| `decision` | `String` | `denied`, or the advisory `flagged` |
+| `fields` | `Map String` | the resource-specific detail |
+
+A check is a leaf: no arguments, no I/O, and equal `start` and `end`
+timestamps. A denial is never encoded as a status, and it manufactures no raw
+`stderr` bytes.
+
+The confused-deputy advisory (§12.7) records one `` `check `` per flagged
+prefix, with `resource: deputy`, `decision: flagged`, and
+`fields: [prefix: …]` naming the writable executable-directory prefix. It
+reports that shape; it does not deny it.
 
 ### 13.4. Batch audit JSON
 
-For a script or `-c` program, `--audit` records the entire run and emits a JSON
-tree after execution:
+For a script or `-c` program, `--audit` records the entire run and emits its
+report as JSON after execution:
 
 ```text
 ral --audit script.ral
@@ -3108,12 +3212,16 @@ ral --audit --pretty -c 'echo hello'
 `--pretty` requires `--audit`. These flags are batch options for an explicit
 script or `-c`; they are not interactive or stdin-script options.
 
-The top-level JSON object has the same four-field shape as the language-level
-`audit` form's report — `status`, `value`, `error`, `children` — for the whole
-run rather than one block. `status` is the final process status chosen by the
-host, and `children` is the run's flat list of collected observations. An
-ordinary runtime failure fills `error`; an explicit `exit` is a control escape
-and leaves `error` empty.
+The top-level JSON object is the same two-field report as the language-level
+`audit` form's — `outcome` and `trail` — for the whole run rather than one
+block. `trail` is the run's flat list of observations, in settlement order. An
+ordinary runtime failure gives `` `err `` carrying the run's error record; an
+explicit `exit` at the root is a control escape rather than a failure, and
+gives `` `ok `` of `Unit`.
+
+The report does not carry the process exit status. That status is the host's,
+`--audit` does not change it, and a second copy inside the record could only
+disagree with it.
 
 The JSON projection favours legibility over round-trip fidelity:
 
@@ -3124,6 +3232,10 @@ The JSON projection favours legibility over round-trip fidelity:
 - executable or process-local values such as blocks, functions, natives, and
   handles become descriptive stubs.
 
+The variant rule is what shapes the report: `outcome` reads as
+`{"tag": "ok", "payload": …}` or `{"tag": "err", "payload": {…}}`, and each
+observation's `what` as `{"tag": "command", "payload": {…}}` and its kin.
+
 Compact mode writes one JSON document followed by a newline. Pretty mode
 writes the same data with indentation. Both write to fd 2. Program output is
 not suppressed: fd 1 remains ordinary stdout and raw program fd 2 bytes remain
@@ -3132,10 +3244,10 @@ program writes there, and with optional `RAL_TIMING` lines. fd 2 is not
 promised to be a standalone JSON stream.
 
 On a runtime failure, `--audit` suppresses the separate human diagnostic
-because the root's `error` already carries ral's explanation. It does not
-suppress the program's raw stderr. Parse, elaboration, and type errors happen
-before execution, so they produce their ordinary diagnostics and no audit
-tree. The program's real exit status is preserved; `--audit` does not turn a
+because the report's `` `err `` payload already carries ral's explanation. It
+does not suppress the program's raw stderr. Parse, elaboration, and type errors
+happen before execution, so they produce their ordinary diagnostics and no
+report. The program's real exit status is preserved; `--audit` does not turn a
 failed run into a successful one.
 
 ### 13.5. Testing ral programs
@@ -3183,12 +3295,13 @@ so tests should mock those functions as values rather than pretending they are
 byte command channels.
 
 `audit` is the execution-observation testing surface. It can assert the
-observation sequence, statuses, values, raw output, capability decisions, and
-source locations without scraping a human diagnostic. Transparent language
-forms do not supply nesting assertions; their nested calls appear directly in
-the nearest report. Tests that compare output bytes should inspect `stdout` or
-`stderr`; tests that compare ral's explanation should inspect `error` or a
-caught error record's `message`.
+observation sequence, statuses, raw output, capability denials, and source
+locations without scraping a human diagnostic, and `succeeded` and `commands`
+cover the common assertions without a `case`. Transparent language forms do not
+supply nesting assertions; their nested calls appear directly in the trail that
+owns them. Tests that compare output bytes should inspect a `` `command ``'s
+`stdout` or `stderr`; tests that compare ral's explanation should inspect its
+`error`, or the `message` of the report's `` `err `` payload.
 
 For executable-level checks:
 
@@ -3884,21 +3997,21 @@ The batch-only inspection flags are:
 
 - `-n`, `--check` — parse, elaborate, and typecheck without executing;
 - `--dump-ast` — parse and print the syntax tree to stderr without elaborating or executing;
-- `--audit` — execute and print the audit tree as JSON on stderr;
+- `--audit` — execute and print the run's audit report as JSON on stderr;
 - `--pretty` — pretty-print that JSON; it requires `--audit`.
 
 These flags require a script path or `-c`; they are not accepted for a bare interactive or stdin-script invocation.
 
 The checker and evaluator receive the same batch builtin surface. A command cannot pass `--check` by being treated as one kind of builtin and then run as another.
 
-The emitted JSON has one structural root for the whole batch run. Beneath it,
-call nodes exist only for public builtin calls and for external or bundled
-command executions. Function application, control forms such as `if`, `case`,
-`try`, `guard`, `within`, `grant`, and `audit`, and loop iterations do not add
-call nodes of their own; the calls executed inside them attach directly to the
-open audit trail. Each call node carries its evaluated arguments, outcome,
-status, source location, timing, and principal, plus captured bytes when the
-active audit capture policy requests them.
+The emitted JSON is one report for the whole batch run, its `trail` a flat list
+in settlement order. `` `command `` observations exist only for public builtin
+calls and for external or bundled command executions. Function application,
+control forms such as `if`, `case`, `try`, `guard`, `within`, `grant`, and
+`audit`, and loop iterations record nothing of their own; the calls executed
+inside them land in the open trail directly. Each observation carries its
+evaluated arguments, status, source location, timing, and principal, plus the
+bytes it captured.
 
 Batch stdout and stderr remain ordinary byte streams. A program's final ral
 value is not an operating-system pipe protocol: interior pipeline stages
@@ -3915,7 +4028,7 @@ At runtime:
 - `exit N` returns `N`;
 - a raised runtime error prints a source-labelled diagnostic and returns that error’s status.
 
-The final process status is clamped to `0..=255`. With `--audit`, the runtime failure is represented in the JSON tree and the duplicate ordinary diagnostic is suppressed.
+The final process status is clamped to `0..=255`, and `--audit` does not change it — the JSON report does not carry it. With `--audit`, the runtime failure is represented in the report's `` `err `` outcome and the duplicate ordinary diagnostic is suppressed.
 
 A foreground batch launched from a terminal may lend that terminal to an interactive child. A backgrounded or non-terminal batch has no such authority.
 
@@ -4456,8 +4569,9 @@ stream goes, without being observed by the binding.
 
 Branch arms are compared through the join of §17.4 rather than arm by arm,
 which is why an arm that ends silently at `Unit` can stand beside arms whose
-captured payload is a `String`. `audit` is the exception: its `value` field
-retains the body's return type, while its byte fields contain captured bytes.
+captured payload is a `String`. `audit` is the exception: its `` `ok ``
+outcome retains the body's return type undecoded, while the bytes its body
+wrote sit in the trail's observations.
 
 ### 17.6. Branch and variant rules
 
@@ -4524,8 +4638,9 @@ which is an operational fact and not something the type records. The
 scope-body, handler-shape, and arm-result constraints retain ordinary
 diagnostic provenance and source spans.
 
-Let `E` be the closed `try` error record
-`{cmd:String, status:Int, message:String, line:Int, col:Int}`. The implemented
+Let `E` be the closed error record
+`{cmd:String, status:Int, message:String, line:Int, col:Int}` — the one
+vocabulary `try`, `poll`, and `audit` all report failure in. The implemented
 scope signatures are:
 
 ```text
@@ -4547,7 +4662,7 @@ guard body cleanup : (μb, A)
 
 body : U F[μb] A
 -------------------------------- Audit
-audit body : (value, AuditRecord A)
+audit body : (value, {outcome : <`ok A | `err E>, trail : List Observation})
 ```
 
 `within`, `grant`, and `guard` pass their body's route and return type
@@ -4555,8 +4670,8 @@ through. `guard`'s cleanup runs for its effects and failures alone: it has no
 consumer for a payload, so whatever it writes escapes to the ambient stream,
 exactly as a discarded statement's bytes do, and its route is not joined with
 the body's. `try` joins its two arms by the rule of §17.4. `audit` is fixed
-`value`: its report is a returned record whose `value` field holds the body's
-own return type, undecoded.
+`value`: its report is a returned record, and the body's own return type sits
+undecoded under its `` `ok `` outcome.
 
 `within` additionally types known option fields and installs schemes for
 literal handler entries while checking its body. `grant` types known
@@ -4663,21 +4778,26 @@ For `guard body cleanup`, cleanup runs after every body value or ordinary body
 error. A cleanup value leaves the body outcome intact. A cleanup error and a
 cleanup escape alike take priority over that outcome and propagate.
 
-`audit body` creates the structural audit root and evaluates `body` with that
-trail active. Beneath the root, command observations are recorded only for
-external or bundled commands and for builtin calls. User-function application,
-control scopes, and iteration machinery are transparent: they record no
-observation of their own, while command and builtin activity reached
-inside them remains visible. A builtin that implements iteration still records
-its own one observation; applying its callback does not add a function or
-per-iteration observation.
+`audit body` opens a trail and evaluates `body` with it active, then returns
+the report: the body's outcome, `` `ok `` of its value or `` `err `` of `E`,
+beside the trail. An ordinary body error settles into `` `err ``; an escape
+propagates past the report. Within the trail, `` `command `` observations are
+recorded only for external or bundled commands and for builtin calls.
+User-function application, control scopes, and iteration machinery are
+transparent: they record no observation of their own, while command and builtin
+activity reached inside them remains visible. A builtin that implements
+iteration still records its own one observation; applying its callback does not
+add a function or per-iteration observation.
 
-Capability observations are a separate `kind` from command observations. They
-are emitted only while an audit trail is active and at least one enclosing
-capability layer has `audit: true`. In that case the capability gates record
-their current allowed or denied filesystem and execution checks; entering a
-capability layer may also record a flagged confused-deputy prefix. Without
-both gates, capability checks add no observations.
+Observations are appended in settlement order, so a command's own observation
+follows those of everything it ran; the `start`–`end` intervals, not the list
+structure, recover which extent contained which.
+
+A `` `check `` observation is a distinct tag from a `` `command ``. The
+capability gates record every filesystem and execution *denial* while a trail
+is open, and no allowed check ever; entering a capability layer may also record
+a flagged confused-deputy prefix. With no trail open, capability checks add no
+observations.
 
 `fail r` requires an error record with a nonzero integer `status` and optional
 `String` or `Bytes` `message`; it raises an ordinary error. `exit n` raises an

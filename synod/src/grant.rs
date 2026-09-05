@@ -357,10 +357,6 @@ impl Grant {
     /// back out would make the grant say something other than what the
     /// user was shown, and the real control on *changes* is the host-side
     /// safety net — checkpoint, report, undo — not a hidden read barrier.
-    ///
-    /// `audit` is on: synod's entire product is a review surface, and a
-    /// reported change is easier to trust beside the record of what the
-    /// agent was allowed to do while producing it.
     pub fn capabilities(&self) -> Capabilities {
         // Minted by the guest's rule, not this host's: `from_guest` folds
         // `/work` in the namespace the gate will match it in.  The ordinary
@@ -396,7 +392,6 @@ impl Grant {
             // detach could birth, so withholding the verb here would deny
             // an escape the machine boundary has already closed.
             detach: None,
-            audit: true,
         }
     }
 }

@@ -12,10 +12,6 @@ use super::value::Value;
 use crate::source::Span;
 use serde::{Deserialize, Serialize};
 
-/// Cap on one command observation's recorded `stderr`; `evaluator::audit`
-/// truncates to it.
-pub const STDERR_CAP_BYTES: usize = 64 * 1024;
-
 /// Bytes captured for one command under `CapturePolicy::Bytes`, empty
 /// otherwise.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -34,17 +30,9 @@ pub enum CapturePolicy {
     Bytes,
 }
 
-/// Backing storage for the in-flight trail; reachable only through [`Audit`].
-#[derive(Default, Debug)]
-struct AuditTrail {
-    observations: Vec<Observation>,
-}
-
 /// Observations detached from a trail — a sandboxed child or a stage thread
 /// hands some up across its boundary, and the receiving side merges them
 /// into the surrounding trail.
-///
-/// Same shape as [`AuditTrail`], but in transit.
 #[derive(Default, Debug, Clone)]
 pub struct AuditFragment {
     observations: Vec<Observation>,
@@ -77,7 +65,7 @@ pub struct TrailScope {
 /// `Some`.
 #[derive(Default, Debug)]
 pub struct Audit {
-    trail: Option<AuditTrail>,
+    trail: Option<Vec<Observation>>,
     capture: CapturePolicy,
     /// Where the command now running was dispatched from — the register every
     /// observation resolves its site against, `None` before a run's first
@@ -133,7 +121,7 @@ impl Audit {
     /// not ask.
     pub fn push(&mut self, obs: Observation) {
         if let Some(trail) = self.trail.as_mut() {
-            trail.observations.push(obs);
+            trail.push(obs);
         }
     }
 
@@ -143,7 +131,7 @@ impl Audit {
     /// only reading a suffix of an outer scope's.
     pub fn open(&mut self) -> TrailScope {
         let opened = self.trail.is_none();
-        let mark = self.trail.get_or_insert_default().observations.len();
+        let mark = self.trail.get_or_insert_default().len();
         TrailScope { opened, mark }
     }
 
@@ -158,11 +146,11 @@ impl Audit {
     pub fn close(&mut self, scope: TrailScope) -> Vec<Observation> {
         let TrailScope { opened, mark } = scope;
         if opened {
-            self.trail.take().map_or_else(Vec::new, |t| t.observations)
+            self.trail.take().unwrap_or_default()
         } else {
             self.trail
                 .as_ref()
-                .map_or_else(Vec::new, |t| t.observations[mark..].to_vec())
+                .map_or_else(Vec::new, |t| t[mark..].to_vec())
         }
     }
 
@@ -170,13 +158,10 @@ impl Audit {
     /// child ships its audit home.  Empty fragment when inactive.
     pub fn take_fragment(&mut self) -> AuditFragment {
         match self.trail.as_mut() {
-            Some(trail) => {
-                AuditFragment::from_observations(std::mem::take(&mut trail.observations))
-            }
+            Some(trail) => AuditFragment::from_observations(std::mem::take(trail)),
             None => AuditFragment::empty(),
         }
     }
-
 }
 
 /// Microseconds since the Unix epoch.
@@ -193,25 +178,33 @@ pub fn epoch_us() -> i64 {
     }
 }
 
-/// The record `audit { … }` returns: the body's own outcome plus the flat
-/// list of observations its dynamic extent produced.
+/// The report `audit { … }` returns, and `--audit`'s root.
+///
+/// The body's own outcome, over the flat trail of observations its dynamic
+/// extent produced.  `Err` carries the record `try` hands its handler,
+/// already built by `evaluator::scope`'s `error_record_of`.
 ///
 /// This is not an observation itself — `audit` runs no command and owns no
 /// site of its own, only the outcome of what it forced into being recorded.
 /// Mirrored in the typechecker by `audit_record` in
 /// `core/src/typecheck/builtins.rs`.
-pub fn tree_value(
-    status: i32,
-    value: Value,
-    error: Option<String>,
-    children: &[Observation],
-) -> Value {
-    let children_list: Vec<Value> = children.iter().map(Observation::to_value).collect();
+pub fn report_value(outcome: Result<Value, Value>, trail: &[Observation]) -> Value {
+    let (label, payload) = match outcome {
+        Ok(v) => ("ok", v),
+        Err(record) => ("err", record),
+    };
     Value::map(vec![
-        ("status".into(), Value::Int(i64::from(status))),
-        ("value".into(), value),
-        ("error".into(), Value::String(error.unwrap_or_default())),
-        ("children".into(), Value::list(children_list)),
+        (
+            "outcome".into(),
+            Value::Variant {
+                label: label.into(),
+                payload: Some(Box::new(payload)),
+            },
+        ),
+        (
+            "trail".into(),
+            Value::list(trail.iter().map(Observation::to_value).collect()),
+        ),
     ])
 }
 
@@ -269,9 +262,9 @@ mod tests {
 
         let inner = audit.open();
         audit.push(dummy("inner-1"));
-        let inner_children = audit.close(inner);
+        let inner_trail = audit.close(inner);
         assert_eq!(
-            inner_children.iter().map(pattern_of).collect::<Vec<_>>(),
+            inner_trail.iter().map(pattern_of).collect::<Vec<_>>(),
             ["inner-1"]
         );
         assert!(
@@ -280,9 +273,9 @@ mod tests {
         );
 
         audit.push(dummy("outer-2"));
-        let outer_children = audit.close(outer);
+        let outer_trail = audit.close(outer);
         assert_eq!(
-            outer_children.iter().map(pattern_of).collect::<Vec<_>>(),
+            outer_trail.iter().map(pattern_of).collect::<Vec<_>>(),
             ["outer-1", "inner-1", "outer-2"],
             "the outer scope sees the inner scope's entries too — the flat merge"
         );

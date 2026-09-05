@@ -225,8 +225,14 @@ impl RedirectState {
                 }
                 WriteFate::Commit => {
                     if let Some(commit) = intent.commit {
-                        old_bytes = commit.old_snapshot_for_diff();
-                        new_bytes = commit.new_snapshot_for_diff();
+                        // Both reads must precede the rename, and cost two
+                        // whole-file reads: taken only for an ear to hear them.
+                        if super::audit::listening(shell, mooring) {
+                            old_bytes = commit.old_snapshot_for_diff();
+                            new_bytes = commit.new_snapshot_for_diff();
+                        } else {
+                            new_bytes = None;
+                        }
                         match commit.commit() {
                             Ok(()) => outcome = WriteOutcome::Committed,
                             Err(e) => {

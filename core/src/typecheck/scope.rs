@@ -180,13 +180,12 @@ impl Inferencer<'_> {
 
     pub(super) fn infer_audit(&mut self, body: &Val) -> ScopeSig {
         let body_cty = self.infer_scope_body_passthrough(body);
-        // The record's `value` field holds the body's raw result — the
-        // runtime stores it undecoded.
+        // The `` `ok `` payload is the body's raw result — the runtime stores
+        // it undecoded.
         let (alpha, _) = self.extract_return(&body_cty);
-        let beta = self.ctx.unifier.fresh_ty();
 
         ScopeSig {
-            value: audit_record(alpha, beta),
+            value: audit_record(alpha),
             route: PayloadRoute::Value,
         }
     }
@@ -224,7 +223,7 @@ fn within_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
     }
 }
 
-/// Schema for the `grant [exec:, fs:, net:, detach:, audit:, editor:, shell:]`
+/// Schema for the `grant [exec:, fs:, net:, detach:, editor:, shell:]`
 /// map.  `exec` and `fs` are left to `decode_capability_map`: an `exec` policy
 /// value is either an `'allow'`/`'deny'` string or a subcommand list, and the
 /// two mix freely within one map, so no homogeneous element type fits.  Their
@@ -232,7 +231,7 @@ fn within_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
 fn grant_field_ty(key: &str, _u: &mut Unifier) -> Option<Ty> {
     let bool_map = || Ty::Map(Box::new(Ty::Bool));
     match key {
-        "net" | "detach" | "audit" => Some(Ty::Bool),
+        "net" | "detach" => Some(Ty::Bool),
         "editor" | "shell" => Some(bool_map()),
         _ => None,
     }

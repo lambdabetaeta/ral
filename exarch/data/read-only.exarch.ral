@@ -12,7 +12,6 @@
 # `reasonable` and lock down via deny.
 
 return [
-  audit: false,
   net:   true,
 
   shell: [chdir: true],

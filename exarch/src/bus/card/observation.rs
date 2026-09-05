@@ -10,8 +10,9 @@ use ral_core::serial::FOValue;
 use std::borrow::Cow;
 
 use ral_core::types::{
-    CommandOrigin, Decision, LeaseClass, Map, Observation, Observed, WorkerId, WriteOutcome,
+    CommandOrigin, Decision, LeaseClass, Observation, Observed, WorkerId, WriteOutcome,
 };
+use std::collections::BTreeMap;
 
 use super::diff::whole_file_hunks;
 use super::{Card, Mark, Role, Span};
@@ -220,9 +221,14 @@ fn write_spans(path: &str, outcome: WriteOutcome) -> Vec<Span> {
 /// decision roles `Role::Bad` when denied — the only decision the rail ever
 /// surfaces, per the policy table in `evaluator/audit.rs`'s `observe_stamped`. The
 /// trailing fields are core's own `fields` map (`name`/`resolved`/`args` for
-/// `exec`, `op`/`path`/`granted` for `fs`) rendered as `key=value` pairs in
-/// the map's own order — whatever is present, nothing inferred.
-fn capability_spans(resource: &str, decision: Decision, fields: &Map) -> Vec<Span> {
+/// `exec`, `op`/`path` for `fs`, `prefix` for `deputy`) rendered as
+/// `key=value` pairs in the map's own order — whatever is present, nothing
+/// inferred.
+fn capability_spans(
+    resource: &str,
+    decision: Decision,
+    fields: &BTreeMap<String, String>,
+) -> Vec<Span> {
     let mut spans = vec![
         Span::new(Role::Muted, "check "),
         Span::new(Role::Path, resource),
@@ -264,7 +270,7 @@ fn worker_spans(id: WorkerId, cmd: &str, class: LeaseClass) -> Vec<Span> {
     ]
 }
 
-fn capability_fields(fields: &Map) -> String {
+fn capability_fields(fields: &BTreeMap<String, String>) -> String {
     fields
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
@@ -404,7 +410,6 @@ mod tests {
             origin: CommandOrigin::External,
             io: AuditIo::default(),
             error: None,
-            value: RalValue::Unit,
         }
     }
 
@@ -437,8 +442,8 @@ mod tests {
             resource: "fs".into(),
             decision: Decision::Denied,
             fields: [
-                ("op".to_string(), RalValue::String("write".into())),
-                ("path".to_string(), RalValue::String("/etc/passwd".into())),
+                ("op".to_string(), "write".to_string()),
+                ("path".to_string(), "/etc/passwd".to_string()),
             ]
             .into_iter()
             .collect(),

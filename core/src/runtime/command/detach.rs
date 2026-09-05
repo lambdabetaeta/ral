@@ -131,7 +131,6 @@ pub(crate) fn detach(
             origin: CommandOrigin::Detached,
             io: AuditIo::default(),
             error: None,
-            value: Value::Unit,
         },
     );
     Ok(Value::map(vec![

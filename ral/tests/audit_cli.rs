@@ -1,10 +1,9 @@
 #![allow(clippy::disallowed_methods)]
 
 // Integration tests for `ral --audit`: the JSON dumped to stderr must be
-// parseable, and its root must be the same envelope the `audit { … }`
-// builtin returns (status / value / error / children) rather than a
-// synthetic command observation.  `--pretty` may change the bytes, never
-// the value.
+// parseable, and its root must be the same report the `audit { … }` builtin
+// returns (outcome / trail) rather than a synthetic command observation.
+// `--pretty` may change the bytes, never the value.
 
 mod common;
 
@@ -60,13 +59,14 @@ fn audit_cli_root_is_the_plain_envelope() {
     let obj = root.as_object().expect("root must be an object");
     let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["children", "error", "status", "value"]);
-    assert_eq!(obj["status"], 0);
+    assert_eq!(keys, ["outcome", "trail"]);
+    // A variant dumps as `{tag, payload}`: the script returned, so `` `ok``.
+    assert_eq!(obj["outcome"]["tag"], "ok");
 
-    let children = obj["children"].as_array().expect("children array");
-    assert_eq!(children.len(), 2, "root: {root}");
-    assert_eq!(children[0]["kind"], "command");
-    assert_eq!(children[0]["argv"][0], "echo");
+    let trail = obj["trail"].as_array().expect("trail array");
+    assert_eq!(trail.len(), 2, "root: {root}");
+    assert_eq!(trail[0]["what"]["tag"], "command");
+    assert_eq!(trail[0]["what"]["payload"]["argv"][0], "echo");
 }
 
 #[test]

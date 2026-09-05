@@ -8,7 +8,7 @@
 //! `build_command` with it, so both paths resolve and confine a call the
 //! same way.
 
-use crate::evaluator::audit::observe;
+use crate::evaluator::audit::{listening, observe};
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell, Value, WriteOutcome};
 
 mod child;
@@ -160,8 +160,16 @@ pub(crate) fn run(
             .as_ref()
             .expect("atomic_commit is only Some when plan.stdout_file is Some");
         if outcome.is_success() {
-            let old_bytes = commit.old_snapshot_for_diff();
-            let preview = commit.new_snapshot_for_diff();
+            // Both reads must precede the rename, and cost two whole-file
+            // reads: taken only for an ear to hear them.
+            let (old_bytes, preview) = if listening(shell, mooring) {
+                (
+                    commit.old_snapshot_for_diff(),
+                    commit.new_snapshot_for_diff(),
+                )
+            } else {
+                (None, None)
+            };
             match commit.commit() {
                 Ok(()) => {
                     observe(

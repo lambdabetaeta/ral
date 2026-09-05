@@ -150,21 +150,6 @@ mod tests {
     }
 
     #[test]
-    fn audit_flag_propagates_through_loader() {
-        let mut shell = shell();
-        let caps = load_capabilities_from_str(
-            &Mooring::adrift(),
-            &mut shell,
-            "return [audit: true, net: false]",
-            "<test:audit>",
-            &ctx(),
-        )
-        .unwrap();
-        assert!(caps.audit);
-        assert_eq!(caps.net, Some(false));
-    }
-
-    #[test]
     fn deny_string_produces_sticky_deny_policy() {
         let mut shell = shell();
         let caps = load_capabilities_from_str(

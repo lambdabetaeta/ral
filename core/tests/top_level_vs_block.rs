@@ -861,65 +861,61 @@ fn function_body_records_into_enclosing_audit() {
     let mut shell = fresh_shell();
     top_level(&mut shell, "let emit = { |_| echo audited-from-fn }").expect("define emit");
     let tree = top_level(&mut shell, "audit { emit () }").expect("audit body");
-    let children = match &tree {
-        Value::Map(m) => match m.get("children") {
-            Some(Value::List(ch)) => ch.iter().cloned().collect::<Vec<_>>(),
-            other => panic!("audit tree must have a list `children` field; got {other:?}"),
-        },
-        other => panic!("audit {{ … }} must return a Map; got {other:?}"),
-    };
-    let saw_echo = children.iter().any(|c| match c {
-        Value::Map(m) => {
-            matches!(m.get("kind"), Some(Value::String(k)) if k == "command")
-                && matches!(
-                    m.get("argv"),
-                    Some(Value::List(argv))
-                        if matches!(argv.get(0), Some(Value::String(s)) if s == "echo")
-                )
-        }
+    let cmds = command_facts(&tree);
+    let saw_echo = cmds.iter().any(|c| match c {
+        Value::Map(m) => matches!(
+            m.get("argv"),
+            Some(Value::List(argv))
+                if matches!(argv.get(0), Some(Value::String(s)) if s == "echo")
+        ),
         _ => false,
     });
     assert!(
         saw_echo,
         "the `echo` inside the function body must appear as its own observation in the \
-         enclosing audit tree; children = {children:?}"
+         enclosing audit trail; commands = {cmds:?}"
     );
 }
 
-/// The lone command-kind observation among an `audit { … }` tree's children,
-/// as `(argv, status)`.  Filtered by `kind`, since the trail also records
-/// writes and reads alongside commands.
-fn only_command_child(tree: &Value) -> (Vec<Value>, Value) {
-    let children = match tree {
-        Value::Map(m) => match m.get("children") {
-            Some(Value::List(ch)) => ch,
-            other => panic!("audit tree must have a list `children` field; got {other:?}"),
-        },
-        other => panic!("audit {{ … }} must return a Map; got {other:?}"),
+/// The `` `command`` facts of an `audit { … }` report's trail, in order: the
+/// trail also records writes and reads, and a fact is read by its tag.
+fn command_facts(report: &Value) -> Vec<Value> {
+    let Value::Map(m) = report else {
+        panic!("audit {{ … }} must return a record; got {report:?}")
     };
-    let commands: Vec<_> = children
+    let Some(Value::List(trail)) = m.get("trail") else {
+        panic!("an audit report must have a list `trail` field; got {m:?}")
+    };
+    trail
         .iter()
-        .filter(|c| {
-            matches!(c, Value::Map(m) if matches!(m.get("kind"), Some(Value::String(k)) if k == "command"))
-        })
-        .collect();
-    assert_eq!(
-        commands.len(),
-        1,
-        "expected exactly one command observation; got {children:?}"
-    );
-    match commands[0] {
-        Value::Map(m) => (
-            match m.get("argv") {
-                Some(Value::List(a)) => a.iter().cloned().collect(),
-                other => panic!("command observation must have a List `argv`; got {other:?}"),
+        .filter_map(|o| match o {
+            Value::Map(o) => match o.get("what") {
+                Some(Value::Variant { label, payload }) if label == "command" => {
+                    payload.as_deref().cloned()
+                }
+                _ => None,
             },
-            m.get("status")
-                .cloned()
-                .expect("command observation must have `status`"),
-        ),
-        other => panic!("audit child must be a Map; got {other:?}"),
-    }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The lone command observation of an `audit { … }` report, as
+/// `(argv, status)`.
+fn only_command_child(tree: &Value) -> (Vec<Value>, Value) {
+    let cmds = command_facts(tree);
+    let [Value::Map(fact)] = cmds.as_slice() else {
+        panic!("expected exactly one command observation; got {cmds:?}")
+    };
+    (
+        match fact.get("argv") {
+            Some(Value::List(a)) => a.iter().cloned().collect(),
+            other => panic!("command observation must have a List `argv`; got {other:?}"),
+        },
+        fact.get("status")
+            .cloned()
+            .expect("command observation must have `status`"),
+    )
 }
 
 /// Forcing an arity-0 native (`!$cwd`) records exactly the same command

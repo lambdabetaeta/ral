@@ -511,16 +511,32 @@ The prelude contains common policies:
     attempt { rm stale.lock }
     succeeds { cargo check -q }             # Bool
 
-`audit` turns success or failure into an execution report:
+`audit` turns success or failure into a report — `[outcome, trail]`:
 
     let report = audit { make -j4 }
-    echo $report[children][0][stderr]
+    echo !{bytes-to-string !{commands $report}[0][stderr]}
 
-`report[children]` is the flat list of what ran during the body: each
-command's `argv`, status, origin, stdout, stderr, value, source location, and
-timing, plus any redirect reads or writes and capability-check decisions.
-`ral --audit script.ral` records the whole script; add `--pretty` for indented
-JSON.
+`outcome` is `` `ok `` of the body's value or `` `err `` of the very record
+`try` would have handed a handler, so failure reads the same either way:
+
+    if !{succeeded $report} { echo built } else { echo 'build failed' }
+
+    case $report[outcome] [
+        `ok:  { |value| return $value },
+        `err: { |error| echo $error[message] },
+    ]
+
+`trail` is the flat list of what happened during the body, each entry an
+envelope — source location, timing, principal — around one `what`, a variant
+tagged `` `command ``, `` `write ``, `` `read ``, `` `check ``, or one of
+their kin. Entries arrive in settlement order, so a command lands after
+everything it ran; their `start`/`end` intervals say which contained which.
+`commands $report` picks out the `` `command `` payloads — `argv`, status,
+origin, stdout, stderr, error — and is what you want whenever only commands
+matter.
+
+`ral --audit script.ral` prints the same report for a whole script as JSON on
+stderr; add `--pretty` for indented JSON.
 
 ## 9  Concurrency
 
@@ -548,9 +564,9 @@ spawns `audit { … }`, so the awaited `value` is an audit report:
     # make progress elsewhere
 
     let result = await $suite
-    let tree   = $result[value]
+    let report = $result[value]
 
-    if $[$tree[status] == 0] { echo passed } else { echo failed }
+    if !{succeeded $report} { echo passed } else { echo failed }
 
 Handles cache their result and may be awaited again. `poll` checks without
 blocking: it returns `` `pending `` with output so far, or `` `settled `` with
@@ -623,11 +639,15 @@ Each mentioned dimension becomes deny-by-default:
 - `exec:` names commands, paths, directory prefixes, or subcommands;
 - `fs:` names readable, writable, and denied regions;
 - `net:` permits or refuses network access;
-- `detach:` permits or refuses work that outlives the session;
-- `audit:` adds capability decisions to an audit tree.
+- `detach:` permits or refuses work that outlives the session.
 
 An omitted dimension keeps the caller's authority. A nested `grant` can only
 reduce authority, never restore it.
+
+Every dimension grants or refuses authority; none decides what is written
+down. Whenever an audit trail is open, a *denial* is recorded as a `` `check ``
+entry and an allowed check never is, so no inner `grant` can hide a refusal
+from the trail you opened around it.
 
 Filesystem policies use stable prefixes such as `cwd:`, `tempdir:`, `gitdir:`,
 `xdg:config`, and `~/project`. They are fixed when the policy is loaded, so a

@@ -25,7 +25,9 @@ source trees, has no occasion to mention:
   matters to the user, write the file with `csvkit` or Python instead.
 - `audit { … }` reads a program that reports through its exit code and
   returns its output as data instead of failing the script. `soffice`,
-  `ocrmypdf`, and `qpdf` all need it.
+  `ocrmypdf`, and `qpdf` all need it. Its report is `[outcome, trail]`; read
+  it with `succeeded $r` and `!{commands $r}[0][stdout]` rather than by
+  walking the trail yourself.
 - `glob` and the search builtins skip hidden files. They do not skip Word's
   lock files: a `~$letter.docx` beside `letter.docx` means the user has that
   document open right now. Never open, copy, or convert one, and think

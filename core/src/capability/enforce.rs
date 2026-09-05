@@ -14,12 +14,13 @@ use super::exec::{Admit, ExecNames, ExecVerdict, evaluate_exec};
 use super::fs::{FsOp, allow_region, deny_region};
 use crate::path::Resolver;
 use crate::types::{
-    Audit, CallSite, Capabilities, Context, Decision, GrantStack, Map, Observation, Observed,
-    Settled, Value, sig, sig_hint,
+    Audit, CallSite, Capabilities, Context, Decision, GrantStack, Observation, Observed, Settled,
+    sig, sig_hint,
 };
+use std::collections::BTreeMap;
 
-/// Gate a command and its argv against the stack's exec opinions.  Audits
-/// only when some layer holds such an opinion, as the fs gate does.
+/// Gate a command and its argv against the stack's exec opinions.  A refusal
+/// is recorded on an open trail, as the fs gate's is.
 pub(crate) fn check_exec_args(
     ctx: &Context,
     display_name: &str,
@@ -64,17 +65,16 @@ pub(crate) fn check_exec_args(
         }
     };
 
-    if ctx.grants.exec().next().is_some() {
-        emit_capability_audit(ctx, "exec", result.is_ok(), audit, site, |m| {
-            m.insert("name".into(), Value::String(display_name.into()));
+    if result.is_err() {
+        emit_capability_denial(ctx, "exec", audit, site, |f| {
+            f.insert("name".into(), display_name.into());
             if let Some(resolved_name) = policy_names
                 .iter()
                 .find(|candidate| **candidate != display_name)
             {
-                m.insert("resolved".into(), Value::String((*resolved_name).into()));
+                f.insert("resolved".into(), (*resolved_name).into());
             }
-            let args_val: Vec<Value> = args.iter().map(|a| Value::String(a.clone())).collect();
-            m.insert("args".into(), Value::list(args_val));
+            f.insert("args".into(), args.join(" "));
         });
     }
 
@@ -82,12 +82,11 @@ pub(crate) fn check_exec_args(
 }
 
 /// The pure half of [`check_fs_op`]'s decision: does the stack admit `op`
-/// on the resolved path, and under which prefix?  `Unrestricted` exactly
-/// when no layer held an `fs` opinion, so there is nothing to audit.
+/// on the resolved path?  `Unrestricted` exactly when no layer held an `fs`
+/// opinion.
 pub(super) enum FsVerdict {
     Unrestricted,
-    /// The innermost matching prefix, for the audit record.
-    Granted(String),
+    Granted,
     Denied,
 }
 
@@ -114,7 +113,7 @@ pub(super) fn fs_verdict(
         return FsVerdict::Denied;
     }
     match allowed.covering(resolved) {
-        Some(prefix) => FsVerdict::Granted(prefix.as_str().to_string()),
+        Some(_) => FsVerdict::Granted,
         None => FsVerdict::Denied,
     }
 }
@@ -159,14 +158,10 @@ pub(crate) fn check_fs_op(
     let resolved = path.canonicalise_lenient();
     let verdict = fs_verdict(&ctx.grants, &ctx.resolver(), &resolved, op);
 
-    if !matches!(verdict, FsVerdict::Unrestricted) {
-        let denied = matches!(verdict, FsVerdict::Denied);
-        emit_capability_audit(ctx, "fs", !denied, audit, site, |m| {
-            m.insert("op".into(), Value::String(op.label().into()));
-            m.insert("path".into(), Value::String(path.display().to_string()));
-            if let FsVerdict::Granted(prefix) = &verdict {
-                m.insert("granted".into(), Value::String(prefix.clone()));
-            }
+    if matches!(verdict, FsVerdict::Denied) {
+        emit_capability_denial(ctx, "fs", audit, site, |f| {
+            f.insert("op".into(), op.label().into());
+            f.insert("path".into(), path.display().to_string());
         });
     }
 
@@ -176,7 +171,7 @@ pub(crate) fn check_fs_op(
             op.label(),
             resolved.display()
         ))),
-        FsVerdict::Unrestricted | FsVerdict::Granted(_) => Ok(()),
+        FsVerdict::Unrestricted | FsVerdict::Granted => Ok(()),
     }
 }
 
@@ -242,8 +237,9 @@ fn check_grant_bool(
     Ok(())
 }
 
-/// Record a capability check on the trail, allowed or denied, whenever some
-/// grants layer asked for `audit: true`.
+/// Record a refused capability check on an open trail.  An admitted one is
+/// never recorded: a trail of every permitted read says nothing an auditor
+/// asked, and the refusals are the whole story.
 ///
 /// The trail is this door's whole audience: it has no `&Mooring` to surface
 /// through. Its callers ([`check_exec_args`], [`check_fs_op`]) are reached
@@ -253,25 +249,24 @@ fn check_grant_bool(
 /// trail alone — unlike a head admission, which broadcasts. A refused
 /// external command still surfaces in its own right, as the failed command
 /// observation its dispatch builds.
-fn emit_capability_audit(
+fn emit_capability_denial(
     context: &Context,
     resource: &str,
-    allowed: bool,
     audit: &mut Audit,
     site: CallSite,
-    fill: impl FnOnce(&mut Map),
+    fill: impl FnOnce(&mut BTreeMap<String, String>),
 ) {
-    if !context.should_audit_capabilities(audit) {
+    if !audit.active() {
         return;
     }
-    let mut fields = Map::new();
+    let mut fields = BTreeMap::new();
     fill(&mut fields);
     let obs = Observation::instant(
         site,
         context.principal(),
         Observed::Capability {
             resource: resource.to_string(),
-            decision: Decision::of_allowed(allowed),
+            decision: Decision::Denied,
             fields,
         },
     );

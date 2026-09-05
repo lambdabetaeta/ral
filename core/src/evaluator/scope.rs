@@ -4,8 +4,8 @@
 //! body's result into the record `try` and `poll` hand their handler.
 
 use crate::types::{
-    Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Observation, Observed,
-    Settled, Shell, Value, as_map, sig, validate_handler_arity,
+    Env, EnvVars, Error, FrameHandle, HandlerEntry, HandlerRole, Map, Settled, Shell, Value,
+    as_map, sig, validate_handler_arity,
 };
 
 use std::collections::HashMap;
@@ -44,24 +44,33 @@ pub(crate) fn error_record(
 }
 
 /// A failed body's position comes from the error's own span; an unspanned
-/// error falls back to the run's call site.  Only a [`Observed::Command`]
-/// names the failing command: a capability check's denial no longer
-/// masquerades as one via the old status pun (D4).
-pub(crate) fn classify(e: &Error, children: &[Observation], shell: &Shell) -> Outcome {
-    let failing = children.iter().rev().find_map(|obs| match &obs.what {
-        Observed::Command { status, argv, .. } if *status != 0 => argv.first().cloned(),
-        _ => None,
-    });
+/// error falls back to the run's call site.  The failing command is the one
+/// the innermost dispatch stamped onto the error (`evaluator::audit`'s
+/// `frame_call`); `<runtime>` names a failure no dispatch owns.
+pub(crate) fn classify(e: &Error, shell: &Shell) -> Outcome {
     let site = e
         .span
         .map_or_else(|| shell.call_site(), |s| shell.site_of(Some(s)));
     Outcome {
         status: e.exit_code(),
         message: e.message.clone(),
-        cmd: failing.unwrap_or_else(|| "<runtime>".into()),
+        cmd: e.command.clone().unwrap_or_else(|| "<runtime>".into()),
         line: site.line,
         col: site.col,
     }
+}
+
+/// [`classify`] then [`error_record`]: the whole way from an [`Error`] to the
+/// record `try`'s handler reads and the report envelope's `` `err ``.
+pub fn error_record_of(e: &Error, shell: &Shell) -> Value {
+    let Outcome {
+        status,
+        message,
+        cmd,
+        line,
+        col,
+    } = classify(e, shell);
+    error_record(&cmd, status, &message, line, col)
 }
 
 /// Parsed `within [...]` options; each key becomes a `Shell::with_*` scope.
@@ -257,19 +266,23 @@ mod tests {
         shell.run(capture_req(src))
     }
 
-    /// A command observation's own `argv[0]`, depth-first, for every
-    /// command in an `audit { … }` tree's flat `children` list.
-    fn command_argv0s(tree: &Value) -> Vec<String> {
-        let map = as_map(tree, "test").expect("audit returns a map");
-        let Some(Value::List(children)) = map.get("children") else {
-            panic!("audit tree must have a list `children` field");
+    /// Every command observation's own `argv[0]`, in order, from an
+    /// `audit { … }` report's flat `trail`.
+    fn command_argv0s(report: &Value) -> Vec<String> {
+        let map = as_map(report, "test").expect("audit returns a map");
+        let Some(Value::List(trail)) = map.get("trail") else {
+            panic!("an audit report must have a list `trail` field");
         };
-        children
+        trail
             .iter()
-            .filter_map(|c| {
-                let m = as_map(c, "test").ok()?;
-                match m.get("argv") {
-                    Some(Value::List(argv)) => match argv.iter().next() {
+            .filter_map(|obs| {
+                let obs = as_map(obs, "test").ok()?;
+                let Value::Variant { label, payload } = obs.get("what")? else {
+                    return None;
+                };
+                let fact = as_map(payload.as_deref()?, "test").ok()?;
+                match (label.as_str(), fact.get("argv")) {
+                    ("command", Some(Value::List(argv))) => match argv.iter().next() {
                         Some(Value::String(s)) => Some(s.clone()),
                         _ => None,
                     },
@@ -279,27 +292,31 @@ mod tests {
             .collect()
     }
 
-    /// `try` forces collection on for its body via `delimited`, and closing
-    /// is the opener's: once `try` returns, the trail is closed again, so a
-    /// stage launched afterward inherits nothing.  `Audit::active_policy` is
-    /// exactly what `pipeline::thread` reads to decide.
+    /// `try` names the failing command from the error's own stamp — the
+    /// innermost dispatch's shown name — and collects nothing to do it, so a
+    /// stage launched under or after it inherits no policy.
+    /// `Audit::active_policy` is exactly what `pipeline::thread` reads.
     #[test]
-    fn try_closes_the_trail_it_opened() {
+    fn try_names_the_failing_command_without_a_trail() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        match run_source(&mut shell, r#"try { sh -c "exit 1" } { |_e| return () }"#) {
-            RunReport::Ran { .. } => {}
+        let cmd = match run_source(
+            &mut shell,
+            r#"try { sh -c "exit 1"; return 'unreached' } { |e| return $e[cmd] }"#,
+        ) {
+            RunReport::Ran { ending, .. } => ending.into_result().expect("the handler must run"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
-        }
+        };
+        assert_eq!(cmd.to_string(), "sh");
         assert_eq!(
             shell.local.audit.active_policy(),
             None,
-            "a stage launched after `try` must inherit no policy"
+            "`try` must open no trail"
         );
     }
 
-    /// Stands in for any Rust panic a `try` body can raise mid-eval.
+    /// Stands in for any Rust panic a delimited body can raise mid-eval.
     fn panic_now(_args: &[Value], _mooring: &Mooring, _shell: &mut Shell) -> Settled<Value> {
-        panic!("scope test: deliberate mid-`try` panic")
+        panic!("scope test: deliberate mid-body panic")
     }
 
     fn panic_now_scheme(_u: &mut crate::typecheck::Unifier) -> crate::typecheck::Scheme {
@@ -315,21 +332,21 @@ mod tests {
     )];
     static PANIC_BUILTINS: &[BuiltinEntry] = &PANIC_BUILTINS_ARR;
 
-    /// Law 2 holds under a panic too: `delimited` closes its scope under
+    /// Law 2 holds under a panic too: `Frame::abandon` closes the scope under
     /// `catch_unwind`, before resuming the unwind — so a body that panics
     /// leaves the trail exactly as closed as one that returns normally.
     #[test]
-    fn a_panicking_try_body_still_closes_the_trail() {
+    fn a_panicking_audit_body_still_closes_the_trail() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         shell.install_builtins(PANIC_BUILTINS);
-        match run_source(&mut shell, "try { core-panic-now } { |_e| return () }") {
+        match run_source(&mut shell, "audit { core-panic-now }") {
             RunReport::Static { .. } => {}
             RunReport::Ran { .. } => panic!("a panicking body must report Static"),
         }
         assert_eq!(
             shell.local.audit.active_policy(),
             None,
-            "a panic through `try`'s body must not leave the trail open"
+            "a panic through `audit`'s body must not leave the trail open"
         );
     }
 
@@ -364,37 +381,38 @@ mod tests {
         );
     }
 
-    /// Nested delimiters see the flat merge: an outer `audit` around a
-    /// `try` still finds the `try`'s own children in its tree, because
-    /// `try`'s `close` only reads a suffix and leaves the outer trail
-    /// intact.
+    /// The flat merge: an `audit` around a `try` finds the commands the
+    /// `try`'s body ran in its own trail, because a `try` interposes no
+    /// scope at all.
     #[test]
     fn nested_delimiters_flat_merge() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let tree = match run_source(
+        let report = match run_source(
             &mut shell,
             "audit { echo one; try { echo two } { |_e| return () }; echo three }",
         ) {
             RunReport::Ran { ending, .. } => ending.into_result().expect("audit body must succeed"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
         };
-        assert_eq!(command_argv0s(&tree), ["echo", "echo", "echo"]);
+        assert_eq!(command_argv0s(&report), ["echo", "echo", "echo"]);
     }
 
-    /// `audit { }`'s own recorded shape is unchanged by the lifecycle
-    /// rewrite: status, and a flat `children` list naming the one command
-    /// its body ran.
+    /// `audit { }`'s report envelope: a body that returned gives `` `ok ``,
+    /// over a flat `trail` naming the one command it ran.
     #[test]
-    fn audit_shape_is_unchanged() {
+    fn audit_reports_ok_over_its_trail() {
         let mut shell = Shell::new(crate::io::TerminalState::default());
-        let tree = match run_source(&mut shell, "audit { echo hi }") {
+        let report = match run_source(&mut shell, "audit { echo hi }") {
             RunReport::Ran { ending, .. } => ending
                 .into_result()
                 .expect("audit { echo hi } must succeed"),
             RunReport::Static { .. } => panic!("well-formed source must run"),
         };
-        let map = as_map(&tree, "test").expect("audit returns a map");
-        assert_eq!(map.get("status"), Some(&Value::Int(0)));
-        assert_eq!(command_argv0s(&tree), ["echo"]);
+        let map = as_map(&report, "test").expect("audit returns a map");
+        match map.get("outcome") {
+            Some(Value::Variant { label, .. }) => assert_eq!(label, "ok"),
+            other => panic!("a returning body must report `ok, got {other:?}"),
+        }
+        assert_eq!(command_argv0s(&report), ["echo"]);
     }
 }

@@ -142,6 +142,7 @@ pub(crate) fn spawn_error(
         status: crate::types::Status::Process(failure.clone()),
         span: None,
         hint: failure.default_hint(name),
+        command: None,
     })
 }
 

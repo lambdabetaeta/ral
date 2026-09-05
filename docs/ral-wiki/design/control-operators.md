@@ -29,9 +29,12 @@ IR as dedicated nodes rather than string-keyed builtins. An operator lacking
 both criteria stays in the prelude: a user-defined `retry` requires no parser
 growth.
 
-Audit ownership is one such mechanism: each scope node owns its body's audit
-nodes, while process boundaries only *transport* fragments — the full account of
-lexical ownership lives in [[design/audit|audit]].
+Audit ownership is one such mechanism: each scope node owns the trail its body
+produces, while process boundaries only *transport* fragments — the full
+account of lexical ownership lives in [[design/audit|audit]]. `audit` is the
+one of the five that hands the ownership back as a value, a report pairing the
+body's outcome with that trail; the other four own a trail without ever naming
+one.
 
 See also [[design/failure|failure]], [[design/scoping|scoping]], [[design/effects-handlers|effects-handlers]], [[design/grant|grant]].
 Cite: RATIONALE §"The grammar is the residue", §"Failure is not truth";

@@ -20,14 +20,14 @@ use crate::runtime::pipeline;
 use crate::source::Span;
 use crate::types::{
     Binding, Break, CapturePolicy, Closure, Env, Error, HandlerArity, HandlerFrame, Mooring,
-    Settled, Shell, TrailScope, Value, as_map, tree_value,
+    Settled, Shell, TrailScope, Value, as_map, error_record_of, report_value,
 };
 #[cfg(unix)]
 use crate::types::HandlerEntry;
 
 use super::pattern;
 use super::redirect::{RedirectState, WriteFate};
-use super::scope::{WithinScope, WithinUndo, classify, error_record};
+use super::scope::{WithinScope, WithinUndo};
 use super::val::{close, interpolate_piece, spread_type_err};
 use super::{expr, observe};
 
@@ -83,8 +83,6 @@ enum Frame {
     Try {
         handler: Value,
         env: Box<Env>,
-        scope: TrailScope,
-        saved: CapturePolicy,
     },
     Guard {
         cleanup: Value,
@@ -724,13 +722,7 @@ impl Machine {
                 if let Err(err) = self.reserve(shell) {
                     break 'arm Focus::Halt(err);
                 }
-                let saved = shell.local.audit.capture_policy();
-                shell
-                    .local
-                    .audit
-                    .set_capture(super::audit::merge_capture(saved, CapturePolicy::Off));
-                let scope = shell.local.audit.open();
-                self.push(Frame::Try { handler: h, env: Box::new(env.clone()), scope, saved });
+                self.push(Frame::Try { handler: h, env: Box::new(env.clone()) });
                 Self::force(b, &env, mooring, shell)
             }
 
@@ -989,11 +981,7 @@ impl Machine {
                 Focus::Return(t)
             }
 
-            Frame::Try { scope, saved, .. } => {
-                let _children = shell.local.audit.close(scope);
-                shell.local.audit.set_capture(saved);
-                Focus::Return(t)
-            }
+            Frame::Try { .. } => Focus::Return(t),
 
             Frame::Guard { cleanup, env } => {
                 let v = match as_value(t) {
@@ -1023,15 +1011,13 @@ impl Machine {
             }
 
             Frame::Audit { scope, saved } => {
-                let children = shell.local.audit.close(scope);
+                let trail = shell.local.audit.close(scope);
                 shell.local.audit.set_capture(saved);
-                // A body that returns exits 0, whatever it returned.
-                let status = 0;
                 let v = match as_value(t) {
                     Ok(v) => v,
                     Err(b) => return Focus::Halt(b),
                 };
-                Focus::Return(Terminal::Value(tree_value(status, v, None, &children)))
+                Focus::Return(Terminal::Value(report_value(Ok(v), &trail)))
             }
         }
     }
@@ -1084,19 +1070,12 @@ impl Machine {
                 Focus::Halt(s)
             }
 
-            Frame::Try { handler, env, scope, saved } => match s {
+            Frame::Try { handler, env } => match s {
                 Break::Error(e) => {
-                    let children = shell.local.audit.close(scope);
-                    shell.local.audit.set_capture(saved);
-                    let outcome = classify(&e, &children, shell);
-                    let record = error_record(&outcome.cmd, outcome.status, &outcome.message, outcome.line, outcome.col);
+                    let record = error_record_of(&e, shell);
                     self.apply_rule(handler, vec![record], &env, None, mooring, shell)
                 }
-                Break::Escape(esc) => {
-                    let _children = shell.local.audit.close(scope);
-                    shell.local.audit.set_capture(saved);
-                    Focus::Halt(Break::Escape(esc))
-                }
+                Break::Escape(esc) => Focus::Halt(Break::Escape(esc)),
             },
 
             Frame::Guard { cleanup, env } => {
@@ -1119,17 +1098,13 @@ impl Machine {
 
             Frame::Audit { scope, saved } => match s {
                 Break::Error(e) => {
-                    let children = shell.local.audit.close(scope);
+                    let trail = shell.local.audit.close(scope);
                     shell.local.audit.set_capture(saved);
-                    Focus::Return(Terminal::Value(tree_value(
-                        e.exit_code(),
-                        Value::Unit,
-                        Some(e.message_with_hint()),
-                        &children,
-                    )))
+                    let record = error_record_of(&e, shell);
+                    Focus::Return(Terminal::Value(report_value(Err(record), &trail)))
                 }
                 Break::Escape(esc) => {
-                    let _children = shell.local.audit.close(scope);
+                    let _trail = shell.local.audit.close(scope);
                     shell.local.audit.set_capture(saved);
                     Focus::Halt(Break::Escape(esc))
                 }
@@ -1141,10 +1116,10 @@ impl Machine {
 impl Frame {
     /// The panic path: undo what a checkpoint cannot hold — fds, staging
     /// files, audit scopes (§2.6). `To`/`Capture` restore `io.stdout`;
-    /// `Redirect` as its own rule; `Unmask` restores; `Try`/`Audit`
-    /// `audit.close(scope)` then `set_capture(saved)`; `Within` applies its
-    /// undo; `Grant` pops. `Apply`, `Source`, `Guard`, `Cleanup` do
-    /// nothing.
+    /// `Redirect` as its own rule; `Unmask` restores; `Audit`
+    /// `audit.close(scope)` then `set_capture(saved)`, discarding the trail
+    /// no one is left to read; `Within` applies its undo; `Grant` pops.
+    /// `Apply`, `Source`, `Try`, `Guard`, `Cleanup` do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
             Self::To { prev_stdout, .. } | Self::Capture { prev: prev_stdout, .. } => {
@@ -1152,8 +1127,8 @@ impl Frame {
             }
             Self::Redirect(state) => state.abandon(shell),
             Self::Unmask { frame } => shell.context.handlers.restore_matched(*frame),
-            Self::Try { scope, saved, .. } | Self::Audit { scope, saved } => {
-                let _children = shell.local.audit.close(scope);
+            Self::Audit { scope, saved } => {
+                let _trail = shell.local.audit.close(scope);
                 shell.local.audit.set_capture(saved);
             }
             Self::Within(undo) => undo.apply(shell),
@@ -1162,6 +1137,7 @@ impl Frame {
             }
             Self::Apply { .. }
             | Self::Source { .. }
+            | Self::Try { .. }
             | Self::Guard { .. }
             | Self::Cleanup { .. } => {}
         }

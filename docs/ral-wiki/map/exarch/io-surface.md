@@ -38,10 +38,12 @@ absent. **Which observations matter is the host's call**, made once in
 a builtin command and an allowed capability check are reported by core and
 dropped by exarch, never drawn and never journalled.
 
-The one gate core keeps is its own: a capability check joins the trail only
-when a grant asked for `audit: true`, which is language semantics, not
-presentation. And only a head admission (`command_call.rs`) surfaces a
-*structured* denial — the `fs` and full-argv checks in
+The one gate core keeps is its own, and it is the decision rather than a flag:
+a capability *denial* joins the trail whenever one is open, an *allowed* check
+never does, and no `grant` has a dimension to change either — language
+semantics, not presentation ([[design/audit|audit]]). And only a head admission
+(`command_call.rs`) surfaces a *structured* denial — the `fs` and full-argv
+checks in
 `capability/enforce.rs` are entered from `types/shell/checks.rs`, whose
 callers in `builtins/` and exarch's own doors carry no `Mooring`, so their
 denials reach the trail alone. A refused *external* command still surfaces
@@ -61,9 +63,8 @@ dispatch, builtins included.
     combinators (`evaluator/redirect.rs`): the open records a `WriteIntent` on
     the `RedirectFrame` and `settle_writes` emits when the **frame settles**,
     with the outcome the door alone can know — `committed` (body ok, an atomic
-    `>` only once its commit succeeds), `aborted` (body failed before commit),
-    `deferred` (body stopped before commit, leaving staged bytes pending), or
-    `failed` (open or commit failed).
+    `>` only once its commit succeeds), `aborted` (the body did not reach the
+    commit), or `failed` (open or commit failed).
   - *An external command* fuses its redirects into the spawn instead
     (`wire_stdout_file` / `wire_stderr`, `runtime/command/stdio.rs`). A
     non-atomic target — `>>`, `>~`, a `>` outside the atomic recipe, any `2>`
@@ -71,15 +72,14 @@ dispatch, builtins included.
     emits **eagerly at the open**, `committed`, no snapshots; a failed open
     surfaces nothing at all. Only an atomic `>` defers, settling post-`wait()`
     in `command::run`: `committed` with snapshots, `failed` on a broken rename,
-    `aborted` when the child did not succeed and the staged temp is discarded,
-    or `deferred` when a stop parks the child with the staged temp intact.
+    `aborted` when the child did not succeed and the staged temp is discarded.
 
   Mode is `write` / `append` / `stream`. No byte count — path, mode, outcome,
-  plus the content snapshots, each whole or absent and never a prefix, read
-  only within 64 KiB (`PREVIEW_CAP`) since the redirect holds neither side in
-  memory otherwise. `new_bytes` is what the card opens; `old_bytes` reaches the
-  [[design/audit|audit trail]] and no card, a redirect saying what now stands
-  in the file rather than what it replaced.
+  plus the content snapshots, each whole or `` `none `` and never a prefix,
+  read only within 64 KiB (`PREVIEW_CAP`) since the redirect holds neither side
+  in memory otherwise. `new_bytes` is what the card opens; `old_bytes` reaches
+  the [[design/audit|audit trail]] and no card, a redirect saying what now
+  stands in the file rather than what it replaced.
 - **Commands** are hooked *after* resolution, at the completion doors, never
   at the call site (where the head may still resolve to a closure or
   builtin). Every command — builtin, external, or detached — is one
@@ -119,26 +119,31 @@ stage settle, not at their original instant, but each observation's own
 
 ## The observation — a Value, not a card
 
-Every observation carries a common envelope — `kind`, `script`, `line`, `col`,
-`start`, `end`, `principal` — plus fields particular to its `kind`:
+Every observation carries a common envelope — `script`, `line`, `col`,
+`start`, `end`, `principal` — around one `what`, a variant whose **tag is the
+kind**. There is no `kind` field: the tag is the only place the kind is
+recorded, so nothing can disagree with it, and a reader dispatches with `case`
+over a row the typechecker closes.
 
 ```
-{kind:"read",             path, …envelope}
-{kind:"write",            path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"deferred"|"failed", new_bytes?, old_bytes?, …envelope}   # each snapshot whole or absent
-{kind:"command",          argv:[prog, …args], status, origin:"builtin"|"external"|"detached", stdout, stderr, error, value, …envelope}
-{kind:"grep",             scope, pattern, …envelope}                      # emitted by the grep builtin
-{kind:"capability-check", resource, decision:"allowed"|"denied"|"flagged", …fields, …envelope}
-{kind:"worker",           id, cmd, class, …envelope}
+what: `read    [path]
+      `write   [path, mode:"write"|"append"|"stream", outcome:"committed"|"aborted"|"failed", new_bytes, old_bytes]   # each snapshot `just or `none
+      `command [argv:[prog, …args], status, origin:"builtin"|"external"|"detached", stdout, stderr, error]
+      `grep    [scope, pattern]                        # emitted by the grep builtin
+      `check   [resource, decision:"denied"|"flagged", fields]
+      `worker  [id, cmd, class:"worker"|"durable"]
+      `act     [verb, subject, payload, refused]       # authored host-side by the desk
 ```
 
-`argv` replaces a separate `cmd`/`args` split; a capability check's `resource`
-and `decision` sit at the top level beside its resource-specific fields —
-never spliced through a nested `value`, and a denial is never encoded as a
-status. Core already names this vocabulary in its capability layer, so
-reporting its own activity adds no concept. `Observation::to_value` is the one
-projection — the same map shape the [[design/audit|audit trail]] and
-`--audit`'s JSON use — reaching the same [[map/core/shell-state|sink]] as a
-kit `` `card ``.
+`argv` replaces a separate `cmd`/`args` split, and carries no returned
+`value`: a process-local or executable value has no honest projection, so the
+argv, status, and bytes are the whole of what a reader gets. A `` `check ``'s
+`resource` and `decision` sit beside its `fields` map — a denial is never
+encoded as a status, and never spliced through a nested value. Core already
+names this vocabulary in its capability layer, so reporting its own activity
+adds no concept. `Observation::to_value` is the one projection — the same map
+shape the [[design/audit|audit trail]] and `--audit`'s JSON use — reaching the
+same [[map/core/shell-state|sink]] as a kit `` `card ``.
 
 ## Binding to a card — exarch
 
@@ -159,8 +164,8 @@ the same graceful degradation as before.
 The operation is a *nominal category*, so it is carried by a word, not a
 mirror-orientation glyph: read is a `muted` `read` verb + a `path` span; write
 reads `write <path> <outcome>` whatever its mode (the mode rides the recorded
-observation): `committed` uses the `ok` role, `aborted` and `deferred` use
-`warn`, and `failed` uses `bad`
+observation): `committed` uses the `ok` role, `aborted` uses `warn`, and
+`failed` uses `bad`
 — and a *committed* write previews its content below the heading
 (`write_preview`): a complete `diff` mark of what landed, read against the
 empty side so every row is an addition. The card retains every hunk and the
@@ -172,7 +177,8 @@ observation's own `status`; grep is the pattern as `code` `in` the cwd scope
 as `path`; a capability check reads `check <resource> <decision> <fields…>`,
 the decision roled `Role::Bad` when denied (the only decision the rail ever
 surfaces) and its trailing fields — core's own `resource`-specific map,
-`name`/`resolved`/`args` for `exec`, `op`/`path`/`granted` for `fs` — rendered
+`name`/`resolved`/`args` for `exec`, `op`/`path` for `fs`, `prefix` for
+`deputy` — rendered
 as `key=value` pairs in the map's own order, whatever is present, nothing
 inferred. `Role::Path` carries a real hue, so the subject of every row stands
 as figure against the muted label and the body prose.

@@ -528,9 +528,34 @@ let contains = { |items x| elem $x $items }
 let nub = { |xs| fold { |acc x| if !{elem $x $acc} { $acc } else { [...$acc, $x] } } [] $xs }
 
 ## Spawn a thunk under audit and return the handle.  The spawned block
-## never fails (failure is data in the audit tree), so `await $h` is
+## never fails (failure is data in the audit report), so `await $h` is
 ## always safe and the handle survives run boundaries.
 let defer = { |body| spawn { audit { !$body } } }
+
+## The `` `command`` facts of an audit report's trail, in trail order;
+## every other kind of fact is passed over.  Usage:
+## `each { |c| echo $c[argv][0] } !{commands $r}`.
+let commands = { |report|
+    fold { |acc o|
+        case $o[what] [
+            `command: { |c| return [...$acc, $c] },
+            `write:   { |_| return $acc },
+            `read:    { |_| return $acc },
+            `grep:    { |_| return $acc },
+            `check:   { |_| return $acc },
+            `worker:  { |_| return $acc },
+            `act:     { |_| return $acc }
+        ]
+    } [] $report[trail]
+}
+
+## True when the audited body returned, false when it failed.
+let succeeded = { |report|
+    case $report[outcome] [
+        `ok:  { |_| return true },
+        `err: { |_| return false }
+    ]
+}
 
 ## Decode the stdout/stderr Bytes from an `await` result into a String.
 ## Usage: `bytes-to-string $r[stdout]`.

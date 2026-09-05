@@ -39,7 +39,7 @@ exarch adds only LLM transport and exchange orchestration:
 
 - the abstraction — the [[design/cbpv|block]];
 - the confinement — grant;
-- the structural [[design/audit|audit tree]].
+- the structural [[design/audit|audit trail]].
 
 Crucially, the agent's "shell" is a real typed language, not string-splicing:
 because data is never re-lexed, split, or globbed once captured, the collapse of

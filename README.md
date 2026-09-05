@@ -182,7 +182,7 @@ ral                       # interactive
 ral script.ral arg1 arg2  # run a script; $args == [arg1, arg2]
 ral -c 'echo hello'       # inline
 ral --check script.ral    # parse and type-check; do not execute
-ral --audit script.ral    # run; emit the execution tree as JSON on stderr
+ral --audit script.ral    # run; emit the audit report as JSON on stderr
 ral --dump-ast script.ral # dump the AST
 ```
 

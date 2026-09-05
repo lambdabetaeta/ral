@@ -44,8 +44,8 @@ Locate, drop, deduplicate, and sample in one turn:
     let suite = defer { cargo test -q 2>&1 }
     let impl  = within [dir: #'src/widget'#] { grep-files #'fn render'# }
     let tests = await $suite
-    let log   = lines !{bytes-to-string $tests[value][children][0][stdout]}
-    [impl: !{take 4 $impl}, ok: $[$tests[value][status] == 0], log: !{take 20 $log}]
+    let log   = lines !{bytes-to-string !{commands $tests[value]}[0][stdout]}
+    [impl: !{take 4 $impl}, ok: !{succeeded $tests[value]}, log: !{take 20 $log}]
 
 ## Exception: writing files
 

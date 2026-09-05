@@ -172,6 +172,21 @@ pub fn closed_record(fields: &[(&str, Ty)]) -> Ty {
     Ty::Record(row)
 }
 
+/// A variant type over a closed row of tags: the tail is `Empty`, so a `case`
+/// on it must cover exactly these arms.  A payload-less tag takes `Unit`, as
+/// `Inferencer::infer_val` gives one at its construction site.
+fn closed_variant(arms: &[(&str, Ty)]) -> Ty {
+    let mut row = Row::Empty;
+    for (l, t) in arms.iter().rev() {
+        row = Row::Extend(
+            crate::syntax::tag::tag_row_label(l),
+            Box::new(t.clone()),
+            Box::new(row),
+        );
+    }
+    Ty::Variant(row)
+}
+
 /// The error record a raising form demands of its argument: `status`, over a
 /// fresh tail.  Open, because re-raising a caught error carries `cmd`, `line`,
 /// `col` and whatever else the record picked up along the way; the tail is
@@ -204,16 +219,93 @@ pub(super) fn try_error_record() -> Ty {
     ])
 }
 
-/// The record `audit { … }` produces, field for field the value shape
-/// `evaluator::audit::tree_value` materialises.  A child in `children` is a
-/// fresh map type, one of the shapes `Observation::to_value` projects, so an
-/// observation's own fields can grow without breaking this.
-pub(super) fn audit_record(value_ty: Ty, child_ty: Ty) -> Ty {
+/// The `` `just x | `none `` an optional projected field carries: an absent
+/// before-image is a fact, not a missing key.
+fn optional_ty(payload: Ty) -> Ty {
+    closed_variant(&[("just", payload), ("none", Ty::Unit)])
+}
+
+/// One arm per [`Observed`](crate::types::Observed) variant, tagged by the
+/// kind, each a closed record of exactly the fields `Observation::to_value`
+/// projects for it.
+fn observed_ty() -> Ty {
+    closed_variant(&[
+        (
+            "command",
+            closed_record(&[
+                ("argv", Ty::List(Box::new(Ty::String))),
+                ("status", Ty::Int),
+                ("origin", Ty::String),
+                ("stdout", Ty::Bytes),
+                ("stderr", Ty::Bytes),
+                ("error", Ty::String),
+            ]),
+        ),
+        (
+            "write",
+            closed_record(&[
+                ("path", Ty::String),
+                ("mode", Ty::String),
+                ("outcome", Ty::String),
+                ("new_bytes", optional_ty(Ty::Bytes)),
+                ("old_bytes", optional_ty(Ty::Bytes)),
+            ]),
+        ),
+        ("read", closed_record(&[("path", Ty::String)])),
+        (
+            "grep",
+            closed_record(&[("scope", Ty::String), ("pattern", Ty::String)]),
+        ),
+        (
+            "check",
+            closed_record(&[
+                ("resource", Ty::String),
+                ("decision", Ty::String),
+                ("fields", Ty::Map(Box::new(Ty::String))),
+            ]),
+        ),
+        (
+            "worker",
+            closed_record(&[("id", Ty::Int), ("cmd", Ty::String), ("class", Ty::String)]),
+        ),
+        (
+            "act",
+            closed_record(&[
+                ("verb", Ty::String),
+                ("subject", optional_ty(Ty::String)),
+                ("payload", Ty::String),
+                ("refused", Ty::Bool),
+            ]),
+        ),
+    ])
+}
+
+/// The record one observation projects as, field for field
+/// `Observation::to_value`: the envelope, and the fact as a tagged `what`.
+fn observation_ty() -> Ty {
     closed_record(&[
-        ("status", Ty::Int),
-        ("value", value_ty),
-        ("error", Ty::String),
-        ("children", Ty::List(Box::new(Ty::Map(Box::new(child_ty))))),
+        ("script", Ty::String),
+        ("line", Ty::Int),
+        ("col", Ty::Int),
+        ("start", Ty::Int),
+        ("end", Ty::Int),
+        ("principal", Ty::String),
+        ("what", observed_ty()),
+    ])
+}
+
+/// The record `audit { … }` produces, field for field the value shape
+/// `evaluator::audit::report_value` materialises.  The body's outcome is a
+/// variant, so a failure is read by `case` rather than by comparing a status
+/// against 0; the `` `err `` payload is the very record `try` hands its
+/// handler.
+pub(super) fn audit_record(value_ty: Ty) -> Ty {
+    closed_record(&[
+        (
+            "outcome",
+            closed_variant(&[("ok", value_ty), ("err", try_error_record())]),
+        ),
+        ("trail", Ty::List(Box::new(observation_ty()))),
     ])
 }
 
@@ -232,20 +324,13 @@ fn await_record(value_ty: Ty) -> Ty {
 /// arm.  The `` `err `` payload is the very record `try` hands its handler
 /// ([`try_error_record`]), so the block's status lives inside it.
 fn settle_record(value_ty: Ty) -> Ty {
-    use crate::syntax::tag::tag_row_label;
-    let outcome = Ty::Variant(Row::Extend(
-        tag_row_label("ok"),
-        Box::new(value_ty),
-        Box::new(Row::Extend(
-            tag_row_label("err"),
-            Box::new(try_error_record()),
-            Box::new(Row::Empty),
-        )),
-    ));
     closed_record(&[
         ("stdout", Ty::Bytes),
         ("stderr", Ty::Bytes),
-        ("outcome", outcome),
+        (
+            "outcome",
+            closed_variant(&[("ok", value_ty), ("err", try_error_record())]),
+        ),
     ])
 }
 
@@ -261,16 +346,10 @@ fn pending_record() -> Ty {
 /// Being `await`'s non-blocking dual, `poll` reports a failure inside the
 /// settled outcome rather than re-raising it.
 fn poll_variant(value_ty: Ty) -> Ty {
-    use crate::syntax::tag::tag_row_label;
-    Ty::Variant(Row::Extend(
-        tag_row_label("pending"),
-        Box::new(pending_record()),
-        Box::new(Row::Extend(
-            tag_row_label("settled"),
-            Box::new(settle_record(value_ty)),
-            Box::new(Row::Empty),
-        )),
-    ))
+    closed_variant(&[
+        ("pending", pending_record()),
+        ("settled", settle_record(value_ty)),
+    ])
 }
 
 /// The record type returned by `list-dir` for each directory entry.
