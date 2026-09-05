@@ -232,6 +232,14 @@ LowBox token on Windows.
 This is defence in depth for a development tool, not a claim that exarch is a
 hardened jail.
 
+One deny does not reach the Linux sandbox layer: a path that does not exist
+when the session starts, under a prefix the profile makes writable. bubblewrap
+can only deny a path by mounting over it, and mounting over a name that is not
+there would have it create that name in your own tree first. ral's own checks
+still refuse the path; a command spawned under the grant can create it. Denying
+a file that already exists, or one under a read-only prefix, is enforced by
+both layers, as it is on macOS either way.
+
 ## Where the built-ins live
 
 The six profiles are ral programs embedded into the exarch binary:

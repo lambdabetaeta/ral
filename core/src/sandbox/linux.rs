@@ -68,8 +68,7 @@ pub(crate) fn make_command_with_policy(
     rw_binds.sort();
     rw_binds.dedup();
     // A name absent on the host binds nothing, so drop it here rather than at
-    // each use: what remains is the envelope's mounts, which is what both the
-    // emitters and `mountpoint_is_creatable` are asking after.
+    // each use: what remains is the envelope's mounts.
     ro_binds.retain(|bind| crate::path::exists(bind.as_str()));
     rw_binds.retain(|bind| crate::path::exists(bind.as_str()));
 
@@ -109,7 +108,7 @@ pub(crate) fn make_command_with_policy(
     denied_binds.sort();
     denied_binds.dedup();
     for bind in &denied_binds {
-        DenyMask::over(bind, &ro_binds, &rw_binds).render(&mut c);
+        DenyMask::over(bind).render(&mut c);
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
@@ -124,36 +123,41 @@ pub(crate) fn make_command_with_policy(
 }
 
 /// The mount that masks one denied path, bwrap having no negative path rule.
-/// The target's shape and the binds around it force which one, and getting it
-/// wrong costs the launch rather than the deny — `--tmpfs` over a regular file
-/// dies in `mkdir` before the body execs — so [`Self::over`] is the only
-/// constructor.
+/// The target's shape forces which one, and getting it wrong costs the launch
+/// rather than the deny — `--tmpfs` over a regular file dies in `mkdir` before
+/// the body execs — so [`Self::over`] is the only constructor.
+///
+/// Every mask goes over a name that already exists: a mount bwrap must first
+/// `mkdir` is not available to us, for the reason [`Self::LeftAbsent`] gives.
 enum DenyMask<'p> {
-    /// An empty directory with no permission bits, and the only mask that
-    /// brings its own mountpoint, hence the absent case too.
+    /// An empty directory with no permission bits, which refuse the owner as
+    /// much as anyone.  The bits are the whole of it: the tmpfs is the
+    /// sandboxed uid's own, so a child that deliberately `chmod`s them back
+    /// has scratch memory at that name — never the denied directory, and
+    /// never the host.  An immutable mode needs a read-only mount, and bwrap
+    /// gives that only for a bind, from a source this process would hold.
     EmptyDir(&'p str),
     /// A device node bound without `MS_DEV`: unopenable, `EACCES` either way.
     UnopenableNode(&'p str),
     /// Nothing — no mount lands on a symlink; the resolved twin holds it.
     OnItsTarget,
-    /// Nothing — the name does not exist and lies under a read-only bind,
-    /// which already refuses the only access left, creation.
-    OnTheBindAbove,
+    /// Nothing — every mask bwrap could lay on a name that does not exist it
+    /// must `mkdir` a mountpoint for first: `EROFS` and a dead envelope under
+    /// a read-only bind, and under a writable one a mkdir on the host, the
+    /// deny creating the very name it forbids (`deny: ['cwd:/.env']` leaving
+    /// an `.env` directory in the user's tree).  So the name is left alone: a
+    /// read-only bind refuses the only access an absent name has, and under a
+    /// writable one the in-process gate stays its single enforcer.
+    LeftAbsent,
 }
 
 impl<'p> DenyMask<'p> {
-    /// `read_only` and `writable` are the envelope's binds, in the order they
-    /// are mounted: an absent name needs a mountpoint bwrap must `mkdir`, and
-    /// only they say whether it can.
-    fn over(path: &'p Rendered, read_only: &[Rendered], writable: &[Rendered]) -> Self {
+    fn over(path: &'p Rendered) -> Self {
         match crate::path::shape(path.as_str()) {
             PathShape::Symlink => Self::OnItsTarget,
             PathShape::NonDir => Self::UnopenableNode(path.as_str()),
             PathShape::Dir => Self::EmptyDir(path.as_str()),
-            PathShape::Absent if mountpoint_is_creatable(path.as_str(), read_only, writable) => {
-                Self::EmptyDir(path.as_str())
-            }
-            PathShape::Absent => Self::OnTheBindAbove,
+            PathShape::Absent => Self::LeftAbsent,
         }
     }
 
@@ -165,29 +169,9 @@ impl<'p> DenyMask<'p> {
             Self::UnopenableNode(path) => {
                 c.args(["--ro-bind", "/dev/null", path]);
             }
-            Self::OnItsTarget | Self::OnTheBindAbove => {}
+            Self::OnItsTarget | Self::LeftAbsent => {}
         }
     }
-}
-
-/// Whether bwrap could make a mountpoint at `path`, which is what an absent
-/// deny's mask costs: `--tmpfs` over a name nothing occupies must `mkdir` it
-/// first, and on a read-only bind that `mkdir` fails and takes the whole
-/// launch with it — `~/.config/gcloud` denied on a host that never installed
-/// gcloud, killing every external command under the grant.
-///
-/// Every writable bind is mounted after every read-only one, and each is an
-/// identity bind, so a writable bind governs its whole subtree whatever its
-/// depth beside a read-only one — the same rule the capability model reads
-/// off a write prefix.  Contained by no bind at all, `path` falls on the new
-/// root's own tmpfs, where creation succeeds.
-fn mountpoint_is_creatable(path: &str, read_only: &[Rendered], writable: &[Rendered]) -> bool {
-    let under = |binds: &[Rendered]| {
-        binds
-            .iter()
-            .any(|bind| crate::path::path_within_str(path, bind.as_str()))
-    };
-    under(writable) || !under(read_only)
 }
 
 /// A seccomp-BPF program: kill on an ABI mismatch, kill each denied
@@ -485,83 +469,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A deny absent at entry but under a writable bind must still be masked,
-    /// or a child creates it and writes it for real.
+    /// One rule under either bind, for two reasons that meet in it: a mask is
+    /// a mount, a mount over an absent name needs a mountpoint bwrap must
+    /// `mkdir`, and that `mkdir` fails with `EROFS` under a read-only bind —
+    /// killing the envelope, as `xdg:config/gcloud` denied on a host with no
+    /// gcloud once did — while under a writable identity bind it succeeds on
+    /// the host, and the deny creates the name it forbids.
     #[test]
-    fn an_absent_path_is_masked_so_a_child_cannot_create_it() {
+    fn an_absent_deny_is_never_mounted_over() {
         let dir = workdir("deny-absent");
-        // Deliberately not created: the deny target must be absent.
-        let denied = dir.join("secret-not-yet-created");
-
-        let args = argv(&deny_within(&dir, &[&denied]));
-        assert!(
-            position_of(
-                &args,
-                &["--perms", "0000", "--tmpfs", &denied.to_string_lossy()]
-            )
-            .is_some(),
-            "an absent deny path must still be masked: {args:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The mask an absent deny needs is a mount, and a mount needs a
-    /// mountpoint bwrap must create: under a read-only bind that `mkdir`
-    /// fails with `EROFS` and the envelope dies before it execs anything.
-    /// Nothing is lost by leaving the name alone — creation is the only
-    /// access an absent name has, and the read-only bind refuses it.
-    #[test]
-    fn an_absent_deny_under_a_read_only_bind_is_left_to_the_bind() {
-        let dir = workdir("deny-absent-ro");
         let config = dir.join("config");
         std::fs::create_dir_all(&config).unwrap();
-        // As `xdg:config/gcloud` is on a host with no gcloud installed.
-        let denied = config.join("gcloud");
+        // Deliberately not created: the deny target must be absent.
+        let under_write = dir.join("secret-not-yet-created");
+        let under_read = config.join("gcloud");
 
-        let args = argv(&SandboxProjection {
+        let read_only = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read_prefixes: vec![config.to_string_lossy().into_owned()],
-                deny_paths: vec![denied.to_string_lossy().into_owned()],
+                deny_paths: vec![under_read.to_string_lossy().into_owned()],
                 ..FsRules::default()
             }),
             net: true,
             exec: crate::types::ExecProjection::default(),
-        });
-        assert!(
-            !args.contains(&denied.to_string_lossy().into_owned()),
-            "no mount may land on an absent deny beneath a read-only bind: {args:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A write prefix nested inside a read prefix — a project tree inside a
-    /// readable home — leaves creation possible, so the mask is owed after
-    /// all, and a read-only ancestor is no excuse to drop it.
-    #[test]
-    fn an_absent_deny_is_masked_where_a_nested_write_bind_restores_creation() {
-        let dir = workdir("deny-absent-nested");
-        let work = dir.join("work");
-        std::fs::create_dir_all(&work).unwrap();
-        let denied = work.join("secret-not-yet-created");
-
-        let args = argv(&SandboxProjection {
-            fs: FsProjection::Restricted(FsRules {
-                read_prefixes: vec![dir.to_string_lossy().into_owned()],
-                write_prefixes: vec![work.to_string_lossy().into_owned()],
-                deny_paths: vec![denied.to_string_lossy().into_owned()],
-                ..FsRules::default()
-            }),
-            net: true,
-            exec: crate::types::ExecProjection::default(),
-        });
-        assert!(
-            position_of(
-                &args,
-                &["--perms", "0000", "--tmpfs", &denied.to_string_lossy()]
-            )
-            .is_some(),
-            "a deny a child could still create must keep its mask: {args:?}"
-        );
+        };
+        for (bind, denied, policy) in [
+            ("writable", &under_write, deny_within(&dir, &[&under_write])),
+            ("read-only", &under_read, read_only),
+        ] {
+            let args = argv(&policy);
+            assert!(
+                !args.contains(&denied.to_string_lossy().into_owned()),
+                "no mount may land on an absent deny beneath a {bind} bind: {args:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -683,6 +624,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Building an envelope must leave the host tree exactly as it found it.
+    /// Masking an absent deny under a *writable* identity bind had bwrap
+    /// `mkdir` its mountpoint straight onto the host: one launch under
+    /// `deny: ['cwd:/.env']` and the user's project held an `.env` directory
+    /// their own tools could then never write.  Only a spawn sees it — the
+    /// argv was well-formed, and the mount was correct inside the namespace.
+    #[test]
+    fn building_an_envelope_never_creates_a_denied_name_on_the_host() {
+        let dir = workdir("deny-absent-spawn-rw");
+        let denied = dir.join("not-yet");
+
+        if !envelope_launches(&deny_within(&dir, &[])) {
+            return;
+        }
+        let out = run_confined(&deny_within(&dir, &[&denied]), "echo READY").expect("spawn bwrap");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("READY"),
+            "an absent deny stopped the envelope from launching: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !denied.exists(),
+            "building the envelope created the denied name on the host: {}",
+            denied.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// No argv assertion can catch a mask that makes bwrap exit before it
     /// execs anything, so this one spawns the envelope too.
     #[test]
@@ -713,9 +682,11 @@ mod tests {
              echo pwned > '{key}' 2>/dev/null || echo KEY-WRITE-REFUSED\n\
              cat '{config}' 2>/dev/null || echo GIT-READ-REFUSED\n\
              touch '{planted}' 2>/dev/null || echo GIT-WRITE-REFUSED\n\
+             chmod 700 '{git}' 2>/dev/null; touch '{planted}' 2>/dev/null\n\
              cat '{readable}' 2>/dev/null\n",
             key = key.display(),
             config = git.join("config").display(),
+            git = git.display(),
             planted = git.join("planted").display(),
             readable = readable.display(),
         );
@@ -748,6 +719,11 @@ mod tests {
             "the grant's own writable prefix stopped being readable: {stdout}"
         );
 
+        // The script's last move is the mask's known limit: a child that
+        // chmods the tmpfs it owns can write inside it.  What must hold is
+        // that none of it reaches the host, which the two assertions below
+        // are — the deny is over the real directory, not over the memory a
+        // child spends on believing otherwise.
         assert_eq!(
             std::fs::read_to_string(&key).unwrap(),
             "PRIVATE-KEY-BYTES",

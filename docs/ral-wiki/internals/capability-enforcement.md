@@ -1,6 +1,6 @@
 ---
-verified_at_commit: c8af3823
-verified_at_date: 2026-09-02
+verified_at_commit: d4d34afc
+verified_at_date: 2026-09-05
 anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, confined_by]
 ---
 
@@ -142,32 +142,33 @@ them is the launch.** `--tmpfs` mkdirs its own mountpoint, so over an existing
 regular file it dies with `ENOTDIR` before bwrap execs anything — a deny that
 denies nothing because nothing runs. Hence `DenyMask::over` as the only
 constructor: an existing non-directory takes `--ro-bind /dev/null`, bound
-without `MS_DEV` and so unopenable either way; a directory or an absent name
-takes `--perms 0000 --tmpfs`, absent names included because a mask must occupy
-the name before the body runs or a child creates the file itself. Nothing
-mounts over a symlink, so a symlinked `deny` is masked at the resolved target
-`sandbox_projection` carries beside the surface spelling.
+without `MS_DEV` and so unopenable either way; a directory takes `--perms 0000
+--tmpfs`, whose missing bits refuse the owner as much as anyone, so a tool
+writing there is refused rather than told it succeeded. That tmpfs is the
+sandboxed uid's own, so a child that deliberately `chmod`s the bits back has
+private scratch at the name — memory the host never sees, never the denied
+directory, and the mask's stated limit
+([[decisions/260905_an-envelope-does-not-touch-the-host|an-envelope-does-not-touch-the-host]]).
+Nothing mounts over a symlink, so a
+symlinked `deny` is masked at the resolved target `sandbox_projection` carries
+beside the surface spelling.
 
-**An absent name under a read-only bind is the one deny that must *not* be
-masked.** Its mountpoint does not exist, bwrap `mkdir`s one, and on a read-only
-bind that `mkdir` returns `EROFS` and kills the envelope — `reasonable` denies
-`xdg:config/gcloud` beneath a readable `xdg:config`, so on any host that never
-installed gcloud every external command under the grant died in sandbox setup
-rather than running. The deny survives its own absence: creation is the only
-access an absent name has, and the read-only bind already refuses it.
-`mountpoint_is_creatable` decides by membership, not depth: every writable bind
-is mounted after every read-only one and each is an identity bind, so a
-writable bind governs its whole subtree however shallow it is beside a
-read-only one — which is also what the capability model reads off a write
-prefix, so backend and model agree. A write prefix nested inside a read prefix
-(a project tree inside a readable home) therefore keeps the mask, and a name
-under no bind at all falls on the new root's own tmpfs, where creation
-succeeds, so it keeps the mask too. Both masks refuse
-with `EACCES` against macOS's `EPERM`, so a cross-platform test should assert
-the bytes are unreachable rather than an errno — and because the failure mode
-is a sandbox that never launches, one test per backend must spawn the envelope
-for real
-(`sandbox::linux::tests::a_denied_path_refuses_every_access_while_the_body_still_runs`).
+**A name that does not exist gets no mask at all.** Every mount bwrap could lay
+there it must `mkdir` a mountpoint for first, and the writable binds are
+identity binds of real host directories, so that mkdir is a write to the host —
+`EROFS` and a dead envelope under a read-only bind, and under a writable one a
+deny that creates the very name it forbids
+([[decisions/260905_an-envelope-does-not-touch-the-host|an-envelope-does-not-touch-the-host]]).
+Under a read-only bind nothing is lost, creation being the only access an
+absent name has. Under a writable bind the deny falls to the in-process gate
+alone, which is a Linux seam and named as one: macOS's rules are negative and
+range over names, so Seatbelt enforces the same deny in full. The masks that do
+land refuse with `EACCES` against macOS's `EPERM`, so a cross-platform test
+should assert the bytes are unreachable rather than an errno — and because the
+failure modes here are a sandbox that never launches and a mount that lies,
+they are pinned by tests that spawn the envelope for real
+(`sandbox::linux::tests::a_denied_path_refuses_every_access_while_the_body_still_runs`,
+`::building_an_envelope_never_creates_a_denied_name_on_the_host`).
 
 **The sandbox is applied per external command, not by re-execing the grant
 body.** A `grant` is a *local* dynamic effect scope: its body evaluates in
