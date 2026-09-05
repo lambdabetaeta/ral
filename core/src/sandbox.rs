@@ -124,21 +124,24 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     }
     #[cfg(target_os = "linux")]
     {
+        let host = linux::HostEnvelope::probe();
         match linux::make_command_with_policy(
             "/bin/true",
             &[],
             policy,
             None,
             launch::Ownership::Kept,
-            linux::HostEnvelope::probe(),
+            host,
         ) {
-            Ok((cmd, _receipt)) => {
+            Ok((cmd, _info_fd)) => {
                 let mut line = String::from("bwrap");
                 for arg in cmd.get_args() {
                     line.push(' ');
                     line.push_str(&arg.to_string_lossy());
                 }
-                eprintln!("--- bwrap argv ---\n{line}\n--- end bwrap argv ---");
+                eprintln!(
+                    "--- bwrap argv ---\n{line}\n--- host envelope ---\n{host}--- end bwrap argv ---"
+                );
             }
             Err(e) => eprintln!("--- bwrap argv error ---\n{e}"),
         }
@@ -177,8 +180,8 @@ pub fn apply_child_limits(child: &crate::process::ChildHandle) {
 /// `/etc/hosts` and `/etc/resolv.conf`, and the launch dies in setup.
 /// Test-only: a spawning test on such a host proves nothing either way, so
 /// callers skip rather than assert.
-// `Surrendered` carries no receipt to read and no parent-death tie: neither
-// decides whether the envelope builds, and `/bin/true` outlives nobody.
+// `Surrendered` carries no `--info-fd` to read and no parent-death tie:
+// neither decides whether the envelope builds, and `/bin/true` outlives nobody.
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
 #[allow(
     clippy::disallowed_methods,
@@ -201,7 +204,7 @@ pub fn restricted_envelope_launches() -> bool {
             launch::Ownership::Surrendered,
             linux::HostEnvelope::probe(),
         )
-        .is_ok_and(|(mut cmd, _no_receipt)| {
+        .is_ok_and(|(mut cmd, _no_info_fd)| {
             cmd.stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
@@ -260,14 +263,14 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
 /// All sandbox startup work, returning argv stripped of
 /// `--sandbox-projection`.
 ///
-/// Pins this binary and, on Unix, enters the OS process sandbox when a
-/// projection was supplied; Windows instead confines the child from the
-/// parent at spawn time.  A returned code means we are the bwrap respawn
-/// parent and should exit with it.
+/// Pins this binary and, on macOS, enters the OS process sandbox when a
+/// projection was supplied; Linux and Windows confine the child from the
+/// parent instead.
 ///
 /// # Errors
-/// A malformed `--sandbox-projection`, or a failure to enter the sandbox.
-pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> {
+/// A malformed `--sandbox-projection`, one on a platform that never emits it,
+/// or a failure to enter the sandbox.
+pub fn early_init(argv: &[String]) -> Result<Vec<String>, String> {
     let (policy, stripped) = strip_policy_arg(argv)?;
     // So a per-command `--sandbox-projection` child re-execs this binary and
     // not whatever the on-disk path holds by then.
@@ -287,10 +290,8 @@ pub fn early_init(argv: &[String]) -> Result<(Vec<String>, Option<u8>), String> 
             windows::session::boot_recover();
         }
     }
-    if let Some(code) = reexec::maybe_enter_process_sandbox(&stripped, policy.as_ref())? {
-        return Ok((stripped, Some(code)));
-    }
-    Ok((stripped, None))
+    reexec::maybe_enter_process_sandbox(policy.as_ref())?;
+    Ok(stripped)
 }
 
 /// Delete this session's `AppContainer` profiles.  Grant ACEs stay: they are
@@ -317,8 +318,7 @@ pub fn teardown_session() {
 pub fn serve_sandbox_early_init() -> Option<u8> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match early_init(&argv) {
-        Ok((_, Some(code))) => Some(code),
-        Ok((stripped, None)) => {
+        Ok(stripped) => {
             serve_sandbox_exec(&stripped).or_else(|| crate::try_run_bundled_tool(&stripped))
         }
         Err(e) => {

@@ -2690,8 +2690,12 @@ A single `false` anywhere in the active stack denies the birth. `true` cannot ov
 When detachment is allowed, the child is created under the effective
 filesystem and network projection and, on hosts that support it, the effective
 executable-path projection. That projection remains attached to the survivor
-for its lifetime. `detach` itself is not part of the OS profile; it decides
-whether the survivor may be born.
+for its lifetime. On Linux the survivor also keeps its envelope's process
+namespaces: the receipt's `pid` names the envelope, not the program; the
+survivor's own `getpid()` is local to its namespace; and from inside any later
+grant the survivor is invisible, reachable only through what it serves.
+`detach` itself is not part of the OS profile; it decides whether the survivor
+may be born.
 
 The `detach` command is present only when the host installs it together with a birth budget.
 
@@ -2774,7 +2778,7 @@ Dynamic loader injection variables such as `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY
 
 **macOS.** ral launches confined children under Seatbelt. Filesystem, offline-network, and executable-path restrictions are kernel-enforced. The executable allow-list also constrains programs launched internally by an admitted child. Subcommand restrictions remain an in-process check on the original invocation.
 
-**Linux.** ral uses bubblewrap for filesystem restrictions and `net: false`; supported architectures also receive a seccomp filter for selected dangerous syscalls. Bubblewrap has no path-based executable filter. ral therefore checks the command it launches, but an admitted program may execute another visible program internally. Pure `exec` attenuation does not by itself create a bubblewrap sandbox.
+**Linux.** ral uses bubblewrap for filesystem restrictions and `net: false`; supported architectures also receive a seccomp filter for selected dangerous syscalls. Every confined child runs in its own ipc, uts and cgroup namespaces and, wherever the host can mount a fresh procfs, its own pid namespace with its own `/proc`: on every projection it sees and can signal no host process. A container runtime that masks `/proc` prevents the pid namespace; the launch still runs, and `RAL_DUMP_SANDBOX_PROFILE` reports the table as the container's own. A confined command has no controlling terminal. Bubblewrap has no path-based executable filter. ral therefore checks the command it launches, but an admitted program may execute another visible program internally. Pure `exec` attenuation does not by itself create a bubblewrap sandbox.
 
 **Windows.** ral uses a projection-specific AppContainer token, filesystem capability SIDs, and a Job Object. AppContainer is deny-by-default: a child confined only to obtain `net: false` does not automatically retain ordinary access to the user’s working tree. Windows has no path-based executable filter, so internally launched executables have the same limitation as on Linux. Network and UNC grant paths are unsupported. Filesystem capability entries are attached to NTFS objects; same-volume renames and hard links can therefore preserve or omit authority differently from a purely path-based rule.
 

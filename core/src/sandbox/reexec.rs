@@ -118,7 +118,7 @@ pub(super) fn register_sandbox_self() {
 #[cfg(target_os = "linux")]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:pin-open] Opens the boot-time ral binary to pin it (by fd) for the Linux sandbox respawn, immune to on-disk swaps. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
+    reason = "[io-door:silent:pin-open] Opens the boot-time ral binary to pin it (by fd) for the Linux helper re-exec, immune to on-disk swaps. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
 )]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     use std::os::fd::{AsRawFd, OwnedFd};
@@ -200,61 +200,28 @@ pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
 
 // ── Process sandbox entry ────────────────────────────────────────────────
 
-/// Enter the OS sandbox for this process if a policy was supplied.
-/// `Some(code)` means exit with it now: on Linux the respawn under bwrap has
-/// already run the real work in a child.
-#[cfg(unix)]
+/// Enter the OS sandbox for this process if a projection was supplied.  Only
+/// macOS enters one: Linux (the bwrap envelope) and Windows (the `AppContainer`
+/// token) confine a child from the parent, so there the flag is a regression
+/// to the macOS shape, or forged, and is refused rather than run unconfined.
 pub(super) fn maybe_enter_process_sandbox(
-    args_without_policy: &[String],
     policy: Option<&crate::types::SandboxProjection>,
-) -> Result<Option<u8>, String> {
+) -> Result<(), String> {
     let Some(policy) = policy else {
-        return Ok(None);
+        return Ok(());
     };
-    enter_for_platform(args_without_policy, policy)
-}
-
-#[cfg(windows)]
-pub(super) fn maybe_enter_process_sandbox(
-    _args_without_policy: &[String],
-    policy: Option<&crate::types::SandboxProjection>,
-) -> Result<Option<u8>, String> {
-    // Confinement is the `AppContainer` token the parent stages via
-    // `Launch::security_capabilities` before `CreateProcessW`, so a child has
-    // nothing to enter and `sandbox::launch` never emits the flag.  Seeing
-    // one means a caller regressed to the Unix shape, or forged it.
-    if policy.is_some() {
-        return Err(
-            "ral: --sandbox-projection is not valid on Windows (confinement is applied by the \
-             parent at spawn time, not entered by the child); refusing to run unconfined"
-                .into(),
-        );
+    #[cfg(target_os = "macos")]
+    {
+        super::macos::enter_current_process(policy)
     }
-    Ok(None)
-}
-
-#[cfg(target_os = "macos")]
-fn enter_for_platform(
-    _args: &[String],
-    policy: &crate::types::SandboxProjection,
-) -> Result<Option<u8>, String> {
-    super::macos::enter_current_process(policy)?;
-    Ok(None)
-}
-
-#[cfg(target_os = "linux")]
-fn enter_for_platform(
-    args: &[String],
-    policy: &crate::types::SandboxProjection,
-) -> Result<Option<u8>, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("ral: current_exe: {e}"))?;
-    super::linux::respawn_under_bwrap(&exe, args, policy).map(Some)
-}
-
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
-fn enter_for_platform(
-    _args: &[String],
-    _policy: &crate::types::SandboxProjection,
-) -> Result<Option<u8>, String> {
-    Err("ral: fs/net sandboxing is unavailable on this Unix platform".into())
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = policy;
+        Err(format!(
+            "ral: {} is not entered on {}: confinement is applied to a child from outside, \
+             never by the child itself; refusing to run unconfined",
+            super::SANDBOX_PROJECTION_FLAG,
+            std::env::consts::OS
+        ))
+    }
 }

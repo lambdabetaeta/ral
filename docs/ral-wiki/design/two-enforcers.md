@@ -48,6 +48,25 @@ narrates *how* each runs; this page argues *why* both exist.
   there — a known gap, not a solved case
   ([[decisions/260530_linux-exec-confinement|linux-exec-confinement]]).
 
+**What a grant's guarantee means on Linux, row by row.** Rows above the rule
+are *promises*: a grant names them, and a host that cannot hold one refuses
+the launch. Rows below are *invariants* of being under an envelope at all —
+applied wherever the host can build them, reported where it cannot
+(`HostEnvelope`, printed by `RAL_DUMP_SANDBOX_PROFILE`), never a reason to
+refuse: nothing in a grant names them, and the in-process half of process
+reach is already total, a ral body reaching processes only through what ral
+serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
+
+| | held by | when the host lacks it |
+|---|---|---|
+| `fs` read/write prefixes, `deny` masks | bwrap mounts | refuse: `confinement_unavailable` |
+| `net: false` | `--unshare-net` | refuse: `projection_enforceable` |
+| `exec` — which binary, which subcommand | in-process gate | the gate stands alone |
+| die with parent, new session, no core, nproc cap, seccomp blocklist | bwrap + `pre_exec` | applied where possible |
+| private ipc / uts / cgroup | `--unshare-*` | never refused |
+| no signalling the host; host process table hidden | pid namespace + fresh `/proc` | reported: the table is the container's own |
+| private ptys | `--dev` | reported: `/dev` by hand over the host's `/dev/pts` |
+
 The discipline this draws: **the in-process gate is authority over dispatch, not
 confinement of children.** Treating it as the latter is the mistake; pairing it
 with the sandbox is the design.

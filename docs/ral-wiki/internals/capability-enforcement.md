@@ -1,7 +1,7 @@
 ---
-verified_at_commit: d1dc8263
-verified_at_date: 2026-09-05
-anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, confined_by, HostEnvelope, render_dev]
+verified_at_commit: 39934600
+verified_at_date: 2026-09-06
+anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -185,15 +185,20 @@ they are pinned by tests that spawn the envelope for real
 **Where the host refuses bwrap a mount, the envelope rebuilds what the mount
 would have provided.** A rootless container's mount layer will not hand bwrap a
 fresh devpts, so `--dev` dies in setup and no `Restricted` envelope launches
-there at all. `HostEnvelope` learns that with one probe spawn
-(`sandbox/linux/host.rs`) and `render_dev` lays out `--dev`'s own shape by hand
-where it must: a tmpfs, the device nodes bound in, the `pts/ptmx` symlink, a
-fresh `/dev/shm`. The one piece it cannot rebuild is the piece refused —
-`/dev/pts` is the host's, so a pty opened inside is not the envelope's own. The
-render is a pure function of the probed `HostEnvelope`, so the argv tests assert
-both shapes from literals rather than from whichever host runs them. Such hosts
-still refuse the read-only rebind of their own locked `/etc/hosts` and
-`/etc/resolv.conf`, which remains open.
+there at all; the same runtimes mask `/proc`, and the kernel then refuses the
+fresh procfs a pid namespace needs. `HostEnvelope` learns both with one probe
+spawn each (`sandbox/linux/host.rs`): `render_dev` lays out `--dev`'s own shape
+by hand where it must — a tmpfs, the device nodes bound in, the `pts/ptmx`
+symlink, a fresh `/dev/shm` — and `--unshare-pid` is emitted only where the
+table can be hidden. What cannot be rebuilt is reported, not refused: neither
+is a restriction a grant names, so `RAL_DUMP_SANDBOX_PROFILE` prints the
+`HostEnvelope` naming each unheld invariant, its cause and the flag that lifts
+it, and the child sees what it would have seen unconfined — the container's
+own table, the host's `/dev/pts` ([[design/two-enforcers|two-enforcers]]). The
+render is a pure function of the probed `HostEnvelope`, so the argv tests
+assert both shapes from literals rather than from whichever host runs them.
+Such hosts still refuse the read-only rebind of their own locked `/etc/hosts`
+and `/etc/resolv.conf`, which remains open.
 
 **The sandbox is applied per external command, not by re-execing the grant
 body.** A `grant` is a *local* dynamic effect scope: its body evaluates in
@@ -206,7 +211,19 @@ through `sandboxed_command` (`sandbox/launch.rs`), which confines that *one*
 child:
 
 - *Linux* wraps each child in `bwrap` via `make_command_with_policy`, threading
-  the logical cwd in as `--chdir`;
+  the logical cwd in as `--chdir`. The envelope is the child's whole world, not
+  only its filesystem view: its own ipc, uts and cgroup namespaces on every
+  projection, and a pid namespace with a fresh `/proc` wherever the host can
+  build one, so a confined child sees and can signal nothing of the host,
+  `/proc/self` is its own, and `ps` under any grant shows the envelope alone.
+  bwrap never execs the payload in place — a monitor clones a namespace init,
+  which forks the payload — so a `Kept` launch reads the payload's pid back
+  over `--info-fd` (`InfoFd`); that pid, a session leader by `--new-session`,
+  is the group every ladder signals, and the monitor is addressed by nobody.
+  `Launch::spawn` places an enveloped launch `NewLeader` whatever was asked and
+  returns the payload's group, `ForegroundDecision` never hands an envelope the
+  terminal, and a pipeline collector addresses each confined stage's envelope
+  beside its own group ([[internals/pipeline-execution|pipeline execution]]);
 - *macOS* re-execs a tiny launcher — `ral --sandbox-projection <json>
   --ral-sandbox-exec <host>` for a host external, or `--ral-bundled-tool <tool>`
   for a bundled tool — that enters Seatbelt in `early_init`

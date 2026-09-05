@@ -504,6 +504,11 @@ accurate string minutes earlier.
   bore it — and the authority became the `detach:` dimension on the capability
   lattice, as this page guessed it would. The `engages_sandbox` gate is gone.
 
+- **What a survivor's `pid` denotes under a grant.** Settled by
+  [[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]:
+  the receipt names bwrap's monitor, the survivor's own `getpid()` is local to
+  its namespace, and no later grant can name it at all.
+
 - **Confirming the race empirically.** One run settles which side wins and how
   reliably: `RAL_DBG=wait` emits `cancel-fired name=… cause=Explicit` from
   `core/src/runtime/command/child.rs:431-438` if and only if the worker thread

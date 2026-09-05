@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5ca433c4
-generated_at_date: 2026-09-05
+generated_at_commit: 39934600
+generated_at_date: 2026-09-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -168,8 +168,9 @@ device for `net` to govern; the in-process gates apply unchanged
 (`docs/SPEC.md` §12.11).
 
 - `early_init(argv)` — startup: consumes `--sandbox-projection`, pins
-  `SANDBOX_SELF`, on Unix enters the OS sandbox for a per-command
-  `--sandbox-projection` child (`maybe_enter_process_sandbox`), and on Windows
+  `SANDBOX_SELF`, on macOS enters the OS sandbox for a per-command
+  `--sandbox-projection` child (`maybe_enter_process_sandbox`; Linux and
+  Windows confine from the parent and refuse the flag), and on Windows
   runs the boot-time orphan sweep (`windows::session::boot_recover`) that
   deletes a crashed prior session's AppContainer profiles and restores the
   per-session ACEs of any legacy pre-capability ledger. A test binary is
@@ -221,13 +222,19 @@ device for `net` to govern; the in-process gates apply unchanged
   `cfg(target_os = "macos")`, the only platform that emits the host re-exec
   tail. The launcher also takes an `Ownership` (`Kept` / `Surrendered`, the
   second variant `cfg(unix)` since only there does the verb that makes the
-  distinction exist): it reaches the Linux backend alone, which is the one
-  that builds an envelope process to tie the child to us, so a `detach`ed
-  survivor keeps the birthing frame's projection for life while dropping
-  that tie ([[map/core/runtime|runtime]]). The grant body itself evaluates
+  distinction exist): it reaches the Linux backend alone, which decides the
+  two ties between the session and the envelope — death (`--die-with-parent`)
+  and address (`--info-fd`) — so a `detach`ed survivor keeps the birthing
+  frame's projection, namespaces included, for life while dropping both
+  ([[map/core/runtime|runtime]]). The grant body itself evaluates
   locally, external children being confined per-command
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
-- Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap), and
+- Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap: the
+  argv — `--new-session`, the ipc/uts/cgroup namespaces and, by host fact, the
+  pid one, `--proc` on both projections, the seccomp filter; `InfoFd`, the
+  payload's pid read back for a `Kept` launch; `linux/host.rs`, `HostEnvelope`,
+  the probed host facts the render is pure in, printed by the profile dump),
+  and
   `windows.rs` (Job Objects capping the child tree at 512 processes, plus the
   AppContainer backend in three submodules — `appcontainer.rs`, the profile
   lifecycle and LowBox `SECURITY_CAPABILITIES` construction; `dacl.rs`, the

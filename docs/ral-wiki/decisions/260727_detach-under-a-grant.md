@@ -107,11 +107,14 @@ is checked where the argv is built, not by birthing a process and interrogating
 a namespace the test cannot enter. On macOS the permitted-birth test is a real
 birth under a real Seatbelt projection, since any `fs:` attenuation raises one.
 
-One thing is asserted from reading rather than from running: whether bwrap
+~~One thing is asserted from reading rather than from running: whether bwrap
 execs the target in place or keeps a supervisor process decides whether the
-receipt's pid names the program or the envelope. Under a Linux projection the
-receipt may name bwrap. That is a *documentation* question about what `pid`
-denotes, not a confinement question, and it wants one run on Linux to settle.
+receipt's pid names the program or the envelope.~~ **Settled** by
+[[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]:
+bwrap always keeps a supervisor, so under a Linux projection the receipt's
+`pid` names bwrap's monitor, which exits when the *initial* process does — for
+a self-daemonizing survivor the receipt is dead the moment it is handed back,
+while the daemon lives on inside a namespace whose init outlives the session.
 
 ## See also
 

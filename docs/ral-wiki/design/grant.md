@@ -34,6 +34,13 @@ identity (`None` = inherit = ⊤, [[map/core/shell-state|`Option<T>: Meet`]]).
 - **`net` has no in-process gate.** ral has no network primitives, so a
   `net: false` is enforced only by the OS sandbox — it fails closed where no
   backend exists.
+- **The process view is the envelope's, on every projection.** No axis names
+  it: a child confined for any reason sees and can signal only the envelope's
+  own processes, so `ps` and `kill` under any grant reach the envelope alone,
+  and a survivor `detach`ed under one grant is invisible from inside the next.
+  On Linux this is a pid namespace wherever the host can build one; where it
+  cannot, the launch runs and the host fact is reported
+  ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
 
 This is a deliberate mental-model fact, recorded so omission is never mistaken
 for an implicit cross-axis deny — see

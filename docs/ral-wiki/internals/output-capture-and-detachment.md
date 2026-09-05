@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 77f7bf14
-verified_at_date: 2026-09-04
+verified_at_commit: 39934600
+verified_at_date: 2026-09-06
 anchors: [Sink::pump, SINK_BUFFER_CAP, WaitedChild, spawn_child, PgidPolicy::NewLeader, process::deadline, WorkerLease, WorkerRegistry, lease_fire, Resident, spawn_detached, DetachPolicy, Capture, decode_utf8_strict, swap_ambient_stdout]
 ---
 
@@ -251,10 +251,15 @@ of the child's pgid.
   ([[decisions/260727_detach-under-a-grant|detach-under-a-grant]]).
 - A survivor born under a projection **keeps it for life**. `build_command`
   renders the frame's confinement into the launch exactly as for a child the
-  session keeps; only `Ownership::Surrendered` drops bwrap's
-  `--die-with-parent`, which against a double fork would kill the survivor
-  moments after birth or never fire at all. Nothing later can widen what it may
-  touch, because nothing later can name it.
+  session keeps; `Ownership::Surrendered` drops only the two ties between the
+  session and the envelope — death (`--die-with-parent`, which against a double
+  fork would kill the survivor moments after birth or never fire at all) and
+  address (`--info-fd`, there being no session left to address it). The
+  namespaces stay: the envelope's init outlives the session, so the daemon
+  runs confined until it exits, its `getpid()` namespace-local and its process
+  invisible from inside any later grant. Nothing later can widen what it may
+  touch, because nothing later can name it
+  ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
 - A detached row could not implement `Resident` (`core/src/types/resident.rs`)
   even if one wanted the ledger's uniformity, because that trait demands
   `cancel()` and every answer is wrong — a no-op lies about the edge, a `kill`

@@ -263,7 +263,7 @@ Should you wish for a service that runs *after* the session is over, use `detach
 
     let d = within [dir: #'/data'#] { detach #'background export job'# python3 export.py }
 
-`detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling and killing can happen only through the OS. 
+`detach` takes a description of the task, a binary to call (not a block!), and some arguments. It then asks the OS to run this binary with these arguments, returning a receipt `[pid, desc]`. Stdin, stdout and stderr are `/dev/null`, so you will not receive any updates. Polling and killing can happen only through the OS — and, from inside a grant, only through what the survivor serves: each grant's children live in their own process namespace, so a later grant cannot `ps` or `kill` a survivor an earlier one detached. 
 
 ## Within
 

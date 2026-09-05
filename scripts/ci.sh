@@ -36,9 +36,8 @@ cd "$(dirname "$0")/.."
 # targets, so no second rule here has to predict it.
 
 # Docker, not podman: docker is rootful, so --privileged is real host
-# privilege.  Rootless podman's is namespace-root only, and if that falls short
-# of bubblewrap's devpts mount the sandbox tests skip rather than fail — which
-# reads exactly like a pass.
+# privilege.  Rootless podman's is namespace-root only, and the envelope tests
+# then exercise their fallback arm, never the namespace.
 if [ "$MODE" = linux-box ]; then
     command -v docker >/dev/null 2>&1 || {
         echo 'ci.sh: linux-box needs docker on PATH' >&2
@@ -52,9 +51,10 @@ fi
 
 # Run one command where $MODE's toolchain lives.
 #
-# --privileged is load-bearing: bubblewrap mounts devpts for its virtual /dev,
-# which an unprivileged container refuses, and every sandbox test would then
-# skip instead of confining anything.  --init reaps the orphaned grandchildren
+# --privileged is load-bearing: an unprivileged container masks /proc and
+# refuses a fresh devpts, so bubblewrap builds neither the pid namespace nor
+# its virtual /dev there, and only here do the tests of both run their held
+# arm.  --init reaps the orphaned grandchildren
 # a killed sandboxed process tree leaves behind, which otherwise read as "the
 # timeout did not kill it".  The named volumes keep the registry and the Linux
 # artefacts inside the VM instead of crossing the bind mount into the host's

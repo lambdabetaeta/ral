@@ -81,16 +81,13 @@ fn main() -> ExitCode {
     }
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let (stripped, exit) = match ral_core::sandbox::early_init(&argv) {
-        Ok(result) => result,
+    let stripped = match ral_core::sandbox::early_init(&argv) {
+        Ok(stripped) => stripped,
         Err(e) => {
             diagnostic::cmd_error("ral", &e);
             return ExitCode::from(1);
         }
     };
-    if let Some(code) = exit {
-        return ExitCode::from(code);
-    }
 
     // Per-command sandbox re-exec tails run after `early_init`: a
     // `--sandbox-projection` child enters the OS sandbox first, then runs the

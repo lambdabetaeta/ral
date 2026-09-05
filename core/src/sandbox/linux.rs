@@ -1,12 +1,13 @@
-//! Linux sandbox: the bubblewrap (`bwrap`) argv that confines a process.
-//!
-//! Two callers build one envelope. `super::reexec` re-execs ral itself here
-//! for a grant body, and `super::launch` wraps a single external child;
-//! whatever the re-exec'd ral spawns inherits its mount namespace and
-//! seccomp filter.  The filter is applied only on x86-64 and aarch64.
-//!
-//! bwrap has no endpoint filter — `--unshare-net` drops the network
-//! namespace whole — so `SandboxProjection::net` is a bit, not a list.
+//! Linux sandbox: the bubblewrap (`bwrap`) argv that confines one external
+//! child.  bwrap is never the payload: its monitor clones a namespace init
+//! which forks the payload, whose `setsid` (`--new-session`) makes its pid the
+//! group of everything inside — the group ral addresses, read over
+//! `--info-fd`; the monitor leads an inert group nobody signals.  The
+//! envelope is the child's whole world on every projection: own ipc, uts and
+//! cgroup namespaces, a pid namespace with a fresh `/proc` where the host can
+//! build one ([`HostEnvelope`]), a seccomp blocklist on x86-64 and aarch64.
+//! bwrap has no endpoint filter — `--unshare-net` drops the network namespace
+//! whole — so `SandboxProjection::net` is a bit, not a list.
 
 mod host;
 
@@ -15,8 +16,7 @@ pub(crate) use host::HostEnvelope;
 use crate::path::{PathShape, Rendered, render_paths};
 use crate::types::{FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// The bubblewrap binary, resolved on `PATH`: every confined launch here execs
 /// it, so a host without it can enforce no projection at all.
@@ -33,8 +33,7 @@ pub(super) const BWRAP: &str = "bwrap";
 ///
 /// `chdir` is the in-sandbox cwd — bwrap starts the child in its
 /// mount-namespace root — so a per-command launch passes the target's
-/// logical cwd, while the grant-body re-exec and the profile dump pass
-/// `None` and let the re-exec'd ral thread cwd into its own children.
+/// logical cwd; the profile dump, which spawns nothing, passes `None`.
 ///
 /// `ownership` decides two ties between the session and the envelope:
 /// death (`--die-with-parent`) and address (`--info-fd`, returned alongside
@@ -85,6 +84,10 @@ pub(crate) fn make_command_with_policy(
     rw_binds.retain(|bind| crate::path::exists(bind.as_str()));
 
     c.arg("--new-session");
+    c.args(["--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try"]);
+    if host.private_pids {
+        c.arg("--unshare-pid");
+    }
     let info_fd = if ownership == super::launch::Ownership::Kept {
         c.arg("--die-with-parent");
         Some(open_info_fd(&mut c)?)
@@ -112,10 +115,11 @@ pub(crate) fn make_command_with_policy(
             }
         }
         FsProjection::Unrestricted => {
-            // Nothing in the stack attenuated fs, so bwrap is here only for
-            // the seccomp envelope and the parent-death tie.  `--dev-bind`
-            // carries device nodes across; `--bind` would skip them.
+            // `--bind` would skip device nodes.  `/proc` goes over the root:
+            // a fresh table under `--unshare-pid`, the host's bound without,
+            // so `/proc/self` is the payload's own either way.
             c.args(["--dev-bind", "/", "/"]);
+            c.args(["--proc", "/proc"]);
         }
     }
     // Masks go on after every bind: last mount wins.  `pinned_dirs` goes
@@ -425,48 +429,6 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
     }
 }
 
-/// Re-exec this ral process under `bwrap` with `policy` enforced, blocking
-/// until it exits.
-pub(super) fn respawn_under_bwrap(
-    exe: &Path,
-    args: &[String],
-    policy: &SandboxProjection,
-) -> Result<u8, String> {
-    // We wait on this one, so its envelope must not outlive an abrupt death.
-    let (mut cmd, info_fd) = make_command_with_policy(
-        exe.to_string_lossy().as_ref(),
-        args,
-        policy,
-        None,
-        super::launch::Ownership::Kept,
-        HostEnvelope::probe(),
-    )?;
-    cmd.stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    let mut child = crate::process::spawn(&mut cmd).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            format!("ral: failed to enter sandbox: {BWRAP} not found")
-        } else {
-            format!("ral: failed to enter sandbox: {e}")
-        }
-    })?;
-    // Never read here; dropped rather than held open for the wait's duration.
-    drop(info_fd);
-    // A bootstrap helper no user code can name, hence never SIGSTOP, so
-    // routing this wait through the reaper — whose only extra service is
-    // answering a stop with SIGCONT — would buy nothing.
-    #[allow(clippy::disallowed_methods)]
-    let status = child
-        .wait()
-        .map_err(|e| format!("ral: failed to enter sandbox: {e}"))?;
-    #[allow(
-        clippy::cast_sign_loss,
-        reason = "clamp(0, 255) bounds the value to the u8 range before the cast"
-    )]
-    Ok(status.code().unwrap_or(1).clamp(0, 255) as u8)
-}
-
 /// System paths always bound read-only.  `/etc` wholesale is excluded —
 /// only the files dynamic linking, name resolution, user lookup and
 /// toolchain resolution need.
@@ -515,8 +477,11 @@ mod tests {
     use crate::types::{FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
 
-    /// For the tests `/dev` is beside the point.
-    const WITH_VIRTUAL_DEV: HostEnvelope = HostEnvelope { virtual_dev: true };
+    /// A bare Linux host.
+    const WHOLE: HostEnvelope = HostEnvelope {
+        private_pids: true,
+        virtual_dev: true,
+    };
 
     fn workdir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("ral-bwrap-{tag}-{}", std::process::id()));
@@ -540,8 +505,16 @@ mod tests {
         }
     }
 
-    fn argv_on(host: HostEnvelope, policy: &SandboxProjection) -> Vec<String> {
-        make_command_with_policy("/bin/true", &[], policy, None, Ownership::Kept, host)
+    fn unrestricted() -> SandboxProjection {
+        SandboxProjection {
+            fs: FsProjection::Unrestricted,
+            net: true,
+            exec: crate::types::ExecProjection::default(),
+        }
+    }
+
+    fn argv_on(host: HostEnvelope, policy: &SandboxProjection, ownership: Ownership) -> Vec<String> {
+        make_command_with_policy("/bin/true", &[], policy, None, ownership, host)
             .expect("ASCII paths render")
             .0
             .get_args()
@@ -550,7 +523,7 @@ mod tests {
     }
 
     fn argv(policy: &SandboxProjection) -> Vec<String> {
-        argv_on(WITH_VIRTUAL_DEV, policy)
+        argv_on(WHOLE, policy, Ownership::Kept)
     }
 
     fn position_of(args: &[String], mask: &[&str]) -> Option<usize> {
@@ -882,13 +855,20 @@ mod tests {
         let dir = workdir("dev-render");
         let policy = deny_within(&dir, &[]);
 
-        let mounted = argv_on(HostEnvelope { virtual_dev: true }, &policy);
+        let mounted = argv(&policy);
         assert!(
             position_of(&mounted, &["--dev", "/dev"]).is_some(),
             "a host that mounts --dev must be given it: {mounted:?}"
         );
 
-        let by_hand = argv_on(HostEnvelope { virtual_dev: false }, &policy);
+        let by_hand = argv_on(
+            HostEnvelope {
+                virtual_dev: false,
+                ..WHOLE
+            },
+            &policy,
+            Ownership::Kept,
+        );
         assert!(
             position_of(&by_hand, &["--dev", "/dev"]).is_none(),
             "the refused mount must not be asked for: {by_hand:?}"
@@ -921,7 +901,10 @@ mod tests {
         }
 
         let out = run_confined(
-            HostEnvelope { virtual_dev: false },
+            HostEnvelope {
+                virtual_dev: false,
+                ..HostEnvelope::probe()
+            },
             &policy,
             "echo x > /dev/null && echo NULL-OK\n\
              head -c 1 /dev/urandom > /dev/null && echo URANDOM-OK\n\
@@ -941,6 +924,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The namespaces key on there being an envelope, the pid one on the host fact.
+    #[test]
+    fn every_envelope_owns_its_namespaces_and_the_pid_one_where_the_host_allows() {
+        let restricted = deny_within(&workdir("namespaces"), &[]);
+        let masked = HostEnvelope {
+            private_pids: false,
+            ..WHOLE
+        };
+        for (host, private_pids) in [(WHOLE, true), (masked, false)] {
+            for policy in [&unrestricted(), &restricted] {
+                for ownership in [Ownership::Kept, Ownership::Surrendered] {
+                    let args = argv_on(host, policy, ownership);
+                    for flag in ["--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try"] {
+                        assert!(
+                            args.iter().any(|a| a == flag),
+                            "{flag} must be on every envelope: {args:?}"
+                        );
+                    }
+                    assert_eq!(
+                        args.iter().any(|a| a == "--unshare-pid"),
+                        private_pids,
+                        "--unshare-pid must follow the host fact alone: {args:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The bound root carries the host's `/proc`; the fresh mount must land after it.
+    #[test]
+    fn an_unrestricted_envelope_mounts_proc_over_the_bound_root() {
+        let args = argv(&unrestricted());
+        let root = position_of(&args, &["--dev-bind", "/", "/"]).expect("the root bind");
+        let proc_ = position_of(&args, &["--proc", "/proc"]).expect("a /proc mount");
+        assert!(root < proc_, "/proc must be mounted over the bound root: {args:?}");
+    }
+
     /// A kept child's envelope is tied to our death and a surrendered one's
     /// must not be, while every other confinement flag stays identical.
     #[test]
@@ -953,16 +973,8 @@ mod tests {
             net: false,
             exec: crate::types::ExecProjection::default(),
         };
-        let argv = |ownership| {
-            make_command_with_policy("/bin/true", &[], &policy, None, ownership, WITH_VIRTUAL_DEV)
-                .expect("ASCII paths render")
-                .0
-                .get_args()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-        };
-        let kept = argv(Ownership::Kept);
-        let surrendered = argv(Ownership::Surrendered);
+        let kept = argv_on(WHOLE, &policy, Ownership::Kept);
+        let surrendered = argv_on(WHOLE, &policy, Ownership::Surrendered);
 
         assert!(
             kept.contains(&"--die-with-parent".to_string()),
@@ -996,29 +1008,16 @@ mod tests {
     /// leader in `Launch::spawn` is exercised end to end, then cancels with
     /// `Explicit` and checks the trap ran well inside `TEARDOWN_GRACE`.
     ///
-    /// The trap's own `exit 0` (the plan's own script, §6) means `sh` catches
-    /// the signal and shuts itself down cleanly rather than dying *by* it —
-    /// so the wait outcome here is a plain successful exit, not
-    /// `WaitOutcome::Cancelled`/`CommandFailure::Cancelled` (those require
-    /// attributing a signal death to the cause, which is step 4 of the plan's
-    /// implementation order and out of this change's scope). What this test
-    /// asserts instead is the property step 3 alone provides: the trap ran,
-    /// `sent` recorded the cancellation, and teardown did not fall back to
-    /// the payload's own 30 s sleep or an ungraceful `SIGKILL`.
-    ///
-    /// `Unrestricted` because the ladder keys on there being an envelope, not
-    /// on which axis was attenuated: the cheapest one proves it.
+    /// The trap's `exit 0` makes the outcome a plain exit; the file is the
+    /// witness that the signal arrived.  `Unrestricted`: the ladder keys on
+    /// there being an envelope, not on which axis was attenuated.
     #[test]
     fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
         use crate::process::{CancelCause, CancelScope, PgidPolicy};
         use crate::runtime::command::{ExternalPlumbing, RunningChild};
         use crate::sandbox::LaunchTarget;
 
-        let policy = SandboxProjection {
-            fs: FsProjection::Unrestricted,
-            net: true,
-            exec: crate::types::ExecProjection::default(),
-        };
+        let policy = unrestricted();
         if !envelope_launches(&policy) {
             return;
         }
@@ -1092,6 +1091,111 @@ mod tests {
              itself, not just bwrap's monitor"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn field<'a>(stdout: &'a str, key: &str) -> Option<&'a str> {
+        stdout.lines().find_map(|line| line.strip_prefix(key))
+    }
+
+    /// A whole line: the script's own text echoes back in `/proc/1/cmdline`.
+    fn emitted(stdout: &str, marker: &str) -> bool {
+        stdout.lines().any(|line| line == marker)
+    }
+
+    /// Where the host cannot build the namespace, the shared table is
+    /// asserted rather than skipped, so a masked host cannot read as a pass.
+    #[test]
+    fn no_host_pid_is_nameable_inside_the_envelope() {
+        let host = HostEnvelope::probe();
+        let restricted = deny_within(&workdir("pidns"), &[]);
+        let mut sleeper = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a host-side sleeper");
+        let script = format!(
+            "echo READY\n\
+             kill -0 {me} 2>/dev/null && echo HOST-PID-VISIBLE\n\
+             kill -TERM {sleeper} 2>/dev/null && echo SLEEPER-SIGNALLED\n\
+             echo PIDS=$(ls /proc | grep -c '^[0-9]')\n\
+             echo INIT=$(tr '\\0' ' ' < /proc/1/cmdline)\n",
+            me = std::process::id(),
+            sleeper = sleeper.id(),
+        );
+        for policy in [&unrestricted(), &restricted] {
+            if !envelope_launches(policy) {
+                continue;
+            }
+            let out = run_confined(host, policy, &script).expect("spawn bwrap");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("READY"),
+                "the envelope did not launch: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if host.private_pids {
+                assert!(
+                    !emitted(&stdout, "HOST-PID-VISIBLE") && !emitted(&stdout, "SLEEPER-SIGNALLED"),
+                    "a host pid was nameable inside the envelope: {stdout}"
+                );
+                assert!(
+                    sleeper.try_wait().expect("poll the sleeper").is_none(),
+                    "the host-side sleeper was killed from inside the envelope"
+                );
+                let pids: u32 = field(&stdout, "PIDS=").and_then(|n| n.parse().ok()).expect("a pid count");
+                assert!(pids <= 8, "the table inside must be the envelope's own: {stdout}");
+                assert!(
+                    field(&stdout, "INIT=").is_some_and(|init| init.starts_with("bwrap")),
+                    "pid 1 inside must be bwrap's init: {stdout}"
+                );
+            } else {
+                assert!(
+                    emitted(&stdout, "HOST-PID-VISIBLE"),
+                    "the datum says the table is shared, yet the test's own pid was not nameable: {stdout}"
+                );
+            }
+        }
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+    }
+
+    /// A bind of the host's `/proc` under a pid namespace would make
+    /// `/proc/self` somebody else's.
+    #[test]
+    fn proc_self_is_the_payloads_own_on_every_projection() {
+        let host = HostEnvelope::probe();
+        let restricted = deny_within(&workdir("procself"), &[]);
+        let shell = std::fs::canonicalize("/bin/sh").expect("resolve /bin/sh");
+        // `read` is a builtin, so `/proc/self` is the shell's; `cat`'s would be its own.
+        let script = "echo READY\n\
+                      echo SELF=$$\n\
+                      read pid _ < /proc/self/stat; echo STAT=$pid\n\
+                      echo EXE=$(readlink /proc/$$/exe)\n";
+        for policy in [&unrestricted(), &restricted] {
+            if !envelope_launches(policy) {
+                continue;
+            }
+            let out = run_confined(host, policy, script).expect("spawn bwrap");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("READY"),
+                "the envelope did not launch: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let own: u32 = field(&stdout, "SELF=").and_then(|n| n.parse().ok()).expect("the shell's pid");
+            assert_eq!(
+                field(&stdout, "STAT="),
+                Some(own.to_string().as_str()),
+                "/proc/self must be the reader's own entry: {stdout}"
+            );
+            assert_eq!(
+                field(&stdout, "EXE=").map(std::path::Path::new),
+                Some(shell.as_path()),
+                "/proc/<pid>/exe must name the shell's own binary: {stdout}"
+            );
+            if host.private_pids {
+                assert!(own < 64, "the shell's pid must be namespace-local: {stdout}");
+            }
+        }
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
