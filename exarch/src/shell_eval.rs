@@ -1377,10 +1377,10 @@ keep-bottom
     #[test]
     fn timeout_kills_sandboxed_subprocess_tree() {
         #[cfg(all(target_os = "linux", feature = "test-util"))]
-        if !ral_core::sandbox::bwrap_devnull_writable() {
+        if !ral_core::sandbox::restricted_envelope_launches() {
             eprintln!(
-                "skip: this host's bwrap envelope cannot open /dev/null — a mount-layer \
-                 property some CI runners have, not a code defect"
+                "skip: this host cannot build a Restricted envelope — its /etc/hosts \
+                 and /etc/resolv.conf are locked mounts bwrap cannot rebind read-only"
             );
             return;
         }

@@ -21,10 +21,12 @@ pub(crate) enum LaunchTarget<'a> {
 }
 
 /// Whether the session keeps owning what it launches.  Read only by the Linux
-/// backend: `Kept` adds bwrap's `--die-with-parent`, so an envelope orphaned
-/// by a crash cannot outlive the session that authorised it, while
+/// backend, which decides two ties between the session and the envelope:
+/// death (bwrap's `--die-with-parent`) and address (`--info-fd`, the receipt
+/// naming the envelope's own session — see `linux::open_receipt`).
 /// `Surrendered` — the `detach` verb, whose child is meant to survive us —
-/// must drop that flag or the survivor dies moments after birth.  No hole: the
+/// drops both: the survivor must not be killed by our death, and there is no
+/// session left here to address once we stop watching it.  No hole: the
 /// confinement holds for the survivor's whole life, frozen as the frame that
 /// birthed it left it.  macOS `execve`s the target in place and Windows has no
 /// `detach`, so neither has an envelope to tie to a parent.
@@ -64,10 +66,13 @@ pub(crate) fn sandboxed_command(
     let _ = cancel;
     #[cfg(target_os = "linux")]
     {
-        let cmd = linux_sandboxed_command(projection, target, args, ownership, shell)?;
+        let (cmd, receipt) = linux_sandboxed_command(projection, target, args, ownership, shell)?;
         let mut launch = crate::process::Launch::from_command(cmd);
         // A host package rather than part of ral, so it may simply be absent.
         launch.confined_by(super::linux::BWRAP);
+        if let Some((reader, writer)) = receipt {
+            launch.receipt(crate::process::launch::Receipt::new(reader, writer));
+        }
         Ok(launch)
     }
     #[cfg(target_os = "macos")]
@@ -146,7 +151,7 @@ fn linux_sandboxed_command(
     args: &[String],
     ownership: Ownership,
     shell: &Shell,
-) -> Settled<Command> {
+) -> Settled<(Command, Option<(os_pipe::PipeReader, os_pipe::PipeWriter)>)> {
     let cwd = shell.cwd().to_string_lossy().into_owned();
     match target {
         LaunchTarget::Host { program } => super::linux::make_command_with_policy(
@@ -155,6 +160,7 @@ fn linux_sandboxed_command(
             projection,
             Some(cwd.as_str()),
             ownership,
+            super::linux::HostEnvelope::probe(),
         )
         .map_err(|e| Break::Error(Error::new(e, 1))),
         LaunchTarget::BundledTool { tool } => {
@@ -174,6 +180,7 @@ fn linux_sandboxed_command(
                 projection,
                 Some(cwd.as_str()),
                 ownership,
+                super::linux::HostEnvelope::probe(),
             )
             .map_err(|e| Break::Error(Error::new(e, 1)))
         }
@@ -475,7 +482,7 @@ mod tests {
     #[test]
     fn linux_host_command_is_bwrap_with_chdir_and_target_tail() {
         let shell = Shell::default();
-        let cmd = linux_sandboxed_command(
+        let (cmd, _receipt) = linux_sandboxed_command(
             &restrictive(),
             LaunchTarget::Host { program: "/bin/sh" },
             &["-c".into(), "echo x > /etc/ral_denied".into()],

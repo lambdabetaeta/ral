@@ -8,6 +8,10 @@
 //! bwrap has no endpoint filter — `--unshare-net` drops the network
 //! namespace whole — so `SandboxProjection::net` is a bit, not a list.
 
+mod host;
+
+pub(crate) use host::HostEnvelope;
+
 use crate::path::{PathShape, Rendered, render_paths};
 use crate::types::{FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
@@ -32,11 +36,20 @@ pub(super) const BWRAP: &str = "bwrap";
 /// logical cwd, while the grant-body re-exec and the profile dump pass
 /// `None` and let the re-exec'd ral thread cwd into its own children.
 ///
-/// `ownership` decides `--die-with-parent` and nothing else.  The flag is
-/// `PR_SET_PDEATHSIG(SIGKILL)` over the whole envelope, so a surrendered
-/// (detached) launch must not carry it: the survivor would be killed
-/// moments after birth, or never, as the scheduler ordered bwrap's `prctl`
-/// against the intermediate's `_exit`.  Confinement is otherwise identical.
+/// `ownership` decides two ties between the session and the envelope:
+/// death (`--die-with-parent`) and address (`--info-fd`, the receipt read
+/// alongside this `Command`).  A surrendered (detached) launch carries
+/// neither: the survivor must not be killed by our death, and there is no
+/// session left here to address once we stop watching it.  Confinement
+/// itself — the mounts, the seccomp filter — is otherwise identical.
+///
+/// The render is pure in `host`, so a test can assert an argv for a host it
+/// is not running on.
+///
+/// The second element of the return is `Kept`'s receipt: our own read end of
+/// the `--info-fd` pipe, paired with the write end whose sole owning copy
+/// the caller must drop right after spawning — see
+/// [`crate::process::launch::Receipt`].
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
@@ -47,7 +60,8 @@ pub(crate) fn make_command_with_policy(
     policy: &SandboxProjection,
     chdir: Option<&str>,
     ownership: super::launch::Ownership,
-) -> Result<Command, String> {
+    host: HostEnvelope,
+) -> Result<(Command, Option<(os_pipe::PipeReader, os_pipe::PipeWriter)>), String> {
     let rendered = policy.rendered()?;
     let mut c = Command::new(BWRAP);
     // Empty when fs is `Unrestricted`: there the envelope binds `/` wholesale
@@ -73,9 +87,12 @@ pub(crate) fn make_command_with_policy(
     rw_binds.retain(|bind| crate::path::exists(bind.as_str()));
 
     c.arg("--new-session");
-    if ownership == super::launch::Ownership::Kept {
+    let receipt = if ownership == super::launch::Ownership::Kept {
         c.arg("--die-with-parent");
-    }
+        Some(open_receipt(&mut c)?)
+    } else {
+        None
+    };
     if !policy.net {
         c.arg("--unshare-net");
     }
@@ -84,7 +101,9 @@ pub(crate) fn make_command_with_policy(
     }
     match &rendered.fs {
         FsProjection::Restricted(_) => {
-            c.args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+            c.args(["--proc", "/proc"]);
+            render_dev(&mut c, host);
+            c.args(["--tmpfs", "/tmp"]);
             for bind in &ro_binds {
                 if !rw_binds.contains(bind) {
                     c.args(["--ro-bind", bind.as_str(), bind.as_str()]);
@@ -119,7 +138,79 @@ pub(crate) fn make_command_with_policy(
     c.arg("--");
     c.arg(name);
     c.args(args);
-    Ok(c)
+    Ok((c, receipt))
+}
+
+/// The envelope's `/dev`: bwrap's `--dev`, or its shape by hand where the
+/// host refuses a fresh devpts.
+///
+/// By hand, `/dev/pts` is the host's, so a pty opened inside is not the
+/// envelope's own.  An absent node is dropped: binding one costs the launch.
+fn render_dev(c: &mut Command, host: HostEnvelope) {
+    if host.virtual_dev {
+        c.args(["--dev", "/dev"]);
+        return;
+    }
+    c.args(["--tmpfs", "/dev"]);
+    for node in [
+        "/dev/null",
+        "/dev/zero",
+        "/dev/full",
+        "/dev/random",
+        "/dev/urandom",
+        "/dev/tty",
+        "/dev/pts",
+    ] {
+        if crate::path::exists(node) {
+            c.args(["--dev-bind", node, node]);
+        }
+    }
+    c.args(["--symlink", "pts/ptmx", "/dev/ptmx"]);
+    c.args(["--symlink", "/proc/self/fd", "/dev/fd"]);
+    for (fd, name) in ["/dev/stdin", "/dev/stdout", "/dev/stderr"]
+        .into_iter()
+        .enumerate()
+    {
+        c.args(["--symlink", &format!("/proc/self/fd/{fd}"), name]);
+    }
+    // After `/dev`'s tmpfs, or it is buried.
+    c.args(["--tmpfs", "/dev/shm"]);
+}
+
+/// Fixed fd bwrap's `--info-fd` receipt travels on, chosen next to the
+/// seccomp filter's 100.
+const INFO_FD: libc::c_int = 101;
+
+/// Open the `--info-fd` pipe for a `Kept` launch and register the write
+/// end at [`INFO_FD`], `CLOEXEC` cleared so it survives into `bwrap` —
+/// the `apply_seccomp` pattern.  `--info-fd` itself is appended here so a
+/// caller cannot pass one without the other.
+///
+/// The write end returned alongside the read end must outlive this call: the
+/// `pre_exec` closure only captures its raw fd, and `dup2` needs the
+/// original still open in the *parent* at fork time to inherit.  Only once
+/// the caller has actually spawned `c` may that copy be dropped — see
+/// [`crate::process::launch::Receipt`].
+fn open_receipt(c: &mut Command) -> Result<(os_pipe::PipeReader, os_pipe::PipeWriter), String> {
+    let (reader, writer) = crate::process::cloexec_pipe().map_err(|e| e.to_string())?;
+    let write_fd = std::os::fd::AsRawFd::as_raw_fd(&writer);
+    unsafe {
+        c.pre_exec(move || {
+            if libc::dup2(write_fd, INFO_FD) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let flags = libc::fcntl(INFO_FD, libc::F_GETFD);
+            if flags < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(INFO_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    c.args(["--info-fd", &INFO_FD.to_string()]);
+    Ok((reader, writer))
 }
 
 /// The mount that masks one denied path, bwrap having no negative path rule.
@@ -181,6 +272,8 @@ impl<'p> DenyMask<'p> {
 fn build_seccomp_filter() -> Vec<u8> {
     const LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
     const JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
+    #[cfg(target_arch = "x86_64")]
+    const JGE_K: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K
     const RET_K: u16 = 0x06; // BPF_RET | BPF_K
     // SECCOMP_RET_KILL_THREAD; KILL_PROCESS (0x8000_0000) would kill bwrap too.
     const KILL: u32 = 0x0000_0000;
@@ -212,6 +305,13 @@ fn build_seccomp_filter() -> Vec<u8> {
     prog.insn(JEQ_K, 1, 0, AUDIT_ARCH); // jt=1: skip the next kill on match
     prog.insn(RET_K, 0, 0, KILL);
     prog.insn(LD_W_ABS, 0, 0, NR);
+    // x32 shares AUDIT_ARCH_X86_64 but sets bit 30 in the syscall number,
+    // so it must be rejected before any equality compare below is trusted.
+    #[cfg(target_arch = "x86_64")]
+    {
+        prog.insn(JGE_K, 0, 1, 0x4000_0000); // jf=1: skip past the kill
+        prog.insn(RET_K, 0, 0, KILL);
+    }
     for &nr in denied {
         #[allow(
             clippy::cast_possible_truncation,
@@ -313,12 +413,13 @@ pub(super) fn respawn_under_bwrap(
     policy: &SandboxProjection,
 ) -> Result<u8, String> {
     // We wait on this one, so its envelope must not outlive an abrupt death.
-    let mut cmd = make_command_with_policy(
+    let (mut cmd, receipt) = make_command_with_policy(
         exe.to_string_lossy().as_ref(),
         args,
         policy,
         None,
         super::launch::Ownership::Kept,
+        HostEnvelope::probe(),
     )?;
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -330,6 +431,9 @@ pub(super) fn respawn_under_bwrap(
             format!("ral: failed to enter sandbox: {e}")
         }
     })?;
+    // This blocking wait never reads the receipt, so drop it — the write end
+    // included — right away rather than leaking it for the wait's duration.
+    drop(receipt);
     // A bootstrap helper no user code can name, hence never SIGSTOP, so
     // routing this wait through the reaper — whose only extra service is
     // answering a stop with SIGCONT — would buy nothing.
@@ -353,9 +457,9 @@ fn default_ro_binds() -> Vec<String> {
         "/usr",
         "/lib",
         "/lib64",
-        // `/dev` and `/proc` are absent: the virtual `--dev`/`--proc` mounts
-        // emitted first supply minimal versions, and a real bind here would
-        // shadow them.  `/sys` has no bwrap virtual op, so it is bound.
+        // `/dev` and `/proc` are absent: the mounts emitted first supply
+        // minimal versions of both, and a real bind here would shadow them.
+        // `/sys` has no bwrap virtual op, so it is bound.
         "/sys",
         "/etc/ld.so.conf",
         "/etc/ld.so.conf.d",
@@ -387,10 +491,13 @@ fn default_ro_binds() -> Vec<String> {
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::make_command_with_policy;
+    use super::{HostEnvelope, make_command_with_policy};
     use crate::sandbox::launch::Ownership;
     use crate::types::{FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
+
+    /// For the tests `/dev` is beside the point.
+    const WITH_VIRTUAL_DEV: HostEnvelope = HostEnvelope { virtual_dev: true };
 
     fn workdir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("ral-bwrap-{tag}-{}", std::process::id()));
@@ -414,12 +521,17 @@ mod tests {
         }
     }
 
-    fn argv(policy: &SandboxProjection) -> Vec<String> {
-        make_command_with_policy("/bin/true", &[], policy, None, Ownership::Kept)
+    fn argv_on(host: HostEnvelope, policy: &SandboxProjection) -> Vec<String> {
+        make_command_with_policy("/bin/true", &[], policy, None, Ownership::Kept, host)
             .expect("ASCII paths render")
+            .0
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect()
+    }
+
+    fn argv(policy: &SandboxProjection) -> Vec<String> {
+        argv_on(WITH_VIRTUAL_DEV, policy)
     }
 
     fn position_of(args: &[String], mask: &[&str]) -> Option<usize> {
@@ -533,26 +645,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn run_confined(policy: &SandboxProjection, script: &str) -> Option<std::process::Output> {
-        make_command_with_policy(
+    fn run_confined(
+        host: HostEnvelope,
+        policy: &SandboxProjection,
+        script: &str,
+    ) -> Option<std::process::Output> {
+        let (mut cmd, receipt) = make_command_with_policy(
             "/bin/sh",
             &["-c".to_string(), script.to_string()],
             policy,
             None,
             Ownership::Kept,
+            host,
         )
-        .expect("ASCII paths render")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()
+        .expect("ASCII paths render");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = cmd.output().ok();
+        // `output()` already forked by here, so our own copy of the write end
+        // is safe to drop now — kept open until then, or bwrap's `dup2` in
+        // `pre_exec` would inherit nothing.
+        drop(receipt);
+        out
     }
 
     /// Whether this host can build a bwrap envelope at all.  Where it cannot
     /// — bwrap absent, or user namespaces unavailable — a spawning test
     /// proves nothing either way and says so on the way out.
     fn envelope_launches(policy: &SandboxProjection) -> bool {
-        let control = run_confined(policy, "echo READY");
+        let control = run_confined(HostEnvelope::probe(), policy, "echo READY");
         if control
             .as_ref()
             .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("READY"))
@@ -601,6 +721,7 @@ mod tests {
             denied = denied.display(),
         );
         let out = run_confined(
+            HostEnvelope::probe(),
             &policy(vec![denied.to_string_lossy().into_owned()]),
             &script,
         )
@@ -638,7 +759,12 @@ mod tests {
         if !envelope_launches(&deny_within(&dir, &[])) {
             return;
         }
-        let out = run_confined(&deny_within(&dir, &[&denied]), "echo READY").expect("spawn bwrap");
+        let out = run_confined(
+            HostEnvelope::probe(),
+            &deny_within(&dir, &[&denied]),
+            "echo READY",
+        )
+        .expect("spawn bwrap");
         assert!(
             String::from_utf8_lossy(&out.stdout).contains("READY"),
             "an absent deny stopped the envelope from launching: {}",
@@ -668,14 +794,6 @@ mod tests {
         if !envelope_launches(&deny_within(&dir, &[])) {
             return;
         }
-        if !crate::sandbox::bwrap_devnull_writable() {
-            eprintln!(
-                "skipping: this host's bwrap envelope cannot open /dev/null, \
-                 which every `2>/dev/null` in this script depends on"
-            );
-            return;
-        }
-
         let script = format!(
             "echo READY\n\
              cat '{key}' 2>/dev/null || echo KEY-READ-REFUSED\n\
@@ -690,7 +808,12 @@ mod tests {
             planted = git.join("planted").display(),
             readable = readable.display(),
         );
-        let out = run_confined(&deny_within(&dir, &[&key, &git]), &script).expect("spawn bwrap");
+        let out = run_confined(
+            HostEnvelope::probe(),
+            &deny_within(&dir, &[&key, &git]),
+            &script,
+        )
+        .expect("spawn bwrap");
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -736,10 +859,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The fallback is the same `/dev`, and only where the host refuses one.
+    #[test]
+    fn a_host_that_refuses_dev_gets_the_same_shape_by_hand() {
+        let dir = workdir("dev-render");
+        let policy = deny_within(&dir, &[]);
+
+        let mounted = argv_on(HostEnvelope { virtual_dev: true }, &policy);
+        assert!(
+            position_of(&mounted, &["--dev", "/dev"]).is_some(),
+            "a host that mounts --dev must be given it: {mounted:?}"
+        );
+
+        let by_hand = argv_on(HostEnvelope { virtual_dev: false }, &policy);
+        assert!(
+            position_of(&by_hand, &["--dev", "/dev"]).is_none(),
+            "the refused mount must not be asked for: {by_hand:?}"
+        );
+        let dev = position_of(&by_hand, &["--tmpfs", "/dev"]).expect("a /dev to fill");
+        let shm = position_of(&by_hand, &["--tmpfs", "/dev/shm"]).expect("a fresh /dev/shm");
+        assert!(dev < shm, "/dev's tmpfs would bury /dev/shm's: {by_hand:?}");
+        for piece in [
+            ["--dev-bind", "/dev/null", "/dev/null"],
+            ["--dev-bind", "/dev/urandom", "/dev/urandom"],
+            ["--symlink", "pts/ptmx", "/dev/ptmx"],
+            ["--symlink", "/proc/self/fd/1", "/dev/stdout"],
+        ] {
+            assert!(
+                position_of(&by_hand, &piece).is_some(),
+                "the by-hand /dev is missing {piece:?}: {by_hand:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Forced rather than probed: where `--dev` mounts, nothing else would
+    /// exercise this arm.
+    #[test]
+    fn the_by_hand_dev_serves_a_confined_body() {
+        let dir = workdir("dev-by-hand");
+        let policy = deny_within(&dir, &[]);
+        if !envelope_launches(&policy) {
+            return;
+        }
+
+        let out = run_confined(
+            HostEnvelope { virtual_dev: false },
+            &policy,
+            "echo x > /dev/null && echo NULL-OK\n\
+             head -c 1 /dev/urandom > /dev/null && echo URANDOM-OK\n\
+             : > /dev/shm/probe && echo SHM-OK\n\
+             exec 3<>/dev/ptmx && echo PTMX-OK\n",
+        )
+        .expect("spawn bwrap");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        for ok in ["NULL-OK", "URANDOM-OK", "SHM-OK", "PTMX-OK"] {
+            assert!(
+                stdout.contains(ok),
+                "the by-hand /dev is missing {ok}: {stdout} {stderr}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A kept child's envelope is tied to our death and a surrendered one's
     /// must not be, while every other confinement flag stays identical.
     #[test]
-    fn only_the_parent_death_tie_distinguishes_a_surrendered_launch() {
+    fn only_the_two_ownership_ties_distinguish_a_surrendered_launch() {
         let policy = SandboxProjection {
             fs: FsProjection::Restricted(FsRules {
                 read_prefixes: vec!["/usr".to_string()],
@@ -749,8 +937,9 @@ mod tests {
             exec: crate::types::ExecProjection::default(),
         };
         let argv = |ownership| {
-            make_command_with_policy("/bin/true", &[], &policy, None, ownership)
+            make_command_with_policy("/bin/true", &[], &policy, None, ownership, WITH_VIRTUAL_DEV)
                 .expect("ASCII paths render")
+                .0
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
@@ -763,15 +952,153 @@ mod tests {
             "a child we keep must not outlive us: {kept:?}"
         );
         assert!(
+            kept.windows(2).any(|w| w == ["--info-fd", "101"]),
+            "a kept launch must carry a receipt naming its own session: {kept:?}"
+        );
+        assert!(
             !surrendered.contains(&"--die-with-parent".to_string()),
             "a survivor must not be killed by our death: {surrendered:?}"
         );
+        assert!(
+            !surrendered.contains(&"--info-fd".to_string()),
+            "a surrendered launch has no session left here to address: {surrendered:?}"
+        );
+        let ownership_ties = ["--die-with-parent", "--info-fd", "101"];
         assert_eq!(
             kept.iter()
-                .filter(|a| *a != "--die-with-parent")
+                .filter(|a| !ownership_ties.contains(&a.as_str()))
                 .collect::<Vec<_>>(),
             surrendered.iter().collect::<Vec<_>>(),
             "the two launches must otherwise be confined identically"
+        );
+    }
+
+    /// T3 (design doc §6): the grace signal must reach the confined payload's
+    /// own session, not bwrap's mortal monitor.  Spawns through the same
+    /// `Launch` + `RunningChild` path a real command takes, so the receipt
+    /// override in `Launch::spawn` is exercised end to end, then cancels with
+    /// `Explicit` and checks the trap ran well inside `TEARDOWN_GRACE`.
+    ///
+    /// The trap's own `exit 0` (the plan's own script, §6) means `sh` catches
+    /// the signal and shuts itself down cleanly rather than dying *by* it —
+    /// so the wait outcome here is a plain successful exit, not
+    /// `WaitOutcome::Cancelled`/`CommandFailure::Cancelled` (those require
+    /// attributing a signal death to the cause, which is step 4 of the plan's
+    /// implementation order and out of this change's scope). What this test
+    /// asserts instead is the property step 3 alone provides: the trap ran,
+    /// `sent` recorded the cancellation, and teardown did not fall back to
+    /// the payload's own 30 s sleep or an ungraceful `SIGKILL`.
+    ///
+    /// `Unrestricted` because the ladder keys on there being an envelope, not
+    /// on which axis was attenuated: the cheapest one proves it.
+    #[test]
+    fn a_confined_payload_gets_its_grace_signal_not_the_monitors() {
+        use crate::process::{CancelCause, CancelScope, PgidPolicy};
+        use crate::runtime::command::{ExternalPlumbing, RunningChild};
+        use crate::sandbox::LaunchTarget;
+
+        let policy = SandboxProjection {
+            fs: FsProjection::Unrestricted,
+            net: true,
+            exec: crate::types::ExecProjection::default(),
+        };
+        if !envelope_launches(&policy) {
+            return;
+        }
+
+        let dir = workdir("receipt-grace");
+        let flag = dir.join("grace");
+        let script = format!(
+            "trap 'echo GRACE > {} ; exit 0' TERM\nsleep 30\n",
+            flag.display()
+        );
+
+        let shell = crate::types::Shell::default();
+        let scope = CancelScope::root();
+        let mut launch = crate::sandbox::sandboxed_command(
+            &policy,
+            LaunchTarget::Host { program: "/bin/sh" },
+            &["-c".to_string(), script],
+            Ownership::Kept,
+            &shell,
+            &scope,
+        )
+        .expect("build confined launch");
+
+        let (child, pgid, jail) = launch
+            .spawn(PgidPolicy::NewLeader)
+            .expect("spawn confined sh");
+
+        let running = RunningChild::assemble_with_owner(
+            child,
+            "sh".to_string(),
+            ExternalPlumbing {
+                stdout_pump: None,
+                stderr_pump: None,
+            },
+            pgid,
+            scope.clone(),
+            jail,
+        );
+
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            scope.cancel(CancelCause::Explicit);
+        });
+
+        let t0 = std::time::Instant::now();
+        let waited = running.wait();
+        let elapsed = t0.elapsed();
+        let (outcome, sent) = (waited.outcome, waited.sent);
+        waited.settle();
+        canceller.join().expect("canceller thread");
+
+        assert!(
+            elapsed.as_secs() < 5,
+            "teardown must not fall back to the payload's own 30 s sleep: took {elapsed:?}"
+        );
+        assert_eq!(
+            sent,
+            Some(CancelCause::Explicit),
+            "the cancel must have reached this wait"
+        );
+        assert_eq!(
+            outcome,
+            crate::process::WaitOutcome::Exited(0),
+            "the trap's own exit must be reported, not a SIGKILL of an \
+             unreached payload"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&flag).unwrap_or_default().trim(),
+            "GRACE",
+            "the trap must have run: the grace signal reached the payload \
+             itself, not just bwrap's monitor"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn seccomp_filter_rejects_x32_high_bit() {
+        // 0x35/0x06 mirror JGE_K/RET_K; k is read from bytes 4..8 of each insn.
+        let bytes = super::build_seccomp_filter();
+        let insns: Vec<&[u8]> = bytes.chunks(8).collect();
+        let has_x32_guard = insns.windows(2).any(|pair| {
+            let (insn, next) = (pair[0], pair[1]);
+            u16::from_le_bytes([insn[0], insn[1]]) == 0x35
+                && u32::from_le_bytes([insn[4], insn[5], insn[6], insn[7]]) == 0x4000_0000
+                && u16::from_le_bytes([next[0], next[1]]) == 0x06
+                && u32::from_le_bytes([next[4], next[5], next[6], next[7]]) == 0
+        });
+        #[cfg(target_arch = "x86_64")]
+        assert!(
+            has_x32_guard,
+            "x86-64 must reject the x32 high bit before any equality compare"
+        );
+        #[cfg(target_arch = "aarch64")]
+        assert!(
+            !has_x32_guard,
+            "aarch64 has no x32 ABI; filter must be unchanged"
         );
     }
 }

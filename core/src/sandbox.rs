@@ -130,8 +130,9 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
             policy,
             None,
             launch::Ownership::Kept,
+            linux::HostEnvelope::probe(),
         ) {
-            Ok(cmd) => {
+            Ok((cmd, _receipt)) => {
                 let mut line = String::from("bwrap");
                 for arg in cmd.get_args() {
                     line.push(' ');
@@ -170,32 +171,42 @@ pub fn apply_child_limits(child: &crate::process::ChildHandle) {
     windows::apply_job_limits(child);
 }
 
-/// Whether `bwrap` on this host can open a device node it binds in.
+/// Whether this host builds a `Restricted` envelope at all.
 ///
-/// False on some CI runners even when `bwrap` itself launches fine — a
-/// mount-layer host property, probed rather than assumed. Test-only:
-/// callers skip rather than assert on it.
+/// A rootless container refuses the read-only remount of its own locked
+/// `/etc/hosts` and `/etc/resolv.conf`, and the launch dies in setup.
+/// Test-only: a spawning test on such a host proves nothing either way, so
+/// callers skip rather than assert.
+// `Surrendered` carries no receipt to read and no parent-death tie: neither
+// decides whether the envelope builds, and `/bin/true` outlives nobody.
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:bwrap-devnull-probe] host capability probe for tests, not a grant spawn"
+    reason = "[io-door:silent:restricted-envelope-probe] host capability probe for tests, not a grant spawn"
 )]
-pub fn bwrap_devnull_writable() -> bool {
-    use std::sync::OnceLock;
-    static RESULT: OnceLock<bool> = OnceLock::new();
-    *RESULT.get_or_init(|| {
-        std::process::Command::new(linux::BWRAP)
-            .args([
-                "--unshare-net",
-                "--dev",
-                "/dev",
-                "--",
-                "/bin/sh",
-                "-c",
-                "echo x > /dev/null",
-            ])
-            .status()
-            .is_ok_and(|status| status.success())
+pub fn restricted_envelope_launches() -> bool {
+    use crate::types::{FsProjection, FsRules};
+    static LAUNCHES: OnceLock<bool> = OnceLock::new();
+    *LAUNCHES.get_or_init(|| {
+        let projection = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules::default()),
+            net: true,
+            exec: crate::types::ExecProjection::default(),
+        };
+        linux::make_command_with_policy(
+            "/bin/true",
+            &[],
+            &projection,
+            None,
+            launch::Ownership::Surrendered,
+            linux::HostEnvelope::probe(),
+        )
+        .is_ok_and(|(mut cmd, _no_receipt)| {
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        })
     })
 }
 

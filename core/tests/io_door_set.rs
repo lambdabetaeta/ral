@@ -145,7 +145,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "core/src/runtime/pipeline/helper.rs",
         "io-door:silent:self-reexec-windows",
     ),
-    ("core/src/sandbox.rs", "io-door:silent:bwrap-devnull-probe"),
+    (
+        "core/src/sandbox.rs",
+        "io-door:silent:restricted-envelope-probe",
+    ),
     ("core/src/sandbox.rs", "io-door:silent:self-reexec"),
     ("core/src/sandbox.rs", "io-door:surface:make-command"),
     ("core/src/sandbox/diag.rs", "io-door:silent:ps-sample"),
@@ -157,6 +160,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/sandbox/launch.rs", "io-door:silent:respawn-exec"),
     ("core/src/sandbox/launch.rs", "io-door:silent:respawn-spawn"),
     ("core/src/sandbox/linux.rs", "io-door:surface:bwrap-launch"),
+    (
+        "core/src/sandbox/linux/host.rs",
+        "io-door:silent:bwrap-host-probe",
+    ),
     ("core/src/sandbox/reexec.rs", "io-door:silent:pin-open"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:pin-stat"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:self-reexec"),

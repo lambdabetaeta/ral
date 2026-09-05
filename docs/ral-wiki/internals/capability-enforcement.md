@@ -1,7 +1,7 @@
 ---
-verified_at_commit: d4d34afc
+verified_at_commit: d1dc8263
 verified_at_date: 2026-09-05
-anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, confined_by]
+anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, confined_by, HostEnvelope, render_dev]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -181,6 +181,19 @@ failure modes here are a sandbox that never launches and a mount that lies,
 they are pinned by tests that spawn the envelope for real
 (`sandbox::linux::tests::a_denied_path_refuses_every_access_while_the_body_still_runs`,
 `::building_an_envelope_never_creates_a_denied_name_on_the_host`).
+
+**Where the host refuses bwrap a mount, the envelope rebuilds what the mount
+would have provided.** A rootless container's mount layer will not hand bwrap a
+fresh devpts, so `--dev` dies in setup and no `Restricted` envelope launches
+there at all. `HostEnvelope` learns that with one probe spawn
+(`sandbox/linux/host.rs`) and `render_dev` lays out `--dev`'s own shape by hand
+where it must: a tmpfs, the device nodes bound in, the `pts/ptmx` symlink, a
+fresh `/dev/shm`. The one piece it cannot rebuild is the piece refused —
+`/dev/pts` is the host's, so a pty opened inside is not the envelope's own. The
+render is a pure function of the probed `HostEnvelope`, so the argv tests assert
+both shapes from literals rather than from whichever host runs them. Such hosts
+still refuse the read-only rebind of their own locked `/etc/hosts` and
+`/etc/resolv.conf`, which remains open.
 
 **The sandbox is applied per external command, not by re-execing the grant
 body.** A `grant` is a *local* dynamic effect scope: its body evaluates in

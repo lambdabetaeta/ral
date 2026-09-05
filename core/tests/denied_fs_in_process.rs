@@ -377,10 +377,10 @@ fn grant_fs_write_denies_helper_stage_redirect() {
 #[test]
 fn grant_fs_write_allows_helper_stage_redirect_inside_set() {
     #[cfg(all(target_os = "linux", feature = "test-util"))]
-    if !ral_core::sandbox::bwrap_devnull_writable() {
+    if !ral_core::sandbox::restricted_envelope_launches() {
         eprintln!(
-            "skip: this host's bwrap envelope cannot open /dev/null — a mount-layer \
-             property some CI runners have, not a code defect"
+            "skip: this host cannot build a Restricted envelope — its /etc/hosts \
+             and /etc/resolv.conf are locked mounts bwrap cannot rebind read-only"
         );
         return;
     }
