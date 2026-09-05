@@ -5,7 +5,7 @@
 //! into a `CancelCause` on the ambient cells that every wait loop already
 //! polls, and ticks an escalation ladder whose third delivery forces `_exit`.
 
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nix::sys::signal::{SigSet, SigmaskHow};
 use rustix::io::Errno;
@@ -13,6 +13,7 @@ use rustix::process::Pid;
 use rustix::termios::{OptionalActions, Termios};
 
 use super::{ESCALATION, Pgid, PgidPolicy};
+use crate::process::Signal;
 use crate::process::cancel::{CancelCause, request_foreground_cancel, request_root_cancel};
 
 // ── Termination handler ────────────────────────────────────────────────────
@@ -46,9 +47,6 @@ extern "C" fn handler(sig: libc::c_int) {
     } else {
         request_root_cancel(CancelCause::Terminate);
     }
-    // The interactive shell binds SIGINT to `sigint_relay` instead, so SIGINT
-    // reaches this fan-out only in batch mode; SIGTERM/SIGHUP always do.
-    relay_signal_to_groups(sig);
 }
 
 /// The termination handler, for a caller installing it signal by signal.
@@ -56,42 +54,18 @@ pub fn term_handler() -> extern "C" fn(libc::c_int) {
     handler
 }
 
-// ── Pipeline relay ─────────────────────────────────────────────────────────
-//
-// A pipeline with both thread and process stages cannot hand the terminal to
-// the external group: its internal stages live in this process and would take
-// SIGTTIN.  The terminal stays with the shell and SIGINT is forwarded instead,
-// to whichever slots of `RELAY_PGIDS` are claimed.  The handler is installed
-// once at startup and never removed, so no signal can arrive mid-install.
-
-const MAX_RELAY: usize = 8;
-
-static RELAY_PGIDS: [AtomicI32; MAX_RELAY] = [const { AtomicI32::new(0) }; MAX_RELAY];
-
-/// Forward `sig` to every occupied slot's process group; async-signal-safe (a
-/// load and a `kill(2)` per slot).
-fn relay_signal_to_groups(sig: libc::c_int) {
-    for slot in &RELAY_PGIDS {
-        let pgid = slot.load(Ordering::Acquire);
-        if pgid != 0 {
-            unsafe {
-                libc::kill(-pgid, sig);
-            }
-        }
-    }
-}
-
-extern "C" fn sigint_relay(_: libc::c_int) {
+extern "C" fn sigint_handler(_: libc::c_int) {
     // The watermark reaches only the runs already in flight, so an idle Ctrl-C
     // at the prompt stays the line editor's and detached workers, carrying no
     // birth instant at all, are spared.
     request_foreground_cancel(CancelCause::Interrupt);
-    relay_signal_to_groups(libc::SIGINT);
 }
 
-/// The SIGINT handler the interactive shell installs in place of `handler`.
-pub fn relay_handler() -> extern "C" fn(libc::c_int) {
-    sigint_relay
+/// The SIGINT handler the interactive shell installs in place of `handler`:
+/// non-escalating, and no delivery of its own — a run in flight hears the
+/// interrupt through its foreground scope.
+pub fn interrupt_handler() -> extern "C" fn(libc::c_int) {
+    sigint_handler
 }
 
 extern "C" fn sigquit_handler(_: libc::c_int) {
@@ -103,30 +77,6 @@ extern "C" fn sigquit_handler(_: libc::c_int) {
 /// The SIGQUIT handler behind the interactive "reap everything" gesture.
 pub fn quit_handler() -> extern "C" fn(libc::c_int) {
     sigquit_handler
-}
-
-/// RAII guard holding a slot in `RELAY_PGIDS` for one mixed pipeline.
-pub struct PipelineRelay(usize);
-
-impl PipelineRelay {
-    /// Claim a slot for `pgid`, or `None` once `MAX_RELAY` are taken.
-    pub fn install(pgid: i32) -> Option<Self> {
-        for (i, slot) in RELAY_PGIDS.iter().enumerate() {
-            if slot
-                .compare_exchange(0, pgid, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
-            {
-                return Some(Self(i));
-            }
-        }
-        None
-    }
-}
-
-impl Drop for PipelineRelay {
-    fn drop(&mut self) {
-        RELAY_PGIDS[self.0].store(0, Ordering::Release);
-    }
 }
 
 // ── Inherited dispositions and child-signal reset ──────────────────────────
@@ -195,7 +145,7 @@ impl PgidPolicy {
     /// Apply this policy from inside a post-fork `pre_exec` closure: no
     /// allocation and no stdlib lock (`last_os_error` only reads `errno`).  The
     /// failure must not be swallowed — a child left in the wrong group is
-    /// invisible to the SIGINT relay and to the abort path's group-wide SIGTERM.
+    /// invisible to every teardown that addresses the group as a whole.
     /// Reach this through [`spawn_with_pgid`], the single funnel that also
     /// mirrors the call in the parent.
     ///
@@ -216,15 +166,6 @@ impl PgidPolicy {
         }
         Ok(())
     }
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::cast_possible_wrap,
-    reason = "child.id() is a live OS pid: positive and well below i32::MAX, so the u32→i32 reinterpretation never wraps"
-)]
-fn child_pid(child: &std::process::Child) -> i32 {
-    child.id() as i32
 }
 
 /// Spawn `cmd` under the one canonical pre-exec discipline.
@@ -385,14 +326,16 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
     })
 }
 
-/// The cause's signal: `SIGINT` for `Interrupt`, else `SIGTERM` — shared with
-/// `PipelineGroup::signal`, whose own pgid-wide send this pid-wide one
-/// mirrors.
-pub(crate) fn cause_signal(cause: CancelCause) -> i32 {
-    if cause == CancelCause::Interrupt {
-        libc::SIGINT
-    } else {
-        libc::SIGTERM
+/// The catchable signal a teardown opens with before its SIGKILL; `None` skips
+/// straight to the kill — a reader-gone cut must not hand the verdict back to
+/// the producer's own disposition, and a root abort has no grace to offer.
+pub(crate) fn grace_signal(cause: CancelCause) -> Option<Signal> {
+    match cause {
+        CancelCause::Interrupt => Some(Signal::new(libc::SIGINT)),
+        CancelCause::Explicit | CancelCause::Deadline | CancelCause::Terminate => {
+            Some(Signal::new(libc::SIGTERM))
+        }
+        CancelCause::ReaderGone | CancelCause::RootAbort => None,
     }
 }
 
@@ -562,14 +505,6 @@ pub fn interrupt_foreground_child() {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-fn active_relay_slots() -> usize {
-    RELAY_PGIDS
-        .iter()
-        .filter(|s| s.load(Ordering::Acquire) != 0)
-        .count()
-}
-
-#[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:test] test fs/process scaffolding"
@@ -577,12 +512,7 @@ fn active_relay_slots() -> usize {
 mod tests {
     use super::super::{clear, escalation_pending};
     use super::*;
-    use crate::process::cancel::{DurableRoot, REQUEST_SERIAL, Serial, clear_root_request};
-    use std::sync::{Arc, Barrier};
-
-    // `RELAY_PGIDS` is global and tests share a process, so without this lock
-    // they would steal each other's slots.
-    static RELAY_TEST_LOCK: Serial = Serial::new();
+    use crate::process::cancel::{DurableRoot, REQUEST_SERIAL, clear_root_request};
 
     fn sigttou_is_blocked() -> bool {
         SigSet::thread_get_mask()
@@ -600,94 +530,25 @@ mod tests {
         assert_eq!(sigttou_is_blocked(), was_blocked);
     }
 
-    // ── Slot allocation ────────────────────────────────────────────────────
+    // ── Teardown ladder ────────────────────────────────────────────────────
 
+    /// The catchable opening of every teardown, and the two causes that have
+    /// none to offer.
     #[test]
-    fn slots_fill_and_drain() {
-        let _lock = RELAY_TEST_LOCK.lock();
-
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
-            reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps"
-        )]
-        let guards: Vec<_> = (1..=MAX_RELAY as i32)
-            .map(|pgid| PipelineRelay::install(pgid).expect("slot should be free"))
-            .collect();
-        assert_eq!(active_relay_slots(), MAX_RELAY);
-
-        assert!(PipelineRelay::install(99).is_none());
-
-        drop(guards);
-        assert_eq!(active_relay_slots(), 0);
-    }
-
-    #[test]
-    fn released_slot_is_reusable() {
-        let _lock = RELAY_TEST_LOCK.lock();
-
-        let g1 = PipelineRelay::install(1).unwrap();
-        drop(g1);
-        let g2 = PipelineRelay::install(1).unwrap();
-        drop(g2);
-        assert_eq!(active_relay_slots(), 0);
-    }
-
-    // ── Concurrency stress ─────────────────────────────────────────────────
-
-    #[test]
-    fn concurrent_install_drop_stress() {
-        let _lock = RELAY_TEST_LOCK.lock();
-
-        const ROUNDS: usize = 500;
-
-        for round in 0..ROUNDS {
-            let barrier = Arc::new(Barrier::new(MAX_RELAY));
-            let handles: Vec<_> = (0..MAX_RELAY)
-                .map(|t| {
-                    let b = barrier.clone();
-                    std::thread::spawn(move || {
-                        b.wait();
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps")]
-                        let pgid = (round * MAX_RELAY + t + 1) as i32;
-                        let g = PipelineRelay::install(pgid)
-                            .expect("slot unavailable — possible double-claim");
-                        std::thread::yield_now();
-                        drop(g);
-                    })
-                })
-                .collect();
-            for h in handles {
-                h.join().unwrap();
-            }
-            assert_eq!(active_relay_slots(), 0, "slot leak after round {round}");
-        }
-    }
-
-    #[test]
-    fn overflow_returns_none_not_panic() {
-        let _lock = RELAY_TEST_LOCK.lock();
-
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
-            reason = "MAX_RELAY is the const 8 and the loop arithmetic stays in the low thousands, so the usize→i32 conversion neither truncates nor wraps"
-        )]
-        let _guards: Vec<_> = (1..=MAX_RELAY as i32)
-            .map(|p| PipelineRelay::install(p).unwrap())
-            .collect();
-
-        let handles: Vec<_> = (0..32)
-            .map(|_| {
-                std::thread::spawn(|| {
-                    for pgid in 100..200i32 {
-                        let _ = PipelineRelay::install(pgid);
-                    }
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
+    fn grace_signal_opens_on_the_cause() {
+        for (cause, expected) in [
+            (CancelCause::Interrupt, Some(libc::SIGINT)),
+            (CancelCause::Explicit, Some(libc::SIGTERM)),
+            (CancelCause::Deadline, Some(libc::SIGTERM)),
+            (CancelCause::Terminate, Some(libc::SIGTERM)),
+            (CancelCause::ReaderGone, None),
+            (CancelCause::RootAbort, None),
+        ] {
+            assert_eq!(
+                grace_signal(cause).map(Signal::number),
+                expected,
+                "{cause:?} must open its teardown with {expected:?}"
+            );
         }
     }
 
@@ -697,7 +558,6 @@ mod tests {
     /// with it every detached worker — untouched.
     #[test]
     fn handler_translates_sigint_into_foreground_interrupt() {
-        let _relay = RELAY_TEST_LOCK.lock();
         let _serial = REQUEST_SERIAL.lock();
         clear();
 
@@ -727,7 +587,6 @@ mod tests {
     /// never stamped: the foreground hears the cause through its root ancestry.
     #[test]
     fn handler_translates_sigterm_and_sighup_into_root_terminate() {
-        let _relay = RELAY_TEST_LOCK.lock();
         let _serial = REQUEST_SERIAL.lock();
         clear();
         clear_root_request();
@@ -755,41 +614,6 @@ mod tests {
         );
         clear();
         clear_root_request();
-    }
-
-    // ── Signal forwarding ──────────────────────────────────────────────────
-
-    #[test]
-    fn relay_delivers_sigint_to_child_group() {
-        // `Command` + `pre_exec` rather than a bare `fork()`, which is a hazard
-        // inside a multithreaded test binary.  `sigint_relay` also raises the
-        // ambient interrupt, hence `REQUEST_SERIAL` alongside the relay lock.
-        let _lock = RELAY_TEST_LOCK.lock();
-        let _serial = REQUEST_SERIAL.lock();
-
-        use std::os::unix::process::CommandExt;
-
-        let mut cmd = std::process::Command::new("sleep");
-        cmd.arg("1000");
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setpgid(0, 0);
-                libc::signal(libc::SIGINT, libc::SIG_DFL);
-                Ok(())
-            });
-        }
-        let mut child = cmd.spawn().expect("spawn sleep");
-        let child_pid = child_pid(&child);
-
-        // The parent mirrors `setpgid` to close the race.
-        let _ = rustix::process::setpgid(Pid::from_raw(child_pid), Pid::from_raw(child_pid));
-
-        let _relay = PipelineRelay::install(child_pid).expect("slot");
-        sigint_relay(libc::SIGINT);
-
-        #[allow(clippy::disallowed_methods)]
-        let status = child.wait().expect("wait");
-        assert!(!status.success(), "child should have been killed by SIGINT");
     }
 
     // ── Detached birth ─────────────────────────────────────────────────────

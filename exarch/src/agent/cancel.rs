@@ -16,9 +16,10 @@
 //! the SIGINT a foreground external child would have received.  Only the trunk
 //! publishes to the slot.
 //!
-//! On Unix `install` chains SIGINT into ral's *non-escalating* `relay_handler`,
-//! never the `term_handler` whose third delivery `_exit`s: a stray SIGINT
-//! reaching the supervising TUI must cancel the exchange, not kill exarch.
+//! On Unix `install` chains SIGINT into ral's *non-escalating*
+//! `interrupt_handler`, never the `term_handler` whose third delivery
+//! `_exit`s: a stray SIGINT reaching the supervising TUI must cancel the
+//! exchange, not kill exarch.
 //! SIGTERM and SIGHUP keep `term_handler` and stamp the token `Terminate`, so a
 //! park reading the token agrees with ral's root about why the agent is ending.
 //!
@@ -149,7 +150,7 @@ pub fn raise_interrupt() {
 }
 
 /// Install the chained signal handler: SIGINT into ral's non-escalating
-/// `relay_handler`, SIGTERM/SIGHUP into its escalating `term_handler`.
+/// `interrupt_handler`, SIGTERM/SIGHUP into its escalating `term_handler`.
 ///
 /// [`chained`] forwards through those static accessors rather than a captured
 /// disposition, so running after `ral_core::process::install_handlers` is
@@ -157,8 +158,8 @@ pub fn raise_interrupt() {
 #[cfg(unix)]
 pub fn install() {
     // SAFETY: `chained`'s body is a `fetch_max` on the published slot plus a
-    // direct call into `relay_handler`/`term_handler`, both plain fn items —
-    // async-signal-safe throughout.
+    // direct call into `interrupt_handler`/`term_handler`, both plain fn items
+    // — async-signal-safe throughout.
     unsafe {
         libc::signal(libc::SIGINT, chained as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, chained as *const () as libc::sighandler_t);
@@ -170,7 +171,7 @@ pub fn install() {
 extern "C" fn chained(sig: libc::c_int) {
     if sig == libc::SIGINT {
         raise(CancelCause::Interrupt);
-        ral_core::process::relay_handler()(sig);
+        ral_core::process::interrupt_handler()(sig);
     } else {
         raise(CancelCause::Terminate);
         ral_core::process::term_handler()(sig);

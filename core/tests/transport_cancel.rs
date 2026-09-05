@@ -61,9 +61,9 @@ fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
     let Report::Ran { ending, trail, .. } = report else {
         panic!("the run must reach evaluation, got {report:?}");
     };
-    // `terminate_group` reserves SIGINT for `Interrupt` and opens with SIGTERM
-    // for every other cause, so the child dies of signal 15 and the run reports
-    // the death it actually died of.
+    // `grace_signal` reserves SIGINT for `Interrupt` and opens with SIGTERM
+    // for `Explicit`, so the child dies of signal 15 and the run reports the
+    // death it actually died of.
     assert_eq!(
         ending.status(),
         143,

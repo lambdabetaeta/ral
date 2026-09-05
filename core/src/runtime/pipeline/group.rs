@@ -1,66 +1,38 @@
 //! Process-group lifecycle for a multi-stage pipeline, on every platform.
 //!
-//! An owning group ([`PipelineGroup::prepare`]) spawns the anchor — `ral
-//! --ral-pipeline-anchor`, the one member that outlives every stage, so the
-//! pgid is joinable for the pipeline's whole life — then installs the SIGINT
-//! relay and, when the plan says so, claims the foreground.  Every external
-//! spawned anywhere inside a stage joins this pgid.  A pipeline launched
-//! inside a stage thread [`PipelineGroup::joining`]s the enclosing pgid
-//! instead: no anchor, no relay, no foreground, and it may not signal or kill
-//! the group.
-//!
-//! The anchor is also the group's witness.  The shell is not a member of the
-//! pgid, so while the terminal belongs to the group the shell never hears a
-//! Ctrl-C the tty delivers to it: the anchor swallows every termination
-//! signal and reports its number on its stdout — a pipe one dedicated thread
-//! blocks reading, posting [`Event::Cancelled`] on the collector's channel.
-//! The anchor's own death comes through the reaper like any watched child's,
-//! via the same [`crate::process::Watch`] its own `into_watch` mints, so no
-//! dedicated thread waits on it. The anchor additionally ignores
-//! `SIGTSTP`/`SIGTTIN`/`SIGTTOU` outright, so it rarely stops at all; on the
-//! rare stop it does see (a bare `kill -STOP`, say) the reaper answers with
-//! `SIGCONT` itself, the one rule applied to the anchor like any other
-//! watched pid.
+//! An owning group spawns the anchor — `ral --ral-pipeline-anchor`, the one
+//! member outliving every stage, so the pgid stays joinable; a group joining
+//! an enclosing stage's pgid has no anchor and may neither signal nor kill it.
+//! The shell is not a member, so a signal the tty delivers to the group
+//! reaches it only as the anchor's [`Event::Witnessed`] — the kernel having
+//! already given that signal to every other member.
 
-#[cfg(unix)]
 use super::collect::Event;
-use crate::process::{CancelCause, Pgid, PgidPolicy};
-use crate::types::{Break, Mooring, Settled, Shell};
 #[cfg(unix)]
+use crate::process::CancelCause;
+use crate::process::{Pgid, PgidPolicy};
+use crate::types::{Break, Mooring, Settled, Shell};
 use std::sync::mpsc::Sender;
 
-/// Pgid lifecycle for one pipeline: the anchor, the foreground guard and the
-/// SIGINT relay slot, all released together on drop.
+/// Pgid lifecycle for one pipeline: the anchor and the foreground guard,
+/// released together on drop.
 pub(super) struct PipelineGroup {
-    /// Whether this group owns the pgid (the anchor spawned it) or joined an
-    /// enclosing stage's: a joining group may not signal, kill, or claim the
-    /// foreground on its own account.
-    owned: bool,
     leader: Pgid,
     /// The terminal handoff *actually held*: `None` when `tcsetpgrp` failed,
     /// or when this group never claimed it at all.
     foreground: Option<crate::process::ForegroundGuard>,
-    /// Held for its `Drop` alone: nothing reads it back, but it must outlive
-    /// every stage so a relayed Ctrl-C keeps reaching the group.
-    #[cfg(unix)]
-    #[allow(dead_code)]
-    relay: Option<crate::process::PipelineRelay>,
-    /// `Some` exactly when `owned`; taken by `Drop`.
+    /// `Some` exactly for an owning group; taken by `Drop`.
     anchor: Option<AnchorProcess>,
 }
 
 impl PipelineGroup {
-    /// An owning group: the anchor, then the relay — safe to install now
-    /// because the anchor is a member that no relayed signal can remove.
-    pub(super) fn prepare(shell: &Shell) -> Settled<Self> {
-        let anchor = AnchorProcess::spawn(shell)?;
-        let leader = anchor.pgid;
+    /// An owning group: the anchor, spawned and witnessed at once, so no
+    /// signal it swallows can land before someone is reading for it.
+    pub(super) fn prepare(shell: &Shell, tx: Sender<Event>) -> Settled<Self> {
+        let anchor = AnchorProcess::spawn(shell, tx)?;
         Ok(Self {
-            owned: true,
-            leader,
+            leader: anchor.pgid,
             foreground: None,
-            #[cfg(unix)]
-            relay: crate::process::PipelineRelay::install(leader.as_raw()),
             anchor: Some(anchor),
         })
     }
@@ -69,23 +41,21 @@ impl PipelineGroup {
     /// owning one.
     pub(super) fn joining(group: Pgid) -> Self {
         Self {
-            owned: false,
             leader: group,
             foreground: None,
-            #[cfg(unix)]
-            relay: None,
             anchor: None,
         }
     }
 
+    /// Owned iff the anchor is this group's own: a joining group may not
+    /// signal, kill, or claim the foreground on its own account.
     pub(super) fn owned(&self) -> bool {
-        self.owned
+        self.anchor.is_some()
     }
 
     /// Whether this group actually holds the controlling terminal — the guard
-    /// it acquired, never the plan it was launched under.  `claim_foreground`
-    /// runs before any stage exists, so this is settled by the time a stage's
-    /// stdin or stdout is routed.
+    /// it acquired, never the plan it was launched under.  Settled before any
+    /// stage exists, so a stage's stdin or stdout may be routed against it.
     pub(super) fn holds_terminal(&self) -> bool {
         self.foreground.is_some()
     }
@@ -110,68 +80,45 @@ impl PipelineGroup {
     pub(super) fn claim_foreground(&mut self, shell: &Shell, mooring: &Mooring) {
         // `resolve_terminal_plan` already gated the foreground plan on the
         // lease; re-borrowing it here is the proof `try_acquire` demands.
-        if self.foreground.is_none()
-            && let Some(lease) = shell.terminal_lease(mooring)
-        {
+        if let Some(lease) = shell.terminal_lease(mooring) {
             self.foreground =
                 crate::process::ForegroundGuard::try_acquire(self.leader.as_raw(), lease);
         }
     }
 
-    /// The owner's cause signal: `SIGINT` for `Interrupt`, else `SIGTERM`,
-    /// then `SIGCONT` — a stopped member cannot act on either until it runs.
-    /// Nothing on Windows, whose only group verb is [`Self::kill`].
-    pub(super) fn signal(&self, cause: CancelCause) {
+    /// Send `signal` to the whole pgid, then `SIGCONT` — a stopped member
+    /// cannot act on the first until it runs.  Nothing for a joining group,
+    /// whose pgid is its owner's to address.
+    #[cfg(unix)]
+    pub(super) fn signal(&self, signal: crate::process::Signal) {
         if !self.owned() {
             return;
         }
-        #[cfg(unix)]
-        {
-            self.leader
-                .signal_group(crate::process::Signal::new(crate::process::cause_signal(cause)));
-            self.leader.signal_group(crate::process::Signal::new(libc::SIGCONT));
-        }
-        #[cfg(windows)]
-        let _ = cause;
+        self.leader.signal_group(signal);
+        self.leader
+            .signal_group(crate::process::Signal::new(libc::SIGCONT));
     }
 
     /// SIGKILL the pgid — the Job Object's kill on Windows.  Idempotent, and
     /// nothing for a joining group, whose pgid is its owner's to end.
     ///
-    /// After this returns, nothing in the group holds a pipe end open.  That
-    /// is the precondition `cancel_all`'s observation rests on: a stage's
-    /// own kill reaches its pid alone, so only the owner can make a pump's
-    /// join terminate.
+    /// After this returns nothing in the group holds a pipe end open: a
+    /// stage's own kill reaches its pid alone, so only the owner can make a
+    /// pump's join terminate.
     pub(super) fn kill(&self) {
         if !self.owned() {
             return;
         }
         self.leader.kill();
     }
-
-    /// Start this group's anchor witness — a no-op on a joining group, which
-    /// has no anchor of its own.  Called once the collector's channel
-    /// exists, since the anchor spawns before it does ([`Self::prepare`]
-    /// runs before [`super::collect::CollectState::new`]).
-    #[cfg(unix)]
-    pub(super) fn start_witness(&mut self, tx: Sender<Event>) {
-        if let Some(anchor) = self.anchor.as_mut() {
-            anchor.start_witness(tx);
-        }
-    }
 }
 
 impl Drop for PipelineGroup {
-    /// The anchor last, after every stage handle has gone (`PipelineResources`
+    /// The anchor last, after every stage handle has gone (`PipelineBuild`
     /// and `PipeNode` both order their fields to guarantee it).
     fn drop(&mut self) {
-        // The relay drops first, still naming a pgid the anchor zombie pins:
-        // reaping the anchor before the relay is gone would leave the pgid
-        // it signals unpinned for the span between the two.
-        #[cfg(unix)]
-        drop(self.relay.take());
-        // The Windows group release lives inside this arm, so it cannot be
-        // guarded on an ownership fact this same statement has consumed.
+        // The Windows release sits inside this arm: the ownership fact it
+        // would otherwise be guarded on is what `take` has just consumed.
         let Some(anchor) = self.anchor.take() else {
             return;
         };
@@ -181,32 +128,19 @@ impl Drop for PipelineGroup {
     }
 }
 
-/// The anchor's own wait, on Unix: spawned and not yet witnessed, or handed
-/// off to the reaper's `Watch` once [`AnchorProcess::start_witness`] runs.
-#[cfg(unix)]
-enum Anchored {
-    Spawned(crate::process::ChildHandle),
-    /// Held for its `Drop` alone, which reaps: nothing reads it back.
-    Watched(#[allow(dead_code)] crate::process::Watch),
-}
-
 struct AnchorProcess {
+    /// Held for its `Drop` alone, which reaps: nothing reads it back.
     #[cfg(unix)]
-    child: Option<Anchored>,
+    child: crate::process::Watch,
     #[cfg(windows)]
     child: crate::process::ChildHandle,
     pgid: Pgid,
     /// The anchor reads this to EOF; closing it is how `finish` ends it.
     release: os_pipe::PipeWriter,
-    /// The anchor's stdout: one byte per signal it swallowed.  `None` once
-    /// [`AnchorProcess::start_witness`] has moved it onto the report reader
-    /// thread.
+    /// Blocks reading the anchor's stdout — one byte per swallowed signal —
+    /// to EOF.
     #[cfg(unix)]
-    report: Option<os_pipe::PipeReader>,
-    /// Blocks reading [`Self::report`] to EOF, one swallowed signal at a
-    /// time.
-    #[cfg(unix)]
-    reporter: Option<std::thread::JoinHandle<()>>,
+    reporter: std::thread::JoinHandle<()>,
 }
 
 fn anchor_error(e: impl std::fmt::Display) -> Break {
@@ -223,8 +157,23 @@ fn cancel_cause(signal: i32) -> CancelCause {
     }
 }
 
+/// The anchor's own death cancels the pipeline: nothing else in the group has
+/// heard of it.
+#[cfg(unix)]
+fn anchor_death(outcome: crate::process::WaitOutcome) -> Event {
+    Event::Cancelled(match outcome {
+        crate::process::WaitOutcome::Signaled(sig) => cancel_cause(sig.number()),
+        _ => CancelCause::Terminate,
+    })
+}
+
 impl AnchorProcess {
-    fn spawn(shell: &Shell) -> Settled<Self> {
+    /// Spawn the anchor and start its witness in one act: the report reader
+    /// and the reaper's `Watch` on the anchor's pid are both live on `tx`
+    /// before the pgid is handed to any stage.
+    fn spawn(shell: &Shell, tx: Sender<Event>) -> Settled<Self> {
+        #[cfg(windows)]
+        let _ = tx;
         let (reader, release) = crate::process::cloexec_pipe().map_err(anchor_error)?;
         let mut cmd =
             super::helper::self_reexec(super::helper::ANCHOR_FLAG).map_err(anchor_error)?;
@@ -248,55 +197,29 @@ impl AnchorProcess {
             let _ = child.reap();
             return Err(anchor_error("failed to establish a process group"));
         };
+        #[cfg(unix)]
+        let (child, reporter) = {
+            let report_tx = tx.clone();
+            let reporter = std::thread::Builder::new()
+                .name("ral pipeline anchor report reader".to_string())
+                .spawn(move || read_anchor_reports(report, &report_tx))
+                .map_err(anchor_error)?;
+            (child.into_watch(tx, anchor_death), reporter)
+        };
         Ok(Self {
-            #[cfg(unix)]
-            child: Some(Anchored::Spawned(child)),
-            #[cfg(windows)]
             child,
             pgid,
             release,
             #[cfg(unix)]
-            report: Some(report),
-            #[cfg(unix)]
-            reporter: None,
+            reporter,
         })
     }
 
-    /// Start this anchor's witness: the report reader thread, and a
-    /// [`crate::process::Watch`] on the anchor's own pid, replacing its
-    /// `Anchored::Spawned` handle.  `child`/`report` are `Some` exactly
-    /// once, so a second call (there is none) would be the bug `expect`
-    /// catches.
-    #[cfg(unix)]
-    fn start_witness(&mut self, tx: Sender<Event>) {
-        let report = self.report.take().expect("started once");
-        let report_tx = tx.clone();
-        self.reporter = std::thread::Builder::new()
-            .name("ral pipeline anchor report reader".to_string())
-            .spawn(move || read_anchor_reports(report, &report_tx))
-            .ok();
-        let Some(Anchored::Spawned(child)) = self.child.take() else {
-            panic!("AnchorProcess::start_witness called more than once");
-        };
-        let watch = child.into_watch(tx, |o| {
-            Event::Cancelled(match o {
-                crate::process::WaitOutcome::Signaled(sig) => cancel_cause(sig.number()),
-                _ => CancelCause::Terminate,
-            })
-        });
-        self.child = Some(Anchored::Watched(watch));
-    }
-
-    /// Close the release pipe, join the report reader, and drop the anchor's
-    /// watch — its own `Drop` reaps.  An external `kill -STOP` on the group
-    /// (unrelated to anything ral itself does) can still catch the anchor
-    /// stopped, but the reaper answers that itself, the same rule applied to
-    /// every watched pid; nothing here need resume it.  POSIX will not
-    /// recycle a leader's pid while the group is non-empty, so the pgid
-    /// stays addressable meanwhile.  The report reader's own read end closes
-    /// only once it sees EOF — the anchor's own exit closing its write end —
-    /// so it is never dropped while the anchor could still `SIGPIPE` on a
-    /// stray write into it, with no manual ordering to get right.
+    /// Close the release pipe, join the report reader, drop the watch — whose
+    /// own `Drop` reaps.  The reader leaves only on EOF, the anchor's own exit
+    /// closing the write end, so the anchor can never `SIGPIPE` on a report.
+    /// POSIX will not recycle a leader's pid while the group is non-empty, so
+    /// the pgid stays addressable meanwhile.
     #[cfg(unix)]
     fn finish(self) {
         let Self {
@@ -306,28 +229,24 @@ impl AnchorProcess {
             ..
         } = self;
         drop(release);
-        if let Some(reporter) = reporter {
-            let _ = reporter.join();
-        }
+        let _ = reporter.join();
         drop(child);
     }
 
     #[cfg(windows)]
     fn finish(self) {
         let Self {
-            mut child, pgid, release, ..
+            mut child, release, ..
         } = self;
         drop(release);
-        let _ = pgid;
         let _ = child.reap();
     }
 }
 
 /// Block-read the anchor's report pipe to EOF, one swallowed signal at a
-/// time.  EOF means the anchor died; the anchor's own watch reports that
-/// with the cause a bare EOF cannot carry, so this simply leaves —
-/// including the ordinary case, `AnchorProcess::finish`'s own teardown,
-/// where nothing is listening on `tx` any more anyway.
+/// time.  Each is a signal the kernel already delivered to every other member,
+/// so the collector tears down without re-sending it.  EOF means the anchor
+/// died, which its own watch reports with the cause a bare EOF cannot carry.
 #[cfg(unix)]
 fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Event>) {
     use std::io::Read;
@@ -336,7 +255,7 @@ fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Event>) {
         match report.read(&mut byte) {
             Ok(1) => {
                 let cause = cancel_cause(i32::from(byte[0]));
-                if tx.send(Event::Cancelled(cause)).is_err() {
+                if tx.send(Event::Witnessed(cause)).is_err() {
                     return;
                 }
             }
@@ -349,10 +268,15 @@ fn read_anchor_reports(mut report: os_pipe::PipeReader, tx: &Sender<Event>) {
 mod tests {
     use super::*;
 
+    /// An owning group whose channel nobody reads — enough for every test
+    /// that only wants a real pgid.
+    fn prepared(shell: &Shell) -> PipelineGroup {
+        PipelineGroup::prepare(shell, std::sync::mpsc::channel().0).expect("anchor spawns")
+    }
+
     #[test]
     fn prepare_yields_a_leader_on_every_platform() {
-        let shell = Shell::default();
-        let group = PipelineGroup::prepare(&shell).expect("anchor spawns");
+        let group = prepared(&Shell::default());
         assert!(group.owned());
         assert!(group.leader_pgid().as_raw() > 0);
     }
@@ -362,7 +286,7 @@ mod tests {
     #[test]
     fn a_group_that_never_acquired_the_terminal_does_not_claim_it() {
         let shell = Shell::default();
-        let mut group = PipelineGroup::prepare(&shell).expect("anchor spawns");
+        let mut group = prepared(&shell);
         group.claim_foreground(&shell, &Mooring::adrift());
         assert!(!group.holds_terminal());
     }
@@ -370,8 +294,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_completed_group_releases_its_windows_job() {
-        let shell = Shell::default();
-        let group = PipelineGroup::prepare(&shell).expect("anchor spawns");
+        let group = prepared(&Shell::default());
         let leader = group.leader_pgid().as_raw();
         assert!(crate::process::is_known_group(leader));
         drop(group);
@@ -379,24 +302,21 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn cancelled_within_2s(rx: &std::sync::mpsc::Receiver<Event>) -> Option<CancelCause> {
+    fn witnessed_within_2s(rx: &std::sync::mpsc::Receiver<Event>) -> Option<CancelCause> {
         match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(Event::Cancelled(cause)) => Some(cause),
+            Ok(Event::Witnessed(cause)) => Some(cause),
             Ok(_) | Err(_) => None,
         }
     }
 
-    /// A signal the group swallows is what the collector reads back over its
-    /// own channel — the shell's only way to hear a Ctrl-C delivered to a
-    /// foreground it lent out.  Two signals in a row prove the anchor
-    /// survived the first: a dead one has nothing left to report.
+    /// A signal the group swallows comes back as `Witnessed`; two in a row
+    /// prove the anchor survived the first.
     #[cfg(unix)]
     #[test]
     fn a_signalled_anchor_reports_the_cause_and_lives_on() {
         let shell = Shell::default();
-        let mut group = PipelineGroup::prepare(&shell).expect("anchor spawns");
         let (tx, rx) = std::sync::mpsc::channel();
-        group.start_witness(tx);
+        let group = PipelineGroup::prepare(&shell, tx).expect("anchor spawns");
         assert!(
             rx.recv_timeout(std::time::Duration::from_millis(200))
                 .is_err(),
@@ -411,7 +331,7 @@ mod tests {
             group
                 .leader_pgid()
                 .signal_group(crate::process::Signal::new(signal));
-            match cancelled_within_2s(&rx) {
+            match witnessed_within_2s(&rx) {
                 Some(c) if c == cause => {}
                 Some(c) => panic!("signal {signal} witnessed as {c:?}"),
                 None => panic!("signal {signal} was never reported"),

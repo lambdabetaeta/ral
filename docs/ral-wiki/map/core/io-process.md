@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4957c6c4
-generated_at_date: 2026-09-04
+generated_at_commit: ccb05833
+generated_at_date: 2026-09-05
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -177,16 +177,25 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
   performs the `tcsetpgrp` handoff, snapshots and restores tty foreground /
   termios, and blocks SIGTTOU for the parent-only restore window; unix
   `interrupt_foreground_child` re-sends raw-mode Esc/Ctrl-C to a foreground
-  external group, `relay_handler` fans SIGINT to active external pgids, and
-  `quit_handler` is the Ctrl-`\` root abort. Platform handlers live in
+  external group, `interrupt_handler` is the interactive SIGINT disposition —
+  a bare `request_foreground_cancel(Interrupt)`, with no delivery of its own,
+  since a pipeline's processes hear a cancellation through the collector — and
+  `quit_handler` is the Ctrl-`\` root abort. `grace_signal(cause)` is the one
+  cause→signal table both teardowns read (`RunningChild::terminate` and the
+  pipeline collector's `cancel_all`): `Interrupt` → SIGINT,
+  `Explicit`/`Deadline`/`Terminate` → SIGTERM, `ReaderGone`/`RootAbort` →
+  `None`, straight to the kill
+  ([[decisions/260905_one-delivery-path|one-delivery-path]]).
+  Platform handlers live in
   `signal/unix.rs` and `signal/windows.rs`. Every Unix child wait now goes
   through the reaper's `waitid`, the one funnel; a pgid is signalled directly
   by `kill(-pgid, …)`, never waited on
   ([[decisions/260720_total-wait-status|total-wait-status]], superseded on
   the pid side). The Windows side
   carries the console-control escalation ladder (`CTRL_BREAK_EVENT` fan-out, then
-  `TerminateJobObject`, then exit), `relay_interrupt` — `relay_handler`'s
-  non-escalating twin, whose fan-out skips a detached worker's group — and
+  `TerminateJobObject`, then exit), `relay_interrupt` — `interrupt_handler`'s
+  Windows analogue, which foreground-cancels and fans a `CTRL_BREAK_EVENT` to
+  every live group, skipping a detached worker's — and
   `break_pipeline_group`, the SIGTERM-grade cooperative break a job teardown
   sends before escalating to `kill_pipeline_group`.
 - `launch.rs` — the owned launch value and its platform interpreters, and the

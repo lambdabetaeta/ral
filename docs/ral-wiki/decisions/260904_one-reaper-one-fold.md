@@ -210,6 +210,11 @@ unchanged.
 in `reaper::scan_one`, not the two the pipeline collector and
 `RunningChild::wait` each carried before this plan.
 
+**Amended by** [[decisions/260905_one-delivery-path|one-delivery-path]]: the
+joining collector's per-pid cancel reads `grace_signal(cause)`, `cause_signal`'s
+current name and the one table `RunningChild::terminate` reads too, and it is
+skipped outright for a signal the anchor witnessed the kernel deliver.
+
 See [[decisions/260902_stages-are-threads|stages-are-threads]],
 [[decisions/260726_cancel-is-a-join|cancel-is-a-join]],
 [[decisions/260726_cancel-is-a-watermark|cancel-is-a-watermark]],

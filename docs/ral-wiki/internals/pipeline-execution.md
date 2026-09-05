@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e536d55d
+verified_at_commit: ccb05833
 verified_at_date: 2026-09-05
-anchors: [PipeNode, resolve_pipeline, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, Event, SettleOnDrop, Effect, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::sender, CollectState::all_stages_launched, CollectState::run, CollectState::drive, CollectState::cancel_all, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, PipelineGroup::start_witness, AnchorProcess, Anchored, ChildHandle, into_watch, watch_cancel, Watch, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Effect::ArmEdge, Event::Wrote]
+anchors: [PipeNode, resolve_pipeline, resolve_launch, StageLaunch, open_stage_routes, launch_thread_stage, ThreadStage, PipelineBuild, StageHandle::cut, Slot, Event, Event::Witnessed, SettleOnDrop, Effect, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::slot, CollectState::all_stages_launched, CollectState::run, CollectState::drive, CollectState::cancel_all, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, PipelineGroup::kill, AnchorProcess, ChildHandle, into_watch, watch_cancel, Watch, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge, Effect::ArmEdge, Event::Wrote]
 ---
 
 # Pipeline execution: byte edges, one process group, threads and processes
@@ -22,9 +22,9 @@ lexical environment rather than `shell.env`. Ordinary application and bind
 compose values in the machine and do not enter this pipeline runtime.
 
 **Resolve freezes a `StageLaunch` per stage from resolve-time facts.**
-`resolve_pipeline` (`pipeline/resolve.rs`) reads redirects, the terminal plan,
-and whether a `!{…}` audit captures bytes, and turns each stage's head
-resolution into one launch decision:
+`resolve_pipeline` (`pipeline/resolve.rs`) settles the terminal plan and calls
+`resolve_launch` per stage — the single launch decision, reading the head's
+resolution, its redirects, and whether a `!{…}` audit captures bytes:
 
 - `Direct(ExternalStage)` — an external command or bundled tool spawned
   straight into the group as its own process, no ral in front of it;
@@ -35,10 +35,11 @@ resolution into one launch decision:
 
 No route is consulted — nor could one be, since the checked IR carries none:
 a stage's classification cannot depend on where its payload lives, because the
-choice must be observationally transparent. The one fact resolve carries
-through is the pipeline node's own `PipeYield`, the syntax the checker wrote in
-place of the last stage's route, frozen onto the `PipelinePlan`. Launch
-consumes these decisions; it does not re-derive a transport mode. There is no
+choice must be observationally transparent. The node's own `PipeYield` — the
+syntax the checker wrote in place of the last stage's route — never passes
+through resolve at all: it comes committed in the checked IR and rides on
+`PipeNode` itself. Launch consumes the frozen decisions; it does not re-derive
+a transport mode. There is no
 in-process pipeline fold and no typed value channel between stages.
 
 **Every interior route is an operating-system byte pipe, allocated from stage
@@ -52,10 +53,11 @@ child's stdio. A non-final stage's returned value is simply discarded, and no
 returned value is ever serialised onto an edge
 ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
 
-**The final-value bit is derived once**, from `i + 1 == n` and
-`plan.yields == PipeYield::Last`; every other stage is `is_last = false`. A
-`Thread` stage simply returns its value on its `JoinHandle` (`StageOutcome`);
-the collector keeps it only when `is_last` says to.
+**The final-value bit is derived from position alone**, `i + 1 == n`; every
+other stage is `is_last = false`. A `Thread` stage carries its value home on
+its own `StageObservation`, and the node's `PipeYield` — held by `PipeNode`,
+not by the plan — decides at `finish` whether that value or `Unit` is the
+pipeline's.
 
 **A non-final stage cannot observe its reader's death by EPIPE.** The parent
 holds a duplicate of each interior edge's read end — `route::HeldEdge { edge,
@@ -64,9 +66,11 @@ edge ever delivers a broken-pipe signal or a write error to the stage that
 writes it: a dead edge is felt only through the mechanism below, at a write,
 never through the OS's own broken-pipe path. `crate::io::Edge` is the edge's
 own fate (`is_dead`/`mark_dead`), shared by the writer and the `HeldEdge` that
-watches it. `CollectState::file_end` emits `Effect::ArmEdge(ix)` when a reader
-stage is filed and its writer still runs: it marks the edge dead and starts
-`pipeline/sentinel.rs::listen(reader, ix, tx)` on the `HeldEdge`'s read end
+watches it. `CollectState::file` emits `Effect::ArmEdge(ix)` when a reader
+stage is filed and its writer still runs: `StageHandle::arm` marks the edge
+dead — before the sentinel snapshots what is pending, so a write completing
+between the two is caught by the sink's own post-check rather than lost — and
+starts `pipeline/sentinel.rs::listen(reader, slot)` on the `HeldEdge`'s read end
 (`reader` moves out of the `HeldEdge`; it is `None` for as long as the
 sentinel holds it), whatever kind the writer is. A `Thread` stage's
 `Sink::Pipe { writer, wake, edge }` checks the same edge itself after each
@@ -113,9 +117,9 @@ keeps, stdout a pipe the parent polls, `SIGTSTP`/`SIGTTIN`/`SIGTTOU` all set
 rest of the group, which the kernel can still stop directly. Every termination signal
 (`SIGINT`/`SIGTERM`/`SIGHUP`/`SIGQUIT`) is caught rather than obeyed: the
 handler writes the signal number to stdout and the anchor lives on. That
-immunity is what lets the SIGINT relay install right after `prepare`, rather
-than waiting for a first real stage spawn: the anchor is a genuine member
-already, so a relayed signal is never forwarded to a child-less pgid.
+immunity is what makes the group addressable from the moment `prepare`
+returns, rather than from a first real stage spawn: the anchor is a genuine
+member already, so the pgid is never child-less.
 `PipelineBuild::new` claims the foreground before any stage runs —
 `claim_foreground` (`group.rs`) is still gated on a borrowed `&TerminalLease`.
 With the terminal settled before user code exists, no start-gate frame is
@@ -128,31 +132,35 @@ belongs to the group the shell never receives the Ctrl-C or Ctrl-Z the tty
 delivers to it. With an external in the group a Ctrl-C would at least kill
 that external and the pipeline would drain; with none — `!{ a } | !{ b }` at
 the prompt — the anchor is the only process the kernel can reach, and it
-swallows the signal. `PipelineGroup::start_witness` (called once the
-collector's channel exists, since the anchor spawns before it does) starts
-one dedicated thread, a report reader blocking to EOF on the anchor's stdout
-— one byte per swallowed signal, sending `Event::Cancelled(cause)`, `SIGINT`
+swallows the signal. `PipelineGroup::prepare` spawns the anchor and starts its
+witness in one act, so no signal it swallows can land before someone is
+reading for it: one dedicated thread blocks to EOF on the anchor's stdout —
+one byte per swallowed signal, sending `Event::Witnessed(cause)`, `SIGINT`
 mapping to `Interrupt`, `SIGQUIT` to `RootAbort`, the rest to `Terminate`, the
-cause the shell's own handler for that signal would apply — and hands the
-anchor's own `ChildHandle` to the reaper as a `Watch`
-(`AnchorProcess`'s `Anchored::Spawned` becomes `Anchored::Watched`), whose
-posting closure maps the exit to `Event::Cancelled` too (a signal death to
-the cause its number names, anything else to `Terminate`). ral does not
+cause the shell's own handler for that signal would apply — and the anchor's
+own `ChildHandle` goes to the reaper as a `Watch` whose posting closure maps
+its exit to `Event::Cancelled` (a signal death to the cause its number names,
+anything else to `Terminate`). ral does not
 suspend ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]): the
 anchor's own rare stop is answered with `SIGCONT` by the reaper itself,
 inside its own scan, and never reaches this channel at all — no anchor
-waiter thread exists to see one. A death, however it left — a signal
-(attributed exactly as a reported swallow would be) or otherwise — reports
-`Event::Cancelled` and ends the loop; the anchor is the group's join target,
-so any death cancels the pipeline, expected (`AnchorProcess::finish`'s own
-teardown) or not. A cancelled event is applied to the pipeline, not to the
-run's scope: `step` answers it with `Effect::CancelAll(cause)`, which cancels
-every stage explicitly (`CollectState::cancel_stages`) and signals the group
-once, exactly as it would for a cancel that arrived through its own mooring,
-and the pipeline's error break is what ends the run. The report reader and
-the reaper's watch on the anchor's own pid are two separate producers into
-the same channel, so the two can race: whichever event arrives first is the
-one `step` answers. A single-stage pipeline never reaches any of this: the machine's
+waiter thread exists to see one. A death, however it left, ends the loop; the
+anchor is the group's join target, so any death cancels the pipeline, expected
+(`AnchorProcess::finish`'s own teardown) or not.
+
+**The two variants say who delivered.** `Witnessed` is the kernel's own
+delivery — the tty gave that signal to every member of the pgid before the
+anchor reported it — so teardown cancels the thread stages and waits out the
+grace but sends no second copy. `Cancelled` is a cause nothing in the group
+has yet been told about (the mooring's scope, the anchor's own death), so
+teardown is what delivers it. Either way the event is applied to the pipeline
+and not to the run's scope: `step` answers with
+`Effect::CancelAll { cause, delivered }` and the pipeline's error break is
+what ends the run. The report reader and the reaper's watch on the anchor's
+own pid are two separate producers into the same channel, so the two can race:
+whichever event arrives first is the one `step` answers.
+
+A single-stage pipeline never reaches any of this: the machine's
 `Pipeline` arm reduces it to its inner closure inline, and `PipeNode::launch`
 never sees it.
 
@@ -170,19 +178,13 @@ The machine's `Pipeline` arm is `PipeNode`'s only caller and steps identically
 inside a stage thread, so a stage whose body is itself a pipeline launches its
 own nested stages. That nested `PipeNode` reads `shell.io.launch_role`: for
 `PipelineStage(g)` it builds `PipelineGroup::joining(g)` instead of preparing
-one — no anchor, no relay, no foreground claim, and `signal`/`kill` no-op,
-since only the owning top-level group may act on the pgid. There is no gate to
-inherit: a stop reaching any member of the nested group, direct or joined, is
-answered with `SIGCONT` by the one process-wide reaper — the same one rule,
-applied uniformly regardless of nesting level, with nothing to forward
-upward and nothing for a joining collector to do about a stop at all. This is
-what closes the case a forwarding chain used to exist for — a stop the anchor
-cannot witness, a single-member `SIGSTOP` two levels down — without needing
-to witness it anywhere: the reaper answers it wherever in the nesting the
-watched pid sits.
-A joining group's `signal`/`kill` still no-op on the pgid — only the owning
-top-level group may act on the whole group — and its own teardown reaches
-its own live externals by pid instead, as it always did.
+one — no anchor, no foreground claim, and `signal`/`kill` no-op, since only
+the owning top-level group may act on the pgid. A stop reaching any member of
+the nested group, direct or joined, is answered with `SIGCONT` by the one
+process-wide reaper — the same rule wherever in the nesting the watched pid
+sits, with nothing to forward upward and nothing for a joining collector to do
+about a stop at all. A joining collector's own teardown therefore reaches its
+live externals by pid, one signal each, since it has no pgid to address.
 
 **A thread stage cuts itself at its own next write; an external is heard by
 the sentinel and killed at the first byte after the discard.** Marking an
@@ -190,7 +192,7 @@ edge dead (`Effect::ArmEdge`) changes nothing for a stage not currently
 writing — its own account continues regardless of writer kind. A `Thread`
 stage's own write needs no cancel and no wake to be cut: its `Sink::Pipe`
 checks `edge.is_dead()` after each chunk it lands — judged, not refused, so a
-child's bytes relayed through a pumped sink under `--audit` reach the edge
+child's bytes carried through a pumped sink under `--audit` reach the edge
 and are heard by the sentinel like any external's, and a write already in
 flight when the edge dies finishes before it is judged — "a write not
 complete when the edge dies does not complete." A
@@ -217,8 +219,10 @@ left — and turns the first byte written after them into
 `Event::Wrote(ix, reader)`,
 handing the read end back. Only then, not at the reader's own terminal event,
 does the process die: `step` records `sent[ix] = ReaderGone`, joined by
-`max`, and emits `Effect::KillStage(ix)`; `RunningChild::terminate` now kills
-outright for `ReaderGone` as for `RootAbort`. The kill addresses the stage's
+`max`, and emits `Effect::KillStage(ix)`, which `StageHandle::cut` performs.
+`grace_signal` offers no catchable signal for `ReaderGone`, so wherever a
+reader-gone teardown runs — a stage's own `RunningChild::terminate`, a nested
+pipeline's `cancel_all` — the kill is outright. The kill addresses the stage's
 pid alone, so a descendant the stage forked outlives it and may still hold
 the pipe a pump of that stage reads; an external ended for a dead write
 therefore *detaches* its pumps rather than joining them
@@ -271,7 +275,8 @@ answers it and the pipeline runs on, exactly as `vim` does.
 **Windows never had a foreground handoff to race and still has none.** There
 is no `tcsetpgrp`, and the terminal plan never selects
 `ForegroundExternalGroup`. The anchor still exists on Windows — it is what
-keys the Job Object in `GROUPS` — but it holds no gate/relay role there; every
+keys the Job Object in `GROUPS` — but it witnesses nothing there, Windows
+having no group-wide delivery to hear; every
 external spawned inside a stage thread still joins the Job Object through the
 same `PgidPolicy::Join` resolution, assigned at creation under the suspended
 create → assign → resume path.
@@ -286,12 +291,13 @@ its last act; a direct external needs no dedicated waiter thread at all —
 `ChildHandle::into_watch`'s own closure posts its raw
 [`crate::process::WaitOutcome`] straight onto the collector's channel as
 `Event::Ended(ix, outcome)`, the reaper being the one party that ever calls
-`waitid` on it; the anchor's report reader sends `Event::Cancelled` for a
-swallowed signal, and its own `Watch` (installed by `PipelineGroup::
-start_witness`) posts the same variant for the anchor's own death; a
-`watch_cancel` on the mooring's scope posts `Event::Cancelled` the instant
-the scope's own cause is set, replacing what used to be a low-frequency
-polling timer with an exact, event-driven post.
+`waitid` on it; the anchor's report reader sends `Event::Witnessed` for a
+swallowed signal, and its own `Watch` posts `Event::Cancelled` for the
+anchor's own death; a `watch_cancel` on the mooring's scope posts
+`Event::Cancelled` the instant the scope's own cause is set. A stage's address
+on that channel is its `Slot { ix, tx }` — handed out by `CollectState::slot`,
+carried by every one of that stage's producers, and wrapped by the
+`SettleOnDrop` a stage thread's closure owns.
 Every index-owning producer — a stage thread's closure — carries its own
 [`SettleOnDrop`], so its `Returned` reaches the channel by its own send or by
 that guard's drop; the anchor's report reader and its own watch hold plain
@@ -307,10 +313,11 @@ performs — so the whole corner-case space is a transition table, testable by
 feeding `step` a sequence of events and asserting the effects, no process,
 sleep, or retry loop needed. `drive` is
 `loop { for e in step(&mut st, rx.recv()?) { run(e) } }` — no interval, no
-backoff, exact latency, zero idle CPU. `step` folds four kinds of event —
-`Ended`, `Returned`, `Cancelled`, `Wrote` — a stop is not among them at all:
-it is answered and forgotten by the reaper's own scan, never reaching the
-channel ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
+backoff, exact latency, zero idle CPU. `step` folds five kinds of event —
+`Ended`, `Returned`, `Wrote`, `Cancelled`, `Witnessed` — a stop is not among
+them at all: it is answered and forgotten by the reaper's own scan, never
+reaching the channel
+([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]).
 `step`'s reader-gone rule is two effects, one per event that justifies it: on
 a stage's own terminal event at index `ix`, if stage `ix - 1` still holds a
 stage handle, emit `Effect::ArmEdge(ix - 1)`; on
@@ -331,31 +338,45 @@ changes which failure the fold reports.
 
 **Teardown is kill-first.** A pipeline that ends before every stage has been
 observed ends by one of two mechanisms, and both put the death of what this
-collector launched before anything that blocks. `CollectState::cancel_all` is
-the one that observes on purpose — a cancel, a witnessed signal, the REPL's
-exit — and spells the order out for both an owning
-and a joining group: (1) `cancel_stages` delivers the cause to each stage —
-for an external, its own pid gets the cause's catchable signal alone
-(`Watch::signal`); a stop this raises, or any it was already in, is the
-reaper's to resume, not this cascade's — recording the cause in `sent[ix]`,
-joined by `max`, as it goes; and `signal` sends the cause then `SIGCONT` to
-`-pgid`, a no-op for a joining group, which has no pgid of its own — the
-`SIGCONT` there is what reaches an unwatched grandchild the reaper's own
-per-pid answer cannot; (2) a bounded grace of at most `TEARDOWN_GRACE`
-(500 ms, shared with the standalone command's own `terminate`) as a single
-blocking `recv_timeout` on the deadline, not a probe loop, filing only a
-stage's own terminal event (`Ended`/`Returned`) it drains — every other kind
-is moot once the whole group is already dying, and is discarded; (3) the
-kill — `group.kill()` (`SIGKILL -pgid`) for an owning group, or
-`kill_live_externals` (a pid-wise `Watch::kill` over every stage still
-`Some`) for a joining one, which has no pgid to `SIGKILL` either; (4) a
+collector launched before anything that blocks.
+`CollectState::cancel_all(group, cause, delivered)` is the one that observes
+on purpose — a cancel, a witnessed signal, the REPL's exit — and spells the
+order out for both an owning and a joining group: (1) every live stage is
+cancelled, recording the cause in `sent[ix]`, joined by `max`, as it goes; a
+thread's scope is cancelled and the thread woken, while an external is left
+untouched here, since a process hears a cancellation only as a signal;
+(2) that signal is `grace_signal(cause)` — `Interrupt` → `SIGINT`,
+`Explicit`/`Deadline`/`Terminate` → `SIGTERM`, `ReaderGone`/`RootAbort` →
+none at all, straight to the kill — sent **once per process**: to the whole
+pgid (then `SIGCONT`, since a stopped member cannot act on the first until it
+runs) for an owning group, or per pid via `Watch::signal` for a joining one,
+which has no pgid of its own. `delivered` skips this step outright: a
+`Witnessed` cause is one the kernel already gave every member, and a second
+copy would be a second interrupt; (3) a bounded grace of at most
+`TEARDOWN_GRACE` (500 ms, shared with the standalone command's own
+`terminate`) as a single blocking `recv_timeout` on the deadline, not a probe
+loop, filing only a stage's own terminal event (`Ended`/`Returned`) it drains
+— every other kind is moot once the whole group is already dying, and is
+discarded; (4) the kill — `group.kill()` (`SIGKILL -pgid`) for an owning
+group, or `kill_live_externals` (a pid-wise `Watch::kill` over every stage
+still `Some`) for a joining one, which has no pgid to `SIGKILL` either; (5) a
 further blocking drain, unbounded, for whatever the grace did not already
 account for — a cancelled and killed member having nowhere left to block;
-(5) the anchor last, in `Drop`, after every stage handle has gone: its report
+(6) the anchor last, in `Drop`, after every stage handle has gone: its report
 reader is joined and its own `Watch` dropped, which reaps (the report
 reader's read end closes only once it sees the anchor's own EOF, so it is
 never dropped while the anchor could still `SIGPIPE` on a stray write into
 it).
+
+Because `grace_signal` is the one cause→signal table, and
+`RunningChild::terminate` reads it too, a reader-gone teardown kills outright
+at every nesting level: `!{ yes | cat } | head -1` ends the inner `yes`
+without a catchable `SIGTERM` ever being attributed to it. What the collector
+sent is read back in `fold`, through `CommandFailure::from_outcome(outcome,
+sent)`, so a pipeline external torn down under `Explicit` or `Deadline`
+reports the cause — "stopped because the call's time limit expired" — exactly
+as a standalone external does
+([[decisions/260905_one-delivery-path|one-delivery-path]]).
 
 `CollectState::drop` is the other, and it covers every forced end that drops
 rather than observes: a launch that failed part-way, an unwind between launch
@@ -370,12 +391,9 @@ Killing before joining is what makes the joins terminate: a stage's own kill
 reaches its pid alone, and a pumped descendant that survived it would hold the
 pump's pipe open forever. The two graces nest without adding — the group's
 `SIGKILL` ends whatever the standalone command's own `terminate` grace is
-waiting on for a stage's interior child. A joining group's own verb set,
-`signal` and `kill`, is a no-op either way — it has no pgid to send either
-to — so its half of teardown is per pid: `cancel_stages` signals,
-`kill_live_externals` kills; descendants of a killed external are the group
-owner's, as for any stage's own kill.
-`PipelineResources`'s and `PipeNode`'s field orders carry
+waiting on for a stage's interior child. Descendants of a killed external are
+the group owner's, as for any stage's own kill.
+`PipelineBuild`'s and `PipeNode`'s field orders carry
 the drop half: routes, then the collector, then the group. The collector's
 kill must reach the pgid it named, and it is the live anchor that keeps that
 pgid from being reused; the anchor is waited last precisely so nothing that
@@ -397,6 +415,7 @@ See also [[design/pipelines|pipelines]],
 [[internals/capability-enforcement|capability-enforcement]],
 [[decisions/260902_stages-are-threads|stages-are-threads]],
 [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]],
-[[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]]; map
+[[decisions/260905_the-cut-is-at-the-write|the-cut-is-at-the-write]],
+[[decisions/260905_one-delivery-path|one-delivery-path]]; map
 [[map/core/runtime|runtime]], [[map/core/io-process|io-process]].
 `docs/SPEC.md` §7, §7.6, §11.6; RATIONALE §"The pipe is the operating system's".

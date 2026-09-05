@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c8a8a706
-generated_at_date: 2026-09-01
+generated_at_commit: ccb05833
+generated_at_date: 2026-09-05
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -457,7 +457,7 @@ escalating disposition never ticks for an exchange-cancel; window-close / logoff
 shutdown pass through unhandled to that disposition, the analogue of
 SIGTERM/SIGHUP staying on the escalating path. Raw mode disables
 `ENABLE_PROCESSED_INPUT`, so Ctrl-C reaches the TUI as an ordinary key event
-and `deliver_interrupt` calls the relay in-process — never a
+and `deliver_interrupt` calls `relay_interrupt` in-process — never a
 `GenerateConsoleCtrlEvent` re-injection, which would broadcast to the console
 group and tick ral's escalation counter.
 A genuine external signal still routes through ral's one cause-carrying

@@ -138,6 +138,11 @@ its forgiven-death rule for a reader-gone kill is unchanged, but its two
 clauses describing a *parked* pipeline no longer hold — there is no park to
 abandon held read ends, and a stop no longer wedges a collector until `fg`.
 
+**Amended by** [[decisions/260905_one-delivery-path|one-delivery-path]]:
+`PipelineRelay` is gone from "What stays" — Ctrl-C reaches a pipeline's
+processes through the collector alone. The anchor stays, as pgid-keeper and
+as the witness of what the kernel already delivered to the group.
+
 See [[decisions/260902_stages-are-threads|stages-are-threads]],
 [[decisions/260903_event-driven-pipeline-collector|event-driven-pipeline-collector]],
 [[decisions/260613_terminal-foreground-ownership|terminal-foreground-ownership]],

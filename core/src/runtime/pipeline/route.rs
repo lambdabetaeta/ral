@@ -1,17 +1,11 @@
 //! Interior edges of a process-staged pipeline are kernel byte pipes.
 //!
 //! Every edge is allocated before any stage spawns, and each end lives in
-//! exactly one [`StageRoute`] the launcher consumes whole — so a doubly-wired
-//! end is unrepresentable, and an aborted launch closes what it never spawned.
-//!
-//! Each non-final stage's route also carries a second, parent-held duplicate
-//! of its outbound edge's read end ([`HeldEdge`]).  While the parent holds
-//! it, the stage writing to that edge can never observe its reader's death —
-//! no SIGPIPE, no EPIPE — so the collector's sentinel, reading that very
-//! duplicate, is the only channel through which a dead reader reaches its
-//! producer.  The duplicate is dropped once the writer's own observation
-//! completes, releasing any of the writer's descendants still blocked on the
-//! edge.
+//! exactly one [`StageRoute`] the launcher consumes whole, so a doubly-wired
+//! end is unrepresentable.  A non-final stage's route also carries the
+//! parent's own duplicate of its outbound read end ([`HeldEdge`]): while the
+//! parent holds it no EPIPE and no SIGPIPE ever reaches the writer, so the
+//! collector's sentinel is the only channel a dead reader reaches it by.
 
 use super::resolve::PipelinePlan;
 use crate::io::Edge;

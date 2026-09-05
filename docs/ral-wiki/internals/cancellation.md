@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 4957c6c4
-verified_at_date: 2026-09-04
-anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, ChromeKind, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, sigint_relay, sigquit_handler, process::check, RunningChild::wait, watch_cancel, escalation_pending]
+verified_at_commit: ccb05833
+verified_at_date: 2026-09-05
+anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, ChromeKind, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, process::check, RunningChild::wait, watch_cancel, escalation_pending]
 ---
 
 # Cancellation
@@ -40,8 +40,8 @@ session reboot), and `escalation_pending()` exposes it for observability only.
 
 **The force-exit floor is reachable only in non-interactive paths.** The `ral`
 batch launcher binds SIGINT to `handler` (`main.rs`, `install_handlers`); the
-interactive REPL rebinds SIGINT to the *relay* (below), which never touches the
-ladder. So repeated Ctrl-C at an interactive prompt is cooperative, never a
+interactive REPL rebinds SIGINT to the non-escalating `interrupt_handler`
+(below), which never touches the ladder. So repeated Ctrl-C at an interactive prompt is cooperative, never a
 hard kill — the escalation belongs to batch scripts, to external SIGTERM/SIGHUP,
 and to exarch's async signal forward.
 
@@ -173,7 +173,10 @@ A blocked wait does not consult the scope, so nothing here polls at all: the
 process-wide reaper ([[map/core/io-process|io-process]]) posts a child's exit
 straight onto `RunningChild::wait`'s own channel, and `watch_cancel` posts a
 cancel onto the same channel the instant the scope's cause is set — one
-blocking `recv`, no interval, no backoff. The teardown is *cause-directed*:
+blocking `recv`, no interval, no backoff. The teardown is *cause-directed*,
+and `grace_signal(cause)` (`process/signal/unix.rs`) is the one table that
+directs it — read by `RunningChild::terminate` and by the pipeline
+collector's `cancel_all` alike:
 
 - **`Interrupt`** → SIGINT-first, a bounded `TEARDOWN_GRACE` (500 ms), then a
   group (or, ungrouped, pid-`Watch`) SIGKILL — a child that traps SIGINT
@@ -182,7 +185,9 @@ blocking `recv`, no interval, no backoff. The teardown is *cause-directed*:
   grace then the same kill — decisive, without pretending to be a user
   keystroke; a `Terminate` hands the tree the very signal the supervisor sent
   ral.
-- **`RootAbort`** → an immediate kill, no grace.
+- **`ReaderGone` / `RootAbort`** → `None`, an immediate kill with no grace. A
+  reader-gone cut must not hand the verdict back to the producer's own
+  disposition, and an abort has no grace to offer.
 
 Every external wait goes through this one `recv`/`terminate` shape — the
 interactive REPL foreground included. ral does not suspend
@@ -199,7 +204,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 
 | gesture | surface | what fires | effect |
 |---|---|---|---|
-| **Ctrl-C** | ral REPL, mid-eval | SIGINT → `sigint_relay` | `request_foreground_cancel(Interrupt)` + relay SIGINT to external pgids; **counter untouched** |
+| **Ctrl-C** | ral REPL, mid-eval | SIGINT → `interrupt_handler` | `request_foreground_cancel(Interrupt)` and nothing else — a pipeline's externals hear it through the collector; **counter untouched** |
 | **Ctrl-C** | ral REPL, idle prompt | line editor reads it as a byte | abandons the partial buffer, `process::clear()`; no signal |
 | **Ctrl-`\`** | ral REPL | SIGQUIT → `sigquit_handler` | `request_root_cancel(RootAbort)` — reaps foreground *and* every detached worker, latching if idle; the REPL loop observes the sticky root and exits |
 | **Ctrl-C** | ral batch / `-c` | SIGINT → `handler` | `request_foreground_cancel(Interrupt)` + ladder `+1`; third press `_exit`s |
@@ -207,7 +212,7 @@ The same two mechanisms are driven by different keys on different surfaces.
 | **Ctrl-C / Esc** | exarch TUI, active exchange | `Agent::interrupt` on the focused agent (reached through that tab's own `Weak`); the trunk also `cancel::raise_interrupt` | cancels the focused agent's `Token` and the scope its interrupt target holds; on the trunk, additionally the published `Token`, `interrupt_foreground_child`, `request_foreground_cancel(Interrupt)` |
 | **Ctrl-C / Ctrl-D** | exarch TUI, idle prompt | key table → quit | drops the TUI guard; no cancellation |
 | **Ctrl-C / Ctrl-D / Esc** | exarch TUI overlay | key table → close overlay | returns to the underlying prompt / exchange; no root cancel |
-| **async SIGINT** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's non-escalating `sigint_relay` |
+| **async SIGINT** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's non-escalating `interrupt_handler` |
 | **async SIGTERM / SIGHUP** | exarch | `chained` handler | cancels the `Token`, then forwards into ral's `handler` → root `Terminate` + ladder |
 
 ### ral interactive signal dispositions
@@ -215,12 +220,18 @@ The same two mechanisms are driven by different keys on different surfaces.
 `boot::setup_signals` (`ral/src/repl/session/boot.rs`)
 fixes the interactive dispositions:
 
-- **SIGINT → relay** (`sigint_relay`). The relay keeps the controlling tty with
-  the shell while a *mixed* pipeline (internal threads + external processes) runs,
-  fanning SIGINT out to up to eight active external pgids via the `RELAY_PGIDS`
-  slot array (`PipelineRelay` RAII). It *also* `request_foreground_cancel`s so an
-  in-process foreground computation unwinds; raised while idle, the cause is
-  older than every frame still to be born, so the next run never sees it.
+- **SIGINT → `interrupt_handler`** (the `sigint_handler` it names). It raises
+  the foreground interrupt and does nothing else — no delivery of its own.
+  ral's own delivery to a pipeline's processes is the cancel tree alone: the
+  foreground scope reaches the collector's `watch_cancel`, which posts
+  `Event::Cancelled` and tears the group down with exactly one grace signal per
+  process ([[internals/pipeline-execution|pipeline-execution]],
+  [[decisions/260905_one-delivery-path|one-delivery-path]]). A foreground
+  pipeline's externals usually hear the kernel's own copy first, delivered by
+  the tty to the pgid that owns the terminal, and the anchor witnesses that so
+  teardown does not re-send it. Raised while idle, the cause is older than
+  every frame still to be born, so the next run never sees it — and a detached
+  worker, carrying no birth instant at all, is spared outright.
 - **SIGQUIT → `sigquit_handler`**, the louder "reap everything" gesture
   ([[decisions/260629_agent-binding-reaping|agent-binding-reaping]] keeps it as
   *cancellation*, never deletion). It is a cooperative `request_root_cancel`, not
@@ -302,8 +313,9 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
 ## Why interactive Ctrl-C cannot force-exit
 
 A deliberate asymmetry worth stating plainly: **the third-signal `_exit` floor is
-unreachable from an interactive prompt.** Interactive SIGINT goes to the relay,
-which never ticks the ladder; the TUI's active-exchange Ctrl-C goes to
+unreachable from an interactive prompt.** Interactive SIGINT goes to
+`interrupt_handler`, which never ticks the ladder; the TUI's active-exchange
+Ctrl-C goes to
 `Agent::interrupt` (and, on the trunk, also `raise_interrupt`), neither
 of which ever touches the ladder. Repeated presses re-write the same cause
 (`fetch_max`), never escalate. The hard
@@ -334,6 +346,8 @@ by construction; the root-reap gesture is REPL Ctrl-`\`, not a TUI key.
   [[internals/pipeline-execution|pipeline-execution]] — the foreground-deadline and
   group-teardown paths that read the scope.
 - [[map/core/io-process|io-process]] (signals, process groups),
-  [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]] (the relay),
+  [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]],
+  [[decisions/260905_one-delivery-path|one-delivery-path]] (one signal per
+  process, through the collector),
   [[map/exarch/agent|agent]] (the attend loop the token wraps),
   and `core/src/process/signal.rs` itself.

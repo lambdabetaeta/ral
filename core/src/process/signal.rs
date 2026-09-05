@@ -26,12 +26,12 @@ use super::reaper::{Watch, watch};
 mod unix;
 #[cfg(unix)]
 pub use unix::{
-    ForegroundGuard, PipelineRelay, install_handlers, interrupt_foreground_child, quit_handler,
-    relay_handler, reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after,
-    term_handler, termios_snapshot,
+    ForegroundGuard, install_handlers, interrupt_foreground_child, interrupt_handler, quit_handler,
+    reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after, term_handler,
+    termios_snapshot,
 };
 #[cfg(unix)]
-pub(crate) use unix::cause_signal;
+pub(crate) use unix::grace_signal;
 
 #[cfg(windows)]
 mod windows;

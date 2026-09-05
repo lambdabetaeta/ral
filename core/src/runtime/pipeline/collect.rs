@@ -1,28 +1,13 @@
 //! Collect phase: fold a process-staged pipeline's per-stage observations
 //! into one result.
 //!
-//! Observation order is the order stages actually end, not launch order: a
-//! non-final stage may outlive its reader (a child that stops itself, or one
-//! that keeps writing after the reader is long gone), so collection reacts to
-//! whichever stage ends next rather than blocking on one at a time.  A stage
-//! is cut at its first write to a dead edge and nowhere else: a thread's own
-//! write raises the break, an external's is heard by the sentinel and
-//! answered with the kill — the one death forgiven. Verdict precedence — first
-//! failure wins, control outranks failure — folds in launch order, over
-//! observations buffered during the walk.  A stop never reaches this fold at
-//! all, whether a member's or the anchor's own: the reaper answers every stop
-//! with `SIGCONT` itself, the one rule in one place.
-//!
-//! Every event in the pipeline's lifecycle — an external's exit from the
-//! reaper, a thread stage's own report, the mooring's or the anchor's own
-//! cancel — arrives as one [`Event`] on one channel.  [`step`] is the pure
-//! fold over it: it never blocks, never signals, never touches a process — it
-//! inspects [`CollectState`] and returns the [`Effect`]s a thin interpreter
-//! (`CollectState::run`) performs.  Attribution lives in the fold too:
-//! `sent` records, for every stage, the strongest cause anything here ever
-//! sent it, and [`CollectState::fold`] is the one place that reads it back
-//! against what actually happened, since only there does `&Shell` reach an
-//! external's settlement at all.
+//! Every lifecycle edge — an external's exit from the reaper, a thread
+//! stage's own report, a cancel, a signal the anchor witnessed — arrives as
+//! one [`Event`] on one channel, and [`step`] is pure over them: effects are
+//! returned, not performed.  Stages are observed in the order they end; the
+//! verdict folds in launch order, the first failure winning and control
+//! outranking failure.  A stage is cut at its first write to a dead edge and
+//! nowhere else.
 
 use super::super::command;
 use super::group::PipelineGroup;
@@ -33,9 +18,19 @@ use crate::types::{
     AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Observed, Settled,
     Shell, Value, epoch_us,
 };
-#[cfg(unix)]
-use std::sync::mpsc::RecvTimeoutError;
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::Instant;
+
+/// Attach a kernel-denial diagnostic to a failed pipeline stage's error.
+/// Best-effort: siblings share the group, so the reader scopes deny lines to a
+/// descendant sample taken now, over the pipeline-wide window from `started`.
+fn augment_stage_failure(err: Error, shell: &Shell, started: Instant) -> Error {
+    if shell.sandbox_projection().is_none() {
+        return err;
+    }
+    let pids = crate::sandbox::sample_descendants(std::process::id());
+    crate::sandbox::augment_failure(err, shell, &pids, started)
+}
 
 /// The fragment is empty when audit is inactive at the parent.
 fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) -> AuditFragment {
@@ -62,35 +57,31 @@ fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) ->
     AuditFragment::from_observations(vec![obs])
 }
 
-/// The shell-touching finish an external stage's raw [`crate::process::WaitOutcome`]
-/// still needs — attribution against `sent`, audit synthesis, exit-hint
-/// lookup, sandbox-denial augmentation — none of which the reaper's own
-/// posting closure may do, holding no `&Shell` of its own.
+/// The shell-touching finish an external stage's raw
+/// [`crate::process::WaitOutcome`] still needs — attribution against `sent`,
+/// audit, exit hints, denial augmentation — none of which the reaper's own
+/// posting closure may do, holding no `&Shell`.
 fn finish_external_settlement(
     name: &str,
     outcome: crate::process::WaitOutcome,
     sent: Option<CancelCause>,
     shell: &Shell,
-    started: std::time::Instant,
+    started: Instant,
 ) -> StageObservation {
     let err = CommandFailure::from_outcome(outcome, sent)
         .map(|f| Error::from_command_failure(name, f, shell));
     let audit = synth_external_stage_audit(shell, name, err.as_ref());
     match err {
         Some(err) => {
-            StageObservation::failure(super::augment_stage_failure(err, shell, started)).with_audit(audit)
+            StageObservation::failure(augment_stage_failure(err, shell, started)).with_audit(audit)
         }
         None => StageObservation::ok().with_audit(audit),
     }
 }
 
 /// One stage's terminal news, before the fold's shell-touching finish: a
-/// thread stage's own closure already computed its whole [`StageObservation`]
-/// and this carries it as-is; an external stage carries only the raw
-/// outcome the reaper posted, since [`finish_external_settlement`] is
-/// [`CollectState::fold`]'s to run, with the `&Shell` nothing upstream of it
-/// may hold — and its still-running pumps, whose join-or-detach the fold
-/// decides by `sent` once the walk, and any teardown kill, is over.
+/// thread stage's own [`StageObservation`] as-is; an external's raw outcome,
+/// with the jail and the still-running pumps the fold settles by `sent`.
 pub(super) enum StageEnd {
     Thread(StageObservation),
     External {
@@ -112,42 +103,64 @@ pub(super) enum Event {
     /// A stage wrote to its dead outbound edge, heard by the sentinel; the
     /// read end travels back so the writer's own filing releases it.
     Wrote(usize, os_pipe::PipeReader),
-    /// The mooring scope, the anchor's report pipe, or the anchor's own
-    /// death — every one of them tears the whole pipeline down.
+    /// The mooring scope, or the anchor's own death — a cause nothing in the
+    /// group has yet been told about, so teardown must deliver it.
     Cancelled(CancelCause),
+    /// The anchor swallowed a signal the kernel had already delivered to
+    /// every member: teardown sends no second copy of it.  Unix alone — the
+    /// Windows anchor has no group-wide delivery to hear.
+    #[cfg(unix)]
+    Witnessed(CancelCause),
 }
 
-/// Owned by the one producer thread responsible for index `ix`: a stage
-/// thread's closure.  Disarmed by [`Self::send`]; dropped armed — an unwind
-/// anywhere on that thread, including before the closure body ran — it
-/// posts the observation itself, so no index can go silent whoever else
-/// still holds a sender.
-pub(super) struct SettleOnDrop {
-    ix: usize,
-    tx: Option<Sender<Event>>,
+/// A stage's address on the collector's channel.
+#[derive(Clone)]
+pub(super) struct Slot {
+    pub(super) ix: usize,
+    pub(super) tx: Sender<Event>,
 }
+
+impl Slot {
+    /// Post one event for this stage; a closed channel means the collector is
+    /// already gone.
+    pub(super) fn send(&self, event: Event) {
+        let _ = self.tx.send(event);
+    }
+
+    /// Hand `child` to the reaper, whose posting closure files this stage's
+    /// own [`Event::Ended`] — no dedicated waiter thread anywhere.
+    pub(super) fn watch(&self, child: crate::process::ChildHandle) -> crate::process::Watch {
+        let ix = self.ix;
+        child.into_watch(self.tx.clone(), move |o| Event::Ended(ix, o))
+    }
+}
+
+/// A stage's dead-man's switch, owned by its own producer thread: disarmed by
+/// [`Self::send`], dropped armed it posts the observation itself, so no index
+/// can go silent whoever else still holds a sender.
+pub(super) struct SettleOnDrop(Option<Slot>);
 
 impl SettleOnDrop {
-    pub(super) fn new(ix: usize, tx: Sender<Event>) -> Self {
-        Self { ix, tx: Some(tx) }
+    pub(super) fn new(slot: Slot) -> Self {
+        Self(Some(slot))
     }
 
     pub(super) fn send(mut self, obs: StageObservation) {
-        let tx = self.tx.take().expect("armed until send or drop");
-        let _ = tx.send(Event::Returned(self.ix, obs));
+        let slot = self.0.take().expect("armed until send or drop");
+        slot.send(Event::Returned(slot.ix, obs));
     }
 }
 
 impl Drop for SettleOnDrop {
     fn drop(&mut self) {
-        if let Some(tx) = self.tx.take() {
+        if let Some(slot) = self.0.take() {
             let msg = if std::thread::panicking() {
                 "ral pipeline stage panicked"
             } else {
                 "ral pipeline stage ended without reporting"
             };
-            let _ = tx.send(Event::Returned(
-                self.ix,
+            slot.send(Event::Returned(
+                slot.ix,
                 StageObservation::failure(Error::new(msg.to_string(), 1)),
             ));
         }
@@ -162,21 +175,19 @@ pub(super) enum Effect {
     /// listening on the parent's duplicate of its read end.
     ArmEdge(usize),
     /// The reader-gone kill, the sentinel having heard the first write to a
-    /// dead edge: the one death forgiven.  Never reused for any other kill —
-    /// see [`StageHandle::kill_now`]'s doc.
+    /// dead edge: the one death forgiven.
     KillStage(usize),
-    CancelAll(CancelCause),
+    /// Tear the whole pipeline down.  `delivered` says the kernel already
+    /// gave every member the signal this cause names, so teardown must not
+    /// send a second copy.
+    CancelAll { cause: CancelCause, delivered: bool },
     Done,
 }
 
-/// One stage's observation, normalized across external children and ral
-/// stage threads.  `final_value` is set only by the final value-typed ral
-/// stage, so a stage that broke carries none.
-///
-/// The break is a [`Break`], whose own two constructors are already the
-/// classification the fold needs: a stage-boundary failure (a panicked
-/// thread, `waitpid`) arrives as `Error` like any other, and only an
-/// `Escape` is control flow.
+/// One stage's observation, normalized across external children and ral stage
+/// threads.  `final_value` is set only by the final value-typed ral stage.
+/// The break's own two constructors are the classification the fold needs:
+/// only an `Escape` is control flow.
 pub(super) struct StageObservation {
     pub(super) break_: Option<Break>,
     final_value: Option<Value>,
@@ -220,9 +231,8 @@ impl StageObservation {
         Self::ok().with_audit(self.audit)
     }
 
-    /// Whether this stage's break is a `cause`-cancellation's own — the
-    /// thread analogue of `WaitOutcome::is_stage_kill`, since only
-    /// `Error::cancelled` mints a `Status::Cancelled`.
+    /// Whether this stage's break is a `cause`-cancellation's own — the thread
+    /// analogue of `WaitOutcome::is_stage_kill`.
     pub(super) fn ended_by(&self, cause: CancelCause) -> bool {
         matches!(&self.break_, Some(Break::Error(e)) if e.cancelled_by() == Some(cause))
     }
@@ -250,20 +260,15 @@ impl PipelineCollector {
         }
     }
 
-    /// Ties go to the earlier stage, the fold being launch-ordered, so a
-    /// Ctrl-Z on stage 2 displaces stage 1's nonzero exit while a second
-    /// failure never displaces the first.
+    /// Ties go to the earlier stage, the fold being launch-ordered.
     fn note(&mut self, br: Break) {
         if self.break_.as_ref().map_or(0, rank) < rank(&br) {
             self.break_ = Some(br);
         }
     }
 
-    /// The audit observations broadcast before the break is ranked, so a stage
-    /// that fails or escapes still contributes what it observed.  Reporting
-    /// each rather than merging them in puts a stage thread's writes and
-    /// execs on the rail — though only where the parent already holds a
-    /// trail, since that is what makes a stage collect at all.
+    /// The audit observations are broadcast before the break is ranked, so a
+    /// stage that fails or escapes still contributes what it observed.
     fn fold(
         &mut self,
         mooring: &Mooring,
@@ -298,24 +303,19 @@ impl PipelineCollector {
 pub(super) struct CollectState {
     stages: Vec<Option<StageHandle>>,
     observed: Vec<Option<StageEnd>>,
-    /// What this collector has itself sent stage `ix`, joined by `max` where
-    /// two causes land on the same stage.  Recorded here, not on the stage or
-    /// its child, since the collector is the one party that knows what it did
-    /// to whom.
+    /// What this collector itself sent stage `ix`, joined by `max`: it is the
+    /// one party that knows what it did to whom.
     sent: Vec<Option<CancelCause>>,
-    started: std::time::Instant,
+    started: Instant,
     /// The pgid a forced end of this collector kills; `None` for a joining
     /// collector, whose owner's teardown does it.
     owned_group: Option<Pgid>,
-    /// Every producer's [`Event`] arrives here: the reaper (through a stage's
-    /// own watch), a stage thread's own report, the anchor's witness, the
-    /// cancel watch.
+    /// Every producer's [`Event`] arrives here: the reaper, a stage thread's
+    /// own report, the anchor's witness, the cancel watch.
     rx: Receiver<Event>,
     /// This collector's own clone, held only while stages are still being
     /// launched: [`Self::all_stages_launched`] drops it, so the channel can
-    /// close once every producer is gone.  A thread stage's own end always
-    /// arrives as `Returned` — by its own send, or by its [`SettleOnDrop`]
-    /// when the producer thread unwinds first.
+    /// close once every producer is gone.
     tx: Option<Sender<Event>>,
     /// The mooring scope, posting [`Event::Cancelled`] the instant it is
     /// cancelled; dropping this disarms it.
@@ -323,12 +323,13 @@ pub(super) struct CollectState {
 }
 
 impl CollectState {
-    pub(super) fn new(group: &mut PipelineGroup, mooring: &Mooring, started: std::time::Instant) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        #[cfg(unix)]
-        if group.owned() {
-            group.start_witness(tx.clone());
-        }
+    pub(super) fn new(
+        rx: Receiver<Event>,
+        tx: Sender<Event>,
+        group: &PipelineGroup,
+        mooring: &Mooring,
+        started: Instant,
+    ) -> Self {
         let cancel_tx = tx.clone();
         let cancel = watch_cancel(mooring.cancel.as_scope().clone(), move |cause| {
             let _ = cancel_tx.send(Event::Cancelled(cause));
@@ -346,11 +347,7 @@ impl CollectState {
     }
 
     /// A `CollectState` for `step`'s own transition-table tests: no group, no
-    /// anchor, no processes — just the state `step` folds over, with a real
-    /// channel so `push`ed [`StageHandle`]s (built with
-    /// [`StageHandle::fake_external_for_step_test`]) still have somewhere to
-    /// send from, unused by the tests that construct events by hand instead.
-    /// The watch is held on a fresh root scope nothing ever cancels.
+    /// anchor, no processes, and a root scope nothing ever cancels.
     #[cfg(test)]
     pub(super) fn for_step_test() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -359,7 +356,7 @@ impl CollectState {
             stages: Vec::new(),
             observed: Vec::new(),
             sent: Vec::new(),
-            started: std::time::Instant::now(),
+            started: Instant::now(),
             owned_group: None,
             rx,
             tx: Some(tx),
@@ -367,20 +364,17 @@ impl CollectState {
         }
     }
 
-    /// The index a stage about to be launched will occupy once pushed, for
-    /// [`super::thread::launch_thread_stage`]'s closure (and a direct
-    /// external's own watch) to name itself by in its own reports.
-    pub(super) fn next_index(&self) -> usize {
-        self.stages.len()
-    }
-
-    /// A clone for a stage's own producer — see [`Event`] and
-    /// [`Self::all_stages_launched`].
-    pub(super) fn sender(&self) -> Sender<Event> {
-        self.tx
-            .as_ref()
-            .expect("a stage is still launching, so the collector's own sender is alive")
-            .clone()
+    /// The channel address of the stage about to be launched — the index it
+    /// will occupy once pushed, and a sender clone for its own producers.
+    pub(super) fn slot(&self) -> Slot {
+        Slot {
+            ix: self.stages.len(),
+            tx: self
+                .tx
+                .as_ref()
+                .expect("a stage is still launching, so the collector's own sender is alive")
+                .clone(),
+        }
     }
 
     /// Every stage is now launched, so the last clone this collector itself
@@ -395,41 +389,24 @@ impl CollectState {
         self.sent.push(None);
     }
 
-    /// Block for the next event.  `None` once every producer is gone —
-    /// a defect elsewhere, since a stage's own end always arrives first —
-    /// treated the same as `Done` itself: there is nothing further
-    /// collection can do.
+    fn live(&self) -> bool {
+        self.stages.iter().any(Option::is_some)
+    }
+
+    /// Block for the next event; `None` once every producer is gone, which
+    /// leaves nothing further to collect and so reads as `Done`.
     fn recv(&self) -> Option<Event> {
         self.rx.recv().ok()
     }
 
-    /// An external's own terminal event: file it as a [`StageEnd::External`]
-    /// — [`StageHandle::file_external_end`] reaps the watch, carrying the
-    /// jail and the pumps out for [`Self::fold`] to finish and settle by
-    /// this stage's own `sent`.
-    fn on_ended(&mut self, ix: usize, outcome: crate::process::WaitOutcome) -> Vec<Effect> {
+    /// File one stage's own terminal event: take its handle out, let `end`
+    /// turn it into a [`StageEnd`], then arm the edge its reader has just
+    /// abandoned and say whether every stage is now observed.
+    fn file(&mut self, ix: usize, end: impl FnOnce(StageHandle) -> StageEnd) -> Vec<Effect> {
         let handle = self.stages[ix]
             .take()
-            .expect("an Ended event arrives once, for a live external stage");
-        let end = handle.file_external_end(outcome);
-        self.file_end(ix, end)
-    }
-
-    /// A thread stage's own terminal event: file it as a
-    /// [`StageEnd::Thread`].
-    fn on_returned(&mut self, ix: usize, obs: StageObservation) -> Vec<Effect> {
-        let handle = self.stages[ix]
-            .take()
-            .expect("a Returned event arrives once, for a live thread stage");
-        let end = handle.file_thread_end(obs);
-        self.file_end(ix, end)
-    }
-
-    /// The common tail once a stage's [`StageEnd`] is known: file it, arm the
-    /// edge its reader has just abandoned, and say whether every stage is now
-    /// observed.
-    fn file_end(&mut self, ix: usize, end: StageEnd) -> Vec<Effect> {
-        self.observed[ix] = Some(end);
+            .expect("a stage's own end arrives once, for a live stage");
+        self.observed[ix] = Some(end(handle));
 
         let mut effects = Vec::new();
         // A stage that already finished keeps its outcome — `!{ echo a;
@@ -438,7 +415,7 @@ impl CollectState {
         if ix > 0 && self.stages[ix - 1].is_some() {
             effects.push(Effect::ArmEdge(ix - 1));
         }
-        if self.stages.iter().all(Option::is_none) {
+        if !self.live() {
             effects.push(Effect::Done);
         }
         effects
@@ -465,27 +442,26 @@ impl CollectState {
         match effect {
             Effect::ArmEdge(ix) => {
                 if let Some(handle) = self.stages[ix].as_mut() {
-                    handle.arm(ix);
+                    handle.arm();
                 }
                 None
             }
             Effect::KillStage(ix) => {
                 if let Some(handle) = self.stages[ix].as_mut() {
-                    handle.kill_now();
+                    handle.cut();
                 }
                 None
             }
-            Effect::CancelAll(cause) => {
-                self.cancel_all(group, cause);
+            Effect::CancelAll { cause, delivered } => {
+                self.cancel_all(group, cause, delivered);
                 Some(())
             }
             Effect::Done => Some(()),
         }
     }
 
-    /// Fold events until every stage is observed —
-    /// `loop { for e in step(&mut st, rx.recv()?) { run(e) } }`, no interval,
-    /// no backoff, exact latency, zero idle CPU.
+    /// Fold events until every stage is observed: a blocking `recv` per
+    /// event, no interval and no backoff.
     pub(super) fn drive(&mut self, group: &PipelineGroup) {
         loop {
             let Some(ev) = self.recv() else {
@@ -499,87 +475,48 @@ impl CollectState {
         }
     }
 
-    /// Tear the whole pipeline down.
-    ///
-    /// Signal, bounded grace, kill, drain — in that order, for both group
-    /// kinds.  The kill precedes every pump join: a stage's own kill reaches
-    /// its pid alone, so a pumped descendant outlives it holding the pump's
-    /// pipe, and no join on that pump returns while it does — which is why
-    /// filing a stage's end here never joins, and `fold` does, after.  A
-    /// collector dropped short of this is ended by `Drop`, kill first.
-    ///
-    /// A joining group has no pgid of its own to signal or kill: the signal
-    /// is per pid, via `cancel_stages`, and the kill per live external, via
-    /// [`Self::kill_live_externals`] — descendants of a killed external are
-    /// the group owner's.
-    ///
-    /// The grace is a bounded blocking `recv_timeout` on the very deadline,
-    /// not a probe loop; only a stage's own terminal event is filed during
-    /// teardown — the reader-gone cascade and further cancellations are moot
-    /// once the whole group is already dying, so every other event is simply
-    /// discarded.  Idempotent: an event already mid-flight may cause this to
-    /// run again (a second cancel racing the first), and every step here —
-    /// re-cancelling, re-signalling, re-killing — is safe to repeat.
-    pub(super) fn cancel_all(&mut self, group: &PipelineGroup, cause: CancelCause) {
-        self.cancel_stages(cause);
-        group.signal(cause); // a no-op for a joining group
-        #[cfg(unix)]
-        {
-            let deadline = std::time::Instant::now() + crate::process::TEARDOWN_GRACE;
-            while self.stages.iter().any(Option::is_some) {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                let event = match self.rx.recv_timeout(remaining) {
-                    Ok(event) => event,
-                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
-                };
-                self.file_terminal_only(event);
-            }
-        }
-        if group.owned() {
-            group.kill();
-        } else {
-            self.kill_live_externals();
-        }
-        while self.stages.iter().any(Option::is_some) {
-            let Some(event) = self.rx.recv().ok() else {
-                break;
+    /// Fold events until every stage is observed, discarding the effects:
+    /// during teardown the group is already dying, so only the filing
+    /// matters.  A bounded blocking `recv_timeout` on the very `deadline`,
+    /// not a probe loop; `None` waits without one.
+    fn drain(&mut self, deadline: Option<Instant>) {
+        while self.live() {
+            let received = match deadline {
+                Some(deadline) => self
+                    .rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .ok(),
+                None => self.rx.recv().ok(),
             };
-            self.file_terminal_only(event);
+            let Some(event) = received else { return };
+            let _ = step(self, event);
         }
     }
 
-    /// `cancel_all`'s own drain: file a stage's own terminal event and
-    /// discard anything else — a further cancel, or a dead write whose reader
-    /// drops with the event, is moot once the whole group is already dying.
-    fn file_terminal_only(&mut self, event: Event) {
-        match event {
-            Event::Ended(ix, outcome) => {
-                let _ = self.on_ended(ix, outcome);
-            }
-            Event::Returned(ix, obs) => {
-                let _ = self.on_returned(ix, obs);
-            }
-            Event::Wrote(..) | Event::Cancelled(_) => {}
-        }
+    /// Every still-live external's wait handle; a thread stage has none, its
+    /// own cancel and wake being all teardown owes it.
+    fn live_externals(&self) -> impl Iterator<Item = &crate::process::Watch> {
+        self.stages.iter().flatten().filter_map(StageHandle::watch)
     }
 
-    /// Kill every still-live external's pid directly — a joining group's own
-    /// half of teardown, with no pgid of its own to kill; descendants of a
-    /// killed external are the group owner's.
     fn kill_live_externals(&self) {
-        for handle in self.stages.iter().flatten() {
-            handle.kill_by_pid();
+        for watch in self.live_externals() {
+            watch.kill();
         }
     }
 
-    /// Cancel and wake every unobserved stage, recording the cause against
-    /// each in `sent`.  Explicit per stage rather than through the mooring:
-    /// a cancel the anchor witnessed has no cancelled ancestor scope to
-    /// propagate from.
-    pub(super) fn cancel_stages(&mut self, cause: CancelCause) {
+    /// Tear the whole pipeline down: cancel every live stage, open with the
+    /// cause's grace signal unless `delivered` says the kernel already sent
+    /// it, wait out the grace, kill, drain.  Idempotent, a second cancel
+    /// being free to race the first.  A joining group has no pgid of its own,
+    /// so both the signal and the kill reach its externals by pid.
+    ///
+    /// The kill precedes every pump join: a descendant that outlives its
+    /// stage holds the pump's pipe, and no join on that pump returns while it
+    /// does — so filing a stage's end never joins, and `fold` does, after.
+    pub(super) fn cancel_all(&mut self, group: &PipelineGroup, cause: CancelCause, delivered: bool) {
+        // Explicit per stage rather than through the mooring: a cancel the
+        // anchor witnessed has no cancelled ancestor scope to propagate from.
         let Self { stages, sent, .. } = self;
         for (ix, handle) in stages.iter_mut().enumerate() {
             if let Some(handle) = handle {
@@ -587,21 +524,36 @@ impl CollectState {
                 handle.cancel(cause);
             }
         }
+        #[cfg(unix)]
+        if let Some(signal) = crate::process::grace_signal(cause) {
+            if !delivered {
+                if group.owned() {
+                    group.signal(signal);
+                } else {
+                    for watch in self.live_externals() {
+                        watch.signal(signal);
+                    }
+                }
+            }
+            self.drain(Some(Instant::now() + crate::process::TEARDOWN_GRACE));
+        }
+        #[cfg(not(unix))]
+        let _ = delivered;
+        if group.owned() {
+            group.kill();
+        } else {
+            self.kill_live_externals();
+        }
+        self.drain(None);
     }
 
-    /// The audit observations and verdict fold, in launch order, over
-    /// whatever this walk observed — the one place `&Shell` reaches an
-    /// external's settlement, and the one place `sent` is read back against
-    /// what happened: an external's pumps are joined, or detached when this
-    /// collector's own reader-gone kill ended it, and its outcome folds
-    /// through [`finish_external_settlement`]; a thread's own observation is
-    /// [`StageObservation::forgiven`] only when its break is that cancel's
-    /// own — the thread analogue of `is_stage_kill`, since only
-    /// `Error::cancelled` mints one.  The pumps join,
-    /// and the jail's cgroup comes down, here and not when the stage's end
-    /// was filed: a join blocks on whatever still holds the pipe, and the
-    /// jail's `rmdir` polls while descendants are still dying — both wait on
-    /// `cancel_all`'s group kill, which precedes this.
+    /// The audit and verdict fold, in launch order — the one place `&Shell`
+    /// reaches an external's settlement, and the one place `sent` is read
+    /// back against what happened: a stage this collector's own reader-gone
+    /// kill ended is forgiven, and its pumps detached rather than joined.
+    ///
+    /// The pumps join and the jail comes down here rather than at filing:
+    /// both wait on `cancel_all`'s group kill, which precedes this.
     pub(super) fn fold(&mut self, mooring: &Mooring, shell: &mut Shell) -> PipelineCollector {
         let n = self.observed.len();
         let sent = std::mem::take(&mut self.sent);
@@ -620,12 +572,9 @@ impl CollectState {
                     jail,
                     pumps,
                 } => {
-                    #[cfg(target_os = "linux")]
                     if let Some(jail) = &jail {
                         jail.finish();
                     }
-                    #[cfg(not(target_os = "linux"))]
-                    let _ = jail;
                     pumps.settle(sent[ix] == Some(CancelCause::ReaderGone));
                     finish_external_settlement(&name, outcome, sent[ix], shell, self.started)
                 }
@@ -642,24 +591,30 @@ impl CollectState {
 /// already owns, not the kill/cancel an `Effect` stands for.
 pub(super) fn step(state: &mut CollectState, ev: Event) -> Vec<Effect> {
     match ev {
-        Event::Ended(ix, outcome) => state.on_ended(ix, outcome),
-        Event::Returned(ix, obs) => state.on_returned(ix, obs),
+        Event::Ended(ix, outcome) => state.file(ix, |h| h.file_external_end(outcome)),
+        Event::Returned(ix, obs) => state.file(ix, |h| h.file_thread_end(obs)),
         Event::Wrote(ix, reader) => state.on_wrote(ix, reader),
-        Event::Cancelled(cause) => vec![Effect::CancelAll(cause)],
+        Event::Cancelled(cause) => vec![Effect::CancelAll {
+            cause,
+            delivered: false,
+        }],
+        #[cfg(unix)]
+        Event::Witnessed(cause) => vec![Effect::CancelAll {
+            cause,
+            delivered: true,
+        }],
     }
 }
 
 impl Drop for CollectState {
-    /// A collector dropped with a stage unobserved is a pipeline ending by
-    /// force — an aborted launch, an unwind — so something dies: an owning
-    /// collector kills its group; a joining collector has no pgid of its own
-    /// and reaches its own externals by pid instead — the owner's group kill
-    /// takes the rest.  Nothing joins here: the pumps of any end already
-    /// filed drop detached, since a descendant a pid-addressed kill missed
-    /// could hold their pipes open for ever.  Every stage observed is the
-    /// ordinary end, which a `spawn` worker that joined the pgid outlives.
+    /// A collector dropped with a stage unobserved is a forced end, so
+    /// something dies: an owning collector kills its group, a joining one its
+    /// own externals by pid.  Nothing joins here — a descendant the kill
+    /// missed could hold a pump's pipe open for ever.  Every stage observed
+    /// is the ordinary end, which a `spawn` worker that joined the pgid
+    /// outlives.
     fn drop(&mut self) {
-        if self.stages.iter().any(Option::is_some) {
+        if self.live() {
             match self.owned_group {
                 Some(pgid) => pgid.kill(),
                 None => self.kill_live_externals(),
@@ -682,9 +637,8 @@ mod tests {
         Error::new(msg.to_string(), status)
     }
 
-    /// The four laws of the join, one per pair of ranks.  An escape outranks
-    /// an error; within a rank the earlier stage wins, the fold being
-    /// launch-ordered.
+    /// The four laws of the join: an escape outranks an error, and within a
+    /// rank the earlier stage wins.
     #[test]
     fn breaks_join_by_rank_earlier_stage_breaking_ties() {
         let mut errors = PipelineCollector::new();
@@ -739,20 +693,27 @@ mod tests {
         }
     }
 
+    /// An owning group and a collector wired onto the same channel, as
+    /// `PipeNode::launch` builds them.
+    fn owning_pipeline(shell: &Shell, mooring: &Mooring) -> (PipelineGroup, CollectState) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let group = PipelineGroup::prepare(shell, tx.clone()).expect("anchor spawns");
+        let collect = CollectState::new(rx, tx, &group, mooring, Instant::now());
+        (group, collect)
+    }
+
     /// `drive` over two real children reaches `Done` and folds what they
-    /// settled.  The *final* stage carries the failure; precedence between
-    /// two surviving verdicts is
-    /// [`breaks_join_by_rank_earlier_stage_breaking_ties`]'s to state, over
-    /// no processes at all.
+    /// settled.
     #[test]
     fn drive_folds_two_settling_stages_to_done() {
         let mut shell = Shell::default();
-        let mut group = PipelineGroup::prepare(&shell).expect("anchor spawns");
         let mooring = Mooring::adrift();
+        let (group, mut collect) = owning_pipeline(&shell, &mooring);
 
-        let mut collect = CollectState::new(&mut group, &mooring, std::time::Instant::now());
-        collect.push(StageHandle::for_test(&collect, spawn_exiting(0)));
-        collect.push(StageHandle::for_test(&collect, spawn_exiting(1)));
+        for code in [0, 1] {
+            let slot = collect.slot();
+            collect.push(StageHandle::for_test(slot, spawn_exiting(code)));
+        }
 
         collect.drive(&group);
         let folded = collect.fold(&mooring, &mut shell);
@@ -762,9 +723,8 @@ mod tests {
         }
     }
 
-    /// An external that exits with `code`, wrapped exactly as a direct
-    /// pipeline stage.  `/bin/sh` because `true` and `false` are not in
-    /// `/bin` on macOS.
+    /// An external that exits with `code`.  `/bin/sh` because `true` and
+    /// `false` are not in `/bin` on macOS.
     fn spawn_exiting(code: u8) -> crate::process::ChildHandle {
         let name = format!("exit {code}");
         let child = std::process::Command::new("/bin/sh")
@@ -774,14 +734,9 @@ mod tests {
         crate::process::ChildHandle::from_std(child)
     }
 
-    /// A stage spawned into the group's own pgid via `PgidPolicy::Join`, as
-    /// `launch.rs` wires a direct external — a background `sleep` forked from
-    /// under `/bin/sh`, whose pid comes back over the stage's own stdout
-    /// before the stage is wrapped for the collector. `wait_on_child` decides
-    /// whether the wrapped `sh` waits on it (so the grandchild is still
-    /// running when the stage is observed) or exits at once (so the
-    /// grandchild is orphaned into the group, still alive, before the stage
-    /// even ends).
+    /// A stage in the group's pgid over a background `sleep`, whose pid comes
+    /// back on the stage's stdout.  `wait_on_child` says whether the stage
+    /// outlives the grandchild or orphans it into the group.
     #[cfg(unix)]
     fn spawn_stage_with_grandchild(
         group: &PipelineGroup,
@@ -834,19 +789,18 @@ mod tests {
         panic!("grandchild pid {pid} outlived the collector's forced end");
     }
 
-    /// A grandchild in the pipeline's pgid that its stage's own pid kill
-    /// cannot reach.  Dropping the collector with the stage unobserved is a
-    /// forced end, and the group kill it fires is what ends the grandchild.
+    /// A grandchild no per-pid kill reaches dies of the group kill a forced
+    /// end fires.
     #[cfg(unix)]
     #[test]
     fn a_collector_dropped_short_of_observation_kills_the_group() {
         let shell = Shell::default();
-        let mut group = PipelineGroup::prepare(&shell).expect("anchor spawns");
+        let mooring = Mooring::adrift();
+        let (group, mut collect) = owning_pipeline(&shell, &mooring);
         let (child, pid) = spawn_stage_with_grandchild(&group, true);
 
-        let mooring = Mooring::adrift();
-        let mut collect = CollectState::new(&mut group, &mooring, std::time::Instant::now());
-        collect.push(StageHandle::for_test(&collect, child));
+        let slot = collect.slot();
+        collect.push(StageHandle::for_test(slot, child));
         drop(collect);
 
         assert_dead_within_2s(pid);
@@ -859,12 +813,12 @@ mod tests {
     #[test]
     fn a_collector_that_observed_every_stage_kills_nothing() {
         let shell = Shell::default();
-        let mut group = PipelineGroup::prepare(&shell).expect("anchor spawns");
         let mooring = Mooring::adrift();
+        let (group, mut collect) = owning_pipeline(&shell, &mooring);
         let (child, pid) = spawn_stage_with_grandchild(&group, false);
 
-        let mut collect = CollectState::new(&mut group, &mooring, std::time::Instant::now());
-        collect.push(StageHandle::for_test(&collect, child));
+        let slot = collect.slot();
+        collect.push(StageHandle::for_test(slot, child));
         collect.drive(&group);
         drop(collect);
 
@@ -876,17 +830,17 @@ mod tests {
         drop(group);
     }
 
-    /// A nested pipeline's own `timeout`-shaped teardown: no pgid of its own
-    /// to signal or kill, so `cancel_all` must reach its direct external's
-    /// pid itself, or it hangs in the final drain until that external exits
-    /// on its own — the defect this collector's joining branch used to have.
+    /// A joining collector has no pgid to kill, so `cancel_all` must reach
+    /// its external's pid itself rather than hang in the final drain.
     #[cfg(unix)]
     #[test]
     fn a_joining_collector_cancel_all_kills_its_externals_and_returns() {
         let mut shell = Shell::default();
-        let owner = PipelineGroup::prepare(&shell).expect("anchor spawns");
+        let mooring = Mooring::adrift();
+        let owner = PipelineGroup::prepare(&shell, std::sync::mpsc::channel().0)
+            .expect("anchor spawns");
         let pgid = owner.leader_pgid();
-        let mut joining = PipelineGroup::joining(pgid);
+        let joining = PipelineGroup::joining(pgid);
 
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.args(["-c", "sleep 30"]);
@@ -894,10 +848,11 @@ mod tests {
             crate::process::spawn_with_pgid(&mut cmd, crate::process::PgidPolicy::Join(pgid))
                 .expect("spawn /bin/sh under the owner's pgid");
 
-        let mooring = Mooring::adrift();
-        let mut collect = CollectState::new(&mut joining, &mooring, std::time::Instant::now());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut collect = CollectState::new(rx, tx, &joining, &mooring, Instant::now());
+        let slot = collect.slot();
         collect.push(StageHandle::for_test(
-            &collect,
+            slot,
             crate::process::ChildHandle::from_std(child),
         ));
         collect.all_stages_launched();
@@ -905,7 +860,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                collect.cancel_all(&joining, CancelCause::Deadline);
+                collect.cancel_all(&joining, CancelCause::Deadline, false);
                 let _ = done_tx.send(());
             });
             done_rx
@@ -923,16 +878,21 @@ mod tests {
 
     // ── step: the transition table ─────────────────────────────────────────
     //
-    // No processes started for their own sake, no sleeps, no retry loops:
-    // every corner case here is a sequence of `Event`s fed to `step`, and an
-    // assertion on the `Effect`s it returns.
+    // Every case is a sequence of `Event`s fed to `step` and an assertion on
+    // the `Effect`s it returns: no sleeps, no retry loops.
 
     fn state_with(n: usize) -> CollectState {
         let mut state = CollectState::for_step_test();
         for _ in 0..n {
-            state.push(StageHandle::fake_external_for_step_test());
+            let slot = state.slot();
+            state.push(StageHandle::fake_external_for_step_test(slot));
         }
         state
+    }
+
+    fn push_fake_thread(state: &mut CollectState) {
+        let slot = state.slot();
+        state.push(StageHandle::fake_thread_for_step_test(slot));
     }
 
     /// A settled reader arms the edge its still-running writer holds — and an
@@ -1001,13 +961,64 @@ mod tests {
     }
 
     /// A cancel always tears down, whatever the cause or its source — the
-    /// mooring's own scope, the anchor's report pipe, or the anchor's own
-    /// death.
+    /// mooring's own scope or the anchor's own death — and teardown must
+    /// deliver it, nothing else having.
     #[test]
     fn a_cancelled_event_cancels_all() {
         let mut state = state_with(1);
         let effects = step(&mut state, Event::Cancelled(CancelCause::Deadline));
-        assert_eq!(effects, vec![Effect::CancelAll(CancelCause::Deadline)]);
+        assert_eq!(
+            effects,
+            vec![Effect::CancelAll {
+                cause: CancelCause::Deadline,
+                delivered: false
+            }]
+        );
+    }
+
+    /// A signal the anchor witnessed reached every member of the group by the
+    /// kernel's own hand, so teardown must not send a second copy of it.
+    #[cfg(unix)]
+    #[test]
+    fn a_witnessed_signal_tears_down_without_resending_it() {
+        let mut state = state_with(1);
+        let effects = step(&mut state, Event::Witnessed(CancelCause::Interrupt));
+        assert_eq!(
+            effects,
+            vec![Effect::CancelAll {
+                cause: CancelCause::Interrupt,
+                delivered: true
+            }]
+        );
+    }
+
+    /// A stage this collector tore down names the cause it sent, not the
+    /// signal number that carried it: the attribution reads `sent` back
+    /// against the wait status, wherever the teardown ran.
+    #[cfg(unix)]
+    #[test]
+    fn a_torn_down_externals_death_names_the_cause_it_was_sent() {
+        let mut shell = Shell::default();
+        let mooring = Mooring::adrift();
+        let mut state = state_with(1);
+        state.sent[0] = Some(CancelCause::Explicit);
+        let _ = step(
+            &mut state,
+            Event::Ended(
+                0,
+                WaitOutcome::Signaled(crate::process::Signal::new(libc::SIGTERM)),
+            ),
+        );
+
+        let folded = state.fold(&mooring, &mut shell);
+        match folded.break_ {
+            Some(Break::Error(e)) => assert!(
+                e.message.contains("stopped because the call was cancelled"),
+                "expected the cause, not the signal number: {}",
+                e.message
+            ),
+            other => panic!("expected the teardown death to fold in as an error, got {other:?}"),
+        }
     }
 
     /// `Ended(ix, Signaled(KILL))` folds as the collector's own forgiven
@@ -1046,8 +1057,8 @@ mod tests {
         let mut shell = Shell::default();
         let mooring = Mooring::adrift();
         let mut state = CollectState::for_step_test();
-        state.push(StageHandle::fake_thread_for_step_test());
-        state.push(StageHandle::fake_thread_for_step_test());
+        push_fake_thread(&mut state);
+        push_fake_thread(&mut state);
 
         let effects = step(&mut state, Event::Returned(1, StageObservation::ok()));
         assert!(
@@ -1075,7 +1086,7 @@ mod tests {
         let mut shell = Shell::default();
         let mooring = Mooring::adrift();
         let mut state = CollectState::for_step_test();
-        state.push(StageHandle::fake_thread_for_step_test());
+        push_fake_thread(&mut state);
 
         let _ = step(
             &mut state,
@@ -1102,7 +1113,7 @@ mod tests {
     fn a_guard_dropped_while_panicking_settles_its_index() {
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let _guard = SettleOnDrop::new(0, tx);
+            let _guard = SettleOnDrop::new(Slot { ix: 0, tx });
             panic!("boom");
         });
         let event = rx
@@ -1127,7 +1138,7 @@ mod tests {
     #[test]
     fn a_guard_that_sent_does_not_settle_twice() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let guard = SettleOnDrop::new(0, tx);
+        let guard = SettleOnDrop::new(Slot { ix: 0, tx });
         guard.send(StageObservation::ok());
         assert!(matches!(rx.recv(), Ok(Event::Returned(0, _))));
         // The send consumed the guard's sender, so the channel is now closed
@@ -1144,7 +1155,7 @@ mod tests {
     #[test]
     fn a_guard_dropped_without_a_panic_reports_a_silent_end() {
         let (tx, rx) = std::sync::mpsc::channel();
-        drop(SettleOnDrop::new(0, tx));
+        drop(SettleOnDrop::new(Slot { ix: 0, tx }));
         match rx.recv().expect("the guard settles on drop") {
             Event::Returned(0, obs) => match obs.break_ {
                 Some(Break::Error(err)) => assert!(
@@ -1164,17 +1175,15 @@ mod tests {
     #[test]
     fn drive_settles_a_stage_whose_producer_unwound() {
         let mut shell = Shell::default();
-        let mut group = PipelineGroup::prepare(&shell).expect("anchor spawns");
         let mooring = Mooring::adrift();
-        let mut collect = CollectState::new(&mut group, &mooring, std::time::Instant::now());
+        let (group, mut collect) = owning_pipeline(&shell, &mooring);
 
-        let ix = collect.next_index();
-        let tx = collect.sender();
-        collect.push(StageHandle::fake_thread_for_step_test());
+        let slot = collect.slot();
+        push_fake_thread(&mut collect);
         collect.all_stages_launched();
 
         let handle = std::thread::spawn(move || {
-            let _guard = SettleOnDrop::new(ix, tx);
+            let _guard = SettleOnDrop::new(slot);
             panic!("boom");
         });
 

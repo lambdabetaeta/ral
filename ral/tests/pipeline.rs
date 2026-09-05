@@ -148,8 +148,8 @@ fn redirect_stderr_to_stdout_flows_through_pipeline() {
 #[test]
 fn pipeline_stage_handler_intercepts_unknown_external() {
     // `mycmd` is not a builtin and (assumedly) not on PATH.  Without the
-    // handler-match check in analyze_stage, the pipeline classifies the
-    // stage as External and the launcher tries to spawn `mycmd`, failing
+    // handler-match check in `resolve_launch`, the pipeline classifies the
+    // stage as external and the launcher tries to spawn `mycmd`, failing
     // with ENOENT before the handler can run.
     let o = run(
         "within [handlers: [mycmd-pipeline-test: { |args| /bin/echo handled }]] \
@@ -627,6 +627,18 @@ fn middle_stage_forgiveness_is_per_edge() {
     let o = run_with_timeout(&[], "yes | cat | head -1", Duration::from_secs(10))
         .expect("middle-stage forgiveness pipeline hung");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+}
+
+#[test]
+fn a_nested_pipelines_producer_is_forgiven_when_the_outer_reader_leaves() {
+    // The outer reader-gone cut reaches the nested pipeline as a `ReaderGone`
+    // cancel, and a cut is a kill: opening on the producer's own SIGTERM
+    // disposition would hand `yes` a death of its own to report, when what
+    // ended it is this collector's doing and is forgiven.
+    let o = run_with_timeout(&[], "!{ yes | cat } | head -1", Duration::from_secs(10))
+        .expect("nested-pipeline forgiveness pipeline hung");
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout, "y\n", "stdout: {}", o.stdout);
 }
 
 #[test]
@@ -1313,7 +1325,7 @@ fn pipeline_external_stage_expands_empty_spread_to_zero_args() {
     // Regression: external pipeline stages used to stringify each raw Val,
     // so `...$xs` with an empty list became a single "" argv entry — and
     // trailing `""` confused commands like fzf ("unknown option:").
-    // analyze_stage must expand spreads the same way eval_call_args does.
+    // `resolve_launch` must expand spreads the same way eval_call_args does.
     let o = run("let ee = []; echo hi | /usr/bin/printf '[%s]\\n' --flag '' ...$ee");
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout, "[--flag]\n[]\n");
@@ -1486,7 +1498,7 @@ fn pipeline_pgid_is_distinct_from_parent() {
 fn pipeline_mid_stage_launch_failure_does_not_hang() {
     // Stage 2 references a command that cannot be resolved, so its
     // launch fails after stage 1 has already spawned.  Dropping the
-    // launch's `PipelineResources` must SIGKILL the pgid before its
+    // launch's `PipelineBuild` must SIGKILL the pgid before its
     // stage handles join and reap every already-spawned child.  If any
     // child leaks the wait() inside the harness will time out.
     let script = "/usr/bin/true | /no/such/binary_xyzzy | /usr/bin/cat";
@@ -1498,7 +1510,7 @@ fn pipeline_mid_stage_launch_failure_does_not_hang() {
 #[test]
 fn pipeline_mid_stage_launch_failure_with_long_producer_kills_it() {
     // Stage 1 is a long-running producer (`yes`); stage 2 fails to launch.
-    // The producer must be killed (SIGKILL) by the launch's `PipelineResources`
+    // The producer must be killed (SIGKILL) by the launch's `PipelineBuild`
     // drop; otherwise it would keep writing to its now-orphaned pipe forever
     // and the test would time out.  This is the canonical Drop-chain regression.
     let script = "/usr/bin/yes | /no/such/binary_xyzzy";
@@ -1530,7 +1542,7 @@ fn race_repeats_deterministically() {
 // ── Foreground-handoff regressions ──────────────────────────────────────────
 //
 // A foreground pipeline that owns a tty cannot admit direct external
-// launch: `resolve::direct_spawnable` forces such stages through the ral
+// launch: `resolve::resolve_launch` forces such stages through the ral
 // helper, and launch releases helper job frames only after `tcsetpgrp`
 // has handed the pty to the pipeline pgid.  The tests below open a real
 // pty so `tcgetpgrp` is meaningful.

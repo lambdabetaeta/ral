@@ -35,7 +35,7 @@ pub use cancel::{
 pub(crate) use cancel::TEARDOWN_GRACE;
 
 #[cfg(unix)]
-pub(crate) use signal::cause_signal;
+pub(crate) use signal::grace_signal;
 pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};
 
 pub use spawn_lock::{cloexec_pipe, output, spawn, status};
@@ -45,9 +45,8 @@ pub use wake::Wake;
 
 #[cfg(unix)]
 pub use signal::{
-    ForegroundGuard, PipelineRelay, install_handlers, interrupt_foreground_child, quit_handler,
-    relay_handler, reset_child_signals, spawn_with_pgid, spawn_with_pgid_after, term_handler,
-    termios_snapshot,
+    ForegroundGuard, install_handlers, interrupt_foreground_child, interrupt_handler, quit_handler,
+    reset_child_signals, spawn_with_pgid, spawn_with_pgid_after, term_handler, termios_snapshot,
 };
 
 #[cfg(unix)]

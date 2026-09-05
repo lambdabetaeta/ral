@@ -1,7 +1,7 @@
-//! Pipeline resolve: freeze each stage's launch decision and the pipeline's
-//! yield.  The `PipeYield` comes committed in the checked IR, never
-//! re-inferred; no process is created and no pipe opened.  Launch reads
-//! everything this phase produces.
+//! Pipeline resolve: freeze each stage's launch decision and the terminal
+//! handoff.  No process is created and no pipe opened; launch reads everything
+//! this phase produces.  The form's `PipeYield` comes committed in the checked
+//! IR and never passes through here.
 
 use super::super::command::CommandIdentity;
 use super::super::command_call;
@@ -30,20 +30,10 @@ pub(super) struct ExternalStage {
     pub(super) args: Vec<Value>,
 }
 
-/// Head resolution for one process-staged stage.  A bundled tool resolves to
-/// `External` like any other head, and the carried identity spares the launch
-/// decision a second `PATH` walk.
-#[derive(Clone, Debug)]
-enum StageKind {
-    Ral,
-    External(CommandIdentity),
-}
-
-/// One stage's launch decision, frozen in `resolve_pipeline` and read by launch
-/// rather than re-derived.  Argv is evaluated into the carried `ExternalStage`
-/// only on the `Direct` path, which consumes it; a `Thread` stage re-evaluates
-/// its argv inside the thread, so doing it here too would run effectful
-/// arguments twice.
+/// One stage's launch decision, frozen here and read by launch rather than
+/// re-derived.  Argv is evaluated only on the `Direct` path, which consumes
+/// it: a `Thread` stage re-evaluates its own inside the thread, so doing it
+/// here too would run effectful arguments twice.
 #[derive(Clone, Debug)]
 pub(super) enum StageLaunch {
     Direct(ExternalStage),
@@ -60,96 +50,48 @@ pub(super) struct StageSpec {
     pub(super) span: Option<Span>,
 }
 
-/// A bundled tool is not distinguished from a host binary — both become
-/// `External`, the `ral --ral-bundled-tool` child being chosen later by the
-/// command image — so `ls`, `cat`, `wc` behave alike everywhere, including on
-/// Windows where there is no `.exe` to spawn.  Admission is left to
-/// `command::vet` at launch, so a head the grant denies still routes through
-/// here and surfaces its refusal as an ordinary error.
-fn classify_stage(stage: &Comp, env: &Env, shell: &Shell) -> StageKind {
-    let CompKind::Exec(e) = &stage.item else {
-        return StageKind::Ral;
-    };
-    match command_call::resolve_command_word(&e.head, env, shell) {
-        command_call::Resolution::External(id) => StageKind::External(id),
-        _ => StageKind::Ral,
-    }
-}
-
-/// Evaluate a stage's argv, for the `Direct` path alone — a `Thread`
-/// external re-evaluates it inside the thread.  `direct_spawnable` admits
-/// only redirect-free stages, so the evaluated redirects are always empty
-/// here.
-fn eval_external_stage(id: CommandIdentity, stage: &Comp, env: &Env) -> Settled<ExternalStage> {
-    let CompKind::Exec(e) = &stage.item else {
-        unreachable!("classify_stage yields an identity only for Exec stages")
-    };
-    let args = machine::close_args(&e.args, env)?;
-    let redirects = machine::close_redirects(&e.redirects, env)?;
-    debug_assert!(
-        redirects.is_empty(),
-        "direct_spawnable gates on no redirects"
-    );
-    Ok(ExternalStage { id, args })
-}
-
-/// Whether an external stage can be spawned with no thread hosting it —
-/// every condition a resolve-time fact:
+/// Freeze one stage's launch decision: a thread unless the head is an external
+/// with no redirect and no byte-capturing audit in force — a redirect needs a
+/// thread's fd table, a capture its accounting.
 ///
-/// - the stage has no redirects (the direct path wires only byte ends);
-/// - no `!{…}` audit is capturing bytes (that needs a thread's accounting).
-fn direct_spawnable(stage: &Comp, shell: &Shell) -> bool {
-    let redirects_empty = matches!(&stage.item, CompKind::Exec(e) if e.redirects.is_empty());
-    redirects_empty && !shell.local.audit.captures_bytes()
-}
-
-/// Freeze one stage's launch decision.  A bundled tool still becomes an
-/// external stage, while redirects and byte-capturing audits keep it on a
-/// thread.
+/// A bundled tool is not distinguished from a host binary, so `ls`, `cat`,
+/// `wc` behave alike everywhere.  Admission is `command::vet`'s at launch: a
+/// head the grant denies still routes through here and refuses as an ordinary
+/// error.
 fn resolve_launch(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageLaunch> {
-    Ok(match classify_stage(stage, env, shell) {
-        StageKind::Ral => StageLaunch::Thread,
-        StageKind::External(id) => {
-            if direct_spawnable(stage, shell) {
-                StageLaunch::Direct(eval_external_stage(id, stage, env)?)
-            } else {
-                StageLaunch::Thread
-            }
-        }
-    })
-}
-
-fn analyze_stage(stage: &Comp, env: &Env, shell: &Shell) -> Settled<StageSpec> {
-    let launch = resolve_launch(stage, env, shell)?;
-    Ok(StageSpec {
-        launch,
-        span: stage.span,
-    })
+    let CompKind::Exec(e) = &stage.item else {
+        return Ok(StageLaunch::Thread);
+    };
+    let command_call::Resolution::External(id) =
+        command_call::resolve_command_word(&e.head, env, shell)
+    else {
+        return Ok(StageLaunch::Thread);
+    };
+    if !e.redirects.is_empty() || shell.local.audit.captures_bytes() {
+        return Ok(StageLaunch::Thread);
+    }
+    Ok(StageLaunch::Direct(ExternalStage {
+        id,
+        args: machine::close_args(&e.args, env)?,
+    }))
 }
 
 /// Frozen output of resolve, threaded through launch and collect.
 pub(super) struct PipelinePlan {
     pub(super) specs: Vec<StageSpec>,
     pub(super) terminal: TerminalPlan,
-    /// What the pipeline form hands back, straight from the IR node.
-    pub(super) yields: crate::ir::PipeYield,
 }
 
 fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
     // The handoff authority is the session's terminal lease, lent only to a run
-    // whose `TerminalAccess` permits it.  No reachable lease → never foreground,
-    // and that single question covers a `Denied` run (exarch's tool runs), a
-    // backgrounded or tty-less launch (ral held no terminal foreground at
-    // startup, so no lease was minted), and every platform without `tcsetpgrp`
-    // (none is ever minted off Unix).
+    // whose `TerminalAccess` permits it: no reachable lease, never foreground.
     if shell.terminal_lease(mooring).is_none() {
         return TerminalPlan::NoTerminal;
     }
-    // With the lease held, foreground iff the final sink is terminal-bound or the
-    // run is an explicit tty loan.  A capture (`!{...}`) has a buffer sink, so it
-    // stays background; the `_ed-tui` loan is the exception — its stdout is
-    // captured too, but the body (e.g. `fzf`) draws on `/dev/tty` and must own the
-    // foreground pgid or its first `tcsetattr` raises SIGTTOU.
+    // A capture (`!{...}`) has a buffer sink and so stays background; the
+    // `_ed-tui` loan is captured too, but its body (`fzf`, say) draws on
+    // `/dev/tty` and must own the foreground pgid or `tcsetattr` raises
+    // SIGTTOU.
     let loan = matches!(mooring.terminal_access, TerminalAccess::ExplicitLoan);
     let terminal_bound = matches!(
         shell.io.stdout,
@@ -162,12 +104,9 @@ fn resolve_terminal_plan(mooring: &Mooring, shell: &Shell) -> TerminalPlan {
     }
 }
 
-/// Resolve phase: freeze every stage's launch path and carry the form's
-/// yield through.  The byte-capturing audit decision is consulted live during
-/// classification, not stored on the plan.
+/// Resolve phase: freeze every stage's launch path and the terminal handoff.
 pub(super) fn resolve_pipeline(
     stages: &[Arc<Comp>],
-    yields: crate::ir::PipeYield,
     env: &Env,
     mooring: &Mooring,
     shell: &Shell,
@@ -175,13 +114,14 @@ pub(super) fn resolve_pipeline(
     let terminal = resolve_terminal_plan(mooring, shell);
     let specs = stages
         .iter()
-        .map(|stage| analyze_stage(stage, env, shell))
+        .map(|stage| {
+            Ok(StageSpec {
+                launch: resolve_launch(stage, env, shell)?,
+                span: stage.span,
+            })
+        })
         .collect::<Settled<Vec<_>>>()?;
-    Ok(PipelinePlan {
-        specs,
-        terminal,
-        yields,
-    })
+    Ok(PipelinePlan { specs, terminal })
 }
 
 #[cfg(test)]

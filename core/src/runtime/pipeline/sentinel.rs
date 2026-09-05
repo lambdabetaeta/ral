@@ -5,9 +5,8 @@
 //! to a reader that left, and the first byte after them is a write to a dead
 //! edge — which the collector answers with the kill.
 
-use super::collect::Event;
+use super::collect::{Event, Slot};
 use std::io::Read;
-use std::sync::mpsc::Sender;
 
 /// Bytes already in the edge's buffer when the reader ended.  A failed
 /// snapshot counts as zero: nothing was proved pending.
@@ -49,7 +48,7 @@ fn pending_bytes(reader: &os_pipe::PipeReader) -> usize {
 /// Discard the bytes owed to the departed reader, then hear the next write.
 /// The reader travels back to the collector with the news, so it is released
 /// at the writer's filing and not before.
-pub(super) fn listen(reader: os_pipe::PipeReader, ix: usize, tx: Sender<Event>) {
+pub(super) fn listen(reader: os_pipe::PipeReader, slot: Slot) {
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buf = [0u8; 8 * 1024];
@@ -65,7 +64,7 @@ pub(super) fn listen(reader: os_pipe::PipeReader, ix: usize, tx: Sender<Event>) 
         if let Ok(n) = reader.read(&mut buf)
             && n > 0
         {
-            let _ = tx.send(Event::Wrote(ix, reader));
+            slot.send(Event::Wrote(slot.ix, reader));
         }
     });
 }

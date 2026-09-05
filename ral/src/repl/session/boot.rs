@@ -58,12 +58,12 @@ pub(super) fn setup_signals() {
             ));
         }
         unsafe {
-            // SIGINT relay rather than SIG_IGN: a no-op when no relay slot is
-            // active (the right behaviour between commands), forwarding to
-            // external pipeline groups when one is.
+            // The non-escalating interrupt handler rather than SIG_IGN: a
+            // no-op between commands, and a cancel of the foreground scope —
+            // whence the pipeline's own teardown — during a run.
             libc::signal(
                 libc::SIGINT,
-                ral_core::process::relay_handler() as *const () as libc::sighandler_t,
+                ral_core::process::interrupt_handler() as *const () as libc::sighandler_t,
             );
             // Ctrl-\ cancels the durable root — the reap-everything gesture.
             libc::signal(

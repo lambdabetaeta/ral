@@ -85,10 +85,9 @@ pub fn try_run_pipeline_anchor() -> Option<u8> {
         crate::sandbox::register_self_for_helpers();
         // Before the mode check, so every argv-bearing ral gets it: Rust's
         // runtime ignores SIGPIPE, but a ral child producing under a foreign
-        // shell's pipeline must still die of it like any well-behaved
-        // producer.  ral's own interior edges never deliver it — the parent
-        // holds each read end.  Parent-side protocol writes, which need
-        // `EPIPE` instead, mask it per write in `subprocess_codec`.
+        // shell's pipeline must still die of it.  ral's own interior edges
+        // never deliver it — the parent holds each read end — and parent-side
+        // protocol writes mask it per write in `subprocess_codec`.
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         }

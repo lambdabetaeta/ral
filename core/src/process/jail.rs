@@ -54,6 +54,11 @@ impl JailCgroup {
         linux::kill(self);
         linux::remove(self);
     }
+
+    /// Nothing to finish: no cgroup was ever created off Linux, so callers
+    /// need no `cfg` of their own.
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn finish(&self) {}
 }
 
 /// One exec's whole jail decision, reached without touching the kernel.

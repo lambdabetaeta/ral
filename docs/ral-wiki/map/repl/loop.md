@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0c6ec335
-generated_at_date: 2026-09-03
+generated_at_commit: ccb05833
+generated_at_date: 2026-09-05
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -54,7 +54,8 @@ once by whoever waits on it rather than being tracked here
   history.
 
 `session/boot.rs` does the one-shot setup: `setup_signals` (the whole Unix
-disposition table in one place — SIGINT relay, SIGQUIT root-abort,
+disposition table in one place — SIGINT `interrupt_handler`, which raises the
+foreground interrupt and nothing else, SIGQUIT root-abort,
 SIGTERM/SIGHUP term handler, SIGTSTP/SIGTTOU/SIGTTIN/SIGPIPE ignore),
 `setup_panic_hook` (restore the pre-raw terminal state — termios on Unix,
 console mode on Windows — then write a crash log, to a state-dir path

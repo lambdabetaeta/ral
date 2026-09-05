@@ -10,10 +10,10 @@ use super::cancel::CancelCause;
 #[cfg(windows)]
 pub(crate) const STAGE_KILL_EXIT_CODE: i32 = 0x5241_4c4b;
 
-/// The escalation ladder ral's own teardown sends, and the whole of it: SIGINT
-/// for an interrupt, SIGTERM for every other cause, SIGKILL to finish.
-/// `terminate_group` in `runtime/command/child.rs` sends exactly these, so a
-/// death by any other signal is the child's own however the wait left.
+/// The escalation ladder ral's own teardown sends, and the whole of it:
+/// whatever `grace_signal` opens with, then SIGKILL to finish.  Every teardown
+/// sends exactly these, so a death by any other signal is the child's own
+/// however the wait left.
 #[cfg(unix)]
 const TEARDOWN_LADDER: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGKILL];
 
@@ -179,7 +179,7 @@ impl WaitOutcome {
     /// kernel or a third party felled with something off the ladder, a segfault
     /// or a broken pipe inside that same window.  A stop is job control's
     /// business either way.
-    pub(crate) fn attribute_to(self, cause: CancelCause) -> Self {
+    fn attribute_to(self, cause: CancelCause) -> Self {
         match self {
             Self::Signaled(signal) if signal.is_teardown() => Self::Cancelled { cause, signal },
             other => other,
@@ -247,7 +247,12 @@ impl CommandFailure {
     /// reaches only the collector's own kill of a producer whose reader was
     /// gone, and only a death that kill actually caused — never an exit
     /// status, which killing a zombie cannot rewrite.
+    ///
+    /// Attribution is the same fact read the other way and so belongs here
+    /// too: a death by a signal on ral's own ladder, with a cause in `sent`,
+    /// is ral's doing whichever teardown sent it.
     pub fn from_outcome(outcome: WaitOutcome, sent: Option<CancelCause>) -> Option<Self> {
+        let outcome = sent.map_or(outcome, |cause| outcome.attribute_to(cause));
         if sent == Some(CancelCause::ReaderGone) && outcome.is_stage_kill() {
             return None;
         }
@@ -449,6 +454,36 @@ mod tests {
                 Some(CommandFailure::Signal(Signal::new(libc::SIGPIPE)))
             );
         }
+    }
+
+    /// A death on ral's ladder is attributed to the cause that was sent,
+    /// wherever the teardown ran — a pipeline stage's SIGTERM names the
+    /// cancellation, not the number.  Only SIGKILL is the reader-gone kill, so
+    /// a SIGTERM under `ReaderGone` is a cancellation and not forgiveness.
+    #[cfg(unix)]
+    #[test]
+    fn from_outcome_attributes_a_ladder_death_to_the_cause_sent() {
+        let term = Signal::new(libc::SIGTERM);
+        assert_eq!(
+            CommandFailure::from_outcome(
+                WaitOutcome::Signaled(term),
+                Some(CancelCause::Deadline)
+            ),
+            Some(CommandFailure::Cancelled {
+                cause: CancelCause::Deadline,
+                signal: term
+            })
+        );
+        assert_eq!(
+            CommandFailure::from_outcome(
+                WaitOutcome::Signaled(term),
+                Some(CancelCause::ReaderGone)
+            ),
+            Some(CommandFailure::Cancelled {
+                cause: CancelCause::ReaderGone,
+                signal: term
+            })
+        );
     }
 
     /// A cancellation in force outranks forgiveness: `Option<CancelCause>`

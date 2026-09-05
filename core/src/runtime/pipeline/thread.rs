@@ -5,6 +5,7 @@
 //! [`Shell::spawn_thread`]; [`ThreadStage`] is the collector's handle onto
 //! the running thread.
 
+use super::collect::Slot;
 use super::launch::LaunchCx;
 use super::resolve::StageSpec;
 use super::route::{ByteOut, StageRoute};
@@ -57,10 +58,7 @@ impl ThreadStage {
     }
 
     /// A `ThreadStage` around no real thread, for `collect.rs`'s own
-    /// transition-table tests: they drive a producer's own panic through a
-    /// separate, unconnected `std::thread::spawn`, sharing only the index and
-    /// sender with this handle, so all this needs to support is
-    /// `join_after_settled`'s no-op join.
+    /// transition-table tests: all it owes them is a no-op join.
     #[cfg(test)]
     pub(super) fn fake_for_step_test() -> Self {
         Self {
@@ -72,9 +70,8 @@ impl ThreadStage {
 }
 
 /// Turn a caught panic's payload into the `Error` a stage's own `Returned`
-/// carries: downcast the usual `&str`/`String` shapes, else name it unknown,
-/// and stamp the stage's own span, since the panicking thread's stack
-/// carries none of its own to attribute it to.
+/// carries, stamped with the stage's span — the panicking thread's stack has
+/// none of its own to attribute it to.
 fn panic_error(payload: &(dyn std::any::Any + Send), span: Option<Span>) -> Error {
     let msg = payload
         .downcast_ref::<&str>()
@@ -103,18 +100,13 @@ impl Drop for ThreadStage {
 }
 
 /// Spawn one ral-written stage on its own thread.
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "LaunchCx bundles unique `&mut` borrows; by-value transfers them so this fn gets mutable access — a shared `&LaunchCx` cannot yield `&mut`"
-)]
 pub(super) fn launch_thread_stage(
     stage: &Arc<Comp>,
     spec: &StageSpec,
     route: StageRoute,
-    cx: LaunchCx<'_>,
-    ix: usize,
+    cx: &LaunchCx<'_>,
+    slot: Slot,
     is_last: bool,
-    tx: std::sync::mpsc::Sender<super::collect::Event>,
 ) -> Settled<ThreadStage> {
     let wake = Wake::new().map_err(|e| {
         let mut err = Error::new(format!("could not create a pipeline stage's wake: {e}"), 1);
@@ -122,7 +114,7 @@ pub(super) fn launch_thread_stage(
         Break::Error(err)
     })?;
     let StageRoute { stdin, stdout, .. } = route;
-    let stdin = super::launch::stage_stdin(stdin, cx.group, cx.shell, &wake)?;
+    let stdin = super::launch::stage_stdin(stdin, cx.shell, &wake)?;
 
     let group = cx.group.leader_pgid();
 
@@ -153,7 +145,7 @@ pub(super) fn launch_thread_stage(
     let comp = Arc::clone(stage);
     let span = spec.span;
 
-    let settle = super::collect::SettleOnDrop::new(ix, tx);
+    let settle = super::collect::SettleOnDrop::new(slot);
     let spawned = cx.shell.spawn_thread(
         mooring,
         "ral pipeline stage",
@@ -161,7 +153,6 @@ pub(super) fn launch_thread_stage(
         move |mooring, child| {
             child.io = io;
             child.local.audit.install_active_policy(policy);
-            let child = &mut *child;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 machine::evaluate(Closure { comp, env }, mooring, child)
             }));
@@ -220,8 +211,11 @@ mod tests {
         }
     }
 
+    /// An owning group whose channel nobody reads: these tests watch a single
+    /// stage's own reports, never the anchor's.
     fn prepared_group() -> PipelineGroup {
-        PipelineGroup::prepare(&Shell::default()).expect("anchor spawns")
+        PipelineGroup::prepare(&Shell::default(), std::sync::mpsc::channel().0)
+            .expect("anchor spawns")
     }
 
     #[test]
@@ -246,7 +240,8 @@ mod tests {
             group: &mut group,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let _handle = launch_thread_stage(&stage, &spec, route, cx, 0, true, tx).expect("launch");
+        let _handle = launch_thread_stage(&stage, &spec, route, &cx, Slot { ix: 0, tx }, true)
+            .expect("launch");
 
         let mut out = Vec::new();
         reader.read_to_end(&mut out).expect("read stage stdout");
@@ -285,8 +280,8 @@ mod tests {
             group: &mut group,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let handle =
-            launch_thread_stage(&stage, &spec, route, cx, 0, true, tx).expect("launch");
+        let handle = launch_thread_stage(&stage, &spec, route, &cx, Slot { ix: 0, tx }, true)
+            .expect("launch");
 
         handle.cancel(CancelCause::ReaderGone);
         handle.interrupt();

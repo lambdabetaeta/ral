@@ -36,9 +36,8 @@ pub trait ExternalWrite: Send + Sync {
 /// Captured bytes, and the one thing about them the write path cannot say:
 /// that [`SINK_BUFFER_CAP`] cut the stream short.
 ///
-/// `Sink::pump` hands back `()` from a thread and every writer's `Ok(())` is
-/// honest about the write, so truncation is recorded here and read out of
-/// band, once the buffer is complete.
+/// Every writer's `Ok(())` is honest about its write, so truncation is
+/// recorded here and read out of band, once the buffer is complete.
 #[derive(Debug, Default)]
 pub struct CapturedBytes {
     bytes: Mutex<Vec<u8>>,
@@ -109,11 +108,9 @@ pub enum Sink {
         pending: Vec<u8>,
     },
     /// A stage thread's interior edge: the write end, the stage's wake, and
-    /// the edge's fate.  Shared by `stdout` and `ambient`, and duplicated
-    /// into each child it spawns; the edge closes when the last holder drops.
-    /// The parent holds the read end, so no `EPIPE` — and no `SIGPIPE` to the
-    /// whole shell — can reach a thread; a write to a dead edge ends the
-    /// stage instead.
+    /// the edge's fate.  The parent holds the read end, so no `EPIPE` — and
+    /// no `SIGPIPE` to the whole shell — can reach a thread; a write to a
+    /// dead edge ends the stage instead.
     Pipe {
         writer: Arc<os_pipe::PipeWriter>,
         wake: Arc<crate::process::Wake>,
@@ -124,12 +121,10 @@ pub enum Sink {
 /// Write `bytes` in `PIPE_BUF` chunks, each after `poll` says it will not
 /// block, so the wake and the edge are consulted between chunks.
 ///
-/// A chunk that lands on a dead edge is the stage's reader-gone break.  It is
-/// judged after landing, not refused before: the collector's sentinel reads
-/// the edge, so a relayed child's bytes are heard there too, and a write
-/// blocked on a full pipe is freed to reach the check.  A fired wake still
-/// ends the write as success: the stage is being cancelled and its next
-/// `check` says why.
+/// A chunk that lands on a dead edge is the stage's reader-gone break, judged
+/// after landing rather than refused before: it is the sentinel that hears the
+/// write.  A fired wake ends the write as success — the stage is being
+/// cancelled, and its next `check` says why.
 #[cfg(unix)]
 fn write_interruptible(
     w: &os_pipe::PipeWriter,
@@ -253,9 +248,9 @@ impl Sink {
     }
 
     /// Spawn a thread draining `reader` into this sink, flushing its tail at
-    /// EOF.  A capture buffer is only complete once the handle is joined.
-    /// The drain outlives any write failure: a child must never find its
-    /// relay pipe closed under it, and a dead edge still needs the bytes to
+    /// EOF; a capture buffer is complete only once the handle is joined.  The
+    /// drain outlives any write failure — a child must never find the pipe it
+    /// writes into closed under it, and a dead edge still needs the bytes to
     /// land for the sentinel to hear them.
     pub fn pump(self, mut reader: impl Read + Send + 'static) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {

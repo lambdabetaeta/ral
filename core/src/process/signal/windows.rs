@@ -48,7 +48,7 @@ pub fn install_handlers() {
 }
 
 /// Cancel the foreground scope and fan `CTRL_BREAK_EVENT` out to every live,
-/// non-detached group — the Windows analogue of Unix's `relay_handler`.
+/// non-detached group — the Windows analogue of Unix's `interrupt_handler`.
 ///
 /// A frontend with its own exchange-cancel ladder (exarch) calls this in-process
 /// rather than re-injecting a console event, which would re-enter the escalating
@@ -66,9 +66,8 @@ pub fn reset_child_signals() {}
 
 // ── Pipeline-group state ───────────────────────────────────────────────────
 //
-// `GROUPS` can be a plain `Mutex` where Unix's `RELAY_PGIDS` needs a lock-free
-// slot array: `SetConsoleCtrlHandler` callbacks run on a worker thread, not in
-// async-signal context.
+// `GROUPS` can be a plain `Mutex`: `SetConsoleCtrlHandler` callbacks run on a
+// worker thread, not in async-signal context.
 
 mod win_groups {
     use crate::process::ChildHandle;

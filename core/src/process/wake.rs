@@ -1,11 +1,10 @@
 //! Ending a stage's blocked stdin read from another thread.
 //!
-//! Unix: a self-pipe the reader polls beside its own fd — a fired wake is
-//! read as `POLLIN` on the wake fd, never a byte the reader must drain.
+//! Unix: a self-pipe the reader polls beside its own fd — a fired wake reads
+//! as `POLLIN` on the wake fd, never as a byte the reader must drain.
 //! Windows: anonymous pipes cannot be polled, so the reader is unblocked by
-//! `CancelSynchronousIo` on its own thread ([`super::signal`] callers use
-//! [`Wake::acknowledge`]/[`Wake::acknowledged`] to agree the read really
-//! ended because of the wake, not some other abort).
+//! `CancelSynchronousIo`, and [`Wake::acknowledge`]/[`Wake::acknowledged`]
+//! agree the read ended because of the wake and not some other abort.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
