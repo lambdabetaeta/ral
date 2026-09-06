@@ -4,8 +4,9 @@
 //! a grant makes, so each is an invariant held where the host allows and
 //! reported where not.  Probed once, so the argv render stays pure in it.
 
+use crate::sandbox::reexec::Pinned;
 use std::fmt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,11 +19,11 @@ pub(crate) struct HostEnvelope {
 
 impl HostEnvelope {
     /// 2–4 ms a spawn, and no answer changes under a running ral.
-    pub(crate) fn probe() -> Self {
+    pub(crate) fn probe(envelope: &Pinned) -> Self {
         static PROBED: OnceLock<HostEnvelope> = OnceLock::new();
         *PROBED.get_or_init(|| Self {
-            private_pids: bwrap_builds(&["--unshare-pid", "--proc", "/proc"]),
-            virtual_dev: bwrap_builds(&["--dev", "/dev"]),
+            private_pids: bwrap_builds(envelope, &["--unshare-pid", "--proc", "/proc"]),
+            virtual_dev: bwrap_builds(envelope, &["--dev", "/dev"]),
         })
     }
 }
@@ -52,16 +53,16 @@ impl fmt::Display for HostEnvelope {
     }
 }
 
-/// Whether bwrap builds an envelope carrying `pieces` and reaches its payload.
-/// Streams are discarded: a refusal is our datum, not a message to the user.
-/// A host without bwrap answers no to everything, harmlessly — the launch that
-/// follows fails on the same missing binary.
+/// Whether the pinned bwrap builds an envelope carrying `pieces` and reaches
+/// its payload.  Streams are discarded: a refusal is our datum, not a message
+/// to the user.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:bwrap-host-probe] setup-time host capability probe against /bin/true, not a model exec image"
 )]
-fn bwrap_builds(pieces: &[&str]) -> bool {
-    Command::new(super::BWRAP)
+fn bwrap_builds(envelope: &Pinned, pieces: &[&str]) -> bool {
+    envelope
+        .command()
         .args(["--ro-bind", "/", "/"])
         .args(pieces)
         .args(["--", "/bin/true"])

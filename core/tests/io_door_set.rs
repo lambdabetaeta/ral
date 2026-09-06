@@ -164,9 +164,10 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "core/src/sandbox/linux/host.rs",
         "io-door:silent:bwrap-host-probe",
     ),
+    ("core/src/sandbox/reexec.rs", "io-door:silent:pin-locate"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:pin-open"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:pin-stat"),
-    ("core/src/sandbox/reexec.rs", "io-door:silent:self-reexec"),
+    ("core/src/sandbox/reexec.rs", "io-door:silent:pinned-exec"),
     ("core/src/sandbox/reexec.rs", "io-door:silent:verify-stat"),
     (
         "core/src/sandbox/windows/dacl.rs",

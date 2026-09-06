@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 39934600
+verified_at_commit: 0e45e6ab
 verified_at_date: 2026-09-06
-anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev]
+anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, Pinned, register_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -199,6 +199,26 @@ render is a pure function of the probed `HostEnvelope`, so the argv tests
 assert both shapes from literals rather than from whichever host runs them.
 Such hosts still refuse the read-only rebind of their own locked `/etc/hosts`
 and `/etc/resolv.conf`, which remains open.
+
+**The envelope's identity is fixed at boot, and nothing a session does can
+change it.** The launcher a confined command runs under is exactly as trusted
+as the file it is, so that file is never chosen by name at spawn time — where
+the only environment in scope is the one built for the payload, `PATH`
+override included, and `Command::new("bwrap")` would have let a `within [env:
+[PATH: …]]` or a planted binary earlier on `PATH` supply code that runs before
+any confinement. Instead `early_init` pins bwrap (`linux::register_envelope`)
+on the absolute entries of the `PATH` ral was started with, before any shell
+exists, as a `reexec::Pinned` — the same fd-pin ral uses for its own re-exec —
+and every launch execs `/proc/self/fd/N`, so neither a `PATH` override nor a
+replace-by-rename at the pinned path reaches it. In-place rewriting of the
+pinned inode is closed by the envelope itself: `make_command_with_policy`
+read-only binds the envelope's own file after the projection's binds, `/`
+wholesale under `Unrestricted` included, and before the masks, the Linux twin
+of macOS's `freeze_admitted_set`. A host with no bwrap to pin is reported by
+`linux::envelope` at the first launch that needs it, through
+`confinement_unavailable`; `Launch::envelope` names the binary for a spawn
+failure's wording only. Pinned by `sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`
+and `::the_envelope_binary_is_read_only_inside_every_envelope`.
 
 **The sandbox is applied per external command, not by re-execing the grant
 body.** A `grant` is a *local* dynamic effect scope: its body evaluates in

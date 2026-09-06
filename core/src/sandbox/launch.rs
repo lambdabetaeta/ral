@@ -152,15 +152,19 @@ fn linux_sandboxed_command(
     ownership: Ownership,
     shell: &Shell,
 ) -> Settled<(Command, Option<super::linux::InfoFd>)> {
+    let envelope = super::linux::envelope()
+        .map_err(|why| Break::Error(super::confinement_unavailable(why)))?;
+    let host = super::linux::HostEnvelope::probe(envelope);
     let cwd = shell.cwd().to_string_lossy().into_owned();
     match target {
         LaunchTarget::Host { program } => super::linux::make_command_with_policy(
+            envelope,
             program,
             args,
             projection,
             Some(cwd.as_str()),
             ownership,
-            super::linux::HostEnvelope::probe(),
+            host,
         )
         .map_err(|e| Break::Error(Error::new(e, 1))),
         LaunchTarget::BundledTool { tool } => {
@@ -175,12 +179,13 @@ fn linux_sandboxed_command(
             tool_args.push(tool.to_string());
             tool_args.extend_from_slice(args);
             super::linux::make_command_with_policy(
+                envelope,
                 &self_path.to_string_lossy(),
                 &tool_args,
                 projection,
                 Some(cwd.as_str()),
                 ownership,
-                super::linux::HostEnvelope::probe(),
+                host,
             )
             .map_err(|e| Break::Error(Error::new(e, 1)))
         }
@@ -480,7 +485,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_host_command_is_bwrap_with_chdir_and_target_tail() {
+    fn linux_host_command_is_the_pinned_envelope_with_chdir_and_target_tail() {
+        super::super::linux::register_envelope();
+        if super::super::linux::envelope().is_err() {
+            eprintln!("skipping: this host has no bwrap to pin");
+            return;
+        }
         let shell = Shell::default();
         let (cmd, _info_fd) = linux_sandboxed_command(
             &restrictive(),
@@ -490,7 +500,11 @@ mod tests {
             &shell,
         )
         .expect("build Linux host command");
-        assert_eq!(cmd.get_program().to_string_lossy(), "bwrap");
+        assert!(
+            cmd.get_program().to_string_lossy().starts_with("/proc/self/fd/"),
+            "the launcher is the fd-pinned envelope, never a name PATH resolves: {:?}",
+            cmd.get_program()
+        );
         let args = argv(&cmd);
         let chdir = args
             .iter()

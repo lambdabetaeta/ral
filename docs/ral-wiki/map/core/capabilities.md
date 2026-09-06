@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 39934600
+generated_at_commit: 0e45e6ab
 generated_at_date: 2026-09-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -168,7 +168,9 @@ device for `net` to govern; the in-process gates apply unchanged
 (`docs/SPEC.md` §12.11).
 
 - `early_init(argv)` — startup: consumes `--sandbox-projection`, pins
-  `SANDBOX_SELF`, on macOS enters the OS sandbox for a per-command
+  `SANDBOX_SELF` and, on Linux, the bwrap envelope (`linux::register_envelope`,
+  walked on the process's own `PATH` before any shell exists), on macOS enters
+  the OS sandbox for a per-command
   `--sandbox-projection` child (`maybe_enter_process_sandbox`; Linux and
   Windows confine from the parent and refuse the flag), and on Windows
   runs the boot-time orphan sweep (`windows::session::boot_recover`) that
@@ -183,8 +185,11 @@ device for `net` to govern; the in-process gates apply unchanged
   (`serve_sandbox_exec` for a host external, `try_run_bundled_tool` for a bundled
   tool). Skip it and `SANDBOX_SELF` stays unpinned, so the per-command launcher
   cannot pin the binary it re-execs.
-- `reexec.rs` — pins an immutable handle on this executable at boot so a
-  confined re-exec runs the same binary even under an on-disk swap. The `Pin`
+- `reexec.rs` — `Pinned`, an executable pinned at boot: the one shape every
+  `Command` the sandbox execs is built from, so nothing a session does to its
+  environment can choose the file. Two are pinned: this executable
+  (`SANDBOX_SELF`), so a confined re-exec runs the same binary even under an
+  on-disk swap, and on Linux the bwrap envelope (`linux::ENVELOPE`). The `Pin`
   variants say where a swap is even askable: `Fd` on Linux (the retained
   descriptor, so `/proc/self/fd/N` resolves to the boot inode), `Stat` on
   macOS (a `(dev, ino)` snapshot re-checked before each spawn), and
@@ -203,8 +208,9 @@ device for `net` to govern; the in-process gates apply unchanged
   projection on a backend with no kernel network enforcement, so an unenforceable
   request fails closed rather than running ignored.
 - `confinement_unavailable` (`sandbox.rs`) — the one refusal for a confinement
-  this host cannot establish, whether `projection_enforceable` saw it coming or
-  the envelope binary turned out to be missing at the spawn.
+  this host cannot establish, whether `projection_enforceable` saw it coming,
+  there was no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the
+  first launch that needs it), or the pinned envelope failed to spawn.
 - `make_command` — wraps an external command in the active policy.
 - `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_command`
   (`runtime/command/process.rs`) routes an external or bundled child through here
@@ -230,6 +236,8 @@ device for `net` to govern; the in-process gates apply unchanged
   locally, external children being confined per-command
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 - Backends: `macos.rs` (Seatbelt, `macos-base.sbpl`), `linux.rs` (bwrap: the
+  `Pinned` envelope, exec'd by descriptor and never by name, its own file
+  read-only bound inside every envelope after the projection's binds; the
   argv — `--new-session`, the ipc/uts/cgroup namespaces and, by host fact, the
   pid one, `--proc` on both projections, the seccomp filter; `InfoFd`, the
   payload's pid read back for a `Kept` launch; `linux/host.rs`, `HostEnvelope`,

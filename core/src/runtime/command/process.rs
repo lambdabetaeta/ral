@@ -103,8 +103,7 @@ pub(crate) fn spawn(
 /// failure is the envelope's, not `name`'s: `vet` resolved `name` before we got
 /// here, and an envelope execs its own target, so a missing one comes back as an
 /// exit status rather than a spawn failure.  Blaming `name` would accuse the one
-/// program we know exists, and make a host lacking the envelope look like a
-/// grant that denies everything.
+/// program we know exists.
 pub(crate) fn spawn_error(
     confinement: Option<&'static str>,
     name: &str,
@@ -113,21 +112,10 @@ pub(crate) fn spawn_error(
     use crate::process::{CommandFailure, SpawnFailure};
 
     if let Some(envelope) = confinement {
-        let (reason, hint) = match e.kind() {
-            std::io::ErrorKind::NotFound => (
-                format!("{envelope} not found on PATH"),
-                format!(
-                    "A grant confines every command it runs under {envelope}, so while one is active \
-                     nothing can start without it — {name} itself resolved fine. Is {envelope} installed \
-                     on this host, and on the PATH ral sees?"
-                ),
-            ),
-            _ => (
-                format!("cannot start {envelope}: {e}"),
-                format!("The envelope failed to launch, so {name} never ran."),
-            ),
-        };
-        return Break::Error(crate::sandbox::confinement_unavailable(&reason).with_hint(hint));
+        return Break::Error(
+            crate::sandbox::confinement_unavailable(&format!("cannot start {envelope}: {e}"))
+                .with_hint(format!("The envelope failed to launch, so {name} never ran.")),
+        );
     }
 
     let failure = match e.kind() {
@@ -215,19 +203,20 @@ mod tests {
     }
 
     /// One `ENOENT` means two different things depending on who the launcher
-    /// exec'd, and the wrong reading turns a host missing bubblewrap into a
-    /// grant that appears to deny every command.
+    /// exec'd, and the wrong reading turns a failed envelope into a grant that
+    /// appears to deny every command.
     #[test]
-    fn missing_envelope_is_not_reported_as_a_missing_command() {
+    fn a_failed_envelope_is_not_reported_as_a_missing_command() {
         let enoent = std::io::Error::from(std::io::ErrorKind::NotFound);
 
         let unconfined = spawn_error(None, "pwd", &enoent);
         assert_eq!(message(&unconfined), "pwd: command not found");
 
         let confined = spawn_error(Some("bwrap"), "pwd", &enoent);
-        assert_eq!(
-            message(&confined),
-            "sandbox confinement unavailable: bwrap not found on PATH"
+        assert!(
+            message(&confined).starts_with("sandbox confinement unavailable: cannot start bwrap"),
+            "{}",
+            message(&confined)
         );
     }
 }

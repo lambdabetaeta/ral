@@ -70,9 +70,9 @@ fn net_enforced() -> bool {
 }
 
 /// The one refusal for "this host cannot establish the confinement the active
-/// grant asks for".  Whether we learn it before the spawn — an axis no backend
-/// here enforces — or from the spawn itself, when the envelope binary turns out
-/// to be missing, the user is owed the same answer: nothing ran, and the
+/// grant asks for".  Whether it is an axis no backend here enforces, an
+/// envelope binary that was not there to pin at boot, or a spawn the envelope
+/// itself failed, the user is owed the same answer: nothing ran, and the
 /// sandbox is why.  Never the command's fault, so never phrased as such.
 pub(crate) fn confinement_unavailable(reason: &str) -> crate::types::Error {
     crate::types::Error::new(format!("sandbox confinement unavailable: {reason}"), 1)
@@ -124,8 +124,16 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
     }
     #[cfg(target_os = "linux")]
     {
-        let host = linux::HostEnvelope::probe();
+        let envelope = match linux::envelope() {
+            Ok(envelope) => envelope,
+            Err(why) => {
+                eprintln!("--- bwrap argv error ---\n{why}");
+                return;
+            }
+        };
+        let host = linux::HostEnvelope::probe(envelope);
         match linux::make_command_with_policy(
+            envelope,
             "/bin/true",
             &[],
             policy,
@@ -134,7 +142,7 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
             host,
         ) {
             Ok((cmd, _info_fd)) => {
-                let mut line = String::from("bwrap");
+                let mut line = envelope.arg0().display().to_string();
                 for arg in cmd.get_args() {
                     line.push(' ');
                     line.push_str(&arg.to_string_lossy());
@@ -196,13 +204,18 @@ pub fn restricted_envelope_launches() -> bool {
             net: true,
             exec: crate::types::ExecProjection::default(),
         };
+        linux::register_envelope();
+        let Ok(envelope) = linux::envelope() else {
+            return false;
+        };
         linux::make_command_with_policy(
+            envelope,
             "/bin/true",
             &[],
             &projection,
             None,
             launch::Ownership::Surrendered,
-            linux::HostEnvelope::probe(),
+            linux::HostEnvelope::probe(envelope),
         )
         .is_ok_and(|(mut cmd, _no_info_fd)| {
             cmd.stdout(std::process::Stdio::null())
@@ -254,7 +267,7 @@ pub(crate) fn register_self_for_helpers() {
 )]
 pub(crate) fn self_command() -> std::io::Result<Command> {
     if let Some(s) = reexec::SANDBOX_SELF.get() {
-        return Ok(s.reexec_command());
+        return Ok(s.command());
     }
     let exe = std::env::current_exe()?;
     Ok(Command::new(exe))
@@ -275,6 +288,9 @@ pub fn early_init(argv: &[String]) -> Result<Vec<String>, String> {
     // So a per-command `--sandbox-projection` child re-execs this binary and
     // not whatever the on-disk path holds by then.
     reexec::register_sandbox_self();
+    // Before any shell exists, so no session can choose its own launcher.
+    #[cfg(target_os = "linux")]
+    linux::register_envelope();
     // Reclaim what a crashed prior session left registered — its AppContainer
     // profiles, and any per-session grant ACEs a pre-capability ledger still
     // records.  Only a primary

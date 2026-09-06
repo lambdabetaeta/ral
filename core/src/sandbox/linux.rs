@@ -13,17 +13,55 @@ mod host;
 
 pub(crate) use host::HostEnvelope;
 
+use super::reexec::Pinned;
 use crate::path::{PathShape, Rendered, render_paths};
 use crate::types::{FsProjection, SandboxProjection};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+use std::sync::OnceLock;
 
-/// The bubblewrap binary, resolved on `PATH`: every confined launch here execs
-/// it, so a host without it can enforce no projection at all.
+/// The bubblewrap binary's name: what [`register_envelope`] walks `PATH` for,
+/// and what a message calls it.  Never handed to `exec` — every launch goes
+/// through the [`Pinned`] envelope.
 pub(super) const BWRAP: &str = "bwrap";
 
-/// Build the [`Command`] that runs `name` under `bwrap` for `policy`: binds
-/// derived from the policy prefixes, `deny_paths` overlaid last.
+static ENVELOPE: OnceLock<Pinned> = OnceLock::new();
+
+/// Pin bwrap for the rest of the process's life, found on the `PATH` this
+/// process was started with — never a shell's, none exists yet — and only in
+/// its absolute entries.  Idempotent, and silent where bwrap is absent:
+/// [`envelope`] says so at the first launch that needs it.
+pub(super) fn register_envelope() {
+    if ENVELOPE.get().is_some() {
+        return;
+    }
+    let host_path = std::env::var("PATH").unwrap_or_default();
+    let absolute: Vec<&str> = host_path
+        .split(':')
+        .filter(|entry| crate::path::is_absolute(entry))
+        .collect();
+    let located = crate::path::which::locate(
+        BWRAP,
+        Some(&absolute.join(":")),
+        crate::path::which::SearchCwd::nowhere(),
+    );
+    if let Some(pinned) = located.and_then(Pinned::open) {
+        let _ = ENVELOPE.set(pinned);
+    }
+}
+
+/// The pinned envelope, or why this host has none.
+pub(super) fn envelope() -> Result<&'static Pinned, &'static str> {
+    ENVELOPE.get().ok_or(
+        "bwrap not found on PATH at startup: a grant confines every external command \
+         under bubblewrap, so while one is active nothing can start without it. Is it \
+         installed on this host, and on the PATH ral was started with?",
+    )
+}
+
+/// Build the [`Command`] that runs `name` under the pinned `envelope` for
+/// `policy`: binds derived from the policy prefixes, `deny_paths` overlaid
+/// last.
 ///
 /// Every name is taken from `policy.rendered()`, so a rule lands on each
 /// spelling the kernel might present rather than on the one the grant author
@@ -52,6 +90,7 @@ pub(super) const BWRAP: &str = "bwrap";
     reason = "[io-door:surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
 )]
 pub(crate) fn make_command_with_policy(
+    envelope: &Pinned,
     name: &str,
     args: &[String],
     policy: &SandboxProjection,
@@ -60,7 +99,7 @@ pub(crate) fn make_command_with_policy(
     host: HostEnvelope,
 ) -> Result<(Command, Option<InfoFd>), String> {
     let rendered = policy.rendered()?;
-    let mut c = Command::new(BWRAP);
+    let mut c = envelope.command();
     // Empty when fs is `Unrestricted`: there the envelope binds `/` wholesale
     // below rather than per prefix.
     let rules = rendered.fs.rules().cloned().unwrap_or_default();
@@ -122,6 +161,13 @@ pub(crate) fn make_command_with_policy(
             c.args(["--proc", "/proc"]);
         }
     }
+    // The file we exec, read-only over whatever the projection bound — `/`
+    // wholesale under `Unrestricted` — so no confined child rewrites the
+    // pinned inode in place, nor moves it: a mountpoint cannot be renamed.
+    let own = envelope
+        .current_path()
+        .map_err(|e| format!("bwrap: the pinned envelope has no path any more: {e}"))?;
+    c.arg("--ro-bind").arg(&own).arg(&own);
     // Masks go on after every bind: last mount wins.  `pinned_dirs` goes
     // unused because a mask is anchored to the inode, so a renamed ancestor
     // carries it — the pin macOS renders explicitly, Linux gets for free.
@@ -472,7 +518,7 @@ fn default_ro_binds() -> Vec<String> {
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::{HostEnvelope, make_command_with_policy};
+    use super::{HostEnvelope, Pinned, make_command_with_policy};
     use crate::sandbox::launch::Ownership;
     use crate::types::{FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
@@ -513,8 +559,14 @@ mod tests {
         }
     }
 
+    /// This test binary stands in for bwrap where only the argv is read: the
+    /// render tests need no bwrap on the host, and no payload shares its name.
+    fn stand_in() -> Pinned {
+        Pinned::open(std::env::current_exe().expect("own path")).expect("own binary pins")
+    }
+
     fn argv_on(host: HostEnvelope, policy: &SandboxProjection, ownership: Ownership) -> Vec<String> {
-        make_command_with_policy("/bin/true", &[], policy, None, ownership, host)
+        make_command_with_policy(&stand_in(), "/bin/true", &[], policy, None, ownership, host)
             .expect("ASCII paths render")
             .0
             .get_args()
@@ -638,11 +690,13 @@ mod tests {
     }
 
     fn run_confined(
+        envelope: &Pinned,
         host: HostEnvelope,
         policy: &SandboxProjection,
         script: &str,
     ) -> Option<std::process::Output> {
         let (mut cmd, info_fd) = make_command_with_policy(
+            envelope,
             "/bin/sh",
             &["-c".to_string(), script.to_string()],
             policy,
@@ -658,23 +712,28 @@ mod tests {
         out
     }
 
-    /// Whether this host can build a bwrap envelope at all.  Where it cannot
-    /// — bwrap absent, or user namespaces unavailable — a spawning test
-    /// proves nothing either way and says so on the way out.
-    fn envelope_launches(policy: &SandboxProjection) -> bool {
-        let control = run_confined(HostEnvelope::probe(), policy, "echo READY");
+    /// This host's pinned bwrap, where it can build an envelope at all.  Where
+    /// it cannot — bwrap absent, or user namespaces unavailable — a spawning
+    /// test proves nothing either way and says so on the way out.
+    fn envelope_launches(policy: &SandboxProjection) -> Option<&'static Pinned> {
+        super::register_envelope();
+        let Ok(envelope) = super::envelope() else {
+            eprintln!("skipping: this host has no bwrap to pin");
+            return None;
+        };
+        let control = run_confined(envelope, HostEnvelope::probe(envelope), policy, "echo READY");
         if control
             .as_ref()
             .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("READY"))
         {
-            return true;
+            return Some(envelope);
         }
         let why = control.map_or_else(
-            || "bwrap not found".to_string(),
+            || "the envelope did not spawn".to_string(),
             |o| String::from_utf8_lossy(&o.stderr).trim().to_string(),
         );
         eprintln!("skipping: this host cannot build a bwrap envelope: {why}");
-        false
+        None
     }
 
     /// The whole regression: `xdg:config` readable, `xdg:config/gcloud`
@@ -701,9 +760,9 @@ mod tests {
             net: true,
             exec: crate::types::ExecProjection::default(),
         };
-        if !envelope_launches(&policy(vec![])) {
+        let Some(envelope) = envelope_launches(&policy(vec![])) else {
             return;
-        }
+        };
 
         let script = format!(
             "echo READY\n\
@@ -711,7 +770,8 @@ mod tests {
             denied = denied.display(),
         );
         let out = run_confined(
-            HostEnvelope::probe(),
+            envelope,
+            HostEnvelope::probe(envelope),
             &policy(vec![denied.to_string_lossy().into_owned()]),
             &script,
         )
@@ -746,11 +806,12 @@ mod tests {
         let dir = workdir("deny-absent-spawn-rw");
         let denied = dir.join("not-yet");
 
-        if !envelope_launches(&deny_within(&dir, &[])) {
+        let Some(envelope) = envelope_launches(&deny_within(&dir, &[])) else {
             return;
-        }
+        };
         let out = run_confined(
-            HostEnvelope::probe(),
+            envelope,
+            HostEnvelope::probe(envelope),
             &deny_within(&dir, &[&denied]),
             "echo READY",
         )
@@ -781,9 +842,9 @@ mod tests {
         std::fs::write(git.join("config"), "GIT-CONFIG-BYTES").unwrap();
         std::fs::write(&readable, "README-BYTES").unwrap();
 
-        if !envelope_launches(&deny_within(&dir, &[])) {
+        let Some(envelope) = envelope_launches(&deny_within(&dir, &[])) else {
             return;
-        }
+        };
         let script = format!(
             "echo READY\n\
              cat '{key}' 2>/dev/null || echo KEY-READ-REFUSED\n\
@@ -799,7 +860,8 @@ mod tests {
             readable = readable.display(),
         );
         let out = run_confined(
-            HostEnvelope::probe(),
+            envelope,
+            HostEnvelope::probe(envelope),
             &deny_within(&dir, &[&key, &git]),
             &script,
         )
@@ -896,14 +958,15 @@ mod tests {
     fn the_by_hand_dev_serves_a_confined_body() {
         let dir = workdir("dev-by-hand");
         let policy = deny_within(&dir, &[]);
-        if !envelope_launches(&policy) {
+        let Some(envelope) = envelope_launches(&policy) else {
             return;
-        }
+        };
 
         let out = run_confined(
+            envelope,
             HostEnvelope {
                 virtual_dev: false,
-                ..HostEnvelope::probe()
+                ..HostEnvelope::probe(envelope)
             },
             &policy,
             "echo x > /dev/null && echo NULL-OK\n\
@@ -959,6 +1022,62 @@ mod tests {
         let root = position_of(&args, &["--dev-bind", "/", "/"]).expect("the root bind");
         let proc_ = position_of(&args, &["--proc", "/proc"]).expect("a /proc mount");
         assert!(root < proc_, "/proc must be mounted over the bound root: {args:?}");
+    }
+
+    /// The launcher is the file pinned at boot, named by descriptor: no
+    /// `PATH` — the shell's override included — has any say in what runs.
+    #[test]
+    fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
+        let (cmd, _info_fd) = make_command_with_policy(
+            &stand_in(),
+            "/bin/true",
+            &[],
+            &unrestricted(),
+            None,
+            Ownership::Kept,
+            WHOLE,
+        )
+        .expect("ASCII paths render");
+        let program = cmd.get_program().to_string_lossy();
+        assert!(
+            program.starts_with("/proc/self/fd/"),
+            "the envelope must be exec'd by pinned descriptor: {program}"
+        );
+    }
+
+    /// Whatever the projection bound, the envelope's own file goes read-only
+    /// over it, before the masks — so a confined child can neither rewrite
+    /// the inode the pin execs nor have a deny displaced by the bind.
+    #[test]
+    fn the_envelope_binary_is_read_only_inside_every_envelope() {
+        let own = std::fs::canonicalize(stand_in().arg0()).expect("resolve the stand-in");
+        let own = own.to_string_lossy();
+        let dir = workdir("envelope-ro");
+        let dir_s = dir.to_string_lossy();
+        let denied = dir.join("secret");
+        std::fs::write(&denied, "x").unwrap();
+
+        for (label, policy, bind) in [
+            ("unrestricted", unrestricted(), ["--dev-bind", "/", "/"]),
+            (
+                "restricted",
+                deny_within(&dir, &[&denied]),
+                ["--bind", dir_s.as_ref(), dir_s.as_ref()],
+            ),
+        ] {
+            let args = argv(&policy);
+            let bound = position_of(&args, &bind).expect("the projection's bind");
+            let own_ro = position_of(&args, &["--ro-bind", &own, &own])
+                .unwrap_or_else(|| panic!("{label}: no read-only bind of the envelope: {args:?}"));
+            assert!(bound < own_ro, "{label}: the envelope's bind must win: {args:?}");
+            if let Some(mask) = position_of(
+                &args,
+                &["--ro-bind", "/dev/null", &denied.to_string_lossy()],
+            ) {
+                assert!(own_ro < mask, "{label}: masks go on last: {args:?}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A kept child's envelope is tied to our death and a surrendered one's
@@ -1018,7 +1137,7 @@ mod tests {
         use crate::sandbox::LaunchTarget;
 
         let policy = unrestricted();
-        if !envelope_launches(&policy) {
+        if envelope_launches(&policy).is_none() {
             return;
         }
 
@@ -1106,7 +1225,6 @@ mod tests {
     /// asserted rather than skipped, so a masked host cannot read as a pass.
     #[test]
     fn no_host_pid_is_nameable_inside_the_envelope() {
-        let host = HostEnvelope::probe();
         let restricted = deny_within(&workdir("pidns"), &[]);
         let mut sleeper = std::process::Command::new("sleep")
             .arg("30")
@@ -1122,10 +1240,11 @@ mod tests {
             sleeper = sleeper.id(),
         );
         for policy in [&unrestricted(), &restricted] {
-            if !envelope_launches(policy) {
+            let Some(envelope) = envelope_launches(policy) else {
                 continue;
-            }
-            let out = run_confined(host, policy, &script).expect("spawn bwrap");
+            };
+            let host = HostEnvelope::probe(envelope);
+            let out = run_confined(envelope, host, policy, &script).expect("spawn bwrap");
             let stdout = String::from_utf8_lossy(&out.stdout);
             assert!(
                 stdout.contains("READY"),
@@ -1162,7 +1281,6 @@ mod tests {
     /// `/proc/self` somebody else's.
     #[test]
     fn proc_self_is_the_payloads_own_on_every_projection() {
-        let host = HostEnvelope::probe();
         let restricted = deny_within(&workdir("procself"), &[]);
         let shell = std::fs::canonicalize("/bin/sh").expect("resolve /bin/sh");
         // `read` is a builtin, so `/proc/self` is the shell's; `cat`'s would be its own.
@@ -1171,10 +1289,11 @@ mod tests {
                       read pid _ < /proc/self/stat; echo STAT=$pid\n\
                       echo EXE=$(readlink /proc/$$/exe)\n";
         for policy in [&unrestricted(), &restricted] {
-            if !envelope_launches(policy) {
+            let Some(envelope) = envelope_launches(policy) else {
                 continue;
-            }
-            let out = run_confined(host, policy, script).expect("spawn bwrap");
+            };
+            let host = HostEnvelope::probe(envelope);
+            let out = run_confined(envelope, host, policy, script).expect("spawn bwrap");
             let stdout = String::from_utf8_lossy(&out.stdout);
             assert!(
                 stdout.contains("READY"),

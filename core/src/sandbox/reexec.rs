@@ -1,12 +1,14 @@
-//! Binary pinning and re-exec for the per-command OS sandbox.
+//! Binary pinning for the per-command OS sandbox.
 //!
-//! `sandbox::early_init` pins our own executable, so a per-command sandbox
-//! launch re-execs the build we booted from and not whatever a mid-session
-//! `cargo install` left at the path.  Linux pins by fd and re-execs
-//! `/proc/self/fd/<N>`; macOS cannot — `execve` is refused on a devfs entry,
-//! which carries no X bit — so it re-stats `(dev, ino)` before each spawn,
-//! catching the inode flip an atomic-rename swap leaves behind; Windows,
-//! confining at the parent's spawn, has no self re-exec to guard.
+//! `sandbox::early_init` pins every executable the sandbox will later exec on
+//! the session's behalf — ral itself everywhere, and on Linux the bwrap
+//! envelope — so a launch runs the file we booted with and not whatever a
+//! mid-session `cargo install`, a PATH override, or a confined child's write
+//! left at the name.  Linux pins by fd and execs `/proc/self/fd/<N>`; macOS
+//! cannot — `execve` is refused on a devfs entry, which carries no X bit — so
+//! it re-stats `(dev, ino)` before each spawn, catching the inode flip an
+//! atomic-rename swap leaves behind; Windows, confining at the parent's
+//! spawn, has no self re-exec to guard.
 //!
 //! `argv[0]` is always the on-disk path, whichever mechanism carried it.
 
@@ -16,10 +18,12 @@ use std::sync::OnceLock;
 #[cfg(target_os = "macos")]
 use crate::types::Error;
 
-// ── SandboxSelf ──────────────────────────────────────────────────────────
+// ── Pinned ───────────────────────────────────────────────────────────────
 
-/// Our own executable, pinned at `early_init` time.
-pub(super) struct SandboxSelf {
+/// An executable pinned at boot, before any shell exists: the one shape a
+/// `Command` the sandbox execs is ever built from, so nothing a session does
+/// to its environment can choose the file.
+pub(super) struct Pinned {
     #[allow(dead_code)]
     pin: Pin,
     /// `/proc/self/fd/<N>` on Linux, the on-disk path everywhere else.
@@ -28,19 +32,49 @@ pub(super) struct SandboxSelf {
     arg0: PathBuf,
 }
 
-#[cfg(unix)]
-impl SandboxSelf {
-    /// Re-exec the pinned binary under its on-disk name, which `exec_path`
-    /// on Linux is not.
+impl Pinned {
+    /// Pin the executable at `arg0` for the rest of the process's life;
+    /// `None` on any failure, which every caller reads as "unpinned".
+    pub(super) fn open(arg0: PathBuf) -> Option<Self> {
+        let (pin, exec_path) = build_pin(&arg0)?;
+        Some(Self {
+            pin,
+            exec_path,
+            arg0,
+        })
+    }
+
+    /// Exec the pinned file under its on-disk name, which `exec_path` on
+    /// Linux is not.  The program is an absolute path, so the child's `PATH`
+    /// — the shell's override included — is never consulted.
+    #[cfg(unix)]
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline helper, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
+        reason = "[io-door:silent:pinned-exec] Builds the Command for a boot-pinned sandbox binary (the ral re-exec for helpers and bundled tools, the bwrap envelope). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
     )]
-    pub(super) fn reexec_command(&self) -> std::process::Command {
+    pub(super) fn command(&self) -> std::process::Command {
         use std::os::unix::process::CommandExt;
         let mut cmd = std::process::Command::new(&self.exec_path);
         cmd.arg0(&self.arg0);
         cmd
+    }
+
+    /// The on-disk path the pin was taken from.
+    #[cfg(target_os = "linux")]
+    pub(super) fn arg0(&self) -> &std::path::Path {
+        &self.arg0
+    }
+
+    /// Where the pinned inode lives *now*, after any rename since boot, so a
+    /// mount meant for the file we exec lands on that file and not on
+    /// whatever has since taken its name.
+    #[cfg(target_os = "linux")]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:pin-locate] Reads the `/proc/self/fd/<N>` magic link of a boot-pinned sandbox binary to find the inode's current path for the envelope's own read-only bind. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
+    )]
+    pub(super) fn current_path(&self) -> std::io::Result<PathBuf> {
+        std::fs::read_link(&self.exec_path)
     }
 }
 
@@ -89,7 +123,7 @@ enum Pin {
     Unguarded,
 }
 
-pub(super) static SANDBOX_SELF: OnceLock<SandboxSelf> = OnceLock::new();
+pub(super) static SANDBOX_SELF: OnceLock<Pinned> = OnceLock::new();
 
 /// Pin our own executable for the rest of the process's life.
 ///
@@ -103,14 +137,9 @@ pub(super) fn register_sandbox_self() {
     let Ok(arg0) = std::env::current_exe() else {
         return;
     };
-    let Some((pin, exec_path)) = build_pin(&arg0) else {
-        return;
-    };
-    let _ = SANDBOX_SELF.set(SandboxSelf {
-        pin,
-        exec_path,
-        arg0,
-    });
+    if let Some(pinned) = Pinned::open(arg0) {
+        let _ = SANDBOX_SELF.set(pinned);
+    }
 }
 
 /// Open `arg0` and produce the `(pin, exec_path)` pair; `None` on any
@@ -118,7 +147,7 @@ pub(super) fn register_sandbox_self() {
 #[cfg(target_os = "linux")]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:pin-open] Opens the boot-time ral binary to pin it (by fd) for the Linux helper re-exec, immune to on-disk swaps. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
+    reason = "[io-door:silent:pin-open] Opens a boot-time sandbox binary (ral itself, the bwrap envelope) to pin it by fd, immune to on-disk swaps. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
 )]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     use std::os::fd::{AsRawFd, OwnedFd};
@@ -172,7 +201,7 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     clippy::disallowed_methods,
     reason = "[io-door:silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
 )]
-pub(super) fn verify_unswapped(s: &SandboxSelf) -> Result<(), Error> {
+pub(super) fn verify_unswapped(s: &Pinned) -> Result<(), Error> {
     use std::os::unix::fs::MetadataExt;
     let Pin::Stat { dev, ino } = &s.pin;
     let meta = std::fs::metadata(&s.arg0).map_err(|e| {
