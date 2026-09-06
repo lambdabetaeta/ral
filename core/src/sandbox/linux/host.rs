@@ -4,6 +4,7 @@
 //! a grant makes, so each is an invariant held where the host allows and
 //! reported where not.  Probed once, so the argv render stays pure in it.
 
+use super::landlock::Abi;
 use crate::sandbox::reexec::Pinned;
 use std::fmt;
 use std::process::Stdio;
@@ -15,6 +16,8 @@ pub(crate) struct HostEnvelope {
     pub(crate) private_pids: bool,
     /// `--dev /dev` mounts; otherwise [`super::render_dev`] stands in.
     pub(crate) virtual_dev: bool,
+    /// The kernel's Landlock level, or `None` where it has none.
+    pub(crate) landlock: Option<Abi>,
 }
 
 impl HostEnvelope {
@@ -24,6 +27,7 @@ impl HostEnvelope {
         *PROBED.get_or_init(|| Self {
             private_pids: bwrap_builds(envelope, &["--unshare-pid", "--proc", "/proc"]),
             virtual_dev: bwrap_builds(envelope, &["--dev", "/dev"]),
+            landlock: Abi::probe(),
         })
     }
 }
@@ -48,6 +52,41 @@ impl fmt::Display for HostEnvelope {
                 "  the container refuses a fresh devpts, so /dev is built by hand over the \
                  host's /dev/pts.  Lifted by running the container --privileged."
             )?;
+        }
+        let exec = self.landlock.is_some_and(|abi| abi >= Abi::EXEC);
+        writeln!(f, "kernel exec confinement: {}", held(exec))?;
+        if !exec {
+            writeln!(
+                f,
+                "  this kernel has no Landlock (not built in, or absent from the boot LSM \
+                 list); a confined child's re-execs (`sh -c`, `find -exec`) are gated only \
+                 by ral's own dispatch."
+            )?;
+        }
+        let scoped = self.landlock.is_some_and(|abi| abi >= Abi::SIGNAL_SCOPE);
+        writeln!(f, "signals scoped to the envelope: {}", held(scoped))?;
+        if !scoped {
+            match self.landlock {
+                Some(abi) => writeln!(
+                    f,
+                    "  this kernel's Landlock is ABI {abi}; the signal scope needs ABI {} \
+                     (Linux 6.12).",
+                    Abi::SIGNAL_SCOPE
+                )?,
+                None => writeln!(
+                    f,
+                    "  the signal scope needs Landlock ABI {} (Linux 6.12), and this kernel \
+                     has no Landlock at all.",
+                    Abi::SIGNAL_SCOPE
+                )?,
+            }
+            if !self.private_pids {
+                writeln!(
+                    f,
+                    "  the pid namespace is unheld too, so a confined child can signal \
+                     same-uid host processes."
+                )?;
+            }
         }
         Ok(())
     }

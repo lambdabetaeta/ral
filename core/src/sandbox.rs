@@ -5,9 +5,12 @@
 //! diagnostics (`diag`).
 //!
 //! Exec is gated in-process everywhere by `capability::check_exec_args`.
-//! macOS also renders a Seatbelt `process-exec` allow-list, catching the
-//! re-execs that check never sees (`sh -c`, `find -exec`); bwrap has no
-//! path-exec filter, so on Linux the in-process gate stands alone.
+//! Both Unix backends also render the allow-list into the kernel, catching the
+//! re-execs that check never sees (`sh -c`, `find -exec`): macOS a Seatbelt
+//! `process-exec` clause, Linux a Landlock `Execute` ruleset the payload
+//! enters inside the bwrap envelope (`linux::landlock`).  Landlock being
+//! allow-list only, a deny *inside* an allow stays with the in-process gate
+//! there; Seatbelt carries it into the kernel.
 
 mod diag;
 mod launch;
@@ -47,7 +50,8 @@ pub(crate) fn run_child_shell_extension(shell: &mut Shell) {
 
 // `runtime::command::process::build_command` routes an external/bundled child
 // through `sandboxed_command` when a projection is active and no guest jail
-// already confines it; `serve_sandbox_exec` is the macOS post-Seatbelt tail.
+// already confines it; `serve_sandbox_exec` is the Unix trampoline's tail,
+// run once the process sandbox is entered.
 pub use launch::serve_sandbox_exec;
 pub(crate) use launch::{LaunchTarget, Ownership, sandboxed_command};
 
@@ -94,11 +98,11 @@ pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(
 /// Carries the JSON-encoded [`SandboxProjection`] into a re-exec'd ral process.
 const SANDBOX_PROJECTION_FLAG: &str = "--sandbox-projection";
 
-/// Tail of the macOS per-command host re-exec: once `early_init` has entered
-/// Seatbelt, [`serve_sandbox_exec`] `execve`s the program inside it.  Distinct
-/// from `--ral-bundled-tool`, which runs a bundled tool in-process rather than
-/// execing a host binary.
-#[cfg(target_os = "macos")]
+/// Tail of a per-command host re-exec: once `early_init` has entered the
+/// process sandbox, [`serve_sandbox_exec`] `execve`s the program inside it.
+/// Distinct from `--ral-bundled-tool`, which runs a bundled tool in-process
+/// rather than execing a host binary.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const SANDBOX_EXEC_FLAG: &str = "--ral-sandbox-exec";
 
 /// Debug switch: set to any value to make [`dump_profile_if_requested`] print
@@ -134,8 +138,11 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
         let host = linux::HostEnvelope::probe(envelope);
         match linux::make_command_with_policy(
             envelope,
-            "/bin/true",
-            &[],
+            linux::Payload {
+                program: "/bin/true",
+                args: &[],
+                image: None,
+            },
             policy,
             None,
             launch::Ownership::Kept,
@@ -153,11 +160,36 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
             }
             Err(e) => eprintln!("--- bwrap argv error ---\n{e}"),
         }
+        dump_landlock_layer(policy, host.landlock);
     }
     #[cfg(windows)]
     {
         let dump = windows::dump_profile_for_windows(policy);
         eprintln!("--- appcontainer profile ---\n{dump}--- end appcontainer profile ---");
+    }
+}
+
+/// The layer the trampoline would enter inside the envelope, printed after the
+/// bwrap argv it is applied under.
+#[cfg(target_os = "linux")]
+fn dump_landlock_layer(
+    policy: &crate::types::SandboxProjection,
+    abi: Option<linux::landlock::Abi>,
+) {
+    let Some(abi) = abi else {
+        eprintln!("landlock layer: none (no Landlock on this kernel)");
+        return;
+    };
+    let rendered = match policy.rendered() {
+        Ok(rendered) => rendered,
+        Err(e) => {
+            eprintln!("--- landlock layer error ---\n{e}");
+            return;
+        }
+    };
+    match linux::landlock::Layer::render(&rendered.exec, abi) {
+        Some(layer) => eprintln!("--- landlock layer ---\n{layer}--- end landlock layer ---"),
+        None => eprintln!("landlock layer: none (nothing to enter)"),
     }
 }
 
@@ -210,8 +242,11 @@ pub fn restricted_envelope_launches() -> bool {
         };
         linux::make_command_with_policy(
             envelope,
-            "/bin/true",
-            &[],
+            linux::Payload {
+                program: "/bin/true",
+                args: &[],
+                image: None,
+            },
             &projection,
             None,
             launch::Ownership::Surrendered,
@@ -276,9 +311,9 @@ pub(crate) fn self_command() -> std::io::Result<Command> {
 /// All sandbox startup work, returning argv stripped of
 /// `--sandbox-projection`.
 ///
-/// Pins this binary and, on macOS, enters the OS process sandbox when a
-/// projection was supplied; Linux and Windows confine the child from the
-/// parent instead.
+/// Pins this binary and, on Unix, enters the OS process sandbox when a
+/// projection was supplied — Seatbelt on macOS, Landlock inside the bwrap
+/// envelope on Linux.  Windows confines the child from the parent instead.
 ///
 /// # Errors
 /// A malformed `--sandbox-projection`, one on a platform that never emits it,
@@ -327,7 +362,7 @@ pub fn teardown_session() {
 ///
 /// First [`early_init`], then the per-command re-exec tails on the argv it
 /// leaves — the `--ral-bundled-tool` multicall via
-/// [`crate::try_run_bundled_tool`], and on macOS the host `execve` via
+/// [`crate::try_run_bundled_tool`], and on Unix the host `execve` via
 /// [`serve_sandbox_exec`].  That order is the point: a `--sandbox-projection`
 /// child is confined before its tail runs.  The stripped argv is discarded, so
 /// the `ral` binary, which parses a CLI out of it, calls [`early_init`] itself.

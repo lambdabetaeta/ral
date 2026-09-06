@@ -137,6 +137,9 @@ uu_timeout   = { version = "0.10", optional = true }
 uu_test      = { version = "0.10", optional = true }
 uu_tac       = { version = "0.10", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
 [target.'cfg(windows)'.dependencies]
 ctrlc        = "3"
 # Path -> capability-name digest for the sandbox's persistent DACL stamps.

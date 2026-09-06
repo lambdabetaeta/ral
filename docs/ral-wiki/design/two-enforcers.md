@@ -43,10 +43,11 @@ narrates *how* each runs; this page argues *why* both exist.
 - *Hence the asymmetry by dimension.* A spawned child's reads and writes are held
   by the sandbox; `net` has no in-process gate at all, because ral dispatches no
   network operation for the gate to see ([[design/grant|grant]]).
-- *Linux exec is the open seam.* ral gates the top-level spawn, but bwrap cannot
-  path-filter the child's re-execs, so path-scoped exec confinement is incomplete
-  there — a known gap, not a solved case
-  ([[decisions/260530_linux-exec-confinement|linux-exec-confinement]]).
+- *Linux exec is a Landlock domain, minus the denies.* bwrap cannot path-filter
+  a child's re-execs, so the payload enters a Landlock layer of its own inside
+  the envelope; Landlock is allow-list only, so a deny *inside* an admit still
+  rests on the in-process gate
+  ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]).
 
 **What a grant's guarantee means on Linux, row by row.** Rows above the rule
 are *promises*: a grant names them, and a host that cannot hold one refuses

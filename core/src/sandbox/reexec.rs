@@ -78,8 +78,9 @@ impl Pinned {
     }
 }
 
-/// The pinned `argv[0]`, or the live `current_exe()`.  The bundled-tool
-/// re-exec hands this to bwrap, which mounts a fresh `/proc` in which a
+/// The pinned `argv[0]`, or the live `current_exe()`.  Every Linux launch
+/// execs this — the trampoline is the envelope's only payload — and it is the
+/// on-disk name because bwrap mounts a fresh `/proc`, in which a
 /// `/proc/self/fd` target would neither bind nor resolve.
 #[cfg(target_os = "linux")]
 pub(super) fn self_arg0() -> std::io::Result<PathBuf> {
@@ -229,10 +230,13 @@ pub(super) fn verify_unswapped(s: &Pinned) -> Result<(), Error> {
 
 // ── Process sandbox entry ────────────────────────────────────────────────
 
-/// Enter the OS sandbox for this process if a projection was supplied.  Only
-/// macOS enters one: Linux (the bwrap envelope) and Windows (the `AppContainer`
-/// token) confine a child from the parent, so there the flag is a regression
-/// to the macOS shape, or forged, and is refused rather than run unconfined.
+/// Enter the OS sandbox for this process if a projection was supplied: macOS
+/// enters Seatbelt, Linux the Landlock layer — inside the bwrap envelope the
+/// parent has already built around us, which is the only place it can be
+/// entered, a domain handling any fs right forbidding `mount(2)`.  Windows
+/// confines a child from the parent with an `AppContainer` token, so there the
+/// flag is a regression to the Unix shape, or forged, and is refused rather
+/// than run unconfined.
 pub(super) fn maybe_enter_process_sandbox(
     policy: Option<&crate::types::SandboxProjection>,
 ) -> Result<(), String> {
@@ -243,7 +247,11 @@ pub(super) fn maybe_enter_process_sandbox(
     {
         super::macos::enter_current_process(policy)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        super::linux::landlock::enter(policy)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = policy;
         Err(format!(

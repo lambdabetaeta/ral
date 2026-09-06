@@ -6,6 +6,14 @@
 //! launch exactly as on the unsandboxed path so the two cannot drift.  Linux
 //! is the exception: bwrap ignores the launcher's `current_dir` and starts the
 //! child in its namespace root, so the logical cwd rides the argv as `--chdir`.
+//!
+//! macOS and Linux share one trampoline: the payload is *ral*, carrying the
+//! folded projection and the target as its argv tail ([`trampoline_tail`]), so
+//! the child enters the process sandbox in `early_init` and only then becomes
+//! the target.  On Linux the trampoline runs inside the bwrap envelope, which
+//! is what makes the Landlock layer possible at all: a domain handling any fs
+//! right forbids `mount(2)`, bwrap's first act.  Windows has no trampoline —
+//! its `LowBox` token is applied at the parent's spawn.
 
 use crate::types::{Break, Error, Settled, Shell};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -44,6 +52,10 @@ pub(crate) enum Ownership {
 /// `shell` is taken only for the logical cwd Linux folds in as `--chdir`, and
 /// `ownership` likewise reaches Linux alone, the one backend that builds an
 /// envelope process to tie to us.
+///
+/// macOS and Linux both launch the [`trampoline_tail`] re-exec of ral —
+/// Linux's under bwrap — while Windows spawns the target itself, confined by
+/// the token the parent stamps on it.
 #[cfg_attr(
     not(target_os = "linux"),
     allow(
@@ -139,9 +151,40 @@ fn windows_sandboxed_command(
     Ok(launch)
 }
 
-/// Linux: expand the target into the bwrap argv via
-/// `super::linux::make_command_with_policy`, which binds an absolute program
-/// path RO so bwrap can exec it.  A bundled tool re-execs *us* through the
+/// The argv every confined re-exec of ral carries: the folded projection the
+/// child enters in `early_init`, then the target it becomes inside that
+/// confinement — a bundled tool run in-process under the `--ral-bundled-tool`
+/// tail, a host program `execve`d by [`serve_sandbox_exec`] under the
+/// `--ral-sandbox-exec` one.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn trampoline_tail(
+    projection: &crate::types::SandboxProjection,
+    target: LaunchTarget,
+    args: &[String],
+) -> Settled<Vec<String>> {
+    let json = serde_json::to_string(projection).map_err(|e| {
+        Break::Error(Error::new(
+            format!("sandbox: failed to encode projection: {e}"),
+            1,
+        ))
+    })?;
+    let (sentinel, name) = match target {
+        LaunchTarget::BundledTool { tool } => {
+            (crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG, tool)
+        }
+        LaunchTarget::Host { program } => (super::SANDBOX_EXEC_FLAG, program),
+    };
+    let mut tail = Vec::with_capacity(args.len() + 4);
+    tail.push(super::SANDBOX_PROJECTION_FLAG.to_string());
+    tail.push(json);
+    tail.push(sentinel.to_string());
+    tail.push(name.to_string());
+    tail.extend_from_slice(args);
+    Ok(tail)
+}
+
+/// Linux: the payload is always the trampoline, launched under bwrap by
+/// `super::linux::make_command_with_policy`.  It re-execs *us* through the
 /// on-disk `arg0`, not the fd-pinned `/proc/self/fd/N` exec path: bwrap mounts
 /// a fresh `/proc`, where that target would neither bind nor resolve.
 #[cfg(target_os = "linux")]
@@ -156,58 +199,41 @@ fn linux_sandboxed_command(
         .map_err(|why| Break::Error(super::confinement_unavailable(why)))?;
     let host = super::linux::HostEnvelope::probe(envelope);
     let cwd = shell.cwd().to_string_lossy().into_owned();
-    match target {
-        LaunchTarget::Host { program } => super::linux::make_command_with_policy(
-            envelope,
-            program,
-            args,
-            projection,
-            Some(cwd.as_str()),
-            ownership,
-            host,
-        )
-        .map_err(|e| Break::Error(Error::new(e, 1))),
-        LaunchTarget::BundledTool { tool } => {
-            let self_path = super::reexec::self_arg0().map_err(|e| {
-                Break::Error(Error::new(
-                    format!("sandbox: cannot resolve self exe for bundled tool: {e}"),
-                    1,
-                ))
-            })?;
-            let mut tool_args = Vec::with_capacity(args.len() + 2);
-            tool_args.push(crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG.to_string());
-            tool_args.push(tool.to_string());
-            tool_args.extend_from_slice(args);
-            super::linux::make_command_with_policy(
-                envelope,
-                &self_path.to_string_lossy(),
-                &tool_args,
-                projection,
-                Some(cwd.as_str()),
-                ownership,
-                host,
-            )
-            .map_err(|e| Break::Error(Error::new(e, 1)))
-        }
-    }
+    let self_path = super::reexec::self_arg0().map_err(|e| {
+        Break::Error(Error::new(
+            format!("sandbox: cannot resolve self exe for the confined re-exec: {e}"),
+            1,
+        ))
+    })?;
+    let tail = trampoline_tail(projection, target, args)?;
+    let image = match target {
+        LaunchTarget::Host { program } => Some(program),
+        LaunchTarget::BundledTool { .. } => None,
+    };
+    super::linux::make_command_with_policy(
+        envelope,
+        super::linux::Payload {
+            program: &self_path.to_string_lossy(),
+            args: &tail,
+            image,
+        },
+        projection,
+        Some(cwd.as_str()),
+        ownership,
+        host,
+    )
+    .map_err(|e| Break::Error(Error::new(e, 1)))
 }
 
-/// macOS: re-exec ral with the folded projection so the child enters Seatbelt
-/// in `early_init`, then runs the target *inside* it — a bundled tool
-/// in-process under the `--ral-bundled-tool` tail, a host program by the
-/// `execve` `serve_sandbox_exec` performs under the `--ral-sandbox-exec` one.
+/// macOS: re-exec ral with the trampoline tail, so the child enters Seatbelt
+/// in `early_init` and only then becomes the target.
 #[cfg(target_os = "macos")]
 fn macos_sandboxed_command(
     projection: &crate::types::SandboxProjection,
     target: LaunchTarget,
     args: &[String],
 ) -> Settled<Command> {
-    let json = serde_json::to_string(projection).map_err(|e| {
-        Break::Error(Error::new(
-            format!("sandbox: failed to encode projection: {e}"),
-            1,
-        ))
-    })?;
+    let tail = trampoline_tail(projection, target, args)?;
     // Refuse to re-exec a pinned executable swapped on disk since boot (a
     // mid-session `cargo install`), which would launch a foreign build.
     if let Some(s) = super::reexec::SANDBOX_SELF.get() {
@@ -219,27 +245,18 @@ fn macos_sandboxed_command(
             1,
         ))
     })?;
-    cmd.arg(super::SANDBOX_PROJECTION_FLAG).arg(json);
-    match target {
-        LaunchTarget::BundledTool { tool } => {
-            cmd.arg(crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG)
-                .arg(tool)
-                .args(args);
-        }
-        LaunchTarget::Host { program } => {
-            cmd.arg(super::SANDBOX_EXEC_FLAG).arg(program).args(args);
-        }
-    }
+    cmd.args(tail);
     Ok(cmd)
 }
 
-/// macOS: `execve` the host program carried in the `--ral-sandbox-exec` tail,
-/// now that `early_init` has entered Seatbelt.
+/// `execve` the host program carried in the `--ral-sandbox-exec` tail, now
+/// that `early_init` has entered the process sandbox — Seatbelt on macOS, the
+/// Landlock layer inside the bwrap envelope on Linux.
 ///
 /// `args` is the post-`early_init` argv, and `None` — the sentinel absent —
 /// lets normal dispatch continue.  On success `execve` never returns; a
 /// failure surfaces as 127, the POSIX "cannot exec" code.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn serve_sandbox_exec(args: &[String]) -> Option<u8> {
     use std::os::unix::process::CommandExt;
 
@@ -267,10 +284,9 @@ pub fn serve_sandbox_exec(args: &[String]) -> Option<u8> {
     Some(127)
 }
 
-/// Off-macOS nothing emits the tail: Linux expands the host target into the
-/// bwrap argv and Windows confines at the parent's spawn, so a child never
-/// re-enters and has nothing to serve.
-#[cfg(not(target_os = "macos"))]
+/// Windows alone emits no tail: it confines at the parent's spawn, so its
+/// child is the target already and has nothing to serve.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn serve_sandbox_exec(_args: &[String]) -> Option<u8> {
     None
 }
@@ -492,8 +508,9 @@ mod tests {
             return;
         }
         let shell = Shell::default();
+        let projection = restrictive();
         let (cmd, _info_fd) = linux_sandboxed_command(
-            &restrictive(),
+            &projection,
             LaunchTarget::Host { program: "/bin/sh" },
             &["-c".into(), "echo x > /etc/ral_denied".into()],
             Ownership::Kept,
@@ -516,7 +533,60 @@ mod tests {
             .position(|a| a == "--")
             .expect("bwrap -- separator");
         assert!(chdir < sep, "--chdir must precede the -- separator");
-        assert_eq!(args[sep + 1], "/bin/sh");
-        assert_eq!(&args[sep + 2..], ["-c", "echo x > /etc/ral_denied"]);
+        // ral --sandbox-projection <json> --ral-sandbox-exec /bin/sh -c …
+        let self_arg0 = super::super::reexec::self_arg0().expect("own path");
+        assert_eq!(args[sep + 1], self_arg0.to_string_lossy());
+        assert_eq!(args[sep + 2], super::super::SANDBOX_PROJECTION_FLAG);
+        let decoded: SandboxProjection =
+            serde_json::from_str(&args[sep + 3]).expect("projection round-trips");
+        assert_eq!(decoded, projection);
+        assert_eq!(args[sep + 4], super::super::SANDBOX_EXEC_FLAG);
+        assert_eq!(args[sep + 5], "/bin/sh");
+        assert_eq!(&args[sep + 6..], ["-c", "echo x > /etc/ral_denied"]);
+        // The trampoline execs it in turn, so bwrap must let it see the file —
+        // under its real name, since bwrap will not mount onto a symlink.
+        let real_sh = std::fs::canonicalize("/bin/sh").expect("resolve /bin/sh");
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--ro-bind" && w[1] == real_sh.to_string_lossy()),
+            "the host image must be bound read-only into the envelope: {args:?}"
+        );
+    }
+
+    /// The bundled-tool seam takes the same trampoline, differing only in the
+    /// sentinel: there is no host binary to `execve` afterwards.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_bundled_tool_command_uses_the_bundled_tool_tail() {
+        super::super::linux::register_envelope();
+        if super::super::linux::envelope().is_err() {
+            eprintln!("skipping: this host has no bwrap to pin");
+            return;
+        }
+        let shell = Shell::default();
+        let (cmd, _info_fd) = linux_sandboxed_command(
+            &restrictive(),
+            LaunchTarget::BundledTool { tool: "ls" },
+            &["-l".into()],
+            Ownership::Kept,
+            &shell,
+        )
+        .expect("build Linux bundled command");
+        let args = argv(&cmd);
+        let sep = args
+            .iter()
+            .position(|a| a == "--")
+            .expect("bwrap -- separator");
+        assert_eq!(args[sep + 2], super::super::SANDBOX_PROJECTION_FLAG);
+        assert_eq!(
+            args[sep + 4],
+            crate::runtime::pipeline::helper::BUNDLED_TOOL_FLAG
+        );
+        assert_eq!(args[sep + 5], "ls");
+        assert_eq!(args[sep + 6], "-l");
+        assert!(
+            !args.iter().any(|a| a == super::super::SANDBOX_EXEC_FLAG),
+            "bundled tool must not carry the host-exec sentinel: {args:?}"
+        );
     }
 }

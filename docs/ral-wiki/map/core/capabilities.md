@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 0e45e6ab
+generated_at_commit: dcb5ad01
 generated_at_date: 2026-09-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -152,12 +152,15 @@ directories — [[decisions/260601_xdg-resolver-consolidation|xdg-resolver-conso
 
 External commands inside a `grant` block run under an OS sandbox enforcing the
 declared **filesystem and network** capabilities. Exec is gated in-process on
-every platform (`capability::check_exec_args`) before the spawn; on macOS the
-Seatbelt profile additionally renders a `process-exec` allow-list, catching the
-re-execs the in-process check never sees (`sh -c`, `find -exec`), while bwrap on
-Linux and the AppContainer on Windows have no path-exec filter so there the
-in-process gate stands alone (on Windows the deny-by-default fs projection
-still bounds which images a child can *read*, and so load, at all).
+every platform (`capability::check_exec_args`) before the spawn; both Unix
+backends additionally render the allow-list into the kernel, catching the
+re-execs the in-process check never sees (`sh -c`, `find -exec`) — macOS as a
+Seatbelt `process-exec` clause, Linux as a Landlock `Execute` ruleset the
+payload enters inside the bwrap envelope (`linux/landlock.rs`; Landlock being
+allow-list only, a deny *inside* an admit stays with the in-process gate
+there). The AppContainer on Windows has no path-exec filter, so there the
+in-process gate stands alone (the deny-by-default fs projection still bounds
+which images a child can *read*, and so load, at all).
 
 Inside a *guest* — a VM whose engine runs under `ral-daemon`, signalled by
 `RAL_GUEST` — the per-command OS backend is not engaged at all: every spawn
@@ -216,17 +219,27 @@ device for `net` to govern; the in-process gates apply unchanged
   (`runtime/command/process.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
   confining that *one* child: a `LaunchTarget::Host` external, or a
-  `LaunchTarget::BundledTool` placed as `ral --ral-bundled-tool <tool>`. Linux
-  wraps each child in `bwrap` (`make_command_with_policy`); macOS re-execs the
-  pinned self (`ral --sandbox-projection <json> --ral-sandbox-exec <host>`, or
-  `--ral-bundled-tool <tool>`) so the child enters Seatbelt in `early_init`, then
-  `serve_sandbox_exec` `execve`s the host target inside it; Windows builds the
+  `LaunchTarget::BundledTool` placed as `ral --ral-bundled-tool <tool>`. macOS
+  and Linux share one trampoline argv, `trampoline_tail`: the payload is the
+  pinned ral itself, `ral --sandbox-projection <json>` followed by either
+  `--ral-sandbox-exec <host>` or `--ral-bundled-tool <tool>`, so the child
+  enters the process sandbox in `early_init` and only then becomes the target,
+  `serve_sandbox_exec` `execve`ing a host program inside the confinement.
+  macOS spawns that trampoline directly; Linux spawns it under `bwrap`
+  (`make_command_with_policy`), giving the full shape **bwrap → ral trampoline
+  → Landlock → `execve`**. That order is forced rather than chosen: a Landlock
+  domain handling any fs right forbids `mount(2)`, bwrap's first act, so the
+  layer can only be entered *inside* the envelope bwrap has already built.
+  `make_command_with_policy` therefore takes a `Payload { program, args, image
+  }` — `program` is the trampoline, `image` the host binary it will exec in
+  turn — and binds both read-only where absolute, since bwrap cannot exec what
+  it cannot see. Windows builds the
   target's `Launch` directly and `windows::session::confine` attaches its
   projection's AppContainer LowBox `SECURITY_CAPABILITIES`, so the parent's own
-  spawn is the confinement point — never a re-exec child. The
+  spawn is the confinement point — never a re-exec child; the
   `--ral-sandbox-exec` sentinel and `serve_sandbox_exec`'s execve arm are
-  `cfg(target_os = "macos")`, the only platform that emits the host re-exec
-  tail. The launcher also takes an `Ownership` (`Kept` / `Surrendered`, the
+  `cfg(any(target_os = "linux", target_os = "macos"))`, Windows alone emitting
+  no tail. The launcher also takes an `Ownership` (`Kept` / `Surrendered`, the
   second variant `cfg(unix)` since only there does the verb that makes the
   distinction exist): it reaches the Linux backend alone, which decides the
   two ties between the session and the envelope — death (`--die-with-parent`)
@@ -333,8 +346,9 @@ reads as closed. `mac_profile_denies_network_when_disabled` asserts it over
 every rule in the rendered profile, with a `net: true` positive control so the
 denial cannot pass vacuously.
 
-Path-scoped *exec* confinement is unenforced on Linux (no landlock backend) —
-[[decisions/260530_linux-exec-confinement|linux-exec-confinement]].
+Path-scoped *exec* confinement on Linux is a Landlock layer the payload enters
+inside the envelope; its deny sets stay with the in-process gate —
+[[decisions/260906_landlock-exec-layer|landlock-exec-layer]].
 
 `diag.rs` (with per-platform readers in `diag/macos.rs` / `diag/linux.rs`) turns
 a kernel-reported sandbox denial into an actionable hint on the

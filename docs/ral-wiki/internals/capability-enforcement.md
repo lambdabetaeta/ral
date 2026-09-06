@@ -91,9 +91,12 @@ spawned process does on its own.**
 - *Exec* — gated in-process on every platform: `check_exec_args` vets the
   arguments *before* the spawn. On macOS the Seatbelt profile additionally
   renders a `process-exec` allow-list, catching re-execs the in-process check
-  never sees (`sh -c`, `find -exec`); bwrap on Linux and the AppContainer on
-  Windows have no path-exec filter, so there the in-process gate stands alone
-  ([[decisions/260530_linux-exec-confinement|linux-exec-confinement]]). That
+  never sees (`sh -c`, `find -exec`); on Linux a Landlock domain entered inside
+  the bwrap envelope carries the same admits into the kernel, minus the deny
+  sets Landlock's allow-list-only shape cannot express
+  ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]); the
+  AppContainer on Windows has no path-exec filter, so there the in-process gate
+  stands alone. That
   allow-list derives its admits from the same `evaluate_exec` verdict, per
   nameable command, so it never denies a command the in-process gate admits nor
   admits one it denies — a CI-enforced conservatism invariant

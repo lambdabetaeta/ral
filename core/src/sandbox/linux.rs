@@ -8,8 +8,14 @@
 //! build one ([`HostEnvelope`]), a seccomp blocklist on x86-64 and aarch64.
 //! bwrap has no endpoint filter — `--unshare-net` drops the network namespace
 //! whole — so `SandboxProjection::net` is a bit, not a list.
+//!
+//! The payload is always ral's own trampoline (`super::launch`), which enters
+//! the [`landlock`] layer rendering `policy.exec` and only then becomes the
+//! target: that order is forced, a Landlock domain handling any fs right
+//! forbidding the `mount(2)` bwrap opens with.
 
 mod host;
+pub(crate) mod landlock;
 
 pub(crate) use host::HostEnvelope;
 
@@ -59,15 +65,25 @@ pub(super) fn envelope() -> Result<&'static Pinned, &'static str> {
     )
 }
 
-/// Build the [`Command`] that runs `name` under the pinned `envelope` for
+/// What the envelope execs, and what it needs bound to do so.
+#[derive(Clone, Copy)]
+pub(crate) struct Payload<'a> {
+    pub(crate) program: &'a str,
+    pub(crate) args: &'a [String],
+    /// A host binary the payload execs in turn, bound RO beside `program`.
+    pub(crate) image: Option<&'a str>,
+}
+
+/// Build the [`Command`] that runs `payload` under the pinned `envelope` for
 /// `policy`: binds derived from the policy prefixes, `deny_paths` overlaid
 /// last.
 ///
 /// Every name is taken from `policy.rendered()`, so a rule lands on each
 /// spelling the kernel might present rather than on the one the grant author
 /// happened to write — a deny naming a symlink masks the target the resolved
-/// twin names.  `policy.exec` has no counterpart here: bwrap filters mounts
-/// and syscalls, not exec by path, so the in-ral gate is the only check.
+/// twin names.  `policy.exec` has no counterpart in the argv: bwrap filters
+/// mounts and syscalls, not exec by path, so it is rendered by [`landlock`]
+/// and entered by the payload *inside* this envelope.
 ///
 /// `chdir` is the in-sandbox cwd — bwrap starts the child in its
 /// mount-namespace root — so a per-command launch passes the target's
@@ -91,8 +107,7 @@ pub(super) fn envelope() -> Result<&'static Pinned, &'static str> {
 )]
 pub(crate) fn make_command_with_policy(
     envelope: &Pinned,
-    name: &str,
-    args: &[String],
+    payload: Payload,
     policy: &SandboxProjection,
     chdir: Option<&str>,
     ownership: super::launch::Ownership,
@@ -109,8 +124,14 @@ pub(crate) fn make_command_with_policy(
     // miss Nix store paths, ~/.cargo/bin and the like — an unbound exe
     // fails with ENOENT inside the sandbox.  Bind the file, not its parent:
     // siblings stay under whatever the caller's `fs:` capability declared.
-    if crate::path::is_absolute(name) {
-        ro_binds.extend(render_paths(&[name])?);
+    // By its real name: bwrap refuses a symlink as a mount destination, and
+    // `/bin/sh` is one on every merged-/usr distribution.
+    for exe in [Some(payload.program), payload.image].into_iter().flatten() {
+        if crate::path::is_absolute(exe)
+            && let Ok(real) = crate::path::canon::canonicalise_strict(std::path::Path::new(exe))
+        {
+            ro_binds.extend(render_paths(&[real.to_string_lossy()])?);
+        }
     }
     ro_binds.sort();
     ro_binds.dedup();
@@ -184,8 +205,8 @@ pub(crate) fn make_command_with_policy(
         c.args(["--seccomp", "100"]);
     }
     c.arg("--");
-    c.arg(name);
-    c.args(args);
+    c.arg(payload.program);
+    c.args(payload.args);
     Ok((c, info_fd))
 }
 
@@ -518,15 +539,17 @@ fn default_ro_binds() -> Vec<String> {
     reason = "[io-door:test] test fs/process scaffolding"
 )]
 mod tests {
-    use super::{HostEnvelope, Pinned, make_command_with_policy};
-    use crate::sandbox::launch::Ownership;
-    use crate::types::{FsProjection, FsRules, SandboxProjection};
+    use super::{HostEnvelope, Payload, Pinned, make_command_with_policy};
+    use crate::sandbox::LaunchTarget;
+    use crate::sandbox::launch::{Ownership, trampoline_tail};
+    use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
     use std::process::Stdio;
 
     /// A bare Linux host.
     const WHOLE: HostEnvelope = HostEnvelope {
         private_pids: true,
         virtual_dev: true,
+        landlock: Some(super::landlock::Abi::SIGNAL_SCOPE),
     };
 
     fn workdir(tag: &str) -> std::path::PathBuf {
@@ -566,7 +589,12 @@ mod tests {
     }
 
     fn argv_on(host: HostEnvelope, policy: &SandboxProjection, ownership: Ownership) -> Vec<String> {
-        make_command_with_policy(&stand_in(), "/bin/true", &[], policy, None, ownership, host)
+        let payload = Payload {
+            program: "/bin/true",
+            args: &[],
+            image: None,
+        };
+        make_command_with_policy(&stand_in(), payload, policy, None, ownership, host)
             .expect("ASCII paths render")
             .0
             .get_args()
@@ -689,16 +717,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Through the very argv a launch builds: the payload is the trampoline,
+    /// which enters the Landlock layer before `execve`ing `/bin/sh`.  A broken
+    /// trampoline is exactly what these tests exist to catch, so even the
+    /// positive control goes this way.
     fn run_confined(
         envelope: &Pinned,
         host: HostEnvelope,
         policy: &SandboxProjection,
         script: &str,
     ) -> Option<std::process::Output> {
+        let sh = "/bin/sh";
+        let tail = trampoline_tail(
+            policy,
+            LaunchTarget::Host { program: sh },
+            &["-c".to_string(), script.to_string()],
+        )
+        .expect("the projection encodes");
+        let self_path = crate::sandbox::reexec::self_arg0().expect("own path");
+        let self_path = self_path.to_string_lossy();
         let (mut cmd, info_fd) = make_command_with_policy(
             envelope,
-            "/bin/sh",
-            &["-c".to_string(), script.to_string()],
+            Payload {
+                program: &self_path,
+                args: &tail,
+                image: Some(sh),
+            },
             policy,
             None,
             Ownership::Kept,
@@ -1030,8 +1074,11 @@ mod tests {
     fn the_launcher_is_the_pinned_envelope_and_never_a_name() {
         let (cmd, _info_fd) = make_command_with_policy(
             &stand_in(),
-            "/bin/true",
-            &[],
+            Payload {
+                program: "/bin/true",
+                args: &[],
+                image: None,
+            },
             &unrestricted(),
             None,
             Ownership::Kept,
@@ -1230,9 +1277,13 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("spawn a host-side sleeper");
+        // Nameability is asked of the table, never of `kill -0`: the Landlock
+        // signal scope refuses a host pid whether or not it is nameable, so a
+        // signal cannot tell the two apart — that is what makes the scope the
+        // hole's second closure (`a_confined_child_cannot_signal_a_host_process`).
         let script = format!(
             "echo READY\n\
-             kill -0 {me} 2>/dev/null && echo HOST-PID-VISIBLE\n\
+             [ -d /proc/{me} ] && echo HOST-PID-VISIBLE\n\
              kill -TERM {sleeper} 2>/dev/null && echo SLEEPER-SIGNALLED\n\
              echo PIDS=$(ls /proc | grep -c '^[0-9]')\n\
              echo INIT=$(tr '\\0' ' ' < /proc/1/cmdline)\n",
@@ -1315,6 +1366,316 @@ mod tests {
                 assert!(own < 64, "the shell's pid must be namespace-local: {stdout}");
             }
         }
+    }
+
+    // ── The Landlock layer the trampoline enters ─────────────────────────
+
+    /// `exec` as the sole axis under test.  The fs stays open on purpose: a
+    /// prefix that also hid the planted binary would let these tests pass on a
+    /// layer that confines nothing.
+    fn exec_policy(exec: ExecProjection) -> SandboxProjection {
+        SandboxProjection {
+            fs: FsProjection::Unrestricted,
+            net: true,
+            exec,
+        }
+    }
+
+    /// The command directories, plus whatever a test adds.  The loader and
+    /// ral's own binary need no naming: `Layer::render` folds them in.
+    fn admitting(dirs: &[&str], paths: &[&str]) -> ExecProjection {
+        ExecProjection::Restricted {
+            allow_paths: paths.iter().map(|p| (*p).to_string()).collect(),
+            allow_dirs: ["/bin", "/usr/bin"]
+                .iter()
+                .chain(dirs)
+                .map(|d| (*d).to_string())
+                .collect(),
+            deny_paths: Vec::new(),
+            deny_dirs: Vec::new(),
+            deny_basenames: Vec::new(),
+        }
+    }
+
+    /// Landlock's own precondition, alongside `envelope_launches`: without a
+    /// layer to enter there is nothing here to prove either way.
+    fn landlock_at_least(need: super::landlock::Abi) -> bool {
+        match super::landlock::Abi::probe() {
+            None => {
+                eprintln!(
+                    "skipping: this kernel has no Landlock (not built in, or absent \
+                     from the boot LSM list)"
+                );
+                false
+            }
+            Some(abi) if abi < need => {
+                eprintln!("skipping: this kernel's Landlock is ABI {abi}, and this test needs {need}");
+                false
+            }
+            Some(_) => true,
+        }
+    }
+
+    /// A runnable copy of `/bin/true` under `dir`, which no test admits.
+    fn planted_binary(dir: &std::path::Path) -> std::path::PathBuf {
+        let copy = dir.join("planted");
+        std::fs::copy("/bin/true", &copy).expect("copy /bin/true");
+        copy
+    }
+
+    /// The interpreter bypass the in-ral gate cannot see: `sh -c` re-execs
+    /// whatever it likes, and only the kernel is still looking.
+    #[test]
+    fn an_interpreter_cannot_exec_a_binary_outside_the_admits() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let dir = workdir("exec-bypass");
+        let copy = planted_binary(&dir);
+        let policy = exec_policy(admitting(&[], &[]));
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!(
+            "echo READY\n\
+             '{copy}' && echo PLANTED-RAN\n\
+             /bin/true && echo ADMITTED-RAN\n",
+            copy = copy.display(),
+        );
+        let out =
+            run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script).expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("READY"),
+            "the envelope did not launch: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !emitted(&stdout, "PLANTED-RAN"),
+            "a binary outside every admit ran: {stdout}"
+        );
+        assert!(
+            emitted(&stdout, "ADMITTED-RAN"),
+            "the layer denied an admitted command, so the deny proves nothing: {stdout}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The domain is inherited, so nesting interpreters buys nothing.
+    #[test]
+    fn a_nested_interpreter_inherits_the_layer() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let dir = workdir("exec-nested");
+        let copy = planted_binary(&dir);
+        let policy = exec_policy(admitting(&[], &[]));
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!(
+            "echo READY\n\
+             sh -c '{copy}' && echo PLANTED-RAN\n\
+             sh -c /bin/true && echo ADMITTED-RAN\n",
+            copy = copy.display(),
+        );
+        let out =
+            run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script).expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("READY"),
+            "the envelope did not launch: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !emitted(&stdout, "PLANTED-RAN"),
+            "a second `sh -c` escaped the layer: {stdout}"
+        );
+        assert!(
+            emitted(&stdout, "ADMITTED-RAN"),
+            "the layer denied an admitted command two levels down: {stdout}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A layer about exec must leave the two ordinary shapes alone: a dynamic
+    /// binary, whose loader needs `Execute` of its own, and a `#!` script,
+    /// which needs it on both the script and its interpreter.
+    #[test]
+    fn an_admitted_dynamic_binary_and_shebang_script_both_run() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = workdir("exec-shebang");
+        let script_file = dir.join("hello.sh");
+        std::fs::write(&script_file, "#!/bin/sh\necho SCRIPT-RAN\n").expect("write script");
+        std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
+            .expect("make the script runnable");
+        let policy = exec_policy(admitting(&[&dir.to_string_lossy()], &[]));
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!(
+            "echo READY\n\
+             cat /dev/null && echo DYNAMIC-RAN\n\
+             '{file}'\n",
+            file = script_file.display(),
+        );
+        let out =
+            run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script).expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        for ran in ["READY", "DYNAMIC-RAN", "SCRIPT-RAN"] {
+            assert!(stdout.contains(ran), "missing {ran}: {stdout} {stderr}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// From ABI 2 a domain that does not *handle* `Refer` refuses every
+    /// cross-directory rename with `EXDEV`, which a layer about exec must not
+    /// do.  Only a spawn sees it: the rendered layer says nothing about `mv`.
+    #[test]
+    fn a_cross_directory_rename_inside_the_write_prefix_still_works() {
+        if !landlock_at_least(super::landlock::Abi::REFER) {
+            return;
+        }
+        let dir = workdir("exec-refer");
+        let (from, to) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(from.join("x"), "MOVED-BYTES").unwrap();
+        let policy = exec_policy(admitting(&[], &[]));
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!(
+            "echo READY\nmv '{from}/x' '{to}/x' && echo MOVED\n",
+            from = from.display(),
+            to = to.display(),
+        );
+        let out =
+            run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script).expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            emitted(&stdout, "MOVED"),
+            "the exec layer refused a rename it has no business refusing: {stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(to.join("x").exists(), "the rename did not land on the host");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/tmp` is a confined child's own writable ground on every projection,
+    /// so nothing but the exec layer stops it dropping a binary there and
+    /// running it.  Both halves are asserted: an admit that changes nothing
+    /// would read as a pass against half of this.
+    #[test]
+    fn a_binary_written_to_tmp_runs_only_where_tmp_is_admitted() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let dir = workdir("exec-tmp");
+        let planted = dir.join("planted");
+        let script = format!(
+            "echo READY\n\
+             cp /bin/true '{planted}' || echo COPY-FAILED\n\
+             '{planted}' && echo TMP-RAN\n",
+            planted = planted.display(),
+        );
+        let script = script.as_str();
+        for (admits_tmp, dirs) in [(false, &[][..]), (true, &["/tmp"][..])] {
+            let policy = exec_policy(admitting(dirs, &[]));
+            let Some(envelope) = envelope_launches(&policy) else {
+                return;
+            };
+            let out = run_confined(envelope, HostEnvelope::probe(envelope), &policy, script)
+                .expect("spawn");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("READY") && !emitted(&stdout, "COPY-FAILED"),
+                "the drop into /tmp did not happen, so nothing was tested: {stdout} {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                emitted(&stdout, "TMP-RAN"),
+                admits_tmp,
+                "/tmp exec must follow the admits alone: {stdout}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The scope rides every launch, whatever the exec axis says: without it a
+    /// confined child signals same-uid host processes wherever the host cannot
+    /// build a pid namespace.  Which errno the refusal carries is the kernel's
+    /// business — `ESRCH` behind a pid namespace, `EPERM` without — so only
+    /// the refusal is asserted.
+    #[test]
+    fn a_confined_child_cannot_signal_a_host_process() {
+        if !landlock_at_least(super::landlock::Abi::SIGNAL_SCOPE) {
+            return;
+        }
+        let dir = workdir("exec-scope");
+        let mut sleeper = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a host-side sleeper");
+        let script = format!(
+            "echo READY\n\
+             kill -0 {pid} 2>/dev/null && echo SLEEPER-VISIBLE\n\
+             kill -TERM {pid} 2>/dev/null && echo SLEEPER-SIGNALLED\n",
+            pid = sleeper.id(),
+        );
+        for exec in [ExecProjection::Unrestricted, admitting(&[], &[])] {
+            let policy = exec_policy(exec);
+            let Some(envelope) = envelope_launches(&policy) else {
+                break;
+            };
+            let out = run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script)
+                .expect("spawn");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("READY"),
+                "the envelope did not launch: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                !emitted(&stdout, "SLEEPER-VISIBLE") && !emitted(&stdout, "SLEEPER-SIGNALLED"),
+                "a host process was reachable from inside the envelope: {stdout}"
+            );
+            assert!(
+                sleeper.try_wait().expect("poll the sleeper").is_none(),
+                "the host-side sleeper was killed from inside the envelope"
+            );
+        }
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing is tightened that the projection did not ask for.
+    #[test]
+    fn an_unrestricted_exec_projection_leaves_every_binary_runnable() {
+        if !landlock_at_least(super::landlock::Abi::EXEC) {
+            return;
+        }
+        let dir = workdir("exec-open");
+        let copy = planted_binary(&dir);
+        let policy = exec_policy(ExecProjection::Unrestricted);
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let script = format!("echo READY\n'{copy}' && echo PLANTED-RAN\n", copy = copy.display());
+        let out =
+            run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script).expect("spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            emitted(&stdout, "PLANTED-RAN"),
+            "an unrestricted exec projection must confine no exec at all: {stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

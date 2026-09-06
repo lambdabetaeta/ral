@@ -1,8 +1,12 @@
 ---
-status: open
+status: superseded
 ---
 
 # Linux exec confinement is a known gap
+
+Superseded by [[decisions/260906_landlock-exec-layer|landlock-exec-layer]]: the
+gap is closed by a Landlock domain the confined payload enters inside the bwrap
+envelope.
 
 On Linux the OS-level sandbox is a `bwrap` envelope with two mechanisms:
 
