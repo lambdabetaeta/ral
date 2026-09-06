@@ -198,7 +198,16 @@ fn linux_sandboxed_command(
     let envelope = super::linux::envelope()
         .map_err(|why| Break::Error(super::confinement_unavailable(why)))?;
     let host = super::linux::HostEnvelope::probe(envelope);
+    if let unprobed @ super::linux::landlock::Landlock::Unprobed(_) = host.landlock {
+        return Err(Break::Error(super::confinement_unavailable(
+            &unprobed.to_string(),
+        )));
+    }
     let cwd = shell.cwd().to_string_lossy().into_owned();
+    // bwrap execs the trampoline by its on-disk name, where a swap would land.
+    if let Some(s) = super::reexec::SANDBOX_SELF.get() {
+        super::reexec::verify_unswapped(s).map_err(Break::Error)?;
+    }
     let self_path = super::reexec::self_arg0().map_err(|e| {
         Break::Error(Error::new(
             format!("sandbox: cannot resolve self exe for the confined re-exec: {e}"),

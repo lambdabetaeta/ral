@@ -26,14 +26,31 @@ impl Abi {
     pub(crate) const REFER: Self = Self(2);
     /// `LANDLOCK_SCOPE_SIGNAL`, Linux 6.12.
     pub(crate) const SIGNAL_SCOPE: Self = Self(6);
+}
 
-    /// This kernel's level, or `None` where Landlock is not built in (ENOSYS)
-    /// or absent from the boot LSM list (EOPNOTSUPP).  The syscall is the only
-    /// honest source: a version is not a feature list, so `uname` is never read.
-    pub(crate) fn probe() -> Option<Self> {
+impl fmt::Display for Abi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// What the version probe answered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Landlock {
+    /// Not built in (`ENOSYS`) or absent from the boot LSM list (`EOPNOTSUPP`).
+    Absent,
+    At(Abi),
+    /// Any other errno: not a kernel without Landlock, so never treated as one.
+    Unprobed(i32),
+}
+
+impl Landlock {
+    /// The syscall is the only honest source: a version is not a feature list,
+    /// so `uname` is never read.
+    pub(crate) fn probe() -> Self {
         /// Not exported by `libc`; `LANDLOCK_CREATE_RULESET_VERSION` in the UAPI.
         const VERSION: libc::c_ulong = 1;
-        static PROBED: OnceLock<Option<Abi>> = OnceLock::new();
+        static PROBED: OnceLock<Landlock> = OnceLock::new();
         *PROBED.get_or_init(|| {
             // SAFETY: the version query takes a null attr and a zero size.
             let level = unsafe {
@@ -44,14 +61,41 @@ impl Abi {
                     VERSION,
                 )
             };
-            u32::try_from(level).ok().map(Self)
+            let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            classify(level, errno)
         })
+    }
+
+    pub(crate) fn abi(self) -> Option<Abi> {
+        match self {
+            Self::At(abi) => Some(abi),
+            _ => None,
+        }
     }
 }
 
-impl fmt::Display for Abi {
+fn classify(level: libc::c_long, errno: i32) -> Landlock {
+    match u32::try_from(level) {
+        Ok(level) => Landlock::At(Abi(level)),
+        Err(_) if errno == libc::ENOSYS || errno == libc::EOPNOTSUPP => Landlock::Absent,
+        Err(_) => Landlock::Unprobed(errno),
+    }
+}
+
+impl fmt::Display for Landlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        match self {
+            Self::Absent => write!(
+                f,
+                "this kernel has no Landlock (not built in, or absent from the boot LSM list)"
+            ),
+            Self::At(abi) => write!(f, "this kernel's Landlock is ABI {abi}"),
+            Self::Unprobed(errno) => write!(
+                f,
+                "the Landlock version probe failed: {}, which is not a kernel without it",
+                io::Error::from_raw_os_error(*errno)
+            ),
+        }
     }
 }
 
@@ -68,9 +112,9 @@ struct Layer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Exec {
     admits: Vec<Rendered>,
-    /// `Refer` handled and granted on `/`.  From ABI 2 a domain that does not
-    /// handle it refuses every cross-directory rename and link (EXDEV), which
-    /// a layer about exec must not do.
+    /// `Refer` handled and granted on `/`: a domain that does not refuses every
+    /// cross-directory rename and link (EXDEV), which a layer about exec must
+    /// not do.  Grantable from ABI 2.
     frees_refer: bool,
 }
 
@@ -94,7 +138,10 @@ impl Layer {
                 allow_dirs,
                 ..
             } => {
-                let base: Vec<String> = platform_base().into_iter().chain(self_path()).collect();
+                let base: Vec<String> = platform_base()
+                    .into_iter()
+                    .chain([self_path()?])
+                    .collect();
                 let mut admits: Vec<Rendered> = allow_paths
                     .iter()
                     .chain(allow_dirs)
@@ -221,10 +268,15 @@ fn open(path: &str) -> Result<landlock::PathFd, Error> {
 
 /// The running binary, admitted unconditionally so a bundled-tool re-exec
 /// need not be named by every policy — as macOS admits its own exec path.
-fn self_path() -> Option<String> {
-    super::super::reexec::self_arg0()
-        .ok()
-        .and_then(|p| p.into_os_string().into_string().ok())
+fn self_path() -> Result<String, String> {
+    let path = super::super::reexec::self_arg0()
+        .map_err(|e| format!("landlock: cannot resolve ral's own path: {e}"))?;
+    path.into_os_string().into_string().map_err(|p| {
+        format!(
+            "landlock: ral's own path {} is not Unicode, so it cannot be admitted",
+            p.display()
+        )
+    })
 }
 
 /// The dynamic linkers, and nothing else.  `execve` of a dynamic binary needs
@@ -303,11 +355,15 @@ impl fmt::Display for Error {
 }
 
 /// Enter the layer `policy` asks for, in the current process.  A kernel with
-/// no Landlock enters nothing: the parent already reported the unheld
-/// invariant, and there is no layer to apply.
+/// no Landlock enters nothing: absence is a declared, unheld invariant, and
+/// there is no layer to apply.
 pub(crate) fn enter(policy: &SandboxProjection) -> Result<(), String> {
-    let Some(abi) = Abi::probe() else {
-        return Ok(());
+    let abi = match Landlock::probe() {
+        Landlock::Absent => return Ok(()),
+        unprobed @ Landlock::Unprobed(_) => {
+            return Err(format!("landlock: {unprobed}; refusing to run confined"));
+        }
+        Landlock::At(abi) => abi,
     };
     match Layer::for_policy(policy, abi)? {
         Some(layer) => layer.enter().map_err(|e| e.to_string()),
@@ -315,12 +371,19 @@ pub(crate) fn enter(policy: &SandboxProjection) -> Result<(), String> {
     }
 }
 
-/// The layer the trampoline would enter on a kernel at `abi`, for the profile
-/// dump: entered by a trampoline, it is otherwise invisible in the bwrap argv.
-pub(crate) fn dump(policy: &SandboxProjection, abi: Option<Abi>) {
-    let Some(abi) = abi else {
-        eprintln!("landlock layer: none (no Landlock on this kernel)");
-        return;
+/// The layer the trampoline would enter on this kernel, for the profile dump:
+/// entered by a trampoline, it is otherwise invisible in the bwrap argv.
+pub(crate) fn dump(policy: &SandboxProjection, landlock: Landlock) {
+    let abi = match landlock {
+        Landlock::Absent => {
+            eprintln!("landlock layer: none (no Landlock on this kernel)");
+            return;
+        }
+        unprobed @ Landlock::Unprobed(_) => {
+            eprintln!("landlock layer: unknown — {unprobed}; a confined launch refuses");
+            return;
+        }
+        Landlock::At(abi) => abi,
     };
     match Layer::for_policy(policy, abi) {
         Ok(Some(layer)) => eprintln!("--- landlock layer ---\n{layer}--- end landlock layer ---"),
@@ -363,6 +426,18 @@ mod tests {
 
     fn layer(exec: &ExecProjection<Rendered>, abi: Abi) -> Option<Layer> {
         Layer::render(exec, abi).expect("ASCII paths render")
+    }
+
+    #[test]
+    fn only_the_two_absence_errnos_read_as_a_kernel_without_landlock() {
+        assert_eq!(classify(5, 0), Landlock::At(Abi(5)));
+        assert_eq!(classify(-1, libc::ENOSYS), Landlock::Absent);
+        assert_eq!(classify(-1, libc::EOPNOTSUPP), Landlock::Absent);
+        assert_eq!(
+            classify(-1, libc::EPERM),
+            Landlock::Unprobed(libc::EPERM),
+            "a seccomp EPERM is not absence"
+        );
     }
 
     #[test]

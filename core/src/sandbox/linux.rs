@@ -167,8 +167,7 @@ pub(crate) fn make_command_with_policy(
     }
     match &rendered.fs {
         FsProjection::Restricted(_) => {
-            c.args(["--proc", "/proc"]);
-            render_dev(&mut c, host);
+            // Before the prefix binds: a write prefix under `/tmp` lands inside it.
             c.args(["--tmpfs", "/tmp"]);
             for bind in &ro_binds {
                 if !rw_binds.contains(bind) {
@@ -178,6 +177,9 @@ pub(crate) fn make_command_with_policy(
             for bind in &rw_binds {
                 c.args(["--bind", bind.as_str(), bind.as_str()]);
             }
+            // After them, or a prefix of `/` or `/proc` re-binds the host's over these.
+            c.args(["--proc", "/proc"]);
+            render_dev(&mut c, host);
         }
         FsProjection::Unrestricted => {
             // `--bind` would skip device nodes.  `/proc` goes over the root:
@@ -188,13 +190,9 @@ pub(crate) fn make_command_with_policy(
         }
     }
     render_cgroup(&mut c, host);
-    // The file we exec, read-only over whatever the projection bound — `/`
-    // wholesale under `Unrestricted` — so no confined child rewrites the
-    // pinned inode in place, nor moves it: a mountpoint cannot be renamed.
-    let own = envelope
-        .current_path()
-        .map_err(|e| format!("bwrap: the pinned envelope has no path any more: {e}"))?;
-    c.arg("--ro-bind").arg(&own).arg(&own);
+    for own in pinned_binaries(envelope)? {
+        c.arg("--ro-bind").arg(&own).arg(&own);
+    }
     // Masks go on after every bind: last mount wins.  `pinned_dirs` goes
     // unused because a mask is anchored to the inode, so a renamed ancestor
     // carries it — the pin macOS renders explicitly, Linux gets for free.
@@ -215,6 +213,27 @@ pub(crate) fn make_command_with_policy(
     c.arg(payload.program);
     c.args(payload.args);
     Ok((c, info_fd))
+}
+
+/// The files a launch execs — the envelope, and the trampoline bwrap execs by
+/// its on-disk name — bound read-only over whatever the projection bound, so
+/// no confined child rewrites a pinned inode in place, nor moves it: a
+/// mountpoint cannot be renamed.
+fn pinned_binaries(envelope: &Pinned) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut paths = vec![
+        envelope
+            .current_path()
+            .map_err(|e| format!("bwrap: the pinned envelope has no path any more: {e}"))?,
+    ];
+    if let Some(own) = super::reexec::SANDBOX_SELF.get() {
+        paths.push(
+            own.current_path()
+                .map_err(|e| format!("ral: the pinned trampoline has no path any more: {e}"))?,
+        );
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 /// The envelope's `/dev`: bwrap's `--dev`, or its shape by hand where the
@@ -322,6 +341,30 @@ impl InfoFd {
     }
 }
 
+/// Move `src` to the fixed descriptor `at` with `CLOEXEC` cleared, for bwrap
+/// to inherit.  Post-fork: async-signal-safe calls only.
+unsafe fn install_inherited(src: libc::c_int, at: libc::c_int) -> std::io::Result<()> {
+    unsafe {
+        // `dup2(n, n)` is a no-op, and the close would then shut the fd being installed.
+        if src != at {
+            if libc::dup2(src, at) < 0 {
+                let failed = std::io::Error::last_os_error();
+                libc::close(src);
+                return Err(failed);
+            }
+            libc::close(src);
+        }
+        let flags = libc::fcntl(at, libc::F_GETFD);
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::fcntl(at, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 /// Open the `--info-fd` pipe for a `Kept` launch and register the write
 /// end at [`INFO_FD`], `CLOEXEC` cleared so it survives into `bwrap` —
 /// the `apply_seccomp` pattern.  `--info-fd` itself is appended here so a
@@ -333,19 +376,7 @@ fn open_info_fd(c: &mut Command) -> Result<InfoFd, String> {
     let (reader, writer) = crate::process::cloexec_pipe().map_err(|e| e.to_string())?;
     let write_fd = std::os::fd::AsRawFd::as_raw_fd(&writer);
     unsafe {
-        c.pre_exec(move || {
-            if libc::dup2(write_fd, INFO_FD) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let flags = libc::fcntl(INFO_FD, libc::F_GETFD);
-            if flags < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(INFO_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        c.pre_exec(move || install_inherited(write_fd, INFO_FD));
     }
     c.args(["--info-fd", &INFO_FD.to_string()]);
     Ok(InfoFd { reader, writer })
@@ -485,13 +516,7 @@ fn park_seccomp_program(filter: &[u8], fd: libc::c_int) -> std::io::Result<()> {
             libc::close(memfd);
             return Err(std::io::Error::last_os_error());
         }
-        if libc::dup2(memfd, fd) < 0 {
-            libc::close(memfd);
-            return Err(std::io::Error::last_os_error());
-        }
-        libc::close(memfd);
-        libc::fcntl(fd, libc::F_SETFD, 0i32); // clear CLOEXEC
-        Ok(())
+        install_inherited(memfd, fd)
     }
 }
 
@@ -553,7 +578,7 @@ mod tests {
         private_pids: true,
         virtual_dev: true,
         private_cgroup: true,
-        landlock: Some(super::landlock::Abi::SIGNAL_SCOPE),
+        landlock: super::landlock::Landlock::At(super::landlock::Abi::SIGNAL_SCOPE),
     };
 
     fn workdir(tag: &str) -> std::path::PathBuf {
@@ -1174,13 +1199,62 @@ mod tests {
         }
     }
 
-    /// The bound root carries the host's `/proc`; the fresh mount must land after it.
+    /// The bound root, or a prefix of `/`, carries the host's `/proc` and
+    /// `/dev`; the envelope's own must land after it, or `HostEnvelope`
+    /// reports a hidden table that is the host's.  `/tmp` goes the other
+    /// way: a write prefix beneath it lands inside the tmpfs.
     #[test]
-    fn an_unrestricted_envelope_mounts_proc_over_the_bound_root() {
-        let args = argv(&unrestricted());
-        let root = position_of(&args, &["--dev-bind", "/", "/"]).expect("the root bind");
-        let proc_ = position_of(&args, &["--proc", "/proc"]).expect("a /proc mount");
-        assert!(root < proc_, "/proc must be mounted over the bound root: {args:?}");
+    fn the_fresh_proc_and_dev_go_over_every_projection_bind() {
+        let dir = workdir("proc-over-binds");
+        let dir_s = dir.to_string_lossy().into_owned();
+        let rooted = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                read_prefixes: vec!["/".to_string()],
+                write_prefixes: vec![dir_s.clone()],
+                ..FsRules::default()
+            }),
+            net: true,
+            exec: ExecProjection::default(),
+        };
+        // `Unrestricted` dev-binds `/` wholesale and mounts no `/dev` of its own.
+        for (label, policy, binds, fresh) in [
+            (
+                "unrestricted",
+                unrestricted(),
+                vec![["--dev-bind", "/", "/"]],
+                vec![["--proc", "/proc"]],
+            ),
+            (
+                "restricted",
+                rooted,
+                vec![
+                    ["--ro-bind", "/", "/"],
+                    ["--ro-bind", "/usr", "/usr"],
+                    ["--bind", dir_s.as_str(), dir_s.as_str()],
+                ],
+                vec![["--proc", "/proc"], ["--dev", "/dev"], ["--tmpfs", "/tmp"]],
+            ),
+        ] {
+            let args = argv(&policy);
+            let at = |piece: &[&str]| {
+                position_of(&args, piece)
+                    .unwrap_or_else(|| panic!("{label}: no {piece:?} in the argv: {args:?}"))
+            };
+            for bind in &binds {
+                for mount in &fresh {
+                    let ordered = if mount[1] == "/tmp" {
+                        at(mount) < at(bind)
+                    } else {
+                        at(bind) < at(mount)
+                    };
+                    assert!(
+                        ordered,
+                        "{label}: {bind:?} and {mount:?} are in the wrong order: {args:?}"
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The launcher is the file pinned at boot, named by descriptor: no
@@ -1207,13 +1281,20 @@ mod tests {
         );
     }
 
-    /// Whatever the projection bound, the envelope's own file goes read-only
-    /// over it, before the masks — so a confined child can neither rewrite
-    /// the inode the pin execs nor have a deny displaced by the bind.
+    /// Whatever the projection bound, both files a launch execs go read-only
+    /// over it, before the masks.  The two names coincide here, the stand-in
+    /// envelope being this test binary.
     #[test]
     fn the_envelope_binary_is_read_only_inside_every_envelope() {
+        crate::sandbox::reexec::register_sandbox_self();
         let own = std::fs::canonicalize(stand_in().arg0()).expect("resolve the stand-in");
-        let own = own.to_string_lossy();
+        let own = own.to_string_lossy().into_owned();
+        let trampoline = crate::sandbox::reexec::SANDBOX_SELF
+            .get()
+            .expect("ral pins itself")
+            .current_path()
+            .expect("the pinned trampoline still has a path");
+        let trampoline = trampoline.to_string_lossy().into_owned();
         let dir = workdir("envelope-ro");
         let dir_s = dir.to_string_lossy();
         let denied = dir.join("secret");
@@ -1229,14 +1310,18 @@ mod tests {
         ] {
             let args = argv(&policy);
             let bound = position_of(&args, &bind).expect("the projection's bind");
-            let own_ro = position_of(&args, &["--ro-bind", &own, &own])
-                .unwrap_or_else(|| panic!("{label}: no read-only bind of the envelope: {args:?}"));
-            assert!(bound < own_ro, "{label}: the envelope's bind must win: {args:?}");
-            if let Some(mask) = position_of(
+            let mask = position_of(
                 &args,
                 &["--ro-bind", "/dev/null", &denied.to_string_lossy()],
-            ) {
-                assert!(own_ro < mask, "{label}: masks go on last: {args:?}");
+            );
+            for (what, path) in [("envelope", own.as_str()), ("trampoline", trampoline.as_str())] {
+                let ro = position_of(&args, &["--ro-bind", path, path]).unwrap_or_else(|| {
+                    panic!("{label}: no read-only bind of the {what}: {args:?}")
+                });
+                assert!(bound < ro, "{label}: the {what}'s bind must win: {args:?}");
+                if let Some(mask) = mask {
+                    assert!(ro < mask, "{label}: masks go on last: {args:?}");
+                }
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -1515,19 +1600,25 @@ mod tests {
     /// Landlock's own precondition, alongside `envelope_launches`: without a
     /// layer to enter there is nothing here to prove either way.
     fn landlock_at_least(need: super::landlock::Abi) -> bool {
-        match super::landlock::Abi::probe() {
-            None => {
+        use super::landlock::Landlock;
+        match Landlock::probe() {
+            Landlock::Absent => {
                 eprintln!(
                     "skipping: this kernel has no Landlock (not built in, or absent \
                      from the boot LSM list)"
                 );
                 false
             }
-            Some(abi) if abi < need => {
+            // A host whose probe fails is broken, not a host without Landlock.
+            Landlock::Unprobed(errno) => panic!(
+                "the Landlock probe failed: {}",
+                std::io::Error::from_raw_os_error(errno)
+            ),
+            Landlock::At(abi) if abi < need => {
                 eprintln!("skipping: this kernel's Landlock is ABI {abi}, and this test needs {need}");
                 false
             }
-            Some(_) => true,
+            Landlock::At(_) => true,
         }
     }
 
@@ -1647,9 +1738,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// From ABI 2 a domain that does not *handle* `Refer` refuses every
-    /// cross-directory rename with `EXDEV`, which a layer about exec must not
-    /// do.  Only a spawn sees it: the rendered layer says nothing about `mv`.
+    /// A domain that does not *handle* `Refer` refuses every cross-directory
+    /// rename with `EXDEV`, which a layer about exec must not do.  Only a
+    /// spawn sees it, and only the inode does: `mv` turns that refusal into a
+    /// copy and an unlink.
     #[test]
     fn a_cross_directory_rename_inside_the_write_prefix_still_works() {
         if !landlock_at_least(super::landlock::Abi::REFER) {
@@ -1665,7 +1757,10 @@ mod tests {
             return;
         };
         let script = format!(
-            "echo READY\nmv '{from}/x' '{to}/x' && echo MOVED\n",
+            "echo READY\n\
+             set -- $(ls -i '{from}/x'); echo INODE-BEFORE=$1\n\
+             mv '{from}/x' '{to}/x' && echo MOVED\n\
+             set -- $(ls -i '{to}/x'); echo INODE-AFTER=$1\n",
             from = from.display(),
             to = to.display(),
         );
@@ -1678,6 +1773,12 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(to.join("x").exists(), "the rename did not land on the host");
+        let before = field(&stdout, "INODE-BEFORE=").expect("an inode before the move");
+        assert_eq!(
+            field(&stdout, "INODE-AFTER="),
+            Some(before),
+            "`mv` fell back to copy-and-unlink, so the rename itself was refused: {stdout}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -4,7 +4,7 @@
 //! a grant makes, so each is an invariant held where the host allows and
 //! reported where not.  Probed once, so the argv render stays pure in it.
 
-use super::landlock::Abi;
+use super::landlock::{Abi, Landlock};
 use crate::sandbox::reexec::Pinned;
 use std::fmt;
 use std::process::Stdio;
@@ -19,8 +19,8 @@ pub(crate) struct HostEnvelope {
     /// `--unshare-cgroup` builds, so [`super::render_cgroup`] re-roots the
     /// tree; otherwise the payload sees the host's.
     pub(crate) private_cgroup: bool,
-    /// The kernel's Landlock level, or `None` where it has none.
-    pub(crate) landlock: Option<Abi>,
+    /// What the kernel's Landlock version probe answered.
+    pub(crate) landlock: Landlock,
 }
 
 impl HostEnvelope {
@@ -31,7 +31,7 @@ impl HostEnvelope {
             private_pids: bwrap_builds(envelope, &["--unshare-pid", "--proc", "/proc"]),
             virtual_dev: bwrap_builds(envelope, &["--dev", "/dev"]),
             private_cgroup: bwrap_builds(envelope, &["--unshare-cgroup"]),
-            landlock: Abi::probe(),
+            landlock: Landlock::probe(),
         })
     }
 }
@@ -66,32 +66,28 @@ impl fmt::Display for HostEnvelope {
                  the ones its /proc/self/cgroup names."
             )?;
         }
-        let exec = self.landlock.is_some_and(|abi| abi >= Abi::EXEC);
+        let exec = self.landlock.abi().is_some_and(|abi| abi >= Abi::EXEC);
         writeln!(f, "kernel exec confinement: {}", held(exec))?;
-        if !exec {
-            writeln!(
+        match self.landlock {
+            unprobed @ Landlock::Unprobed(_) => {
+                writeln!(f, "  {unprobed}; a confined launch refuses.")?;
+            }
+            absent @ Landlock::Absent => writeln!(
                 f,
-                "  this kernel has no Landlock (not built in, or absent from the boot LSM \
-                 list); a confined child's re-execs (`sh -c`, `find -exec`) are gated only \
-                 by ral's own dispatch."
-            )?;
+                "  {absent}; a confined child's own re-execs (`sh -c`, `find -exec`) are \
+                 gated by nothing: ral's dispatch sees only what it launches itself."
+            )?,
+            Landlock::At(_) => {}
         }
-        let scoped = self.landlock.is_some_and(|abi| abi >= Abi::SIGNAL_SCOPE);
+        let scoped = self.landlock.abi().is_some_and(|abi| abi >= Abi::SIGNAL_SCOPE);
         writeln!(f, "signals scoped to the envelope: {}", held(scoped))?;
         if !scoped {
-            match self.landlock {
-                Some(abi) => writeln!(
+            if let at @ (Landlock::At(_) | Landlock::Absent) = self.landlock {
+                writeln!(
                     f,
-                    "  this kernel's Landlock is ABI {abi}; the signal scope needs ABI {} \
-                     (Linux 6.12).",
+                    "  {at}; the signal scope needs ABI {} (Linux 6.12).",
                     Abi::SIGNAL_SCOPE
-                )?,
-                None => writeln!(
-                    f,
-                    "  the signal scope needs Landlock ABI {} (Linux 6.12), and this kernel \
-                     has no Landlock at all.",
-                    Abi::SIGNAL_SCOPE
-                )?,
+                )?;
             }
             if !self.private_pids {
                 writeln!(

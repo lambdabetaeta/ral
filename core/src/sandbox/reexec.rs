@@ -5,8 +5,10 @@
 //! envelope — so a launch runs the file we booted with and not whatever a
 //! mid-session `cargo install`, a PATH override, or a confined child's write
 //! left at the name.  Linux pins by fd and execs `/proc/self/fd/<N>`; macOS
-//! cannot — `execve` is refused on a devfs entry, which carries no X bit — so
-//! it re-stats `(dev, ino)` before each spawn, catching the inode flip an
+//! cannot — `execve` is refused on a devfs entry, which carries no X bit.
+//! The confined trampoline is exec'd by its on-disk name on both — bwrap
+//! resolves it inside a namespace with a fresh `/proc` — so both re-stat
+//! `(dev, ino)` before each such spawn, catching the inode flip an
 //! atomic-rename swap leaves behind; Windows, confining at the parent's
 //! spawn, has no self re-exec to guard.
 //!
@@ -15,7 +17,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use crate::types::Error;
 
 // ── Pinned ───────────────────────────────────────────────────────────────
@@ -236,17 +238,14 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
 /// every per-command `--sandbox-projection` re-exec, to catch an executable
 /// swapped on disk since registration.
 ///
-/// macOS-only, the lone platform with a parent-side self re-exec — Linux
-/// goes through the fd-pinned path, out of a swap's reach, and Windows never
-/// re-execs itself — so `Pin::Stat` is the only variant compiled here.
-#[cfg(target_os = "macos")]
+/// Every Unix: the trampoline is exec'd by name on both, so the Linux fd pin
+/// is no protection here.  Windows never re-execs itself.
+#[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
 )]
 pub(super) fn verify_unswapped(s: &Pinned) -> Result<(), Error> {
-    use std::os::unix::fs::MetadataExt;
-    let Pin::Stat { dev, ino } = &s.pin;
     let meta = std::fs::metadata(&s.arg0).map_err(|e| {
         Error::new(
             format!(
@@ -256,7 +255,7 @@ pub(super) fn verify_unswapped(s: &Pinned) -> Result<(), Error> {
             1,
         )
     })?;
-    if meta.dev() == *dev && meta.ino() == *ino {
+    if s.is_inode(&meta) {
         Ok(())
     } else {
         Err(Error::new(
