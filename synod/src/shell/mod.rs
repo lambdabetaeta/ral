@@ -18,8 +18,16 @@ pub mod sink;
 
 use exarch::provider::credential::CredentialStore;
 use exarch::provider::models::{LiveSource, ModelCatalog};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter as _, Manager};
+
+/// The two halves [`Accounts`] holds.  Behind `Arc`s because a conversation's
+/// [`exarch::provider::Bureau`] shares them for its whole life, while the
+/// window goes on reading the same pair through this state.
+type Shared = (
+    Arc<Mutex<CredentialStore>>,
+    Arc<Mutex<ModelCatalog<LiveSource>>>,
+);
 
 /// The credential scrub's outcome, resolved once at startup — while the
 /// process is still single-threaded, [`synod::session::prepare`] requires —
@@ -37,24 +45,20 @@ use tauri::{AppHandle, Emitter as _, Manager};
 /// Every holder in `synod::session` takes them locked only briefly — for an
 /// account list, a cached model list, an admission — never across a network
 /// call or a machine boot.
-pub struct Accounts(Result<(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String>);
+pub struct Accounts(Result<Shared, String>);
 
 impl Accounts {
     /// Wrap the credential scrub's outcome, composed in `main`, as Tauri
     /// state.  The field stays private; every reach from here on goes
     /// through [`Self::resolved`].
-    pub(crate) fn new(
-        resolved: Result<(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String>,
-    ) -> Self {
+    pub(crate) fn new(resolved: Result<Shared, String>) -> Self {
         Self(resolved)
     }
 
     /// The store and catalog, or a fresh copy of the startup failure that
     /// left this run with neither — every command answers with the same
     /// sentence rather than each restating how to unwrap it.
-    pub(crate) fn resolved(
-        &self,
-    ) -> Result<&(Mutex<CredentialStore>, Mutex<ModelCatalog<LiveSource>>), String> {
+    pub(crate) fn resolved(&self) -> Result<&Shared, String> {
         self.0.as_ref().map_err(Clone::clone)
     }
 }

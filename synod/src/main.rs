@@ -49,7 +49,7 @@ mod shell;
 use shell::{Accounts, commands, keys, review, signin};
 
 use exarch::provider::models::{LiveSource, ModelCatalog};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 fn main() {
@@ -60,11 +60,11 @@ fn main() {
     // crashed run left behind.
     synod::workspace::history::sweep_stale();
     let accounts = Accounts::new(synod::session::prepare().map(|store| {
-        let catalog = Mutex::new(ModelCatalog::new(
+        let catalog = Arc::new(Mutex::new(ModelCatalog::new(
             LiveSource::new(&store),
             synod::session::SYNOD,
-        ));
-        (Mutex::new(store), catalog)
+        )));
+        (Arc::new(Mutex::new(store)), catalog)
     }));
 
     tauri::Builder::default()

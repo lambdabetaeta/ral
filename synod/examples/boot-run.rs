@@ -45,7 +45,7 @@ use exarch::bus::{AgentId, Sink};
 use exarch::egress::Egress;
 use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
-use exarch::provider::{Provider, ToolCall};
+use exarch::provider::{Bureau, Provider, ToolCall};
 use exarch::record::{Display, Record, Transient};
 use ral_core::types::Capabilities;
 use std::path::PathBuf;
@@ -156,6 +156,8 @@ fn main() {
         // `seat_machine` overwrites this: the dialler cannot exist before
         // the machine it wraps.
         dial: None,
+        // The provider above is scripted, so nothing here ever mints one.
+        bureau: Arc::new(Bureau::Scripted),
     };
     // `_net` is held open only so its EOF ends the session; this example
     // wants no guest network of its own.

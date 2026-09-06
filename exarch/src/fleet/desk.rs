@@ -809,6 +809,7 @@ impl ExarchDesk {
             disk_warn_bytes: s.agent.disk_warn_bytes(),
             egress: s.agent.egress().clone(),
             dial: s.agent.dial().cloned(),
+            bureau: s.agent.bureau().clone(),
             reach,
         })
         .map_err(|why| Error::new(format!("`agents `start` refused: {why}"), 1))?;
@@ -953,6 +954,7 @@ impl ExarchDesk {
             disk_warn_bytes: s.agent.disk_warn_bytes(),
             egress: s.agent.egress().clone(),
             dial: Some(dial),
+            bureau: s.agent.bureau().clone(),
             reach,
         })
         .map_err(|why| Error::new(format!("`agents `start` refused: {why}"), 1))?;

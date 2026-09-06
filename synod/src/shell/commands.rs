@@ -380,7 +380,7 @@ fn converse(
     // a failure here means the credential scrub's outcome flipped under us,
     // which cannot happen — but a worker that finds no store stands down
     // rather than panics.
-    let Ok((store, _)) = accounts.resolved() else {
+    let Ok((store, catalog)) = accounts.resolved() else {
         return ConversationEnded {
             stopped: false,
             explained: false,
@@ -393,7 +393,7 @@ fn converse(
                   user-input adapter site clippy.toml admits, not a path built from parts"
     )]
     let picked = Path::new(folder);
-    let (mut conversation, opening) = match Conversation::begin(picked, store, choice) {
+    let (mut conversation, opening) = match Conversation::begin(picked, store, catalog, choice) {
         Ok(begun) => begun,
         Err(e) => {
             emitter.emit(

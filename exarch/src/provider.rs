@@ -6,6 +6,7 @@
 //! module.
 
 pub mod accounts;
+pub mod bureau;
 pub mod credential;
 mod error;
 pub mod identity;
@@ -25,6 +26,7 @@ mod transport;
 mod usage;
 mod wire;
 
+pub use bureau::Bureau;
 pub use error::ProviderError;
 pub(crate) use error::{error_object, extract_url, transient_label};
 pub use identity::{Account, AccountId, Auth, Billing, Service, ServiceName};
@@ -84,7 +86,10 @@ enum Backend {
 
 impl Provider {
     /// Build a live provider selection on a shared engine.
-    pub fn build(
+    ///
+    /// [`bureau::Bureau::build`] is the only caller: minting a provider needs
+    /// a credential, and the bureau is what holds one.
+    pub(crate) fn build(
         engine: Arc<Engine>,
         account: &Account,
         model: String,

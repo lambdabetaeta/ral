@@ -102,6 +102,10 @@ pub(crate) struct Build {
     /// Shared verbatim by every fork — `` agents `start ``'s wire arm reads it off
     /// its own agent, never off a fresh construction.
     pub(crate) dial: Option<Arc<dyn Dial>>,
+    /// The one owner of provider construction, likewise a host setting
+    /// inherited verbatim: a spawn that names its own selection mints the
+    /// child's provider through this and nothing else.
+    pub(crate) bureau: Arc<crate::provider::Bureau>,
     /// This agent's reach into its own running eval, read off `seat` before it
     /// moves into this bundle — a root states it pre-weakened
     /// ([`EvalReach::interrupt_only`]).
@@ -189,6 +193,10 @@ pub struct RootConfig {
     /// and no dialler is refused here — never a runtime surprise reached
     /// only once a model calls `agent`.
     pub dial: Option<Arc<dyn Dial>>,
+    /// Where this trunk's providers come from, shared by every fork.  A host
+    /// that mints no providers of its own passes
+    /// [`Bureau::Scripted`](crate::provider::Bureau::Scripted).
+    pub bureau: Arc<crate::provider::Bureau>,
 }
 
 /// Where the trunk's engine lives — [`Avatar::root`]'s one construction-time
@@ -245,6 +253,7 @@ impl Avatar {
             disk_warn_bytes,
             egress,
             dial,
+            bureau,
             reach,
         } = b;
         let nudges = tool_enabled.then(nudge::Nudges::new);
@@ -276,6 +285,7 @@ impl Avatar {
             disk_warn_bytes,
             egress,
             dial,
+            bureau,
             cancel: cancel::Token::new(),
             reach,
             mailbox,
@@ -334,6 +344,7 @@ impl Avatar {
             fuel,
             egress,
             dial,
+            bureau,
         } = cfg;
         // The CLI rejects both pairings at parse; these hold the invariant for
         // every other caller that builds a root.
@@ -475,6 +486,7 @@ impl Avatar {
             disk_warn_bytes,
             egress,
             dial,
+            bureau,
             reach,
         })
         // A brand-new fleet, so this can never collide or find its rootless
@@ -640,6 +652,7 @@ impl Avatar {
             disk_warn_bytes: self.agent.disk_warn_bytes,
             egress: self.agent.egress.clone(),
             dial: self.agent.dial.clone(),
+            bureau: self.agent.bureau.clone(),
             reach,
         })?)
     }
@@ -765,6 +778,7 @@ impl Avatar {
             disk_warn_bytes,
             egress,
             dial: None,
+            bureau: Arc::new(crate::provider::Bureau::Scripted),
             reach,
         })
         .expect("a fresh fleet's trunk is born unrefused"))
@@ -1019,6 +1033,7 @@ mod tests {
                 fuel: SPAWN_FUEL,
                 egress: crate::egress::Egress::for_test(),
                 dial: None,
+                bureau: Arc::new(crate::provider::Bureau::Scripted),
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -1414,6 +1429,7 @@ mod tests {
                 fuel: 0,
                 egress: crate::egress::Egress::for_test(),
                 dial: None,
+                bureau: Arc::new(crate::provider::Bureau::Scripted),
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -1540,6 +1556,7 @@ mod tests {
                 fuel: 1,
                 egress: crate::egress::Egress::for_test(),
                 dial: None,
+                bureau: Arc::new(crate::provider::Bureau::Scripted),
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),
@@ -1597,6 +1614,7 @@ mod tests {
                 fuel: 1,
                 egress: crate::egress::Egress::for_test(),
                 dial: None,
+                bureau: Arc::new(crate::provider::Bureau::Scripted),
             },
             RootSeat::Identity {
                 scratch: Arc::new(scratch),

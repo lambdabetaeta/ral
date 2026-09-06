@@ -314,7 +314,7 @@ enum LoginMsg {
     Done(Result<(OAuthToken, bool), String>),
 }
 
-pub(super) fn login(tui: &mut Tui, ctx: &mut CommandCtx<'_>) {
+pub(super) fn login(tui: &mut Tui, ctx: &CommandCtx<'_>) {
     tui.app.overlay = Some(Overlay::Login(LoginOverlay::new()));
     let outcome = drive_login(tui);
     tui.app.overlay = None;
@@ -409,8 +409,15 @@ fn drive_login(tui: &mut Tui) -> Option<(OAuthToken, bool)> {
 /// credential store and catalog. No provider swap: a `ChatGPT` account has no
 /// built-in default model, so the user picks one through `/model`; and a
 /// re-login upserts the very cell the focused tab already reads through.
-fn apply_login(tui: &Tui, ctx: &mut CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
-    let (id, label) = crate::provider::admit_login(ctx.store, ctx.catalog, token);
+fn apply_login(tui: &mut Tui, ctx: &CommandCtx<'_>, token: &OAuthToken, replaced: bool) {
+    let admitted = ctx.bureau.admit(token);
+    let (id, label) = match admitted {
+        Ok(admitted) => admitted,
+        Err(e) => {
+            tui.app.push_error(tui.app.tabs.focused(), &e);
+            return;
+        }
+    };
     let already_active = tui
         .app
         .tabs

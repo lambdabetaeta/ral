@@ -53,6 +53,7 @@ pub(crate) struct TestAgentSpec {
     pub(crate) disk_warn_bytes: Option<u64>,
     pub(crate) egress: crate::egress::Egress,
     pub(crate) dial: Option<Arc<dyn crate::agent::Dial>>,
+    pub(crate) bureau: Arc<crate::provider::Bureau>,
     /// Still carrying [`crate::prompt::BUILTIN_INDEX_PLACEHOLDER`], like
     /// [`Agent::system_base`](crate::agent::Agent) itself.
     pub(crate) system_base: String,
@@ -80,6 +81,7 @@ impl TestAgentSpec {
             disk_warn_bytes: None,
             egress: crate::egress::Egress::for_test(),
             dial: None,
+            bureau: Arc::new(crate::provider::Bureau::Scripted),
             system_base: String::new(),
             index: crate::prompt::BuiltinIndex::resolve(&Shell::new(
                 ral_core::io::TerminalState::default(),
@@ -113,6 +115,7 @@ pub(crate) fn test_agent(
         disk_warn_bytes,
         egress,
         dial,
+        bureau,
         system_base,
         index,
     } = spec;
@@ -141,6 +144,7 @@ pub(crate) fn test_agent(
         disk_warn_bytes,
         egress,
         dial,
+        bureau,
         cancel,
         reach,
         mailbox,
@@ -275,6 +279,7 @@ fn root(interactive: bool, chat: bool) -> Avatar {
             fuel: SPAWN_FUEL,
             egress: crate::egress::Egress::for_test(),
             dial: None,
+            bureau: Arc::new(crate::provider::Bureau::Scripted),
         },
         RootSeat::Identity {
             scratch: Arc::new(scratch),

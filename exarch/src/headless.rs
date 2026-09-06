@@ -790,6 +790,7 @@ mod tests {
                 fuel: 0,
                 egress: crate::egress::Egress::for_test(),
                 dial: None,
+                bureau: Arc::new(crate::provider::Bureau::Scripted),
             },
             RootSeat::Identity {
                 scratch,
@@ -1146,6 +1147,7 @@ mod tests {
                 fuel: SPAWN_FUEL,
                 egress: crate::egress::Egress::for_test(),
                 dial: None,
+                bureau: Arc::new(crate::provider::Bureau::Scripted),
             },
             RootSeat::Identity {
                 scratch,

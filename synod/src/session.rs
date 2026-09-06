@@ -35,10 +35,10 @@ use crate::workspace;
 use baseline::Baseline;
 use exarch::agent::{Avatar, RecordedAccount};
 use exarch::provider::{
-    self, Engine, Provider,
-    credential::{Credential, CredentialStore},
+    self, Bureau, Engine, Provider,
+    credential::CredentialStore,
     identity::{self, Account},
-    models::resolve_account,
+    models::{LiveSource, ModelCatalog, resolve_account},
     pricing,
 };
 use opening::{no_copy_line, no_room_for_copy, slow_copy_line};
@@ -154,14 +154,13 @@ impl Conversation {
     /// its failure instead.
     ///
     /// # Panics
-    /// Panics if the chosen account is absent from `store` — an invariant
-    /// [`choose`] upholds by choosing only among available ones, and
-    /// [`resolve_account`] upholds by resolving only against the same list —
-    /// or if the resolved tuning's effort is one [`provider::EFFORT_LADDER`]
-    /// does not name, which [`resolve_tuning`] cannot produce.
+    /// Panics if the resolved tuning's effort is one
+    /// [`provider::EFFORT_LADDER`] does not name, which [`resolve_tuning`]
+    /// cannot produce.
     pub fn begin(
         folder: &Path,
-        store: &Mutex<CredentialStore>,
+        store: &Arc<Mutex<CredentialStore>>,
+        catalog: &Arc<Mutex<ModelCatalog<LiveSource>>>,
         choice: Option<Choice>,
     ) -> Result<(Self, Opening), String> {
         let grant = Grant::open(folder)?;
@@ -186,7 +185,6 @@ impl Conversation {
             label,
             model,
             effort,
-            credential,
         } = select_account(store, choice)?;
         let announced_model = model.clone();
         let tuning = resolve_tuning(effort, &model)?;
@@ -241,16 +239,14 @@ impl Conversation {
         let system =
             crate::prompt::assemble(&caps, machine.workspace_path(), &grant.name(), &config_dir)?;
 
-        let engine = Engine::new();
-        let provider = Arc::new(Provider::build(
-            engine,
-            &account,
-            model.clone(),
-            &credential,
-            None,
-            tuning,
-            None,
-        ));
+        // Synod's engine is per-conversation; the credentials and catalog it
+        // draws on are the application's, held for its whole life.
+        let bureau = Arc::new(Bureau::Live {
+            engine: Engine::new(),
+            store: Arc::clone(store),
+            catalog: Arc::clone(catalog),
+        });
+        let provider = bureau.build(&account, model.clone(), &tuning, None, None)?;
 
         let config = exarch::agent::RootConfig {
             system,
@@ -285,6 +281,7 @@ impl Conversation {
             // `seat_machine` overwrites this: the dialler cannot exist
             // before the machine it wraps.
             dial: None,
+            bureau,
         };
         let (dial, agent, net_wire) = seat_machine(machine, config, provider)?;
         let net = net_seat(net_wire, egress)?;
@@ -471,23 +468,19 @@ pub fn unseat_machine(
 
 /// The whole of what a conversation needs from the credential store — the
 /// account it runs on, the label it goes by among its fellows, the model,
-/// the effort asked for, and the credential it authenticates with — read
-/// under one brief lock.
+/// and the effort asked for — read under one brief lock.  The credential is
+/// not among them: the [`Bureau`] resolves that when it mints the provider.
 struct Selected {
     account: Account,
     label: String,
     model: String,
     effort: Option<String>,
-    credential: Credential,
 }
 
 /// Everything slow in [`Conversation::begin`] (the machine's boot, the
 /// folder's safety copy) happens after this returns, so a sign-in in the
 /// window is never held up behind a conversation opening, nor the other way
-/// round.  The credential is cloned rather than borrowed for the same
-/// reason, and clones as what it already is — a `ChatGPT` login's shared
-/// cell, so a token refreshed later is still the one this conversation
-/// sends.
+/// round.
 ///
 /// `choice.account` resolves by id alone, through [`resolve_account`] —
 /// never by the label a human reads, which two accounts can share; naming
@@ -525,10 +518,6 @@ fn select_account(
         (account, model, None)
     };
     let label = identity::label(&account, &available);
-    let credential = store
-        .get(&account.id)
-        .expect("the chosen account is one of the available ones")
-        .clone();
     // Everything the caller does next is slow, and none of it is the
     // store's business.
     drop(store);
@@ -537,7 +526,6 @@ fn select_account(
         label,
         model,
         effort,
-        credential,
     })
 }
 

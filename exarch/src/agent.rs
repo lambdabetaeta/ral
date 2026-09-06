@@ -159,6 +159,11 @@ pub struct Agent {
     /// every fork, so a wire child's own `agent` call dials through the same
     /// seam its parent did.
     dial: Option<Arc<dyn Dial>>,
+    /// The one owner of provider construction — the engine, credentials, and
+    /// catalog this session mints selections from.  Shared verbatim by every
+    /// fork, so a child that names its own model is built through the same
+    /// door the trunk was.
+    bureau: Arc<crate::provider::Bureau>,
     /// The seat's own reach into this agent's running eval, fixed at
     /// construction — a self-registering root states it pre-weakened
     /// ([`EvalReach::interrupt_only`]) precisely because its seat rebuilds in
@@ -346,6 +351,10 @@ impl Agent {
 
     pub(crate) fn dial(&self) -> Option<&Arc<dyn Dial>> {
         self.dial.as_ref()
+    }
+
+    pub(crate) fn bureau(&self) -> &Arc<crate::provider::Bureau> {
+        &self.bureau
     }
 
     pub(crate) fn system_base(&self) -> &Arc<str> {

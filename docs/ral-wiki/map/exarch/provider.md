@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 99226d37
-generated_at_date: 2026-09-05
+generated_at_commit: b46ad7ad
+generated_at_date: 2026-09-06
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -206,6 +206,38 @@ genai `Client`:
   account — fresh claims update the handle's ingredients — but never re-keys
   it: the issued id is pinned to the current token's, since every map keys on
   it.
+
+## One owner for construction
+
+`Provider::build` needs an `Engine` and a `Credential`, and a `Provider`
+retains neither — it keeps a built `Transport`. So minting a *second*
+selection has nothing to work from unless the engine, the credential store,
+and the model catalog are reachable together. `provider/bureau.rs` is that
+trio named once: `Bureau::Live { engine, store, catalog }`, or
+`Bureau::Scripted` for a session that mints nothing (`Engine::new` primes the
+pricing catalog over the network, so no unit test may build one). It mirrors
+`Provider`'s own `Backend::{Live, Scripted}` split rather than inventing a
+second idiom.
+
+`Bureau::build` is **the only caller of `Provider::build`**, which is
+`pub(crate)` for that reason; `available`, `admit` (a `/login`'s admission)
+and `with_catalog` are the rest of the surface. The two halves are shared
+(`Arc<Mutex<_>>`) rather than owned, so two hosts compose: exarch builds one
+bureau over its own pair in `run()`, while synod keeps the same pair as
+application-wide window state and mints an engine per conversation. They are
+two mutexes and not one because a spawn touches only the store while the
+picker's pump touches only the catalog — under a single lock a spawn would
+queue behind a model-list fetch for nothing.
+
+**Lock discipline**, synod's own rule inherited: locked briefly, never across
+a network call, a picker frame, or a machine boot; and the converse, that a UI
+thread never holds either while waiting on an agent thread. `Bureau::admit` is
+the one door that takes both at once, store first. The `/model` overlay's
+`drive_picker` therefore takes the catalog per fold — to open the `Listing`,
+to pump it, to record endpoints, to clone the fetch seam — and never around
+the fetch itself; `Bureau` carries `Arc<Bureau>` on `RootConfig`, `Build` and
+`Agent`, the established "host setting, inherited verbatim by every fork" slot
+beside `egress` and `dial`.
 
 ## Model catalogs
 

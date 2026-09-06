@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 99226d37
-generated_at_date: 2026-09-05
+generated_at_commit: b46ad7ad
+generated_at_date: 2026-09-06
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/protocol.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
@@ -275,7 +275,12 @@ model (with a Thinking control beside the Assistant picker) and describe the
 job; watch the assistant work, its narration streamed in; then read what
 changed and put anything back. `mod.rs` owns `Accounts` — the credential
 scrub's outcome paired with the model catalog, a private field reached only
-through `resolved()` — and the two refresh entries, `refresh_menu_now`
+through `resolved()`. Both halves are `Arc<Mutex<_>>`, because a conversation
+outlives no store of its own: `Conversation::begin` builds an
+`exarch::provider::Bureau::Live` over the very pair the window keeps, plus the
+engine it mints per conversation, so a sign-in admitted through the window is
+visible to a running conversation's next spawn and the two can never drift.
+`mod.rs` also owns the two refresh entries, `refresh_menu_now`
 (synchronous) and `refresh_menu_async` (off the calling thread); the debounce
 that decides when a refresh is worth asking for at all, `RefreshGate`, lives
 in `commands.rs`. `commands.rs` holds the folder picker, the

@@ -26,8 +26,8 @@ pub mod tui;
 
 use agent::Avatar;
 use clap::Parser;
-use provider::{Engine, Provider};
-use std::sync::Arc;
+use provider::{Bureau, Engine};
+use std::sync::{Arc, Mutex};
 use tui::SessionInfo;
 
 /// Pre-`main` trampoline shared by the binary and every test binary: dress a
@@ -86,17 +86,13 @@ pre_main_ctor!();
 /// link the whole crate.
 ///
 /// It parses the CLI, composes the capability lattice, builds an [`Avatar`] +
-/// [`Provider`], and hands off to a frontend.
+/// [`provider::Provider`], and hands off to a frontend.
 ///
 /// # Errors
 /// Returns `Err` if the CLI is misused, if no provider is available, or if
 /// loading the provider config, resolving the model selection, building the
 /// capability policy, setting up the scratch/log directories, or the chosen
 /// frontend fails.
-///
-/// # Panics
-/// Panics if the selected provider is absent from the credential store, an
-/// invariant the selection step upholds.
 pub fn run() -> Result<(), String> {
     let c = cli::Cli::parse();
     // Subcommands act and exit before the provider-availability check below,
@@ -128,7 +124,7 @@ pub fn run() -> Result<(), String> {
     // SAFETY: startup is still single-threaded — the tokio runtime and the
     // session's workers come later — so nothing races this env mutation.  It is
     // the only scrub, so every child inherits an environment free of keys.
-    let mut store = provider::credential::CredentialStore::resolve_and_scrub(custom);
+    let store = provider::credential::CredentialStore::resolve_and_scrub(custom);
     let available = store.available();
     if available.is_empty() {
         return Err(
@@ -179,10 +175,6 @@ pub fn run() -> Result<(), String> {
         service: account.service.name.as_str().to_string(),
         id: account.id.as_str().to_string(),
     };
-    let cred = store
-        .get(&account.id)
-        .expect("selected provider must be available")
-        .clone();
 
     let (caps, restrict_files) =
         policy::for_invocation(&cwd, &c.base, c.extend_base.as_deref(), &c.restrict)?;
@@ -224,15 +216,12 @@ pub fn run() -> Result<(), String> {
 
     // One runtime for the whole fleet; per-credential transports warm lazily.
     let engine = Engine::new();
-    let provider = Arc::new(Provider::build(
-        engine.clone(),
-        &account,
-        model.clone(),
-        &cred,
-        c.max_tokens,
-        tuning,
-        route,
-    ));
+    let bureau = Arc::new(Bureau::Live {
+        engine,
+        store: Arc::new(Mutex::new(store)),
+        catalog: Arc::new(Mutex::new(catalog)),
+    });
+    let provider = bureau.build(&account, model.clone(), &tuning, route, c.max_tokens)?;
     let mut session = Avatar::root(
         agent::RootConfig {
             system,
@@ -252,6 +241,7 @@ pub fn run() -> Result<(), String> {
             fuel: agent::SPAWN_FUEL,
             egress,
             dial: None,
+            bureau: Arc::clone(&bureau),
         },
         agent::RootSeat::Identity {
             scratch: Arc::clone(&scratch),
@@ -273,17 +263,7 @@ pub fn run() -> Result<(), String> {
     if c.headless {
         headless::run(&mut session, &info, &provider, seed, c.output_format)
     } else {
-        tui::run(
-            &mut session,
-            &provider,
-            &info,
-            &mut store,
-            &mut catalog,
-            &run_dir,
-            seed,
-            c.vi,
-            &engine,
-        )
+        tui::run(&mut session, &provider, &info, &bureau, &run_dir, seed, c.vi)
     }
 }
 

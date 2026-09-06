@@ -19,11 +19,7 @@ use crossterm::event::{
 use crate::{
     agent::{Agent, Avatar, Control, Verdict, cancel},
     bus::{BusReceiver, Emitter, FleetBus, Inbox, Pass, Post, Signal},
-    provider::{
-        self, Provider,
-        credential::CredentialStore,
-        models::{LiveSource, ModelCatalog},
-    },
+    provider::{Bureau, Provider},
     record::Emitter as Recorder,
 };
 use std::sync::mpsc::TryRecvError;
@@ -147,17 +143,14 @@ impl Control for ReplControl {
 ///
 /// # Panics
 /// Panics if the OS refuses to spawn the agent worker thread.
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     session: &mut Avatar,
     provider: &Arc<Provider>,
     info: &banner::SessionInfo<'_>,
-    store: &mut CredentialStore,
-    catalog: &mut ModelCatalog<LiveSource>,
+    bureau: &Bureau,
     run_dir: &Path,
     seed: Option<String>,
     vi: bool,
-    engine: &Arc<provider::Engine>,
 ) -> Result<(), String> {
     let stderr_log = run_dir.join("stderr.log");
     let mut tui = Tui::new(
@@ -168,7 +161,7 @@ pub fn run(
         session.inbox(),
     )
     .map_err(|e| format!("ratatui init: {e}"))?;
-    tui.app.update_live_model(provider, &store.available());
+    tui.app.update_live_model(provider, &bureau.available());
     // A *session*-lived bus, not per-exchange: a detached async child keeps
     // streaming to its tab after the exchange that spawned it ends.
     let bus = FleetBus::session(&session.inbox());
@@ -227,12 +220,10 @@ pub fn run(
     // Without a way to wake the parked worker with a `/quit`, the `join` below
     // would deadlock whenever the UI loop dies first.
     let quit_mailbox = session.inbox().mailbox();
-    let mut cmd_ctx = CommandCtx {
-        store,
-        catalog,
+    let cmd_ctx = CommandCtx {
+        bureau,
         info,
         recorder: &recorder,
-        engine,
     };
     // This is the process's trunk — a fact of the launch, not of any position
     // in the tree — so its token is what an OS signal must reach, held for as
@@ -248,7 +239,7 @@ pub fn run(
             })
             .expect("spawn agent worker");
 
-        let r = ui_loop(&mut tui, &bus, done_ref, &mut cmd_ctx);
+        let r = ui_loop(&mut tui, &bus, done_ref, &cmd_ctx);
         if r.is_err() {
             quit_mailbox.push(Post::Barrier("/quit".into()));
         }
@@ -282,11 +273,9 @@ pub fn run(
 /// path — `route_submit` into `pick_model` / `login` — threads one context.
 /// Every agent-side reach is the tabs' own, so no fleet handle rides here.
 pub struct CommandCtx<'a> {
-    pub(super) store: &'a mut CredentialStore,
-    pub(super) catalog: &'a mut ModelCatalog<LiveSource>,
+    pub(super) bureau: &'a Bureau,
     pub(super) info: &'a SessionInfo<'a>,
     pub(super) recorder: &'a Recorder,
-    pub(super) engine: &'a Arc<provider::Engine>,
 }
 
 /// Route one `Signal` to its `App` entry point.
@@ -332,7 +321,7 @@ fn ui_loop(
     tui: &mut Tui,
     bus: &FleetBus,
     done: &AtomicBool,
-    ctx: &mut CommandCtx<'_>,
+    ctx: &CommandCtx<'_>,
 ) -> io::Result<()> {
     const BATCH: usize = 64;
     let frame = Duration::from_millis(16); // ~60 FPS max
@@ -483,7 +472,7 @@ fn ui_loop(
             dirty = true;
             if let Some(agent) = tui.app.tabs.agent(now_focus) {
                 tui.app
-                    .update_live_model(&agent.current_provider(), &ctx.store.available());
+                    .update_live_model(&agent.current_provider(), &ctx.bureau.available());
             }
         }
     }

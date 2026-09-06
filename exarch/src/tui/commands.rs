@@ -396,7 +396,7 @@ pub(super) fn route_submit(
     text: String,
     tui: &mut Tui,
     mailbox: &Mailbox,
-    ctx: &mut super::tui_loop::CommandCtx<'_>,
+    ctx: &super::tui_loop::CommandCtx<'_>,
 ) -> io::Result<()> {
     let info = ctx.info;
     let trimmed = text.trim();
