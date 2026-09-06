@@ -22,7 +22,7 @@ mod common;
 use ral_core::protocol::{Program, Run};
 #[cfg(unix)]
 use ral_core::types::FsPolicy;
-use ral_core::types::{Capabilities, Settled, Shell};
+use ral_core::types::{Capabilities, GrantStack, Settled, Shell};
 use ral_core::{Break, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
 
 // ── Harness ─────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ fn top_level_under_request(shell: &mut Shell, caps: Capabilities, source: &str) 
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
-            caps,
+            caps: GrantStack::of(caps),
             wall: None,
             deferred_lease: None,
             worker_cap: None,
@@ -189,7 +189,7 @@ fn recovered_try_reports_a_clean_transport_status() {
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,
@@ -439,7 +439,7 @@ fn top_level_capturing(shell: &mut Shell, source: &str) -> (Settled<Value>, Vec<
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

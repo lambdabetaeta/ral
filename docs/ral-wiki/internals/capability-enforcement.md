@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 92ff8756
+verified_at_commit: 2cfeb108
 verified_at_date: 2026-09-06
-anchors: [check_exec_args, check_fs_op, fs_verdict, pinned_binary, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, register_envelope]
+anchors: [check_exec_args, check_fs_op, check_fs_exact, locate, walk, Located, admits_fs_exact, fs_verdict, pinned_binary, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, register_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -19,16 +19,27 @@ function over a borrowed `Context`, and each meets the dynamic `GrantStack`
 across the *whole* stack, not a single frame:
 
 - `check_exec_args`;
-- `check_fs_op` (read / write);
+- `check_fs_op`, a read *by name* — a predicate, a listing, a module load;
+- `Shell::locate`, the door every open goes through, which judges the
+  located object with `check_fs_exact`;
 - the editor/shell bool gates;
 - `sandbox_projection`, the OS-renderable `SandboxProjection`.
 
 The `capability` module is the only place authority is decided — a module
 boundary, not a typestate
-([[decisions/260605_witness-collapse|witness-collapse]]). The fold composes the
-layers by `Meet`:
+([[decisions/260605_witness-collapse|witness-collapse]]). **The fold composes
+verdicts over layers; it never flattens the layers into one frame.** A
+`Capabilities` is one layer and the `GrantStack` is the meet — each verdict
+(`evaluate_exec`, `allow_region`, `deny_region`, `permits_detach`) walks the
+stack and combines what each layer says about *this* access. There is no
+`Capabilities::meet`: the exec representation `(dirs, literals)` is not closed
+under intersection, because a bare-name literal's meaning depends on where the
+name resolves at check time, so a flattened meet would have to guess
+([[decisions/260906_object-not-name|object-not-name]]). `Join` survives for the
+one place a union is meant — exarch's `--extend-base` widening a single base
+layer — with its own "silence lifts no veto" rule.
 
-- a dimension omitted from a grant inherits the ambient authority;
+- a dimension omitted from a layer inherits the ambient authority;
 - a dimension present can only narrow;
 - a deny is anti-monotonic — a later layer adds denies but never reopens a denied
   region ([[design/scoping|dynamic frames]]).
@@ -38,7 +49,7 @@ structured primitives route through this same chokepoint
 ([[internals/builtins-registry|builtins]]), which closes the bypass and lets ral
 stay a [[invariants/single-binary|single binary]].
 
-**Path matching is a fixed four-stage rule** (`core/src/path/`):
+**Path matching is a fixed rule** (`core/src/path/`):
 
 - expand sigils and `~`;
 - lex;
@@ -46,7 +57,16 @@ stay a [[invariants/single-binary|single binary]].
 - match by prefix (`path_within`).
 
 Canonicalising *before* matching is why a directory scoped by a grant cannot be
-escaped through a symlink or `..`.
+escaped through a symlink or `..` — for a read *by name*. **An open takes a
+fifth stage instead** (`path/walk.rs`): `Shell::locate` walks the name from
+the root through directory handles, never letting the kernel follow a
+symlink, splicing each link it meets into the remaining name itself, and
+judges the *object* it lands on (`check_fs_exact` on `Located::real`, which is
+canonical by construction). The `Located` then performs the open, stat,
+staging, rename and unlink relative to the directory handle with
+`FollowSymlinks::No`, so what was judged is what is touched: a dangling link
+is judged at its target, and a component swapped after the judgment is never
+followed. `check_fs_write` no longer exists — every write is a `locate`.
 
 **A command head is judged by three identities, and the two directions of the
 gate read different numbers of them.** A head carries the surface spelling, the
@@ -109,6 +129,13 @@ spawned process does on its own.**
   invariant needs no differential test — the two cannot disagree. All that
   separates them is when the fold runs: afresh on every check for the gate,
   once at spawn for the profile, because that is when the profile is written.
+  The projection carries no allow beneath a deny (`PrefixSet::outside`):
+  under deny-wins such an allow is dead, and a backend whose primitive orders
+  explicit allows before inherited denies — a Windows ACL — must never be
+  handed one. On macOS the directories a deny needs kept in place
+  (`FsRules::pinned_dirs`) are the ancestor closure of every *rendered* deny
+  name within a rendered write name, so an alias's chain is pinned alongside
+  its target's.
   One target is excused before either region is consulted: the *discard
   device* — `/dev/null`, or `NUL` on Windows — which `ResolvedPath::is_discard`
   names on either host, and which needs no authority because nothing reaches

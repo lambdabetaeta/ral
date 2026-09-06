@@ -177,7 +177,7 @@ pub(crate) fn run_batch(
         run: Run {
             program: Program::Source(source.to_string()),
             script_name: name.to_string(),
-            caps: ral_core::types::Capabilities::root(),
+            caps: ral_core::types::GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

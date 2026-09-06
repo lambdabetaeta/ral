@@ -2,10 +2,10 @@
 
 //! Integration tests for `ral --capabilities a.ral[,b.ral...]`.
 //!
-//! The flag loads each `.ral` capability profile, left-to-right `meet`s
-//! them, freezes once, and pushes the result as a permanent session
-//! frame above `Capabilities::root()`.  Verified end-to-end by spawning
-//! the built binary against tempfile profiles.
+//! The flag loads each `.ral` capability profile, freezes it, and pushes it
+//! as its own permanent session layer above `Capabilities::root()`, so the
+//! stack is the composition.  Verified end-to-end by spawning the built
+//! binary against tempfile profiles.
 
 mod common;
 

@@ -29,7 +29,7 @@ use ral_core::protocol::{
     Control, DispatchId, Event, Host, Liveness, Program, Report, Run, TerminalEndpoint, Transport,
     WireTransport, dispatch_to_report,
 };
-use ral_core::types::Capabilities;
+use ral_core::types::GrantStack;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 
 // Mirror the binary's pre-`main` re-exec dispatch: the `--engine` re-exec is
@@ -118,7 +118,7 @@ fn source_run(src: &str) -> Run {
     Run {
         program: Program::Source(src.into()),
         script_name: "<test>".into(),
-        caps: Capabilities::root(),
+        caps: GrantStack::root(),
         wall: None,
         deferred_lease: None,
         worker_cap: None,

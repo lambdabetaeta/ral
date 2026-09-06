@@ -59,6 +59,9 @@ regex         = "1"
 shlex         = { workspace = true }
 ignore        = "0.4"
 tempfile      = "3.27"
+fastrand      = { workspace = true }
+cap-primitives = { workspace = true }
+cap-fs-ext    = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 ryu           = "1"

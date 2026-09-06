@@ -38,7 +38,7 @@ pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 pub(super) use self::router::parse_key_notation;
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, Mooring, Settled};
+use ral_core::types::{Break, GrantStack, Mooring, Settled};
 use ral_core::{
     HookName, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
     StaticDiagnostics, Value, diagnostic,
@@ -481,7 +481,7 @@ pub(super) fn framed_run_request<'a>(
         run: Run {
             program,
             script_name: script_name.to_string(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

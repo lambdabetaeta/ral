@@ -142,15 +142,25 @@ impl GrantStack {
         resolver: &Resolver,
         path: &crate::path::ResolvedPath,
     ) -> bool {
+        self.admits_fs_exact(op, resolver, &path.canonicalise_lenient())
+    }
+
+    /// [`admits_fs`](Self::admits_fs) for a path already symlink-free — what
+    /// [`crate::path::Located::real`] hands over — so no second walk gets to
+    /// disagree with the one that located the object.
+    pub fn admits_fs_exact(&self, op: &FsOp, resolver: &Resolver, real: &std::path::Path) -> bool {
         matches!(
-            fs_verdict(self, resolver, &path.canonicalise_lenient(), op),
+            fs_verdict(self, resolver, real, op),
             FsVerdict::Unrestricted | FsVerdict::Granted
         )
     }
 }
 
 /// Decide an `op` on one resolved path, audit it, and mint the `Break` on
-/// denial: [`fs_verdict`] is the decision, this the reporting around it.
+/// denial.  The path is canonicalised leniently, so this is for the *reads
+/// by name* — predicates, listings, module loading — where nothing is
+/// written through the name.  A write goes through `Shell::locate`, which
+/// judges the located object with [`check_fs_exact`].
 /// A [discard device](crate::path::ResolvedPath::is_discard) is exempt from
 /// both regions — asked before canonicalisation, since the question is about
 /// the name, not about what is on the disk under it.
@@ -164,13 +174,24 @@ pub(crate) fn check_fs_op(
     if path.is_discard() {
         return Ok(());
     }
-    let resolved = path.canonicalise_lenient();
-    let verdict = fs_verdict(&ctx.grants, &ctx.resolver(), &resolved, op);
+    check_fs_exact(ctx, &path.canonicalise_lenient(), op, audit, site)
+}
+
+/// Decide an `op` on a symlink-free path: [`fs_verdict`] is the decision,
+/// this the reporting around it.
+pub(crate) fn check_fs_exact(
+    ctx: &Context,
+    resolved: &std::path::Path,
+    op: &FsOp,
+    audit: &mut Audit,
+    site: CallSite,
+) -> Settled<()> {
+    let verdict = fs_verdict(&ctx.grants, &ctx.resolver(), resolved, op);
 
     if let FsVerdict::Denied | FsVerdict::Guarded(_) = verdict {
         emit_capability_denial(ctx, "fs", audit, site, |f| {
             f.insert("op".into(), op.label().into());
-            f.insert("path".into(), path.display().to_string());
+            f.insert("path".into(), resolved.display().to_string());
             if let FsVerdict::Guarded(pinned) = verdict {
                 f.insert("pinned".into(), pinned.into());
             }

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1c0ceaeb
+generated_at_commit: 2cfeb108
 generated_at_date: 2026-09-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -16,8 +16,11 @@ narrow.
 
 Every runtime yes/no over the dynamic capability stack is a free
 `capability::check_*(&Context, …)` function that folds the whole stack
-(`ctx.grants`): `admits_head`, `check_exec_args`, `check_fs_op`, the
+(`ctx.grants`): `admits_head`, `check_exec_args`, `check_fs_op` (a read by
+name) and `check_fs_exact` (the object `Shell::locate` walked to), the
 editor/shell bool gates, and the OS-renderable `sandbox_projection`. The
+fold combines the layers' *verdicts*; there is no `Capabilities::meet`
+([[decisions/260906_object-not-name|object-not-name]]). The
 `capability` module is the only place authority is decided — a module boundary
 rather than a typestate
 ([[decisions/260605_witness-collapse|witness-collapse]]). Why `Capabilities`,
@@ -27,19 +30,23 @@ the live judgment, and `SandboxProjection` are distinct and not one is argued in
 Submodules:
 
 - `enforce.rs` — the point-of-use gates: head admission, the
-  audit-bearing exec/fs checks (`check_exec_args`, `check_fs_op`), and
-  the editor/shell bool gates. The fs gate is split so the judgment is
-  reusable without the report: `fs_verdict` is the decision — `Guarded`
-  first, for a write onto a boot-pinned sandbox binary
-  (`sandbox::pinned_binary`, by inode), before any grant is folded — and
-  `check_fs_op` is the layer that audits it and mints the `Break`, and the
-  one layer that excuses the discard device (`ResolvedPath::is_discard`)
-  before either region is consulted;
+  audit-bearing exec/fs checks (`check_exec_args`, `check_fs_op`,
+  `check_fs_exact`), and the editor/shell bool gates. The fs gate is split
+  so the judgment is reusable without the report: `fs_verdict` is the
+  decision — `Guarded` first, for a write onto a boot-pinned sandbox binary
+  (`sandbox::pinned_binary`, by inode), before any grant is folded —
+  `check_fs_exact` audits it and mints the `Break` for a symlink-free path,
+  and `check_fs_op` is the read-by-name layer over it that canonicalises
+  leniently and excuses the discard device (`ResolvedPath::is_discard`)
+  before either region is consulted. `Shell::locate` (`types/shell/checks.rs`)
+  is the door every open takes: `path::walk` to the object, then
+  `check_fs_exact` on `Located::real`; `GrantStack::admits_fs_exact` is the
+  quiet twin a write card asks before reading a before-image;
 - `sandbox.rs` — the OS-renderable `sandbox_projection` builder;
 - `deputy.rs` — `deputy_prefixes`, the confused-deputy report: the prefixes a
   grant makes both `exec`-admitted and `fs`-writable, judged with
-  `path::covers` on a *folded* `Capabilities` (neither layer of a meet is
-  guilty alone). **What it locates is where a write becomes runnable, not an
+  `path::covers` on the `GrantStack`'s two prefix sets folded by
+  `meet_prefixes` (neither layer is guilty alone). **What it locates is where a write becomes runnable, not an
   escalation**: within one projection the dropped binary is spawned under the
   confinement that wrote it, and only a runner outside the projection turns
   the shape into an escape — so it reports and never denies. Findings surface at grant push and at an exarch profile load
@@ -69,8 +76,8 @@ plus `FsPolicy`, `GrantStack`,
 `Meet`, `Join`, and the exec authority
 `ExecMap { literals, allow_dirs, deny_dirs }` — `literals` keyed by name/path
 under the three-valued `ExecPolicy`, the two directory sets stored already
-partitioned by verdict as `BTreeSet<NormalizedPrefix>`, so a meet folds the
-partition it will use rather than re-deriving it, and a deny survives the
+partitioned by verdict as `BTreeSet<NormalizedPrefix>`, so a verdict reads
+the partition it needs rather than re-deriving it, and a deny survives the
 spelling and the depth it is judged on
 ([[decisions/260602_exec-authority-partitioned|exec-authority-partitioned]]).
 
@@ -85,7 +92,13 @@ plus `which.rs` for PATH search.
   per platform: off-Unix `get_user_home` declines rather than fabricating a
   home, and each call site picks its own fallback);
 - lex — `lex.rs`;
-- canonicalise — `canon.rs`;
+- canonicalise — `canon.rs`, for a read by name;
+- locate — `walk.rs`, for an open: `walk` descends from the root through
+  directory handles with no symlink followed by the kernel, splicing each
+  link into the name and re-walking, and hands back a `Located` — the
+  directory handle, the leaf, and the symlink-free `real` path — whose every
+  operation is handle-relative with `FollowSymlinks::No` (`cap-primitives`
+  supplies the `*at` calls on Unix and Windows);
 - match — `lex::path_within`, which folds `starts_with_identity` over the
   alias pairs; under Windows path semantics that comparison unifies case,
   `/` vs `\`, and `\\?\`-verbatim spellings, so the fs-grant, exec-dir, and
@@ -135,8 +148,9 @@ open.
 disk-free: `covers` is the one containment judgment, keyed on
 `(namespace, resolved)` so prefixes in different namespaces never overlap and
 a cross-namespace meet is the empty, fail-closed intersection; `meet_prefixes`
-is the kernel `PrefixSet::meet` and every `types::capability` lattice meet
-share. `PrefixSet::resolve` is the lone door here that still holds a
+is the kernel `PrefixSet::meet`, `ExecMap::join` and the deputy fold share;
+`PrefixSet::outside` drops the allows a deny region covers, so no projection
+carries an allow beneath a deny. `PrefixSet::resolve` is the lone door here that still holds a
 `Resolver` — the sandbox-projection fold, which must render a prefix that was
 never frozen (a bare exec-dir string, a `~`-headed fs prefix).
 

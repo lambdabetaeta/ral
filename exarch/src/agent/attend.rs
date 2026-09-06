@@ -815,7 +815,7 @@ mod tests {
             Run {
                 program: Program::Source(cmd.to_string()),
                 script_name: "<test>".to_string(),
-                caps: ral_core::types::Capabilities::root(),
+                caps: ral_core::types::GrantStack::root(),
                 wall: Some(std::time::Duration::from_secs(5)),
                 deferred_lease: Some(lease),
                 worker_cap: None,

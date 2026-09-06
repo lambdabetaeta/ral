@@ -1,10 +1,18 @@
-//! Opening redirect targets: the atomic `>` recipe, the fd-level path for the
-//! shapes a `Sink` cannot model, and the `< file` handoff into `shell.io.stdin`.
-//! The frames in `evaluator::redirect` drive all three.
+//! Opening redirect targets: the atomic `>` recipe and the `< file` handoff
+//! into `shell.io.stdin`.  The frames in `evaluator::redirect` drive both.
+//!
+//! Every open here goes through [`Shell::locate`], so the object authorised
+//! is the object the handle then names — the door never re-walks a string
+//! the gate has already judged.
 
+use crate::capability::FsOp;
 use crate::evaluator::audit::observe;
+use crate::path::{Located, ResolvedPath};
 use crate::syntax::ast::RedirectMode;
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::Read as _;
 
 /// A redirect target resolved to a concrete path or fd.
 #[derive(Clone, Debug)]
@@ -40,13 +48,6 @@ fn io_error(ctx: &str, e: &std::io::Error) -> Break {
     Break::Error(Error::new(msg, 1))
 }
 
-#[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-#[cfg(windows)]
-use windows_sys::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
-};
-
 /// An atomic `>` staged in a temp file beside its target, until
 /// [`commit`](Self::commit) renames it or [`abandon`](Self::abandon) unlinks
 /// it — and `Drop` does the latter too, for whichever of the two nobody
@@ -56,20 +57,22 @@ use windows_sys::Win32::System::Console::{
 /// `self` and empty it first, so the `Drop` that follows sees `None` and
 /// does nothing on the path that already decided.
 ///
-/// The rename mints a fresh inode: hardlinks to the old one keep the old
-/// contents, and owner, xattrs and ACLs fall to kernel inheritance.  It also
-/// needs write permission on the *parent directory*, not just on the file.
-/// Concurrent writers race as usual — this buys crash safety, not exclusion.
+/// Staging, commit and rollback all act relative to the directory handle the
+/// door located, so nothing between the judgment and the rename can rename
+/// the directory out from under the write.  The rename mints a fresh inode:
+/// hardlinks to the old one keep the old contents, and owner, xattrs and ACLs
+/// fall to kernel inheritance.  Concurrent writers race as usual — this buys
+/// crash safety, not exclusion.
 pub(crate) struct PendingWrite(Option<Staged>);
 
 struct Staged {
-    tmp: std::path::PathBuf,
-    target: std::path::PathBuf,
+    target: Located,
+    tmp: OsString,
 }
 
 impl PendingWrite {
-    fn new(tmp: std::path::PathBuf, target: std::path::PathBuf) -> Self {
-        Self(Some(Staged { tmp, target }))
+    fn new(target: Located, tmp: OsString) -> Self {
+        Self(Some(Staged { target, tmp }))
     }
 
     /// Finish the write: flush the staged bytes, rename onto the target, then
@@ -94,46 +97,53 @@ impl PendingWrite {
         }
     }
 
-    /// The whole staged file: what will land at `target` if `commit` succeeds.
+    /// The whole staged file: what will land at the target if `commit`
+    /// succeeds.
     ///
     /// `None` past [`PREVIEW_CAP`], never a prefix. A card shows a write as the
     /// change it made, and a change cannot be read off part of one side — a
     /// truncated preview would describe a file that never existed. Past the cap
     /// the write is reported and not shown.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:surface:atomic-temp-read] Sub-step of the atomic `>` write door's preview surface: stat and read the tmp file before the rename commits it. The write card surfaces when the redirect frame settles; this read is not a separate model operation."
-    )]
     pub(crate) fn new_snapshot_for_diff(&self) -> Option<Vec<u8>> {
         let staged = self.0.as_ref()?;
-        if std::fs::metadata(&staged.tmp).ok()?.len() > PREVIEW_CAP {
-            return None;
-        }
-        std::fs::read(&staged.tmp).ok()
+        read_capped(staged.target.sibling_read(&staged.tmp).ok()?)
     }
 
     /// The target's content before the rename — untouched until `commit`, so
     /// the write card can diff against it.
     ///
-    /// `Some` means the before-image is *known*, and a file that does not yet
-    /// exist has a known before-image: the empty one, against which the write
-    /// reads as every line added. `None` is reserved for a target that exists
-    /// and cannot be read whole — past [`PREVIEW_CAP`], on the same ground as
-    /// [`Self::new_snapshot_for_diff`], or unreadable. Keeping the two apart is
-    /// what stops a card diffing an overwrite against nothing and claiming the
-    /// file was created.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:surface:atomic-old-read] Sub-step of the atomic `>` write door's diff-eligibility check: stat and read the target's pre-existing content before the rename commits it, exactly mirroring new_snapshot_for_diff's read of the new side. Not a separate model operation — the write/diff card surfaces when the redirect frame settles."
-    )]
-    pub(crate) fn old_snapshot_for_diff(&self) -> Option<Vec<u8>> {
+    /// A before-image is a *read*, and is taken only where the live grant
+    /// admits one: under a write-only grant the write still lands, and the
+    /// card simply has no old side.  `Some` means the before-image is
+    /// *known*, and a file that does not yet exist has a known before-image:
+    /// the empty one, against which the write reads as every line added.
+    /// `None` is reserved for a target that exists and cannot be read whole —
+    /// past [`PREVIEW_CAP`], on the same ground as
+    /// [`Self::new_snapshot_for_diff`], or not ours to read. Keeping the two
+    /// apart is what stops a card diffing an overwrite against nothing and
+    /// claiming the file was created.
+    pub(crate) fn old_snapshot_for_diff(&self, shell: &Shell) -> Option<Vec<u8>> {
         let staged = self.0.as_ref()?;
-        match std::fs::metadata(&staged.target) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
-            Ok(m) if m.len() <= PREVIEW_CAP => std::fs::read(&staged.target).ok(),
-            _ => None,
+        if !shell.admits_fs_exact(&FsOp::Read, staged.target.real()) {
+            return None;
+        }
+        match staged.target.stat().ok()? {
+            None => Some(Vec::new()),
+            Some(s) if s.len <= PREVIEW_CAP => read_capped(staged.target.read().ok()?),
+            Some(_) => None,
         }
     }
+}
+
+/// `None` past [`PREVIEW_CAP`], judged on the open handle so the size read
+/// is the size of the bytes read.
+fn read_capped(mut file: File) -> Option<Vec<u8>> {
+    if file.metadata().ok()?.len() > PREVIEW_CAP {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 impl Drop for PendingWrite {
@@ -146,38 +156,25 @@ impl Drop for PendingWrite {
 
 impl Staged {
     /// Drop the staged bytes, leaving the target as it was.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:silent:atomic-abandon] Reasoned-silent rollback of the atomic `>` write door: unlink the staged temp for a write that will not land. The aborted write card is the surface; this removal raises none of its own."
-    )]
     fn unlink(&self) {
-        let _ = std::fs::remove_file(&self.tmp);
+        let _ = self.target.remove_sibling(&self.tmp);
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:surface:atomic-commit] The atomic `>` write door's commit step: re-open the staged temp to flush it, rename it onto the target, then re-open the parent directory only to fsync the entry durable. The write surface fires when the write settles (committed once this returns Ok); these opens carry written bytes to disk, they are not separate model reads."
-    )]
     fn rename_durable(&self) -> std::io::Result<()> {
         // Data blocks before any directory entry, or a crash can commit the
         // entry with the blocks still unwritten — a renamed zero-length file.
         // Opened for writing, not reading: Windows' `FlushFileBuffers` refuses
         // a read-only handle.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&self.tmp)?
-            .sync_all()?;
+        self.target.sibling_write(&self.tmp)?.sync_all()?;
         // On Windows this is `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which
         // *fails* rather than swapping when another process holds the target
         // open without delete sharing, so a live reader turns a silent success
         // into a hard error.
-        std::fs::rename(&self.tmp, &self.target)?;
+        self.target.rename_sibling_over(&self.tmp)?;
         // Without the parent fsync a panic can roll the directory entry back.
-        // Errors don't unwind the rename, and Windows has no directory handle
-        // to flush, so both just fall through.
-        if let Ok(dir) = std::fs::File::open(crate::path::parent_or_cwd(&self.target)) {
-            let _ = dir.sync_all();
-        }
+        // Errors don't unwind the rename, and Windows has no directory flush,
+        // so both just fall through.
+        let _ = self.target.sync_dir();
         Ok(())
     }
 }
@@ -186,55 +183,24 @@ impl Staged {
 /// never pulled into memory whole to show a head.
 const PREVIEW_CAP: u64 = 64 * 1024;
 
-/// True for new paths and regular files.  TTYs, `/dev/null` and named pipes
-/// stream instead — there is no inode to rename.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:surface:atomic-eligible] Stat of the `>` write door's target to choose atomic vs. streaming semantics. A sub-step of the surfacing write door (open_file), not a model read; the write card is the operation's surface."
-)]
-fn atomic_eligible(path: &std::path::Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) => meta.file_type().is_file(),
-        Err(_) => true,
-    }
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:surface:open-atomic] The `>` write door's tmp-file recipe: stat the target only to preserve its mode onto the tmp. A sub-step of the surfacing write door (open_file); the write card is the operation's surface, not this mode-preservation stat."
-)]
+/// Stage an atomic `>` beside its located target.  `existing` is the
+/// target's stat when it exists: its mode is carried onto the staged file,
+/// since a redirect must not silently narrow a 0644 file; a new file gets
+/// what `open(2)` would have created under the umask.
 fn open_atomic(
     path: &str,
-    target: &crate::path::ResolvedPath,
-) -> Settled<(std::fs::File, PendingWrite)> {
-    // Resolve symlinks, or the rename replaces the link itself with a regular
-    // file.  `canonicalise_strict` errors on a path that does not exist yet;
-    // for a fresh file the literal target is the right one.
-    let target = target
-        .canonicalise_strict()
-        .unwrap_or_else(|_| target.as_path().to_path_buf());
-    // Stage beside the target: `rename(2)` is atomic only within one
-    // filesystem.  `parent_or_cwd` reads `Path::parent`'s `Some("")` for a
-    // bare filename as the cwd.
-    let parent = crate::path::parent_or_cwd(&target);
-    // A random name, not `target.tmp`: a predictable one races concurrent
-    // writers in a shared directory.  Dot-prefixed to hide it, with `O_EXCL`
-    // inside.  It stays a `NamedTempFile` for the rest of this body — the one
-    // stretch where nobody yet knows the write exists, so its `Drop` is the
-    // only thing that could clean up an early return — and becomes a
-    // `PendingWrite` at the hand-off below.
-    let tmp = tempfile::Builder::new()
-        .prefix(".")
-        .suffix(".ral-write.tmp")
-        .tempfile_in(parent)
+    target: Located,
+    existing: Option<&crate::path::walk::Stat>,
+) -> Settled<(File, PendingWrite)> {
+    let (file, tmp) = target
+        .create_sibling_tmp()
         .map_err(|e| io_error(path, &e))?;
-    // tempfile creates at 0600, and a redirect must not silently narrow a
-    // 0644 file.  Carry the target's mode over; for a new file mirror what
-    // `open(2)` would have created.
+    // Latched before the first fallible step, so an early `?` unlinks it.
+    let pending = PendingWrite::new(target, tmp);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&target).ok().map_or_else(
+        let mode = existing.map_or_else(
             || {
                 // `rustix::process::umask` has no read-only form: set a
                 // throwaway value to read the mask, then put it back.
@@ -244,23 +210,28 @@ fn open_atomic(
                 let mask = u32::from(prev.as_raw_mode());
                 0o666 & !mask
             },
-            |m| m.permissions().mode() & 0o7777,
+            |s| s.mode,
         );
-        let mut perms = tmp
-            .as_file()
-            .metadata()
-            .map_err(|e| io_error(path, &e))?
-            .permissions();
-        perms.set_mode(mode);
-        tmp.as_file()
-            .set_permissions(perms)
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
             .map_err(|e| io_error(path, &e))?;
     }
-    let file = tmp.as_file().try_clone().map_err(|e| io_error(path, &e))?;
-    // Past every fallible step: disarm the unlink and hand the write on as
-    // paths, for a caller that must now say how it ends.
-    let (_, tmp) = tmp.keep().map_err(|e| io_error(path, &e.error))?;
-    Ok((file, PendingWrite::new(tmp, target)))
+    #[cfg(not(unix))]
+    let _ = existing;
+    Ok((file, pending))
+}
+
+/// The discard device is exempt from the grant and from the walk alike: there
+/// is no object to locate, and on Windows `NUL` is a name the Win32 layer
+/// resolves anywhere rather than an entry in any directory.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:discard-device] `/dev/null` / `NUL` opened by name: no bytes reach or leave the model, and no grant region can contain a device that is not a file."
+)]
+fn open_discard(rp: &ResolvedPath) -> std::io::Result<File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(rp.as_path())
 }
 
 /// Open a redirect target.  `>` to a regular file returns a [`PendingWrite`]
@@ -268,46 +239,41 @@ fn open_atomic(
 /// shape streams.
 /// Paths resolve against the shell's scoped cwd, so a `within [dir: …]`
 /// redirect lands right even from a native, where the host cwd never moves.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:surface:open-file] The redirect read/write door for `<`/`>`/`>>`/`>~` on fd 1/2: every model redirect opens here. The read/write card is fused onto the operation by the redirect frame that wraps this open (committed/aborted/failed outcome on settle)."
-)]
 pub(crate) fn open_file(
     path: &str,
     mode: RedirectMode,
     shell: &mut Shell,
-) -> Settled<(std::fs::File, Option<PendingWrite>)> {
+) -> Settled<(File, Option<PendingWrite>)> {
     let rp = shell.resolve(path);
-    match mode {
-        RedirectMode::Read => shell.check_fs_read(&rp)?,
-        _ => shell.check_fs_write(&rp)?,
+    let stream = |opened: std::io::Result<File>| {
+        opened.map(|f| (f, None)).map_err(|e| io_error(path, &e))
+    };
+    if rp.is_discard() {
+        return stream(open_discard(&rp));
     }
+    let op = match mode {
+        RedirectMode::Read => FsOp::Read,
+        _ => FsOp::Write,
+    };
+    let target = shell.locate(&rp, &op)?;
     match mode {
-        RedirectMode::Append => std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(rp.as_path())
-            .map(|f| (f, None))
-            .map_err(|e| io_error(path, &e)),
-        RedirectMode::StreamWrite => std::fs::File::create(rp.as_path())
-            .map(|f| (f, None))
-            .map_err(|e| io_error(path, &e)),
-        RedirectMode::Read => std::fs::File::open(rp.as_path())
-            .map(|f| (f, None))
-            .map_err(|e| io_error(path, &e)),
+        RedirectMode::Read => stream(target.read()),
+        RedirectMode::Append => stream(target.append()),
+        RedirectMode::StreamWrite => stream(target.truncate()),
         // The payload is the redirect word itself; `install_stdin_redirect`
         // routes it without touching the filesystem.
         RedirectMode::HereString => {
             unreachable!("here-string redirects never reach the file-open door")
         }
         RedirectMode::Write => {
-            if atomic_eligible(rp.as_path()) {
-                let (file, commit) = open_atomic(path, &rp)?;
-                Ok((file, Some(commit)))
-            } else {
-                std::fs::File::create(rp.as_path())
-                    .map(|f| (f, None))
-                    .map_err(|e| io_error(path, &e))
+            let existing = target.stat().map_err(|e| io_error(path, &e))?;
+            // TTYs and named pipes stream: there is no inode to rename.
+            match existing {
+                Some(s) if !s.is_file => stream(target.truncate()),
+                existing => {
+                    let (file, commit) = open_atomic(path, target, existing.as_ref())?;
+                    Ok((file, Some(commit)))
+                }
             }
         }
     }
@@ -329,298 +295,6 @@ pub(crate) fn atomic_write(path: &str, bytes: &[u8], shell: &mut Shell) -> Settl
     }
 }
 
-/// One descriptor `F_DUPFD_CLOEXEC`'d aside before [`apply_redirects`] `dup2`'d
-/// over `fd`.  Restoration is RAII, so a [`RedirectGuard`] left half-built by a
-/// `?` still reverses every `dup2` already installed.
-#[cfg(unix)]
-pub(crate) struct BackupFd {
-    pub(crate) fd: u32,
-    pub(crate) backup: std::os::fd::OwnedFd,
-}
-
-#[cfg(unix)]
-impl Drop for BackupFd {
-    fn drop(&mut self) {
-        // A failure here has nowhere to go; `backup` closes itself after.
-        use std::os::fd::AsFd;
-        #[allow(
-            clippy::cast_possible_wrap,
-            reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
-        )]
-        let _ = unsafe { crate::process::clobber_slot(self.backup.as_fd(), self.fd as i32) };
-    }
-}
-
-/// Windows analog of `BackupFd`: `Drop` puts `prev` back in the std slot,
-/// then closes `owned` — the handle we opened for a file target, mirroring the
-/// Unix `close(raw)`.  An `Fd→Fd` merge (`2>&1`) aliases a live slot's handle
-/// and so leaves `owned` empty.
-#[cfg(windows)]
-pub(crate) struct BackupHandle {
-    pub(crate) std_handle: u32,
-    pub(crate) prev: HANDLE,
-    pub(crate) owned: Option<HANDLE>,
-}
-
-#[cfg(windows)]
-impl Drop for BackupHandle {
-    fn drop(&mut self) {
-        // Restore the slot first, so the owned handle is unreachable through
-        // any std slot before we close it.  Failures have nowhere to go.
-        unsafe {
-            SetStdHandle(self.std_handle, self.prev);
-            if let Some(h) = self.owned {
-                CloseHandle(h);
-            }
-        }
-    }
-}
-
-/// Undo state for [`apply_redirects`]: backups to restore, writes to settle.
-pub(crate) struct RedirectGuard {
-    #[cfg(unix)]
-    saved: Vec<BackupFd>,
-    #[cfg(windows)]
-    saved: Vec<BackupHandle>,
-    commits: Vec<PendingWrite>,
-}
-
-/// Pop, rather than let `Vec::drop` unwind forwards: overlapping `dup2`s — a
-/// swap of fd 1 and fd 2 — only compose back correctly in reverse.
-///
-/// A guard reaching `Drop` still holding writes is one whose frame never
-/// settled — `apply_redirects` failed part-way, or the body unwound — so those
-/// writes end unfinished and their targets keep what they had.
-#[cfg(unix)]
-impl Drop for RedirectGuard {
-    fn drop(&mut self) {
-        while let Some(_b) = self.saved.pop() {
-            // The pop is the work: `BackupFd::Drop` does the dup2 and close.
-        }
-        self.abandon_unsettled();
-    }
-}
-
-/// Windows analog, LIFO for the same reason.
-#[cfg(windows)]
-impl Drop for RedirectGuard {
-    fn drop(&mut self) {
-        while let Some(_b) = self.saved.pop() {
-            // The pop is the work: `BackupHandle::Drop` restores the slot.
-        }
-        self.abandon_unsettled();
-    }
-}
-
-impl RedirectGuard {
-    /// Each drained write's own `Drop` unlinks its temp.
-    fn abandon_unsettled(&mut self) {
-        self.commits.clear();
-    }
-}
-
-/// fd-0 file redirects belong to `shell.io.stdin` via
-/// [`install_stdin_redirect`]; `apply_redirects` here and `wire_stdin` in
-/// `stdio.rs` must both leave them alone.
-fn is_stdin_file_redirect(r: &EvalRedirectV) -> bool {
-    matches!(
-        r,
-        EvalRedirectV {
-            fd: 0,
-            mode: RedirectMode::Read | RedirectMode::HereString,
-            target: EvalRedirect::File(_)
-        }
-    )
-}
-
-/// Only fds 0, 1 and 2 have a `SetStdHandle` slot, so a higher one is rejected
-/// rather than silently dropped.
-#[cfg(windows)]
-fn fd_to_std_handle(fd: u32) -> Settled<u32> {
-    match fd {
-        0 => Ok(STD_INPUT_HANDLE),
-        1 => Ok(STD_OUTPUT_HANDLE),
-        2 => Ok(STD_ERROR_HANDLE),
-        other => Err(Break::Error(Error::new(
-            format!(
-                "redirect to fd {other} is not supported for bundled tools on Windows \
-                 (only 0, 1, 2 map to a Win32 standard-handle slot)"
-            ),
-            1,
-        ))),
-    }
-}
-
-/// Install, at the fd level, the shapes no `Sink` can model — fd ≥ 3 targets
-/// above all — which is everything the redirect frame in `evaluator::redirect`
-/// passes down here.  The guard's commits must be taken out by
-/// `restore_redirects` before it drops; fd-0 file redirects are skipped, since
-/// [`install_stdin_redirect`] owns them.
-#[cfg(unix)]
-pub(crate) fn apply_redirects(
-    redirects: &[EvalRedirectV],
-    shell: &mut Shell,
-) -> Settled<RedirectGuard> {
-    let mut guard = RedirectGuard {
-        saved: Vec::new(),
-        commits: Vec::new(),
-    };
-    for r in redirects {
-        if is_stdin_file_redirect(r) {
-            continue;
-        }
-        let EvalRedirectV { fd, mode, target } = r;
-        match target {
-            EvalRedirect::File(path) => {
-                let effective_mode = if *fd == 2 { stderr_mode(*mode) } else { *mode };
-                // Safe under `?`: backups already pushed LIFO-restore when
-                // `guard` drops on the error return.
-                let (file, commit) = open_file(path, effective_mode, shell)?;
-                if let Some(c) = commit {
-                    guard.commits.push(c);
-                }
-                // `owned` closes at the end of this arm; the `dup2` has taken
-                // its own reference to the open file by then.
-                use std::os::fd::AsRawFd;
-                let owned: std::os::fd::OwnedFd = file.into();
-                install_dup2(owned.as_raw_fd(), *fd, &mut guard)?;
-            }
-            EvalRedirect::Fd(target_fd) => {
-                #[allow(
-                    clippy::cast_possible_wrap,
-                    reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
-                )]
-                install_dup2(*target_fd as i32, *fd, &mut guard)?;
-            }
-        }
-    }
-    Ok(guard)
-}
-
-/// Point `dst_fd` at `src_fd`, backing `dst_fd` up first.
-///
-/// That backup is the only restore path, so when it fails — `EBADF` for a
-/// `dst_fd` that was never opened, the normal state for an fd ≥ 3 — we error
-/// rather than install a `dup2` that would pin `dst_fd` at the target for the
-/// life of the shell.
-#[cfg(unix)]
-fn install_dup2(src_fd: i32, dst_fd: u32, guard: &mut RedirectGuard) -> Settled<()> {
-    use std::os::fd::BorrowedFd;
-
-    // `CLOEXEC`, not a bare `dup`: the backup is guard bookkeeping, and an
-    // external spawned from inside the redirected body must not inherit it.
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
-    )]
-    // SAFETY: `dst_fd` names the slot this redirect is about to overwrite,
-    // live for the borrow, which ends with this statement.
-    let backup =
-        unsafe { rustix::io::fcntl_dupfd_cloexec(BorrowedFd::borrow_raw(dst_fd as i32), 0) }
-            .map_err(|e| {
-                Break::Error(Error::new(
-                    format!(
-                        "redirect to fd {dst_fd}: cannot save the existing descriptor \
-                 ({e}) — refusing to install a redirect with no restore path"
-                    ),
-                    1,
-                ))
-            })?;
-    guard.saved.push(BackupFd { fd: dst_fd, backup });
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
-    )]
-    // SAFETY: the caller holds `src_fd` open across this call — either the
-    // just-opened file's `OwnedFd` or a live standard slot.
-    if let Err(e) =
-        unsafe { crate::process::clobber_slot(BorrowedFd::borrow_raw(src_fd), dst_fd as i32) }
-    {
-        return Err(Break::Error(Error::new(
-            format!("redirect to fd {dst_fd}: dup2 failed ({e})"),
-            1,
-        )));
-    }
-    Ok(())
-}
-
-/// Windows analog, structurally mirroring the Unix arm.  `SetStdHandle` stands
-/// in for `dup2`: Rust's `std::io::stdout()` calls `GetStdHandle` on every
-/// write, so replacing the slot retargets writes already in flight.
-#[cfg(windows)]
-pub(crate) fn apply_redirects(
-    redirects: &[EvalRedirectV],
-    shell: &mut Shell,
-) -> Settled<RedirectGuard> {
-    let mut guard = RedirectGuard {
-        saved: Vec::new(),
-        commits: Vec::new(),
-    };
-    for r in redirects {
-        if is_stdin_file_redirect(r) {
-            continue;
-        }
-        let EvalRedirectV { fd, mode, target } = r;
-        let dst_slot = fd_to_std_handle(*fd)?;
-        match target {
-            EvalRedirect::File(path) => {
-                let effective_mode = if *fd == 2 { stderr_mode(*mode) } else { *mode };
-                // Safe under `?`: backups already pushed LIFO-restore when
-                // `guard` drops on the error return.
-                let (file, commit) = open_file(path, effective_mode, shell)?;
-                if let Some(c) = commit {
-                    guard.commits.push(c);
-                }
-                use std::os::windows::io::IntoRawHandle;
-                let raw = file.into_raw_handle() as HANDLE;
-                let prev = unsafe { GetStdHandle(dst_slot) };
-                // Push before the set, so `Drop` closes `raw` either way and
-                // a set that never happens cannot leak the opened file.
-                guard.saved.push(BackupHandle {
-                    std_handle: dst_slot,
-                    prev,
-                    owned: Some(raw),
-                });
-                unsafe {
-                    SetStdHandle(dst_slot, raw);
-                }
-            }
-            EvalRedirect::Fd(target_fd) => {
-                let src_slot = fd_to_std_handle(*target_fd)?;
-                let prev = unsafe { GetStdHandle(dst_slot) };
-                let src_handle = unsafe { GetStdHandle(src_slot) };
-                guard.saved.push(BackupHandle {
-                    std_handle: dst_slot,
-                    prev,
-                    owned: None,
-                });
-                unsafe {
-                    SetStdHandle(dst_slot, src_handle);
-                }
-            }
-        }
-    }
-    Ok(guard)
-}
-
-/// Take the writes out before `guard` drops at the end of this call, since
-/// that `Drop` is the fd-level restore — which must run whether or not the
-/// redirected body succeeded.  Taking them is also what disarms the guard's
-/// own abandon: settling them is now the caller's to do.
-pub(crate) fn restore_redirects(mut guard: RedirectGuard) -> Vec<PendingWrite> {
-    std::mem::take(&mut guard.commits)
-}
-
-/// Finish each staged write, stopping at the first failure.
-pub(crate) fn commit_atomics(commits: Vec<PendingWrite>) -> Settled<()> {
-    for commit in commits {
-        commit
-            .commit()
-            .map_err(|e| Break::Error(Error::new(format!("atomic write: {e}"), 1)))?;
-    }
-    Ok(())
-}
-
 /// Park the fd-0 redirect — `< file` or the here-string `<< str` — on
 /// `shell.io.stdin`, returning a [`StdinRedirectGuard`] that puts back
 /// whatever `Source` was there.  When several redirects name fd 0 the last
@@ -634,10 +308,6 @@ pub(crate) fn commit_atomics(commits: Vec<PendingWrite>) -> Settled<()> {
 /// Routing through `Source` rather than `dup2` is what keeps the cached
 /// `startup_stdin_tty` honest — consumers trust it only when `Source` is
 /// `Terminal`, which then really does mean the inherited fd 0.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:surface:stdin-redirect] The `< file` read door on fd 0: opens the model's stdin redirect and emits the read card eagerly (so the read precedes the body/exec it feeds, e.g. `cat < a`). The open IS the surfaced read."
-)]
 pub(crate) fn install_stdin_redirect(
     redirects: &[EvalRedirectV],
     mooring: &Mooring,
@@ -655,9 +325,7 @@ pub(crate) fn install_stdin_redirect(
     };
     let source = match mode {
         RedirectMode::Read => {
-            let rp = shell.resolve(word);
-            shell.check_fs_read(&rp)?;
-            let f = std::fs::File::open(rp.as_path()).map_err(|e| io_error(word, &e))?;
+            let (f, _) = open_file(word, RedirectMode::Read, shell)?;
             // Door 1 — READ, recorded eagerly so it precedes the body or
             // exec it feeds, as in `cat < a`.
             observe(shell, mooring, Observed::Read { path: word.clone() });
@@ -698,104 +366,5 @@ impl StdinRedirectGuard {
         if let Self::Installed(prior) = self {
             shell.io.stdin = prior;
         }
-    }
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    /// The fd table is process-global; these tests mutate it and assert on it.
-    static FD_TABLE: Mutex<()> = Mutex::new(());
-
-    /// `F_GETFD` returns `EBADF` exactly when `fd` is not open.
-    fn fd_is_open(fd: i32) -> bool {
-        unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
-    }
-
-    /// A free fd ≥ 3 that stays free: pin a barrier well above the low slots
-    /// `open_file` allocates into, then target the one just past it.
-    fn pinned_unopened_fd() -> (u32, BarrierFd) {
-        let barrier = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 32) };
-        assert!(barrier >= 0, "could not pin a high barrier fd");
-        #[allow(
-            clippy::cast_sign_loss,
-            reason = "barrier is a fcntl-returned fd asserted >= 0 on the line above, so no sign is lost"
-        )]
-        let target = barrier as u32 + 1;
-        #[allow(
-            clippy::cast_possible_wrap,
-            reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
-        )]
-        let target_fd = target as i32;
-        assert!(!fd_is_open(target_fd), "target fd {target} must start free");
-        (target, BarrierFd(barrier))
-    }
-
-    struct BarrierFd(i32);
-    impl Drop for BarrierFd {
-        fn drop(&mut self) {
-            unsafe { libc::close(self.0) };
-        }
-    }
-
-    /// `echo hi 3>/tmp/x`: nothing to back up, so the redirect must error
-    /// rather than install a `dup2` with no restore path.
-    #[test]
-    fn file_redirect_to_unopened_fd_errors_and_leaks_nothing() {
-        let _serial = FD_TABLE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (fd, _barrier) = pinned_unopened_fd();
-        let mut shell = Shell::default();
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("x").to_string_lossy().into_owned();
-        let redirects = [EvalRedirectV {
-            fd,
-            mode: RedirectMode::Write,
-            target: EvalRedirect::File(target),
-        }];
-
-        let result = apply_redirects(&redirects, &mut shell);
-
-        assert!(result.is_err(), "redirect to unopened fd {fd} must error");
-        #[allow(
-            clippy::cast_possible_wrap,
-            reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
-        )]
-        let fd_i32 = fd as i32;
-        assert!(
-            !fd_is_open(fd_i32),
-            "fd {fd} must stay unopened — no unrestorable redirect installed",
-        );
-    }
-
-    /// The `n>&m` shape is rejected for the same reason.
-    #[test]
-    fn fd_dup_redirect_to_unopened_fd_errors_and_leaks_nothing() {
-        let _serial = FD_TABLE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (fd, _barrier) = pinned_unopened_fd();
-        let mut shell = Shell::default();
-        let redirects = [EvalRedirectV {
-            fd,
-            mode: RedirectMode::Write,
-            target: EvalRedirect::Fd(1),
-        }];
-
-        let result = apply_redirects(&redirects, &mut shell);
-
-        assert!(result.is_err(), "redirect to unopened fd {fd} must error");
-        #[allow(
-            clippy::cast_possible_wrap,
-            reason = "fd is a non-negative descriptor number (u32 by design); the libc boundary wants c_int and the value never sets the top bit, so no wrap"
-        )]
-        let fd_i32 = fd as i32;
-        assert!(
-            !fd_is_open(fd_i32),
-            "fd {fd} must stay unopened — no unrestorable redirect installed",
-        );
     }
 }

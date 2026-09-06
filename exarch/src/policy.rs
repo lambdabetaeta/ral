@@ -1,13 +1,15 @@
 //! Capability composition for exarch.
 //!
 //! ```text
-//!   ceiling   = base ∨ extend_base?
-//!   effective = ceiling ⊓ restrict₁ ⊓ restrict₂ ⊓ ...
+//!   ceiling = base ∨ extend_base?
+//!   stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?]
 //! ```
 //!
-//! One optional join widens the ceiling, then any number of meets attenuate
-//! from it; each phase commutes within itself.  Composition is explicit —
-//! nothing is auto-loaded.
+//! One optional join widens the ceiling into its own layer; every other
+//! composition is the [`GrantStack`] itself — each `--restrict` file, and
+//! each deny carve-out, is pushed as its own layer rather than folded ahead
+//! of time, so the stack's own per-check fold is the one meet that ever
+//! runs.  Composition is explicit — nothing is auto-loaded.
 
 mod base;
 mod load;
@@ -17,20 +19,21 @@ use load::{absolute_in, lint_deputy_prefixes, load_capabilities_ral};
 use ral_core::host;
 use ral_core::io::TerminalState;
 use ral_core::path::{sigil::FreezeCtx, sigil::freeze_path_list};
-use ral_core::types::{Capabilities, Shell};
+use ral_core::types::{Capabilities, GrantStack, Shell};
 use std::path::{Path, PathBuf};
 
-/// Compose a session's effective [`Capabilities`], with the restrict files'
+/// Compose a session's effective [`GrantStack`], with the restrict files'
 /// absolute paths.
 ///
 /// `base_name` selects a bake-in profile from `base`.  Every profile freezes
-/// against the session's `$HOME` and working directory as it loads, so join and
-/// meet run on already-resolved bundles.  Each restrict file's own path joins
-/// `fs.deny_paths`, putting the bytes that shape the agent's permissions beyond
-/// its reach; the extend-base file does not, since widening authority is a
-/// trust-source concern rather than a containment one.  On the same footing,
-/// and for the same reason, every attenuated grant denies
-/// [`provider::credential_files`](crate::provider::credential_files).
+/// against the session's `$HOME` and working directory as it loads, so the
+/// join and every layer push run on already-resolved bundles.  Each restrict
+/// file's own path joins a deny layer, putting the bytes that shape the
+/// agent's permissions beyond its reach; the extend-base file does not,
+/// since widening authority is a trust-source concern rather than a
+/// containment one.  On the same footing, and for the same reason, the
+/// stack denies [`provider::credential_files`](crate::provider::credential_files)
+/// in its own layer wherever some layer holds an `fs` opinion.
 ///
 /// # Errors
 /// Unknown `base_name`, or a profile that fails to load.
@@ -43,10 +46,10 @@ pub fn for_invocation(
     base_name: &str,
     extend_base: Option<&Path>,
     restrict_files: &[PathBuf],
-) -> Result<(Capabilities, Vec<PathBuf>), String> {
+) -> Result<(GrantStack, Vec<PathBuf>), String> {
     // The loader evaluates ral source, so it needs a Shell.  This one is
     // scaffolding: the caller builds the session's real shell separately, from
-    // the frozen Capabilities returned here.
+    // the frozen GrantStack returned here.
     let mut load_shell = Shell::new(TerminalState::default());
 
     let cwd_path = PathBuf::from(cwd);
@@ -56,11 +59,10 @@ pub fn for_invocation(
         cwd: &cwd_path,
     };
 
-    let mut caps: Capabilities = resolve_base(base_name, &ctx)?;
-
+    let mut ceiling: Capabilities = resolve_base(base_name, &ctx)?;
     if let Some(path) = extend_base {
         let abs = absolute_in(cwd, path);
-        caps = caps.join(load_capabilities_ral(
+        ceiling = ceiling.join(load_capabilities_ral(
             &ral_core::types::Mooring::adrift(),
             &mut load_shell,
             &abs,
@@ -69,9 +71,12 @@ pub fn for_invocation(
         )?);
     }
 
+    let mut stack = GrantStack::root();
+    stack.push(ceiling);
+
     let restricts: Vec<PathBuf> = restrict_files.iter().map(|p| absolute_in(cwd, p)).collect();
     for path in &restricts {
-        caps = caps.meet(load_capabilities_ral(
+        stack.push(load_capabilities_ral(
             &ral_core::types::Mooring::adrift(),
             &mut load_shell,
             path,
@@ -81,30 +86,30 @@ pub fn for_invocation(
     }
 
     if !restricts.is_empty() {
-        deny_paths(&mut caps, &restricts, &ctx)?;
+        stack.push(deny_layer(&restricts, &ctx)?);
     }
 
     // Our own credentials are the authority a grant is *made of*, never
-    // something it hands out — so they are carved out after composition, where
-    // no profile can forget them and no `--extend-base` can widen them back.
-    // Only where an fs policy exists: `dangerous` attenuates nothing by
-    // contract, and installing one there to hold these denies would silently
-    // confine every session that asked not to be, against an agent that can
-    // read the same bytes a hundred other ways.
-    if caps.fs.is_some() {
-        deny_paths(&mut caps, &crate::provider::credential_files(), &ctx)?;
+    // something it hands out — so they are carved out in their own layer,
+    // where no profile can forget them and no `--extend-base` can widen them
+    // back.  Only where some layer holds an fs opinion: `dangerous`
+    // attenuates nothing by contract, and installing one there to hold these
+    // denies would silently confine every session that asked not to be,
+    // against an agent that can read the same bytes a hundred other ways.
+    if stack.iter().any(|c| c.fs.is_some()) {
+        stack.push(deny_layer(&crate::provider::credential_files(), &ctx)?);
     }
 
-    lint_deputy_prefixes(&caps);
+    lint_deputy_prefixes(&stack);
 
-    Ok((caps, restricts))
+    Ok((stack, restricts))
 }
 
-/// Attenuate `parent` to a bake-in base for a spawned child.
+/// Resolve a bake-in base for a spawned child — the layer a caller pushes onto the parent's stack.
 ///
-/// `parent ⊓ base`, frozen against the child's working directory.  The meet is
-/// ≤ both operands, so a spawn can only reduce a child's reach: naming a base
-/// looser than the parent changes nothing.
+/// Frozen against the child's working directory. The stack is the meet, so a
+/// spawn narrowing a child only ever adds a layer; naming a base looser than
+/// the parent changes nothing once folded.
 ///
 /// # Errors
 /// Unknown `base_name`.
@@ -112,30 +117,26 @@ pub fn for_invocation(
     clippy::disallowed_methods,
     reason = "host-env: the child's base freezes against the launching user's real home, like for_invocation's"
 )]
-pub fn narrow(parent: &Capabilities, base_name: &str, cwd: &str) -> Result<Capabilities, String> {
+pub fn base_layer(base_name: &str, cwd: &str) -> Result<Capabilities, String> {
     let cwd_path = PathBuf::from(cwd);
     let home = host::home();
     let ctx = FreezeCtx {
         home: home.as_deref(),
         cwd: &cwd_path,
     };
-    let base = resolve_base(base_name, &ctx)?;
-    Ok(parent.clone().meet(base))
+    resolve_base(base_name, &ctx)
 }
 
-/// Add each path to `fs.deny_paths`, installing the root policy first when none
-/// is set, so a deny always lands on a concrete policy rather than the implicit
-/// ceiling.
+/// A deny layer carving `paths` out of a fresh, otherwise-unrestricted fs
+/// policy — a constructor, not a mutator, since composition is now the
+/// stack: each caller pushes the layer this returns rather than folding it
+/// into one already on the stack.
 ///
 /// Only the lexical form is pushed: the in-process check in
 /// `core/src/capability/enforce.rs` and the OS sandbox profiles each expand a
 /// deny entry to its canonical and macOS-firmlink variants themselves.
-fn deny_paths(
-    caps: &mut Capabilities,
-    paths: &[PathBuf],
-    ctx: &FreezeCtx<'_>,
-) -> Result<(), String> {
-    let frozen = freeze_path_list(
+fn deny_layer(paths: &[PathBuf], ctx: &FreezeCtx<'_>) -> Result<Capabilities, String> {
+    let mut frozen = freeze_path_list(
         paths
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
@@ -143,11 +144,14 @@ fn deny_paths(
         ctx,
     )
     .map_err(|e| e.message)?;
-    let fs = caps.fs.get_or_insert_with(root_fs_policy);
-    fs.deny_paths.extend(frozen);
-    fs.deny_paths.sort();
-    fs.deny_paths.dedup();
-    Ok(())
+    frozen.sort();
+    frozen.dedup();
+    let mut fs = root_fs_policy();
+    fs.deny_paths = frozen;
+    Ok(Capabilities {
+        fs: Some(fs),
+        ..Capabilities::default()
+    })
 }
 
 #[cfg(test)]
@@ -169,34 +173,34 @@ mod tests {
 
         // The `/` ceiling freezes to the native root spelling: `\` on Windows,
         // still a universal prefix there since it folds to zero components.
-        let (cwd, root) = if cfg!(windows) {
-            (r"C:\", r"\")
-        } else {
-            ("/", "/")
-        };
-        let (caps, _) =
+        let cwd = if cfg!(windows) { r"C:\" } else { "/" };
+        let (stack, _) =
             for_invocation(cwd, "dangerous", None, std::slice::from_ref(&path)).unwrap();
-        let fs = caps.fs.expect("restrict file should install fs carve-out");
-        assert_eq!(fs.read_prefixes, vec![root]);
-        assert_eq!(fs.write_prefixes, vec![root]);
+
+        let resolver = ral_core::path::Resolver::shell_less();
+        let rp = resolver.resolve(&path.to_string_lossy());
         assert!(
-            fs.deny_paths.iter().any(|p| *p == *path.to_string_lossy()),
+            !stack.admits_fs(&ral_core::capability::FsOp::Write, &resolver, &rp),
             "restrict file path should be write-denied"
         );
 
         let _ = std::fs::remove_file(path);
     }
 
-    /// Meet ANDs the verdicts, so a `confined` parent (network off) naming the
-    /// looser `minimal` base (network on) stays offline.
+    /// The stack ANDs the verdicts, so a `confined` layer (network off) under
+    /// the looser `minimal` layer (network on) stays offline whichever order
+    /// they were pushed.
     #[test]
     fn narrow_cannot_escalate_a_restricted_parent() {
-        let parent = narrow(&Capabilities::root(), "confined", "/work/proj").unwrap();
-        assert_eq!(parent.net, Some(false), "confined parent has net off");
-        let child = narrow(&parent, "minimal", "/work/proj").unwrap();
-        assert_eq!(
-            child.net,
-            Some(false),
+        let confined = base_layer("confined", "/work/proj").unwrap();
+        assert_eq!(confined.net, Some(false), "confined layer has net off");
+        let minimal = base_layer("minimal", "/work/proj").unwrap();
+
+        let mut stack = GrantStack::root();
+        stack.push(confined);
+        stack.push(minimal);
+        assert!(
+            !stack.net().all(|n| n),
             "naming a looser base must not turn the network back on"
         );
     }

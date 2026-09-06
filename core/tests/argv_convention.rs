@@ -20,7 +20,7 @@
 mod common;
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, Shell, Value};
+use ral_core::types::{Break, GrantStack, Shell, Value};
 use ral_core::{
     RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Settled, StaticDiagnostics,
 };
@@ -42,7 +42,7 @@ fn report(src: &str) -> RunReport {
         run: Run {
             program: Program::Source(src.into()),
             script_name: "<argv-convention>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

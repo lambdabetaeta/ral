@@ -34,10 +34,14 @@ pub(crate) fn sandbox_projection(
     // and is paid again on each rebuild.
     #[cfg(debug_assertions)]
     let t_fold = std::time::Instant::now();
+    // Computed once so read and write are each projected against the same
+    // deny region: under deny-wins an allow beneath a deny is dead
+    // authority, and no backend may ever be handed one to reorder.
+    let deny = deny_region(grants, resolver);
     // Zipped because the two allow regions are `Some` on the same condition —
     // some layer held an `fs` opinion — so there is no mixed case to weigh.
-    let read = allow_region(grants, resolver, &FsOp::Read);
-    let write = allow_region(grants, resolver, &FsOp::Write);
+    let read = allow_region(grants, resolver, &FsOp::Read).map(|r| r.outside(&deny));
+    let write = allow_region(grants, resolver, &FsOp::Write).map(|w| w.outside(&deny));
     let regions = read.zip(write);
     let mut net_allowed = true;
     let mut saw_net = false;
@@ -77,7 +81,7 @@ pub(crate) fn sandbox_projection(
         Some((read, write)) => FsProjection::Restricted(FsRules {
             read_prefixes: surface_strings(read),
             write_prefixes: surface_strings(write),
-            deny_paths: surface_strings(deny_region(grants, resolver)),
+            deny_paths: surface_strings(deny),
             pinned_dirs: Vec::new(),
         }),
         None => FsProjection::Unrestricted,

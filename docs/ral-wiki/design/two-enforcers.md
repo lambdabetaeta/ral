@@ -35,6 +35,18 @@ narrates *how* each runs; this page argues *why* both exist.
   so the per-command sandbox launch is skipped entirely — an unrestricted child
   spawns directly.
 
+**What the in-process enforcer authorises is the object, not the name.** A
+gate that judges a canonicalised string and lets the caller re-walk the
+original string with `open(2)` has two walks, and whatever differs between
+them — a dangling link the canonicaliser could not follow, a directory swapped
+for a symlink by a concurrent child — is an object the gate never saw. So the
+gate's fs door is one walk (`Shell::locate`, `path/walk.rs`): from the root
+through directory handles, no symlink ever followed by the kernel, each link
+spliced into the name and re-walked, the verdict taken on the object landed
+on, and the open, stat, staging and rename done relative to that directory
+handle. Authority is preserved through execution because the handle *is* the
+authority ([[decisions/260906_object-not-name|object-not-name]]).
+
 **Why the gate cannot be the only enforcer.**
 
 - *It is blind to what a child does on its own.* Once ral spawns `sh`, the gate's
@@ -45,8 +57,11 @@ narrates *how* each runs; this page argues *why* both exist.
   network operation for the gate to see ([[design/grant|grant]]).
 - *Linux exec is a Landlock domain, minus the denies.* bwrap cannot path-filter
   a child's re-execs, so the payload enters a Landlock layer of its own inside
-  the envelope; Landlock is allow-list only, so a deny *inside* an admit still
-  rests on the in-process gate
+  the envelope. Two gaps stay with the in-process gate, which sees neither once
+  a child re-execs: Landlock is allow-list only, so a deny *inside* an admit is
+  the gate's alone; and the kernel gates the path passed to `execve`, not the
+  code a process runs, so an admitted loader or interpreter handed an
+  unadmitted file as an argument runs it
   ([[decisions/260906_landlock-exec-layer|landlock-exec-layer]]).
 
 **What a grant's guarantee means on Linux, row by row.** Rows above the rule
@@ -69,9 +84,14 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | no signalling the host; host process table hidden | pid namespace + fresh `/proc` | reported: the table is the container's own |
 | private ptys | `--dev` | reported: `/dev` by hand over the host's `/dev/pts` |
 
-**Neither enforcer is the body's to rewrite.** The launcher pinned at boot —
-bwrap on Linux, ral itself where it re-execs — is closed to a confined child by
-its own read-only bind, and to ral's own writes by the gate's `Guarded`
+The first row has one exception: a `deny` naming a path *absent* on the host
+under a *writable* prefix is held by the in-process gate alone, no mount being
+able to mask a name that does not exist without first creating it there.
+
+**Neither enforcer is the body's to rewrite.** Every launcher pinned at boot —
+on Linux both bwrap and ral's own trampoline, and ral itself wherever else it
+re-execs — is closed to a confined child by its own read-only bind, and to
+ral's own writes by the gate's `Guarded`
 verdict: judged by inode, so a hard link names it too, and *before* any grant
 is folded, since a stack with no `fs` opinion is `Unrestricted` and exactly the
 case to catch. It is the discard device's twin — a name no grant needs to

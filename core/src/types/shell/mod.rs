@@ -501,7 +501,7 @@ mod tests {
             run: crate::protocol::Run {
                 program: crate::protocol::Program::Source("$[1 + 1]".into()),
                 script_name: "<test>".into(),
-                caps: crate::types::Capabilities::root(),
+                caps: crate::types::GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,

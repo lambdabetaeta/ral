@@ -107,7 +107,7 @@ pub struct Agent {
     /// The fleet-shared builtin index, resolved once at the trunk, so a fork
     /// resolving its own prompt never needs a live [`Shell`](ral_core::Shell).
     index: Arc<crate::prompt::BuiltinIndex>,
-    caps: ral_core::types::Capabilities,
+    caps: ral_core::types::GrantStack,
     /// Strong and upward: `None` ⇔ this agent is a root — the trunk, or a
     /// `/branch` child, which converses and reports to nobody.  A parent
     /// whose avatar has gone is still reachable here, terminated token and
@@ -325,7 +325,7 @@ impl Agent {
         self.returns
     }
 
-    pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
+    pub(crate) fn caps(&self) -> &ral_core::types::GrantStack {
         &self.caps
     }
 
@@ -636,7 +636,7 @@ impl Avatar {
     }
 
     #[cfg(test)]
-    pub(crate) fn caps(&self) -> &ral_core::types::Capabilities {
+    pub(crate) fn caps(&self) -> &ral_core::types::GrantStack {
         self.agent.caps()
     }
 

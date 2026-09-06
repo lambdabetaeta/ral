@@ -28,7 +28,7 @@ mod common;
 
 use ral_core::serial::FOValue;
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Capabilities, Shell};
+use ral_core::types::{GrantStack, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
@@ -65,7 +65,7 @@ fn birth(shell: &mut Shell, call: &str) -> serde_json::Value {
         run: Run {
             program: Program::Source(format!("let r = {call}; to-json $r")),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,
@@ -103,7 +103,7 @@ fn refusal(shell: &mut Shell, source: &str) -> String {
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

@@ -66,7 +66,7 @@ fn try_birth_detached() -> Option<u8> {
                      echo {marker} >> {trace}; sleep 0.05; done'; echo $d[pid]"
                 )),
                 script_name: "<detach-birth>".into(),
-                caps: crate::types::Capabilities::root(),
+                caps: crate::types::GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,

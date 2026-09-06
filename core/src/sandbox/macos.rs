@@ -344,13 +344,13 @@ fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item
     }
 }
 
-/// Expand-then-ancestors, and deliberately not the ancestors-then-expand of
-/// `FsRules::pinned_dirs`: these are read-metadata allowances for the lookup
-/// chains Seatbelt actually walks, so they are owed to the *rendered* names —
-/// including the system paths and the self-exec literal, which the projection
-/// never carried and so `traverse` never saw.  A pin is the other thing
-/// entirely, a write veto derived in surface space; folding the two would
-/// conflate them.
+/// Expand-then-ancestors, the same order `FsRules::pinned_dirs` now derives
+/// in.  What still separates the two is the *set*, not the order: this walks
+/// the ancestors of every rendered path handed to it — including the system
+/// paths and the self-exec literal, which the projection never carried and
+/// so `traverse` never saw — for the read-metadata allowances Seatbelt's
+/// lookup needs, while a pin is only the deny ancestors that fall within a
+/// write name, kept for the unlink veto.
 fn emit_ancestor_metadata<'a>(
     lines: &mut Vec<String>,
     paths: impl IntoIterator<Item = &'a Rendered>,
@@ -879,6 +879,50 @@ mod tests {
             !profile.contains("(deny file-write-unlink (subpath"),
             "pins must be literal, not subpath — subpath would also block \
              unlinking every entry inside the pinned directory"
+        );
+    }
+
+    /// A deny reached only through a symlinked ancestor must still pin the
+    /// *resolved* chain: `alias → top/deep` inside the write prefix, denying
+    /// `alias/secret`.  Rendering the deny before deriving ancestors is what
+    /// surfaces `top` here — the surface chain alone (`alias`) never mentions
+    /// it, so `mv top elsewhere` would otherwise move the denied bytes to a
+    /// name no deny rule covers.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:test] test fs scaffolding: a tempdir tree and a symlink for the alias pin"
+    )]
+    fn mac_profile_pins_the_resolved_ancestor_reached_through_an_alias() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("top/deep")).expect("nested target dir");
+        std::os::unix::fs::symlink(root.join("top/deep"), root.join("alias"))
+            .expect("a symlink aliasing the nested target");
+
+        let write = root.to_str().expect("ascii temp path").to_string();
+        let deny = format!("{write}/alias/secret");
+        let policy = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                write_prefixes: vec![write],
+                deny_paths: vec![deny],
+                ..FsRules::default()
+            }),
+            net: true,
+            exec: ExecProjection::default(),
+        };
+        let profile = build_profile(&policy).unwrap();
+
+        let resolved_top = std::fs::canonicalize(root)
+            .expect("the temp dir resolves")
+            .join("top");
+        let pin = format!(
+            "(deny file-write-unlink (literal \"{}\"))",
+            resolved_top.to_str().expect("ascii temp path")
+        );
+        assert!(
+            profile.contains(&pin),
+            "the ancestor reached only through the alias must be pinned:\n{profile}"
         );
     }
 }

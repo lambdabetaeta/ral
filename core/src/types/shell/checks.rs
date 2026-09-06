@@ -91,8 +91,10 @@ impl Shell {
         })
     }
 
-    /// Check an fs read.  `path` comes from `Shell::resolve`, so the gate's
-    /// sole input is already cwd-anchored and `.`/`..`-collapsed.
+    /// Check an fs read *by name* — a predicate, a listing, a module load.
+    /// `path` comes from `Shell::resolve`, so the gate's sole input is
+    /// already cwd-anchored and `.`/`..`-collapsed.  Anything that opens the
+    /// name, for reading or writing, takes [`Self::locate`] instead.
     ///
     /// # Errors
     /// `Err` if, at some layer with an `fs` opinion, `path` falls under a
@@ -103,15 +105,45 @@ impl Shell {
         })
     }
 
-    /// Check an fs write.
+    /// The fs door: walk `path` to the object it names, symlink-free, and
+    /// authorise *that object* for `op`.  The [`Located`] handed back
+    /// performs every operation relative to the object's directory handle,
+    /// so what was judged is what gets opened — a dangling link is judged at
+    /// its target, and a component swapped after the judgment is never
+    /// followed.  Every write in ral comes through here.
     ///
     /// # Errors
-    /// `Err` if, at some layer with an `fs` opinion, `path` falls under a
-    /// `deny_paths` entry or outside every write prefix.
-    pub fn check_fs_write(&mut self, path: &crate::path::ResolvedPath) -> Settled<()> {
-        self.audit_call(|ctx, audit, site| {
-            crate::capability::check_fs_op(ctx, path, &FsOp::Write, audit, site)
-        })
+    /// The walk's I/O error, phrased with the name as written; or the
+    /// grant's refusal.
+    pub fn locate(
+        &mut self,
+        path: &crate::path::ResolvedPath,
+        op: &FsOp,
+    ) -> Settled<crate::path::Located> {
+        let located = crate::path::walk::walk(path).map_err(|e| {
+            let name = path.display();
+            let msg = match e.kind() {
+                std::io::ErrorKind::NotFound => format!("{name}: no such file or directory"),
+                std::io::ErrorKind::PermissionDenied => format!("{name}: permission denied"),
+                _ => format!("{name}: {e}"),
+            };
+            crate::types::Break::Error(crate::types::Error::new(msg, 1))
+        })?;
+        if !path.is_discard() {
+            self.audit_call(|ctx, audit, site| {
+                crate::capability::check_fs_exact(ctx, located.real(), op, audit, site)
+            })?;
+        }
+        Ok(located)
+    }
+
+    /// Whether the live stack admits `op` on a path already located — no
+    /// audit, no refusal: the question a door asks about a *side* read it
+    /// may simply forgo, such as a write card's before-image.
+    pub fn admits_fs_exact(&self, op: &FsOp, real: &std::path::Path) -> bool {
+        self.context
+            .grants
+            .admits_fs_exact(op, &self.context.resolver(), real)
     }
 
     /// The OS-renderable projection of the live capability stack; `None` when

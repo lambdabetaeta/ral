@@ -63,25 +63,28 @@ pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Val
     Ok(Value::list(entries.into_iter().map(|(_, v)| v).collect()))
 }
 
+/// The system temp directory, located and authorised for writing: what a
+/// fresh temp entry is created inside.
+fn writable_temp_dir(shell: &mut Shell) -> Settled<crate::path::Located> {
+    let rp = shell.resolve(&std::env::temp_dir().to_string_lossy());
+    shell.locate(&rp, &crate::capability::FsOp::Write)
+}
+
 pub(super) fn builtin_temp_dir(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let parent = std::env::temp_dir();
-    let rp = shell.resolve(&parent.to_string_lossy());
-    shell.check_fs_write(&rp)?;
+    let parent = writable_temp_dir(shell)?;
     let path = tempfile::Builder::new()
         .prefix("ral-tmp-")
-        .tempdir_in(&parent)
+        .tempdir_in(parent.real())
         .map_err(|e| sig(format!("temp-dir: {e}")))?
         .keep();
     Ok(Value::String(path.to_string_lossy().into_owned()))
 }
 
 pub(super) fn builtin_temp_file(_args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let parent = std::env::temp_dir();
-    let rp = shell.resolve(&parent.to_string_lossy());
-    shell.check_fs_write(&rp)?;
+    let parent = writable_temp_dir(shell)?;
     let named = tempfile::Builder::new()
         .prefix("ral-tmp-")
-        .tempfile_in(&parent)
+        .tempfile_in(parent.real())
         .map_err(|e| sig(format!("temp-file: {e}")))?;
     let (_file, path) = named.keep().map_err(|e| sig(format!("temp-file: {e}")))?;
     Ok(Value::String(path.to_string_lossy().into_owned()))

@@ -23,7 +23,7 @@ mod common;
 use std::io::Write;
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, Settled, Shell, Status};
+use ral_core::types::{Break, GrantStack, Settled, Shell, Status};
 use ral_core::{
     RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins, diagnostic,
 };
@@ -45,7 +45,7 @@ fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

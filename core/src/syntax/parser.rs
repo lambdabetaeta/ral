@@ -2872,7 +2872,8 @@ mod tests {
         assert!(err.message.contains("use `< path`"), "got: {}", err.message);
     }
 
-    /// `<<` always feeds stdin: fd 0 may be spelled out, anything else errors.
+    /// `<<` always feeds stdin: fd 0 may be spelled out, another standard
+    /// stream errors here (an fd past 2 never leaves the lexer).
     #[test]
     fn herestring_fd_prefix() {
         let ast = unwrap_stmts(parse("cat 0<< #'x'#").unwrap());
@@ -2880,7 +2881,7 @@ mod tests {
             Ast::Call { redirects, .. } => assert_eq!(redirects[0].fd, 0),
             other => panic!("expected command, got {other:?}"),
         }
-        let err = parse("cat 3<< #'x'#").expect_err("fd 3 herestring must not parse");
+        let err = parse("cat 2<< #'x'#").expect_err("fd 2 herestring must not parse");
         assert!(
             err.message.contains("always feeds stdin"),
             "got: {}",

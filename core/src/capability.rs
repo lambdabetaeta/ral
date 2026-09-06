@@ -19,7 +19,7 @@ pub(crate) use decode::decode_capability_map;
 pub use deputy::deputy_prefixes;
 pub(crate) use enforce::{
     admits_head, check_editor_read, check_editor_tui, check_editor_write, check_exec_args,
-    check_fs_op, check_shell_chdir,
+    check_fs_exact, check_fs_op, check_shell_chdir,
 };
 pub use fs::FsOp;
 pub use load::{apply_session_profiles, load_capabilities_from_path, load_capabilities_from_str};

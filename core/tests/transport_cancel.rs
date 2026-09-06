@@ -18,7 +18,7 @@
 #![cfg(unix)]
 
 use ral_core::protocol::{IdentityTransport, Program, Report, Run, Transport, dispatch_to_report};
-use ral_core::types::{Capabilities, CapturePolicy, Observed, Shell};
+use ral_core::types::{CapturePolicy, GrantStack, Observed, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,7 +40,7 @@ fn a_cancel_through_the_control_door_stops_an_in_flight_run() {
         Run {
             program: Program::Source("/bin/sleep 30".into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

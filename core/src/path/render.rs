@@ -68,6 +68,24 @@ pub(crate) fn rendered_ancestors<'a>(
         .collect()
 }
 
+/// The directories a deny needs kept traversable to be reachable at all:
+/// every proper ancestor of a rendered deny name that lies within some
+/// rendered write name — taken *after* expansion, so a deny reached only
+/// through a symlinked chain (`W/alias/secret` where `W/alias → W/top/deep`)
+/// pins every ancestor of both the surface and the resolved spelling, not
+/// just the ones the pre-expansion string happened to share with `write`.
+pub(crate) fn rendered_pins(deny: &[Rendered], write: &[Rendered]) -> Vec<Rendered> {
+    super::proper_ancestors(deny.iter().map(Rendered::as_str))
+        .into_iter()
+        .filter(|dir| {
+            write
+                .iter()
+                .any(|w| super::lex::path_within_str(dir, w.as_str()))
+        })
+        .map(Rendered)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

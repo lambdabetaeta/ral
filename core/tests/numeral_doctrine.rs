@@ -20,7 +20,7 @@ mod common;
 use ral_core::builtins::{REPL_PRINT_PARAMS, pretty_print};
 use ral_core::ir::Val;
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Capabilities, Shell, Value, fmt_float};
+use ral_core::types::{GrantStack, Shell, Value, fmt_float};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
 /// A session as every front end builds one: prelude registered, env seeded,
@@ -39,7 +39,7 @@ fn printed(src: &str) -> String {
         run: Run {
             program: Program::Source(src.into()),
             script_name: "<numeral-doctrine>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

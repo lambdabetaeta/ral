@@ -14,7 +14,7 @@ use crate::ir::{
 };
 use crate::io::{self, Sink};
 use crate::path::sigil::FreezeCtx;
-use crate::runtime::command::{self, EvalRedirect, EvalRedirectV};
+use crate::runtime::command::{EvalRedirect, EvalRedirectV};
 use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
 use crate::source::Span;
@@ -966,12 +966,9 @@ impl Machine {
 
             Frame::Redirect(state) => {
                 let mut state = *state;
-                let commits = state.tear_down(shell);
+                state.tear_down(shell);
                 match state.settle_writes(WriteFate::Commit, mooring, shell) {
-                    Ok(()) => match command::commit_atomics(commits) {
-                        Ok(()) => Focus::Return(t),
-                        Err(b) => Focus::Halt(b),
-                    },
+                    Ok(()) => Focus::Return(t),
                     Err(b) => Focus::Halt(b),
                 }
             }
@@ -1056,12 +1053,8 @@ impl Machine {
 
             Frame::Redirect(state) => {
                 let mut state = *state;
-                let commits = state.tear_down(shell);
+                state.tear_down(shell);
                 let _ = state.settle_writes(WriteFate::Abort, mooring, shell);
-                // Every staged write, fd-level and sink-level alike, falls out
-                // of scope here — which is how `PendingWrite`'s own `Drop`
-                // abandons it.
-                drop(commits);
                 Focus::Halt(s)
             }
 

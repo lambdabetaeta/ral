@@ -3,10 +3,10 @@
 //! side.
 //!
 //! A prefix carries its symlink-followed `resolved` form on the value, so
-//! composition ([`Capabilities::meet`](crate::types::Capabilities::meet)
-//! and the lattices under it) is a total pure function of two policies:
-//! the disk is consulted once, at freeze.  Enforcement still re-resolves
-//! against the live filesystem — composition speaks about the policy,
+//! the set algebra over prefixes ([`meet_prefixes`](super::meet_prefixes),
+//! [`covers`](super::covers)) is a total pure function of two policies: the
+//! disk is consulted once, at freeze.  Enforcement still re-resolves
+//! against the live filesystem — the algebra speaks about the policy,
 //! enforcement about the world.
 //!
 //! Both types have private fields, and every door runs the one

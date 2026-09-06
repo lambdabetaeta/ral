@@ -11,7 +11,7 @@
 mod common;
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, Settled, Shell, Value};
+use ral_core::types::{Break, GrantStack, Settled, Shell, Value};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
 
 fn top_level(source: &str) -> Settled<Value> {
@@ -22,7 +22,7 @@ fn top_level(source: &str) -> Settled<Value> {
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

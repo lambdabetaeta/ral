@@ -12,9 +12,10 @@
 use exarch::bootstrap::{EXARCH, SYNOD, Scratch};
 use exarch::policy::for_invocation;
 use exarch::prompt::host_section;
+use ral_core::capability::FsOp;
 use ral_core::path::NormalizedPrefix;
 use ral_core::path::basedir::XdgKind;
-use ral_core::types::{Break, ExecPolicy, Settled, Shell};
+use ral_core::types::{Break, GrantStack, Settled, Shell};
 use std::path::PathBuf;
 
 exarch::pre_main_ctor!();
@@ -53,6 +54,15 @@ fn refusal(r: Settled<()>) -> String {
     }
 }
 
+/// Install every layer of `stack` onto a fresh throwaway shell — the stack is
+/// the meet, so a real session's whole composed authority is these layers
+/// folded at every check, never one flattened `Capabilities`.
+fn install(shell: &mut Shell, stack: &GrantStack) {
+    for layer in stack {
+        shell.push_session_capabilities(layer.clone());
+    }
+}
+
 /// The join runs before the meet, so a widened grant the attenuation file
 /// never names is erased by it.  Inverting the phases turns `--extend-base`
 /// into an escape hatch from `--restrict`; `ls`, named on both sides, is the
@@ -68,32 +78,23 @@ fn an_extend_base_grant_cannot_survive_a_restrict_that_omits_it() {
     let restrict = profile(&dir, "restrict.ral", "return [exec: [ls: 'allow']]\n");
     let cwd = dir.path().to_string_lossy().into_owned();
 
-    let (caps, _) =
+    let (stack, _) =
         for_invocation(&cwd, "minimal", Some(&extend), &[restrict]).expect("profiles compose");
-    let exec = caps.exec.as_ref().expect("the meet leaves an exec opinion");
-    assert_ne!(
-        exec.literals.get("rustc"),
-        Some(&ExecPolicy::Allow),
-        "the restrict names only ls, so the widened rustc grant must not be in the lattice"
-    );
 
     let mut shell = Shell::default();
+    install(&mut shell, &stack);
     shell
-        .with_capabilities(caps.clone(), |sh| {
-            sh.check_exec_args("rustc", &["rustc", "/usr/bin/rustc"], &[])
-        })
+        .check_exec_args("rustc", &["rustc", "/usr/bin/rustc"], &[])
         .expect_err("--extend-base must not outlive a --restrict that omits it");
-    let mut shell = Shell::default();
     shell
-        .with_capabilities(caps, |sh| {
-            sh.check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
-        })
-        .expect("what both sides name survives the meet");
+        .check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
+        .expect("what both sides name survives the fold");
 }
 
-/// `--restrict` is documented as order-free.  Meet is commutative, and the
-/// deny list is sorted and deduped, so the two argv orders must compose to one
-/// value — not merely to two equivalent ones.
+/// `--restrict` is documented as order-free.  Each file becomes its own
+/// layer, so the two argv orders build stacks that differ in shape but must
+/// fold to the same verdict on every check, and each file's own deny entry
+/// must survive regardless of which side of the pair it was.
 #[test]
 fn two_restricts_compose_to_the_same_grant_in_either_order() {
     let dir = Scratch::for_test(EXARCH, "restrict-commutes").expect("scratch dir");
@@ -109,31 +110,43 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
     );
     let cwd = dir.path().to_string_lossy().into_owned();
 
-    let ab = for_invocation(&cwd, "dangerous", None, &[a.clone(), b.clone()])
-        .expect("profiles compose")
-        .0;
-    let ba = for_invocation(&cwd, "dangerous", None, &[b, a])
-        .expect("profiles compose")
-        .0;
-    assert_eq!(ab, ba, "flag order must not reach the composed grant");
+    let (ab, _) = for_invocation(&cwd, "dangerous", None, &[a.clone(), b.clone()])
+        .expect("profiles compose");
+    let (ba, _) =
+        for_invocation(&cwd, "dangerous", None, &[b, a]).expect("profiles compose");
 
-    let fs = ab.fs.expect("a restrict file installs an fs carve-out");
-    assert!(
-        fs.deny_paths.is_sorted(),
-        "the deny list is canonical, not argv-ordered: {:?}",
-        fs.deny_paths
-    );
-    for name in ["a.ral", "b.ral"] {
-        let path = dir.path().join(name);
-        assert_eq!(
-            fs.deny_paths
-                .iter()
-                .filter(|p| **p == *path.to_string_lossy())
-                .count(),
-            1,
-            "{name} should be denied exactly once in {:?}",
-            fs.deny_paths
+    for stack in [&ab, &ba] {
+        let mut shell = Shell::default();
+        install(&mut shell, stack);
+        shell
+            .check_exec_args("git", &["git", "/usr/bin/git"], &[])
+            .expect("git admitted regardless of restrict argv order");
+        shell
+            .check_exec_args("cat", &["cat", "/usr/bin/cat"], &[])
+            .expect("cat admitted regardless of restrict argv order");
+        assert!(
+            !stack.net().all(|n| n),
+            "net: false in either file must survive the fold, flag order must not reach it"
         );
+        for name in ["a.ral", "b.ral"] {
+            let path = dir.path().join(name);
+            let denied = stack
+                .fs()
+                .flat_map(|fs| fs.deny_paths.iter())
+                .filter(|p| p.as_str() == path.to_string_lossy())
+                .count();
+            assert_eq!(
+                denied, 1,
+                "{name} should be denied exactly once whichever order it was named"
+            );
+        }
+        for fs in stack.fs() {
+            assert!(
+                fs.deny_paths.is_sorted(),
+                "each layer's own deny list is canonical, not argv-ordered: {:?}",
+                fs.deny_paths
+            );
+        }
     }
 }
 
@@ -156,24 +169,24 @@ fn a_restrict_file_is_refused_by_the_fs_gate_under_either_spelling() {
     let canonical = std::fs::canonicalize(&restrict).expect("the restrict file exists");
     let cwd = dir.path().to_string_lossy().into_owned();
 
-    let (caps, _) = for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&restrict))
+    let (stack, _) = for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&restrict))
         .expect("profile composes");
 
     let mut shell = Shell::default();
-    shell.with_capabilities(caps, |sh| {
-        for spelling in [&restrict, &canonical] {
-            let path = sh.resolve(&spelling.to_string_lossy());
-            let message = refusal(sh.check_fs_write(&path));
-            assert!(
-                message.contains("denied by grant"),
-                "{} should be refused by the grant, got: {message}",
-                spelling.display()
-            );
-        }
-        let path = sh.resolve(&sibling.to_string_lossy());
-        sh.check_fs_write(&path)
-            .expect("the deny is targeted: a sibling file stays writable");
-    });
+    install(&mut shell, &stack);
+    for spelling in [&restrict, &canonical] {
+        let path = shell.resolve(&spelling.to_string_lossy());
+        let message = refusal(shell.locate(&path, &FsOp::Write).map(|_| ()));
+        assert!(
+            message.contains("denied by grant"),
+            "{} should be refused by the grant, got: {message}",
+            spelling.display()
+        );
+    }
+    let path = shell.resolve(&sibling.to_string_lossy());
+    shell
+        .locate(&path, &FsOp::Write)
+        .expect("the deny is targeted: a sibling file stays writable");
 }
 
 /// The key that pays for the turn is not a thing the turn may read back.
@@ -197,31 +210,31 @@ fn no_attenuated_base_can_read_a_credential_file() {
     ];
 
     for base in BASES.into_iter().filter(|b| *b != "dangerous") {
-        let (caps, _) = for_invocation(&cwd, base, None, &[]).expect("base composes");
-        let fs = caps
-            .fs
-            .clone()
-            .unwrap_or_else(|| panic!("{base} attenuates the filesystem"));
+        let (stack, _) = for_invocation(&cwd, base, None, &[]).expect("base composes");
+        assert!(
+            stack.fs().next().is_some(),
+            "{base} attenuates the filesystem"
+        );
         let mut shell = Shell::default();
-        shell.with_capabilities(caps, |sh| {
-            for secret in &secrets {
-                assert!(
-                    fs.deny_paths
-                        .iter()
-                        .any(|p| *p == *secret.to_string_lossy()),
-                    "{base} must veto {}, not merely leave it ungranted: {:?}",
-                    secret.display(),
-                    fs.deny_paths
-                );
-                let path = sh.resolve(&secret.to_string_lossy());
-                let message = refusal(sh.check_fs_read(&path));
-                assert!(
-                    message.contains("denied by grant"),
-                    "{base} should refuse to read {}, got: {message}",
-                    secret.display()
-                );
-            }
-        });
+        install(&mut shell, &stack);
+        for secret in &secrets {
+            let denied_somewhere = stack
+                .fs()
+                .flat_map(|fs| fs.deny_paths.iter())
+                .any(|p| p.as_str() == secret.to_string_lossy());
+            assert!(
+                denied_somewhere,
+                "{base} must veto {}, not merely leave it ungranted",
+                secret.display()
+            );
+            let path = shell.resolve(&secret.to_string_lossy());
+            let message = refusal(shell.check_fs_read(&path));
+            assert!(
+                message.contains("denied by grant"),
+                "{base} should refuse to read {}, got: {message}",
+                secret.display()
+            );
+        }
     }
 }
 
@@ -236,17 +249,23 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
     let cwd = dir.path().to_string_lossy().into_owned();
     let oauth = EXARCH.xdg_dir(XdgKind::State).join("oauth.json");
 
-    let (caps, _) = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
-    assert!(caps.fs.is_none(), "dangerous must attenuate nothing");
+    let (stack, _) = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
+    assert!(
+        stack.fs().next().is_none(),
+        "dangerous must attenuate nothing"
+    );
 
     let restrict = profile(&dir, "restrict.ral", "return [net: false]\n");
-    let (caps, _) = for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&restrict))
+    let (stack, _) = for_invocation(&cwd, "dangerous", None, std::slice::from_ref(&restrict))
         .expect("dangerous composes with a restrict file");
-    let fs = caps.fs.expect("a restrict file installs the root policy");
+    let denies: Vec<String> = stack
+        .fs()
+        .flat_map(|fs| fs.deny_paths.iter())
+        .map(|p| p.as_str().to_string())
+        .collect();
     assert!(
-        fs.deny_paths.iter().any(|p| *p == *oauth.to_string_lossy()),
-        "an attenuated dangerous must still carve out the tokens: {:?}",
-        fs.deny_paths
+        denies.iter().any(|p| *p == *oauth.to_string_lossy()),
+        "an attenuated dangerous must still carve out the tokens: {denies:?}"
     );
 }
 
@@ -259,20 +278,19 @@ fn dangerous_stays_ambient_until_something_attenuates_it() {
 fn the_grant_summary_agrees_with_an_attenuated_grant() {
     let dir = Scratch::for_test(EXARCH, "grant-prompt").expect("scratch dir");
     let cwd = dir.path().to_string_lossy().into_owned();
-    let (caps, _) = for_invocation(&cwd, "minimal", None, &[]).expect("minimal composes");
-    let text = host_section(&caps, &dir);
+    let (stack, _) = for_invocation(&cwd, "minimal", None, &[]).expect("minimal composes");
+    let text = host_section(&stack, &dir);
 
     assert!(
         !text.contains("Ambient authority"),
         "an attenuated session must not be told it holds everything:\n{text}"
     );
-    assert_eq!(caps.net, Some(true), "minimal declares net: true");
-    let rendered = match caps.net {
-        None => "inherit",
-        Some(true) => "allow",
-        Some(false) => "deny",
-    };
-    assert_eq!(bullet(&text, "- net:"), format!("- net: {rendered}"));
+    assert_eq!(
+        stack.net().collect::<Vec<_>>(),
+        vec![true],
+        "minimal declares net: true, and is the only layer with an opinion"
+    );
+    assert_eq!(bullet(&text, "- net:"), "- net: allow");
     let veto = if cfg!(windows) {
         "cmd"
     } else {
@@ -295,8 +313,8 @@ fn the_grant_summary_agrees_with_an_attenuated_grant() {
 fn the_grant_summary_collapses_for_an_unattenuated_grant() {
     let dir = Scratch::for_test(EXARCH, "grant-prompt-dangerous").expect("scratch dir");
     let cwd = dir.path().to_string_lossy().into_owned();
-    let (caps, _) = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
-    let text = host_section(&caps, &dir);
+    let (stack, _) = for_invocation(&cwd, "dangerous", None, &[]).expect("dangerous composes");
+    let text = host_section(&stack, &dir);
 
     assert!(text.contains("Ambient authority"), "{text}");
     assert!(bullet(&text, "- scratch:").contains(&*dir.path().to_string_lossy()));

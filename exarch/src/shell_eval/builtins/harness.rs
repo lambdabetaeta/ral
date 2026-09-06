@@ -1130,13 +1130,12 @@ mod tests {
     /// the policy layer offers a launching human bases a child is not handed.
     #[test]
     fn every_permission_label_resolves_to_a_bake_in_base() {
-        let root = ral_core::types::Capabilities::root();
         let cwd = std::env::current_dir().unwrap().display().to_string();
         for label in PERMISSION_LABELS {
-            crate::policy::narrow(&root, label, &cwd)
+            crate::policy::base_layer(label, &cwd)
                 .unwrap_or_else(|e| panic!("door label `{label} must name a bake-in base: {e}"));
         }
-        let err = crate::policy::narrow(&root, "bogus", &cwd)
+        let err = crate::policy::base_layer("bogus", &cwd)
             .expect_err("an unknown base must be refused");
         let offered: std::collections::BTreeSet<&str> = err
             .rsplit_once("expected one of: ")

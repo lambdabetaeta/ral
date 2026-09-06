@@ -5,8 +5,8 @@
 
 use super::Shell;
 use crate::types::{
-    Binding, Capabilities, Decision, Env, HandlerEntry, HandlerRole, Observation, Observed,
-    Settled, Value,
+    Binding, Capabilities, Decision, Env, GrantStack, HandlerEntry, HandlerRole, Observation,
+    Observed, Settled, Value,
 };
 use std::collections::BTreeMap;
 
@@ -35,6 +35,22 @@ impl Shell {
         r
     }
 
+    /// [`with_capabilities`](Self::with_capabilities) for a whole ceiling: every
+    /// layer of `stack` is pushed for `f`'s dynamic extent and popped after —
+    /// never folded into one frame, since the stack is the meet.
+    pub fn with_layers<R>(&mut self, stack: GrantStack, f: impl FnOnce(&mut Self) -> R) -> R {
+        let depth = stack.len();
+        for layer in stack {
+            self.context.grants.push(layer);
+        }
+        self.audit_deputy_prefixes();
+        let r = f(self);
+        for _ in 0..depth {
+            self.context.grants.pop();
+        }
+        r
+    }
+
     /// Push a capability frame with no paired pop: it survives to process
     /// exit.  Where `ral --capabilities <file.ral>`'s session-wide ceiling
     /// lands, above the [`Capabilities::root`] frame [`Shell::new`] installs.
@@ -45,26 +61,16 @@ impl Shell {
     }
 
     /// Observe a `deputy` capability check per flagged prefix of the stack
-    /// just pushed, meet-folded.
-    /// [`crate::capability::deputy_prefixes`] demands the fold and only
-    /// reports, never denies; this is its one call site.  No-op unless a trail
-    /// is open.
+    /// just pushed.  [`crate::capability::deputy_prefixes`] takes the stack
+    /// and only reports, never denies; this is its one call site.  No-op
+    /// unless a trail is open.
     pub(crate) fn audit_deputy_prefixes(&mut self) {
         if !self.local.audit.active() {
             return;
         }
-        let Some(folded) = self
-            .context
-            .grants
-            .iter()
-            .cloned()
-            .reduce(Capabilities::meet)
-        else {
-            return;
-        };
         let site = self.call_site();
         let principal = self.context.principal();
-        for prefix in crate::capability::deputy_prefixes(&folded) {
+        for prefix in crate::capability::deputy_prefixes(&self.context.grants) {
             let fields = BTreeMap::from([("prefix".to_string(), prefix.as_str().to_string())]);
             // Pushed rather than sent through `evaluator::audit::observe_stamped`: a
             // `Flagged` decision has no rail branch in the policy table, so the

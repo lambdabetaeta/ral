@@ -94,7 +94,7 @@ pub(super) fn inherit_tty(plan: &RedirectPlan, shell: &Shell) -> bool {
 
 /// Classify the call-site redirects into a stdout/stderr plan.  Every shape
 /// either lands a case below or becomes a named error; nothing is dropped in
-/// silence, matching `redirect::apply_redirects` on the in-process path.
+/// silence, matching `install_sink_redirects` on the in-process path.
 pub(crate) fn classify_redirects(redirects: &[EvalRedirectV]) -> Settled<RedirectPlan> {
     let mut plan = RedirectPlan {
         stdout_file: None,

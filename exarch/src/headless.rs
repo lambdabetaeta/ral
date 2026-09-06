@@ -776,7 +776,7 @@ mod tests {
         Avatar::root(
             RootConfig {
                 system: "system".into(),
-                caps: ral_core::types::Capabilities::default(),
+                caps: ral_core::types::GrantStack::root(),
                 run_dir: dir,
                 resume: None,
                 no_logs: false,
@@ -1133,7 +1133,7 @@ mod tests {
         Avatar::root(
             RootConfig {
                 system: "system".into(),
-                caps: ral_core::types::Capabilities::default(),
+                caps: ral_core::types::GrantStack::root(),
                 run_dir: dir,
                 resume: None,
                 no_logs: false,

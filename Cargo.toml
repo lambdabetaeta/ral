@@ -50,6 +50,12 @@ sha2       = "0.11"
 ruzstd     = "0.9"
 blake3     = "1"
 tempfile   = "3.27"
+fastrand   = "2"
+# Directory-handle-relative filesystem primitives (`openat` and kin) on Unix
+# and Windows alike; `cap-fs-ext` carries the `follow` switch on
+# `OpenOptions` that `cap-primitives` keeps behind an extension trait.
+cap-primitives = "4"
+cap-fs-ext = { version = "4", default-features = false }
 fs4        = { version = "1", default-features = false }
 # The window's half of the seam: `serde-compat` is the whole point, so the
 # emitted TypeScript carries the serde tag and casing the JSON actually has,

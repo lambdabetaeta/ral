@@ -27,9 +27,8 @@ pub(crate) use detach::detach;
 pub(crate) use identity::CommandIdentity;
 pub(crate) use process::{build_command, spawn_error};
 pub(crate) use redirect::{
-    EvalRedirect, EvalRedirectV, PendingWrite, RedirectGuard, StdinRedirectGuard, apply_redirects,
-    atomic_write, commit_atomics, install_stdin_redirect, open_file, restore_redirects,
-    stderr_mode,
+    EvalRedirect, EvalRedirectV, PendingWrite, StdinRedirectGuard, atomic_write,
+    install_stdin_redirect, open_file, stderr_mode,
 };
 use stdio::classify_redirects;
 pub(crate) use stdio::{StdinRoute, TtyInputPermit};
@@ -164,7 +163,7 @@ pub(crate) fn run(
             // reads: taken only for an ear to hear them.
             let (old_bytes, preview) = if listening(shell, mooring) {
                 (
-                    commit.old_snapshot_for_diff(),
+                    commit.old_snapshot_for_diff(shell),
                     commit.new_snapshot_for_diff(),
                 )
             } else {

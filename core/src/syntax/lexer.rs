@@ -1254,17 +1254,23 @@ impl Lexer {
         }
     }
 
-    /// Parse the digit prefix of an fd redirect.  Overflow is a hard error:
-    /// silently coercing `99999999999>` to fd 1 is the bash sloppiness we
-    /// refuse.
+    /// Parse the digit prefix of an fd redirect.  Only the three standard
+    /// streams exist: ral has no numbered descriptors, so `3>` is refused
+    /// here rather than left to mean whatever fd 3 happens to be in the
+    /// process — a pipe or a pinned binary of the runtime's own.
     fn parse_fd(digits: &str, span: Span) -> Result<u32, LexError> {
         debug_assert!(!digits.is_empty(), "scan_fd_redirect called without digits");
-        digits.parse::<u32>().map_err(|_| {
-            Self::error(
+        match digits.parse::<u32>() {
+            Ok(fd @ 0..=2) => Ok(fd),
+            _ => Err(Self::error(
                 span,
-                format!("file descriptor '{digits}' does not fit in u32"),
-            )
-        })
+                format!(
+                    "file descriptor {digits}: ral has only standard input (0), \
+                     standard output (1) and standard error (2) — to send output \
+                     to a file, redirect fd 1 or 2 (`> file`, `2> file`)"
+                ),
+            )),
+        }
     }
 
     fn finish_redirect(
@@ -2221,6 +2227,20 @@ mod tests {
             let err = lex(src).expect_err("`<<<` must not lex");
             assert!(
                 err.message().contains("here-string operator"),
+                "for {src:?} got: {}",
+                err.message()
+            );
+        }
+    }
+
+    /// No numbered descriptors: an fd past 2 on either side of a redirect is
+    /// refused at the lexer, so nothing downstream ever names one.
+    #[test]
+    fn redirect_fd_above_two_is_refused() {
+        for src in ["cmd 3> f", "cmd 3>> f", "cmd 4< f", "cmd 2>&3", "cmd 99999999999> f"] {
+            let err = lex(src).expect_err("numbered descriptors must not lex");
+            assert!(
+                err.message().contains("standard error (2)"),
                 "for {src:?} got: {}",
                 err.message()
             );

@@ -1268,7 +1268,7 @@ mod tests {
             run: Run {
                 program: Program::Source(src.to_string()),
                 script_name: "<test>".to_string(),
-                caps: ral_core::types::Capabilities::root(),
+                caps: ral_core::types::GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,
@@ -1670,7 +1670,7 @@ mod tests {
                 run: Run {
                     program: Program::Source("help".to_string()),
                     script_name: "<test>".to_string(),
-                    caps: ral_core::types::Capabilities::root(),
+                    caps: ral_core::types::GrantStack::root(),
                     wall: None,
                     deferred_lease: None,
                     worker_cap: None,

@@ -15,7 +15,7 @@
 mod common;
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, Escape, Settled, Shell, Status, Value};
+use ral_core::types::{Break, Escape, GrantStack, Settled, Shell, Status, Value};
 use ral_core::{
     RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, StaticDiagnostics, builtins,
 };
@@ -35,7 +35,7 @@ fn eval(shell: &mut Shell, source: &str) -> Settled<Value> {
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,
@@ -87,7 +87,7 @@ fn expect_static(source: &str) -> StaticDiagnostics {
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

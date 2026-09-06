@@ -28,7 +28,7 @@ use ral_core::io::TerminalState;
 use ral_core::protocol::{
     Liveness, Program, Report, Run, TerminalEndpoint, Transport, WireTransport, dispatch_to_report,
 };
-use ral_core::types::Capabilities;
+use ral_core::types::GrantStack;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use vm_manager::{BootArtifact, Hypervisor, Machine, MachineSpec};
 
@@ -210,7 +210,7 @@ fn prove_the_host_can_dial_in(
     let run = Run {
         program: Program::Source(format!("python3 << #####'{GUEST_LISTENER}'#####\n")),
         script_name: "<boot-smoke>".to_string(),
-        caps: Capabilities::root(),
+        caps: GrantStack::root(),
         wall: Some(Duration::from_secs(60)),
         deferred_lease: None,
         worker_cap: None,

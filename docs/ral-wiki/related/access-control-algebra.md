@@ -1,6 +1,7 @@
 ---
-verified_at_date: 2026-06-23
-anchors: [Capabilities::meet, Capabilities::join, FsPolicy::meet, FsPolicy::join, ExecPolicy::meet, ExecPolicy::join, meet_literal_exec, join_literal_exec, check_fs_op, layer_exec_verdict, for_invocation]
+verified_at_commit: 2cfeb108
+verified_at_date: 2026-09-06
+anchors: [GrantStack, Capabilities::join, FsPolicy::join, ExecPolicy::meet, ExecPolicy::join, join_literal_exec, evaluate_exec, allow_region, deny_region, check_fs_op, layer_exec_verdict, for_invocation]
 against: [design/grant, internals/capability-enforcement, design/two-enforcers]
 ---
 
@@ -19,9 +20,12 @@ Every rule does one of three things to a given command or path: **allow** it,
 **deny** it, or **say nothing**. Pieces combine two ways:
 
 - **restrict** (`--restrict`, nested `grant`) — *narrow*. The result permits
-  something only if every layer permits it (`Capabilities::meet`).
+  something only if every layer permits it. This is *stacking*: each piece is
+  a layer of the `GrantStack`, and every verdict folds the layers' answers to
+  the access at hand. Nothing flattens two layers into one — see below for
+  why it cannot.
 - **extend-base** (`--extend-base`) — *widen*. The result adds the overlay's
-  grants on top of the base (`Capabilities::join`).
+  grants on top of the base (`Capabilities::join`), producing one layer.
 
 ## The one rule: a deny is a floor
 
@@ -93,19 +97,37 @@ practical upshot is the only thing needed day to day: **deny wins, both ways.**
 That this is *not* a single lattice — it genuinely has two orderings — is why one
 operation never "absorbs" the other; that is expected, not a defect.
 
+## Why restrict is stacking and not a flattened meet
+
+An exec layer is `(allow_dirs, deny_dirs, literals)`, and a literal keyed by a
+bare name — `git: [status]` — is admission-or-restriction for *whatever `git`
+resolves to at check time*. Take A = `/usr/bin/` allowed and `git: [status]`,
+B = `/usr/bin/` allowed and silent on `git`. `A ∧ B` should refuse `git push`
+(A does). No `(dirs, literals)` triple says that: keep A's literal and the
+result also refuses `git` where B's directories never admitted it; drop it and
+the result admits `git push`. The meaning of the one-sided key is "A's
+restriction ∧ B's directory verdict on the resolved path", which exists only
+at the access. So the representation is not closed under intersection, and
+the meet is the stack: `evaluate_exec` asks each layer about the concrete
+command and intersects the answers, where the same question *is* closed.
+(This was a real hole: a flattened `meet_literal_exec` dropped the one-sided
+restriction — [[decisions/260906_object-not-name|object-not-name]].)
+
 ## Cross-check: the code matches
 
-The composition site is `exarch::policy::for_invocation`, which computes
-`base.join(extend).meet(restrict₁)…`.
+The composition site is `exarch::policy::for_invocation`, which produces a
+`GrantStack` whose layers are `base ∨ extend`, then each `restrict`, then the
+deny layers for the restrict files and the credential files.
 
-- **restrict** — `FsPolicy::meet` unions denies and intersects prefixes;
-  `ExecPolicy::meet` and `meet_literal_exec` make `Deny` win. Deny-overrides. ✔
+- **restrict** — each file is a layer; `allow_region` intersects fs regions
+  across layers, `deny_region` unions them, `evaluate_exec` intersects the
+  layers' exec verdicts. Deny-overrides. ✔
 - **extend-base** — `FsPolicy::join` unions denies *and* prefixes;
   `ExecPolicy::join` and `join_literal_exec` make `Deny` win; `ExecMap::join`
   lets a deny-dir win the exact-key clash. Deny-overrides, uniform with fs. ✔
-- **at the point of use** — `check_fs_op` tests denies before grants and folds
-  every stack layer; `layer_exec_verdict` checks vetoes first. Any layer's deny
-  denies. ✔
+- **at the point of use** — `check_fs_op` and `Shell::locate` test denies
+  before grants and fold every stack layer; `layer_exec_verdict` checks vetoes
+  first. Any layer's deny denies. ✔
 
 ## See also
 

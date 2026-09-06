@@ -9,7 +9,9 @@ use ral_core::builtins;
 use ral_core::protocol::{Program, Run};
 #[cfg(unix)]
 use ral_core::types::{ExecMap, ExecPolicy};
-use ral_core::types::{Break, Capabilities, Shell, Value};
+#[cfg(unix)]
+use ral_core::types::Capabilities;
+use ral_core::types::{Break, GrantStack, Shell, Value};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 #[cfg(unix)]
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,7 +25,7 @@ fn run_on(shell: &mut Shell, input: &str) -> ral_core::types::Settled<Value> {
         run: Run {
             program: Program::Source(input.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

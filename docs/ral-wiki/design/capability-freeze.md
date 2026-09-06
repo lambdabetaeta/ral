@@ -134,16 +134,19 @@ and the lattice operations run on the resolved bundles.
   effective home; exarch's `for_invocation` against `host::home()` and the
   session cwd.
 
-The composition `meet` and the runtime fold are then two fidelities of one
+The frozen prefixes and the runtime fold are then two fidelities of one
 algebra — lexical over the resolved strings here, canonical over
-symlink-resolved paths at enforcement time — sharing their atoms
-(`meet_prefix_sets_by`, `meet_literal_exec`) but kept apart deliberately:
+symlink-resolved paths at enforcement time — sharing their atom
+(`meet_prefixes`) but kept apart deliberately:
 [[decisions/260602_exec-authority-partitioned|exec-authority-partitioned]]
 §"one combinator at two fidelities" and §"the two folds stay separate".
+Composition itself is stacking, not a fold over frozen values: the
+`GrantStack` holds each layer and every verdict intersects the layers'
+answers at the access ([[decisions/260906_object-not-name|object-not-name]]).
 
 ## Off the wire by construction
 
-`Capabilities` derives `Serialize` / `Deserialize` so its meet-folded
+`Capabilities` derives `Serialize` / `Deserialize` so the stack's folded
 [[design/capability-carriers|SandboxProjection]] crosses to a re-exec'd child —
 a trusted boundary between cooperating ral processes, where the parent has
 already resolved every path. Since a `Capabilities` is always resolved, only

@@ -18,7 +18,7 @@
 use ral_core::protocol::{
     Control, DispatchId, Host, Liveness, Program, Run, Transport, WireTransport,
 };
-use ral_core::types::Capabilities;
+use ral_core::types::GrantStack;
 use ral_core::wire::WireChannel;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use std::os::unix::net::UnixStream;
@@ -49,7 +49,7 @@ fn big_run() -> Run {
     Run {
         program: Program::Source("x".repeat(16 * 1024 * 1024)),
         script_name: "<test>".into(),
-        caps: Capabilities::root(),
+        caps: GrantStack::root(),
         wall: None,
         deferred_lease: None,
         worker_cap: None,

@@ -2,7 +2,7 @@
 //! loader dressed in exarch's error format, the confused-deputy lint, and the
 //! cwd-relative path helper `super::for_invocation` calls around them.
 
-use ral_core::types::{Break, Capabilities, Escape, Mooring, Shell};
+use ral_core::types::{Break, Capabilities, Escape, GrantStack, Mooring, Shell};
 use std::path::{Path, PathBuf};
 
 use ral_core::path;
@@ -36,13 +36,13 @@ pub(super) fn load_capabilities_ral(
     })
 }
 
-/// Warn — never deny — when the composed ceiling admits exec and write on one
+/// Warn — never deny — when the composed stack admits exec and write on one
 /// prefix, as `ral_core::capability::deputy_prefixes` judges it.
 ///
-/// Runs after every `join`/`meet` in [`for_invocation`](super::for_invocation):
-/// two profiles can each be innocent and still meet into a deputy.
-pub(super) fn lint_deputy_prefixes(caps: &Capabilities) {
-    let found = ral_core::capability::deputy_prefixes(caps);
+/// Runs once every layer is pushed in [`for_invocation`](super::for_invocation):
+/// two profiles can each be innocent and still fold into a deputy.
+pub(super) fn lint_deputy_prefixes(stack: &GrantStack) {
+    let found = ral_core::capability::deputy_prefixes(stack);
     if found.is_empty() {
         return;
     }

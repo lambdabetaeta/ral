@@ -1,17 +1,20 @@
 //! The capability lattice: one frame of typed authority, and the folds over it.
 //!
-//! A [`Capabilities`] frame bundles the per-effect policies.
-//! [`Capabilities::meet`] composes frames downward — [`Capabilities::root`]
-//! is top, [`Capabilities::deny_all`] bottom — and [`Capabilities::join`] widens a
-//! base ceiling at load time.  Denies are sticky under both.
+//! A [`Capabilities`] frame bundles the per-effect policies.  Composition
+//! downward is the [`GrantStack`]: a `grant { ... }` or a loaded profile
+//! pushes one more layer, and every verdict folds the layers afresh —
+//! `evaluate_exec`, `allow_region`/`deny_region`, `permits_detach` — rather
+//! than flattening them into one `Capabilities` first.  [`Capabilities::join`]
+//! is the one place a frame still composes eagerly: `--extend-base` widens a
+//! base ceiling at load time, before any attenuation runs, and its "silence
+//! lifts no veto" semantics only make sense as a single-layer union.  Denies
+//! are sticky under both regimes.
 //!
 //! [`SandboxProjection`] is the meet-folded fs+net+exec residue the OS sandbox
 //! backends render; `detach` gates a verb instead of an OS rule, so it is folded
 //! at the call by [`GrantStack::permits_detach`] and reaches no projection.
 
-use crate::path::{
-    NormalizedPrefix, Rendered, meet_prefixes, path_within_str, proper_ancestors, render_paths,
-};
+use crate::path::{NormalizedPrefix, Rendered, render_paths, rendered_pins};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -143,16 +146,16 @@ pub struct FsRules<N> {
     pub write_prefixes: Vec<N>,
     #[serde(default)]
     pub deny_paths: Vec<N>,
-    /// Every proper ancestor of a `deny_paths` entry that lies within some
-    /// write prefix.  The macOS backend pins each against rename and unlink,
-    /// or a confined child relocates the ancestor directory itself
-    /// (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r` when the write
-    /// prefix root is the ancestor) and the denied bytes resurface at a name
-    /// no deny rule covers.  `deny_paths` already carries both a deny's
-    /// surface spelling and its symlink-resolved target
-    /// (`sandbox_projection` in `capability::sandbox`), so taking ancestors
-    /// of it pins both chains — closing a symlink swapped in after sandbox
-    /// entry too.
+    /// The ancestor closure of every *rendered* `deny_paths` entry that lies
+    /// within some *rendered* write name.  The macOS backend pins each
+    /// against rename and unlink, or a confined child relocates the ancestor
+    /// directory itself (`mv /repo/.ssh /repo/x`, or `mv /repo /scratch/r`
+    /// when the write prefix root is the ancestor) and the denied bytes
+    /// resurface at a name no deny rule covers.  Rendering runs before the
+    /// ancestor walk (`SandboxProjection::traverse`), so both a deny's
+    /// surface chain and its resolved chain are pinned, and an alias
+    /// `W/alias → W/top/deep` with deny `W/alias/secret` pins `W/top` too —
+    /// an ancestor chain only the resolved spelling reveals.
     #[serde(skip)]
     pub pinned_dirs: Vec<N>,
 }
@@ -308,9 +311,11 @@ impl SandboxProjection<String> {
     /// forgetting to expand one new list.
     ///
     /// Pins are derived here rather than carried because they are a *function*
-    /// of the deny paths and the write prefixes, taken in surface space where
-    /// containment is the same lexical judgment the fold already made, and
-    /// only then handed to `f` alongside the sets they came from.
+    /// of the deny paths and the write prefixes — but only once both are
+    /// rendered: containment before expansion and after do not commute, since
+    /// a name reached only through a symlinked chain has ancestors the
+    /// surface spelling never mentions.  So `f` runs on the deny and write
+    /// sets first, and the ancestor walk runs on their rendered output.
     ///
     /// # Errors
     ///
@@ -338,14 +343,14 @@ impl SandboxProjection<String> {
                 // authority — see [`FsRules::pinned_dirs`].
                 pinned_dirs: _,
             }) => {
-                let write_prefixes = ordered(write_prefixes);
-                let deny_paths = ordered(deny_paths);
-                let pinned_dirs = derive_pins(&deny_paths, &write_prefixes);
+                let write_prefixes = f(&ordered(write_prefixes))?;
+                let deny_paths = f(&ordered(deny_paths))?;
+                let pinned_dirs = rendered_pins(&deny_paths, &write_prefixes);
                 FsProjection::Restricted(FsRules {
                     read_prefixes: f(&ordered(read_prefixes))?,
-                    write_prefixes: f(&write_prefixes)?,
-                    deny_paths: f(&deny_paths)?,
-                    pinned_dirs: f(&pinned_dirs)?,
+                    write_prefixes,
+                    deny_paths,
+                    pinned_dirs,
                 })
             }
         };
@@ -509,18 +514,6 @@ impl GrantStack {
     pub fn permits_detach(&self) -> bool {
         self.0.iter().all(|c| c.detach != Some(false))
     }
-
-    /// The whole stack folded to one ceiling, root first: every layer's
-    /// opinion applied through [`Capabilities::meet`], agreeing with every
-    /// per-axis fold above since `None` is `meet`'s identity. What a wire
-    /// seat's own grant-narrowing meets against, since a `GrantStack` itself
-    /// has no wire form.
-    pub fn effective(&self) -> Capabilities {
-        self.0
-            .iter()
-            .cloned()
-            .fold(Capabilities::root(), Capabilities::meet)
-    }
 }
 
 impl<'a> IntoIterator for &'a GrantStack {
@@ -528,6 +521,14 @@ impl<'a> IntoIterator for &'a GrantStack {
     type IntoIter = std::slice::Iter<'a, Capabilities>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
+    }
+}
+
+impl IntoIterator for GrantStack {
+    type Item = Capabilities;
+    type IntoIter = std::vec::IntoIter<Capabilities>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
@@ -562,23 +563,6 @@ impl Capabilities {
 }
 
 impl Capabilities {
-    /// The most-authority capability below both sides.  Inner fields intersect
-    /// (exec maps, fs prefixes) or AND (net, detach, editor, shell), while
-    /// `fs.deny_paths` unions — more denies is less authority.  Prefix
-    /// intersection goes through [`meet_prefixes`], judged on the `resolved`
-    /// form each [`NormalizedPrefix`] already carries, so no disk is consulted
-    /// here.
-    pub fn meet(self, other: Self) -> Self {
-        Self {
-            exec: self.exec.meet(other.exec),
-            fs: self.fs.meet(other.fs),
-            net: self.net.meet(other.net),
-            detach: self.detach.meet(other.detach),
-            editor: self.editor.meet(other.editor),
-            shell: self.shell.meet(other.shell),
-        }
-    }
-
     /// Widen `self` with `other` — the composition `--extend-base` runs to lift
     /// a base ceiling before any attenuation.  Positive authority unions, but
     /// every veto survives from either side, so an extension can grant where
@@ -648,22 +632,6 @@ impl Join for ExecPolicy {
     }
 }
 
-impl Meet for FsPolicy {
-    fn meet(self, other: Self) -> Self {
-        let sorted_meet = |a: &[NormalizedPrefix], b: &[NormalizedPrefix]| {
-            let mut out = meet_prefixes(a, b);
-            out.sort();
-            out.dedup();
-            out
-        };
-        Self {
-            read_prefixes: sorted_meet(&self.read_prefixes, &other.read_prefixes),
-            write_prefixes: sorted_meet(&self.write_prefixes, &other.write_prefixes),
-            deny_paths: union_prefixes(self.deny_paths, other.deny_paths),
-        }
-    }
-}
-
 impl Join for FsPolicy {
     fn join(self, other: Self) -> Self {
         Self {
@@ -672,16 +640,6 @@ impl Join for FsPolicy {
             // Denies union exactly as in `meet`: an overlay silent on a base
             // carve-out must not lift it.
             deny_paths: union_prefixes(self.deny_paths, other.deny_paths),
-        }
-    }
-}
-
-impl Meet for EditorPolicy {
-    fn meet(self, other: Self) -> Self {
-        Self {
-            read: self.read.meet(other.read),
-            write: self.write.meet(other.write),
-            tui: self.tui.meet(other.tui),
         }
     }
 }
@@ -696,14 +654,6 @@ impl Join for EditorPolicy {
     }
 }
 
-impl Meet for ShellPolicy {
-    fn meet(self, other: Self) -> Self {
-        Self {
-            chdir: self.chdir.meet(other.chdir),
-        }
-    }
-}
-
 impl Join for ShellPolicy {
     fn join(self, other: Self) -> Self {
         Self {
@@ -712,32 +662,10 @@ impl Join for ShellPolicy {
     }
 }
 
-/// `allow_dirs` intersects through [`meet_prefixes`] — a prefix survives only
-/// where both sides admit it, the deeper winning — while `deny_dirs` unions.
-/// The sweep afterwards drops any allow [`same_gate_dir`](NormalizedPrefix::same_gate_dir)
-/// as a deny rather than merely byte-equal to it, so a clash resolves to the
-/// deny even across alias spellings or two sides that froze different disk state.
-impl Meet for ExecMap {
-    fn meet(self, other: Self) -> Self {
-        let self_allow: Vec<NormalizedPrefix> = self.allow_dirs.into_iter().collect();
-        let other_allow: Vec<NormalizedPrefix> = other.allow_dirs.into_iter().collect();
-        let mut allow_dirs: BTreeSet<NormalizedPrefix> = meet_prefixes(&self_allow, &other_allow)
-            .into_iter()
-            .collect();
-        let deny_dirs: BTreeSet<NormalizedPrefix> =
-            self.deny_dirs.into_iter().chain(other.deny_dirs).collect();
-        allow_dirs.retain(|p| !deny_dirs.iter().any(|d| d.same_gate_dir(p)));
-        Self {
-            allow_dirs,
-            deny_dirs,
-            literals: meet_literal_exec(&self.literals, &other.literals),
-        }
-    }
-}
-
-/// Both sets union, then the same `same_gate_dir` sweep as [`meet`](Meet::meet)
-/// drops the allows a deny covers — so an overlay that re-grants a directory
-/// the base vetoed still loses it.
+/// Both sets union, then a [`same_gate_dir`](NormalizedPrefix::same_gate_dir)
+/// sweep drops any allow that clashes with a deny — even across alias
+/// spellings, or two sides that froze different disk state — so an overlay
+/// that re-grants a directory the base vetoed still loses it.
 impl Join for ExecMap {
     fn join(self, other: Self) -> Self {
         let mut allow_dirs: BTreeSet<NormalizedPrefix> = self
@@ -754,35 +682,6 @@ impl Join for ExecMap {
             literals: join_literal_exec(&self.literals, &other.literals),
         }
     }
-}
-
-/// Allow-sided keys must appear on both sides; a `Deny` propagates from either,
-/// even where the other map has no entry at all.
-fn meet_literal_exec(
-    a: &BTreeMap<String, ExecPolicy>,
-    b: &BTreeMap<String, ExecPolicy>,
-) -> BTreeMap<String, ExecPolicy> {
-    let mut out = BTreeMap::new();
-    for (name, pa) in a {
-        match b.get(name) {
-            Some(pb) => {
-                out.insert(name.clone(), pa.clone().meet(pb.clone()));
-            }
-            None if matches!(pa, ExecPolicy::Deny) => {
-                out.insert(name.clone(), ExecPolicy::Deny);
-            }
-            None => {}
-        }
-    }
-    for (name, pb) in b {
-        if a.contains_key(name) {
-            continue;
-        }
-        if matches!(pb, ExecPolicy::Deny) {
-            out.insert(name.clone(), ExecPolicy::Deny);
-        }
-    }
-    out
 }
 
 /// Shared keys combine through [`ExecPolicy::join`], and a one-sided key
@@ -811,20 +710,6 @@ fn join_literal_exec(
     out
 }
 
-/// The directories a deny needs kept traversable to be reachable at all:
-/// every proper ancestor of a deny path that lies within some write prefix.
-///
-/// Surface space, before any host expansion.  Containment here is the same
-/// lexical judgment the fold already made, and an ancestor chain is a property
-/// of the name rather than of the object — so expanding first would only ask
-/// the question once per spelling and get the same answer each time.
-fn derive_pins(deny_paths: &[String], write_prefixes: &[String]) -> Vec<String> {
-    proper_ancestors(deny_paths.iter().map(String::as_str))
-        .into_iter()
-        .filter(|dir| write_prefixes.iter().any(|w| path_within_str(dir, w)))
-        .collect()
-}
-
 fn union_prefixes(a: Vec<NormalizedPrefix>, b: Vec<NormalizedPrefix>) -> Vec<NormalizedPrefix> {
     a.into_iter()
         .chain(b)
@@ -840,17 +725,33 @@ mod lattice_tests;
 mod traverse_tests {
     use super::*;
 
-    /// The pins the traversal derives, in the surface space it derives them in.
-    ///
-    /// Deliberately short of the renderer: which ancestors the derivation picks
-    /// is this module's concern, while how many names each one answers to is
-    /// the host's.  Asserting on rendered output would conflate the two and
-    /// make the expected value a property of the machine — on Windows a
-    /// nonexistent `/repo` expands to the drive-qualified `\\?\C:\repo`
-    /// alongside itself, where on Unix it expands to only itself.
+    /// The pins the traversal derives, through the real renderer — pins are
+    /// now a function of *rendered* names, so this goes through
+    /// [`SandboxProjection::rendered`] rather than calling the derivation
+    /// bare.  Containment, not equality: the renderer is entitled to add
+    /// spellings (on Windows a nonexistent `/repo` expands to the
+    /// drive-qualified `\\?\C:\repo` alongside itself), so callers assert
+    /// `as_str` containment, not the exact set.
     fn pinned(write: &[&str], deny: &[&str]) -> Vec<String> {
         let strings = |ps: &[&str]| ps.iter().copied().map(str::to_string).collect::<Vec<_>>();
-        derive_pins(&strings(deny), &strings(write))
+        let projection = SandboxProjection {
+            fs: FsProjection::Restricted(FsRules {
+                read_prefixes: Vec::new(),
+                write_prefixes: strings(write),
+                deny_paths: strings(deny),
+                pinned_dirs: Vec::new(),
+            }),
+            net: true,
+            exec: ExecProjection::default(),
+        };
+        let out = projection.rendered().expect("ASCII paths render");
+        out.fs
+            .rules()
+            .expect("restricted in, restricted out")
+            .pinned_dirs
+            .iter()
+            .map(|r| r.as_str().to_string())
+            .collect()
     }
 
     /// The write prefix root is itself a proper ancestor of a deep-enough
@@ -858,10 +759,10 @@ mod traverse_tests {
     /// the case that closes `mv /repo /scratch/r`.
     #[test]
     fn pins_every_ancestor_within_the_write_prefix_including_its_root() {
-        assert_eq!(
-            pinned(&["/repo"], &["/repo/a/b/secret"]),
-            ["/repo", "/repo/a", "/repo/a/b"]
-        );
+        let dirs = pinned(&["/repo"], &["/repo/a/b/secret"]);
+        for expect in ["/repo", "/repo/a", "/repo/a/b"] {
+            assert!(dirs.iter().any(|d| d == expect), "got {dirs:?}");
+        }
     }
 
     /// A read prefix is not a write prefix: only the latter can widen a deny's

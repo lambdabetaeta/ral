@@ -319,7 +319,7 @@ mod tests {
 mod chokepoint_tests {
     use crate::boot::BakedPrelude;
     use crate::protocol::{Program, Run};
-    use crate::types::{Capabilities, HandleState, Settled, Shell, Value};
+    use crate::types::{GrantStack, HandleState, Settled, Shell, Value};
     use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
@@ -360,7 +360,7 @@ mod chokepoint_tests {
             run: Run {
                 program: Program::Source(source.into()),
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,
@@ -387,7 +387,7 @@ mod chokepoint_tests {
             run: Run {
                 program: Program::Source(source.into()),
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,
@@ -576,7 +576,7 @@ mod chokepoint_tests {
             run: Run {
                 program: Program::Source("$[1 + true]".into()),
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,
@@ -643,7 +643,7 @@ mod chokepoint_tests {
                     args: vec![],
                 },
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,
@@ -818,7 +818,7 @@ mod chokepoint_tests {
             run: Run {
                 program: Program::Source("return $prune_x".into()),
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,

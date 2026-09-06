@@ -244,7 +244,7 @@ pub(crate) fn deferred_sink(emit: &Emitter) -> Arc<dyn DeferredSink> {
 /// every real caller a [`crate::fleet::desk::RunHost`].
 pub(crate) fn run_shell(
     transport: &dyn ral_core::protocol::Transport,
-    caps: &ral_core::types::Capabilities,
+    caps: &ral_core::types::GrantStack,
     cmd: &str,
     timeout_secs: u64,
     host: Arc<dyn ral_core::protocol::Host>,
@@ -474,7 +474,13 @@ mod tests {
             recorder: recorder.clone(),
             surface: Mutex::new(crate::record::commit::SurfaceBuffer::new()),
         });
-        let outcome = run_shell(&transport, caps, cmd, timeout_secs, applier.clone());
+        let outcome = run_shell(
+            &transport,
+            &ral_core::types::GrantStack::of(caps.clone()),
+            cmd,
+            timeout_secs,
+            applier.clone(),
+        );
         // Recover the mutated shell so `let`/`cd`/binding state reaches the
         // caller's next run — the across-calls contract these tests pin.
         *shell = transport.into_shell();

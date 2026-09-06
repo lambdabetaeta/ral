@@ -39,7 +39,7 @@ fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
 fn root_config(run_dir: &Path, resume: bool) -> RootConfig {
     RootConfig {
         system: "system".into(),
-        caps: ral_core::types::Capabilities::default(),
+        caps: ral_core::types::GrantStack::root(),
         run_dir: run_dir.to_path_buf(),
         resume: resume.then(|| run_dir.to_path_buf()),
         no_logs: false,

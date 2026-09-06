@@ -6,7 +6,7 @@
 //! Plugins may transform the result via the `prompt` lifecycle hook.
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, HookName};
+use ral_core::types::{Break, GrantStack, HookName};
 use ral_core::{
     Captured, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell, Value,
     diagnostic,
@@ -62,7 +62,7 @@ fn prompt_run(name: &str) -> RunRequest<'static> {
                 args: vec![],
             },
             script_name: "<prompt>".to_string(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,
@@ -236,7 +236,7 @@ mod tests {
             run: ral_core::protocol::Run {
                 program: ral_core::protocol::Program::Source(src.to_string()),
                 script_name: "<test>".to_string(),
-                caps: ral_core::types::Capabilities::root(),
+                caps: ral_core::types::GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,

@@ -45,7 +45,6 @@ fn engine_boot_shell() -> ral_core::Shell {
 /// one is told why rather than silently admitted.
 #[cfg(unix)]
 fn no_seeded_children(
-    _own: &ral_core::types::Capabilities,
     _grant: &str,
     _cwd: &str,
 ) -> Result<ral_core::types::Capabilities, String> {

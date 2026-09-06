@@ -30,7 +30,7 @@ mod common;
 
 use ral_core::builtins;
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, Shell, Value};
+use ral_core::types::{Break, GrantStack, Shell, Value};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
 /// Evaluate a ral script through the public run door — parse, elaborate,
@@ -43,7 +43,7 @@ fn eval(input: &str) -> ral_core::types::Settled<Value> {
         run: Run {
             program: Program::Source(input.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

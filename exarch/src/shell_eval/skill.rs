@@ -51,9 +51,10 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 ///
 /// Runs once at boot, before a `Shell` exists, so it asks the fs gate's own
 /// verdict — [`GrantStack::admits_fs`](ral_core::types::GrantStack::admits_fs)
-/// over a one-frame stack of the session `caps` — about each `SKILL.md` it
-/// opens, where `skill-list` and `skill` use `Shell::check_fs_read`.  At boot
-/// that frame is the whole stack, so the two doors agree by construction.
+/// over the session's whole grant stack — about each `SKILL.md` it opens,
+/// where `skill-list` and `skill` use `Shell::check_fs_read`.  At boot that
+/// stack is the one this agent will run under, so the two doors agree by
+/// construction.
 #[allow(
     clippy::disallowed_methods,
     reason = "[io-door:silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by GrantStack::admits_fs"
@@ -61,9 +62,8 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 pub fn discover_metadata(
     cwd: &Path,
     config_dir: &Path,
-    caps: &ral_core::types::Capabilities,
+    grants: &ral_core::types::GrantStack,
 ) -> Vec<Skill> {
-    let grants = ral_core::types::GrantStack::of(caps.clone());
     // Shell-less as at the fff index: every candidate is `cwd`/`config_dir`
     // joined absolute, so the resolver's home and cwd are never consulted.
     let resolver = ral_core::path::Resolver::shell_less();

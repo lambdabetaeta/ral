@@ -65,10 +65,12 @@ pub fn load_capabilities_from_path(
     load_capabilities_from_str(mooring, shell, &source, &abs, ctx)
 }
 
-/// Load each profile in `paths`, `meet`-fold left to right (each file narrows
-/// authority), and push the result as a permanent session-wide ceiling.
+/// Load each profile in `paths` and push each as its own permanent, session-wide layer.
 ///
-/// One `FreezeCtx` serves the whole fold, so every profile resolves its sigils
+/// Root first, and the stack folds them at every check, so no file's opinion
+/// is ever flattened away by a sibling that is silent on the same key.
+///
+/// One `FreezeCtx` serves every load, so every profile resolves its sigils
 /// against the same home and cwd, and an `xdg:` path escaping `$HOME` is
 /// rejected at the profile that names it.  Failures carry a bare mechanism
 /// message; the caller prepends provenance (`--capabilities`, a config key).
@@ -92,11 +94,10 @@ pub fn apply_session_profiles(
         home: home.as_deref(),
         cwd: &cwd,
     };
-    let mut composed = Capabilities::default();
     for path in paths {
-        composed = composed.meet(load_capabilities_from_path(mooring, shell, path, &ctx)?);
+        let layer = load_capabilities_from_path(mooring, shell, path, &ctx)?;
+        shell.push_session_capabilities(layer);
     }
-    shell.push_session_capabilities(composed);
     Ok(())
 }
 

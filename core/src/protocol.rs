@@ -120,9 +120,11 @@ pub struct Run {
     /// Label for the root source context: `"<stdin>"` for the REPL, `"<tool>"`
     /// for exarch.
     pub script_name: String,
-    /// The capability ceiling pushed for the eval's dynamic extent;
-    /// `Capabilities::root()` is ⊤, the identity on authority.
-    pub caps: crate::types::Capabilities,
+    /// The capability ceiling pushed for the eval's dynamic extent, every
+    /// layer of it: the stack is the meet, and folding it into one frame
+    /// would lose what a layer says only about a resolved name.
+    /// `GrantStack::root()` is ⊤, the identity on authority.
+    pub caps: crate::types::GrantStack,
     /// `Some(d)` arms a deadline cancel on the run's foreground scope `d`
     /// after it starts; `None` leaves the run uncapped.
     pub wall: Option<std::time::Duration>,
@@ -1389,14 +1391,14 @@ impl Transport for IdentityTransport {
 mod identity_cancel_tests {
     use super::*;
     use crate::run::{RequestedTerminalAccess, RunIo, RunStdin};
-    use crate::types::{Capabilities, Shell};
+    use crate::types::Shell;
     use std::time::{Duration, Instant};
 
     fn sleep_run(src: &str) -> Run {
         Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: crate::types::GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,
@@ -2144,7 +2146,7 @@ mod enquiry_tests {
     use crate::run::{
         RequestedTerminalAccess, RunIo, RunLifecycle, RunReport, RunRequest, RunStdin,
     };
-    use crate::types::{Capabilities, Desk, Fork, Mooring, Shell};
+    use crate::types::{Desk, Fork, Mooring, Shell};
     use std::sync::Mutex;
 
     /// The minimal capturing request under the ⊤ ceiling, mirroring `run.rs`'s
@@ -2154,7 +2156,7 @@ mod enquiry_tests {
             run: Run {
                 program: Program::Source(src.into()),
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: crate::types::GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,
@@ -2290,7 +2292,7 @@ mod enquiry_tests {
                 Run {
                     program: Program::Source(String::new()),
                     script_name: "<test>".into(),
-                    caps: Capabilities::root(),
+                    caps: crate::types::GrantStack::root(),
                     wall: None,
                     deferred_lease: None,
                     worker_cap: None,
@@ -2356,7 +2358,7 @@ mod durability_tests {
         Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
-            caps: crate::types::Capabilities::root(),
+            caps: crate::types::GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,
@@ -2947,7 +2949,7 @@ mod wire_liveness_tests {
             Run {
                 program: Program::Source("$[1 + 1]".into()),
                 script_name: "<test>".into(),
-                caps: crate::types::Capabilities::root(),
+                caps: crate::types::GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,

@@ -44,7 +44,7 @@ pub fn install_child_hooks_and_serve_helpers() -> Option<u8> {
         ral_core::engine::run_engine(&[ral_core::engine::EngineInstaller {
             tag: shell_eval::builtins::INSTALLER_TAG,
             boot: bootstrap::engine_boot_shell,
-            narrow: policy::narrow,
+            narrow: policy::base_layer,
         }]);
     }
     if let Some(code) = ral_core::try_run_pipeline_anchor() {
@@ -179,7 +179,9 @@ pub fn run() -> Result<(), String> {
     // be sandboxed under.
     {
         let mut probe = ral_core::Shell::new(ral_core::io::TerminalState::default());
-        probe.push_session_capabilities(caps.clone());
+        for layer in &caps {
+            probe.push_session_capabilities(layer.clone());
+        }
         if let Some(projection) = probe.sandbox_projection() {
             ral_core::sandbox::dump_profile_if_requested(&projection);
         }

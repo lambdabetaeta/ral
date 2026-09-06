@@ -361,7 +361,7 @@ mod tests {
             run: ral_core::protocol::Run {
                 program: ral_core::protocol::Program::Source(src.to_string()),
                 script_name: "<test>".to_string(),
-                caps: ral_core::types::Capabilities::root(),
+                caps: ral_core::types::GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,

@@ -70,7 +70,7 @@ pub(crate) struct Build {
     /// The fleet-shared builtin index, carried on so this agent's own forks
     /// resolve theirs without a live shell.
     pub(crate) index: Arc<crate::prompt::BuiltinIndex>,
-    pub(crate) caps: ral_core::types::Capabilities,
+    pub(crate) caps: ral_core::types::GrantStack,
     /// Already through its identity ceremony: `assemble` seats no engine of
     /// its own, so every construction site states which seat kind it builds.
     pub(crate) seat: Seat,
@@ -180,7 +180,7 @@ impl RecordedAccount {
 )]
 pub struct RootConfig {
     pub system: String,
-    pub caps: ral_core::types::Capabilities,
+    pub caps: ral_core::types::GrantStack,
     pub run_dir: std::path::PathBuf,
     pub resume: Option<std::path::PathBuf>,
     pub no_logs: bool,
@@ -569,7 +569,7 @@ impl Avatar {
     /// (`ExarchDesk::launch`), and `/branch` calls `fork_with` directly with
     /// the name it already chose.
     #[cfg(test)]
-    pub(crate) fn fork(&self, caps: ral_core::types::Capabilities) -> Result<Self, Unforked> {
+    pub(crate) fn fork(&self, caps: ral_core::types::GrantStack) -> Result<Self, Unforked> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         self.fork_named(
             caps,
@@ -582,7 +582,7 @@ impl Avatar {
     #[cfg(test)]
     pub(crate) fn fork_named(
         &self,
-        caps: ral_core::types::Capabilities,
+        caps: ral_core::types::GrantStack,
         name: &str,
     ) -> Result<Self, Unforked> {
         self.fork_with(caps, true, name.to_string())
@@ -593,7 +593,7 @@ impl Avatar {
     /// and the desk's refusal read that one bit, so they cannot disagree.
     fn fork_with(
         &self,
-        caps: ral_core::types::Capabilities,
+        caps: ral_core::types::GrantStack,
         returns: bool,
         name: String,
     ) -> Result<Self, Unforked> {
@@ -774,7 +774,7 @@ impl Avatar {
             system: system.into(),
             system_prompt,
             index,
-            caps: ral_core::types::Capabilities::default(),
+            caps: ral_core::types::GrantStack::root(),
             seat,
             log,
             parent: None,
@@ -1031,7 +1031,7 @@ mod tests {
         let root = Avatar::root(
             RootConfig {
                 system: template,
-                caps: ral_core::types::Capabilities::default(),
+                caps: ral_core::types::GrantStack::root(),
                 run_dir: dir.path().to_owned(),
                 resume: None,
                 no_logs: false,
@@ -1375,7 +1375,7 @@ mod tests {
         session.run_shell("c0".into(), "let parent_scratch = 1", 5, &emit);
 
         let mut child = session
-            .fork(ral_core::types::Capabilities::default())
+            .fork(ral_core::types::GrantStack::root())
             .expect("fork");
         assert!(
             scope_has(&mut child, "parent_scratch"),
@@ -1428,7 +1428,7 @@ mod tests {
         let agent = Avatar::root(
             RootConfig {
                 system: "system".into(),
-                caps: ral_core::types::Capabilities::default(),
+                caps: ral_core::types::GrantStack::root(),
                 run_dir: dir.path().to_owned(),
                 resume: Some(dir.path().to_owned()),
                 no_logs: false,
@@ -1555,7 +1555,7 @@ mod tests {
         let agent = Avatar::root(
             RootConfig {
                 system: "system".into(),
-                caps: ral_core::types::Capabilities::default(),
+                caps: ral_core::types::GrantStack::root(),
                 run_dir: dir.path().to_owned(),
                 resume: None,
                 no_logs: true,
@@ -1581,7 +1581,7 @@ mod tests {
         .expect("mirror-only agent");
         let root_log = agent.log_dir();
         let child = agent
-            .fork(ral_core::types::Capabilities::default())
+            .fork(ral_core::types::GrantStack::root())
             .expect("mirror-only child");
         let child_log = child.log_dir();
         for log_dir in [&root_log, &child_log] {
@@ -1613,7 +1613,7 @@ mod tests {
         let root = Avatar::root(
             RootConfig {
                 system: "system".into(),
-                caps: ral_core::types::Capabilities::default(),
+                caps: ral_core::types::GrantStack::root(),
                 run_dir: dir.path().to_owned(),
                 resume: Some(dir.path().to_owned()),
                 no_logs: false,
@@ -1638,7 +1638,7 @@ mod tests {
         )
         .expect("resumed root");
         let child = root
-            .fork(ral_core::types::Capabilities::default())
+            .fork(ral_core::types::GrantStack::root())
             .expect("post-resume child");
         let child_id = child
             .log_dir()

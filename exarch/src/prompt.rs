@@ -6,7 +6,7 @@ pub mod host;
 use crate::cli::EditScheme;
 use crate::shell_eval::skill;
 use ral_core::Shell;
-use ral_core::types::Capabilities;
+use ral_core::types::{Capabilities, GrantStack};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,7 @@ pub const CHAT_SYSTEM: &str = ".";
 /// If reading a `--system` file or a discovered `AGENTS.md` fails.
 pub fn assemble(
     files: &[PathBuf],
-    caps: &Capabilities,
+    caps: &GrantStack,
     scratch: &crate::bootstrap::Scratch,
     cwd: &Path,
     config_dir: &Path,
@@ -289,7 +289,7 @@ pub fn render(sections: &[(Option<&str>, String)]) -> String {
 /// Every line is a *host* truth, which is why the composition is exarch's
 /// alone — synod's engine lives in a guest VM where none of them hold, so it
 /// builds its own around the shared [`grant_summary`].
-pub fn host_section(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) -> String {
+pub fn host_section(caps: &GrantStack, scratch: &crate::bootstrap::Scratch) -> String {
     let state = scratch
         .app()
         .xdg_dir(ral_core::path::basedir::XdgKind::State);
@@ -297,9 +297,29 @@ pub fn host_section(caps: &Capabilities, scratch: &crate::bootstrap::Scratch) ->
     format!(
         "{}\n{}",
         host::snapshot(&state),
-        grant_summary(caps, &scratch_line)
+        stack_summary(caps, &scratch_line)
     )
 }
+
+/// [`grant_summary`] over every restrictive layer of `stack`, oldest first —
+/// the stack is the meet, so describing each layer in turn describes the
+/// whole composed ceiling without re-deriving the single flattened
+/// `Capabilities` that finding 2 retired.  The common case (no `--restrict`
+/// files) has exactly one restrictive layer, so its output is
+/// `grant_summary`'s unchanged.
+fn stack_summary(stack: &GrantStack, scratch_line: &str) -> String {
+    let layers: Vec<&Capabilities> = stack.iter().filter(|c| c.is_restrictive()).collect();
+    let Some((first, rest)) = layers.split_first() else {
+        return grant_summary(&Capabilities::root(), scratch_line);
+    };
+    let mut s = grant_summary(first, scratch_line);
+    for (i, caps) in rest.iter().enumerate() {
+        let _ = writeln!(s, "\nLayer {} of {} further restricting layers:", i + 2, layers.len());
+        s.push_str(&grant_summary(caps, scratch_line));
+    }
+    s
+}
+
 /// The live grant: a static legend teaching the notation and the runtime
 /// denial string, then one effect per line.
 ///

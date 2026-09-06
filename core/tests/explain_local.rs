@@ -7,7 +7,7 @@
 mod common;
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Capabilities, Settled, Shell, Value};
+use ral_core::types::{GrantStack, Settled, Shell, Value};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
 
 fn shell() -> Shell {
@@ -22,7 +22,7 @@ fn run_capture(shell: &mut Shell, src: &str) -> (Settled<Value>, String) {
         run: Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

@@ -859,7 +859,6 @@ mod tests {
     /// These tests never hatch, so the honest policy is the one a host with no
     /// grant lexicon states: no seeded child is admitted.
     fn no_seeded_children(
-        _own: &crate::types::Capabilities,
         _grant: &str,
         _cwd: &str,
     ) -> Result<crate::types::Capabilities, String> {
@@ -932,7 +931,6 @@ mod engine_session_tests {
     /// This engine is attached to in-process and never hatches, so it states
     /// the only policy a host without a grant lexicon can: no seeded child.
     fn no_seeded_children(
-        _own: &crate::types::Capabilities,
         _grant: &str,
         _cwd: &str,
     ) -> Result<crate::types::Capabilities, String> {
@@ -950,7 +948,7 @@ mod engine_session_tests {
         Run {
             program: crate::protocol::Program::Source(src.into()),
             script_name: "<test>".into(),
-            caps: crate::types::Capabilities::root(),
+            caps: crate::types::GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

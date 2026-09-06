@@ -8,7 +8,7 @@
 mod common;
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Capabilities, Shell, Value};
+use ral_core::types::{GrantStack, Shell, Value};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
 
 fn fresh_shell() -> Shell {
@@ -23,7 +23,7 @@ fn top_level(shell: &mut Shell, source: &str) -> String {
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

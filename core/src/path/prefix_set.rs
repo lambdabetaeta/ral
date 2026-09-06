@@ -64,6 +64,15 @@ impl PrefixSet {
         self
     }
 
+    /// Every prefix `deny` does not [`cover`](covers) — deny-wins on the
+    /// projection itself, so an allow beneath a deny never reaches a
+    /// backend, including one whose own primitive would order an explicit
+    /// allow before an inherited deny (Windows ACLs).
+    pub fn outside(mut self, deny: &Self) -> Self {
+        self.0.retain(|p| !deny.0.iter().any(|d| covers(d, p)));
+        self
+    }
+
     /// The deepest prefix whose region contains `path`, if any — the
     /// containment question the runtime gate asks, decided against the same
     /// `resolved` forms [`covers`] keys on and through the same alias-aware
@@ -163,11 +172,44 @@ mod tests {
         assert_eq!(a.clone().meet(a.clone()), a);
     }
 
+    /// Overlap keys on `(namespace, resolved)`, not `resolved` alone: a host
+    /// and a guest prefix spelling the same string must never overlap, or a
+    /// host ceiling could narrow the guest grants `synod`'s `grant.rs` mints.
+    #[test]
+    fn meet_keeps_cross_namespace_prefixes_from_overlapping() {
+        let host = set(&[NormalizedPrefix::for_test("/work", "/work", Namespace::Host)]);
+        let guest = set(&[NormalizedPrefix::for_test("/work", "/work", Namespace::Guest)]);
+        assert!(
+            host.meet(guest).surface().is_empty(),
+            "a host prefix and a guest prefix resolving to the same string must not overlap"
+        );
+    }
+
     #[test]
     fn meet_is_commutative() {
         let a = set(&[lit("/a"), lit("/b/c")]);
         let b = set(&[lit("/a/x"), lit("/b")]);
         assert_eq!(a.clone().meet(b.clone()), b.meet(a));
+    }
+
+    #[test]
+    fn outside_drops_an_allow_a_deny_covers() {
+        assert!(
+            set(&[lit("/d/f")])
+                .outside(&set(&[lit("/d")]))
+                .surface()
+                .is_empty(),
+            "a read/write region beneath a deny must not reach the projection"
+        );
+    }
+
+    #[test]
+    fn outside_keeps_an_allow_the_deny_does_not_cover() {
+        assert_eq!(
+            surface(&set(&[lit("/d")]).outside(&set(&[lit("/d/f")]))),
+            vec![np("/d")],
+            "a deny narrower than the allow must not drop the whole region"
+        );
     }
 
     #[test]

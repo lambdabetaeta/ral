@@ -3,7 +3,9 @@
 //! Four stages, one sibling module each: sigil expansion of `~`/`xdg:` at
 //! the head (`sigil`), cwd-anchoring and `.`/`..` folding (`lex`),
 //! `realpath` with an ancestor-walk fallback (`canon`), and alias-aware
-//! containment (`lex::path_within`).
+//! containment (`lex::path_within`).  Where a name is about to be *written
+//! through*, a fifth (`walk`) locates the object itself, symlink-free, so
+//! the gate judges what the kernel will touch.
 //!
 //! Stage 2 mints a [`ResolvedPath`]; the grant side mints a
 //! [`NormalizedPrefix`] through the same folding kernel, so an access-side
@@ -21,6 +23,7 @@ pub mod resolved;
 pub mod resolver;
 pub mod sigil;
 pub mod tilde;
+pub mod walk;
 pub mod which;
 
 pub use tilde::{abbreviate_home, home, user_name};
@@ -38,8 +41,10 @@ pub use prefix_set::{PrefixSet, covers, meet_prefixes};
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;
 pub use render::{Rendered, render_paths};
+pub(crate) use render::rendered_pins;
 pub use resolved::{Namespace, NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
+pub use walk::Located;
 pub(crate) use which::{PathSearch, search};
 pub use which::{SearchCwd, commands_on_path, forget_located_commands, locate, resolve_in_path};
 

@@ -8,9 +8,9 @@
 //! `RAL_ENGINE_SEED_FD`, writes the one framed [`EngineSeed`] while the child
 //! drains it, and answers [`crate::protocol::HATCH_ACK`]: a peer that hears
 //! the ack has a live child holding its whole seed. [`seed_from_env`] and
-//! [`apply_seed`] are the other end, narrowing the child through the
-//! [`GrantNarrower`] its [`crate::engine::EngineInstaller`] carries — core has
-//! no grant vocabulary of its own.
+//! [`apply_seed`] are the other end, pushing the child's own grant layer
+//! through the [`GrantNarrower`] its [`crate::engine::EngineInstaller`]
+//! carries — core has no grant vocabulary of its own.
 //!
 //! Nothing here names a transport: the listening socket is the caller's, and
 //! the tests stand a `UnixListener` and `UnixStream` pairs in for it. Only a
@@ -50,15 +50,17 @@ type Recipe = &'static [&'static str];
 #[cfg(target_os = "linux")]
 const ENGINE: Recipe = &["--engine"];
 
-/// `own`, the grant tag, the cwd — in, a narrowed [`Capabilities`] out.
+/// The grant tag and the cwd — in, one [`Capabilities`] layer out.
 ///
-/// The narrowing is `own ⊓ resolve_base(grant, cwd)`, evaluated where the
-/// host's own capability vocabulary lives, since core carries no base-tag
-/// lexicon. A field of [`crate::engine::EngineInstaller`] rather than a registered
-/// hook: an installer is chosen at `Attach`, before [`apply_seed`] runs, so
-/// the policy can be demanded of every host that dresses an engine instead of
+/// Pushed onto the hydrated shell's stack rather than folded against what it
+/// already carries: the stack itself is the meet, so the child's own ceiling
+/// only needs to be resolved, not composed here. Evaluated where the host's
+/// own capability vocabulary lives, since core carries no base-tag lexicon. A
+/// field of [`crate::engine::EngineInstaller`] rather than a registered hook:
+/// an installer is chosen at `Attach`, before [`apply_seed`] runs, so the
+/// policy can be demanded of every host that dresses an engine instead of
 /// left in a slot one of them might forget to fill.
-pub type GrantNarrower = fn(&Capabilities, &str, &str) -> Result<Capabilities, String>;
+pub type GrantNarrower = fn(&str, &str) -> Result<Capabilities, String>;
 
 /// The process-global hatch table. No thread, no signal handler: a hatch
 /// sweeps it on entry, and `teardown` sweeps it once more as the engine
@@ -471,9 +473,10 @@ fn read_seed(mut channel: UnixStream) -> Result<EngineSeed, String> {
 }
 
 /// Application of a seed already taken: called from `engine_session` once the
-/// installer has booted `shell`. Hydrates scope and context, then narrows
-/// `shell`'s capabilities through `narrow`, the [`GrantNarrower`] that
-/// installer carries.
+/// installer has booted `shell`. Hydrates scope and context, then pushes the
+/// child's own grant layer, resolved by `narrow`, the [`GrantNarrower`] that
+/// installer carries — the hydrated stack already carries the parent's
+/// layers, so this only adds the child's, never folds against them.
 ///
 /// # Errors
 /// Returns a sentence naming a decode failure, or whatever `narrow` refuses
@@ -493,10 +496,9 @@ pub(crate) fn apply_seed(
         .into_runtime(&dec)
         .map_err(|e| format!("hatch: the seed's scope failed to decode: {}", e.message))?;
 
-    let own = shell.context.grants.effective();
     let cwd = shell.cwd();
-    let narrowed = narrow(&own, &seed.grant, &cwd.to_string_lossy())?;
-    shell.push_session_capabilities(narrowed);
+    let layer = narrow(&seed.grant, &cwd.to_string_lossy())?;
+    shell.push_session_capabilities(layer);
     Ok(())
 }
 
@@ -517,17 +519,17 @@ mod tests {
         P.get_or_init(BakedPrelude::bake_runtime)
     }
 
-    /// A grant narrower that just meets `own` against a fixed floor, so
-    /// tests need no exarch-shaped base vocabulary.
+    /// A grant narrower that returns a fixed net-off layer, so tests need no
+    /// exarch-shaped base vocabulary.
     #[allow(
         clippy::unnecessary_wraps,
         reason = "must match GrantNarrower's fn-pointer signature, which can genuinely refuse"
     )]
-    fn deny_net(own: &Capabilities, _grant: &str, _cwd: &str) -> Result<Capabilities, String> {
-        Ok(own.clone().meet(Capabilities {
+    fn deny_net(_grant: &str, _cwd: &str) -> Result<Capabilities, String> {
+        Ok(Capabilities {
             net: Some(false),
             ..Capabilities::default()
-        }))
+        })
     }
 
     /// The libtest binary has no `--engine`, so a hatched child is one exact
@@ -714,9 +716,8 @@ mod tests {
             .expect("apply seed");
 
         assert_eq!(shell.env.get("kept"), Some(&Value::Int(7)));
-        assert_eq!(
-            shell.context.grants.effective().net,
-            Some(false),
+        assert!(
+            !shell.context.grants.net().all(|n| n),
             "the installer's narrower must land its floor on the hydrated shell"
         );
     }

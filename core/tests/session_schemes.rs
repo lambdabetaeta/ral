@@ -11,7 +11,7 @@ mod common;
 
 use ral_core::source::FileId;
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Capabilities, Settled};
+use ral_core::types::{GrantStack, Settled};
 use ral_core::{
     CompileOutcome, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
     TypeError, Value, builtins, compile_and_typecheck, typecheck::fmt_scheme,
@@ -41,7 +41,7 @@ fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
         run: Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

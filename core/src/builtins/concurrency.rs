@@ -785,7 +785,7 @@ fn detach_handle(handle: &HandleInner) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Capabilities, Map};
+    use crate::types::{GrantStack, Map};
     use std::sync::mpsc;
 
     fn status(b: Break) -> i32 {
@@ -1494,7 +1494,7 @@ mod tests {
             run: Run {
                 program: Program::Source(src.into()),
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,
@@ -1525,7 +1525,7 @@ mod tests {
             run: Run {
                 program: Program::Source(src.into()),
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: Some(worker_cap),

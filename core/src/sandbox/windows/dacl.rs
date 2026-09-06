@@ -1114,9 +1114,16 @@ fn win32_err_str(path: &Path, msg: &str) -> DaclError {
 /// Merge one explicit allow-or-deny ACE into `path`'s DACL, under the path
 /// mutex the caller holds across scan, ledger, and this. `SetEntriesInAclW`
 /// inserts in canonical order — explicit deny, explicit allow, inherited — so
-/// a deny beats an allow inherited from an enclosing grant; and a directory
-/// gets `OI|CI`, whose propagation Win32 handles in both directions, which is
-/// why nothing here walks descendants.
+/// a deny nested inside an allowed parent beats the allow the parent
+/// inherits down to it. The other direction never reaches this backend at
+/// all: `sandbox::capability::sandbox_projection` calls
+/// [`PrefixSet::outside`](crate::path::PrefixSet::outside) so an allow
+/// beneath a deny is dropped from the projection before any ACE is stamped,
+/// rather than relying on ACL order to bury it. A directory gets `OI|CI`,
+/// whose propagation Win32 handles in both directions, which is why nothing
+/// here walks descendants. **Residual, not fixed here:** a descendant whose
+/// own DACL has inheritance protection turned on does not receive the
+/// directory's deny at all; characterising that needs a Windows host.
 fn apply_explicit_ace(
     path: &Path,
     sid_str: &str,

@@ -286,7 +286,7 @@ mod tests {
     use crate::fleet::Fleet;
     use crate::fleet::desk::{ExarchDesk, HostServices, RunHost, SurfaceApplier};
     use ral_core::protocol::{EnquiryError, Host, Liveness, Program, Report, Run, WireTransport};
-    use ral_core::types::{Capabilities, Nursery};
+    use ral_core::types::{GrantStack, Nursery};
     use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
@@ -297,7 +297,7 @@ mod tests {
         Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,
@@ -356,7 +356,6 @@ mod tests {
     /// tests never spawn from it.
     fn test_trunk(fleet: &Arc<Fleet>) -> Arc<crate::agent::Agent> {
         let mut spec = crate::agent::testkit::TestAgentSpec::new("wire-trunk");
-        spec.caps = Capabilities::root();
         spec.returns = true;
         crate::agent::testkit::test_agent(fleet, spec).expect("a fresh fleet's trunk")
     }

@@ -47,7 +47,7 @@ use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Bureau, Provider, ToolCall};
 use exarch::record::{Display, Record, Transient};
-use ral_core::types::Capabilities;
+use ral_core::types::GrantStack;
 use std::path::PathBuf;
 use std::sync::Arc;
 use synod::session::{seat_machine, unseat_machine};
@@ -136,7 +136,7 @@ fn main() {
     std::fs::create_dir_all(&run_dir).expect("make the run directory");
     let config = RootConfig {
         system: "you are a helpful office assistant".to_string(),
-        caps: Capabilities::root(),
+        caps: GrantStack::root(),
         run_dir,
         resume: None,
         no_logs: false,

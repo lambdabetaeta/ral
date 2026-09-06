@@ -24,7 +24,7 @@ use ral_core::sync::LockExt;
 use ral_core::Value as RalValue;
 use ral_core::serial::FOValue;
 use ral_core::protocol::{EnquiryError, Host};
-use ral_core::types::{CallSite, Capabilities, Error, Nursery, NurseryId, Observation, Observed};
+use ral_core::types::{CallSite, Error, GrantStack, Nursery, NurseryId, Observation, Observed};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -915,13 +915,14 @@ impl ExarchDesk {
         &self,
         spec: &Launch,
         provider: &Provider,
-    ) -> Result<(Capabilities, crate::agent::event::AgentLog, String), Error> {
+    ) -> Result<(GrantStack, crate::agent::event::AgentLog, String), Error> {
         let s = &self.services;
-        // `narrow` names all six legal bases in its own diagnostic, so an
+        // `base_layer` names all six legal bases in its own diagnostic, so an
         // unknown `grant` needs no refusal text here.
         let cwd = s.cwd.to_string_lossy();
-        let child_caps = crate::policy::narrow(s.agent.caps(), spec.grant, &cwd)
-            .map_err(|reason| Error::new(reason, 1))?;
+        let layer = crate::policy::base_layer(spec.grant, &cwd).map_err(|reason| Error::new(reason, 1))?;
+        let mut child_caps = s.agent.caps().clone();
+        child_caps.push(layer);
 
         // On the raw `AgentLog`, not through `Avatar::inherit_context`, which
         // needs a `&Self` the child is not yet. The index resolves here, off the
@@ -2102,7 +2103,6 @@ mod tests {
         let fleet = Fleet::new();
         let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
         spec.mailbox = parent_inbox.mailbox();
-        spec.caps = Capabilities::root();
         spec.fuel = fuel;
         spec.returns = true;
         spec.search = true;
@@ -3266,9 +3266,10 @@ mod tests {
     }
 
     /// A request above the parent's ceiling is narrowed, never refused — the
-    /// shape [`crate::policy::narrow`] gives `grant`. Only that half is visible
-    /// here: the clamped bit lands in a private `Agent` field, so
-    /// `agent::build`'s fork test asserts the narrowing itself.
+    /// child's stack gains one more layer from [`crate::policy::base_layer`].
+    /// Only that half is visible here: the clamped bit lands in a private
+    /// `Agent` field, so `agent::build`'s fork test asserts the narrowing
+    /// itself.
     #[test]
     fn agent_start_admits_a_search_request_above_the_parents_ceiling() {
         let (services, _fleet, parent_inbox) = services_with(3, |spec| spec.search = false);
@@ -4346,7 +4347,6 @@ mod wire_tests {
         let mut spec = crate::agent::testkit::TestAgentSpec::new("parent");
         spec.reach = fake_wire_reach();
         spec.mailbox = parent_inbox.mailbox();
-        spec.caps = Capabilities::root();
         spec.fuel = fuel;
         spec.returns = true;
         spec.search = true;
@@ -4540,7 +4540,6 @@ mod wire_tests {
     fn identity_and_wire_peers_exchange_messages_through_one_desk() {
         let fleet = Fleet::new();
         let mut parent_spec = crate::agent::testkit::TestAgentSpec::new("parent");
-        parent_spec.caps = Capabilities::root();
         parent_spec.fuel = 3;
         parent_spec.returns = true;
         parent_spec.search = true;

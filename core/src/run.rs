@@ -19,7 +19,7 @@ use crate::syntax::parser::ParseError;
 use crate::protocol::{Program, Run};
 use crate::typecheck::TypeError;
 use crate::types::{
-    Break, Capabilities, DeferredSink, Desk, Error, Escape, Fork, Mooring, NurseryGuard,
+    Break, DeferredSink, Desk, Error, Escape, Fork, GrantStack, Mooring, NurseryGuard,
     Observation, Settled, Shell, SurfaceSink, TerminalPolicy, TrailScope, Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
@@ -665,7 +665,7 @@ pub(crate) fn run_framed<'a>(
     next: Io,
     script_name: &str,
     src: Option<&str>,
-    capabilities: Capabilities,
+    capabilities: GrantStack,
     mut lifecycle: Box<dyn RunLifecycle + 'a>,
     body: impl FnOnce(&Mooring, &mut Shell) -> Settled<Value>,
 ) -> (Settled<Value>, i32) {
@@ -681,7 +681,7 @@ pub(crate) fn run_framed<'a>(
     let src = src.unwrap_or("");
     lifecycle.pre_exec(mooring, shell, src);
 
-    let result = shell.with_capabilities(capabilities, |s| body(mooring, s));
+    let result = shell.with_layers(capabilities, |s| body(mooring, s));
 
     // Cancellation is sticky until the run settles, and the run settles here: a
     // recovery construct (`try`) classifies the cancellation `Break::Error`
@@ -718,7 +718,7 @@ pub(crate) mod tests {
             run: Run {
                 program: Program::Source(src.into()),
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,

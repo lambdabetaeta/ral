@@ -237,14 +237,14 @@ mod tests {
     use crate::run::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
     use crate::protocol::{Program, Run};
     use crate::types::Mooring;
-    use crate::types::{BuiltinBody, BuiltinEntry, Capabilities};
+    use crate::types::{BuiltinBody, BuiltinEntry, GrantStack};
 
     fn capture_req(src: &str) -> RunRequest<'static> {
         RunRequest {
             run: Run {
                 program: Program::Source(src.into()),
                 script_name: "<test>".into(),
-                caps: Capabilities::root(),
+                caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
                 worker_cap: None,

@@ -15,7 +15,7 @@
 mod common;
 
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Capabilities, Shell};
+use ral_core::types::{GrantStack, Shell};
 use ral_core::{
     RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value,
 };
@@ -39,7 +39,7 @@ fn run_seen(shell: &mut Shell, source: &str) -> (Result<Value, String>, Vec<u8>)
         run: Run {
             program: Program::Source(source.into()),
             script_name: "<capture-coercion>".into(),
-            caps: Capabilities::root(),
+            caps: GrantStack::root(),
             wall: None,
             deferred_lease: None,
             worker_cap: None,
