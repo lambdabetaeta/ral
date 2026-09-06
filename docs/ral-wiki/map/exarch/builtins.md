@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0c6ec335
-generated_at_date: 2026-09-03
+generated_at_commit: d273e519
+generated_at_date: 2026-09-06
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -273,9 +273,9 @@ queryable store.
   outer row is open so an unknown tag reaches a door that enumerates the six; each known
   tag's payload keeps its exact type, so the closed record inside `` `start ``
   still makes a missing or misspelled field a static error naming it, while the
-  `type`/`grant` rows *inside* that record stay open for the same reason one
-  level down.
-  `` `start [prompt: …, name: …, type: …, grant: …, search: …] `` is the one
+  `type`/`grant`/`provider`/`model` rows *inside* that record stay open for the
+  same reason one level down.
+  `` `start [prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …] `` is the one
   spawn: launch-only and always asynchronous, a one-line notice arriving
   through the inbox when the child replies, and the child's row in the answer carrying the `name` and
   `log-dir` the old receipt did. `name` is the child's identity — the tab-bar
@@ -290,7 +290,19 @@ queryable store.
   `read-only`, `edit-only`, `reasonable`, `dangerous`); `search` is a `Bool`
   admitting the provider's own hosted web search, clamped at the desk to at
   most the caller's own bit, which the trunk takes from the IT network policy's
-  `search` verdict ([[map/exarch/agent|agent]]). Fuel bounds delegation depth,
+  `search` verdict ([[map/exarch/agent|agent]]). `provider` and `model` are
+  each `` `inherit `` or `` `named <Str> ``, and both are always written:
+  ral has no optional field, so absence is *data* carried by a variant
+  ([[invariants/optionality-via-variants|optionality-via-variants]]) and the
+  record row stays closed. `` `inherit ``/`` `inherit `` shares the parent's
+  `Arc<Provider>` verbatim; a named `model` alone keeps the parent's account
+  and credential; a named `provider` alone runs the parent's model when it
+  resolves to the parent's own account, else that account's service default
+  model, refused naming `model` when the service publishes none. Because
+  `` `inherit `` *states* which account the child is on, a named model never
+  has to be attributed to one, so the desk resolves a provider name with
+  `resolve_pinned_provider` and never touches the catalog: a spawn can never
+  block the fleet on a model-list round trip. Fuel bounds delegation depth,
   not fan-out — refused only once the caller's own `fuel` reaches zero.
   `` `message [to: …, text: …] `` and `` `cancel <name> `` are descendant-only,
   resolved by name and enforced at the desk; a scope violation raises. Where a

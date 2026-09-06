@@ -1,13 +1,15 @@
 An agent is a function from a prompt and your bindings to a value. It runs in a copy of your shell, reads what you point it at, and replies with first-order ral data that you compute with. 
 
-`` agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>] `` asynchronously launches an agent. `name` is a descriptive handle ('todo-scan', 'chunk-3'). `grant` is one of `` `confined ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, `` `dangerous ``, at most your own authority. An agent that only reads bindings and answers needs `` `confined ``. `search` says whether it may use the web. `explain agents` has the full documentation.
+`` agents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>] `` asynchronously launches an agent. `name` is a descriptive handle ('todo-scan', 'chunk-3'). `grant` is one of `` `confined ``, `` `read-only ``, `` `edit-only ``, `` `reasonable ``, `` `dangerous ``, at most your own authority. An agent that only reads bindings and answers needs `` `confined ``. `search` says whether it may use the web. `explain agents` has the full documentation.
+
+`provider` and `model` say what the child runs on; write `` `inherit `` for both to run it on your own selection. Spend a cheaper, faster model on a child whose task is mechanical and whose answer you will check — a scan, a summary, a fan-out over chunks — with `` model: `named '<model>' `` and `` provider: `inherit ``, which keeps your own account. Keep your own model for work that needs judgement.
 
 An agent's shell is a snapshot of yours at `start`, and has exactly the same definitions and cwd. 
 
 The agent's initial prompt may be constructed by using `ral`:
 
     let ctx = from-string < design.md
-    agents `start [prompt: #'Review the plan bound at $ctx against src/solver/. Reply [verdict: `ok|`revise, issues: [[file, line, why]]].'#, name: 'plan-review', type: `amnemon, grant: `read-only, search: false]
+    agents `start [prompt: #'Review the plan bound at $ctx against src/solver/. Reply [verdict: `ok|`revise, issues: [[file, line, why]]].'#, name: 'plan-review', type: `amnemon, grant: `read-only, search: false, provider: `inherit, model: `inherit]
 
 Do not quote something that an agent can access from a binding. Never read a binding to echo it to an agent. The same goes for repeatable scripts, e.g. define `let run-suite = { … }` and ask the agent to run it by name. 
 
@@ -22,7 +24,7 @@ Example:
 
     let chunks = map { |f| from-string < $f } !{glob #'notes/*.md'#}
     for !{range 0 !{length $chunks}} { |i|
-      agents `start [prompt: "Summarise the text bound at $chunks[$i]. Reply [topic: Str, claims: [Str]].", name: "chunk-$i", type: `amnemon, grant: `confined, search: false]
+      agents `start [prompt: "Summarise the text bound at $chunks[$i]. Reply [topic: Str, claims: [Str]].", name: "chunk-$i", type: `amnemon, grant: `confined, search: false, provider: `inherit, model: `inherit]
     }
 
 When all the agents are done:

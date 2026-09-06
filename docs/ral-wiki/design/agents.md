@@ -89,9 +89,11 @@ that decision left open).
 
 The `` agents `start `` tag is **launch-only and always asynchronous**
 ([[decisions/260617_async-agent-tool|async-agent-tool]]). Its argument is a
-single closed record `[prompt: …, name: …, type: …, grant: …, search: …]` —
+single closed record
+`[prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …]` —
 a record literal, so a missing or misspelled field is a *static* error naming
-it, while the `type` (`` `amnemon ``/`` `mnemon ``) and `grant` tags are
+it, while the `type` (`` `amnemon ``/`` `mnemon ``), `grant`, `provider` and
+`model` tags are
 checked at the runtime door that enumerates their legal labels
 ([[decisions/260719_agent-names-and-schedule-labels|names-and-schedule-labels]]).
 One call:
@@ -129,10 +131,45 @@ isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
 - **`` `amnemon ``** is tabula rasa. The child starts with no conversation history;
   only the shell value-snapshot and the chosen prompt cross the edge.
 - **`` `mnemon ``** remembers. The child imports the parent's model-visible context
-  and appends the call's `prompt` as a fresh final user prompt, while
-  reusing the parent's current provider selection so provider prompt caches can
-  hit. If the parent is mid-tool-call, the unanswered assistant tool-call frame is
+  and appends the call's `prompt` as a fresh final user prompt. Left on the
+  parent's own selection it reuses that provider's prompt cache; sent to
+  another account or model it is still sound — reasoning crosses the transcript
+  as plain text (`ContentPart::ReasoningContent`), not as signed blocks — but
+  forfeits the cache. If the parent is mid-tool-call, the unanswered assistant
+  tool-call frame is
   not inherited; the child forks the request context, not a dangling protocol.
+
+The spawn's **`provider`** and **`model`** fields choose what the child runs
+on. ral has no optional record field and no null: absence is *data*, carried
+by a variant ([[invariants/optionality-via-variants|optionality-via-variants]]),
+so both fields are required and their values carry the optionality —
+`` `inherit `` or `` `named <Str> ``. The record row therefore stays closed,
+and a misspelled field stays a static error. The four rows:
+
+| `provider` | `model` | the child runs on |
+| --- | --- | --- |
+| `` `inherit `` | `` `inherit `` | the parent's `Arc<Provider>`, shared verbatim, allocating nothing |
+| `` `inherit `` | `` `named m `` | the parent's account and credential, model `m` |
+| `` `named p `` | `` `inherit `` | account `p`: the parent's model if `p` is the parent's own account, else `p`'s service default model — refused, naming `model`, when that service has none |
+| `` `named p `` | `` `named m `` | account `p`, model `m` |
+
+Tuning (effort, temperature, `top_p`) and the output cap are the operator's
+knobs rather than part of a model's identity, so they inherit in every row; the
+`OpenRouter` route names a serving provider and survives only where the
+resolved account is the parent's. **No catalog, no network, no inference**:
+because `` `inherit `` *states* which account the child is on, a bare `model`
+never has to be attributed to one, so a spawn can never block the fleet on a
+model-list round trip, nor be refused because a cold catalog left a name
+unattributable. That is the one deliberate divergence from the CLI, where
+`--model` with no `--provider` must work out which account serves it — an
+inference that exists only because a human typed no provider at all, whereas a
+spawn always types one.
+
+`provider::Bureau` is what makes any of this possible: `Provider::build` needs
+an engine and a credential that no `Provider` retains, so the bureau names that
+trio once and is the only place a live provider is minted
+([[map/exarch/provider|provider]]). A scripted session holds `Bureau::Scripted`
+and refuses a named selection in one sentence saying so.
 
 ### Bind and hand: context as a value
 
@@ -151,6 +188,8 @@ agents `start [
   type: `amnemon,
   grant: `read-only,
   search: false,
+  provider: `inherit,
+  model: `inherit,
 ]
 ```
 

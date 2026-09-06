@@ -16,6 +16,7 @@ use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
 use crate::bus::{AgentId, Emitter, Stamp};
 use crate::fleet::schedule::{CronSchedule, Trigger, parse_duration};
 use crate::fleet::{Fleet, check_name, roster::listing};
+use crate::provider::Provider;
 use crate::record::commit::SurfaceBuffer;
 use crate::shell_eval::{self, PinDigests, Surface};
 use genai::chat::ChatRole;
@@ -621,6 +622,45 @@ fn payload_label(v: FOValue, class: &str) -> Result<String, Error> {
     }
 }
 
+/// What a spawn asks of one half of the child's model selection: the
+/// spawning agent's own, or one named outright. ral has no optional field, so
+/// the absence of a choice is data, and this variant is what carries it.
+pub(crate) enum Selection {
+    Inherit,
+    Named(String),
+}
+
+/// Decode a `provider`/`model` field. The door already closed this row
+/// engine-side; a guest may still send whatever it likes.
+fn payload_selection(v: FOValue, class: &str, field: &str) -> Result<Selection, Error> {
+    match v {
+        FOValue::Variant {
+            label,
+            payload: None,
+        } if label == "inherit" => Ok(Selection::Inherit),
+        FOValue::Variant {
+            label,
+            payload: Some(payload),
+        } if label == "named" => match *payload {
+            FOValue::String { value } if !value.is_empty() => Ok(Selection::Named(value)),
+            other => Err(Error::new(
+                format!(
+                    "`{class}`: `{field}`'s `named` must carry a non-empty Str, got {}",
+                    other.shape()
+                ),
+                1,
+            )),
+        },
+        other => Err(Error::new(
+            format!(
+                "`{class}`: `{field}` must be `inherit` or `named '<name>'`, got {}",
+                other.shape()
+            ),
+            1,
+        )),
+    }
+}
+
 /// All that varies across `` `start ``'s two spawn kinds (`amnemon`/`mnemon`,
 /// the `agent` builtin's `type`); every other step of the spawn spine is
 /// identical for both and lives once in [`ExarchDesk::launch`].
@@ -630,6 +670,10 @@ struct Launch<'a> {
     grant: &'a str,
     /// Import the parent's model-visible conversation — a `mnemon` spawn only.
     inherit_context: bool,
+    /// Which account the child authenticates as.
+    provider: Selection,
+    /// Which model it runs, on that account.
+    model: Selection,
     /// Refused if any live agent already bears it.
     name: String,
     prompt: String,
@@ -753,8 +797,12 @@ impl ExarchDesk {
             ));
         }
 
+        // Before the seat split, so both arms share one resolution and a
+        // refusal unwinds nothing: no adopted shell, no forked log, no dial.
+        let provider = self.child_provider(&spec)?;
+
         let scratch = match &s.kind {
-            SeatKind::Wire => return self.launch_wire(spec),
+            SeatKind::Wire => return self.launch_wire(spec, provider),
             SeatKind::Identity { scratch } => scratch.clone(),
         };
 
@@ -774,7 +822,7 @@ impl ExarchDesk {
             ));
         };
 
-        let (child_caps, child_log, system_prompt) = self.fork_child(&spec)?;
+        let (child_caps, child_log, system_prompt) = self.fork_child(&spec, &provider)?;
 
         // Mirrors `Avatar::fork_with`'s `Build` literal, with the adopted shell
         // and forked log standing in for `fork_session`'s fresh ones.
@@ -796,7 +844,7 @@ impl ExarchDesk {
             log: child_log,
             parent: Some(s.agent.clone()),
             fuel,
-            provider: ProviderHandle::new(s.agent.current_provider()),
+            provider: ProviderHandle::new(provider),
             interactive: s.agent.interactive(),
             returns: true,
             allow_schedule: s.agent.allow_schedule,
@@ -817,12 +865,56 @@ impl ExarchDesk {
         self.spawn_child(child, spec.name, spec.prompt)
     }
 
+    /// The child's provider: the parent's own `Arc` verbatim when neither
+    /// field names a selection, and a freshly minted one otherwise.
+    ///
+    /// No catalog and no network: `` `inherit `` *states* which account the
+    /// child is on, so a named model never has to be attributed to one, and a
+    /// spawn can never block the fleet on a model-list round trip.
+    fn child_provider(&self, spec: &Launch) -> Result<Arc<Provider>, Error> {
+        let s = &self.services;
+        let current = s.agent.current_provider();
+        if matches!(
+            (&spec.provider, &spec.model),
+            (Selection::Inherit, Selection::Inherit)
+        ) {
+            return Ok(current);
+        }
+        let refused = |why: String| Error::new(format!("`agents `start` refused: {why}"), 1);
+        let bureau = s.agent.bureau();
+        let available = bureau.available();
+        let account = match &spec.provider {
+            Selection::Inherit => current.account().clone(),
+            Selection::Named(name) => {
+                crate::provider::models::resolve_pinned_provider(name, &available)
+                    .map_err(refused)?
+            }
+        };
+        let model = match &spec.model {
+            Selection::Named(model) => model.clone(),
+            Selection::Inherit if account.id == current.account().id => {
+                current.model().to_string()
+            }
+            Selection::Inherit => account.service.default_model.clone().ok_or_else(|| {
+                refused(format!(
+                    "'{}' publishes no default model, so a child sent to it must be told which \
+                     one to run — write `model: `named '<model>'` rather than `` `inherit ``",
+                    crate::provider::identity::label(&account, &available)
+                ))
+            })?,
+        };
+        bureau
+            .reselect(&current, &account, model)
+            .map_err(refused)
+    }
+
     /// The child-log/capability half of the spawn spine, shared by both arms:
     /// an identity spawn runs it once it has adopted its shell, a wire spawn
     /// before it dials, since the host has no shell of its own to gate on.
     fn fork_child(
         &self,
         spec: &Launch,
+        provider: &Provider,
     ) -> Result<(Capabilities, crate::agent::event::AgentLog, String), Error> {
         let s = &self.services;
         // `narrow` names all six legal bases in its own diagnostic, so an
@@ -844,10 +936,14 @@ impl ExarchDesk {
                 spawns: s.agent.fuel().saturating_sub(1) > 0,
             },
         );
+        let child_account = crate::agent::RecordedAccount::of(
+            provider.account(),
+            &s.agent.bureau().available(),
+        );
         let child_log = {
             let mut parent_log = s.log.lock();
             let mut child_log = parent_log
-                .fork(child_id, system_prompt.len())
+                .fork(child_id, system_prompt.len(), provider.model(), &child_account)
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
             let inherited = spec
                 .inherit_context
@@ -869,7 +965,7 @@ impl ExarchDesk {
     /// guest acknowledges — which it does only once the child process
     /// exists. The answer is the roster the identity arm gives; the builtin
     /// cannot tell which served it.
-    fn launch_wire(&self, spec: Launch) -> Result<FOValue, Error> {
+    fn launch_wire(&self, spec: Launch, provider: Arc<Provider>) -> Result<FOValue, Error> {
         let s = &self.services;
         let ForkClaim::Listening { port, token } = spec.fork else {
             return Err(Error::new(
@@ -887,7 +983,7 @@ impl ExarchDesk {
                 1,
             ));
         };
-        let (child_caps, child_log, system_prompt) = self.fork_child(&spec)?;
+        let (child_caps, child_log, system_prompt) = self.fork_child(&spec, &provider)?;
 
         let mut stream = dial.dial(port).map_err(|reason| {
             Error::new(
@@ -942,7 +1038,7 @@ impl ExarchDesk {
             log: child_log,
             parent: Some(s.agent.clone()),
             fuel,
-            provider: ProviderHandle::new(s.agent.current_provider()),
+            provider: ProviderHandle::new(provider),
             interactive: s.agent.interactive(),
             returns: true,
             allow_schedule: s.agent.allow_schedule,
@@ -998,7 +1094,7 @@ impl ExarchDesk {
             req.take("spec", "the model's own spawn record")?,
             CLASS,
             "`spec`",
-            "[prompt: …, name: …, type: …, grant: …, search: …]",
+            "[prompt: …, name: …, type: …, grant: …, search: …, provider: …, model: …]",
         )?;
         let fork = payload_fork(
             req.take("fork", "how this spawn's forked session is to be reached")?,
@@ -1038,11 +1134,23 @@ impl ExarchDesk {
             CLASS,
             "search",
         )?;
+        let provider = payload_selection(
+            spec.take("provider", "which account the child authenticates as")?,
+            CLASS,
+            "provider",
+        )?;
+        let model = payload_selection(
+            spec.take("model", "which model the child runs")?,
+            CLASS,
+            "model",
+        )?;
 
         self.launch(Launch {
             fork,
             grant: &grant,
             inherit_context: mnemon,
+            provider,
+            model,
             name,
             prompt,
             search,
@@ -2129,6 +2237,13 @@ mod tests {
         }
     }
 
+    fn named(value: &str) -> FOValue {
+        FOValue::Variant {
+            label: "named".to_string(),
+            payload: Some(Box::new(text(value))),
+        }
+    }
+
     /// The nested request both registries now take: the family names the
     /// class, the tag names what to do, and the payload is the model's value.
     pub(super) fn family_req(family: &str, tag: &str, payload: Option<FOValue>) -> FOValue {
@@ -2143,14 +2258,17 @@ mod tests {
 
     /// `` `agents `start ``: the model's own spec record beside whichever
     /// `fork` tag the engine minted. Always `` `amnemon ``, the only kind the
-    /// desk tests exercise.
-    pub(super) fn start_req_forked(
+    /// desk tests exercise, and `selection` is the `provider`/`model` pair —
+    /// `` `inherit ``/`` `inherit `` for every test but the selection ones.
+    pub(super) fn start_req_selecting(
         fork: FOValue,
         prompt: &str,
         name: &str,
         grant: &str,
         search: bool,
+        selection: (FOValue, FOValue),
     ) -> FOValue {
+        let (provider, model) = selection;
         let spec = FOValue::Map {
             entries: vec![
                 ("prompt".to_string(), text(prompt)),
@@ -2158,6 +2276,8 @@ mod tests {
                 ("type".to_string(), bare("amnemon")),
                 ("grant".to_string(), bare(grant)),
                 ("search".to_string(), FOValue::Bool { value: search }),
+                ("provider".to_string(), provider),
+                ("model".to_string(), model),
             ],
         };
         family_req(
@@ -2169,6 +2289,21 @@ mod tests {
         )
     }
 
+    /// The inheriting pair every test but the selection ones sends.
+    pub(super) fn inherits() -> (FOValue, FOValue) {
+        (bare("inherit"), bare("inherit"))
+    }
+
+    pub(super) fn start_req_forked(
+        fork: FOValue,
+        prompt: &str,
+        name: &str,
+        grant: &str,
+        search: bool,
+    ) -> FOValue {
+        start_req_selecting(fork, prompt, name, grant, search, inherits())
+    }
+
     /// The in-process shape: the fork waits in this host's own nursery.
     pub(super) fn start_req(
         session: NurseryId,
@@ -2177,13 +2312,17 @@ mod tests {
         grant: &str,
         search: bool,
     ) -> FOValue {
-        let fork = FOValue::Variant {
+        start_req_forked(parked(session), prompt, name, grant, search)
+    }
+
+    /// A `fork` tag naming a session parked in this host's own nursery.
+    pub(super) fn parked(session: NurseryId) -> FOValue {
+        FOValue::Variant {
             label: "parked".to_string(),
             payload: Some(Box::new(FOValue::Int {
                 value: i64::try_from(session.0).expect("small test id"),
             })),
-        };
-        start_req_forked(fork, prompt, name, grant, search)
+        }
     }
 
     /// `` `agents `message ``: the model's record, by the surface's own names.
@@ -3008,6 +3147,83 @@ mod tests {
         let _ = wait_for_settle(&parent_inbox);
     }
 
+    /// A `Launch` naming `selection`, and otherwise the plainest spawn there
+    /// is — the two provider tests differ in nothing else.
+    fn launch_selecting(provider: Selection, model: Selection) -> Launch<'static> {
+        Launch {
+            fork: ForkClaim::Parked(NurseryId(0)),
+            grant: "confined",
+            inherit_context: false,
+            provider,
+            model,
+            name: "helper".to_string(),
+            prompt: "go".to_string(),
+            search: false,
+        }
+    }
+
+    /// Naming neither half is an inheritance, not a decision: the child gets
+    /// the parent's own `Arc<Provider>`, allocating nothing and asking the
+    /// bureau nothing.
+    #[test]
+    fn an_inheriting_spawn_hands_the_child_the_parents_own_provider() {
+        let desk = desk();
+        let parent = desk.services.agent.current_provider();
+        let child = desk
+            .child_provider(&launch_selecting(Selection::Inherit, Selection::Inherit))
+            .expect("an inheriting spawn resolves nothing");
+        assert!(
+            Arc::ptr_eq(&parent, &child),
+            "the child must share the parent's provider, not a rebuild of it"
+        );
+    }
+
+    /// A scripted session mints nothing, so a spawn that names a selection is
+    /// refused saying so rather than silently inheriting.
+    #[test]
+    fn a_named_selection_under_a_scripted_bureau_is_refused() {
+        let desk = desk();
+        let Err(err) = desk.child_provider(&launch_selecting(
+            Selection::Inherit,
+            Selection::Named("other-model".to_string()),
+        )) else {
+            panic!("a scripted bureau must refuse to mint");
+        };
+        assert!(
+            err.message.contains("scripted") && err.message.contains("mints no others"),
+            "the refusal must say this session mints nothing, got: {}",
+            err.message
+        );
+    }
+
+    /// And it is refused before anything is adopted: no child is registered,
+    /// exactly as a missing spec field leaves none.
+    #[test]
+    fn a_refused_selection_never_registers_a_child() {
+        let (desk, _fleet, _parent_inbox) = spawnable_desk(3);
+        let root = root_shell();
+        let session = desk.services.nursery.park(forkable_child_shell(&root));
+        let err = desk
+            .handle(start_req_selecting(
+                parked(session),
+                "go",
+                "helper",
+                "confined",
+                false,
+                (bare("inherit"), named("other-model")),
+            ))
+            .expect_err("a scripted bureau must refuse to mint");
+        assert!(
+            err.message.contains("`agents `start` refused"),
+            "the refusal must name the tag it refused, got: {}",
+            err.message
+        );
+        assert!(
+            listing(&desk.services.agent).is_empty(),
+            "a refused selection must never register a child"
+        );
+    }
+
     /// The desk reads the model's record by field name, so a missing field is
     /// named and told what it was for — never a position the model never wrote.
     #[test]
@@ -3026,6 +3242,8 @@ mod tests {
                                     ("type".to_string(), bare("amnemon")),
                                     ("grant".to_string(), bare("confined")),
                                     ("search".to_string(), FOValue::Bool { value: false }),
+                                    ("provider".to_string(), bare("inherit")),
+                                    ("model".to_string(), bare("inherit")),
                                 ],
                             },
                         ),
@@ -3385,7 +3603,7 @@ mod tests {
         let emit = Emitter::new(tx, session.agent.id);
         let _ = session.run_shell(
             "call-1".to_string(),
-            r#"surface `unpin [key: "test-marker"]; agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true]"#,
+            r#"surface `unpin [key: "test-marker"]; agents `start [prompt: #'go'#, name: 't', type: `amnemon, grant: `confined, search: true, provider: `inherit, model: `inherit]"#,
             5,
             &emit,
         );

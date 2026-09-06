@@ -1,6 +1,6 @@
 ---
-generated_at_commit: a6117cb1
-generated_at_date: 2026-09-02
+generated_at_commit: d273e519
+generated_at_date: 2026-09-06
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -548,6 +548,24 @@ the fleet by id), so a
 swap on one agent never disturbs another. `fork` seeds the child's own handle
 from the parent's current provider (`ProviderHandle::new(self.provider.current())`),
 so the child inherits the model in force at spawn and may diverge afterward.
+
+A builtin spawn may say otherwise. `` agents `start ``'s `provider` and
+`model` fields each name `` `inherit `` or `` `named <Str> ``, and
+`ExarchDesk::child_provider` reads them **before the `SeatKind` split**, so
+both arms share one resolution and a refusal unwinds nothing — no adopted
+nursery shell, no forked log, no dialled listener. `` `inherit ``/``
+`inherit `` short-circuits to the parent's own `Arc<Provider>`, allocating
+nothing; anything else goes through `provider::Bureau::reselect`, which
+inherits the parent's tuning and output cap, keeps its `OpenRouter` route only
+where the account is unchanged, and mints on the session's engine
+([[map/exarch/provider|provider]]). A scripted session holds
+`Bureau::Scripted` and refuses, saying it mints nothing.
+
+Both `AgentLog::fork` call sites — the desk's and `fork_with`'s — hand the
+child log the *live* model and account rather than copying the parent log's,
+which were fixed at its session start: a child forked after a `/model` on the
+parent's tab used to record the pre-switch model, and now records what it
+actually runs.
 
 ## Lifecycle: clear, compact, resume, fork
 

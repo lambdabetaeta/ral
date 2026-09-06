@@ -170,11 +170,7 @@ pub fn run() -> Result<(), String> {
             &provider::state::State::new(&account, &available, &model, &tuning, route.as_deref()),
         );
     }
-    let recorded_account = agent::RecordedAccount {
-        label: provider::identity::label(&account, &available),
-        service: account.service.name.as_str().to_string(),
-        id: account.id.as_str().to_string(),
-    };
+    let recorded_account = agent::RecordedAccount::of(&account, &available);
 
     let (caps, restrict_files) =
         policy::for_invocation(&cwd, &c.base, c.extend_base.as_deref(), &c.restrict)?;

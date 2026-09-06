@@ -149,6 +149,16 @@ pub struct RecordedAccount {
 }
 
 impl RecordedAccount {
+    /// The snapshot of `account`, labelled as it reads among `available` —
+    /// the one place a live account becomes a log header.
+    pub fn of(account: &crate::provider::Account, available: &[crate::provider::Account]) -> Self {
+        Self {
+            label: crate::provider::identity::label(account, available),
+            service: account.service.name.as_str().to_string(),
+            id: account.id.as_str().to_string(),
+        }
+    }
+
     /// A snapshot for tests that only care that *something* is recorded.
     /// Not `#[cfg(test)]`: integration test binaries link the library built
     /// without it, so a fixture they share with the unit tests must be an
@@ -603,10 +613,15 @@ impl Avatar {
                 spawns: fuel > 0,
             },
         );
+        // Seeded from the parent's *current* provider, so a later `/model` on
+        // either never disturbs the other — and so the child's log header
+        // names the selection it actually runs.
+        let current = self.agent.provider.current();
+        let account = RecordedAccount::of(current.account(), &self.agent.bureau.available());
         let log = self
             .log
             .lock()
-            .fork(child_id, system_prompt.len())
+            .fork(child_id, system_prompt.len(), current.model(), &account)
             .map_err(Unforked::Log)?;
         let seat = match &self.seat {
             // No detach: `fork_session` carries no such policy across, so
@@ -634,9 +649,7 @@ impl Avatar {
             // creator would have bounded.
             parent: returns.then(|| self.agent.clone()),
             fuel,
-            // Seeded from the parent's *current* provider, so a later `/model`
-            // on either never disturbs the other.
-            provider: ProviderHandle::new(self.agent.provider.current()),
+            provider: ProviderHandle::new(current),
             // Human-attachment is inherited; engagement is not, being read off
             // the child's own exchange clock from its first exchange.
             interactive: self.agent.interactive,

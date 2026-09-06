@@ -394,17 +394,28 @@ impl AgentLog {
         Ok(s)
     }
 
-    /// Build a forked child log, inheriting `sessions_root`, `model`, and
-    /// `account` and recording this log's id as the child's parent.
+    /// Build a forked child log, inheriting `sessions_root` and recording this
+    /// log's id as the child's parent.
+    ///
+    /// `model` and `account` are the child's *own*, handed in rather than
+    /// copied off this log: a spawn may name another selection, and this log's
+    /// pair was fixed at session start, so a `/model` since would make a
+    /// copied header a lie.
     ///
     /// # Errors
     /// Creating the child's directory, or writing `SessionStarted`, failed.
-    pub fn fork(&self, child_id: AgentId, system_prompt_bytes: usize) -> io::Result<Self> {
+    pub fn fork(
+        &self,
+        child_id: AgentId,
+        system_prompt_bytes: usize,
+        model: &str,
+        account: &RecordedAccount,
+    ) -> io::Result<Self> {
         let mut s = Self::open_fresh(
             self.sessions_root.clone(),
             child_id,
-            self.model.clone(),
-            self.account.clone(),
+            model.to_string(),
+            account.clone(),
             self.durable,
         )?;
         if self.durable {
@@ -1642,6 +1653,35 @@ mod tests {
             record,
             Record::Forensic(Forensic::Nudge { used: 2, max: 3, cause }) if cause == "stop=length"
         )));
+    }
+
+    /// A child's opening bookend names the selection it was handed, not the
+    /// one its parent's file opened with: a spawn may send the child to
+    /// another model, and a `/model` since has already moved the parent's own.
+    #[test]
+    fn a_forked_log_records_the_selection_it_was_handed() {
+        let parent = fresh_root();
+        let child = parent
+            .fork(
+                1,
+                0,
+                "other-model",
+                &RecordedAccount::for_test("other-provider"),
+            )
+            .expect("child log");
+        let opened = records(&child)
+            .into_iter()
+            .find_map(|r| match r {
+                Record::Protocol(Protocol::SessionStarted { model, label, .. }) => {
+                    Some((model, label))
+                }
+                _ => None,
+            })
+            .expect("the child's opening bookend");
+        assert_eq!(
+            opened,
+            ("other-model".to_string(), "other-provider".to_string())
+        );
     }
 
     #[test]

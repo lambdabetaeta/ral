@@ -45,13 +45,14 @@ pub enum Bureau {
     Scripted,
 }
 
-/// What a provider is built from, decided before anything is minted.
-pub struct Blueprint {
-    pub account: Account,
-    pub model: String,
-    pub tuning: Tuning,
-    pub route: Option<String>,
-    pub max_tokens: Option<u32>,
+/// What a provider is built from, decided before anything is minted — so the
+/// decision is testable without an [`Engine`], and hence without the network.
+struct Blueprint {
+    account: Account,
+    model: String,
+    tuning: Tuning,
+    route: Option<String>,
+    max_tokens: Option<u32>,
 }
 
 /// The build order for `account` and `model`, everything else inherited from
@@ -61,7 +62,7 @@ pub struct Blueprint {
 /// model's identity, so they carry across whatever the selection. The
 /// `OpenRouter` route names a serving provider and means nothing on another
 /// account, so it survives only where the account is unchanged.
-pub fn blueprint(current: &Provider, account: &Account, model: String) -> Blueprint {
+fn blueprint(current: &Provider, account: &Account, model: String) -> Blueprint {
     Blueprint {
         route: current
             .route
@@ -122,6 +123,27 @@ impl Bureau {
             tuning.clone(),
             route,
         )))
+    }
+
+    /// Mint a provider that differs from `current` only in its account and
+    /// model — the spawn's door, where a child's selection is decided.
+    ///
+    /// # Errors
+    /// As [`Bureau::build`].
+    pub fn reselect(
+        &self,
+        current: &Provider,
+        account: &Account,
+        model: String,
+    ) -> Result<Arc<Provider>, String> {
+        let plan = blueprint(current, account, model);
+        self.build(
+            &plan.account,
+            plan.model,
+            &plan.tuning,
+            plan.route,
+            plan.max_tokens,
+        )
     }
 
     /// Admit a freshly signed-in `ChatGPT` token, returning who it now is and
