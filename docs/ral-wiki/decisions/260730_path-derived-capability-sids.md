@@ -144,6 +144,19 @@ load-bearing caveat of the design, accepted explicitly:
   rw-tree A into ro-tree B is still writable through `cap(A)`, though B grants
   only reads. A hard link across differently-granted prefixes is the same fact
   spelled differently — one object, several names, one descriptor.
+- **The per-session memo may not speak for a deny.** `session::confine` keeps a
+  per-projection memo of `(path-as-spelled, kind)` pairs it has already ensured,
+  to spare repeat launches even the witness check. Because it keys on the name
+  rather than the object, a replacement under that name — any editor that saves
+  by write-tmp-then-rename, inheriting allow from an rw-granted parent and
+  nothing else — leaves the memo satisfied and the new object unstamped. For an
+  allow grant that is the fail-closed drift above; for a deny it is fail-open,
+  and it needs no drift in the granted tree at all, only a save. **Denies are
+  therefore never memoized**: each reaches `ensure_fs_grant`, whose own two
+  witnesses probe the live object, at one `GetNamedSecurityInfoW` per deny path
+  per launch. Keying the memo on file id and volume serial instead would fix the
+  same hole for all three kinds, at a stat per path — worth doing when the memo's
+  savings are measured to matter.
 - **What changed is duration, not kind.** Both drifts exist under the
   session-scoped design too — the rename semantics are the OS's, not ral's — but
   restore-at-teardown bounded the fail-open one to a single session. Persistence

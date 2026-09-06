@@ -50,11 +50,17 @@ struct ProjectionKey {
     deny: Vec<String>,
 }
 
-/// One projection's profile, the `(path, kind)` pairs already ensured for it,
-/// and the capability names those pairs resolved to — the exact set
+/// One projection's profile, the allow `(path, kind)` pairs already ensured
+/// for it, and the capability names its grants resolved to — the exact set
 /// [`confine`] mints into every token it builds for this projection.
 struct ProjectionSandbox {
     profile: AppContainerProfile,
+    /// Allow grants only, and keyed on the path *as spelled*: an object
+    /// replaced under that name loses the ACE that went with the old NTFS
+    /// object, so a memo hit on a stale entry silently skips the restamp. For
+    /// rw and ro that fails closed — the child simply cannot reach the new
+    /// object. A deny memoized the same way would fail *open*, so denies are
+    /// never memoized; see [`ensure_grants`].
     granted: HashSet<(PathBuf, GrantKind)>,
     /// In first-grant order, without repeats. A path the filters dropped —
     /// already covered by the well-known `AppContainer` SIDs, or not on disk —
@@ -271,11 +277,15 @@ pub(crate) fn confine(
         t_filter.elapsed(),
     );
 
-    // Denies skip the effective-access filter: it answers whether the
-    // `AppContainer` already *has* this access, which says nothing about
-    // whether subtracting it needs a stamp.
+    // Denies skip both the memo and the effective-access filter. The filter
+    // answers whether the `AppContainer` already *has* this access, which says
+    // nothing about whether subtracting it needs a stamp; the memo would
+    // answer for a path whose object may since have been replaced, and a deny
+    // that skips its restamp is gone. So every deny reaches
+    // `dacl::ensure_fs_grant`, whose witness pair — stamp store plus a probe of
+    // the live object's own DACL — is the sole authority for it, at one
+    // `GetNamedSecurityInfoW` per deny path per launch.
     let deny: Vec<PathBuf> = rules.deny_paths.iter().map(PathBuf::from).collect();
-    let deny = filter_out_granted(&proj.granted, deny, GrantKind::Deny);
     let deny = existing_paths(deny);
 
     // Each of these is a witness check on a path already stamped, and a whole
@@ -342,9 +352,15 @@ fn ensure_grants(
         };
         dacl::ensure_fs_grant(&canonical, &cap.sid_string, kind, cancel)
             .map_err(|e| dacl_break(&e))?;
-        // Memoized under the path as spelled, not as canonicalized: that is
-        // what the next `confine` will hand us.
-        proj.granted.insert((p, kind));
+        // Allow grants are memoized under the path as spelled, not as
+        // canonicalized: that is what the next `confine` will hand us. A stale
+        // entry — the object replaced under that name — then costs the child
+        // access it should have had, which is the safe direction. A deny is
+        // never memoized, because there the same staleness restores access the
+        // projection refused.
+        if kind != GrantKind::Deny {
+            proj.granted.insert((p, kind));
+        }
         if !proj.fs_caps.contains(&name) {
             proj.fs_caps.push(name);
         }
