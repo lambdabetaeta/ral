@@ -160,36 +160,12 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
             }
             Err(e) => eprintln!("--- bwrap argv error ---\n{e}"),
         }
-        dump_landlock_layer(policy, host.landlock);
+        linux::landlock::dump(policy, host.landlock);
     }
     #[cfg(windows)]
     {
         let dump = windows::dump_profile_for_windows(policy);
         eprintln!("--- appcontainer profile ---\n{dump}--- end appcontainer profile ---");
-    }
-}
-
-/// The layer the trampoline would enter inside the envelope, printed after the
-/// bwrap argv it is applied under.
-#[cfg(target_os = "linux")]
-fn dump_landlock_layer(
-    policy: &crate::types::SandboxProjection,
-    abi: Option<linux::landlock::Abi>,
-) {
-    let Some(abi) = abi else {
-        eprintln!("landlock layer: none (no Landlock on this kernel)");
-        return;
-    };
-    let rendered = match policy.rendered() {
-        Ok(rendered) => rendered,
-        Err(e) => {
-            eprintln!("--- landlock layer error ---\n{e}");
-            return;
-        }
-    };
-    match linux::landlock::Layer::render(&rendered.exec, abi) {
-        Some(layer) => eprintln!("--- landlock layer ---\n{layer}--- end landlock layer ---"),
-        None => eprintln!("landlock layer: none (nothing to enter)"),
     }
 }
 

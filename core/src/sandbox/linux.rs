@@ -127,9 +127,9 @@ pub(crate) fn make_command_with_policy(
     // By its real name: bwrap refuses a symlink as a mount destination, and
     // `/bin/sh` is one on every merged-/usr distribution.
     for exe in [Some(payload.program), payload.image].into_iter().flatten() {
-        if crate::path::is_absolute(exe)
-            && let Ok(real) = crate::path::canon::canonicalise_strict(std::path::Path::new(exe))
-        {
+        if crate::path::is_absolute(exe) {
+            let real = crate::path::canon::canonicalise_strict(std::path::Path::new(exe))
+                .map_err(|e| format!("sandbox: {exe} is not on the host to bind: {e}"))?;
             ro_binds.extend(render_paths(&[real.to_string_lossy()])?);
         }
     }
