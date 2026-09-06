@@ -509,7 +509,7 @@ mod tests {
         .unwrap();
         tx.send_signal(Signal::Transient(
             1,
-            Transient::State(crate::bus::AgentState::Compacting),
+            Transient::State(crate::bus::AgentState::Evicting),
         ))
         .unwrap();
         assert_eq!(
@@ -520,7 +520,7 @@ mod tests {
         match rx.try_recv().unwrap() {
             Signal::Transient(1, Transient::State(s)) => assert_eq!(
                 s,
-                crate::bus::AgentState::Compacting,
+                crate::bus::AgentState::Evicting,
                 "the newer state replaced the older"
             ),
             _ => panic!("expected State"),

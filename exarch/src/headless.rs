@@ -418,8 +418,8 @@ impl Headless<'_> {
             K::Notice { notice } => {
                 self.print_card(&card::notice_card(&card::to_card_notice(notice)));
             }
-            K::Context { rows } => {
-                self.print_card(&card::context_rows_card(rows));
+            K::Context { rows, evicted } => {
+                self.print_card(&card::context_rows_card(rows, *evicted));
             }
             K::Step { n } => {
                 if id == self.root_id {
@@ -434,12 +434,12 @@ impl Headless<'_> {
                     EditAuthority::Harness => "harness",
                 };
                 match op {
-                    ContextOp::Fold {
+                    ContextOp::Evict {
                         through_exchange, ..
                     } => {
                         let _ = writeln!(
                             self.err,
-                            "[context folded through exchange {through_exchange} ({authority})]"
+                            "[context evicted through exchange {through_exchange} ({authority})]"
                         );
                     }
                     ContextOp::Drop { exchanges } => {

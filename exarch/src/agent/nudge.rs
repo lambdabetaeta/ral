@@ -42,8 +42,13 @@ fn wrap_reminder(body: &str) -> String {
 /// `Unknown` (a stale token measure under a known window) must neither warn
 /// nor re-arm: a stale measure relieves nothing.
 pub(crate) enum Pressure {
-    /// The rendered detail, e.g. "173000 of 200000 tokens".
-    Over(String),
+    Over {
+        /// The rendered detail, e.g. "173000 of 200000 tokens".
+        detail: String,
+        /// The cut the next boundary would apply, `None` when no exchange is
+        /// old enough to shed.
+        through: Option<u64>,
+    },
     Under,
     Unknown,
 }
@@ -169,12 +174,12 @@ impl Nudges {
             // An emptied register re-arms even an identical future digest.
             None => self.pinned_told = None,
         }
-        if let Pressure::Over(detail) = &facts.pressure
+        if let Pressure::Over { detail, through } = &facts.pressure
             && !self.pressure_told
         {
             self.pressure_told = true;
             record_nudge(log, self.used, "context pressure".into());
-            parts.push(format!("Context pressure: {detail}. {PRESSURE_MESSAGE}"));
+            parts.push(pressure_message(detail, *through));
         }
         (!parts.is_empty()).then(|| wrap_reminder(&parts.join(" ")))
     }
@@ -201,11 +206,21 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
     a final message on its own is not delivered.";
 
 /// Shown once [`Facts::pressure`] crosses its soft line, budget-free like the
-/// pinned-state reminder: durable state belongs in files, not bindings, so it
-/// survives the summary that compaction is about to fold history into.
-const PRESSURE_MESSAGE: &str = "Older history will be auto-compacted into a summary soon. \
-    Preserve what must survive verbatim: write durable state to files and keep the paths — do \
-    not park large values in bindings — and record your intent with `goal-set`/`tasks-add`.";
+/// pinned-state reminder: the cut is announced before it happens, so the model
+/// can leave its future self a line.  With nothing old enough to shed there is
+/// no cut to announce, and the reading alone is the whole message.
+fn pressure_message(detail: &str, through: Option<u64>) -> String {
+    match through {
+        Some(through) => format!(
+            "Context pressure: {detail}. At the next exchange boundary exchanges through \
+             {through} will leave your context; they stay readable with `transcript` (`read, \
+             `grep, `index) and your pinned state stays in view. If you want to leave your \
+             future self a line, run `context `evict [through: {through}, note: '…']` now; \
+             otherwise nothing is required of you."
+        ),
+        None => format!("Context pressure: {detail}."),
+    }
+}
 
 const EMPTY_MESSAGE: &str = "Your previous turn produced no text and no tool calls. \
     If you are finished, say so explicitly; otherwise continue.";
@@ -228,6 +243,13 @@ mod tests {
     fn fresh_log() -> AgentLog {
         AgentLog::for_test(0, "test", &crate::agent::RecordedAccount::for_test("test"))
             .expect("session log")
+    }
+
+    fn over(through: Option<u64>) -> Pressure {
+        Pressure::Over {
+            detail: "400 of 500 tokens".into(),
+            through,
+        }
     }
 
     fn facts() -> Facts {
@@ -437,13 +459,13 @@ mod tests {
     }
 
     /// The pressure gauge composes on a clean completion, budget-free, and
-    /// carries both the detail and the file-paths-over-bindings guidance.
+    /// carries both the reading and the planned cut.
     #[test]
     fn pressure_part_composes_budget_free_on_complete() {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
         let f = Facts {
-            pressure: Pressure::Over("400 of 500 tokens".into()),
+            pressure: over(Some(7)),
             ..facts()
         };
         let msg = nudges
@@ -455,11 +477,35 @@ mod tests {
             .expect("pressure due should nudge");
         assert!(msg.contains("400 of 500 tokens"), "{msg}");
         assert!(
-            msg.contains("write durable state to files")
-                && msg.contains("do not park large values in bindings"),
-            "must steer state to files, not bindings: {msg}"
+            msg.contains("exchanges through 7 will leave your context")
+                && msg.contains("`context `evict [through: 7"),
+            "must name the cut and offer the note: {msg}"
         );
         assert_eq!(nudges.used, 0, "the pressure nudge is budget-free");
+    }
+
+    /// Nothing old enough to shed: the reading stands alone, with no cut to
+    /// announce and no note to offer.
+    #[test]
+    fn pressure_without_a_planned_cut_states_the_reading_alone() {
+        let mut nudges = Nudges::new();
+        let mut log = fresh_log();
+        let f = Facts {
+            pressure: over(None),
+            ..facts()
+        };
+        let msg = nudges
+            .react(
+                &Ok(deliberate::Outcome::Complete("done".into())),
+                &f,
+                &mut log,
+            )
+            .expect("pressure due should nudge");
+        assert!(msg.contains("400 of 500 tokens"), "{msg}");
+        assert!(
+            !msg.contains("evict") && !msg.contains("will leave your context"),
+            "with no cut planned there is nothing to announce: {msg}"
+        );
     }
 
     /// All three obligations join one message: the returning agent's `reply`,
@@ -472,7 +518,7 @@ mod tests {
         let f = Facts {
             must_reply: true,
             pinned: Some("tasks 3/8".into()),
-            pressure: Pressure::Over("400 of 500 tokens".into()),
+            pressure: over(Some(7)),
             ..facts()
         };
         let msg = nudges
@@ -497,7 +543,7 @@ mod tests {
         let f = Facts {
             pinned: Some("tasks 3/8".into()),
             quiet: false,
-            pressure: Pressure::Over("400 of 500 tokens".into()),
+            pressure: over(Some(7)),
             ..facts()
         };
         assert!(
@@ -520,7 +566,7 @@ mod tests {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
         let f = Facts {
-            pressure: Pressure::Over("400 of 500 tokens".into()),
+            pressure: over(Some(7)),
             ..facts()
         };
         assert!(
@@ -621,7 +667,7 @@ mod tests {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
         let over = Facts {
-            pressure: Pressure::Over("400 of 500 tokens".into()),
+            pressure: over(Some(7)),
             ..facts()
         };
         let under = Facts {
@@ -649,7 +695,7 @@ mod tests {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
         let over = Facts {
-            pressure: Pressure::Over("400 of 500 tokens".into()),
+            pressure: over(Some(7)),
             ..facts()
         };
         let unknown = Facts {
@@ -692,7 +738,7 @@ mod tests {
             ..facts()
         };
         let quiet_over = Facts {
-            pressure: Pressure::Over("400 of 500 tokens".into()),
+            pressure: over(Some(7)),
             ..facts()
         };
         let complete = || Ok(deliberate::Outcome::Complete("done".into()));
@@ -735,7 +781,7 @@ mod tests {
         let both_due = Facts {
             must_reply: true,
             pinned: Some("tasks 3/8".into()),
-            pressure: Pressure::Over("400 of 500 tokens".into()),
+            pressure: over(Some(7)),
             ..facts()
         };
         assert!(
@@ -752,7 +798,7 @@ mod tests {
         nudges.reset();
         let no_must_reply = Facts {
             pinned: Some("tasks 3/8".into()),
-            pressure: Pressure::Over("400 of 500 tokens".into()),
+            pressure: over(Some(7)),
             ..facts()
         };
         let msg = nudges

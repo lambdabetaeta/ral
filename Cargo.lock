@@ -2026,6 +2026,7 @@ dependencies = [
  "pulldown-cmark",
  "ral-core",
  "ratatui",
+ "regex",
  "reqwest",
  "rustix",
  "rustls",

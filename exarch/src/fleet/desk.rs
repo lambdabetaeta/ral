@@ -9,7 +9,8 @@
 //! output.
 
 use crate::agent::event::{
-    ContextOp, ContextSurvey, EditAuthority, TranscriptMessage, TranscriptPart, TranscriptSpan,
+    AgentLog, ContextOp, ContextSurvey, EditAuthority, GrepAnswer, StoreIndexItem,
+    TranscriptMessage, TranscriptPart, TranscriptSpan,
 };
 use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
@@ -20,11 +21,12 @@ use crate::provider::Provider;
 use crate::record::commit::SurfaceBuffer;
 use crate::shell_eval::{self, PinDigests, Surface};
 use genai::chat::ChatRole;
-use ral_core::sync::LockExt;
 use ral_core::Value as RalValue;
-use ral_core::serial::FOValue;
 use ral_core::protocol::{EnquiryError, Host};
+use ral_core::serial::FOValue;
+use ral_core::sync::LockExt;
 use ral_core::types::{CallSite, Error, GrantStack, Nursery, NurseryId, Observation, Observed};
+use regex::Regex;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -86,7 +88,7 @@ pub(crate) enum DeskAct {
     Unschedule,
     Reply,
     ContextDrop,
-    ContextFold,
+    ContextEvict,
 }
 
 impl DeskAct {
@@ -100,7 +102,7 @@ impl DeskAct {
             Self::Unschedule => "unschedule",
             Self::Reply => "reply",
             Self::ContextDrop => "context-drop",
-            Self::ContextFold => "context-fold",
+            Self::ContextEvict => "context-evict",
         }
     }
 
@@ -115,7 +117,7 @@ impl DeskAct {
             "unschedule" => Self::Unschedule,
             "reply" => Self::Reply,
             "context-drop" => Self::ContextDrop,
-            "context-fold" => Self::ContextFold,
+            "context-evict" => Self::ContextEvict,
             other => unreachable!("desk act fragment carries an unknown verb `{other}`"),
         }
     }
@@ -136,7 +138,7 @@ impl DeskAct {
             // parent and to nobody else.
             Self::Reply => "staged your reply".to_string(),
             Self::ContextDrop => named("dropped context"),
-            Self::ContextFold => named("folded context"),
+            Self::ContextEvict => named("evicted context"),
         }
     }
 }
@@ -365,17 +367,18 @@ fn payload_exchanges(payload: Option<Box<FOValue>>, class: &str) -> Result<Vec<u
         .collect()
 }
 
-/// The rail subject `` `transcript ``/`` `context `drop `` both mint from an
-/// exchange list: `"exchanges [1, 2, 3]"`.
+/// The rail subject `` `context `drop `` mints from an exchange list:
+/// `"exchanges [1, 2, 3]"`.
 fn exchanges_subject(exchanges: &[u64]) -> String {
-    format!(
-        "exchanges [{}]",
-        exchanges
-            .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+    format!("exchanges [{}]", exchanges_list(exchanges))
+}
+
+fn exchanges_list(exchanges: &[u64]) -> String {
+    exchanges
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn usize_to_i64(value: usize) -> i64 {
@@ -494,6 +497,13 @@ impl<'a> Fields<'a> {
                 1,
             )),
         }
+    }
+
+    /// Take one field by name if the record carries it; the caller decides
+    /// what its absence means.
+    fn optional(&mut self, field: &str) -> Option<FOValue> {
+        let at = self.entries.iter().position(|(key, _)| key == field)?;
+        Some(self.entries.swap_remove(at).1)
     }
 
     /// Take one field by name; a missing one is told what it was for.
@@ -892,9 +902,7 @@ impl ExarchDesk {
         };
         let model = match &spec.model {
             Selection::Named(model) => model.clone(),
-            Selection::Inherit if account.id == current.account().id => {
-                current.model().to_string()
-            }
+            Selection::Inherit if account.id == current.account().id => current.model().to_string(),
             Selection::Inherit => account.service.default_model.clone().ok_or_else(|| {
                 refused(format!(
                     "'{}' publishes no default model, so a child sent to it must be told which \
@@ -903,9 +911,7 @@ impl ExarchDesk {
                 ))
             })?,
         };
-        bureau
-            .reselect(&current, &account, model)
-            .map_err(refused)
+        bureau.reselect(&current, &account, model).map_err(refused)
     }
 
     /// The child-log/capability half of the spawn spine, shared by both arms:
@@ -920,7 +926,8 @@ impl ExarchDesk {
         // `base_layer` names all six legal bases in its own diagnostic, so an
         // unknown `grant` needs no refusal text here.
         let cwd = s.cwd.to_string_lossy();
-        let layer = crate::policy::base_layer(spec.grant, &cwd).map_err(|reason| Error::new(reason, 1))?;
+        let layer =
+            crate::policy::base_layer(spec.grant, &cwd).map_err(|reason| Error::new(reason, 1))?;
         let mut child_caps = s.agent.caps().clone();
         child_caps.push(layer);
 
@@ -937,22 +944,23 @@ impl ExarchDesk {
                 spawns: s.agent.fuel().saturating_sub(1) > 0,
             },
         );
-        let child_account = crate::agent::RecordedAccount::of(
-            provider.account(),
-            &s.agent.bureau().available(),
-        );
+        let child_account =
+            crate::agent::RecordedAccount::of(provider.account(), &s.agent.bureau().available());
         let child_log = {
             let mut parent_log = s.log.lock();
             let mut child_log = parent_log
-                .fork(child_id, system_prompt.len(), provider.model(), &child_account)
+                .fork(
+                    child_id,
+                    system_prompt.len(),
+                    provider.model(),
+                    &child_account,
+                )
                 .map_err(|e| Error::new(format!("could not fork child session log: {e}"), 1))?;
-            let inherited = spec
-                .inherit_context
-                .then(|| parent_log.inherited_context_messages());
+            let inherited = spec.inherit_context.then(|| parent_log.inherited_context());
             drop(parent_log);
-            if let Some(messages) = inherited {
+            if let Some(inherited) = inherited {
                 child_log
-                    .import_context(messages)
+                    .import_context(inherited)
                     .map_err(|e| Error::new(e, 1))?;
             }
             child_log
@@ -1548,7 +1556,7 @@ impl ExarchDesk {
         match tag.as_str() {
             "survey" => Ok(survey_answer(self.context_survey())),
             "drop" => self.context_drop(payload),
-            "fold" => self.context_fold(payload),
+            "evict" => self.context_evict(payload),
             other => Err(unknown_tag("context", other)),
         }
     }
@@ -1559,14 +1567,66 @@ impl ExarchDesk {
         self.services.log.lock().context_survey()
     }
 
-    /// `` `transcript `` — the named exchanges read back as material, one
-    /// span record per named exchange, probing rather than acting: a read
-    /// commits no act, so the verb string below is a second mint outside
-    /// [`DeskAct::verb`] on purpose.
+    /// `` `transcript `` — the store: every tag reads it and none writes it.
+    /// A read commits no act, so the verb string its trace line carries is a
+    /// second mint outside [`DeskAct::verb`] on purpose.
     fn transcript(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let exchanges = payload_exchanges(payload, "transcript")?;
-        let subject = exchanges_subject(&exchanges);
-        let result = self.services.log.lock().read_context(&exchanges);
+        let (tag, payload) = family_tag(payload, "transcript")?;
+        match tag.as_str() {
+            "index" => self.traced("index".to_string(), |log| {
+                Ok(store_index_answer(log.store_index()))
+            }),
+            "read" => self.transcript_read(payload),
+            "grep" => self.transcript_grep(payload),
+            other => Err(unknown_tag("transcript", other)),
+        }
+    }
+
+    /// `` `transcript `read `` — the named closed exchanges as material, one
+    /// span record each.
+    fn transcript_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        let exchanges = payload_exchanges(payload, "transcript `read")?;
+        let subject = format!("read {}", exchanges_list(&exchanges));
+        self.traced(subject, |log| {
+            log.read_context(&exchanges).map(transcript_answer)
+        })
+    }
+
+    /// `` `transcript `grep `` — a Rust regex over the store's text, the
+    /// whole of it or the named exchanges alone. The pattern is compiled
+    /// here, so an invalid one is refused in the regex crate's own words.
+    fn transcript_grep(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        const CLASS: &str = "transcript `grep";
+        let mut spec = Fields::payload(payload, CLASS, "[pattern: Str]")?;
+        let pattern = payload_string(
+            spec.take("pattern", "the Rust regex to search the store for")?,
+            CLASS,
+            "pattern",
+        )?;
+        let exchanges = spec
+            .optional("exchanges")
+            .map(|value| payload_exchanges(Some(Box::new(value)), CLASS))
+            .transpose()?;
+        let subject = match &exchanges {
+            Some(exchanges) => format!("grep {pattern} in {}", exchanges_list(exchanges)),
+            None => format!("grep {pattern}"),
+        };
+        self.traced(subject, |log| {
+            let regex = Regex::new(&pattern).map_err(|error| error.to_string())?;
+            log.grep_store(&regex, exchanges.as_deref())
+                .map(grep_answer)
+        })
+    }
+
+    /// The tail every `` `transcript `` tag shares: answer off the log, and
+    /// mirror the call — refused or not — onto the trace under its own
+    /// subject.
+    fn traced(
+        &self,
+        subject: String,
+        answer: impl FnOnce(&mut AgentLog) -> Result<FOValue, String>,
+    ) -> Result<FOValue, Error> {
+        let result = answer(&mut self.services.log.lock());
         self.services
             .record_display(crate::record::Display::HarnessCall {
                 verb: "transcript".to_string(),
@@ -1574,9 +1634,7 @@ impl ExarchDesk {
                 payload: subject,
                 failed: result.is_err(),
             });
-        result
-            .map(transcript_answer)
-            .map_err(|error| Error::new(error, 1))
+        result.map_err(|error| Error::new(error, 1))
     }
 
     /// `` `context `drop `` — shed the named exchanges from the view.
@@ -1592,33 +1650,42 @@ impl ExarchDesk {
         )
     }
 
-    /// `` `context `fold `` — collapse every exchange through `through` into
-    /// one digest.
-    fn context_fold(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        const CLASS: &str = "context `fold";
-        let mut spec = Fields::payload(payload, CLASS, "[through: …, digest: …]")?;
+    /// `` `context `evict `` — every exchange through `through` leaves the
+    /// window at once, with the model's optional `note` beside the index that
+    /// replaces them.
+    fn context_evict(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
+        const CLASS: &str = "context `evict";
+        let mut spec = Fields::payload(payload, CLASS, "[through: …]")?;
         let through = payload_exchange(
-            spec.take("through", "the last exchange to fold")?,
+            spec.take("through", "the last exchange to evict")?,
             CLASS,
             "through",
         )?;
-        let digest = payload_string(
-            spec.take(
-                "digest",
-                "the summary text standing in for what it replaces",
-            )?,
-            CLASS,
-            "digest",
-        )?;
+        let note = match spec.optional("note") {
+            Some(value) => {
+                let note = payload_string(value, CLASS, "note")?;
+                if note.is_empty() {
+                    return Err(Error::new(
+                        format!("`{CLASS}`: `note` must not be empty — omit it to leave none"),
+                        1,
+                    ));
+                }
+                Some(note)
+            }
+            None => None,
+        };
         let subject = format!("through {through}");
-        let payload = format!("{subject}, digest {digest}");
+        let payload = match &note {
+            Some(note) => format!("{subject}, note {note}"),
+            None => subject.clone(),
+        };
         self.context_edit(
-            DeskAct::ContextFold,
+            DeskAct::ContextEvict,
             Some(&subject),
             payload,
-            ContextOp::Fold {
+            ContextOp::Evict {
                 through_exchange: through,
-                digest,
+                note,
             },
         )
     }
@@ -1663,7 +1730,7 @@ impl ExarchDesk {
 }
 
 /// The `` `context `` family's one answer: the model view as it stands, spans
-/// first. A digest is a span like any other, addressed by its reach.
+/// first, then the count of exchanges that have left it.
 fn survey_answer(survey: ContextSurvey) -> FOValue {
     let spans = survey
         .items
@@ -1708,6 +1775,12 @@ fn survey_answer(survey: ContextSurvey) -> FOValue {
         entries: vec![
             ("spans".to_string(), FOValue::List { items: spans }),
             (
+                "evicted".to_string(),
+                FOValue::Int {
+                    value: usize_to_i64(survey.evicted),
+                },
+            ),
+            (
                 "total-bytes".to_string(),
                 FOValue::Int {
                     value: usize_to_i64(survey.total_bytes),
@@ -1723,9 +1796,88 @@ fn survey_answer(survey: ContextSurvey) -> FOValue {
     }
 }
 
-/// `` `transcript ``'s answer: one span record per named exchange or digest,
-/// each carrying the model's own messages narrowed to variant parts — never
-/// a serialization of the provider's own content structs.
+/// `` `transcript `index ``'s answer: one row per closed exchange the store
+/// holds, oldest first, `in-view` saying which of them the model is still
+/// paying for.
+fn store_index_answer(items: Vec<StoreIndexItem>) -> FOValue {
+    FOValue::List {
+        items: items
+            .into_iter()
+            .map(|item| FOValue::Map {
+                entries: vec![
+                    (
+                        "exchange".to_string(),
+                        FOValue::Int {
+                            value: u64_to_i64(item.exchange),
+                        },
+                    ),
+                    text_field("kind", item.kind.as_str().to_string()),
+                    text_field("prompt", item.opening),
+                    (
+                        "steps".to_string(),
+                        FOValue::Int {
+                            value: usize_to_i64(item.steps),
+                        },
+                    ),
+                    (
+                        "bytes".to_string(),
+                        FOValue::Int {
+                            value: usize_to_i64(item.bytes),
+                        },
+                    ),
+                    (
+                        "in-view".to_string(),
+                        FOValue::Bool {
+                            value: item.in_view,
+                        },
+                    ),
+                ],
+            })
+            .collect(),
+    }
+}
+
+/// `` `transcript `grep ``'s answer: the hits it kept, and how many there
+/// were in all.
+fn grep_answer(answer: GrepAnswer) -> FOValue {
+    let hits = answer
+        .hits
+        .into_iter()
+        .map(|hit| FOValue::Map {
+            entries: vec![
+                (
+                    "exchange".to_string(),
+                    FOValue::Int {
+                        value: u64_to_i64(hit.exchange),
+                    },
+                ),
+                text_field("role", role_label(&hit.role).to_string()),
+                (
+                    "line".to_string(),
+                    FOValue::Int {
+                        value: usize_to_i64(hit.line),
+                    },
+                ),
+                text_field("text", hit.text),
+            ],
+        })
+        .collect();
+    FOValue::Map {
+        entries: vec![
+            ("hits".to_string(), FOValue::List { items: hits }),
+            (
+                "total".to_string(),
+                FOValue::Int {
+                    value: usize_to_i64(answer.total),
+                },
+            ),
+        ],
+    }
+}
+
+/// `` `transcript `read ``'s answer: one span record per named exchange, each
+/// carrying the model's own messages narrowed to variant parts — never a
+/// serialization of the provider's own content structs.
 fn transcript_answer(spans: Vec<TranscriptSpan>) -> FOValue {
     FOValue::List {
         items: spans.into_iter().map(transcript_span_value).collect(),
@@ -1755,26 +1907,35 @@ fn transcript_span_value(span: TranscriptSpan) -> FOValue {
     }
 }
 
-fn transcript_message_value(message: TranscriptMessage) -> FOValue {
-    let role = match message.role {
+/// The four spellings a role crosses under, whether as a message's tag or as
+/// a grep hit's `Str`.
+fn role_label(role: &ChatRole) -> &'static str {
+    match role {
         ChatRole::System => "system",
         ChatRole::User => "user",
         ChatRole::Assistant => "assistant",
         ChatRole::Tool => "tool",
-    };
+    }
+}
+
+fn transcript_message_value(message: TranscriptMessage) -> FOValue {
     FOValue::Map {
         entries: vec![
             (
                 "role".to_string(),
                 FOValue::Variant {
-                    label: role.to_string(),
+                    label: role_label(&message.role).to_string(),
                     payload: None,
                 },
             ),
             (
                 "parts".to_string(),
                 FOValue::List {
-                    items: message.parts.into_iter().map(transcript_part_value).collect(),
+                    items: message
+                        .parts
+                        .into_iter()
+                        .map(transcript_part_value)
+                        .collect(),
                 },
             ),
         ],
@@ -2176,13 +2337,12 @@ mod tests {
         family_req("context", "drop", Some(payload))
     }
 
-    fn context_fold_request(through: i64, digest: &str) -> FOValue {
-        let spec = RalValue::map(vec![
-            ("through".to_string(), RalValue::Int(through)),
-            ("digest".to_string(), RalValue::String(digest.to_string())),
-        ]);
-        let payload = harness::context_fold_payload(&spec).expect("valid fold spec");
-        family_req("context", "fold", Some(payload))
+    fn context_evict_request(through: i64, note: Option<&str>) -> FOValue {
+        let mut fields = vec![("through".to_string(), RalValue::Int(through))];
+        fields.extend(note.map(|note| ("note".to_string(), RalValue::String(note.to_string()))));
+        let payload =
+            harness::context_evict_payload(&RalValue::map(fields)).expect("valid evict spec");
+        family_req("context", "evict", Some(payload))
     }
 
     /// The `` `context `survey `` call, shaped exactly as `builtin_context`
@@ -2191,13 +2351,21 @@ mod tests {
         family_req("context", "survey", None)
     }
 
-    fn transcript_request(exchanges: &[i64]) -> FOValue {
-        let payload = harness::context_exchanges_payload(&exchanges_value(exchanges), "transcript")
-            .expect("valid exchange list");
-        FOValue::Variant {
-            label: "transcript".to_string(),
-            payload: Some(Box::new(payload)),
-        }
+    fn transcript_read_request(exchanges: &[i64]) -> FOValue {
+        let payload =
+            harness::context_exchanges_payload(&exchanges_value(exchanges), "transcript `read")
+                .expect("valid exchange list");
+        family_req("transcript", "read", Some(payload))
+    }
+
+    fn transcript_grep_request(pattern: &str, exchanges: Option<&[i64]>) -> FOValue {
+        let mut fields = vec![("pattern".to_string(), RalValue::String(pattern.to_string()))];
+        fields.extend(
+            exchanges.map(|exchanges| ("exchanges".to_string(), exchanges_value(exchanges))),
+        );
+        let payload =
+            harness::transcript_grep_payload(&RalValue::map(fields)).expect("valid grep spec");
+        family_req("transcript", "grep", Some(payload))
     }
 
     fn int_field(value: FOValue, key: &str) -> i64 {
@@ -2477,21 +2645,21 @@ mod tests {
     }
 
     #[test]
-    fn context_survey_lists_digest_import_and_live_exchange() {
+    fn context_survey_lists_import_and_live_exchange_beside_the_evicted_count() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
             complete_exchange(&mut log, "closed\nexchange", "answer");
-            complete_exchange(&mut log, "folded", "answer");
+            complete_exchange(&mut log, "evicted", "answer");
             log.apply_edit(
-                ContextOp::Fold {
+                ContextOp::Evict {
                     through_exchange: 1,
-                    digest: "kept summary".into(),
+                    note: None,
                 },
                 EditAuthority::Model,
             )
-            .expect("fold");
-            log.import_context(vec![genai::chat::ChatMessage::user("inherited\ncontext")])
+            .expect("evict");
+            log.import_note(genai::chat::ChatMessage::user("inherited\ncontext"))
                 .expect("import");
             log.append_user("live".into(), None).expect("live prompt");
         }
@@ -2510,7 +2678,7 @@ mod tests {
         let FOValue::List { items } = spans else {
             panic!("survey spans must be a list")
         };
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 3);
         let kinds = items
             .iter()
             .map(|item| {
@@ -2528,7 +2696,20 @@ mod tests {
                     .expect("survey kind")
             })
             .collect::<Vec<_>>();
-        assert_eq!(kinds, vec!["digest", "exchange", "import", "exchange"]);
+        assert_eq!(kinds, vec!["exchange", "import", "exchange"]);
+        let evicted = entries
+            .iter()
+            .find_map(|(key, value)| {
+                (key == "evicted").then(|| match value {
+                    FOValue::Int { value } => *value,
+                    _ => panic!("survey evicted must be an Int"),
+                })
+            })
+            .expect("survey evicted");
+        assert_eq!(
+            evicted, 1,
+            "the one evicted exchange is counted, not listed"
+        );
         let total_bytes = entries
             .iter()
             .find_map(|(key, value)| {
@@ -2564,9 +2745,11 @@ mod tests {
         });
         desk.services.emit = Emitter::new(tx, 0);
 
-        let FOValue::List { items } = desk.handle(transcript_request(&[1])).expect("transcript")
+        let FOValue::List { items } = desk
+            .handle(transcript_read_request(&[1]))
+            .expect("transcript `read")
         else {
-            panic!("transcript must answer a list of spans")
+            panic!("transcript `read must answer a list of spans")
         };
         let [FOValue::Map { entries }] = items.as_slice() else {
             panic!("one named span must answer exactly one record, got {items:?}")
@@ -2598,11 +2781,11 @@ mod tests {
                 subject: Some(subject),
                 payload,
                 failed: false,
-            }) if verb == "transcript" && subject == "exchanges [1]" && payload == "exchanges [1]"
+            }) if verb == "transcript" && subject == "read 1" && payload == "read 1"
         ));
 
         let error = desk
-            .handle(transcript_request(&[]))
+            .handle(transcript_read_request(&[]))
             .expect_err("an empty read is not meaningful");
         assert_eq!(error.message, "transcript must name at least one exchange");
         let record = crate::bus::drain_records(&rx)
@@ -2617,6 +2800,25 @@ mod tests {
                 ..
             }) if verb == "transcript"
         ));
+    }
+
+    /// The pattern is compiled at the desk, so an invalid one is refused in
+    /// the regex crate's own words rather than in a paraphrase of them.
+    #[test]
+    #[expect(
+        clippy::invalid_regex,
+        reason = "the pattern that will not compile is this test's subject"
+    )]
+    fn grep_refuses_a_bad_regex_with_the_crate_message() {
+        const UNCLOSED: &str = "(unclosed";
+        let desk = desk();
+        let expected = Regex::new(UNCLOSED)
+            .expect_err("an unclosed group is not a regex")
+            .to_string();
+        let error = desk
+            .handle(transcript_grep_request(UNCLOSED, None))
+            .expect_err("an invalid regex is not searchable");
+        assert_eq!(error.message, expected);
     }
 
     #[test]
@@ -2644,24 +2846,25 @@ mod tests {
             .expect_err("an unknown exchange is not editable");
         assert_eq!(err.message, "exchange 7 is not present in the current view");
 
-        let folded_desk = desk();
+        let evicted_desk = desk();
         {
-            let mut log = folded_desk.services.log.lock();
+            let mut log = evicted_desk.services.log.lock();
             complete_exchange(&mut log, "one", "answer");
             complete_exchange(&mut log, "two", "answer");
+            complete_exchange(&mut log, "three", "answer");
         }
-        folded_desk
-            .handle(context_fold_request(2, "kept summary"))
-            .expect("fold");
-        let err = folded_desk
+        evicted_desk
+            .handle(context_evict_request(2, None))
+            .expect("evict");
+        let err = evicted_desk
             .handle(context_drop_request(&[1]))
-            .expect_err("an exchange inside the digest is not addressable");
+            .expect_err("an exchange that has left is not addressable");
         assert_eq!(
             err.message,
-            "exchange 1 is folded into the digest through 2 — name 2 to drop the digest whole, or fold further"
+            "exchange 1 has already left your context — the earliest still in view is 3"
         );
 
-        let err = folded_desk
+        let err = evicted_desk
             .handle(context_drop_request(&[]))
             .expect_err("an empty drop is not an edit");
         assert_eq!(
@@ -2703,23 +2906,25 @@ mod tests {
         assert_eq!(int_field(items[0].clone(), "exchange"), 2);
     }
 
-    /// The fold counterpart: a fold commits [`DeskAct::ContextFold`], not
+    /// The eviction counterpart: it commits [`DeskAct::ContextEvict`], not
     /// [`DeskAct::ContextDrop`] — the audit sentence names the act it actually
-    /// took, which nothing else in this suite pins — and its answer stands the
-    /// new digest's own weight beside the spans that survive it.
+    /// took, which nothing else in this suite pins — and its answer counts
+    /// what left beside the spans that survive it.
     #[test]
-    fn context_fold_commits_the_fold_act_and_answers_the_digest_span() {
+    fn context_evict_commits_the_evict_act_and_counts_what_left() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
             complete_exchange(&mut log, "one", "a longer answer");
             complete_exchange(&mut log, "two", "another answer");
+            complete_exchange(&mut log, "three", "a third answer");
         }
         let answer = desk
-            .handle(context_fold_request(2, "kept summary"))
-            .expect("context fold");
+            .handle(context_evict_request(2, Some("the parser is fixed")))
+            .expect("context evict");
+        assert_eq!(int_field(answer.clone(), "evicted"), 2);
         let FOValue::Map { entries } = answer else {
-            panic!("a fold must answer the survey record")
+            panic!("an eviction must answer the survey record")
         };
         let spans = entries
             .iter()
@@ -2728,23 +2933,38 @@ mod tests {
         let FOValue::List { items } = spans else {
             panic!("survey spans must be a list")
         };
-        let [digest] = items.as_slice() else {
-            panic!("the fold leaves the digest alone in the view, got {items:?}")
+        let [survivor] = items.as_slice() else {
+            panic!("the eviction leaves one span in the view, got {items:?}")
         };
-        assert_eq!(str_field(digest, "kind").as_deref(), Some("digest"));
-        assert_eq!(int_field(digest.clone(), "exchange"), 2);
-        assert!(
-            int_field(digest.clone(), "bytes") > 0,
-            "the digest's own weight is what diagnoses a bad fold"
-        );
+        assert_eq!(str_field(survivor, "kind").as_deref(), Some("exchange"));
+        assert_eq!(int_field(survivor.clone(), "exchange"), 3);
         let audit = desk
             .services
             .acts
             .audit()
-            .expect("a landed fold leaves an act");
+            .expect("a landed eviction leaves an act");
         assert!(
-            audit.contains("folded context"),
-            "the audit sentence must name the fold, got: {audit}"
+            audit.contains("evicted context"),
+            "the audit sentence must name the act, got: {audit}"
+        );
+    }
+
+    /// An empty note would render `Your note at eviction: ""` in the head
+    /// marker, so the door refuses it rather than the shape allowing it.
+    #[test]
+    fn context_evict_refuses_an_empty_note() {
+        let desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            complete_exchange(&mut log, "one", "answer");
+            complete_exchange(&mut log, "two", "answer");
+        }
+        let err = desk
+            .handle(context_evict_request(1, Some("")))
+            .expect_err("an empty note is not a note");
+        assert_eq!(
+            err.message,
+            "`context `evict`: `note` must not be empty — omit it to leave none"
         );
     }
 
@@ -4327,11 +4547,9 @@ mod wire_tests {
         let (host, guest) = UnixStream::pair().expect("socketpair standing in for the dial");
         let mut child = spawn_engine_on(&guest);
         drop(guest);
-        let transport = ral_core::protocol::WireTransport::adopt(
-            host,
-            ral_core::protocol::Liveness::default(),
-        )
-        .expect("adopt host stream");
+        let transport =
+            ral_core::protocol::WireTransport::adopt(host, ral_core::protocol::Liveness::default())
+                .expect("adopt host stream");
         let control = ral_core::protocol::Transport::control(&transport).clone();
         let _ = child.kill();
         let _ = child.wait();

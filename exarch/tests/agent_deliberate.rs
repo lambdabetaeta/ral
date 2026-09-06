@@ -337,14 +337,15 @@ fn empty_reply_commits_a_stub_not_empty_content() {
     );
 }
 
-/// Auto-compaction fires at the one boundary `deliberate` checks — its own
-/// entry — and rewrites the model view to the summary plus the recent
-/// exchange, verbatim.  `test-model` has no pricing-catalog entry, so the
-/// window is unknown and the byte fallback (`digest::COMPACT_THRESHOLD`, 500
-/// KiB) is the live trigger: the older exchange is the larger, so half the
-/// history holds the newer one whole.
+/// Auto-eviction fires at the one boundary `deliberate` checks — its own
+/// entry — and rewrites the model view to the head marker plus the recent
+/// exchange, verbatim, with no provider round-trip of its own.  `test-model`
+/// has no pricing-catalog entry, so the window is unknown and the byte
+/// fallback (`digest::EVICT_THRESHOLD`, 500 KiB) is the live trigger: the
+/// older exchange is the larger, so half the history holds the newer one
+/// whole.
 #[test]
-fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
+fn eviction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
     let mut session = Avatar::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
@@ -373,24 +374,31 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
     assert!(
         transients
             .iter()
-            .any(|t| matches!(t, Transient::State(AgentState::Compacting))),
-        "the compaction must announce its own state"
+            .any(|t| matches!(t, Transient::State(AgentState::Evicting))),
+        "the eviction must announce its own state"
     );
+    // Three scripted replies for three deliberations: a request of the
+    // eviction's own would have drained the queue and panicked the scripted
+    // provider before this line.
     let view = session.rendered_messages();
     assert_eq!(view[0].role, ChatRole::User);
-    let summary = view[0].content.first_text().unwrap_or_default();
+    let marker = view[0].content.first_text().unwrap_or_default();
     assert!(
-        summary.contains("scripted summary"),
-        "the model view must open on the summary, got {summary:?}"
+        marker.starts_with("[EXARCH // Exchange") && marker.contains("left your context"),
+        "the model view must open on the head marker, got {marker:?}"
+    );
+    assert!(
+        marker.contains("EXCHANGE1"),
+        "the head marker indexes the evicted exchange by its opening line, got {marker:?}"
     );
     let rendered = serde_json::to_string(&view).unwrap();
     assert!(
-        !rendered.contains("EXCHANGE1"),
-        "the summarised prefix must leave the model view"
+        !rendered.contains(&"x".repeat(1000)),
+        "the evicted prefix's body must leave the model view"
     );
     assert!(
         rendered.contains("EXCHANGE2") && rendered.contains("ack two"),
-        "the recent exchange is kept verbatim, not summarised"
+        "the recent exchange is kept verbatim"
     );
     assert!(session.is_ready());
 
@@ -411,17 +419,17 @@ fn compaction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
             record,
             Record::Protocol(Protocol::UserPrompt { text, .. }) if text.contains("EXCHANGE1")
         )),
-        "compaction must not touch the durable record log"
+        "an eviction must not touch the durable record log"
     );
     assert!(
         records.iter().any(|record| matches!(
             record,
             Record::Protocol(Protocol::ContextEdited {
-                op: ContextOp::Fold { .. },
+                op: ContextOp::Evict { note: None, .. },
                 by: EditAuthority::Harness,
             })
         )),
-        "auto-compaction must record its fold as a harness-authored context edit"
+        "auto-eviction must record a harness-authored context edit, and write no note"
     );
 }
 

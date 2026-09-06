@@ -963,7 +963,7 @@ fn render_raw(bytes: &[u8]) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Slate text for system notes — model switches, stream stalls, compaction.
+/// Slate text for system notes — model switches, stream stalls, evictions.
 pub(super) fn note(s: &str) -> Vec<Line<'static>> {
     vec![Line::from(Span::styled(
         s.to_string(),

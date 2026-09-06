@@ -64,6 +64,7 @@ pub enum BlockKind {
     },
     Context {
         rows: Vec<ContextRow>,
+        evicted: usize,
     },
     Cancelled,
     Error {
@@ -334,16 +335,17 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
             NoticeFact::Reap { cmd, cause } => format!("[reap: {cmd} ({cause})]"),
             NoticeFact::Prune { names, .. } => format!("[prune: {}]", names.join(", ")),
         },
-        BlockKind::Context { rows } => {
-            let lines: Vec<String> = rows
-                .iter()
-                .map(|row| {
-                    format!(
-                        "[context: exchange {} {} {}]",
-                        row.exchange, row.kind, row.opening
-                    )
-                })
-                .collect();
+        BlockKind::Context { rows, evicted } => {
+            let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
+            if *evicted > 0 {
+                lines.push(format!("[context: evicted {evicted} exchanges]"));
+            }
+            lines.extend(rows.iter().map(|row| {
+                format!(
+                    "[context: exchange {} {} {}]",
+                    row.exchange, row.kind, row.opening
+                )
+            }));
             lines.join("\n")
         }
         BlockKind::Cancelled => "[cancelled]".to_string(),
@@ -362,9 +364,9 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
                 EditAuthority::Harness => "harness",
             };
             match op {
-                ContextOp::Fold {
+                ContextOp::Evict {
                     through_exchange, ..
-                } => format!("[context folded through exchange {through_exchange} ({authority})]"),
+                } => format!("[context evicted through exchange {through_exchange} ({authority})]"),
                 ContextOp::Drop { exchanges } => {
                     let list = exchanges
                         .iter()
@@ -430,7 +432,7 @@ fn step_display(memo: &mut Blocks, seq: Seq, d: Display) {
         Display::Card { marks } => memo.push(seq, BlockKind::Card { marks }),
         Display::Done { outcome } => memo.push(seq, BlockKind::Done { outcome }),
         Display::Notice { notice } => memo.push(seq, BlockKind::Notice { notice }),
-        Display::Context { rows } => memo.push(seq, BlockKind::Context { rows }),
+        Display::Context { rows, evicted } => memo.push(seq, BlockKind::Context { rows, evicted }),
         Display::Step { n } => memo.push(seq, BlockKind::Step { n }),
         Display::ContextEdited { op, by } => {
             memo.push(seq, BlockKind::ContextEdited { op, by });

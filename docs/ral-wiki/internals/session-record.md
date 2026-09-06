@@ -76,7 +76,9 @@ seam returns from `emit`. Its `Memo` owns the protocol state, exchange view,
 and ledger. When context edits evict old protocol records, the ledger keeps
 their `Stamp` byte ranges and reads those lines back from `record.jsonl` when a
 refold needs them; no recorded protocol fact is deleted and the whole log is
-never held in memory.
+never held in memory. The refold is no longer the only reader: `transcript`
+reads those same ranges back on demand, so the log is the model's store as
+well as its identity ([[decisions/260906_context-rollover|context-rollover]]).
 
 ### The provider-facing transcript is a persistent value
 

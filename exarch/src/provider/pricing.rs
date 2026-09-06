@@ -218,7 +218,7 @@ pub fn caps_or_default(model: &str) -> ModelCaps {
 /// makes.
 ///
 /// `agent::deliberate` reads this one field at every turn boundary to decide
-/// whether to compact, and falls back to its byte heuristic on `None`.
+/// whether to evict, and falls back to its byte heuristic on `None`.
 pub fn context_window(model: &str) -> Option<u64> {
     CATALOG.get()?.caps.get(model)?.context_window
 }

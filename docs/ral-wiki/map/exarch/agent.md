@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d273e519
+generated_at_commit: c5df4203
 generated_at_date: 2026-09-06
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -360,6 +360,16 @@ attempt:
 | pin reminder | quiet ∧ `Ok(Complete)` ∧ register non-empty ∧ digest changed | free |
 | pressure warning | quiet ∧ `Ok(Complete)` ∧ gauge `Over` ∧ excursion untold | free |
 
+The pressure warning names the cut it is warning about: `pressure_gauge` calls
+`Avatar::planned_eviction` (a cheap walk over cached span bytes) and carries
+the answer as `Pressure::Over { detail, through }`, so the message tells the
+model which exchange the next boundary will evict through, that the material
+stays readable with `transcript`, and how to leave itself a line —
+`` context `evict [through: n, note: '…'] `` — before it goes. With nothing old
+enough to shed, `through` is `None` and the reading alone is the whole message.
+Durability is the log's job, so the nudge no longer asks the model to write
+state to files.
+
 Everything else is accepted as-is, unspent, and deliberately so: `Replied` (a
 reply is final), `Cancelled` (the human asked), `Capped` (a nudge would only
 buy the deliberation another `MAX_STEPS` after it already burned 250 round
@@ -394,7 +404,7 @@ strain the fold law
 ([[decisions/260812_context-is-a-projection|context-is-a-projection]]'s "one
 state, one fold") — a condition that *holds* seems like it should not be
 re-stated per turn — but it does not: the transcript is already persistent,
-so a committed turn stands in every later render until an edit folds it, and
+so a committed turn stands in every later render until an edit sheds it, and
 re-stating the register on every turn was never persistence, only
 redundancy. What must be recorded is the level's *transitions*, and an edge —
 "the register changed", "pressure crossed the line" — is genuinely
@@ -404,8 +414,8 @@ render-time seam re-injecting live state would break `fold(log) == memo`,
 since the model's view would stop being reproducible from the record; a
 dedicated "standing condition" record class still has to enter the fold to
 reach the model, so it is a user turn with a fancier name plus a new record
-variant, fold arm, and admission rule — machinery for no semantic gain. A
-compaction may fold a telling into the digest without harm either way: both
+variant, fold arm, and admission rule — machinery for no semantic gain. An
+eviction may carry a telling out of the window without harm either way: both
 conditions self-heal regardless — pressure re-fires per excursion by
 construction, the pin reminder re-fires on the next register change, and the
 model can always `pin-list`.
@@ -567,7 +577,7 @@ which were fixed at its session start: a child forked after a `/model` on the
 parent's tab used to record the pre-switch model, and now records what it
 actually runs.
 
-## Lifecycle: clear, compact, resume, fork
+## Lifecycle: clear, evict, resume, fork
 
 `clear` rebuilds the focused agent without carrying cancellation residue forward:
 it drops the waiting inbox before the reboot, so a prompt typed during that
@@ -610,34 +620,44 @@ transcript, and no run lock, is created. The in-memory model view and live bus
 still operate, children inherit the choice, and there is consequently nothing
 for `--resume` to reopen.
 
-`compact` runs `provider.summarize` over the closed prefix when context pressure
-crosses the window's reserve (`digest.rs`'s `compaction_due` — used tokens
-into the top 15% of a known window; `COMPACT_THRESHOLD`, 500 KiB of serialised
-history, is the fallback when the window is unknown) and `AgentLog::can_compact`
-holds (no pending tool results). It is called at the **top of `deliberate`**,
-where the agent is `ReadyForUser` ([[invariants/turn-ends-ready|exchange-ends-ready]])
+`evict` sheds the older half of the window when context pressure crosses the
+window's reserve (`digest.rs`'s `eviction_due` — used tokens into the top 15%
+of a known window; `EVICT_THRESHOLD`, 500 KiB of serialised history, is the
+fallback when the window is unknown) and `AgentLog::can_evict` holds (no
+pending tool results). It is called at the **top of `deliberate`**, where the
+agent is `ReadyForUser` ([[invariants/turn-ends-ready|exchange-ends-ready]])
 and the gate actually holds — every provider round-trip (`step`) passes through
 here, so long autonomous and headless sessions stay bounded without an
-interactive `/compact`. An exchange-boundary Esc bails before the summarize
-request ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
+interactive `/evict`. `suffix_keep_budget` (half the history bytes) sets the
+cut and `Memo::plan_eviction` walks back from the newest closed span until that
+budget is spent; the plan carries only `through_exchange`. **No provider call
+is involved**, so an exchange-boundary Esc has nothing to interrupt and simply
+leaves the window as it lies
+([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 
-A successful compaction records `ContextEdited { op: Fold, by: Harness }` with
-the digest and cut. The same fold step removes the prefix spans from the model
-view and evicts their resident events, retaining only their byte ranges in
-`record.jsonl`; this is residency following the view, not a second drain rule.
-There is no `Compacted` state or archival cut to infer. A failed attempt records
-nothing and sheds nothing. The durable log is appended to, never rewritten.
+A successful eviction records `ContextEdited { op: Evict { through_exchange,
+note: None }, by: Harness }`, wrapped in `Transient::State(AgentState::Evicting)`
+for the state row — momentary, since the edit is the whole of it. The same fold
+step removes the prefix spans from the model view, computes one `EvictedRow`
+per removed span, and frees their resident events, retaining only their byte
+ranges in `record.jsonl`; this is residency following the view, not a second
+drain rule. The rows are what the head marker renders, so what left is still
+named and still readable through `transcript`
+([[decisions/260906_context-rollover|context-rollover]]). Nothing old enough to
+shed is a no-op, not an event. The durable log is appended to, never rewritten.
 
-Auto-compaction is one authority over the same `Fold`/`Drop` edit
+Harness eviction is one authority over the same `Evict`/`Drop` edit
 ([[decisions/260812_context-is-a-projection|context-is-a-projection]]). The
-model reaches the other two: `` context `survey ``/`` `drop ``/`` `fold `` and
-`transcript` let it survey, read back, and shed closed exchanges of its own
-choosing, each edit recording `ContextEdited` with `EditAuthority::Model`
-rather than `Harness`. The user's own hand is `/rewind <exchange>`, which
-desugars to the same `Drop` at `EditAuthority::User`, sheds queued self-nudges,
-and rebuilds the nudge state; `/context` surveys the transcript without editing
-it, the read-only sibling `ReplControl::command` serves alongside `/clear`,
-`/compact`, `/branch`, and `/quit`.
+model reaches the other two: `` context `survey ``/`` `drop ``/``
+`evict [through, note] `` edit the window and `transcript`'s ``
+`index ``/`` `read ``/`` `grep `` read the store, each edit recording
+`ContextEdited` with `EditAuthority::Model` rather than `Harness`; only the
+model's own `` `evict `` carries a `note`. The user's own hand is
+`/rewind <exchange>`, which desugars to the same `Drop` at
+`EditAuthority::User`, sheds queued self-nudges, and rebuilds the nudge state;
+`/context` surveys the window without editing it, the read-only sibling
+`ReplControl::command` serves alongside `/clear`, `/evict`, `/branch`, and
+`/quit`.
 
 `Avatar::check_disk_warn` is the disk half of the same ADR ("Disk: report
 and warn only") — report-and-warn only, never rotation or deletion.
@@ -782,9 +802,13 @@ silently severed at this call site.
 
 `digest.rs` holds `clip` and the fixed per-section byte caps for what the
 *model* sees in history: each tool-result section has its own cap
-(`VALUE_CAP` 20 KiB, `STDOUT_CAP`/`STDERR_CAP` 10 KiB), alongside separate caps
-for opaque error blobs (`OPAQUE_CAP`) and the history-compaction threshold; a
-child's reply is not clipped, since it reaches the parent as a value through
+(`VALUE_CAP` 20 KiB, `STDOUT_CAP`/`STDERR_CAP` 10 KiB), alongside a separate cap
+for opaque error blobs (`OPAQUE_CAP`) and the whole-history gauges — the
+`EVICT_THRESHOLD` byte fallback, `eviction_due`/`eviction_trigger` (the reserve
+line and the token count that names it, for `/resources`), `pressure_due` and
+its `PRESSURE_THRESHOLD_FALLBACK` one reserve ahead of it, and
+`suffix_keep_budget`, the half-the-bytes cut. These caps bound a single result;
+eviction bounds the whole history. A child's reply is not clipped, since it reaches the parent as a value through
 `` agents `read `` rather than as text. An oversize section keeps a head+tail digest
 and elides the middle, with a banner nudging the model to scope the query at
 its source and re-read in slices — the same rendering the transcript records,

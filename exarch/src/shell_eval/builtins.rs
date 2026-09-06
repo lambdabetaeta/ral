@@ -1368,7 +1368,7 @@ mod tests {
     }
 
     /// The whole rediscovery idiom: birth a service without keeping its binding,
-    /// reacquire by id, `await` — the only way back once compaction erases the
+    /// reacquire by id, `await` — the only way back once an eviction erases the
     /// binding that named it.
     #[test]
     fn service_handle_reacquires_a_durable_service_and_await_round_trips() {

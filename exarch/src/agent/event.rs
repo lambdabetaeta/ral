@@ -9,9 +9,10 @@
 use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
-use crate::record::model::{Memo, Transcript, View};
+use crate::record::model::{Eviction, Memo, Transcript, View};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -119,9 +120,13 @@ pub enum EditAuthority {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextOp {
-    Fold {
+    /// Every span through `through_exchange` leaves the view at once; the
+    /// model reads the harness's index of them in their place, and `note` —
+    /// the model's own, never the harness's — beside it.
+    Evict {
         through_exchange: u64,
-        digest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     Drop {
         exchanges: Vec<u64>,
@@ -188,12 +193,14 @@ pub enum QuiesceReason {
     Replied,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextSpanKind {
     Exchange,
     Import,
-    Digest,
+    /// An ancestor's exchange, resolved through this log's lineage rather
+    /// than its own ledger.
+    Inherited,
 }
 
 impl ContextSpanKind {
@@ -201,7 +208,7 @@ impl ContextSpanKind {
         match self {
             Self::Exchange => "exchange",
             Self::Import => "import",
-            Self::Digest => "digest",
+            Self::Inherited => "inherited",
         }
     }
 }
@@ -219,6 +226,9 @@ pub struct ContextSurveyItem {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContextSurvey {
     pub items: Vec<ContextSurveyItem>,
+    /// Closed exchanges that have left the view by eviction — the rows of
+    /// every [`crate::record::model::Eviction`] the view carries.
+    pub evicted: usize,
     pub total_bytes: usize,
     pub total_steps: usize,
 }
@@ -231,10 +241,41 @@ impl ContextSurvey {
     }
 }
 
-/// `transcript`'s answer: one element per named span or digest.
+/// `` transcript `index ``'s answer: one element per closed exchange the
+/// store holds, in view or not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreIndexItem {
+    pub exchange: u64,
+    pub kind: ContextSpanKind,
+    pub opening: String,
+    pub steps: usize,
+    /// The weight the exchange carried while the model held it.
+    pub bytes: usize,
+    pub in_view: bool,
+}
+
+/// One line of one message that matched `` transcript `grep ``'s pattern.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrepHit {
+    pub exchange: u64,
+    pub role: ChatRole,
+    /// 1-based, within that message's searched text.
+    pub line: usize,
+    pub text: String,
+}
+
+/// `hits` is capped; `total` is the true count, so a model reading a large
+/// one knows to narrow rather than to page.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GrepAnswer {
+    pub hits: Vec<GrepHit>,
+    pub total: usize,
+}
+
+/// `` transcript `read ``'s answer: one element per named closed exchange.
 ///
-/// In the model view's own order, addressed by `exchange` rather than by
-/// argument position — [`super::model::AgentLog::read_context`]'s doc comment.
+/// In store order, addressed by `exchange` rather than by argument position —
+/// [`super::model::AgentLog::read_context`]'s doc comment.
 #[derive(Clone, Debug)]
 pub struct TranscriptSpan {
     pub exchange: u64,
@@ -310,19 +351,30 @@ pub struct AgentLog {
     seam: crate::record::Emitter,
 }
 
-/// A planned cut: the visible prefix through `through_exchange` becomes the
-/// transcript to summarise, while the newer spans stay verbatim.
-pub struct CompactionPlan {
+/// What a `mnemon` child is forked with: its parent's window, span by span
+/// under the parent's own exchange ids, beside the link that makes every
+/// older ancestor exchange readable too.
+pub struct Inherited {
+    /// The parent's `record.jsonl`, or `None` when the parent kept no log.
+    pub source: Option<PathBuf>,
+    /// The parent's head-marker state, so the child's marker opens where the
+    /// parent's stood.
+    pub evictions: Vec<Eviction>,
+    /// The parent's own exchange floor: ids at or below it are the
+    /// ancestry's, and the child mints its first above it.
     pub through_exchange: u64,
-    pub prefix: Transcript,
+    /// One entry per in-view parent span, in view order.
+    pub spans: Vec<(u64, Vec<ChatMessage>)>,
+}
+
+/// A planned cut: every visible span through `through_exchange` leaves the
+/// window, while the newer ones stay verbatim.
+pub struct EvictionPlan {
+    pub through_exchange: u64,
 }
 
 pub(crate) struct ClearRecord {
     pub(crate) rotation_error: Option<io::Error>,
-}
-
-pub(crate) fn summary_prompt(summary: &str) -> String {
-    format!("Summary of prior work in this session:\n\n{summary}")
 }
 
 impl AgentLog {
@@ -562,13 +614,13 @@ impl AgentLog {
     }
 
     /// Whether a fresh user prompt is admissible.  The attend loop leaves every
-    /// exchange here, and compaction demands it.
+    /// exchange here, and an eviction demands it.
     pub fn is_ready(&self) -> bool {
         self.model_memo.is_ready()
     }
 
-    pub fn can_compact(&self) -> bool {
-        self.model_memo.can_compact()
+    pub fn can_evict(&self) -> bool {
+        self.model_memo.can_evict()
     }
 
     /// Number of event slots still owned by the model view, for the host's
@@ -587,17 +639,37 @@ impl AgentLog {
         self.model_memo.context_survey()
     }
 
-    /// Read named, closed spans in their model-view order.
+    /// Read named, closed exchanges in store order — in view or evicted.
     ///
     /// # Errors
-    /// Refuses an empty list, a duplicate name, a missing or folded exchange,
-    /// or the exchange still in progress.
+    /// Refuses an empty list, a duplicate name, an exchange this session never
+    /// recorded, the exchange still in progress, or an evicted exchange in a
+    /// session that keeps no log.
     pub fn read_context(&mut self, exchanges: &[u64]) -> Result<Vec<TranscriptSpan>, String> {
         self.model_memo.read_context(exchanges)
     }
 
+    /// Every closed exchange the store holds, oldest first.
+    pub fn store_index(&mut self) -> Vec<StoreIndexItem> {
+        self.model_memo.store_index()
+    }
+
+    /// Search the closed exchanges' text — the named ones, or the whole
+    /// store when `exchanges` is `None`.
+    ///
+    /// # Errors
+    /// Refuses a named list the way [`Self::read_context`] does, and a named
+    /// evicted exchange in a session that keeps no log.
+    pub fn grep_store(
+        &mut self,
+        pattern: &Regex,
+        exchanges: Option<&[u64]>,
+    ) -> Result<GrepAnswer, String> {
+        self.model_memo.grep_store(pattern, exchanges)
+    }
+
     /// Approximate context size in serialised model-view bytes.  The fallback
-    /// compaction trigger in [`crate::agent::Avatar::compact`] when the model's
+    /// eviction trigger in [`crate::agent::Avatar::evict`] when the model's
     /// context window is unknown; otherwise that tracks token pressure instead.
     pub fn history_bytes(&mut self) -> usize {
         self.model_memo.history_bytes()
@@ -617,40 +689,82 @@ impl AgentLog {
         Ok(self.model_memo.transcript())
     }
 
-    /// Every committed message whatever the phase; compaction's input.
+    /// Every committed message whatever the phase.
     pub fn history_transcript(&mut self) -> Transcript {
         self.model_memo.transcript()
     }
 
-    /// The parent context a `mnemon` child inherits, materialised whole — the
-    /// mnemon child seed, where ownership genuinely transfers into the
-    /// child's own ledger via [`Self::import_context`].  A spawn from inside
-    /// a tool batch leaves the parent waiting on the very call that made the
-    /// child, so that unfinished assistant frame is dropped: the child starts
-    /// from the request context, not a dangling tool protocol.
-    pub fn inherited_context_messages(&mut self) -> Vec<ChatMessage> {
-        self.model_memo.inherited_context_messages()
+    /// The parent half of a `mnemon` fork — the seed, where ownership
+    /// genuinely transfers into the child's own ledger via
+    /// [`Self::import_context`].  A spawn from inside a tool batch leaves the
+    /// parent waiting on the very call that made the child, so that
+    /// unfinished assistant frame is dropped: the child starts from the
+    /// request context, not a dangling tool protocol.
+    pub fn inherited_context(&mut self) -> Inherited {
+        let source = self.durable.then(|| self.dir.join("record.jsonl"));
+        let evictions = self.model_memo.view().evictions.clone();
+        let through_exchange = self.model_memo.exchange_floor();
+        Inherited {
+            source,
+            evictions,
+            through_exchange,
+            spans: self.model_memo.inherited_context(),
+        }
     }
 
-    /// Import parent context without appending a prompt: a `mnemon` child's
-    /// launch prompt arrives through its inbox, and `deliberate` commits it
-    /// through [`Self::append_user`] like any other exchange.
+    /// Import a parent's context without appending a prompt: a `mnemon`
+    /// child's launch prompt arrives through its inbox, and `deliberate`
+    /// commits it through [`Self::append_user`] like any other exchange.
+    ///
+    /// The link goes down first, then one `ContextMessage` per message under
+    /// the parent's own exchange id, so the child's view reproduces the
+    /// parent's spans and can name any of them.
     ///
     /// # Errors
-    /// The session is not at a ready boundary, or recording a message failed.
-    pub fn import_context(&mut self, messages: Vec<ChatMessage>) -> Result<(), String> {
-        if !self.model_memo.is_ready() {
-            return Err(format!(
-                "cannot import context while session is in state {}",
-                self.model_memo.state_description()
-            ));
-        }
-        let exchange = self.next_exchange();
-        for message in messages {
-            self.record_protocol(Protocol::ContextMessage { exchange, message })
-                .map_err(|e| e.to_string())?;
+    /// The session is not at a ready boundary, or recording a record failed.
+    pub fn import_context(&mut self, inherited: Inherited) -> Result<(), String> {
+        self.ready_to_import()?;
+        let Inherited {
+            source,
+            evictions,
+            through_exchange,
+            spans,
+        } = inherited;
+        self.record_protocol(Protocol::Inherited {
+            source,
+            evictions,
+            through_exchange,
+        })
+        .map_err(|e| e.to_string())?;
+        for (exchange, messages) in spans {
+            for message in messages {
+                self.record_protocol(Protocol::ContextMessage { exchange, message })
+                    .map_err(|e| e.to_string())?;
+            }
         }
         Ok(())
+    }
+
+    /// One harness-authored message imported as an exchange of this log's
+    /// own — the resume note, which inherits nothing and links to no one.
+    ///
+    /// # Errors
+    /// The session is not at a ready boundary, or recording failed.
+    pub fn import_note(&mut self, message: ChatMessage) -> Result<(), String> {
+        self.ready_to_import()?;
+        let exchange = self.next_exchange();
+        self.record_protocol(Protocol::ContextMessage { exchange, message })
+            .map_err(|e| e.to_string())
+    }
+
+    fn ready_to_import(&self) -> Result<(), String> {
+        if self.model_memo.is_ready() {
+            return Ok(());
+        }
+        Err(format!(
+            "cannot import context while session is in state {}",
+            self.model_memo.state_description()
+        ))
     }
 
     // ── Protocol mutations ────────────────────────────────────────────────
@@ -768,21 +882,22 @@ impl AgentLog {
         }
     }
 
-    pub fn plan_compaction(&mut self, keep_budget_bytes: usize) -> Option<CompactionPlan> {
-        self.model_memo.plan_compaction(keep_budget_bytes, None)
+    pub fn plan_eviction(&mut self, keep_budget_bytes: usize) -> Option<EvictionPlan> {
+        self.model_memo.plan_eviction(keep_budget_bytes, None)
     }
 
-    pub fn plan_compaction_before(
+    pub fn plan_eviction_before(
         &mut self,
         keep_budget_bytes: usize,
         before_exchange: u64,
-    ) -> Option<CompactionPlan> {
+    ) -> Option<EvictionPlan> {
         self.model_memo
-            .plan_compaction(keep_budget_bytes, Some(before_exchange))
+            .plan_eviction(keep_budget_bytes, Some(before_exchange))
     }
 
     /// # Errors
-    /// Refuses an empty drop, an unknown or folded exchange, or a live exchange.
+    /// Refuses an empty drop, an unknown or already-evicted exchange, or a
+    /// live exchange.
     pub fn apply_edit(&mut self, op: ContextOp, by: EditAuthority) -> Result<(), String> {
         self.model_memo.validate_edit(&op)?;
         self.record_protocol(Protocol::ContextEdited { op: op.clone(), by })
@@ -797,7 +912,7 @@ impl AgentLog {
     /// anchor. The anchor is checked before the suffix is derived.
     ///
     /// # Errors
-    /// Refuses an absent anchor or one strictly inside the current digest.
+    /// Refuses an absent anchor or one that has already left the view.
     pub fn rewind_exchanges(&self, anchor: u64) -> Result<Vec<u64>, String> {
         self.model_memo.rewind_exchanges(anchor)
     }
@@ -815,7 +930,7 @@ impl AgentLog {
         at_unix_ms: u64,
     ) -> io::Result<ClearRecord> {
         if !self.durable {
-            self.model_memo = Memo::default();
+            self.model_memo = Memo::new(None);
             let rotation_error = self.seam.rotate(None).err();
             self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
             return Ok(ClearRecord { rotation_error });
@@ -832,7 +947,7 @@ impl AgentLog {
             }
         };
         let rotation_error = self.rotate_record(&record_path, rotation);
-        self.model_memo = Memo::default();
+        self.model_memo = Memo::new(Some(record_path));
         let started = self.started_event(None, system_prompt_bytes, at_unix_ms);
         let seam_error = self.record_protocol(started).err();
         Ok(ClearRecord {
@@ -941,10 +1056,10 @@ impl AgentLog {
             fs::remove_dir_all(&dir)?;
         }
         fs::create_dir_all(&dir)?;
-        let seam = if durable {
-            crate::record::Emitter::create(&dir.join("record.jsonl"))?
-        } else {
-            crate::record::Emitter::none()
+        let source = durable.then(|| dir.join("record.jsonl"));
+        let seam = match &source {
+            Some(path) => crate::record::Emitter::create(path)?,
+            None => crate::record::Emitter::none(),
         };
         Ok(Self {
             id: session_id,
@@ -954,7 +1069,7 @@ impl AgentLog {
             account,
             sessions_root,
             _scratch: None,
-            model_memo: Memo::default(),
+            model_memo: Memo::new(source),
             seam,
         })
     }
@@ -1047,11 +1162,11 @@ impl AgentLog {
         }
     }
 
+    /// Exchange ids are lineage-monotone: a child's first is minted above its
+    /// ancestry's reach, not above its own view, which a fork may leave
+    /// empty.
     fn next_exchange(&self) -> u64 {
-        self.model_memo
-            .current_exchange()
-            .unwrap_or(0)
-            .saturating_add(1)
+        self.model_memo.exchange_floor().saturating_add(1)
     }
 
     pub fn current_exchange(&self) -> Option<u64> {
@@ -1165,6 +1280,10 @@ mod tests {
             .unwrap();
     }
 
+    fn regex(pattern: &str) -> Regex {
+        Regex::new(pattern).expect("a test pattern is a regex")
+    }
+
     fn record_path(log: &AgentLog) -> PathBuf {
         log.dir().join("record.jsonl")
     }
@@ -1177,8 +1296,7 @@ mod tests {
     fn span_partition_records_steering_imports_and_unaddressable_prefixes() {
         let mut s = fresh_root();
         s.record_error("before the first prompt".into()).unwrap();
-        s.import_context(vec![ChatMessage::user("inherited")])
-            .unwrap();
+        s.import_note(ChatMessage::user("inherited")).unwrap();
         complete_exchange(&mut s, "prompt", "answer");
         s.append_user("tool prompt".into(), None).unwrap();
         s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
@@ -1218,9 +1336,9 @@ mod tests {
         complete_exchange(&mut s, "three", "three");
         assert_eq!(s.current_exchange(), Some(3));
         s.apply_edit(
-            ContextOp::Fold {
+            ContextOp::Evict {
                 through_exchange: 1,
-                digest: "old".into(),
+                note: None,
             },
             EditAuthority::Harness,
         )
@@ -1268,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_admissibility_refuses_live_unknown_folded_and_empty_names() {
+    fn edit_admissibility_refuses_live_unknown_departed_and_empty_names() {
         let mut live = fresh_root();
         live.append_user("live".into(), None).unwrap();
         let err = live
@@ -1291,21 +1409,22 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, "a context edit must name at least one exchange");
 
+        complete_exchange(&mut unknown, "two", "two");
         unknown
             .apply_edit(
-                ContextOp::Fold {
+                ContextOp::Evict {
                     through_exchange: 1,
-                    digest: "summary".into(),
+                    note: None,
                 },
                 EditAuthority::Harness,
             )
             .unwrap();
         let err = unknown
-            .apply_edit(ContextOp::Drop { exchanges: vec![0] }, EditAuthority::Model)
+            .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
             .unwrap_err();
         assert_eq!(
             err,
-            "exchange 0 is folded into the digest through 1 — name 1 to drop the digest whole, or fold further"
+            "exchange 1 has already left your context — the earliest still in view is 2"
         );
     }
 
@@ -1343,36 +1462,6 @@ mod tests {
             matches!(assistant_msg.parts.as_slice(), [TranscriptPart::Text(text)] if text == "first answer")
         );
 
-        s.apply_edit(
-            ContextOp::Fold {
-                through_exchange: 2,
-                digest: "the old work is complete".into(),
-            },
-            EditAuthority::Harness,
-        )
-        .unwrap();
-        let digest = s
-            .read_context(&[2])
-            .expect("the digest reach is addressable");
-        let [digest] = digest.as_slice() else {
-            panic!("the digest is one span, got {digest:?}")
-        };
-        assert_eq!(digest.exchange, 2);
-        let digest_text = |m: &TranscriptMessage| {
-            m.parts
-                .iter()
-                .any(|p| matches!(p, TranscriptPart::Text(text) if text.contains("the old work is complete")))
-        };
-        assert!(digest.messages.iter().any(digest_text));
-        assert!(!digest.messages.iter().any(|m| m
-            .parts
-            .iter()
-            .any(|p| matches!(p, TranscriptPart::Text(text) if text.contains("first prompt")))));
-        assert_eq!(
-            s.read_context(&[1]).unwrap_err(),
-            "exchange 1 is folded into the digest through 2 — name 2 to drop the digest whole, or fold further"
-        );
-
         complete_exchange(&mut s, "third prompt", "third answer");
         s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
             .unwrap();
@@ -1382,70 +1471,378 @@ mod tests {
         );
     }
 
+    /// The head marker's first message, or `None` when nothing has been
+    /// evicted.
+    fn head_marker(s: &mut AgentLog) -> Option<String> {
+        s.history_transcript()
+            .messages()
+            .next()
+            .and_then(|message| message.content.first_text())
+            .filter(|text| text.starts_with("[EXARCH // Exchange"))
+            .map(str::to_string)
+    }
+
     #[test]
-    fn fold_of_fold_updates_one_digest_and_keeps_the_suffix() {
+    fn evict_of_evict_indexes_both_cuts_and_keeps_the_suffix() {
         let mut s = fresh_root();
-        complete_exchange(&mut s, "one", "one");
-        complete_exchange(&mut s, "two", "two");
+        for prompt in ["one", "two", "three"] {
+            complete_exchange(&mut s, prompt, prompt);
+        }
         s.apply_edit(
-            ContextOp::Fold {
+            ContextOp::Evict {
                 through_exchange: 1,
-                digest: "first digest".into(),
-            },
-            EditAuthority::Harness,
-        )
-        .unwrap();
-        s.apply_edit(
-            ContextOp::Fold {
-                through_exchange: 1,
-                digest: "second digest".into(),
+                note: Some("the parser is fixed".into()),
             },
             EditAuthority::Model,
         )
         .unwrap();
-
-        assert_eq!(
-            s.view().digest.as_ref().map(|d| d.text.clone()),
-            Some("second digest".into())
-        );
-        assert_eq!(
-            s.view()
-                .spans
-                .iter()
-                .map(|span| span.id)
-                .collect::<Vec<_>>(),
-            vec![2]
-        );
-    }
-
-    #[test]
-    fn digest_addressing_drops_the_digest_at_its_reach() {
-        let mut s = fresh_root();
-        complete_exchange(&mut s, "one", "one");
-        complete_exchange(&mut s, "two", "two");
         s.apply_edit(
-            ContextOp::Fold {
-                through_exchange: 1,
-                digest: "digest".into(),
+            ContextOp::Evict {
+                through_exchange: 2,
+                note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
-        s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
-            .unwrap();
-        assert!(s.view().digest.is_none());
+
+        assert_eq!(s.view().evictions.len(), 2);
+        assert_eq!(
+            s.view()
+                .evictions
+                .iter()
+                .flat_map(|eviction| eviction.rows.iter())
+                .map(|row| row.exchange)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         assert_eq!(
             s.view()
                 .spans
                 .iter()
                 .map(|span| span.id)
                 .collect::<Vec<_>>(),
-            vec![2]
+            vec![3]
+        );
+        let marker = head_marker(&mut s).expect("two evictions render one marker");
+        assert!(marker.starts_with("[EXARCH // Exchanges 1–2 have left your context."));
+        assert!(marker.contains("Your note at eviction: \"the parser is fixed\""));
+    }
+
+    /// The prompt cache reads message 0 byte for byte, so the marker must
+    /// depend on the evictions and nothing else — not on how many times it is
+    /// rendered, and not on whether the view was built live or refolded.
+    #[test]
+    fn head_marker_is_a_pure_function_of_evictions() {
+        let sessions = sessions_root("head-marker-purity");
+        let mut live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        for prompt in ["one", "two", "three"] {
+            complete_exchange(&mut live, prompt, prompt);
+        }
+        live.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 2,
+                note: Some("keep going".into()),
+            },
+            EditAuthority::Model,
+        )
+        .unwrap();
+        let first = head_marker(&mut live).expect("an eviction renders a marker");
+        assert_eq!(head_marker(&mut live).as_ref(), Some(&first));
+        drop(live);
+
+        let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
+        assert_eq!(head_marker(&mut resumed), Some(first));
+    }
+
+    #[test]
+    fn head_marker_collapses_rows_past_the_cap() {
+        let mut s = fresh_root();
+        for n in 1..=45u64 {
+            let prompt = format!("prompt {n}");
+            complete_exchange(&mut s, &prompt, "answer");
+        }
+        s.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 44,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        let marker = head_marker(&mut s).expect("an eviction renders a marker");
+        assert!(
+            marker.contains("1–4  (4 earlier exchanges — transcript `index)"),
+            "the rows past the cap collapse to one line, got: {marker}"
+        );
+        assert!(
+            !marker.lines().any(|line| line.starts_with("   1  "))
+                && marker.lines().any(|line| line.starts_with("   5  ")),
+            "the collapsed rows are the oldest, got: {marker}"
+        );
+        assert_eq!(
+            marker.lines().count(),
+            1 + 1 + 40,
+            "one sentence, one collapse line, and the capped rows"
+        );
+    }
+
+    /// A drop of a late exchange keeps the provider's prefix cached, so it
+    /// must leave message 0 exactly as it was.
+    #[test]
+    fn drop_does_not_touch_the_head_marker() {
+        let mut s = fresh_root();
+        for prompt in ["one", "two", "three", "four"] {
+            complete_exchange(&mut s, prompt, prompt);
+        }
+        s.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 2,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        let before = head_marker(&mut s).expect("an eviction renders a marker");
+        s.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::Model)
+            .unwrap();
+        assert_eq!(head_marker(&mut s), Some(before));
+        assert!(
+            s.view()
+                .evictions
+                .iter()
+                .all(|eviction| eviction.rows.iter().all(|row| row.exchange != 3))
         );
     }
 
     #[test]
-    fn compaction_plan_walks_newest_spans_and_folds_by_exchange() {
+    fn evict_refuses_an_exchange_already_gone() {
+        let mut s = fresh_root();
+        for prompt in ["one", "two", "three"] {
+            complete_exchange(&mut s, prompt, prompt);
+        }
+        s.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 2,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        let err = s
+            .apply_edit(
+                ContextOp::Evict {
+                    through_exchange: 1,
+                    note: None,
+                },
+                EditAuthority::Model,
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "exchange 1 has already left your context — the earliest still in view is 3"
+        );
+    }
+
+    #[test]
+    fn evict_refuses_the_live_exchange() {
+        let mut s = fresh_root();
+        complete_exchange(&mut s, "one", "one");
+        s.append_user("two".into(), None).unwrap();
+        let err = s
+            .apply_edit(
+                ContextOp::Evict {
+                    through_exchange: 2,
+                    note: None,
+                },
+                EditAuthority::Model,
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "exchange 2 is the one you are in — a context edit may only name closed exchanges"
+        );
+    }
+
+    /// What comes back from the log is what the model was sent: the records
+    /// hold the clipped strings, and one rendering serves both.
+    #[test]
+    fn read_context_reads_an_evicted_exchange_byte_identically() {
+        let mut s = fresh_root();
+        complete_exchange(&mut s, "one", "answer one");
+        complete_exchange(&mut s, "two", "answer two");
+        let before = format!("{:?}", s.read_context(&[1]).expect("in view"));
+        s.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 1,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        let after = format!("{:?}", s.read_context(&[1]).expect("evicted but recorded"));
+        assert_eq!(after, before);
+        assert_eq!(
+            s.read_context(&[9]).unwrap_err(),
+            "exchange 9 was never recorded — the last closed exchange is 2"
+        );
+    }
+
+    /// The store is every closed exchange, wherever it lies: the evicted one
+    /// carries the weight it left at, the in-view ones the weight they still
+    /// cost, and the exchange in flight is in no store at all.
+    #[test]
+    fn store_index_lists_in_view_and_evicted() {
+        let mut s = fresh_root();
+        for prompt in ["one", "two", "three"] {
+            complete_exchange(&mut s, prompt, prompt);
+        }
+        s.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 1,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        s.append_user("live".into(), None).unwrap();
+
+        let index = s.store_index();
+        assert_eq!(
+            index
+                .iter()
+                .map(|item| (item.exchange, item.in_view))
+                .collect::<Vec<_>>(),
+            vec![(1, false), (2, true), (3, true)]
+        );
+        assert_eq!(index[0].opening, "one");
+        assert!(
+            index
+                .iter()
+                .all(|item| item.bytes > 0 && item.kind == ContextSpanKind::Exchange)
+        );
+    }
+
+    /// One search over both sides of the ledger: the freed records read back
+    /// off `record.jsonl`, the resident ones off the render cache, and the
+    /// hits in store order across the seam between them.
+    #[test]
+    fn grep_walks_resident_then_freed() {
+        let mut s = fresh_root();
+        complete_exchange(&mut s, "the parser is broken", "I will fix the parser");
+        complete_exchange(&mut s, "the lexer is fine", "nothing to do");
+        s.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 1,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+
+        let answer = s
+            .grep_store(&regex(r"\bthe\b"), None)
+            .expect("the whole store is searchable");
+        assert_eq!(answer.total, 3);
+        assert_eq!(
+            answer
+                .hits
+                .iter()
+                .map(|hit| (hit.exchange, hit.role.clone(), hit.line))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, ChatRole::User, 1),
+                (1, ChatRole::Assistant, 1),
+                (2, ChatRole::User, 1),
+            ]
+        );
+        assert_eq!(answer.hits[0].text, "the parser is broken");
+
+        let named = s
+            .grep_store(&regex("parser"), Some(&[2]))
+            .expect("a named closed exchange is searchable");
+        assert_eq!(named.total, 0);
+        assert_eq!(
+            s.grep_store(&regex("parser"), Some(&[9])).unwrap_err(),
+            "exchange 9 was never recorded — the last closed exchange is 2"
+        );
+    }
+
+    /// A pattern that matches everything answers a window, not the store:
+    /// `total` is what tells the model to narrow.
+    #[test]
+    fn grep_caps_hits_and_reports_total() {
+        let mut s = fresh_root();
+        let many = (1..=150)
+            .map(|n| format!("line {n} matches"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        complete_exchange(&mut s, "count", &many);
+
+        let answer = s
+            .grep_store(&regex("matches"), None)
+            .expect("the whole store is searchable");
+        assert_eq!(answer.total, 150);
+        assert_eq!(answer.hits.len(), 100);
+        assert_eq!(answer.hits[0].line, 1);
+        assert_eq!(
+            answer.hits[99].line, 100,
+            "the oldest hundred, in store order"
+        );
+    }
+
+    #[test]
+    fn no_logs_refuses_reading_an_evicted_exchange_and_names_the_mode() {
+        let sessions = sessions_root("no-logs-read-back");
+        let mut s = AgentLog::root_without_logs(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        complete_exchange(&mut s, "one", "one");
+        complete_exchange(&mut s, "two", "two");
+        s.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 1,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        assert_eq!(
+            s.read_context(&[1]).unwrap_err(),
+            "this session runs without a log (`--no-logs`), so exchange 1 left your context for good; only exchanges still in view can be read back."
+        );
+        assert_eq!(
+            s.grep_store(&regex("one"), Some(&[1])).unwrap_err(),
+            "this session runs without a log (`--no-logs`), so exchange 1 left your context for good; only exchanges still in view can be read back."
+        );
+        assert_eq!(
+            s.grep_store(&regex("one"), None)
+                .expect("what is resident is still searchable")
+                .total,
+            0,
+            "the head marker has already said the evicted exchanges are unreadable"
+        );
+        let marker = head_marker(&mut s).expect("an eviction renders a marker");
+        assert!(
+            marker.contains("They are not readable: this session keeps no log."),
+            "a session with no store says so, got: {marker}"
+        );
+        assert!(!marker.contains("transcript"));
+    }
+
+    #[test]
+    fn eviction_plan_walks_newest_spans_and_cuts_by_exchange() {
         let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
@@ -1456,22 +1853,17 @@ mod tests {
             .last()
             .expect("the newest exchange has a survey row")
             .bytes;
-        let plan = s.plan_compaction(keep).expect("old spans to fold");
+        let plan = s.plan_eviction(keep).expect("old spans to shed");
         assert_eq!(plan.through_exchange, 2);
-        assert!(
-            plan.prefix
-                .messages()
-                .any(|message| { message.content.first_text() == Some("one") })
-        );
         s.apply_edit(
-            ContextOp::Fold {
+            ContextOp::Evict {
                 through_exchange: plan.through_exchange,
-                digest: "summary".into(),
+                note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
-        assert_eq!(s.view().digest.as_ref().unwrap().through_exchange, 2);
+        assert_eq!(s.context_survey().evicted, 2);
         assert!(
             !s.history_transcript()
                 .messages()
@@ -1482,8 +1874,7 @@ mod tests {
     #[test]
     fn user_ending_import_span_is_never_torn() {
         let mut s = fresh_root();
-        s.import_context(vec![ChatMessage::user("imported user")])
-            .unwrap();
+        s.import_note(ChatMessage::user("imported user")).unwrap();
         complete_exchange(&mut s, "normal", "answer");
 
         let transcript = s.history_transcript();
@@ -1727,14 +2118,13 @@ mod tests {
             0,
         )
         .unwrap();
-        live.import_context(vec![ChatMessage::user("inherited")])
-            .unwrap();
+        live.import_note(ChatMessage::user("inherited")).unwrap();
         complete_exchange(&mut live, "one", "answer one");
         complete_exchange(&mut live, "two", "answer two");
         live.apply_edit(
-            ContextOp::Fold {
+            ContextOp::Evict {
                 through_exchange: 2,
-                digest: "the old work is complete".into(),
+                note: None,
             },
             EditAuthority::Harness,
         )
@@ -2016,9 +2406,9 @@ mod tests {
                 }
                 2 => {
                     live.apply_edit(
-                        ContextOp::Fold {
+                        ContextOp::Evict {
                             through_exchange: 2,
-                            digest: "folded".into(),
+                            note: None,
                         },
                         EditAuthority::Harness,
                     )
@@ -2032,14 +2422,14 @@ mod tests {
                 }
                 4 => {
                     live.apply_edit(
-                        ContextOp::Fold {
+                        ContextOp::Evict {
                             through_exchange: 2,
-                            digest: "folded".into(),
+                            note: Some("halfway".into()),
                         },
                         EditAuthority::Harness,
                     )
                     .unwrap();
-                    live.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::Model)
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::Model)
                         .unwrap();
                 }
                 5 => {
@@ -2049,17 +2439,17 @@ mod tests {
                 }
                 6 => {
                     live.apply_edit(
-                        ContextOp::Fold {
+                        ContextOp::Evict {
                             through_exchange: 1,
-                            digest: "first".into(),
+                            note: None,
                         },
                         EditAuthority::Harness,
                     )
                     .unwrap();
                     live.apply_edit(
-                        ContextOp::Fold {
-                            through_exchange: 1,
-                            digest: "second".into(),
+                        ContextOp::Evict {
+                            through_exchange: 2,
+                            note: Some("second cut".into()),
                         },
                         EditAuthority::Model,
                     )
@@ -2084,6 +2474,378 @@ mod tests {
                 "pattern {pattern}"
             );
         }
+    }
+
+    /// `resume` refuses unless its from-scratch refold agrees with the
+    /// incremental memo, and an eviction's rows are part of that agreement —
+    /// so a refold that re-rendered a freed span differently would refuse
+    /// here rather than serve the model a marker that had drifted.
+    #[test]
+    fn fold_equals_memo_across_evict() {
+        let sessions = sessions_root("fold-equals-memo-evict");
+        let mut live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        live.append_user("interrupted".into(), None).unwrap();
+        live.quiesce(QuiesceReason::Cancelled);
+        for prompt in ["one", "two", "three"] {
+            complete_exchange(&mut live, prompt, prompt);
+        }
+        live.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 3,
+                note: Some("the abandoned exchange is indexed too".into()),
+            },
+            EditAuthority::Model,
+        )
+        .unwrap();
+        let evictions = live.view().evictions.clone();
+        drop(live);
+
+        let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
+        assert_eq!(resumed.view().evictions, evictions);
+    }
+
+    /// A `mnemon` child of `parent`: its own log under the same sessions
+    /// root, opened with the spans and the link the parent hands over.
+    fn mnemon(parent: &mut AgentLog, child_id: AgentId) -> AgentLog {
+        let inherited = parent.inherited_context();
+        let mut child = parent
+            .fork(child_id, 0, "model", &RecordedAccount::for_test("provider"))
+            .expect("child log");
+        child.import_context(inherited).expect("import");
+        child
+    }
+
+    fn openings(span: &TranscriptSpan) -> Vec<&str> {
+        span.messages
+            .iter()
+            .filter_map(|message| match message.parts.first() {
+                Some(TranscriptPart::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The lineage is one address space: what the parent evicted before the
+    /// fork is still the child's to read, under the number the parent gave
+    /// it, and the child's own ids start above every one of them.
+    #[test]
+    fn a_mnemon_child_reads_an_ancestors_evicted_exchange_and_mints_ids_above_it() {
+        let sessions = sessions_root("lineage-read");
+        let mut parent = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        for prompt in ["one", "two", "three", "four"] {
+            complete_exchange(&mut parent, prompt, prompt);
+        }
+        parent
+            .apply_edit(
+                ContextOp::Evict {
+                    through_exchange: 3,
+                    note: None,
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+
+        let mut child = mnemon(&mut parent, 1);
+        assert_eq!(
+            child
+                .view()
+                .spans
+                .iter()
+                .map(|span| span.id)
+                .collect::<Vec<_>>(),
+            vec![4],
+            "the parent's surviving span crosses under the parent's own id"
+        );
+        complete_exchange(&mut child, "the child's own", "answer");
+        assert_eq!(child.current_exchange(), Some(5));
+
+        let read = child
+            .read_context(&[2])
+            .expect("an ancestor's evicted exchange is in the lineage's store");
+        let [span] = read.as_slice() else {
+            panic!("one named exchange answers one span, got {read:?}")
+        };
+        assert_eq!(span.exchange, 2);
+        assert_eq!(openings(span), vec!["two", "two"]);
+
+        let mut grandchild = mnemon(&mut child, 2);
+        let read = grandchild
+            .read_context(&[2])
+            .expect("two links back is still the same store");
+        assert_eq!(openings(&read[0]), vec!["two", "two"]);
+        complete_exchange(&mut grandchild, "the grandchild's own", "answer");
+        assert_eq!(grandchild.current_exchange(), Some(6));
+    }
+
+    /// A `/rewind` at a ready boundary can leave a parent with no span at
+    /// all; the ids it minted are still spent, and the child says so.
+    #[test]
+    fn an_empty_parent_view_still_floors_the_childs_first_exchange() {
+        let sessions = sessions_root("lineage-floor");
+        let mut parent = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        complete_exchange(&mut parent, "one", "one");
+        complete_exchange(&mut parent, "two", "two");
+        parent
+            .apply_edit(
+                ContextOp::Drop {
+                    exchanges: vec![1, 2],
+                },
+                EditAuthority::User,
+            )
+            .unwrap();
+        assert!(parent.view().spans.is_empty());
+
+        let mut child = mnemon(&mut parent, 1);
+        assert!(child.view().spans.is_empty());
+        child.append_user("first".into(), None).unwrap();
+        assert_eq!(child.current_exchange(), Some(3));
+    }
+
+    /// A link to a parent that kept no log ends the lineage, and the refusal
+    /// names the parent rather than blaming the child's own mode.
+    #[test]
+    fn a_no_logs_link_refuses_naming_the_ancestor() {
+        let sessions = sessions_root("lineage-no-logs");
+        let mut parent = AgentLog::root_without_logs(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        complete_exchange(&mut parent, "one", "one");
+        complete_exchange(&mut parent, "two", "two");
+        parent
+            .apply_edit(
+                ContextOp::Evict {
+                    through_exchange: 1,
+                    note: None,
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+
+        let mut child = mnemon(&mut parent, 1);
+        assert_eq!(
+            child.read_context(&[1]).unwrap_err(),
+            "an ancestor of this session ran `--no-logs`, so exchange 1 is unreadable; only what was handed down at the fork is still in your view."
+        );
+    }
+
+    /// Only a fork's opening may link a log to an ancestry: a link found
+    /// after the log has a context of its own is foreign data.
+    #[test]
+    fn admission_refuses_inherited_after_the_first_exchange() {
+        let sessions = sessions_root("lineage-late-link");
+        let mut live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        complete_exchange(&mut live, "one", "one");
+        let path = sessions.path().join("0/record.jsonl");
+        drop(live);
+        let late = Record::Protocol(Protocol::Inherited {
+            source: None,
+            evictions: Vec::new(),
+            through_exchange: 0,
+        });
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&crate::record::envelope_line(&late))
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        file.flush().unwrap();
+
+        let error = AgentLog::resume(sessions.path(), 0)
+            .err()
+            .expect("a late link is foreign data");
+        let text = error.to_string();
+        assert!(text.contains("only a fork's opening may do"), "{text}");
+    }
+
+    /// The link is folded, not just recorded: a refold reads the parent's
+    /// head-marker state back off it, so the `fold == memo` law covers an
+    /// inherited view as it covers an evicted one.
+    #[test]
+    fn fold_equals_memo_across_evict_and_inherited() {
+        let ancestry = sessions_root("fold-equals-memo-ancestor");
+        let mut ancestor = AgentLog::root(
+            ancestry.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        for prompt in ["one", "two", "three"] {
+            complete_exchange(&mut ancestor, prompt, prompt);
+        }
+        ancestor
+            .apply_edit(
+                ContextOp::Evict {
+                    through_exchange: 2,
+                    note: Some("the parser is fixed".into()),
+                },
+                EditAuthority::Model,
+            )
+            .unwrap();
+        let inherited = ancestor.inherited_context();
+
+        let sessions = sessions_root("fold-equals-memo-inherited");
+        let mut live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        live.import_context(inherited).unwrap();
+        complete_exchange(&mut live, "own", "own");
+        live.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 3,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        let evictions = live.view().evictions.clone();
+        assert_eq!(evictions.len(), 2, "the parent's cut and this log's own");
+        drop(live);
+
+        let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
+        assert_eq!(resumed.view().evictions, evictions);
+    }
+
+    /// The index is the whole lineage, oldest first, each exchange listed
+    /// once: an inherited exchange the child holds itself is an import of its
+    /// own, never a second row from the ancestry.
+    #[test]
+    fn store_index_lists_in_view_and_evicted_and_inherited() {
+        let sessions = sessions_root("lineage-index");
+        let mut parent = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        for prompt in ["one", "two", "three"] {
+            complete_exchange(&mut parent, prompt, prompt);
+        }
+        parent
+            .apply_edit(
+                ContextOp::Evict {
+                    through_exchange: 2,
+                    note: None,
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+
+        let mut child = mnemon(&mut parent, 1);
+        complete_exchange(&mut child, "four", "four");
+
+        let index = child.store_index();
+        assert_eq!(
+            index
+                .iter()
+                .map(|item| (item.exchange, item.kind, item.in_view))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, ContextSpanKind::Inherited, false),
+                (2, ContextSpanKind::Inherited, false),
+                (3, ContextSpanKind::Import, true),
+                (4, ContextSpanKind::Exchange, true),
+            ]
+        );
+        assert_eq!(index[0].opening, "one");
+        assert!(index.iter().all(|item| item.bytes > 0));
+    }
+
+    /// One search over the whole lineage: the child's resident span, its own
+    /// freed records, and then the ancestor's file — in store order across
+    /// all three, and never the same exchange twice.
+    #[test]
+    fn grep_walks_resident_then_freed_then_ancestors() {
+        let sessions = sessions_root("lineage-grep");
+        let mut parent = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        complete_exchange(&mut parent, "the parser is broken", "I will fix the parser");
+        complete_exchange(&mut parent, "the lexer is fine", "nothing to do");
+        parent
+            .apply_edit(
+                ContextOp::Evict {
+                    through_exchange: 1,
+                    note: None,
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+
+        let mut child = mnemon(&mut parent, 1);
+        complete_exchange(&mut child, "the tests pass", "good");
+        child
+            .apply_edit(
+                ContextOp::Evict {
+                    through_exchange: 2,
+                    note: None,
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+
+        let answer = child
+            .grep_store(&regex(r"\bthe\b"), None)
+            .expect("the lineage's whole store is searchable");
+        assert_eq!(answer.total, 4);
+        assert_eq!(
+            answer
+                .hits
+                .iter()
+                .map(|hit| (hit.exchange, hit.role.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, ChatRole::User),
+                (1, ChatRole::Assistant),
+                (2, ChatRole::User),
+                (3, ChatRole::User),
+            ]
+        );
+        assert_eq!(answer.hits[0].text, "the parser is broken");
     }
 
     #[test]

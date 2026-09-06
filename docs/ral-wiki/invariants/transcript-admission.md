@@ -13,8 +13,9 @@ admissibility* at the one place messages enter the log: the `deliberate` commit
 boundary in [[map/exarch/agent|agent]].
 
 Sequencing is **not** strict user/assistant alternation, and never was.
-Consecutive same-role messages are routine: a compacted session sends the
-digest as a user message immediately before the next span's user prompt, an
+Consecutive same-role messages are routine: a session that has evicted sends
+the head marker — the harness's user-voice index of what left — as message 0,
+immediately before the oldest surviving span's user prompt, an
 inherited import span can end on a user message with the child's launch prompt
 behind it, and an abandoned exchange's note is a user message before the prompt
 that replaced it ([[invariants/turn-ends-ready|exchange-ends-ready]]). genai's
@@ -45,11 +46,19 @@ Three commit-time obligations, all in `Agent::deliberate` (the deep-review X-tag
   calls and continues the loop; only a `MaxTokens` turn with *no* tool call
   raises `Truncated` to nudge.
 
-Two adjacent obligations keep the invariant whole:
+Three adjacent obligations keep the invariant whole:
 
-- **Auto-compaction runs where it can (X1).** Compaction needs `ReadyForUser`
-  (`can_compact`), which holds at the top of `deliberate`, never mid-loop in
+- **Eviction runs where it can (X1).** It needs `ReadyForUser` (`can_evict`),
+  which holds at the top of `deliberate`, never mid-loop in
   `AwaitingAssistantAfterToolResults` — the prior placement was dead code.
+- **`Inherited` stands only at a fork's opening.** `Admission` refuses
+  `Protocol::Inherited` anywhere but the first protocol record of a child log:
+  at `ReadyForUser`, with `max_exchange == 0`, and never twice. The record is
+  sequencing-neutral — it commits no message and advances no state — so the
+  rule cannot be read off a `State` alone; it is admission's own, and it is
+  what makes "a log has at most one ancestry, fixed at the fork that opened it"
+  a property of the file rather than a habit of the writer
+  ([[decisions/260906_context-rollover|context-rollover]]).
 - **A JSON-body 4xx is classified, not lost (X3).** `json_status_code` reads
   a JSON `"code": <code>` from the nested or flat error body, so an
   OpenRouter-shaped `{"code":400,…}` becomes a structured `Api` error rather
@@ -63,5 +72,5 @@ exarch analogue of the wire-hop discipline
 complete values.
 
 See also [[invariants/turn-ends-ready|exchange-ends-ready]] (the sequencing
-half), [[map/exarch/agent|agent]] (`deliberate`, `admit_assistant`, `compact`),
+half), [[map/exarch/agent|agent]] (`deliberate`, `admit_assistant`, `evict`),
 [[map/exarch/provider|provider]] (`from_genai`, `json_status_code`).

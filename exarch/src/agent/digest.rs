@@ -4,7 +4,7 @@
 //! cap, so one oversized stream cannot crowd out the others.  The string the
 //! model reads on later turns is the one the transcript records, so the user
 //! never sees more of a result than the model did.  These caps bound a single
-//! result; the whole history is bounded by compaction ([`compaction_due`]).
+//! result; the whole history is bounded by eviction ([`eviction_due`]).
 
 use crate::shell_eval;
 use std::fmt::Write;
@@ -20,21 +20,16 @@ const STDERR_CAP: usize = 10_000;
 /// section caps: a diagnostic past a few KB is noise.
 pub const OPAQUE_CAP: usize = 3000;
 
-/// Fallback compaction trigger, in serialised model-view bytes, for
-/// `Avatar::compact` — used only when the model's context window is unknown
+/// Fallback eviction trigger, in serialised model-view bytes, for
+/// `Avatar::evict` — used only when the model's context window is unknown
 /// (a native provider with no fetched catalog).
 ///
-/// A known window goes through [`compaction_due`] instead.
-pub const COMPACT_THRESHOLD: usize = 500 * 1024;
+/// A known window goes through [`eviction_due`] instead.
+pub const EVICT_THRESHOLD: usize = 500 * 1024;
 
-/// Summary output cap when the window is unknown.  Generous on purpose: a
-/// truncated summary aborts the whole compaction, so a verbose summariser
-/// must be able to finish.
-pub const SUMMARY_CAP_FALLBACK_TOKENS: u32 = 8_192;
-
-/// Tokens held back from the window for the next prompt and the summary
-/// response.  Mirrors oh-my-pi's `effectiveReserveTokens`: 15% of the
-/// window, with a floor so a small window still keeps a usable margin.
+/// Tokens held back from the window for the next prompt.  Mirrors
+/// oh-my-pi's `effectiveReserveTokens`: 15% of the window, with a floor so a
+/// small window still keeps a usable margin.
 fn reserve_tokens(window: u64) -> u64 {
     const RESERVE_FLOOR_TOKENS: u64 = 16_384;
     (window * 15 / 100).max(RESERVE_FLOOR_TOKENS)
@@ -42,40 +37,29 @@ fn reserve_tokens(window: u64) -> u64 {
 
 /// Whether the live context (`used` input tokens) has grown into the
 /// reserve — i.e. crossed `window − reserve`.
-pub fn compaction_due(used: u64, window: u64) -> bool {
+pub fn eviction_due(used: u64, window: u64) -> bool {
     used + reserve_tokens(window) > window
 }
 
-/// The token count past which [`compaction_due`] fires, spelled as a gauge
+/// The token count past which [`eviction_due`] fires, spelled as a gauge
 /// cap for `/resources`.
-pub fn compaction_trigger(window: u64) -> u64 {
+pub fn eviction_trigger(window: u64) -> u64 {
     window.saturating_sub(reserve_tokens(window))
 }
 
-/// The soft line one full reserve ahead of [`compaction_due`]: room enough
-/// for the model to park what matters in files before the summary takes the
-/// rest.
+/// The soft line one full reserve ahead of [`eviction_due`]: room enough for
+/// the model to leave itself a note before the older half of its context
+/// goes.
 pub fn pressure_due(used: u64, window: u64) -> bool {
     used + 2 * reserve_tokens(window) > window
 }
 
 /// Fallback soft line when the window is unknown: three-quarters of
-/// [`COMPACT_THRESHOLD`].
-pub const PRESSURE_THRESHOLD_FALLBACK: usize = COMPACT_THRESHOLD / 4 * 3;
+/// [`EVICT_THRESHOLD`].
+pub const PRESSURE_THRESHOLD_FALLBACK: usize = EVICT_THRESHOLD / 4 * 3;
 
-/// Summary output cap for a known `window`: four-fifths of the reserve,
-/// clamped at both ends.
-///
-/// A compaction keeps its recent suffix verbatim ([`suffix_keep_budget`]), so
-/// the summary covers only the dropped prefix.
-pub fn summary_cap_tokens(window: u64) -> u32 {
-    const MIN: u64 = 4_096;
-    const MAX: u64 = 32_768;
-    (reserve_tokens(window) * 4 / 5).clamp(MIN, MAX) as u32
-}
-
-/// Byte budget for the verbatim suffix kept across a compaction: half the
-/// model-view bytes, the older half being what gets summarised.
+/// Byte budget for the verbatim suffix kept across an eviction: half the
+/// model-view bytes, the older half being what leaves the window.
 ///
 /// Window-agnostic — it splits whatever is in context, which the trigger
 /// bounds.
@@ -232,11 +216,11 @@ mod tests {
     #[test]
     fn pressure_line_sits_a_full_reserve_before_the_trigger() {
         let w = 200_000;
-        let trigger = compaction_trigger(w);
-        assert!(!compaction_due(trigger, w) && compaction_due(trigger + 1, w));
+        let trigger = eviction_trigger(w);
+        assert!(!eviction_due(trigger, w) && eviction_due(trigger + 1, w));
         assert!(
             pressure_due(trigger, w),
-            "compaction due implies pressure due"
+            "eviction due implies pressure due"
         );
         assert!(!pressure_due(w / 2, w), "half a window is not pressure");
     }

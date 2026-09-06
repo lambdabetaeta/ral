@@ -30,9 +30,7 @@ impl Sealed {
 
 /// The one whole-history deep copy: the shared transcript → genai's owned
 /// request. Call inside the attempt, so a retry re-manufactures and no
-/// pre-made template is ever cloned. `tail`, when given, is a freshly
-/// minted message appended after the transcript's own — `summarize`'s
-/// instruction — never a second clone site.
+/// pre-made template is ever cloned.
 ///
 /// Shapes the transcript for prompt caching. Breakpoints are
 /// Anthropic-only: on `OpenAI` the same `CacheControl` selects the
@@ -41,16 +39,14 @@ impl Sealed {
 /// Marking the system prompt and the last two messages leaves two anchors
 /// of different depths: the shallower is free (it writes the same
 /// tokens), and it saves the rewrite whenever the next tail diverges
-/// rather than extends — a retry, a fork, a compaction.
+/// rather than extends — a retry, a fork, an eviction.
 pub(super) fn manufacture(
     adapter: AdapterKind,
     system: &str,
     transcript: &Transcript,
-    tail: Option<ChatMessage>,
     tools: &[Tool],
 ) -> Sealed {
     let mut owned: Vec<ChatMessage> = transcript.messages().cloned().collect();
-    owned.extend(tail);
     let mut request = if adapter == AdapterKind::Anthropic {
         for message in owned.iter_mut().rev().take(2) {
             message.options = Some(MessageOptions::from(CacheControl::Ephemeral));
@@ -116,7 +112,7 @@ mod tests {
             ChatMessage::user("three"),
         ]);
         let request =
-            manufacture(AdapterKind::Anthropic, "SYS", &transcript, None, &[]).into_request();
+            manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
         assert!(request.system.is_none());
         assert_eq!(request.messages[0].role, ChatRole::System);
         let marked = |index: usize| {
@@ -135,7 +131,7 @@ mod tests {
     fn openai_gets_a_bare_system_prompt_and_no_breakpoints() {
         let transcript = Transcript::for_test(vec![ChatMessage::user("hi")]);
         let request =
-            manufacture(AdapterKind::OpenAIResp, "SYS", &transcript, None, &[]).into_request();
+            manufacture(AdapterKind::OpenAIResp, "SYS", &transcript, &[]).into_request();
         assert_eq!(request.system.as_deref(), Some("SYS"));
         assert!(request.messages[0].options.is_none());
     }
@@ -144,7 +140,7 @@ mod tests {
     fn manufacture_leaves_the_source_messages_untouched() {
         let source = vec![ChatMessage::user("one"), ChatMessage::user("two")];
         let transcript = Transcript::for_test(source.clone());
-        let _ = manufacture(AdapterKind::Anthropic, "SYS", &transcript, None, &[]);
+        let _ = manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]);
         assert!(source.iter().all(|message| message.options.is_none()));
         assert!(
             transcript
@@ -157,28 +153,23 @@ mod tests {
     fn no_tools_leaves_the_request_tools_unset() {
         let transcript = Transcript::default();
         let request =
-            manufacture(AdapterKind::Anthropic, "SYS", &transcript, None, &[]).into_request();
+            manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
         assert!(request.tools.is_none());
     }
 
+    /// The degenerate last-two: a one-message transcript leaves the system
+    /// prompt and that message both marked, and no third breakpoint invented.
     #[test]
-    fn tail_rides_along_after_the_transcript_and_is_still_marked() {
+    fn a_single_message_transcript_marks_the_system_prompt_and_itself() {
         let transcript = Transcript::for_test(vec![ChatMessage::user("one")]);
-        let request = manufacture(
-            AdapterKind::Anthropic,
-            "SYS",
-            &transcript,
-            Some(ChatMessage::user("summarise this")),
-            &[],
-        )
-        .into_request();
-        // system, "one", tail — the tail is one of the marked last two.
-        assert_eq!(request.messages.len(), 3);
-        assert_eq!(
-            request.messages[2].content.first_text(),
-            Some("summarise this")
+        let request = manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
+        assert_eq!(request.messages.len(), 2);
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| message.options.is_some())
         );
-        assert!(request.messages[2].options.is_some());
     }
 
     #[test]

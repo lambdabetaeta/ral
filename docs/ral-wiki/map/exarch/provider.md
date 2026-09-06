@@ -1,5 +1,5 @@
 ---
-generated_at_commit: b46ad7ad
+generated_at_commit: c5df4203
 generated_at_date: 2026-09-06
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
@@ -13,8 +13,8 @@ local below the facade: `provider/identity.rs` owns selectable identity,
 `request.rs` per-request `ChatOptions` and tuning (`Tuning`, the
 `EFFORT_LADDER` rungs — the TUI keeps only the glyphs), `wire.rs` the one door
 that turns a `Transcript` into an owned `genai::ChatRequest` (below),
-`transport.rs` credential binding and caching, `stream.rs` completion and
-summary execution, `retry.rs` recovery timing, `usage.rs` accounting,
+`transport.rs` credential binding and caching, `stream.rs` completion
+execution, `retry.rs` recovery timing, `usage.rs` accounting,
 `error.rs` fault classification, and `listing.rs` model-list fetch
 orchestration. The public facade
 re-exports their established types; sibling modules meet through narrow
@@ -260,7 +260,7 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
   a keyed background-fetch pump (`Fetches`), and the per-provider `Listing`
   that seeds from the catalog's cache and fills misses in as they land.
 
-## The streaming and summary paths
+## The streaming path
 
 - `complete(system, transcript, tool_enabled, search, on_delta, cancel)` —
   streams one assistant reply, calling `on_delta` with a `Delta::Say` per text
@@ -286,12 +286,10 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
   decoded event can do that.
   This lands the first local slice of
   [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
-- `summarize` — one non-streamed call producing a compaction summary; used by
-  [[map/exarch/agent|`Avatar::compact`]]. The same idle timeout bounds the
-  whole `exec_chat` request (no incremental events to idle between). A summary
-  that itself hit the 1024-token budget is surfaced as `Truncated`, so
-  `compact` keeps the un-summarised history rather than committing a half
-  summary (X10).
+- Streaming is the **only** call the engine makes. There is no second,
+  non-streamed path: bounding the window is
+  [[map/exarch/agent|`Avatar::evict`]]'s job and it makes no provider call at
+  all ([[decisions/260906_context-rollover|context-rollover]]).
 - `cancel` is the **request-local** cancellation handle: the foreground exchange
   passes its root token (Esc-linked), an async `agent` passes its own
   `cancel::Token`, so two concurrent requests no longer share one
@@ -370,15 +368,15 @@ cannot land mid-character and panic (X8).
 ADR, [[internals/session-record|session-record]] covers the persistent
 `Transcript` value it consumes. `Sealed(ChatRequest)` wraps the result and is
 deliberately not `Clone`, so a built request cannot be kept alive and cloned
-for a later retry; `manufacture(adapter, system, transcript: &Transcript, tail,
+for a later retry; `manufacture(adapter, system, transcript: &Transcript,
 tools)` is called fresh inside each retry attempt in `stream.rs`'s
-`Engine::complete`/`Engine::summarize`, and is the sole successor to the old
-free-standing `build_cached_request` and both engines' `request_template`s,
-which no longer exist.
+`Engine::complete`, and is the sole successor to the old free-standing
+`build_cached_request` and both engines' `request_template`s, which no longer
+exist.
 
 `manufacture` marks `cache_control: ephemeral` breakpoints on the system
 prompt and the last two messages, for Anthropic alone: two anchors of
-different depths, so a diverging tail (retry, fork, compaction) still lands on
+different depths, so a diverging tail (retry, fork, a self-nudge) still lands on
 a cached prefix. The marks land on `manufacture`'s own fresh clone of the
 transcript's shared messages, never on the shared segments themselves. On
 OpenAI the same marks would select the metered *explicit* prompt cache, which

@@ -35,7 +35,7 @@ pub(super) enum RailKind {
     Error,
     /// The human's turn — the one kind not tinted by an agent's hue.
     Prompt,
-    /// Any other chrome notice: a model switch, a stall, a compaction.
+    /// Any other chrome notice: a model switch, a stall, an eviction.
     Note,
 }
 impl RailKind {

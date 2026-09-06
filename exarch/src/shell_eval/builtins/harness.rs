@@ -12,12 +12,12 @@
 //! is handed a guest port to dial, and dials it while it answers.
 //! [`crate::fleet::desk::ExarchDesk`] answers every enquiry on the other side.
 //!
-//! One verb per addressable state, named as the model names it: `agents`,
-//! `schedules` and `context` each carry the model's tag as a nested variant
-//! and its record verbatim, the tag selects the transition, and the answer is
-//! always the state afterwards. `transcript` is no part of that family: it is
-//! the only harness verb whose answer is the size of the thing it describes,
-//! so it wears a name that says so before the call rather than after.
+//! One verb per addressable thing, named as the model names it: `agents`,
+//! `schedules`, `context` and `transcript` each carry the model's tag as a
+//! nested variant and its record verbatim, and the tag selects what happens.
+//! The first three name a state, and answer it afterwards. `transcript`
+//! names the store instead, which no tag of it writes, so its tags answer
+//! what they were asked for rather than a state.
 
 use crate::fleet::desk::Selection;
 use crate::fleet::schedule::{CronSchedule, parse_duration};
@@ -633,11 +633,11 @@ fn builtin_pin_list(_args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
     Ok(Value::list(items.into_iter().map(Value::from).collect()))
 }
 
-/// The `` `context `` scheme (`context_receipt_ty`) is a closed three-field
-/// record, so a survey missing any of them is host-side drift, not a call
-/// error — name what is missing rather than shrugging at the whole shape.
+/// The `` `context `` scheme (`context_receipt_ty`) is a closed record, so a
+/// survey missing any of its fields is host-side drift, not a call error —
+/// name what is missing rather than shrugging at the whole shape.
 fn context_receipt(answer: FOValue) -> Settled<Value> {
-    const FIELDS: [&str; 3] = ["spans", "total-bytes", "total-steps"];
+    const FIELDS: [&str; 4] = ["spans", "evicted", "total-bytes", "total-steps"];
     let FOValue::Map { entries } = &answer else {
         return Err(sig(
             "context: host answered an unexpected shape for the survey",
@@ -679,20 +679,24 @@ pub(crate) fn context_exchanges_payload(value: &Value, verb: &str) -> Settled<FO
     Ok(FOValue::List { items: exchanges })
 }
 
-/// The `` `fold `` spec, checked field by field and then sent verbatim: the
+/// The `` `evict `` spec, checked field by field and then sent verbatim: the
 /// record crosses to the desk by name, as every other family's does, so
 /// widening the reach later adds a field rather than shifting a position.
-pub(crate) fn context_fold_payload(value: &Value) -> Settled<FOValue> {
-    const VERB: &str = "context `fold";
+///
+/// The scheme leaves the record open on `note`, since a closed row cannot
+/// express an optional field, so the door is where a `note` of the wrong
+/// type is caught.
+pub(crate) fn context_evict_payload(value: &Value) -> Settled<FOValue> {
+    const VERB: &str = "context `evict";
     let Value::Map(spec) = value else {
         return Err(sig(format!(
-            "{VERB}: expected [through: Int, digest: Str], got {}",
+            "{VERB}: expected [through: Int] or [through: Int, note: Str], got {}",
             value.type_name()
         )));
     };
     let Some(through) = spec.get("through") else {
         return Err(sig(format!(
-            "{VERB}: the spec record needs a `through` field — the last exchange to fold"
+            "{VERB}: the spec record needs a `through` field — the last exchange to evict"
         )));
     };
     let Value::Int(through) = through else {
@@ -706,28 +710,25 @@ pub(crate) fn context_fold_payload(value: &Value) -> Settled<FOValue> {
             "{VERB}: `through` must be non-negative, got {through}"
         )));
     }
-    let Some(digest) = spec.get("digest") else {
+    if let Some(note) = spec.get("note")
+        && !matches!(note, Value::String(_))
+    {
         return Err(sig(format!(
-            "{VERB}: the spec record needs a `digest` field — the model's summary text"
-        )));
-    };
-    if !matches!(digest, Value::String(_)) {
-        return Err(sig(format!(
-            "{VERB}: `digest` must be a Str, got {}",
-            digest.type_name()
+            "{VERB}: `note` must be a Str, got {}",
+            note.type_name()
         )));
     }
     verbatim(value, VERB)
 }
 
 /// `context <tag>` — one enquiry, whose answer is the model view itself:
-/// `` `survey `` describes it, `` `drop `` and `` `fold `` edit it, and every
+/// `` `survey `` describes it, `` `drop `` and `` `evict `` edit it, and every
 /// tag answers the survey the transition leaves behind. The admissibility of
-/// an edit — live, unknown, folded, empty — is the desk's.
+/// an edit — live, unknown, already gone, empty — is the desk's.
 fn builtin_context(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
     let Value::Variant { label, payload } = &args[0] else {
         return Err(sig(format!(
-            "context: expected a `survey, `drop, or `fold tag, got {}",
+            "context: expected a `survey, `drop, or `evict tag, got {}",
             args[0].type_name()
         )));
     };
@@ -738,34 +739,88 @@ fn builtin_context(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Sett
             "drop",
             Some(context_exchanges_payload(exchanges, "context `drop")?),
         ),
-        ("fold", Some(spec)) => request("context", "fold", Some(context_fold_payload(spec)?)),
+        ("evict", Some(spec)) => request("context", "evict", Some(context_evict_payload(spec)?)),
         _ => {
             return Err(sig(format!(
-                "context: tag must be one of `survey, `drop, `fold — got {label}"
+                "context: tag must be one of `survey, `drop, `evict — got {label}"
             )));
         }
     };
     context_receipt(shell.enquire(mooring, request)?)
 }
 
-/// `transcript` — enquires `` `transcript ``; the answer is one span record
-/// per named exchange, each carrying its messages as ral records with
-/// variant parts — see [`scheme_transcript`] for the exact shape.
+/// `transcript <tag>` — one enquiry onto the store: `` `index `` lists every
+/// closed exchange, `` `read `` returns the named ones as material, and
+/// `` `grep `` searches them. Each tag answers its own shape, so the answer
+/// is checked per tag rather than once.
 fn builtin_transcript(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let payload = context_exchanges_payload(&args[0], "transcript")?;
-    let answer = shell.enquire(
-        mooring,
-        FOValue::Variant {
-            label: "transcript".to_string(),
-            payload: Some(Box::new(payload)),
-        },
-    )?;
-    if !matches!(answer, FOValue::List { .. }) {
-        return Err(sig(
-            "transcript: host answered an unexpected shape; expected one span record per exchange",
-        ));
+    let Value::Variant { label, payload } = &args[0] else {
+        return Err(sig(format!(
+            "transcript: expected an `index, `read, or `grep tag, got {}",
+            args[0].type_name()
+        )));
+    };
+    let (request, listed) = match (label.as_str(), payload) {
+        ("index", None) => (request("transcript", "index", None), true),
+        ("read", Some(exchanges)) => (
+            request(
+                "transcript",
+                "read",
+                Some(context_exchanges_payload(exchanges, "transcript `read")?),
+            ),
+            true,
+        ),
+        ("grep", Some(spec)) => (
+            request("transcript", "grep", Some(transcript_grep_payload(spec)?)),
+            false,
+        ),
+        _ => {
+            return Err(sig(format!(
+                "transcript: tag must be one of `index, `read, `grep — got {label}"
+            )));
+        }
+    };
+    let answer = shell.enquire(mooring, request)?;
+    let shaped = if listed {
+        matches!(answer, FOValue::List { .. })
+    } else {
+        matches!(answer, FOValue::Map { .. })
+    };
+    if !shaped {
+        return Err(sig(format!(
+            "transcript: host answered an unexpected shape for `{label}"
+        )));
     }
     Ok(Value::from(answer))
+}
+
+/// `` `grep ``'s spec, checked field by field and then sent verbatim. The
+/// scheme leaves the record open on `exchanges`, since a closed row cannot
+/// express an optional field, so the door is where a narrowing of the wrong
+/// type is caught; the pattern itself is the desk's to compile.
+pub(crate) fn transcript_grep_payload(value: &Value) -> Settled<FOValue> {
+    const VERB: &str = "transcript `grep";
+    let Value::Map(spec) = value else {
+        return Err(sig(format!(
+            "{VERB}: expected [pattern: Str] or [pattern: Str, exchanges: [Int]], got {}",
+            value.type_name()
+        )));
+    };
+    let Some(pattern) = spec.get("pattern") else {
+        return Err(sig(format!(
+            "{VERB}: the spec record needs a `pattern` field — the Rust regex to search for"
+        )));
+    };
+    if !matches!(pattern, Value::String(_)) {
+        return Err(sig(format!(
+            "{VERB}: `pattern` must be a Str, got {}",
+            pattern.type_name()
+        )));
+    }
+    if let Some(exchanges) = spec.get("exchanges") {
+        let _ = context_exchanges_payload(exchanges, VERB)?;
+    }
+    verbatim(value, VERB)
 }
 
 /// A variant over a row of tags with stated payloads, ending in `tail`.
@@ -784,11 +839,14 @@ fn open_variant(tags: &[(&str, Ty)], tail: RowVar) -> Ty {
     variant_row(tags, Row::Var(tail))
 }
 
-/// Closed: every tag this call may ever answer is named here, so a
-/// misspelled or forgotten arm on the answering side is a static mismatch
-/// rather than a tag the model discovers only by seeing it fail to match.
-fn closed_variant(tags: &[(&str, Ty)]) -> Ty {
-    variant_row(tags, Row::Empty)
+/// A record type left open on `tail`: the one shape a row can give an
+/// *optional* field, whose type is then the door's to check.
+fn open_record(fields: &[(&str, Ty)], tail: RowVar) -> Ty {
+    let mut row = Row::Var(tail);
+    for (label, ty) in fields.iter().rev() {
+        row = Row::Extend((*label).to_string(), Box::new(ty.clone()), Box::new(row));
+    }
+    Ty::Record(row)
 }
 
 /// `agents :: ∀α β ρ1 ρ2 ρ3 ρ4 ρ5. <list | start [prompt: Str, name: Str, type: Variant ρ1, grant: Variant ρ2, search: Bool, provider: Variant ρ3, model: Variant ρ4] | message [to: Str, text: Str] | cancel Str | reply β | read Str | ρ5> → F α`
@@ -932,37 +990,40 @@ fn context_span_ty() -> Ty {
 fn context_receipt_ty() -> Ty {
     closed_record(&[
         ("spans", Ty::List(Box::new(context_span_ty()))),
+        ("evicted", Ty::Int),
         ("total-bytes", Ty::Int),
         ("total-steps", Ty::Int),
     ])
 }
 
-/// `context :: ∀ρ. <survey | drop [Int] | fold [through: Int, digest: Str] | ρ> → F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int]`
+/// `context :: ∀ρ1 ρ2. <survey | drop [Int] | evict [through: Int | ρ1] | ρ2> → F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], evicted: Int, total-bytes: Int, total-steps: Int]`
 ///
 /// Same shape as [`scheme_agents`] and [`scheme_schedules`]: an open outer
-/// tag row so an unknown tag reaches the door naming the three legal ones,
-/// and a closed `fold` record row so a missing or misspelled field is
-/// static. `drop`'s payload is a bare `[Int]`, as `` `cancel ``'s is a bare
-/// `Str` — a list of exchange numbers has no shape left to name.
+/// tag row so an unknown tag reaches the door naming the three legal ones.
+/// `drop`'s payload is a bare `[Int]`, as `` `cancel ``'s is a bare `Str` —
+/// a list of exchange numbers has no shape left to name.
+///
+/// `evict`'s record row is open on `ρ1` because `note` is optional and a
+/// closed row cannot say so; [`context_evict_payload`] refuses a `note` of
+/// the wrong type, and the desk an empty one — a required `note` would
+/// invite `''`, and a marker reading `Your note at eviction: ""` is a defect.
 ///
 /// One answer for all three tags: an edit changes what is addressable, so
 /// the survey the transition leaves behind is what the next edit must be
 /// written against.
 fn scheme_context(u: &mut Unifier) -> Scheme {
+    let evict_row = u.fresh_row_var();
     let tag_row = u.fresh_row_var();
     scheme(
         &[],
         &[],
-        &[tag_row],
+        &[evict_row, tag_row],
         thunk(fun(
             open_variant(
                 &[
                     ("survey", Ty::Unit),
                     ("drop", Ty::List(Box::new(Ty::Int))),
-                    (
-                        "fold",
-                        closed_record(&[("through", Ty::Int), ("digest", Ty::String)]),
-                    ),
+                    ("evict", open_record(&[("through", Ty::Int)], evict_row)),
                 ],
                 tag_row,
             ),
@@ -971,74 +1032,39 @@ fn scheme_context(u: &mut Unifier) -> Scheme {
     )
 }
 
-/// One arm per [`genai::chat::ContentPart`] variant kept as material;
-/// `ThoughtSignature` contributes no part and so has no arm here.
-fn transcript_part_ty() -> Ty {
-    closed_variant(&[
-        ("text", closed_record(&[("content", Ty::String)])),
-        (
-            "program",
-            closed_record(&[
-                ("tool", Ty::String),
-                ("source", Ty::String),
-                ("keys", Ty::List(Box::new(Ty::String))),
-            ]),
-        ),
-        ("result", closed_record(&[("content", Ty::String)])),
-        ("reasoning", closed_record(&[("content", Ty::String)])),
-        (
-            "binary",
-            closed_record(&[
-                ("content-type", Ty::String),
-                ("name", Ty::String),
-                ("bytes", Ty::Int),
-            ]),
-        ),
-        (
-            "custom",
-            closed_record(&[("provider", Ty::String), ("model", Ty::String)]),
-        ),
-    ])
-}
-
-fn transcript_role_ty() -> Ty {
-    closed_variant(&[
-        ("system", Ty::Unit),
-        ("user", Ty::Unit),
-        ("assistant", Ty::Unit),
-        ("tool", Ty::Unit),
-    ])
-}
-
-fn transcript_message_ty() -> Ty {
-    closed_record(&[
-        ("role", transcript_role_ty()),
-        ("parts", Ty::List(Box::new(transcript_part_ty()))),
-    ])
-}
-
-fn transcript_span_ty() -> Ty {
-    closed_record(&[
-        ("exchange", Ty::Int),
-        ("messages", Ty::List(Box::new(transcript_message_ty()))),
-    ])
-}
-
-/// `transcript :: [Int] → F [[exchange: Int, messages: [Message]]]` — one
-/// span record per named exchange, in the view's own order rather than the
-/// argument's, so a slice is `$t[0]` and a count is `length $t`.
+/// `transcript :: ∀α ρ1 ρ2. <index | read [Int] | grep [pattern: Str | ρ1] | ρ2> → F α`
 ///
-/// `Message = [role: `system|`user|`assistant|`tool, parts: [Part]]`, and
-/// `Part` is one variant per [`genai::chat::ContentPart`] kept as material —
-/// see [`transcript_part_ty`].
-fn scheme_transcript(_u: &mut Unifier) -> Scheme {
+/// The outer tag row is open (`ρ2`) so an unrecognised tag reaches the
+/// runtime door that names the three legal ones, rather than dying as a
+/// row-unification mismatch.
+///
+/// Each tag answers its own shape — a listing, one span record per named
+/// exchange, a hit table — so `α` is left free rather than fixed to any one
+/// of them, exactly as [`scheme_agents`] leaves it free for `` `read ``.
+/// The answer's shape is then the door's to check and the docstring's to
+/// state.
+///
+/// `grep`'s record row is open on `ρ1` because `exchanges` is optional and a
+/// closed row cannot say so; [`transcript_grep_payload`] refuses one of the
+/// wrong type.
+fn scheme_transcript(u: &mut Unifier) -> Scheme {
+    let grep_row = u.fresh_row_var();
+    let tag_row = u.fresh_row_var();
+    let answer_ty = u.fresh_tyvar();
     scheme(
+        &[answer_ty],
         &[],
-        &[],
-        &[],
+        &[grep_row, tag_row],
         thunk(fun(
-            Ty::List(Box::new(Ty::Int)),
-            pure(Ty::List(Box::new(transcript_span_ty()))),
+            open_variant(
+                &[
+                    ("index", Ty::Unit),
+                    ("read", Ty::List(Box::new(Ty::Int))),
+                    ("grep", open_record(&[("pattern", Ty::String)], grep_row)),
+                ],
+                tag_row,
+            ),
+            pure(Ty::Var(answer_ty)),
         )),
     )
 }
@@ -1049,13 +1075,13 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::new(
         Cow::Borrowed("agents"),
         scheme_agents,
-        "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one, `reply to hand your own value up, `read one back off a descendant. Every tag but `read answers with the roster afterwards, [[name: Str, state: `busy|`waiting-on-agents|`replied|`waiting, idle-s: Int, elapsed-s: Int, log-dir: Str]], so what you read back is always what is live now rather than a receipt for what you just did.\n\nagents `list  — your live descendants at any depth, oldest first. `state` is `busy while working, `waiting-on-agents while held only by a busy child of its own, `replied once it has called `reply and parked, `waiting once a human has engaged it and it parked with no reply. `idle-s` is seconds since it parked — zero while `busy` or `waiting-on-agents. A settled agent (cancelled, failed, or reaped past its hour) is not listed. This is how you recover names after a context compaction.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as a one-line notice in your inbox, and you fetch the value with `read. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation. A `mnemon` child left on your own selection reuses your provider's cache; one sent to another account or model is still sound — reasoning crosses as plain text, not as signed blocks — but forfeits that locality, so pay for it deliberately. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. `provider` and `model` say what the child runs on, and both are always written — there is no omitting them, and `inherit is how you say you have no opinion. `provider: `inherit, model: `inherit` shares your own provider outright and is the plain default. `provider: `inherit, model: `named '<model>'` keeps your account and credential and changes only the model — the way to spend a cheaper, faster model on a narrow child while you keep a stronger one for yourself. `provider: `named '<provider>', model: `inherit` moves the child to another signed-in account: your own model if that account is the one you are on, otherwise that account's default model, and the call is refused naming `model` if it publishes none. `provider: `named …, model: `named …` says both outright. A provider name that no signed-in account answers to, or that several answer to, is refused naming the accounts you have; pick from those. Effort, temperature, and output cap are the operator's knobs rather than part of a model's identity, so they carry across whatever you name. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live descendant named `to`; it lands at that child's next exchange boundary, not as human input, and wakes a `replied or `waiting child into a fresh exchange. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. A cancel is a request, not a transaction: the child is still running when this answers, so its row is still in the roster you get back. A name you still see listed is NOT a failed cancel — do not fire it again; read `list later and find it gone.\n\nagents `reply <value>  — hand `value` back to whoever spawned you. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call `reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. It does not end your run: you park (`state `replied) rather than settle, and may be `message`d for a follow-up — answer that with another `reply. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this.\n\nagents `read <name>  — fetch the value the live descendant named `name` last handed to `reply, as [name: Str, reply: <value>]. The one tag that does not answer the roster. Only a descendant of yours may be read — never a sibling, an ancestor, or yourself; refused otherwise, as is a name that never replied. Idempotent: reading again before the child replies afresh answers the same value.\n\nEach tag is one exchange with the host, and — for every tag but `read — the roster it answers is the registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "agents <tag>  — the fleet: `list what is live, `start a child, `message one, `cancel one, `reply to hand your own value up, `read one back off a descendant. Every tag but `read answers with the roster afterwards, [[name: Str, state: `busy|`waiting-on-agents|`replied|`waiting, idle-s: Int, elapsed-s: Int, log-dir: Str]], so what you read back is always what is live now rather than a receipt for what you just did.\n\nagents `list  — your live descendants at any depth, oldest first. `state` is `busy while working, `waiting-on-agents while held only by a busy child of its own, `replied once it has called `reply and parked, `waiting once a human has engaged it and it parked with no reply. `idle-s` is seconds since it parked — zero while `busy` or `waiting-on-agents. A settled agent (cancelled, failed, or reaped past its hour) is not listed. This is how you recover names after an eviction.\n\nagents `start [prompt: <Str>, name: <Str>, type: `amnemon|`mnemon, grant: <permission>, search: <Bool>, provider: `inherit|`named <Str>, model: `inherit|`named <Str>]  — launch a sub-agent. Launch-only and always asynchronous: the child's reply is NOT this call's result — it arrives later, as a one-line notice in your inbox, and you fetch the value with `read. The answer's roster carries the child's row, and that row's name and log-dir are its receipt. `type` selects the child's memory: `amnemon` starts blank (no shared history), while `mnemon` inherits your current model-visible conversation. A `mnemon` child left on your own selection reuses your provider's cache; one sent to another account or model is still sound — reasoning crosses as plain text, not as signed blocks — but forfeits that locality, so pay for it deliberately. Every child receives the value-snapshot of the parent's bindings, cwd, and env — `mnemon` too; the serializable fragment crosses, while a live job handle becomes an opaque placeholder. `prompt` is a computed string and becomes the child's fresh final prompt. Keep large material in a named binding rather than splicing it into prompt; small, certainly-needed material may still be spliced. Wrap `prompt` in a raw string #'…'# if it carries $, !, or quotes. `name` is the child's identity — non-empty, at most 24 characters, ASCII letters/digits/-/_ only — and must not be borne by any live agent, or the call is refused; pick something descriptive, like 'fix-parser-tests'. `grant` bounds the child to at most your own authority and must be exactly one of `confined (offline, no home reads), `read-only (writes only to scratch), `edit-only (edits the working tree, no build tooling), `reasonable (everyday tooling), `dangerous (no narrowing); any other label is refused, naming all five. `search` states whether the child may use the provider's own built-in web search, bounded above by your own — asking for it when you do not have it silently yields a child without it. `provider` and `model` say what the child runs on, and both are always written — there is no omitting them, and `inherit is how you say you have no opinion. `provider: `inherit, model: `inherit` shares your own provider outright and is the plain default. `provider: `inherit, model: `named '<model>'` keeps your account and credential and changes only the model — the way to spend a cheaper, faster model on a narrow child while you keep a stronger one for yourself. `provider: `named '<provider>', model: `inherit` moves the child to another signed-in account: your own model if that account is the one you are on, otherwise that account's default model, and the call is refused naming `model` if it publishes none. `provider: `named …, model: `named …` says both outright. A provider name that no signed-in account answers to, or that several answer to, is refused naming the accounts you have; pick from those. Effort, temperature, and output cap are the operator's knobs rather than part of a model's identity, so they carry across whatever you name. Delegation depth is finite — each descendant is handed one less unit of fuel than its spawner holds, and once fuel reaches zero this call is refused; fuel bounds how deep a chain may recurse, never how many children you may start at any one depth.\n\nagents `message [to: <Str>, text: <Str>]  — send `text` as a marked item to the live descendant named `to`; it lands at that child's next exchange boundary, not as human input, and wakes a `replied or `waiting child into a fresh exchange. Only a descendant of yours may receive it — never a sibling, an ancestor, or yourself; refused otherwise. It does not return the recipient's answer: this is coordination, not a call. Nothing in the roster changes, so the answer is the plain confirmation that the recipient was live when you sent.\n\nagents `cancel <name>  — ask the live descendant named `name` to stop. It stops at its next checkpoint and then delivers a cancelled result to your inbox. Only a descendant of yours may be cancelled — never a sibling, an ancestor, or yourself; refused otherwise. A cancel is a request, not a transaction: the child is still running when this answers, so its row is still in the roster you get back. A name you still see listed is NOT a failed cancel — do not fire it again; read `list later and find it gone.\n\nagents `reply <value>  — hand `value` back to whoever spawned you. Your parent receives exactly this value, nothing else — not your reasoning, your shell bindings, or any prose you streamed along the way. `value` must be first-order data: no closures, handles, or environments; passing one fails this call with a didactic error and your run continues, so fix the value and call `reply again. Call it more than once in an exchange and the last call wins — an earlier value is discarded, not appended. It does not end your run: you park (`state `replied) rather than settle, and may be `message`d for a follow-up — answer that with another `reply. A non-finite Float (NaN, +Infinity, -Infinity) reaches your parent as the string \"NaN\"/\"Infinity\"/\"-Infinity\" — JSON, which the value eventually crosses into, has no such numbers. Refused on the interactive trunk and every /branch child: they converse with the user turn after turn and never return, so they hold no obligation to call this.\n\nagents `read <name>  — fetch the value the live descendant named `name` last handed to `reply, as [name: Str, reply: <value>]. The one tag that does not answer the roster. Only a descendant of yours may be read — never a sibling, an ancestor, or yourself; refused otherwise, as is a name that never replied. Idempotent: reading again before the child replies afresh answers the same value.\n\nEach tag is one exchange with the host, and — for every tag but `read — the roster it answers is the registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_agents),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("schedules"),
         scheme_schedules,
-        "schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nschedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after a context compaction.\n\nschedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nschedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag is one exchange with the host, and the table it answers is the schedule registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "schedules <tag>  — your self-wakeups: `list what is armed, `add one, `remove one. Every tag answers with the table afterwards, [[label: Str, trigger: Str, next-s: Int, fires: Int]], so what you read back is always what is armed now rather than a receipt for what you just did. Requires the self-wakeup grant (--allow-schedule) — an agent that can wake itself indefinitely holds real authority, so without the grant every tag is refused.\n\nschedules `list  — your live wakeups, oldest first: label as you named it, trigger as its source text (a cron expression, or `after 30m`), next-s the seconds until the next fire, recomputed as you ask, and fires how many times it has fired so far. Only live schedules appear: a spent one-shot has already removed itself, so a label you armed with `after and then see no more of has fired, not vanished. This is how you recover labels after an eviction.\n\nschedules `add [trigger: `cron <Str>|`after <Str>, label: <Str>, prompt: <Str>]  — arm a self-wakeup: at the chosen time a marked item carrying `prompt` is delivered to your inbox and re-engages you with no human present. It drains at your next exchange boundary — as soon as the tool batch in flight settles, not only at the end of the exchange — and arrives as marked chrome, `[scheduled '<label>' · <trigger>] <prompt>`, never read as a command even when the prompt opens with `/`. `trigger` is exactly one of two variants; any other shape is refused, naming both. `cron '<expr>'` is recurring: five whitespace-separated fields, minute hour day-of-month month day-of-week, read in the host's local timezone — e.g. `cron '0 9 * * 1-5'` for weekdays at 09:00. Each field is a comma list of `*`, a number, a range `a-b`, or a step over either (`*/15`, `a-b/2`, `N/step` meaning N up to the field's maximum); month and day-of-week also accept three-letter names (jan…dec, sun…sat), and day-of-week accepts 7 as a second spelling of Sunday. When both day fields are restricted, either one matching fires it (Vixie-cron's OR rule); when only one is, that one decides. Every fire recomputes the next occurrence in the host timezone, so DST shifts, clock steps, and suspends are absorbed rather than accumulated. `after '<n><unit>'` is a one-shot relative delay from the moment of arming, unit one of s/m/h/d and the count greater than zero — e.g. `after '30m'`, `after '2h'`. A trigger with no next occurrence at all — a parseable but impossible date such as `cron '0 0 30 2 *'` — is refused here rather than arming silently. `label` names the wakeup and is its identity: it must not be borne by another live schedule, and you must always supply one. `prompt` is the natural-language instruction you act on when woken, not code. Read the new row's next-s out of the answer to catch a cron expression that parsed but does not mean what you meant. Once armed: an `after removes itself when it fires; a cron re-arms itself, and drops itself only when nothing further lies inside its search horizon. A fire whose previous wakeup is still sitting undrained in your inbox is skipped, not queued behind it, and does not count as a fire. While any schedule is live this session parks for the next wakeup at quiescence instead of ending, so a recurring schedule you never remove keeps this agent alive indefinitely — that is what the grant buys. `/clear` drops every live schedule.\n\nschedules `remove <label>  — disarm the wakeup bearing `label`; its next occurrence goes with it and nothing further is delivered. The entry is gone in the answer, so the row's absence is the confirmation. A label that was never there answers the same way, and that is no evidence of a mistake: a one-shot may have fired and removed itself since you read it.\n\nEach tag is one exchange with the host, and the table it answers is the schedule registry as it stands once the transition has landed. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_schedules),
     ),
     BuiltinEntry::new(
@@ -1073,13 +1099,13 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::new(
         Cow::Borrowed("context"),
         scheme_context,
-        "context <tag>  — the finite, addressable model context: `survey what is in it, `drop closed exchanges, `fold a prefix into a digest you write. Every tag answers with the survey afterwards, [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], total-bytes: Int, total-steps: Int], so what you read back is always the context as it stands rather than a receipt for what you just did. An edit changes what is addressable — folded exchanges stop being nameable, and the digest answers to its reach — so the answer is also the survey your next edit must be written against.\n\ncontext `survey  — one span per exchange, import, or digest, oldest first. `exchange` names the span, a digest by the last exchange it reaches; `kind` is exchange, import, or digest; `prompt` is its opening line, `bytes` its serialized weight, `steps` its provider-step count, and `live` marks the exchange you are in, which no edit may name. `total-bytes` against your context window is the number that decides whether to edit at all. This tag surveys: it changes nothing.\n\ncontext `drop <exchanges>  — shed whole closed exchanges, where <exchanges> is a list of non-negative exchange numbers read off `survey. The exchange you are in cannot be named, an unknown or already-folded exchange is refused with an explanation, and an empty list is not an edit. You are always mid-exchange when you speak, so a rewind-shaped request for a suffix of closed exchanges is this tag with a range; there is no rewind.\n\ncontext `fold [through: <Int>, digest: <Str>]  — replace the visible prefix through a closed exchange with the digest text you supply. `through` may name the current digest by its reach, folding further, but cannot cross the exchange you are in. A digest is curation, not a promise of compression: the answer shows the new digest's own `bytes` beside the spans that survive it, which is how you see whether the fold was worth making.\n\nEach tag is one exchange with the host, and the survey it answers is the model view as it stands once the transition has landed; an edit lands at the desk immediately and is recorded as a model context event. Editing before the provider's cache watermark re-reads the prefix on the next request, so an edit that sheds little can cost more than it saves. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "context <tag>  — the window: what the provider is sent. Every tag answers the survey afterwards, [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], evicted: Int, total-bytes: Int, total-steps: Int].\n\ncontext `survey  — one span per exchange in your context, oldest first; `evicted` counts the closed exchanges that have left it (readable with transcript). `total-bytes` against your window is the number that decides whether to edit at all. Changes nothing.\n\ncontext `drop <exchanges>  — shed whole closed exchanges from the window; they remain in the store. The provider re-reads everything after the earliest dropped exchange on your next request, so a drop that sheds little can cost more than it saves.\n\ncontext `evict [through: <Int>, note: <Str>]  — every exchange through a closed one leaves the window at once, replaced by the harness's index of them; `note` is optional and is shown beside that index to your future self. This is what the harness does for you when the window fills, without a note; do it yourself only to leave one, or to cut early on purpose.\n\nEach tag is one exchange with the host, and the survey it answers is the model view as it stands once the transition has landed; an edit lands at the desk immediately and is recorded as a model context event. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_context),
     ),
     BuiltinEntry::new(
         Cow::Borrowed("transcript"),
         scheme_transcript,
-        "transcript <exchanges>  — read named closed exchanges back as material: one [exchange: Int, messages: [Message]] record per span. The list must be non-empty; name a digest by its reach, and do not name an exchange folded strictly inside one. The answer is ordered by the context, not by your argument, so each element carries its own `exchange` — that field is the element's address, not its position. Being a list, it reads in slices: $t[0] is one span and length $t is the count.\n\nA Message is [role: `system|`user|`assistant|`tool, parts: [Part]], one Message per model turn the span holds — a step boundary carries no message of its own. A Part is a variant, one arm per kind of content: `text [content: Str] is plain text; `program [tool: Str, source: Str, keys: [Str]] is a tool call — for exarch's own ral tool, `source` is the script that ran and `keys` is empty; for any other tool, `source` is empty and `keys` names its arguments; `result [content: Str] is a tool's response, already the digest the model saw; `reasoning [content: Str] is a model's reasoning, carried in full; `binary [content-type: Str, name: Str, bytes: Int] is an image/audio/video/PDF attachment's metadata only, never its payload; `custom [provider: Str, model: Str] names a provider-specific extension, never its payload. Narrow this material with `filter`/`take`/`view-text` over the records — do not expect elision or byte caps here, that is your job to apply.\n\nOnly stdout echoes into a turn's tool result; a `let`-bound value prints nothing. Both stdout and a turn's final VALUE enter your context, so never bare-print a whole binding merely to inspect it — the transcript is material, not a survey. It commits nothing and edits nothing; context `drop does that. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "transcript <tag>  — the store: every closed exchange this session or its ancestors recorded, whether or not it is still in your context. Read-only.\n\ntranscript `index  — [[exchange: Int, kind: Str, prompt: Str, steps: Int, bytes: Int, in-view: Bool]], oldest first. `kind` is `exchange`, `import`, or `inherited` (an ancestor's).\n\ntranscript `read <exchanges>  — the named closed exchanges as material, [[exchange: Int, messages: [Message]]] in store order, each element carrying its own `exchange`. A Message is [role: `system|`user|`assistant|`tool, parts: [Part]], one Message per model turn the span holds — a step boundary carries no message of its own. A Part is a variant, one arm per kind of content: `text [content: Str] is plain text; `program [tool: Str, source: Str, keys: [Str]] is a tool call — for exarch's own ral tool, `source` is the script that ran and `keys` is empty; for any other tool, `source` is empty and `keys` names its arguments; `result [content: Str] is a tool's response, already the digest the model saw; `reasoning [content: Str] is a model's reasoning, carried in full; `binary [content-type: Str, name: Str, bytes: Int] is an image/audio/video/PDF attachment's metadata only, never its payload; `custom [provider: Str, model: Str] names a provider-specific extension, never its payload. Narrow this material with `filter`/`take`/`view-text` over the records — do not expect elision or byte caps here, that is your job to apply. Bind the answer and read it in slices; the whole of it entering your context is what eviction just saved you from.\n\ntranscript `grep [pattern: <Str>, exchanges: <[Int]>]  — a Rust regex over every closed exchange (or the named ones): prompts, your programs, their results, your reasoning. `exchanges` is optional and narrows the search to those closed exchanges. Answers [hits: [[exchange: Int, role: Str, line: Int, text: Str]], total: Int], at most 100 hits oldest first; `total` is the true count, so a large one means narrow the pattern or the exchanges. Then `read the exchange a hit names.\n\nTo search a long store without spending your own context, hand the task to a `mnemon child: agents `start [type: `mnemon, prompt: 'transcript `grep … then reply with …'] — it shares your store and runs its own transcript against it. An `amnemon child starts blank and has no store but its own.\n\nAnswered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_transcript),
     ),
 ];
@@ -1135,8 +1161,8 @@ mod tests {
             crate::policy::base_layer(label, &cwd)
                 .unwrap_or_else(|e| panic!("door label `{label} must name a bake-in base: {e}"));
         }
-        let err = crate::policy::base_layer("bogus", &cwd)
-            .expect_err("an unknown base must be refused");
+        let err =
+            crate::policy::base_layer("bogus", &cwd).expect_err("an unknown base must be refused");
         let offered: std::collections::BTreeSet<&str> = err
             .rsplit_once("expected one of: ")
             .unwrap_or_else(|| panic!("the refusal must enumerate the bases, got: {err}"))
@@ -2249,7 +2275,7 @@ mod tests {
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
         let result = session.run_shell("call-1".to_string(), "context `rewind [3]", 5, &emit);
-        for tag in ["survey", "drop", "fold"] {
+        for tag in ["survey", "drop", "evict"] {
             assert!(
                 result.content.contains(tag),
                 "must name `{tag}, got: {}",
@@ -2258,50 +2284,47 @@ mod tests {
         }
     }
 
-    /// Static, not a door error: `` `fold ``'s closed record row reports the
-    /// field, which is what makes widening its reach a one-line change.
+    /// `` `evict ``'s record row is open only on the tail, so `through`
+    /// itself is still static: a misspelling reaches the type error, not the
+    /// door.
     #[test]
-    fn misspelled_fold_field_errors_statically_naming_the_field() {
+    fn misspelled_evict_field_errors_statically_naming_the_field() {
         let mut session = crate::agent::Avatar::for_test("system").unwrap();
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
-        let result = session.run_shell(
-            "call-1".to_string(),
-            "context `fold [thru: 1, digest: 'summary']",
-            5,
-            &emit,
-        );
+        let result = session.run_shell("call-1".to_string(), "context `evict [thru: 1]", 5, &emit);
         assert!(
-            result.content.contains("no field named 'thru'"),
-            "the diagnostic must name the offending field, got: {}",
+            !result.content.contains("EXIT: 0") && result.content.contains("through"),
+            "the diagnostic must name the field the row demands, got: {}",
             result.content
         );
     }
 
     /// The whole family through the real shell: an edit answers the survey
-    /// the transition leaves behind, so the digest's own row — addressed by
-    /// its reach, like every other span — is there to read without a second
-    /// call.
+    /// the transition leaves behind, so the count of what left is there to
+    /// read without a second call. The optional `note` rides the open record
+    /// row, so both shapes type-check.
     #[test]
-    fn a_fold_answers_the_survey_it_leaves_behind() {
+    fn an_eviction_answers_the_survey_it_leaves_behind() {
         let mut session = trunk_with_a_closed_exchange();
+        crate::agent::testkit::close_exchange(&session, "second prompt", "second answer");
         let (tx, _rx) = crate::bus::channel();
         let emit = crate::bus::Emitter::new(tx, session.agent.id);
 
         let result = session.run_shell(
             "call-1".to_string(),
-            "context `fold [through: 1, digest: 'the old work is done']",
+            "context `evict [through: 1, note: 'the old work is done']",
             5,
             &emit,
         );
         assert!(
             result.content.contains("EXIT: 0"),
-            "a valid fold must succeed, got: {}",
+            "a valid eviction must succeed, got: {}",
             result.content
         );
         assert!(
-            result.content.contains("digest") && result.content.contains("total-bytes"),
-            "the answer must be the survey afterwards, carrying the new digest span, got: {}",
+            result.content.contains("evicted") && result.content.contains("total-bytes"),
+            "the answer must be the survey afterwards, carrying the evicted count, got: {}",
             result.content
         );
         assert!(
@@ -2311,9 +2334,31 @@ mod tests {
         );
     }
 
-    /// §2.1's shape, end to end: the answer is a list, so a slice is `$t[0]`,
-    /// addressed by its own `exchange` field, and its messages are ral
-    /// records with variant parts rather than a rendered string.
+    /// The same tag with no `note`: the open record row admits it, so the
+    /// harness never asks the model for an empty string.
+    #[test]
+    fn an_eviction_without_a_note_type_checks() {
+        let mut session = trunk_with_a_closed_exchange();
+        crate::agent::testkit::close_exchange(&session, "second prompt", "second answer");
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+
+        let result = session.run_shell(
+            "call-1".to_string(),
+            "context `evict [through: 1]",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("EXIT: 0"),
+            "an eviction with no note must succeed, got: {}",
+            result.content
+        );
+    }
+
+    /// §2.4's shape, end to end: `` `read ``'s answer is a list, so a slice
+    /// is `$t[0]`, addressed by its own `exchange` field, and its messages
+    /// are ral records with variant parts rather than a rendered string.
     #[test]
     fn transcript_answers_span_records_with_variant_parts() {
         let mut session = trunk_with_a_closed_exchange();
@@ -2322,7 +2367,7 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r#"let t = transcript [1]
+            r#"let t = transcript `read [1]
                echo !{length $t}
                echo $t[0][exchange]
                let msgs = $t[0][messages]
@@ -2362,6 +2407,62 @@ mod tests {
             result.content.contains("role=assistant")
                 && result.content.contains("text=first answer"),
             "the assistant turn must be a `text part of an `assistant message, got: {}",
+            result.content
+        );
+    }
+
+    /// `scheme_transcript`'s outer tag row is open, so `` transcript `search ``
+    /// — the tag a model most plausibly invents — reaches the door naming the
+    /// three legal ones.
+    #[test]
+    fn unknown_transcript_tag_reaches_the_door_naming_every_legal_tag() {
+        let mut session = crate::agent::Avatar::for_test("system").unwrap();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+        let result = session.run_shell("call-1".to_string(), "transcript `search 'x'", 5, &emit);
+        for tag in ["index", "read", "grep"] {
+            assert!(
+                result.content.contains(tag),
+                "must name `{tag}, got: {}",
+                result.content
+            );
+        }
+    }
+
+    /// The answer type is free, so each tag's own shape has to type-check
+    /// against the use the program makes of it: a listing indexes as a list,
+    /// a grep answer projects `hits` and `total` as a record. The optional
+    /// `exchanges` rides `` `grep ``'s open record row.
+    #[test]
+    fn index_and_grep_answer_their_own_shapes() {
+        let mut session = trunk_with_a_closed_exchange();
+        let (tx, _rx) = crate::bus::channel();
+        let emit = crate::bus::Emitter::new(tx, session.agent.id);
+
+        let result = session.run_shell(
+            "call-1".to_string(),
+            r"let i = transcript `index
+               echo $i[0][exchange] $i[0][in-view]
+               let g = transcript `grep [pattern: 'first (prompt|answer)']
+               echo !{length $g[hits]} $g[total]
+               let n = transcript `grep [pattern: 'nothing here', exchanges: [1]]
+               echo $n[total]",
+            5,
+            &emit,
+        );
+        assert!(
+            result.content.contains("1 true"),
+            "the one closed exchange is listed and still in view, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("2 2"),
+            "both of its turns match, and `total` counts them all, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("\n0\n"),
+            "a pattern that matches nothing answers no hits, got: {}",
             result.content
         );
     }

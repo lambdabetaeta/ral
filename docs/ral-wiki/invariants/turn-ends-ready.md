@@ -79,8 +79,8 @@ a deliberation is still driving.
 
 The hard rule: a path that ends an exchange must leave a fresh prompt
 admissible. Add a new exchange-ending outcome through `quiesce` (extend
-`QuiesceReason`), never by returning with tool calls unanswered. Compaction
-reads `is_ready` too ([[map/exarch/agent|agent]] `can_compact`).
+`QuiesceReason`), never by returning with tool calls unanswered. Eviction
+reads `is_ready` too ([[map/exarch/agent|agent]] `can_evict`).
 
 See also [[internals/session-record|session-record]] (the durable protocol and
 its model fold),

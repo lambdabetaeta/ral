@@ -313,7 +313,7 @@ mod tests {
 
         let result = session.run_shell(
             "transcript-no-echo".into(),
-            "let ctx = transcript [1]",
+            "let ctx = transcript `read [1]",
             5,
             &emit,
         );

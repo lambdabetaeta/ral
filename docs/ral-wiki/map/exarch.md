@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 99226d37
-generated_at_date: 2026-09-05
+generated_at_commit: c5df4203
+generated_at_date: 2026-09-06
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -212,7 +212,7 @@ the per-agent index and optional sections still resolve from the stored base.
 ## Subsystems
 
 - [[map/exarch/agent|agent]] — the uniform node and the thin `Fleet`: the attend loop
-  (provider round-trips, tool-call batches with prompt-queue steering, auto-compaction,
+  (provider round-trips, tool-call batches with prompt-queue steering, context eviction,
   the nudge-retry policy, sub-agent fork), the `parent` predicate, the owned
   hot-swappable provider, dynamic focus, and the subtree cancel cascade.
 - [[map/exarch/provider|provider]] — LLM transport over genai: streaming, the retry

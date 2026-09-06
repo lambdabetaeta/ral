@@ -1,6 +1,6 @@
 //! Canned replies for the `Backend::Scripted` arm, so tests never dial out.
 
-use super::{CutShort, Delta, ProviderError, StepOut, SummaryOut, Usage};
+use super::{CutShort, Delta, ProviderError, StepOut, Usage};
 use genai::chat::{ChatMessage, StopReason, ToolCall};
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -188,17 +188,6 @@ impl Script {
         reply.outcome
     }
 
-    #[allow(
-        clippy::unused_self,
-        clippy::unnecessary_wraps,
-        reason = "the scripted and live backend arms deliberately share one shape"
-    )]
-    pub(super) fn summarize(&self, _model: &str) -> Result<SummaryOut, ProviderError> {
-        Ok(SummaryOut {
-            summary: "scripted summary".to_string(),
-            usage: Usage::default(),
-        })
-    }
 }
 
 impl Default for Script {

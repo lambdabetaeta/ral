@@ -152,6 +152,18 @@ accumulator over the bus stream, for the reasons enumerated there. The
 projection principle governs everything durable; it does not yet govern the
 live screen.
 
+## Superseding note: the store the losses ruled out
+
+[[decisions/260906_context-rollover|context-rollover]] withdraws two of the
+accepted losses below. Spans that leave the view *are* a queryable history
+store, read through `transcript`'s `` `index ``/`` `read ``/`` `grep ``, so
+"transcript before a drop is the sanctioned handoff" no longer describes
+anything. And the prefix/set asymmetry is dissolved rather than fixed: there
+is no digest left to be a privileged kind of span, `` `fold `` becoming
+`` `evict `` over a list of prefix removals whose rows `refold` recomputes.
+The law itself is untouched — eviction frees residency and keeps the
+`Stamp` — and so is everything this page says about the fold.
+
 ## Accepted losses
 
 The design accepts the following costs and boundaries rather than smuggling

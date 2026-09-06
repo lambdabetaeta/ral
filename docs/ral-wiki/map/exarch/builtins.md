@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d273e519
+generated_at_commit: c5df4203
 generated_at_date: 2026-09-06
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
@@ -182,14 +182,15 @@ door instead of a closed variant type: an unknown label errors before any
 enquiry crosses, naming the legal set, rather than a static row-unification
 error with no room for a didactic message.
 
-**The desk answers six classes: three families and three singletons.**
-`` `agents ``, `` `schedules `` and `` `context `` each carry a tag naming what
-to do (`family_tag`), and an unrecognised tag is as loud one level down as an
-unrecognised class is at the top (`unknown_tag`) — never a silent default.
-The three singletons — `` `pin-read ``, `` `pin-list ``, `` `transcript `` —
+**The desk answers six classes: four families and two singletons.**
+`` `agents ``, `` `schedules ``, `` `context `` and `` `transcript `` each carry
+a tag naming what to do (`family_tag`), and an unrecognised tag is as loud one
+level down as an unrecognised class is at the top (`unknown_tag`) — never a
+silent default. The two singletons — `` `pin-read ``, `` `pin-list `` —
 take a bare payload read positionally (`payload_list` and the scalar
 accessors); a family tag's own **record** crosses by field name, through
-`FOValue::try_from(&Value)` and out through `Fields`, `` `fold ``'s included. The desk's decode is not a
+`FOValue::try_from(&Value)` and out through `Fields`, `` `evict ``'s and
+`` `grep ``'s included. The desk's decode is not a
 duplicate of the builtin's door but the **trust boundary**: the door checks
 engine-side so a bad value reaches the model with the parser's own message, and
 the desk checks again because a guest can send whatever it likes — which is why
@@ -197,46 +198,70 @@ the desk checks again because a guest can send whatever it likes — which is wh
 
 ### Context stewardship
 
-The context verbs address the model view by the exchange and digest reaches
-reported by `` `survey ``; they do not expose the forensic event ledger as a
-queryable store.
+Two verbs over two things: `context` is **the window** — what the provider is
+sent and the model pays for — and `transcript` is **the store**, every closed
+exchange this session or its ancestors ever recorded
+([[decisions/260906_context-rollover|context-rollover]]). `context` edits and
+surveys; `transcript` only reads.
 
-- **`context <tag>`** → `∀ρ. <survey | drop [Int] | fold [through: Int, digest:
-  Str] | ρ> → F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int,
-  steps: Int, live: Bool]], total-bytes: Int, total-steps: Int]`. One verb per
-  addressable state: the tag selects the transition, and **every** tag answers
-  the survey afterwards. That is not a shared prefix collapsed but the rule the
-  registries already follow, and it fits the view better than either, because
-  an edit changes *what is addressable* — the swallowed exchanges stop being
-  nameable and the digest answers to its reach — so the edit is also the
-  resurvey the next edit must be written against.
-  - `` `survey `` describes the finite view, one span per exchange, import, or
-    digest, a digest named by the last exchange it reaches. It changes nothing.
-  - `` `drop <exchanges> `` sheds whole closed exchanges. The live, unknown,
-    folded, duplicate, or empty selection is refused with an explanation; a
-    user-shaped rewind is the same closed-range operation.
-  - `` `fold [through, digest] `` replaces the visible prefix through a closed
-    exchange with the supplied digest. The reach may extend the current digest
-    but cannot cross the live exchange.
+- **`context <tag>`** → `∀ρ1 ρ2. <survey | drop [Int] | evict [through: Int |
+  ρ1] | ρ2> → F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int,
+  steps: Int, live: Bool]], evicted: Int, total-bytes: Int, total-steps: Int]`.
+  One verb per addressable state: the tag selects the transition, and **every**
+  tag answers the survey afterwards. That is not a shared prefix collapsed but
+  the rule the registries already follow, and it fits the view better than
+  either, because an edit changes *what is addressable* — an evicted exchange
+  stops being nameable in the window — so the edit is also the resurvey the
+  next edit must be written against.
+  - `` `survey `` describes the finite window, one span per exchange or import,
+    beside `evicted`, the count of closed exchanges that have left it. It
+    changes nothing.
+  - `` `drop <exchanges> `` sheds whole closed exchanges from the window; they
+    remain in the store. The live, already-gone, duplicate, or empty selection
+    is refused with an explanation; a user-shaped rewind is the same
+    closed-range operation.
+  - `` `evict [through, note] `` removes every span through a closed exchange
+    at once, replaced at the head of the window by the harness's index of what
+    left. `note` is the model's own line to its future self, rendered beside
+    that index; the harness's own eviction writes none. The `evict` row is
+    **open** precisely because `note` is optional and a closed row cannot say
+    so, with `context_evict_payload` refusing an empty one at the door — a
+    marker reading `Your note at eviction: ""` is a defect the type should
+    prevent, and making `note` required would invite exactly that.
 
-  Each edit records a `ContextEdited` model event at the desk immediately.
-  There is no byte-delta receipt: the decision-relevant number is `total-bytes`
-  now against the budget, and a bad fold is diagnosed better by the digest's own
-  `bytes` sitting beside the spans it replaced — that says *where* the weight
-  is, not merely that it moved
-  ([[decisions/260812_context-is-a-projection|context-is-a-projection]]).
-- **`transcript <exchanges>`** → `F [[exchange: Int, messages: [Message]]]`.
-  Reads named closed exchanges back as material: one span record per named
-  exchange or digest, ordered by the view rather than by the argument, each
-  addressed by its own `exchange` field rather than by a `=== … ===` header a
-  reader had to re-parse. It may name a digest by its reach, but not an
-  exchange swallowed by that digest. It is **not** a tag of `context`, because
-  it is the one harness verb whose answer is the size of the thing it
+  Each edit records a `ContextEdited` model event at the desk immediately,
+  under `DeskAct::ContextEvict` or `ContextDrop`. There is no byte-delta
+  receipt: the decision-relevant number is `total-bytes` now against the
+  budget ([[decisions/260812_context-is-a-projection|context-is-a-projection]]).
+- **`transcript <tag>`** → `∀α ρ1 ρ2. <index | read [Int] | grep [pattern: Str
+  | ρ1] | ρ2> → F α`. Read-only: no tag records a protocol event, though each
+  records a `Display::HarnessCall` for the screen. The answer type is a bare
+  `α` because the three tags answer three shapes.
+  - `` `index `` → `[[exchange: Int, kind: Str, prompt: Str, steps: Int,
+    bytes: Int, in-view: Bool]]`, oldest first. `kind` is `exchange`, `import`,
+    or `inherited` (an ancestor's). A departed exchange — evicted *or* dropped —
+    is listed at the weight it carried when it left.
+  - `` `read <exchanges> `` → `[[exchange: Int, messages: [Message]]]`, the
+    named closed exchanges as material, in store order, each addressed by its
+    own `exchange` field rather than by a `=== … ===` header a reader had to
+    re-parse. In view, evicted to this log's file, or an ancestor's: all three
+    render through the same `closed_messages`, so what comes back is what the
+    model was sent.
+  - `` `grep [pattern, exchanges] `` → `[hits: [[exchange: Int, role: Str,
+    line: Int, text: Str]], total: Int]`. A Rust regex — ral's own `re-*`
+    dialect, compiled at the desk so a bad pattern is refused in the regex
+    crate's words — over prompts, programs, results, and reasoning, per line.
+    `exchanges` is optional and narrows the search. At most `GREP_HITS` (100)
+    hits, oldest first, each line clipped at 200 bytes, with `total` the true
+    count so a large one says *narrow*, not *page*.
+
+  `` `read `` is the one harness answer whose size is the size of the thing it
   describes: the survey spends a few hundred bytes to describe a 200 KB view,
-  and this returns the 200 KB. A distinct name is the cheapest safety
-  mechanism available on a model-facing surface, and the only one that acts
-  before the call rather than after. The list is what makes the doc's own
-  advice sayable — a slice is `$t[0]`, a count is `length $t`.
+  and this returns the 200 KB. That is why it is a tag of `transcript` and not
+  of `context` — the distinct name is the cheapest safety mechanism a
+  model-facing surface has, and the only one that acts before the call rather
+  than after — and why the docstring points a long search at a `mnemon` child,
+  which shares the store and spends its own context on it.
 
   A `Message` is `[role: `system|`user|`assistant|`tool, parts: [Part]]`, one
   per model turn the span holds — a step boundary is not a turn and
@@ -256,7 +281,10 @@ queryable store.
   ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]
   for the private `Transcript` cache this reads through,
   `render_closed_entry`'s cached segment converted to material rather than
-  re-rendered).
+  re-rendered). `` `grep `` searches that same narrowing — `` `text ``,
+  `` `program ``'s source, `` `result ``, `` `reasoning ``, a binary payload
+  and a provider extension carrying no text a pattern could mean — so nothing
+  is searchable that is not readable.
 
 - **`agents <tag>`** → `∀α. F α`. One verb for the fleet, over an **open** row
   of six tags — `` `list ``, `` `start ``, `` `message ``, `` `cancel ``,

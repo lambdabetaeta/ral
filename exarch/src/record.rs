@@ -148,6 +148,21 @@ pub enum Protocol {
         exchange: u64,
         message: ChatMessage,
     },
+    /// The link a `mnemon` child opens with: the ancestry its inherited
+    /// exchange ids resolve against.  Written once, before the
+    /// [`Protocol::ContextMessage`]s that carry the parent's view.
+    Inherited {
+        /// The parent's `record.jsonl`, where every inherited exchange — in
+        /// the parent's view or long evicted — reads back from; `None` when
+        /// the parent ran `--no-logs`.
+        source: Option<PathBuf>,
+        /// The parent's head-marker state, by value, so the child's marker
+        /// renders without reading the parent's file.
+        evictions: Vec<model::Eviction>,
+        /// The parent's own exchange floor at the fork: ids at or below it
+        /// resolve against the ancestry, ids above it are the child's own.
+        through_exchange: u64,
+    },
     StepStarted {
         n: u32,
         tuning: Tuning,
@@ -253,6 +268,11 @@ pub enum Display {
     },
     Context {
         rows: Vec<ContextRow>,
+        /// Closed exchanges that have left the window by eviction; drawn as
+        /// one leading line when non-zero. Defaulted on deserialize, so a
+        /// `record.jsonl` written before the count existed still reads.
+        #[serde(default)]
+        evicted: usize,
     },
     /// Beside `Protocol::StepStarted`, whose `tuning` the screen never
     /// showed — the display class never derives from the protocol twin it
@@ -296,7 +316,7 @@ pub enum NoticeFact {
 }
 
 /// One row of a `/context` survey, minus its rendered card.  `kind` mirrors
-/// `ContextSpanKind::as_str`'s three spellings for the same reason.
+/// `ContextSpanKind::as_str`'s spellings for the same reason.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextRow {

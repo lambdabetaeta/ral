@@ -506,9 +506,9 @@ impl Avatar {
             avatar
                 .log
                 .lock()
-                .import_context(vec![genai::chat::ChatMessage::user(
+                .import_note(genai::chat::ChatMessage::user(
                     "session resumed from disk; the shell is fresh: bindings, workers, and cwd from before are gone, the scratch dir is new ($EXARCH_SCRATCH is per-pid, so scratch paths in the old context are dead), pinned state and scheduled events are gone (pin-list and schedules `list to confirm), and any sub-agents from before have ended.",
-                )])
+                ))
                 .map_err(io::Error::other)?;
         }
         Ok(avatar)
@@ -682,13 +682,15 @@ impl Avatar {
         Ok(child)
     }
 
-    /// Import the creator's model-visible context into `child`, mnemon-style.
+    /// Import the creator's model-visible context into `child`, mnemon-style:
+    /// its spans under the creator's own exchange ids, and the link that
+    /// makes the rest of the lineage's store readable from there.
     fn inherit_context(&self, child: &Self) -> Result<(), Unforked> {
-        let messages = self.log.lock().inherited_context_messages();
+        let inherited = self.log.lock().inherited_context();
         child
             .log
             .lock()
-            .import_context(messages)
+            .import_context(inherited)
             .map_err(|why| Unforked::Log(io::Error::other(why)))
     }
 
@@ -1296,7 +1298,7 @@ mod tests {
     }
 
     #[test]
-    fn rewind_validates_the_anchor_drops_the_digest_whole_and_sheds_nudges() {
+    fn rewind_validates_the_anchor_refuses_what_has_gone_and_sheds_nudges() {
         let mut session = Avatar::for_test("system").unwrap();
         {
             let mut log = session.log.lock();
@@ -1322,33 +1324,32 @@ mod tests {
             .log
             .lock()
             .apply_edit(
-                ContextOp::Fold {
+                ContextOp::Evict {
                     through_exchange: 2,
-                    digest: "the first two are complete".into(),
+                    note: None,
                 },
                 EditAuthority::Harness,
             )
             .unwrap();
         assert_eq!(
             session.rewind(1, &emit).unwrap_err(),
-            "exchange 1 is folded into the digest through 2 — name 2 to drop the digest whole, or fold further"
+            "exchange 1 has already left your context — the earliest still in view is 3"
         );
 
         session.inbox.push(Post::Nudge {
             exchange: 3,
             text: "stale continuation".into(),
         });
-        session.rewind(2, &emit).expect("the digest reach is legal");
+        session.rewind(3, &emit).expect("an in-view anchor is legal");
         let view = session.log.lock().view().clone();
-        assert!(view.digest.is_none(), "the digest reach was dropped whole");
         assert!(view.spans.is_empty(), "the rewind removes the whole suffix");
         assert!(
             !matches!(session.inbox.next_item(), Some(Item::Nudge { .. })),
             "a queued nudge for a rewound exchange must not commit"
         );
-        // The fold applied above published its own edit record once the first
-        // rewind attempt coupled the seam, so the drop is asserted anywhere on
-        // the channel rather than at a fixed position.
+        // The eviction applied above published its own edit record once the
+        // first rewind attempt coupled the seam, so the drop is asserted
+        // anywhere on the channel rather than at a fixed position.
         assert!(
             crate::bus::drain_records(&rx)
                 .into_iter()
@@ -1357,7 +1358,7 @@ mod tests {
                     crate::record::Record::Protocol(crate::record::Protocol::ContextEdited {
                         op: ContextOp::Drop { exchanges },
                         by: EditAuthority::User,
-                    }) if exchanges == vec![2, 3]
+                    }) if exchanges == vec![3]
                 )),
             "rewind must be durable on the trace"
         );

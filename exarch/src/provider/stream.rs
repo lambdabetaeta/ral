@@ -1,4 +1,4 @@
-//! Streaming turns, summaries, and partial-response projection.
+//! Streaming turns and partial-response projection.
 
 use super::ProviderError;
 use super::request::{Tuning, complete_options};
@@ -10,7 +10,7 @@ use crate::agent::cancel;
 use crate::record::model::Transcript;
 use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatOptions, ChatStreamEvent, StopReason, StreamEnd, ToolCall};
+use genai::chat::{ChatMessage, ChatStreamEvent, StopReason, StreamEnd, ToolCall};
 
 /// One streamed assistant response.
 pub struct StepOut {
@@ -43,12 +43,6 @@ pub enum CutShort {
     Stalled(ProviderError),
 }
 
-/// One compaction summary response.
-pub struct SummaryOut {
-    pub summary: String,
-    pub usage: Usage,
-}
-
 impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn complete<F: FnMut(Delta<'_>)>(
@@ -74,7 +68,7 @@ impl Engine {
             "before request",
             cancel,
             async |attempt| {
-                let request = manufacture(adapter, system, transcript, None, &tools).into_request();
+                let request = manufacture(adapter, system, transcript, &tools).into_request();
                 let mut seen_streamed_content = false;
                 let mut streamed = String::new();
                 let mut streamed_reasoning = String::new();
@@ -175,81 +169,6 @@ impl Engine {
             },
         ))
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn summarize(
-        &self,
-        transport: &Transport,
-        model: &str,
-        system: &str,
-        transcript: &Transcript,
-        max_tokens: u32,
-        cancel: &cancel::Token,
-    ) -> Result<SummaryOut, ProviderError> {
-        self.refresh_if_stale(transport);
-        let adapter = transport.adapter();
-        let options = ChatOptions::default()
-            .with_max_tokens(max_tokens)
-            .with_prompt_cache_key(self.cache_key());
-
-        let response = self.block_on(retry_with_backoff(
-            "during summary",
-            cancel,
-            async |attempt| {
-                let request = manufacture(
-                    adapter,
-                    system,
-                    transcript,
-                    Some(summary_instruction()),
-                    &[],
-                )
-                .into_request();
-                // `exec_chat` returns only when the whole reply is in, so this
-                // bounds the whole call; no per-read timeout backs it up.
-                let result = tokio::select! {
-                    biased;
-                    () = wait_for_cancel(cancel) => {
-                        return Attempt::Failed(ProviderError::Cancelled("during summary"));
-                    }
-                    () = tokio::time::sleep(idle_timeout(attempt)) => {
-                        return Attempt::Failed(ProviderError::Transient {
-                            cause: "summary request: no response within timeout".into(),
-                            attempts: 1,
-                            body: None,
-                            status: None,
-                        });
-                    }
-                    result = transport.client().exec_chat(model, request, Some(&options)) => result,
-                };
-                match result {
-                    Ok(response) => Attempt::Done(response),
-                    Err(error) => Attempt::Failed(ProviderError::from_genai(&error, model)),
-                }
-            },
-        ))?;
-
-        if matches!(response.stop_reason, Some(StopReason::MaxTokens(_))) {
-            return Err(ProviderError::Truncated {
-                reason: "summary exceeded the compaction token budget".into(),
-            });
-        }
-        Ok(SummaryOut {
-            summary: response.first_text().unwrap_or("").to_string(),
-            usage: usage_from(model, &response.usage, transport.metered(), adapter),
-        })
-    }
-}
-
-/// Freshly minted per attempt — never a clone of a shared message, so it
-/// carries none of the wire door's single annotated clone site.
-fn summary_instruction() -> ChatMessage {
-    ChatMessage::user(
-        "Summarise the conversation so far concisely: \
-        the user's task, what has been tried, what worked, what state the \
-        shell is in (cwd, env, defined names), and any open subtasks. \
-        A prior summary may appear first — fold it in. \
-        Return only the summary, no preamble.",
-    )
 }
 
 fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: AdapterKind) -> StepOut {

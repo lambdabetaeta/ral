@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ccb05833
-generated_at_date: 2026-09-05
+generated_at_commit: c5df4203
+generated_at_date: 2026-09-06
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -38,7 +38,7 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   *over* it to the prompts queued behind, which it changes nothing about.
   A `Boundary::Barrier` post stops the scan dead, because there the order the
   human typed is part of what they said: a command that rewrites or ends the
-  context (`Post::Barrier` — `/clear`, `/compact`, `/rewind`, `/quit`), or a
+  context (`Post::Barrier` — `/clear`, `/evict`, `/rewind`, `/quit`), or a
   slash-prefixed steering line, which is itself prompt text and so must reach
   the model ahead of the prompt text typed after it. Without that split a
   `/branch` typed mid-turn corked every prompt behind it until the turn ended
@@ -366,7 +366,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  tab). View commands (`/help`, `/legend`, `/copy`,
  `/export`, `/model`, `/login`, `/thinking`, `/close`, `/focus`) run on the UI
  thread; session commands (`/branch`, `/context`, `/resources`, `/clear`,
- `/compact`, `/rewind`, `/quit`) enter the focused
+ `/evict`, `/rewind`, `/quit`) enter the focused
  agent's inbox as `Command` items and run in `ReplControl`; the registry's
  `rewrites` field is what says which of those is a barrier in the queue and
  which the prompts behind it may pass over. `/branch [name]`

@@ -279,7 +279,7 @@ pub fn to_card_notice(notice: &crate::record::NoticeFact) -> Notice {
 /// A `/context` survey's rows as one [`Mark::Fields`] matrix under a
 /// "context" header — the one rendering `tui` and `headless` both draw from,
 /// and `pub` for synod.
-pub fn context_rows_card(rows: &[crate::record::ContextRow]) -> Card {
+pub fn context_rows_card(rows: &[crate::record::ContextRow], evicted: usize) -> Card {
     let fields = rows
         .iter()
         .map(|row| Field {
@@ -299,12 +299,22 @@ pub fn context_rows_card(rows: &[crate::record::ContextRow]) -> Card {
             ]),
         })
         .collect();
-    Card(vec![
-        Mark::Text {
-            spans: vec![Span::new(Role::Strong, "context")],
-        },
-        Mark::Fields { rows: fields },
-    ])
+    let mut marks = vec![Mark::Text {
+        spans: vec![Span::new(Role::Strong, "context")],
+    }];
+    if evicted > 0 {
+        marks.push(Mark::Text {
+            spans: vec![Span::new(
+                Role::Muted,
+                format!(
+                    "evicted: {evicted} exchange{}",
+                    if evicted == 1 { "" } else { "s" }
+                ),
+            )],
+        });
+    }
+    marks.push(Mark::Fields { rows: fields });
+    Card(marks)
 }
 
 /// The one observation a producer didn't group.

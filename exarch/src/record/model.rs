@@ -17,13 +17,15 @@
 use super::log::Log;
 use super::{Fold, Protocol, Record, Recorded, Refusal, Stamp};
 use crate::agent::event::{
-    CompactionPlan, ContextOp, ContextSpanKind, ContextSurvey, ContextSurveyItem, QuiesceReason,
-    ToolResult, TranscriptMessage, TranscriptPart, TranscriptSpan, summary_prompt,
-    validate_result_ids,
+    ContextOp, ContextSpanKind, ContextSurvey, ContextSurveyItem, EvictionPlan, GrepAnswer,
+    GrepHit, QuiesceReason, StoreIndexItem, ToolResult, TranscriptMessage, TranscriptPart,
+    TranscriptSpan, validate_result_ids,
 };
 use genai::chat::{
     Binary, BinarySource, ChatMessage, ChatRole, ContentPart, CustomPart, ToolCall, ToolResponse,
 };
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -60,14 +62,6 @@ enum State {
     AwaitingAssistantAfterToolResults,
 }
 
-/// A closed prefix of exchanges, folded into one summary the model reads in
-/// place of the spans it replaced.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Digest {
-    pub through_exchange: u64,
-    pub text: String,
-}
-
 /// One exchange's (or imported context's) contiguous run of protocol records,
 /// named by its exchange id.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,17 +70,39 @@ pub struct Span {
     pub events: Range<usize>,
 }
 
-/// The model's addressable window onto the protocol subsequence: an optional
-/// digest standing in for everything it folded, plus the closed and live
-/// spans still readable by exchange id.
+/// The model's addressable window onto the protocol subsequence: the prefix
+/// removals the head marker indexes, plus the closed and live spans still
+/// readable by exchange id.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct View {
-    pub digest: Option<Digest>,
+    /// Prefix removals, in the order they landed; the head marker renders
+    /// these and nothing else.
+    pub evictions: Vec<Eviction>,
     pub spans: Vec<Span>,
 }
 
+/// One [`ContextOp::Evict`] as the head marker reads it back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Eviction {
+    /// One row per span the op removed, ascending.
+    pub rows: Vec<EvictedRow>,
+    /// The model's own line to its future self, if it wrote one.
+    pub note: Option<String>,
+}
+
+/// What the head marker remembers of one exchange that left the window: its
+/// address, and the weight it carried while the model still held it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvictedRow {
+    pub exchange: u64,
+    pub kind: ContextSpanKind,
+    pub opening: String,
+    pub steps: usize,
+    pub bytes: usize,
+}
+
 /// The provider-facing view as a persistent value: one shared segment per
-/// closed span (digest included), the live tail rendered fresh. Clone is
+/// closed span (the head marker included), the live tail rendered fresh. Clone is
 /// Arc bumps; the only routes back to owned messages are the wire door and
 /// the mnemon child seed.
 #[derive(Clone, Default)]
@@ -138,13 +154,6 @@ struct SpanRender {
     bytes: usize,
 }
 
-/// The digest's rendering, replaced wholesale whenever a `Fold` replaces the
-/// digest text itself.
-struct DigestRender {
-    segment: Arc<[ChatMessage]>,
-    bytes: usize,
-}
-
 fn message_bytes(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
@@ -159,8 +168,12 @@ struct Ledger {
     len: usize,
     resident: BTreeMap<usize, Recorded<Protocol>>,
     freed: BTreeMap<usize, Stamp>,
-    /// `record.jsonl`'s own path, known once this fold is seeded from disk
-    /// ([`resume`]) — the only thing a freed index needs to read itself back.
+    /// `record.jsonl`'s own path — the only thing a freed index needs to read
+    /// itself back, and `None` exactly when the session keeps no log.
+    ///
+    /// Reading a completed record by byte range from the file this process is
+    /// still appending to is safe: a [`Stamp`] exists only once the seam has
+    /// written the whole record under its lock.
     source: Option<PathBuf>,
 }
 
@@ -219,21 +232,34 @@ impl Ledger {
                     "the freed record ledger has no readable record.jsonl",
                 ));
             };
-            #[allow(
-                clippy::disallowed_methods,
-                reason = "[io-door:silent:model-fold-freed-read] reads one evicted protocol record back off record.jsonl by its own Stamp; output infra, not turn-time data I/O"
-            )]
-            let mut file = File::open(path)?;
-            for (index, stamp) in &self.freed {
-                events.push((*index, read_freed(&mut file, stamp)?));
-            }
+            let stamps: Vec<Stamp> = self.freed.values().cloned().collect();
+            let read = read_records(path, &stamps)?;
+            events.extend(self.freed.keys().copied().zip(read));
             events.sort_unstable_by_key(|(index, _)| *index);
         }
         Ok(events)
     }
 }
 
-fn read_freed(reader: &mut File, stamp: &Stamp) -> io::Result<Protocol> {
+/// Read `stamps`' records back off `path`, in the order given — one file
+/// opened per call, whoever is asking.
+///
+/// # Errors
+/// Returns `Err` if the file cannot be opened, a range cannot be read, or a
+/// stamp names anything but a protocol record.
+fn read_records(path: &Path, stamps: &[Stamp]) -> io::Result<Vec<Protocol>> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:model-fold-freed-read] reads evicted protocol records back off record.jsonl by their own Stamps; output infra, not turn-time data I/O"
+    )]
+    let mut file = File::open(path)?;
+    stamps
+        .iter()
+        .map(|stamp| read_stamped(&mut file, stamp))
+        .collect()
+}
+
+fn read_stamped(reader: &mut File, stamp: &Stamp) -> io::Result<Protocol> {
     let bytes = stamp.bytes();
     let length = usize::try_from(bytes.end.saturating_sub(bytes.start))
         .map_err(|_| io::Error::other("a freed record range is too large to read"))?;
@@ -266,15 +292,106 @@ pub struct Memo {
     /// (`record_event_span` only opens a span strictly past the running
     /// maximum), so `(id, end)` determines a rendering globally and forever.
     render: HashMap<u64, SpanRender>,
-    digest_render: Option<DigestRender>,
+    /// The head marker, recomputed whenever [`View::evictions`] changes and
+    /// present exactly when that list is non-empty.
+    head_render: Option<(Arc<[ChatMessage]>, usize)>,
+    /// Every span that has left the view, by eviction or by drop: where its
+    /// records lie in the ledger, and the row it was weighed at while the
+    /// model still held it. Memo-only, never serialised, and never part of
+    /// the `fold == memo` check.
+    departed: BTreeMap<u64, Departed>,
+    /// The parent this log's opening context came from, when it is a
+    /// `mnemon` child; [`Protocol::Inherited`] is the one thing that sets it.
+    ancestry: Option<Ancestry>,
+    /// The lineage's own store, walked once on the first read that reaches
+    /// past this log's ledger. Memo-only, never serialised.
+    ancestry_index: Option<AncestorIndex>,
+}
+
+/// [`Memo::departed`]'s value.
+struct Departed {
+    events: Range<usize>,
+    row: EvictedRow,
+}
+
+/// One link of a lineage: whose file the ids below it read back from, and
+/// how far down they reach.
+#[derive(Clone)]
+struct Ancestry {
+    /// That ancestor's `record.jsonl`, or `None` when it kept no log.
+    source: Option<PathBuf>,
+    /// Ids at or below this belong to the ancestry; above it they are this
+    /// log's own.
+    through_exchange: u64,
+}
+
+/// The lineage's closed exchanges, by id — and, when the walk stopped short
+/// of the lineage's root, why, so an id it could not reach is refused with
+/// the reason rather than called unrecorded.
+#[derive(Default)]
+struct AncestorIndex {
+    spans: BTreeMap<u64, AncestorSpan>,
+    broken: Option<Break>,
+}
+
+/// One ancestor's exchange: where its records lie, and the row the store
+/// index weighs it by. `source` is per-span because a lineage of three
+/// spreads its ids over three files.
+struct AncestorSpan {
+    source: PathBuf,
+    stamps: Vec<Stamp>,
+    row: EvictedRow,
+}
+
+/// Why a lineage walk stopped before the ancestry's root.
+enum Break {
+    /// That ancestor kept no log at all.
+    NoLog,
+    /// Its `record.jsonl` could not be read. `/clear` cancels every
+    /// descendant before it rotates, so no live child holds a link to a
+    /// rotated file: the reachable cause is a hand-deleted directory.
+    Unreadable { source: PathBuf, error: String },
+}
+
+impl Break {
+    fn refusal(&self, exchange: u64) -> String {
+        match self {
+            Self::NoLog => format!(
+                "an ancestor of this session ran `--no-logs`, so exchange {exchange} is unreadable; only what was handed down at the fork is still in your view."
+            ),
+            Self::Unreadable { source, error } => format!(
+                "exchange {exchange} was recorded by an ancestor, but the ancestor's log at {} is gone: {error}",
+                source.display()
+            ),
+        }
+    }
+}
+
+/// Several exchanges lying in one file, in store order, each with the stamps
+/// its own records were written under.
+type StampedSpans = Vec<(u64, Vec<Stamp>)>;
+
+/// Where one closed exchange's records lie. Slots and [`Stamp`]s rather than
+/// the records themselves: resolution is a `&mut self` walk, and a borrow of
+/// the ledger taken here would outlive it.
+enum Located {
+    Resident(Range<usize>),
+    Freed(Vec<Stamp>),
+    Ancestor { source: PathBuf, stamps: Vec<Stamp> },
 }
 
 impl Memo {
-    /// Attach `record.jsonl`'s own path, so a later eviction can read its
-    /// freed record back — set once, at resume, by whoever seeded this memo
-    /// from disk; a live memo with no eviction ever needs it.
-    pub fn attach_source(&mut self, path: PathBuf) {
-        self.ledger.source = Some(path);
+    /// The one constructor: `source` is `record.jsonl`'s path, or `None` for
+    /// a session that keeps no log, and is fixed for this memo's life.
+    #[must_use]
+    pub fn new(source: Option<PathBuf>) -> Self {
+        Self {
+            ledger: Ledger {
+                source,
+                ..Ledger::default()
+            },
+            ..Self::default()
+        }
     }
 
     /// Whether a record that opens a span — a fresh [`Protocol::UserPrompt`],
@@ -286,7 +403,7 @@ impl Memo {
         admits_new_span(&self.state)
     }
 
-    pub fn can_compact(&self) -> bool {
+    pub fn can_evict(&self) -> bool {
         self.is_ready()
     }
 
@@ -294,13 +411,20 @@ impl Memo {
         (self.max_exchange != 0).then_some(self.max_exchange)
     }
 
-    pub fn last_view_exchange(&self) -> Option<u64> {
-        self.view.spans.last().map(|span| span.id).or_else(|| {
-            self.view
-                .digest
+    /// The id the next exchange this log opens is minted above. Ids are
+    /// lineage-monotone, so a fork that inherited an empty view — a rewind
+    /// at a ready boundary can leave one — still starts past its ancestry
+    /// rather than back at 1.
+    pub(crate) fn exchange_floor(&self) -> u64 {
+        self.max_exchange.max(
+            self.ancestry
                 .as_ref()
-                .map(|digest| digest.through_exchange)
-        })
+                .map_or(0, |ancestry| ancestry.through_exchange),
+        )
+    }
+
+    pub fn last_view_exchange(&self) -> Option<u64> {
+        self.view.spans.last().map(|span| span.id)
     }
 
     pub fn log_len(&self) -> usize {
@@ -361,18 +485,27 @@ impl Memo {
         quiesce_records(&self.state, reason)
     }
 
-    /// The parent context a `mnemon` child inherits, materialised whole: the
-    /// one other place ownership genuinely transfers, beside the wire door.
+    /// The parent context a `mnemon` child inherits, span by span under this
+    /// log's own exchange ids: the one other place ownership genuinely
+    /// transfers, beside the wire door. The head marker is not among them —
+    /// the child re-renders it from the evictions the link carries.
+    ///
     /// A spawn from inside a tool batch leaves the parent waiting on the very
     /// call that made the child, so that unfinished assistant frame is
     /// dropped: the child starts from the request context, not a dangling
     /// tool protocol.
-    pub(crate) fn inherited_context_messages(&mut self) -> Vec<ChatMessage> {
+    pub(crate) fn inherited_context(&mut self) -> Vec<(u64, Vec<ChatMessage>)> {
         let omit_tail_assistant = matches!(self.state, State::AwaitingToolResults { .. });
-        self.assemble(omit_tail_assistant)
-            .messages()
-            .cloned()
-            .collect()
+        let spans = self.view.spans.clone();
+        let Some((last, closed)) = spans.split_last() else {
+            return Vec::new();
+        };
+        let mut inherited: Vec<(u64, Vec<ChatMessage>)> = closed
+            .iter()
+            .map(|span| (span.id, self.render_closed_entry(span).segment.to_vec()))
+            .collect();
+        inherited.push((last.id, self.render_tail(last, omit_tail_assistant)));
+        inherited
     }
 
     /// The provider-facing transcript — recomputed from the protocol
@@ -386,8 +519,8 @@ impl Memo {
 
     fn assemble(&mut self, omit_tail_assistant: bool) -> Transcript {
         let mut transcript = Transcript::default();
-        if let Some(digest) = &self.digest_render {
-            transcript.push(Arc::clone(&digest.segment), digest.bytes);
+        if let Some((segment, bytes)) = &self.head_render {
+            transcript.push(Arc::clone(segment), *bytes);
         }
         let spans = self.view.spans.clone();
         if let Some((last, closed)) = spans.split_last() {
@@ -425,6 +558,18 @@ impl Memo {
         self.render.get(&span.id).expect("just ensured present")
     }
 
+    /// Re-render the head marker from the evictions the view now carries —
+    /// the one place [`Self::head_render`] is written, so it cannot drift
+    /// from them.
+    fn recompute_head(&mut self) {
+        let readable = self.ledger.source.is_some();
+        self.head_render = (!self.view.evictions.is_empty()).then(|| {
+            let message = ChatMessage::user(render_head(&self.view.evictions, readable));
+            let bytes = message_bytes(std::slice::from_ref(&message));
+            (Arc::from(vec![message]), bytes)
+        });
+    }
+
     /// The last span only, never cached and never dropped: the tail is the
     /// exchange in flight, so it renders whatever state it rests in.
     fn render_tail(&self, span: &Span, omit_tail_assistant: bool) -> Vec<ChatMessage> {
@@ -449,30 +594,14 @@ impl Memo {
             .ledger
             .resident_events(span.events.start..end)
             .expect("view spans are resident in the ledger");
-        let settles = events
-            .iter()
-            .fold(State::default(), |state, event| advance(&state, event));
-        if closed && !matches!(settles, State::ReadyForUser) {
-            return vec![ChatMessage::user(abandoned_note(&events))];
+        if closed {
+            return closed_messages(&events);
         }
         events
             .into_iter()
             .cloned()
             .flat_map(into_chat_messages)
             .collect()
-    }
-
-    fn messages_for_spans(&mut self, spans: &[Span]) -> Transcript {
-        let mut transcript = Transcript::default();
-        if let Some(digest) = &self.digest_render {
-            transcript.push(Arc::clone(&digest.segment), digest.bytes);
-        }
-        let spans = spans.to_vec();
-        for span in &spans {
-            let entry = self.render_closed_entry(span);
-            transcript.push(Arc::clone(&entry.segment), entry.bytes);
-        }
-        transcript
     }
 
     /// The window every read query of the model view answers over — private
@@ -482,11 +611,14 @@ impl Memo {
         &self.view
     }
 
-    fn digest_reach(&self) -> Option<u64> {
+    /// The last exchange an eviction has taken out of the view. Evictions are
+    /// prefix ops, so every id at or below it is gone for good.
+    fn eviction_reach(&self) -> Option<u64> {
         self.view
-            .digest
-            .as_ref()
-            .map(|digest| digest.through_exchange)
+            .evictions
+            .last()
+            .and_then(|eviction| eviction.rows.last())
+            .map(|row| row.exchange)
     }
 
     /// Slots still owned by the model view: the append-only ledger retains
@@ -499,11 +631,11 @@ impl Memo {
             .iter()
             .map(|span| span.events.len())
             .sum::<usize>();
-        events + usize::from(self.view.digest.is_some())
+        events + usize::from(self.head_render.is_some())
     }
 
     /// Approximate context size in serialised model-view bytes — the
-    /// fallback compaction trigger when the model's context window is
+    /// fallback eviction trigger when the model's context window is
     /// unknown. Closed spans read the memo's cached bytes; only the live
     /// tail is re-serialised.
     pub(crate) fn history_bytes(&mut self) -> usize {
@@ -519,53 +651,34 @@ impl Memo {
     /// # Panics
     /// Panics if a view span is not resident in the ledger.
     pub(crate) fn context_survey(&mut self) -> ContextSurvey {
-        let mut survey = ContextSurvey::default();
-        if let Some(digest) = &self.view.digest {
-            let bytes = self
-                .digest_render
-                .as_ref()
-                .expect("a view digest always has a cached rendering")
-                .bytes;
-            let item = ContextSurveyItem {
-                exchange: digest.through_exchange,
-                kind: ContextSpanKind::Digest,
-                opening: opening_line(&digest.text),
-                bytes,
-                steps: 0,
-                live: false,
-            };
-            survey.add(item);
-        }
+        // The head marker is in the window but on no row, so it weighs on
+        // the total alone: `total_bytes` stays `history_bytes`.
+        let mut survey = ContextSurvey {
+            evicted: self
+                .view
+                .evictions
+                .iter()
+                .map(|eviction| eviction.rows.len())
+                .sum(),
+            total_bytes: self.head_render.as_ref().map_or(0, |(_, bytes)| *bytes),
+            ..ContextSurvey::default()
+        };
         let spans = self.view.spans.clone();
         let last = spans.len().saturating_sub(1);
         for (index, span) in spans.iter().enumerate() {
-            let (kind, opening, steps) = {
-                let events = self
-                    .ledger
-                    .resident_events(span.events.clone())
-                    .expect("view spans are resident in the ledger");
-                let kind = match events.first() {
-                    Some(Protocol::ContextMessage { .. }) => ContextSpanKind::Import,
-                    _ => ContextSpanKind::Exchange,
-                };
-                let opening = opening_line_for_events(&events);
-                let steps = events
-                    .iter()
-                    .filter(|event| matches!(event, Protocol::StepStarted { .. }))
-                    .count();
-                (kind, opening, steps)
-            };
-            let bytes = if index == last {
-                message_bytes(&self.render_tail(span, false))
+            // The last span is weighed as it lies, never cached as closed.
+            let row = if index == last {
+                let bytes = message_bytes(&self.render_tail(span, false));
+                self.weighed_row(span, bytes)
             } else {
-                self.render_closed_entry(span).bytes
+                self.span_row(span)
             };
             let item = ContextSurveyItem {
-                exchange: span.id,
-                kind,
-                opening,
-                bytes,
-                steps,
+                exchange: row.exchange,
+                kind: row.kind,
+                opening: row.opening,
+                bytes: row.bytes,
+                steps: row.steps,
                 live: self.is_live_exchange(span.id),
             };
             survey.add(item);
@@ -573,82 +686,304 @@ impl Memo {
         survey
     }
 
-    /// Read named, closed spans in their model-view order — one
-    /// [`TranscriptSpan`] each, addressed by its own `exchange` field rather
-    /// than by argument position, so the order is the view's and not the
-    /// argument's. Each span's messages are exactly the ones
-    /// [`Self::render_closed_entry`] caches for the next provider request,
-    /// narrowed to [`TranscriptPart`]s rather than the provider's own
-    /// content parts — a span answers what the model saw, not a fresh
-    /// rendering of it.
+    /// One in-view span weighed as a closed one: what the survey reports, and
+    /// what an eviction remembers of the span once its records are freed.
+    fn span_row(&mut self, span: &Span) -> EvictedRow {
+        let bytes = self.render_closed_entry(span).bytes;
+        self.weighed_row(span, bytes)
+    }
+
+    fn weighed_row(&self, span: &Span, bytes: usize) -> EvictedRow {
+        let events = self
+            .ledger
+            .resident_events(span.events.clone())
+            .expect("view spans are resident in the ledger");
+        evicted_row(span.id, &events, bytes)
+    }
+
+    /// Read named, closed exchanges in store order — one [`TranscriptSpan`]
+    /// each, addressed by its own `exchange` field rather than by argument
+    /// position. Every arm of [`Self::resolve`] renders through
+    /// [`closed_messages`], so what comes back is what the model was sent,
+    /// whether the exchange is still in view, evicted to this log's own file,
+    /// or an ancestor's. All are narrowed to [`TranscriptPart`]s rather than
+    /// the provider's own content parts.
     ///
     /// # Errors
-    /// Refuses an empty list, a duplicate name, a missing or folded exchange,
-    /// or the exchange still in progress.
-    pub(crate) fn read_context(&mut self, exchanges: &[u64]) -> Result<Vec<TranscriptSpan>, String> {
+    /// Refuses an empty list, a duplicate name, an exchange this lineage never
+    /// recorded, the exchange still in progress, or one behind a `--no-logs`
+    /// boundary.
+    pub(crate) fn read_context(
+        &mut self,
+        exchanges: &[u64],
+    ) -> Result<Vec<TranscriptSpan>, String> {
+        self.validate_read(exchanges)?;
+        let mut named: Vec<u64> = exchanges.to_vec();
+        named.sort_unstable();
+        let mut spans = Vec::with_capacity(named.len());
+        for exchange in named {
+            let messages = self
+                .located_messages(exchange)?
+                .iter()
+                .map(transcript_message)
+                .collect();
+            spans.push(TranscriptSpan { exchange, messages });
+        }
+        Ok(spans)
+    }
+
+    /// One closed exchange's messages, wherever the lineage keeps them.
+    fn located_messages(&mut self, exchange: u64) -> Result<Vec<ChatMessage>, String> {
+        match self.resolve(exchange)? {
+            Located::Resident(events) => {
+                let events = self
+                    .ledger
+                    .resident_events(events)
+                    .expect("view spans are resident in the ledger");
+                Ok(closed_messages(&events))
+            }
+            Located::Freed(stamps) => {
+                let path = self
+                    .ledger
+                    .source
+                    .clone()
+                    .expect("a freed exchange resolves only where there is a file to read");
+                read_span(&path, &stamps, exchange)
+            }
+            Located::Ancestor { source, stamps } => read_span(&source, &stamps, exchange),
+        }
+    }
+
+    /// Where one closed exchange's records lie: own resident, own freed, then
+    /// the ancestry — which is consulted only for an id at or below the
+    /// fork's reach, every id above it being this log's own.
+    ///
+    /// # Errors
+    /// Refuses an id no lineage record answers for, one whose records were
+    /// freed in a session that keeps no log, and one behind a broken link.
+    fn resolve(&mut self, exchange: u64) -> Result<Located, String> {
+        if let Some(span) = self.view.spans.iter().find(|span| span.id == exchange) {
+            return Ok(Located::Resident(span.events.clone()));
+        }
+        if self.departed.contains_key(&exchange) {
+            if self.ledger.source.is_none() {
+                return Err(no_log_refusal(exchange));
+            }
+            return Ok(Located::Freed(self.departed_stamps(exchange)?));
+        }
+        let unreached = never_recorded_refusal(exchange, self.last_closed_exchange());
+        if self
+            .ancestry
+            .as_ref()
+            .is_none_or(|ancestry| exchange > ancestry.through_exchange)
+        {
+            return Err(unreached);
+        }
+        let index = self.ancestor_index();
+        match index.spans.get(&exchange) {
+            Some(span) => Ok(Located::Ancestor {
+                source: span.source.clone(),
+                stamps: span.stamps.clone(),
+            }),
+            None => Err(index
+                .broken
+                .as_ref()
+                .map_or(unreached, |broken| broken.refusal(exchange))),
+        }
+    }
+
+    /// The lineage's store, walked once: O(ancestor file) on the first read
+    /// that reaches past this log's own ledger, and free thereafter.
+    fn ancestor_index(&mut self) -> &AncestorIndex {
+        if self.ancestry_index.is_none() {
+            let index = self
+                .ancestry
+                .as_ref()
+                .map_or_else(AncestorIndex::default, index_ancestry);
+            self.ancestry_index = Some(index);
+        }
+        self.ancestry_index.as_ref().expect("just ensured present")
+    }
+
+    /// One departed exchange's records, by the [`Stamp`]s they were freed
+    /// under, in log order.
+    fn departed_stamps(&self, exchange: u64) -> Result<Vec<Stamp>, String> {
+        let departed = self
+            .departed
+            .get(&exchange)
+            .expect("validated as departed before it is read");
+        departed
+            .events
+            .clone()
+            .map(|index| {
+                self.ledger.freed.get(&index).cloned().ok_or_else(|| {
+                    format!(
+                        "exchange {exchange} names record slot {index}, which the ledger has neither resident nor freed — the fold's own invariant broke"
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Every closed exchange the store holds, oldest first: the departed ones
+    /// at the weight they were carrying when they left, the rest as the
+    /// survey weighs them, and the ancestry's own beneath both. The live
+    /// exchange is in no store.
+    ///
+    /// An id this log recorded itself is listed once, by its own row: an
+    /// inherited exchange is an import here, not an ancestor's, whether it is
+    /// still in view or long dropped.
+    pub(crate) fn store_index(&mut self) -> Vec<StoreIndexItem> {
+        let mut items: Vec<StoreIndexItem> = self
+            .departed
+            .values()
+            .map(|departed| store_index_item(&departed.row, false))
+            .collect();
+        for span in self.view.spans.clone() {
+            if !self.is_live_exchange(span.id) {
+                let row = self.span_row(&span);
+                items.push(store_index_item(&row, true));
+            }
+        }
+        let own: HashSet<u64> = items.iter().map(|item| item.exchange).collect();
+        items.extend(
+            self.ancestor_index()
+                .spans
+                .values()
+                .filter(|span| !own.contains(&span.row.exchange))
+                .map(|span| store_index_item(&span.row, false)),
+        );
+        items.sort_unstable_by_key(|item| item.exchange);
+        items
+    }
+
+    /// Search the closed exchanges' text: the named ones, or the whole store.
+    /// Resident spans are searched off the render cache, then the departed
+    /// ones off `record.jsonl`, then the ancestry's own — each file in one
+    /// pass in stamp order.
+    ///
+    /// An unreadable exchange is refused when it was named and passed over
+    /// when the whole store was: the head marker has already told the model
+    /// which of its exchanges it cannot have back.
+    ///
+    /// # Errors
+    /// Refuses a named list [`Self::validate_read`] refuses, and any named
+    /// exchange [`Self::resolve`] cannot reach.
+    pub(crate) fn grep_store(
+        &mut self,
+        pattern: &Regex,
+        exchanges: Option<&[u64]>,
+    ) -> Result<GrepAnswer, String> {
+        if let Some(named) = exchanges {
+            self.validate_read(named)?;
+            // Every name is resolved before any is searched: a hit list is no
+            // answer to a name the store cannot reach.
+            for &exchange in named {
+                let _ = self.resolve(exchange)?;
+            }
+        }
+        let wanted = |id: u64| exchanges.is_none_or(|named| named.contains(&id));
+        let mut tally = Tally::default();
+
+        for span in self.view.spans.clone() {
+            if wanted(span.id) && !self.is_live_exchange(span.id) {
+                let segment = Arc::clone(&self.render_closed_entry(&span).segment);
+                grep_messages(pattern, span.id, &segment, &mut tally);
+            }
+        }
+
+        let mut owners: StampedSpans = Vec::new();
+        if let Some(path) = self.ledger.source.clone() {
+            for exchange in self.departed.keys().copied().filter(|id| wanted(*id)) {
+                owners.push((exchange, self.departed_stamps(exchange)?));
+            }
+            grep_records(pattern, &path, &owners, &mut tally)?;
+        }
+
+        for (path, owners) in self.ancestor_groups(&wanted) {
+            grep_records(pattern, &path, &owners, &mut tally)?;
+        }
+        Ok(tally.answer())
+    }
+
+    /// The ancestry's searchable exchanges, grouped by the file they lie in
+    /// and in store order — never one this log's own ledger already answered
+    /// for.
+    fn ancestor_groups(&mut self, wanted: &impl Fn(u64) -> bool) -> Vec<(PathBuf, StampedSpans)> {
+        let own: HashSet<u64> = self
+            .view
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .chain(self.departed.keys().copied())
+            .collect();
+        let mut groups: Vec<(PathBuf, StampedSpans)> = Vec::new();
+        for (exchange, span) in &self.ancestor_index().spans {
+            if own.contains(exchange) || !wanted(*exchange) {
+                continue;
+            }
+            let owner = (*exchange, span.stamps.clone());
+            match groups.last_mut() {
+                Some((path, owners)) if *path == span.source => owners.push(owner),
+                _ => groups.push((span.source.clone(), vec![owner])),
+            }
+        }
+        groups
+    }
+
+    /// Every named exchange must be closed, named once, and one this lineage
+    /// recorded — its own, in view or departed, or an ancestor's.
+    fn validate_read(&self, exchanges: &[u64]) -> Result<(), String> {
         if exchanges.is_empty() {
             return Err("transcript must name at least one exchange".into());
         }
-        self.validate_named_exchanges(exchanges)?;
-        let named: HashSet<u64> = exchanges.iter().copied().collect();
-        let mut spans = Vec::new();
-        if let Some(digest) = &self.view.digest
-            && named.contains(&digest.through_exchange)
-        {
-            let messages = self
-                .digest_render
-                .as_ref()
-                .expect("a view digest always has a cached rendering")
-                .segment
-                .iter()
-                .map(transcript_message)
-                .collect();
-            spans.push(TranscriptSpan {
-                exchange: digest.through_exchange,
-                messages,
-            });
-        }
-        for span in self.view.spans.clone() {
-            if !named.contains(&span.id) {
-                continue;
+        let reach = self
+            .ancestry
+            .as_ref()
+            .map_or(0, |ancestry| ancestry.through_exchange);
+        let mut named = HashSet::with_capacity(exchanges.len());
+        for &exchange in exchanges {
+            if !named.insert(exchange) {
+                return Err(format!("exchange {exchange} was named more than once"));
             }
-            let messages = self
-                .render_closed_entry(&span)
-                .segment
-                .iter()
-                .map(transcript_message)
-                .collect();
-            spans.push(TranscriptSpan {
-                exchange: span.id,
-                messages,
-            });
+            if self.is_live_exchange(exchange) {
+                return Err(live_exchange_refusal(exchange));
+            }
+            if exchange > reach
+                && !self.departed.contains_key(&exchange)
+                && !self.view.spans.iter().any(|span| span.id == exchange)
+            {
+                return Err(never_recorded_refusal(
+                    exchange,
+                    self.last_closed_exchange(),
+                ));
+            }
         }
-        Ok(spans)
+        Ok(())
+    }
+
+    /// The newest exchange the store holds whole: in view or departed, and
+    /// never the one still in flight.
+    fn last_closed_exchange(&self) -> Option<u64> {
+        self.view
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .chain(self.departed.keys().copied())
+            .filter(|id| !self.is_live_exchange(*id))
+            .max()
     }
 
     /// Resolve a user rewind into the whole visible suffix beginning at its
     /// anchor. The anchor is checked before the suffix is derived.
     ///
     /// # Errors
-    /// Refuses an absent anchor or one strictly inside the current digest.
+    /// Refuses an absent anchor or one that has already left the view.
     pub(crate) fn rewind_exchanges(&self, anchor: u64) -> Result<Vec<u64>, String> {
-        if let Some(reach) = self.digest_reach() {
-            if anchor < reach {
-                return Err(folded_exchange_refusal(anchor, reach));
-            }
-            if anchor == reach {
-                let mut exchanges = vec![anchor];
-                exchanges.extend(
-                    self.view
-                        .spans
-                        .iter()
-                        .filter(|span| span.id >= anchor)
-                        .map(|span| span.id),
-                );
-                return Ok(exchanges);
-            }
-        }
         if !self.view.spans.iter().any(|span| span.id == anchor) {
+            if self.eviction_reach().is_some_and(|reach| anchor <= reach) {
+                return Err(self.evicted_exchange_refusal(anchor));
+            }
             return Err(rewind_unknown_exchange_refusal(
                 anchor,
                 self.last_view_exchange(),
@@ -667,7 +1002,7 @@ impl Memo {
     /// Refuses an unnamed edit, an unaddressable target, or a live exchange.
     pub(crate) fn validate_edit(&self, op: &ContextOp) -> Result<(), String> {
         match op {
-            ContextOp::Fold {
+            ContextOp::Evict {
                 through_exchange, ..
             } => self.validate_closed_present(*through_exchange),
             ContextOp::Drop { exchanges } => {
@@ -691,19 +1026,15 @@ impl Memo {
         Ok(())
     }
 
-    /// An exchange is addressable iff it survives in the view — as a span, or
-    /// as the digest named by its reach — and closed iff it is not the live
-    /// one.
+    /// An exchange is addressable iff a span for it is still in the view, and
+    /// closed iff it is not the live one. An eviction is a prefix op, so an
+    /// id at or below the latest one's reach is told it is gone rather than
+    /// told it was never there.
     fn validate_closed_present(&self, exchange: u64) -> Result<(), String> {
-        if let Some(reach) = self.digest_reach() {
-            if exchange < reach {
-                return Err(folded_exchange_refusal(exchange, reach));
-            }
-            if exchange == reach {
-                return Ok(());
-            }
-        }
         if !self.view.spans.iter().any(|span| span.id == exchange) {
+            if self.eviction_reach().is_some_and(|reach| exchange <= reach) {
+                return Err(self.evicted_exchange_refusal(exchange));
+            }
             return Err(unknown_exchange_refusal(exchange));
         }
         if self.is_live_exchange(exchange) {
@@ -712,15 +1043,27 @@ impl Memo {
         Ok(())
     }
 
-    /// Plan-compaction only ever runs at a ready boundary
-    /// ([`Self::can_compact`]), so no span it weighs — the one last in
-    /// `view.spans` included — is still growing, and every one is safe to
-    /// cache through [`Self::render_closed_entry`].
-    pub(crate) fn plan_compaction(
+    fn evicted_exchange_refusal(&self, exchange: u64) -> String {
+        match self.view.spans.first() {
+            Some(first) => format!(
+                "exchange {exchange} has already left your context — the earliest still in view is {}",
+                first.id
+            ),
+            None => format!(
+                "exchange {exchange} has already left your context — no exchange is still in view"
+            ),
+        }
+    }
+
+    /// Planning only ever runs at a ready boundary ([`Self::can_evict`]), so
+    /// no span it weighs — the one last in `view.spans` included — is still
+    /// growing, and every one is safe to cache through
+    /// [`Self::render_closed_entry`].
+    pub(crate) fn plan_eviction(
         &mut self,
         keep_budget_bytes: usize,
         before_exchange: Option<u64>,
-    ) -> Option<CompactionPlan> {
+    ) -> Option<EvictionPlan> {
         let spans = self.view.spans.clone();
         let cap = before_exchange.map(|id| {
             spans
@@ -752,15 +1095,275 @@ impl Memo {
             return None;
         }
 
-        Some(CompactionPlan {
+        Some(EvictionPlan {
             through_exchange: spans[suffix_start - 1].id,
-            prefix: self.messages_for_spans(&spans[..suffix_start]),
         })
     }
 }
 
 fn opening_line(text: &str) -> String {
     text.lines().next().unwrap_or_default().to_string()
+}
+
+/// A span is an import iff its first record is one; nothing else opens one.
+fn span_kind(events: &[&Protocol]) -> ContextSpanKind {
+    match events.first() {
+        Some(Protocol::ContextMessage { .. }) => ContextSpanKind::Import,
+        _ => ContextSpanKind::Exchange,
+    }
+}
+
+fn step_count(events: &[&Protocol]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, Protocol::StepStarted { .. }))
+        .count()
+}
+
+/// A closed span's messages — or, when its own fold never settles, the one
+/// note standing for the exchange it abandoned. The single rendering the
+/// model view, an eviction's weight, and a read-back all go through, so a
+/// record read off disk answers byte-for-byte what the model was sent.
+fn closed_messages(events: &[&Protocol]) -> Vec<ChatMessage> {
+    let settles = events
+        .iter()
+        .fold(State::default(), |state, event| advance(&state, event));
+    if !matches!(settles, State::ReadyForUser) {
+        return vec![ChatMessage::user(abandoned_note(events))];
+    }
+    events
+        .iter()
+        .map(|event| (*event).clone())
+        .flat_map(into_chat_messages)
+        .collect()
+}
+
+/// One closed exchange read back off a file it was stamped into.
+fn read_span(path: &Path, stamps: &[Stamp], exchange: u64) -> Result<Vec<ChatMessage>, String> {
+    let records =
+        read_records(path, stamps).map_err(|error| read_back_refusal(exchange, path, &error))?;
+    Ok(closed_messages(&records.iter().collect::<Vec<_>>()))
+}
+
+/// Search several exchanges lying in one file: their stamps in store order,
+/// read in a single pass and split back onto the exchanges that own them.
+fn grep_records(
+    pattern: &Regex,
+    path: &Path,
+    owners: &[(u64, Vec<Stamp>)],
+    tally: &mut Tally,
+) -> Result<(), String> {
+    if owners.is_empty() {
+        return Ok(());
+    }
+    let stamps: Vec<Stamp> = owners
+        .iter()
+        .flat_map(|(_, stamps)| stamps.iter().cloned())
+        .collect();
+    let records = read_records(path, &stamps).map_err(|error| {
+        format!(
+            "the exchanges recorded in {} could not be read back: {error}",
+            path.display()
+        )
+    })?;
+    let mut at = 0;
+    for (exchange, stamps) in owners {
+        let span: Vec<&Protocol> = records[at..at + stamps.len()].iter().collect();
+        at += stamps.len();
+        grep_messages(pattern, *exchange, &closed_messages(&span), tally);
+    }
+    Ok(())
+}
+
+/// Walk a lineage from one link, indexing every closed exchange it can
+/// reach: one pass per ancestor file, each stopping at that link's own
+/// `through_exchange`, and following the ancestor's own [`Protocol::Inherited`]
+/// on to the grandparent. The nearest copy of an id wins, an ancestor's
+/// imported spans being the same exchanges under the same numbers.
+fn index_ancestry(ancestry: &Ancestry) -> AncestorIndex {
+    let mut index = AncestorIndex::default();
+    let mut link = Some(ancestry.clone());
+    while let Some(Ancestry {
+        source,
+        through_exchange,
+    }) = link
+    {
+        let Some(path) = source else {
+            index.broken = Some(Break::NoLog);
+            return index;
+        };
+        match index_ancestor(&path, through_exchange, &mut index.spans) {
+            Ok(next) => link = next,
+            Err(error) => {
+                index.broken = Some(Break::Unreadable {
+                    source: path,
+                    error: error.to_string(),
+                });
+                return index;
+            }
+        }
+    }
+    index
+}
+
+/// One ancestor file's own exchanges through `through_exchange`, partitioned
+/// by the same rule the live fold partitions by on a view that applies no
+/// edits: the store is every exchange the file recorded, whatever that
+/// session later shed from its window. Answers the link to its own parent,
+/// when the walk met one.
+fn index_ancestor(
+    path: &Path,
+    through_exchange: u64,
+    spans: &mut BTreeMap<u64, AncestorSpan>,
+) -> io::Result<Option<Ancestry>> {
+    let mut view = View::default();
+    let mut max_exchange = 0u64;
+    let mut records: Vec<Protocol> = Vec::new();
+    let mut stamps: Vec<Stamp> = Vec::new();
+    let mut link = None;
+    for record in Log::read(path)? {
+        let record = record?;
+        let Record::Protocol(protocol) = record.value() else {
+            continue;
+        };
+        // Everything at or below the link's reach was recorded before the
+        // fork; the first record past it ends the pass.
+        if record_exchange(protocol).is_some_and(|id| id > through_exchange) {
+            break;
+        }
+        if let Protocol::Inherited {
+            source,
+            through_exchange,
+            ..
+        } = protocol
+        {
+            link = Some(Ancestry {
+                source: source.clone(),
+                through_exchange: *through_exchange,
+            });
+        }
+        record_event_span(&mut view, &mut max_exchange, protocol, records.len());
+        records.push(protocol.clone());
+        stamps.push(record.stamp().clone());
+    }
+    for span in &view.spans {
+        let events: Vec<&Protocol> = records[span.events.clone()].iter().collect();
+        let _ = spans.entry(span.id).or_insert_with(|| AncestorSpan {
+            source: path.to_path_buf(),
+            stamps: stamps[span.events.clone()].to_vec(),
+            row: ancestor_row(span.id, &events),
+        });
+    }
+    Ok(link)
+}
+
+/// One ancestor exchange's row, weighed exactly as [`Memo::span_row`] weighs
+/// an own one, and named `inherited` however the ancestor itself recorded it.
+fn ancestor_row(exchange: u64, events: &[&Protocol]) -> EvictedRow {
+    EvictedRow {
+        kind: ContextSpanKind::Inherited,
+        ..evicted_row(exchange, events, message_bytes(&closed_messages(events)))
+    }
+}
+
+/// One evicted exchange's row, weighed at `bytes` — the caller's, since an
+/// in-view span reads the render cache and a refold re-renders.
+fn evicted_row(exchange: u64, events: &[&Protocol], bytes: usize) -> EvictedRow {
+    EvictedRow {
+        exchange,
+        kind: span_kind(events),
+        opening: opening_line_for_events(events),
+        steps: step_count(events),
+        bytes,
+    }
+}
+
+/// One store-index row, weighed as the row it was built from was.
+fn store_index_item(row: &EvictedRow, in_view: bool) -> StoreIndexItem {
+    StoreIndexItem {
+        exchange: row.exchange,
+        kind: row.kind,
+        opening: row.opening.clone(),
+        steps: row.steps,
+        bytes: row.bytes,
+        in_view,
+    }
+}
+
+/// Hits one `` `grep `` answers with; `total` still counts them all.
+const GREP_HITS: usize = 100;
+
+/// What a hit's line is clipped to, in bytes.
+const GREP_TEXT_BYTES: usize = 200;
+
+/// Store order: exchange, then message within it, then line within that.
+type HitKey = (u64, usize, usize);
+
+/// The oldest [`GREP_HITS`] matches in store order, and how many there were
+/// in all — bounded, so a pattern that matches everything costs one window
+/// rather than the whole store.
+#[derive(Default)]
+struct Tally {
+    hits: Vec<(HitKey, GrepHit)>,
+    total: usize,
+}
+
+impl Tally {
+    fn offer(&mut self, key: HitKey, hit: GrepHit) {
+        self.total += 1;
+        let at = self.hits.partition_point(|(seen, _)| *seen < key);
+        if at < GREP_HITS {
+            self.hits.insert(at, (key, hit));
+            self.hits.truncate(GREP_HITS);
+        }
+    }
+
+    fn answer(self) -> GrepAnswer {
+        GrepAnswer {
+            hits: self.hits.into_iter().map(|(_, hit)| hit).collect(),
+            total: self.total,
+        }
+    }
+}
+
+/// One hit per matching line of one exchange's messages.
+fn grep_messages(pattern: &Regex, exchange: u64, messages: &[ChatMessage], tally: &mut Tally) {
+    for (position, message) in messages.iter().enumerate() {
+        for (index, line) in searched_text(message).lines().enumerate() {
+            if pattern.is_match(line) {
+                tally.offer(
+                    (exchange, position, index),
+                    GrepHit {
+                        exchange,
+                        role: message.role.clone(),
+                        line: index + 1,
+                        text: line[..ral_core::text::floor_char_boundary(line, GREP_TEXT_BYTES)]
+                            .to_string(),
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// What a message contributes to a search — read off the same narrowing a
+/// `` `read `` answers with, so nothing is searchable that is not readable.
+/// A binary payload and a provider extension carry no text a pattern could
+/// mean, and contribute none.
+fn searched_text(message: &ChatMessage) -> String {
+    transcript_message(message)
+        .parts
+        .into_iter()
+        .filter_map(|part| match part {
+            TranscriptPart::Text(text)
+            | TranscriptPart::Result(text)
+            | TranscriptPart::Reasoning(text)
+            | TranscriptPart::Program { source: text, .. } => Some(text),
+            TranscriptPart::Binary { .. } | TranscriptPart::Custom { .. } => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn opening_line_for_events(events: &[&Protocol]) -> String {
@@ -779,7 +1382,8 @@ fn opening_line_for_events(events: &[&Protocol]) -> String {
             | Protocol::StepStarted { .. }
             | Protocol::AssistantMessage { .. }
             | Protocol::ToolResults { .. }
-            | Protocol::ContextEdited { .. } => {}
+            | Protocol::ContextEdited { .. }
+            | Protocol::Inherited { .. } => {}
         }
     }
     String::new()
@@ -871,14 +1475,30 @@ fn live_exchange_refusal(id: u64) -> String {
     format!("exchange {id} is the one you are in — a context edit may only name closed exchanges")
 }
 
-fn folded_exchange_refusal(id: u64, reach: u64) -> String {
+fn unknown_exchange_refusal(id: u64) -> String {
+    format!("exchange {id} is not present in the current view")
+}
+
+fn never_recorded_refusal(id: u64, last: Option<u64>) -> String {
+    match last {
+        Some(last) => {
+            format!("exchange {id} was never recorded — the last closed exchange is {last}")
+        }
+        None => format!("exchange {id} was never recorded — no exchange has closed yet"),
+    }
+}
+
+fn read_back_refusal(exchange: u64, path: &Path, error: &io::Error) -> String {
     format!(
-        "exchange {id} is folded into the digest through {reach} — name {reach} to drop the digest whole, or fold further"
+        "exchange {exchange} could not be read back from {}: {error}",
+        path.display()
     )
 }
 
-fn unknown_exchange_refusal(id: u64) -> String {
-    format!("exchange {id} is not present in the current view")
+fn no_log_refusal(id: u64) -> String {
+    format!(
+        "this session runs without a log (`--no-logs`), so exchange {id} left your context for good; only exchanges still in view can be read back."
+    )
 }
 
 fn rewind_unknown_exchange_refusal(id: u64, last: Option<u64>) -> String {
@@ -907,7 +1527,8 @@ fn advance(state: &State, protocol: &Protocol) -> State {
         | Protocol::SessionEnded
         | Protocol::ContextMessage { .. }
         | Protocol::StepStarted { .. }
-        | Protocol::ContextEdited { .. } => state.clone(),
+        | Protocol::ContextEdited { .. }
+        | Protocol::Inherited { .. } => state.clone(),
     }
 }
 
@@ -925,7 +1546,8 @@ fn into_chat_messages(protocol: Protocol) -> Vec<ChatMessage> {
         | Protocol::SessionResumed { .. }
         | Protocol::SessionEnded
         | Protocol::StepStarted { .. }
-        | Protocol::ContextEdited { .. } => Vec::new(),
+        | Protocol::ContextEdited { .. }
+        | Protocol::Inherited { .. } => Vec::new(),
     }
 }
 
@@ -940,7 +1562,8 @@ fn record_exchange(protocol: &Protocol) -> Option<u64> {
         | Protocol::StepStarted { .. }
         | Protocol::AssistantMessage { .. }
         | Protocol::ToolResults { .. }
-        | Protocol::ContextEdited { .. } => None,
+        | Protocol::ContextEdited { .. }
+        | Protocol::Inherited { .. } => None,
     }
 }
 
@@ -969,7 +1592,10 @@ fn admissible(state: &State, protocol: &Protocol) -> bool {
         | Protocol::SessionResumed { .. }
         | Protocol::SessionEnded
         | Protocol::StepStarted { .. }
-        | Protocol::ContextEdited { .. } => true,
+        | Protocol::ContextEdited { .. }
+        // Sequencing-neutral; where a link may stand is [`Admission::step`]'s
+        // own rule, needing more than a [`State`].
+        | Protocol::Inherited { .. } => true,
     }
 }
 
@@ -1013,6 +1639,82 @@ fn abandoned_note(events: &[&Protocol]) -> String {
     };
     format!(
         "[EXARCH // An exchange here was interrupted before any reply; its content is not in your context. {effects}]"
+    )
+}
+
+/// Evicted exchanges the head marker draws a row each for; everything older
+/// collapses into one line naming the range.
+const HEAD_ROWS: usize = 40;
+
+/// What a row's opening line is clipped to, in bytes.
+const HEAD_OPENING_BYTES: usize = 72;
+
+/// The head marker: the one user-voice message standing where an evicted
+/// prefix was, indexing every exchange that has left so the model can ask for
+/// any of them back.
+///
+/// A pure function of its two arguments — no clock, no path, no
+/// ordering-unstable container — so between two evictions the provider's
+/// prompt cache sees a byte-stable message 0. `readable` is fixed for a
+/// memo's life, a session either keeping a log or not, so the marker remains
+/// a function of `evictions` alone within one session.
+///
+/// Voice and bracket as [`abandoned_note`]: the harness may state a fact
+/// about the conversation, never speak in the model's own voice.
+fn render_head(evictions: &[Eviction], readable: bool) -> String {
+    let rows: Vec<&EvictedRow> = evictions
+        .iter()
+        .flat_map(|eviction| eviction.rows.iter())
+        .collect();
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return String::new();
+    };
+    let departed = if rows.len() == 1 {
+        format!("Exchange {} has left your context.", first.exchange)
+    } else {
+        format!(
+            "Exchanges {}–{} have left your context.",
+            first.exchange, last.exchange
+        )
+    };
+    let whereabouts = if readable {
+        "They are still readable: `transcript `read [n]` reads one back as material, \
+         `transcript `grep 're'` searches them all, `transcript `index` lists every \
+         closed exchange."
+    } else {
+        "They are not readable: this session keeps no log."
+    };
+    let mut lines = vec![format!("[EXARCH // {departed} {whereabouts}")];
+    let collapsed = rows.len().saturating_sub(HEAD_ROWS);
+    if collapsed > 0 {
+        let range = format!("{}–{}", first.exchange, rows[collapsed - 1].exchange);
+        lines.push(format!(
+            "{range:>4}  ({collapsed} earlier exchanges — transcript `index)"
+        ));
+    }
+    let mut seen = 0usize;
+    for eviction in evictions {
+        for row in &eviction.rows {
+            seen += 1;
+            if seen > collapsed {
+                lines.push(head_row(row));
+            }
+        }
+        if let Some(note) = &eviction.note {
+            lines.push(format!("Your note at eviction: \"{note}\""));
+        }
+    }
+    format!("{}]", lines.join("\n"))
+}
+
+fn head_row(row: &EvictedRow) -> String {
+    let opening =
+        &row.opening[..ral_core::text::floor_char_boundary(&row.opening, HEAD_OPENING_BYTES)];
+    format!(
+        "{:>4}  {opening:<50}{:>3} steps {:>5} KB",
+        row.exchange,
+        row.steps,
+        row.bytes / 1024
     )
 }
 
@@ -1068,30 +1770,47 @@ fn step_protocol(memo: &mut Memo, stamp: Stamp, protocol: &Protocol) {
     let index = memo.ledger.append(Recorded::new(stamp, protocol.clone()));
     memo.state = advance(&memo.state, protocol);
     record_event_span(&mut memo.view, &mut memo.max_exchange, protocol, index);
+    if let Protocol::Inherited {
+        source,
+        evictions,
+        through_exchange,
+    } = protocol
+    {
+        inherit(&mut memo.view, evictions);
+        memo.ancestry = Some(Ancestry {
+            source: source.clone(),
+            through_exchange: *through_exchange,
+        });
+        memo.recompute_head();
+    }
     let removed = if let Protocol::ContextEdited { op, .. } = protocol {
-        let removed = removed_event_ranges(&memo.view, op);
-        apply_context_op(&mut memo.view, op);
-        memo.newest_edit = Some(index);
-        match op {
-            ContextOp::Fold { digest, .. } => {
-                let message = ChatMessage::user(summary_prompt(digest));
-                let bytes = message_bytes(std::slice::from_ref(&message));
-                memo.digest_render = Some(DigestRender {
-                    segment: Arc::from(vec![message]),
-                    bytes,
-                });
-            }
-            ContextOp::Drop { .. } => {
-                if memo.view.digest.is_none() {
-                    memo.digest_render = None;
-                }
-            }
+        let leaving: Vec<Span> = removed_spans(&memo.view, op).into_iter().cloned().collect();
+        let mut rows = Vec::with_capacity(leaving.len());
+        for span in &leaving {
+            let row = memo.span_row(span);
+            rows.push(row.clone());
+            let _ = memo.departed.insert(
+                span.id,
+                Departed {
+                    events: span.events.clone(),
+                    row,
+                },
+            );
         }
+        // A drop leaves the head marker alone: it indexes the prefix that
+        // left, and touching message 0 would throw away a cache a drop of a
+        // late exchange still holds.
+        let evicted = matches!(op, ContextOp::Evict { .. });
+        apply_context_op(&mut memo.view, op, if evicted { rows } else { Vec::new() });
+        if evicted {
+            memo.recompute_head();
+        }
+        memo.newest_edit = Some(index);
         // Memory hygiene, not correctness: a stale render can never be read
         // back, since a hit demands `end` to match a span still in view.
         let live_ids: HashSet<u64> = memo.view.spans.iter().map(|span| span.id).collect();
         memo.render.retain(|id, _| live_ids.contains(id));
-        removed
+        leaving.iter().map(|span| span.events.clone()).collect()
     } else {
         Vec::new()
     };
@@ -1106,45 +1825,45 @@ fn step_protocol(memo: &mut Memo, stamp: Stamp, protocol: &Protocol) {
     }
 }
 
-fn removed_event_ranges(view: &View, op: &ContextOp) -> Vec<Range<usize>> {
+/// The spans `op` takes out of `view`, in view order.
+fn removed_spans<'a>(view: &'a View, op: &ContextOp) -> Vec<&'a Span> {
     match op {
-        ContextOp::Fold {
+        ContextOp::Evict {
             through_exchange, ..
         } => view
             .spans
             .iter()
             .filter(|span| span.id <= *through_exchange)
-            .map(|span| span.events.clone())
             .collect(),
         ContextOp::Drop { exchanges } => view
             .spans
             .iter()
             .filter(|span| exchanges.contains(&span.id))
-            .map(|span| span.events.clone())
             .collect(),
     }
 }
 
-fn apply_context_op(view: &mut View, op: &ContextOp) {
+/// A link's own step on the view: the parent's head-marker state becomes the
+/// child's, which a fresh log has none of.
+fn inherit(view: &mut View, evictions: &[Eviction]) {
+    view.evictions = evictions.to_vec();
+}
+
+/// `rows` is what an [`ContextOp::Evict`] remembers of the spans it removes;
+/// a drop indexes nothing and passes none.
+fn apply_context_op(view: &mut View, op: &ContextOp, rows: Vec<EvictedRow>) {
     match op {
-        ContextOp::Fold {
+        ContextOp::Evict {
             through_exchange,
-            digest,
+            note,
         } => {
-            view.digest = Some(Digest {
-                through_exchange: *through_exchange,
-                text: digest.clone(),
+            view.evictions.push(Eviction {
+                rows,
+                note: note.clone(),
             });
             view.spans.retain(|span| span.id > *through_exchange);
         }
         ContextOp::Drop { exchanges } => {
-            let remove_digest = view
-                .digest
-                .as_ref()
-                .is_some_and(|digest| exchanges.contains(&digest.through_exchange));
-            if remove_digest {
-                view.digest = None;
-            }
             view.spans.retain(|span| !exchanges.contains(&span.id));
         }
     }
@@ -1184,18 +1903,45 @@ fn record_event_span(view: &mut View, max_exchange: &mut u64, protocol: &Protoco
 /// alone, resident or freed — the `fold == memo` check [`resume`] runs
 /// against the incrementally maintained memo, so an eviction that silently
 /// lost or misplaced a record is caught rather than trusted.
+///
+/// An eviction's rows are part of that check, so they are recomputed here
+/// from the records the op removed, rendered through [`closed_messages`] —
+/// the same rendering the live fold weighed them by.
 fn refold(ledger: &Ledger) -> io::Result<(State, View, u64)> {
+    let events = ledger.fold_events()?;
     let mut state = State::default();
     let mut view = View::default();
     let mut max_exchange = 0u64;
-    for (index, protocol) in ledger.fold_events()? {
-        state = advance(&state, &protocol);
-        record_event_span(&mut view, &mut max_exchange, &protocol, index);
-        if let Protocol::ContextEdited { op, .. } = &protocol {
-            apply_context_op(&mut view, op);
+    for (index, protocol) in &events {
+        state = advance(&state, protocol);
+        record_event_span(&mut view, &mut max_exchange, protocol, *index);
+        if let Protocol::Inherited { evictions, .. } = protocol {
+            inherit(&mut view, evictions);
+        }
+        if let Protocol::ContextEdited { op, .. } = protocol {
+            let rows = match op {
+                ContextOp::Evict { .. } => removed_spans(&view, op)
+                    .into_iter()
+                    .map(|span| refolded_row(span, &events))
+                    .collect(),
+                ContextOp::Drop { .. } => Vec::new(),
+            };
+            apply_context_op(&mut view, op, rows);
         }
     }
     Ok((state, view, max_exchange))
+}
+
+/// One evicted span's row, weighed from the records the refold holds rather
+/// than from a render cache it has none of.
+fn refolded_row(span: &Span, events: &[(usize, Protocol)]) -> EvictedRow {
+    let start = events.partition_point(|(index, _)| *index < span.events.start);
+    let end = events.partition_point(|(index, _)| *index < span.events.end);
+    let records: Vec<&Protocol> = events[start..end]
+        .iter()
+        .map(|(_, protocol)| protocol)
+        .collect();
+    evicted_row(span.id, &records, message_bytes(&closed_messages(&records)))
 }
 
 /// The protocol sequencing law, replayed record by record beside the fold that
@@ -1212,6 +1958,8 @@ struct Admission {
     view: View,
     max_exchange: u64,
     index: usize,
+    /// A log has at most one ancestry, fixed at the fork that opened it.
+    inherited: bool,
 }
 
 impl Admission {
@@ -1235,6 +1983,21 @@ impl Admission {
                 self.state = advance(&self.state, &record);
             }
         }
+        if matches!(protocol, Protocol::Inherited { .. }) {
+            if self.inherited
+                || self.max_exchange != 0
+                || !matches!(self.state, State::ReadyForUser)
+            {
+                return Err(Refusal::Foreign {
+                    record: Box::new(Record::Protocol(protocol.clone())),
+                    reason: format!(
+                        "record {} links this log to an ancestor's store, which only a fork's opening may do; by here the log has a context of its own, and no live session inherits twice",
+                        index + 1
+                    ),
+                });
+            }
+            self.inherited = true;
+        }
         self.state = advance(&self.state, protocol);
         if let Some(id) = record_exchange(protocol) {
             let joins = id > self.max_exchange
@@ -1255,7 +2018,9 @@ impl Admission {
         }
         record_event_span(&mut self.view, &mut self.max_exchange, protocol, index);
         if let Protocol::ContextEdited { op, .. } = protocol {
-            apply_context_op(&mut self.view, op);
+            // Rows are the fold's business; this walk judges sequencing, and
+            // never reads `View::evictions` back.
+            apply_context_op(&mut self.view, op, Vec::new());
         }
         Ok(())
     }
@@ -1359,8 +2124,7 @@ pub fn resume(path: &Path) -> io::Result<(Memo, String, String)> {
     if let Some(tail) = find_crash_tail(path)? {
         quarantine_tail(path, &tail)?;
     }
-    let mut memo = Memo::default();
-    memo.attach_source(path.to_path_buf());
+    let mut memo = Memo::new(Some(path.to_path_buf()));
     let mut admission = Admission::default();
     let mut identity = None;
     for record in Log::read(path)? {
@@ -1392,7 +2156,8 @@ pub fn resume(path: &Path) -> io::Result<(Memo, String, String)> {
                 | Protocol::StepStarted { .. }
                 | Protocol::AssistantMessage { .. }
                 | Protocol::ToolResults { .. }
-                | Protocol::ContextEdited { .. }) => {
+                | Protocol::ContextEdited { .. }
+                | Protocol::Inherited { .. }) => {
                     return Err(io::Error::other(format!(
                         "cannot resume {}: the first record is {other:?}; expected SessionStarted {{ session_id: 0, parent: None }} — is this a copied child log?",
                         path.display()

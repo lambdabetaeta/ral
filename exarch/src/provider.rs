@@ -32,7 +32,7 @@ pub(crate) use error::{error_object, extract_url, transient_label};
 pub use identity::{Account, AccountId, Auth, Billing, Service, ServiceName};
 pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
-pub use stream::{CutShort, Delta, StepOut, SummaryOut};
+pub use stream::{CutShort, Delta, StepOut};
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};
 
@@ -186,30 +186,6 @@ impl Provider {
             self.route.as_deref()
         } else {
             None
-        }
-    }
-
-    /// Summarise an already-rendered transcript.
-    ///
-    /// # Errors
-    /// Returns an error once the bounded retry policy is exhausted.
-    pub fn summarize(
-        &self,
-        system: &str,
-        transcript: &Transcript,
-        max_tokens: u32,
-        cancel: &cancel::Token,
-    ) -> Result<SummaryOut, ProviderError> {
-        match &self.backend {
-            Backend::Live { engine, transport } => engine.summarize(
-                transport,
-                &self.model,
-                system,
-                transcript,
-                max_tokens,
-                cancel,
-            ),
-            Backend::Scripted(script) => script.summarize(&self.model),
         }
     }
 }

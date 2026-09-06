@@ -112,10 +112,10 @@ impl Control for ReplControl {
                 }
                 Verdict::Continue
             }
-            "/compact" => {
+            "/evict" => {
                 let p = session.current_provider();
                 let token = session.cancel_token().clone();
-                session.compact(&p, true, &token, None);
+                session.evict(&p, true, &token, None);
                 Verdict::Continue
             }
             // Surveyed on the thread that owns the shell the rows describe,

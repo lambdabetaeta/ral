@@ -1300,7 +1300,9 @@ impl Viewport {
                     notice,
                 )))]
             }
-            K::Context { rows } => vec![Block::card(card::context_rows_card(rows))],
+            K::Context { rows, evicted } => {
+                vec![Block::card(card::context_rows_card(rows, *evicted))]
+            }
             K::Cancelled => vec![Block::chrome(
                 ChromeKind::Cancelled,
                 super::line::note("cancelled"),
@@ -1336,10 +1338,10 @@ impl Viewport {
                     EditAuthority::Harness => "harness",
                 };
                 let text = match op {
-                    ContextOp::Fold {
+                    ContextOp::Evict {
                         through_exchange, ..
                     } => format!(
-                        "[context folded through exchange {through_exchange} ({authority})]"
+                        "[context evicted through exchange {through_exchange} ({authority})]"
                     ),
                     ContextOp::Drop { exchanges } => {
                         let list = exchanges

@@ -129,7 +129,7 @@ impl Engine {
             .clone()
     }
 
-    /// Called first by `complete` and `summarize`; a failed refresh only logs, so
+    /// Called first by `complete`; a failed refresh only logs, so
     /// the stale token rides the request rather than a hiccup killing the turn.
     pub(super) fn refresh_if_stale(&self, transport: &Transport) {
         let Some(cell) = &transport.token_cell else {

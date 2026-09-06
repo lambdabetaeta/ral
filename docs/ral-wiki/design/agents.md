@@ -129,7 +129,8 @@ The spawn's **`type`** field chooses the child's **model memory**, not its shell
 isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
 
 - **`` `amnemon ``** is tabula rasa. The child starts with no conversation history;
-  only the shell value-snapshot and the chosen prompt cross the edge.
+  only the shell value-snapshot and the chosen prompt cross the edge. It has no
+  ancestry: its store is its own and nothing else's.
 - **`` `mnemon ``** remembers. The child imports the parent's model-visible context
   and appends the call's `prompt` as a fresh final user prompt. Left on the
   parent's own selection it reuses that provider's prompt cache; sent to
@@ -138,6 +139,23 @@ isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
   forfeits the cache. If the parent is mid-tool-call, the unanswered assistant
   tool-call frame is
   not inherited; the child forks the request context, not a dangling protocol.
+
+Inheritance is **per exchange, under the parent's own ids**. The parent hands
+its window over span by span, and the child records one `ContextMessage` per
+message carrying the *parent's* exchange id, so the child's view reproduces the
+parent's spans: `` context `survey `` shows them as individual `import` rows and
+`` context `drop `` can shed exactly one of them. Ahead of them goes one
+`Protocol::Inherited { source, evictions, through_exchange }` — the parent's
+`record.jsonl`, the parent's head-marker state by value, and the fork's reach.
+That link is what makes the two logs **one store**: an id at or below the reach
+resolves against the ancestry, walking each ancestor file once into a memoised
+index and following that ancestor's own link on to the grandparent, so a
+`mnemon` child can `` transcript `read `` or `` `grep `` anything its lineage
+ever recorded, evicted from the parent's window long before the fork included.
+Ids are therefore lineage-monotone: the child mints its first prompt above the
+parent's floor, and along any lineage an id names exactly one exchange. Only
+`--no-logs` breaks the chain, and the refusal names the ancestor rather than
+calling the exchange unrecorded ([[decisions/260906_context-rollover|context-rollover]]).
 
 The spawn's **`provider`** and **`model`** fields choose what the child runs
 on. ral has no optional record field and no null: absence is *data*, carried
@@ -174,13 +192,13 @@ and refuses a named selection in one sentence saying so.
 ### Bind and hand: context as a value
 
 Selective delegation is ordinary data flow, not a new memory mode. The parent
-surveys and reads closed spans, binds the returned `[Str]` without printing it,
-slices or reshapes it in ral, drops the originals, and hands the binding to an
-`` `amnemon `` child:
+surveys and reads closed spans, binds the returned span records without
+printing them, slices or reshapes them in ral, drops the originals, and hands
+the binding to an `` `amnemon `` child:
 
 ```ral
-let ctx = transcript [4, 7]
-let handoff = slice $ctx[0] 0 12000
+let ctx = transcript `read [4, 7]
+let handoff = take 12 $ctx[0][messages]
 context `drop [4, 7]
 agents `start [
   prompt: "read `handoff` for the material to work from; report your findings",

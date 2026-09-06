@@ -56,6 +56,9 @@ prompt-editor = { path = "../prompt-editor" }
 # extra cost.
 grep       = "0.4"
 ignore     = "0.4"
+# `transcript `grep`'s pattern dialect, the same one ral's own `re-*` family
+# speaks; ral-core already compiles it, so this adds no build.
+regex      = "1"
 tempfile   = "3.27"
 base64     = { workspace = true }
 sha2       = { workspace = true }

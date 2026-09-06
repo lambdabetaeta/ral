@@ -447,8 +447,8 @@ mod tests {
         ModelIden::new(AdapterKind::Anthropic, model)
     }
 
-    /// The non-streamed (`exec_chat`) failure shape — what `Engine::summarize`,
-    /// the compaction path, hands to `from_genai`.
+    /// The non-streamed (`exec_chat`) failure shape genai returns, which
+    /// carries its status only as a typed `StatusCode`.
     fn web_model_call(status: StatusCode, headers: HeaderMap) -> genai::Error {
         genai::Error::WebModelCall {
             model_iden: iden("m"),
@@ -676,16 +676,16 @@ mod tests {
 
     /// `ResponseFailedStatus` renders its status as `"… status code '503'"`,
     /// with no machine-parseable token — classification must read the typed
-    /// `StatusCode` or the backoff loop never retries a compaction 5xx.
+    /// `StatusCode` or the backoff loop never retries a non-streamed 5xx.
     #[test]
-    fn from_genai_classifies_compaction_5xx_as_transient() {
+    fn from_genai_classifies_a_non_streamed_5xx_as_transient() {
         let e = ProviderError::from_genai(
             &web_model_call(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new()),
             "anthropic/claude-opus-4",
         );
         assert!(
             matches!(e, ProviderError::Transient { .. }),
-            "compaction 503 must classify Transient, got {e:?}"
+            "a non-streamed 503 must classify Transient, got {e:?}"
         );
     }
 

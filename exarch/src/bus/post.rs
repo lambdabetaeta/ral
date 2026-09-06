@@ -138,7 +138,7 @@ pub(crate) enum Post {
     /// `/copy`, …) are served frontend-side and never reach here.
     Command(String),
     /// A session command that rewrites or ends the context (`/clear`,
-    /// `/compact`, `/rewind`, `/quit`), raw — otherwise its sibling above in
+    /// `/evict`, `/rewind`, `/quit`), raw — otherwise its sibling above in
     /// every respect but the one [`Boundary::Barrier`] names.
     Barrier(String),
 }

@@ -9,7 +9,7 @@
 //! `/resources` cannot immortalise the zombies it exists to reveal.
 
 use crate::agent::Avatar;
-use crate::agent::digest::{COMPACT_THRESHOLD, compaction_trigger};
+use crate::agent::digest::{EVICT_THRESHOLD, eviction_trigger};
 use crate::agent::seat::engine_gone;
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span};
 use crate::fleet::AGENT_LEASE_IDLE;
@@ -278,8 +278,8 @@ pub fn dir_size(root: &Path) -> u64 {
         .sum()
 }
 
-/// The compaction-pressure rows, mirroring `Avatar::compact`'s own trigger so
-/// the pressure shown is the pressure that fires: a known window compacts on
+/// The eviction-pressure rows, mirroring `Avatar::evict`'s own trigger so
+/// the pressure shown is the pressure that fires: a known window evicts on
 /// tokens against that window, and only the unknown-window fallback still
 /// runs on serialised bytes. `measured` is `None` when the token count is
 /// stale ([`Avatar::measured_input`]) — a stale read must report unknown,
@@ -291,9 +291,9 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
             ProbeRow::new(
                 "context.tokens",
                 tokens,
-                Some(compaction_trigger(w)),
+                Some(eviction_trigger(w)),
                 "evict",
-                Some(format!("auto-compaction trigger; window {w} tokens")),
+                Some(format!("auto-eviction trigger; window {w} tokens")),
             ),
             ProbeRow::new(
                 "log.bytes",
@@ -301,7 +301,7 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
                 None,
                 "evict",
                 Some(
-                    "model-view bytes (fallback compaction gauge when the window is unknown)"
+                    "model-view bytes (fallback eviction gauge when the window is unknown)"
                         .to_string(),
                 ),
             ),
@@ -309,18 +309,18 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
         (Some(w), None) if w > 0 => vec![ProbeRow::new(
             "log.bytes",
             history_bytes,
-            Some(COMPACT_THRESHOLD as u64),
+            Some(EVICT_THRESHOLD as u64),
             "evict",
             Some(format!(
-                "auto-compaction threshold; token measure stale (window {w} tokens)"
+                "auto-eviction threshold; token measure stale (window {w} tokens)"
             )),
         )],
         _ => vec![ProbeRow::new(
             "log.bytes",
             history_bytes,
-            Some(COMPACT_THRESHOLD as u64),
+            Some(EVICT_THRESHOLD as u64),
             "evict",
-            Some("auto-compaction threshold; window unknown".to_string()),
+            Some("auto-eviction threshold; window unknown".to_string()),
         )],
     }
 }
@@ -547,7 +547,10 @@ impl Avatar {
             })
             .collect();
         let recorder = self.recorder();
-        if let Err(error) = recorder.emit(crate::record::Display::Context { rows }) {
+        if let Err(error) = recorder.emit(crate::record::Display::Context {
+            rows,
+            evicted: survey.evicted,
+        }) {
             recorder.report_fault(&error);
         }
     }
@@ -708,7 +711,7 @@ mod tests {
         let fact = crate::bus::drain_records(&rx)
             .into_iter()
             .find_map(|rec| match rec {
-                Record::Display(Display::Context { rows }) => Some(rows),
+                Record::Display(Display::Context { rows, .. }) => Some(rows),
                 _ => None,
             })
             .expect("the survey records a Display::Context commit");
@@ -890,8 +893,8 @@ mod tests {
         let bytes = row(&rows, "log.bytes");
         assert_eq!(
             bytes.cap,
-            Some(COMPACT_THRESHOLD as u64),
-            "an unknown window falls back to the byte threshold `compact` itself uses"
+            Some(EVICT_THRESHOLD as u64),
+            "an unknown window falls back to the byte threshold `evict` itself uses"
         );
         assert_eq!(bytes.policy, "evict");
         assert!(
@@ -900,9 +903,9 @@ mod tests {
         );
     }
 
-    /// A known window is the pressure `Avatar::compact` actually fires on, so
+    /// A known window is the pressure `Avatar::evict` actually fires on, so
     /// that is what the fold must show: `context.tokens` capped at
-    /// `compaction_trigger(w)`, and `log.bytes` demoted to an uncapped
+    /// `eviction_trigger(w)`, and `log.bytes` demoted to an uncapped
     /// fallback gauge rather than faking a second, unenforced ceiling.
     #[test]
     fn known_window_reports_context_tokens_not_bytes() {
@@ -911,8 +914,8 @@ mod tests {
         assert_eq!(tokens.current, 12_345, "the live input-token numerator");
         assert_eq!(
             tokens.cap,
-            Some(compaction_trigger(200_000)),
-            "the same trigger `Avatar::compact` fires auto-compaction on"
+            Some(eviction_trigger(200_000)),
+            "the same trigger `Avatar::evict` fires auto-eviction on"
         );
         assert_eq!(tokens.policy, "evict");
         assert!(
@@ -924,7 +927,7 @@ mod tests {
         assert_eq!(bytes.current, 4_096, "the byte gauge still reports");
         assert_eq!(
             bytes.cap, None,
-            "log.bytes is no longer where the compaction pressure lives"
+            "log.bytes is no longer where the eviction pressure lives"
         );
         assert_eq!(
             rows.iter().filter(|r| r.name == "log.bytes").count(),
@@ -948,7 +951,7 @@ mod tests {
         assert_eq!(bytes.current, 4_096);
         assert_eq!(
             bytes.cap,
-            Some(COMPACT_THRESHOLD as u64),
+            Some(EVICT_THRESHOLD as u64),
             "falls back to the same byte threshold as an unknown window"
         );
     }

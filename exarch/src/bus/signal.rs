@@ -43,8 +43,8 @@ pub enum AgentState {
     AwaitingModel,
     /// A `ral` call is evaluating.
     Evaluating,
-    /// Summarising the history prefix to win back context.
-    Compacting,
+    /// The momentary state around the eviction edit.
+    Evicting,
     /// Parked on a live child's result: a wait on the fleet, not on the human.
     WaitingOnAgents,
 }
@@ -58,7 +58,7 @@ impl AgentState {
             Self::Ready => "ready",
             Self::AwaitingModel => "awaiting model",
             Self::Evaluating => "evaluating",
-            Self::Compacting => "compacting",
+            Self::Evicting => "evicting",
             Self::WaitingOnAgents => "waiting on agents",
         }
     }

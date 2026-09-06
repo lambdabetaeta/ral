@@ -2,16 +2,14 @@
 //!
 //! [`Avatar::deliberate`] steps the provider until it stops calling tools,
 //! bounded by [`MAX_STEPS`] since a headless run has no Esc to hand.
-//! Auto-compaction is checked once, at entry — the sole boundary with no
+//! Auto-eviction is checked once, at entry — the sole boundary with no
 //! exchange in flight — against the policy in [`digest`](crate::agent::digest).
 //! [`Avatar::attend`] is the loop around this, one call per inbox item.
 
 use crate::agent::Avatar;
 use crate::agent::attend::announce;
 use crate::agent::cancel;
-use crate::agent::digest::{
-    COMPACT_THRESHOLD, SUMMARY_CAP_FALLBACK_TOKENS, suffix_keep_budget, summary_cap_tokens,
-};
+use crate::agent::digest::{EVICT_THRESHOLD, suffix_keep_budget};
 use crate::agent::event::{
     ContextOp, EditAuthority, QuiesceReason, ToolResult as SessionToolResult,
 };
@@ -77,9 +75,9 @@ impl Avatar {
         // the one point every route into a deliberation is guaranteed to cross.
         self.reply = None;
         // Entry, before the prompt is committed, is the one place
-        // `can_compact()` is guaranteed to hold, and every exchange and nudge
+        // `can_evict()` is guaranteed to hold, and every exchange and nudge
         // alike crosses it.
-        self.compact(provider, false, token, continues);
+        self.evict(provider, false, token, continues);
         if let Some(p) = prompt {
             self.log
                 .lock()
@@ -192,7 +190,7 @@ impl Avatar {
                 .first_text()
                 .unwrap_or_default()
                 .to_string();
-            // The live numerator the next `compact` weighs against the window.
+            // The live numerator the next `evict` weighs against the window.
             let input_tokens = usage.input;
             let measured_at = {
                 let mut log = self.log.lock();
@@ -307,73 +305,73 @@ impl Avatar {
         }
     }
 
-    pub(crate) fn compact(
+    /// The exchange an eviction would cut through were it to run now, `None`
+    /// when nothing is old enough to shed.  Planning caches closed renderings,
+    /// so it never runs over a live span.
+    pub(crate) fn planned_eviction(&self) -> Option<u64> {
+        let mut log = self.log.lock();
+        if !log.can_evict() {
+            return None;
+        }
+        let keep = suffix_keep_budget(log.history_bytes());
+        log.plan_eviction(keep).map(|plan| plan.through_exchange)
+    }
+
+    /// Shed the older half of the window, the harness writing no note of its
+    /// own: the model's own `` context `evict `` is where a note comes from.
+    pub(crate) fn evict(
         &self,
         provider: &Arc<Provider>,
         requested: bool,
         token: &cancel::Token,
         continues: Option<u64>,
     ) {
-        if !self.log.lock().can_compact() {
+        if !self.log.lock().can_evict() {
             if requested {
-                self.note_error("cannot compact while tool results are pending".into());
+                self.note_error("cannot evict while tool results are pending".into());
             }
             return;
         }
-        // Auto-compaction tracks real context pressure: the tokens the model
+        // Auto-eviction tracks real context pressure: the tokens the model
         // last saw against its window, firing once they grow into the reserve.
         // An unknown window falls back to the byte heuristic; a manual
-        // `/compact` overrides the trigger entirely.
-        let window = provider.context_window();
-        let (due, summary_cap) = match window {
-            Some(w) if w > 0 => (self.token_compaction_due(w), summary_cap_tokens(w)),
-            _ => {
-                let bytes = self.log.lock().history_bytes();
-                (bytes >= COMPACT_THRESHOLD, SUMMARY_CAP_FALLBACK_TOKENS)
-            }
+        // `/evict` overrides the trigger entirely.
+        let due = match provider.context_window() {
+            Some(w) if w > 0 => self.token_eviction_due(w),
+            _ => self.log.lock().history_bytes() >= EVICT_THRESHOLD,
         };
         if !requested && !due {
             return;
         }
-        // Never start a summarize request an exchange-boundary Esc has already
-        // doomed.
+        // An exchange-boundary Esc leaves the window as it lies; the next
+        // entry weighs it again.
         if token.is_cancelled() {
             return;
         }
-        // Keep the recent half verbatim; summarise the older prefix.
+        // Keep the recent half verbatim; the older prefix leaves the window.
         let keep = suffix_keep_budget(self.log.lock().history_bytes());
         let plan = match continues {
-            Some(exchange) => self.log.lock().plan_compaction_before(keep, exchange),
-            None => self.log.lock().plan_compaction(keep),
+            Some(exchange) => self.log.lock().plan_eviction_before(keep, exchange),
+            None => self.log.lock().plan_eviction(keep),
         };
         let Some(plan) = plan else {
-            // No exchange old enough to summarise: a no-op, not an event.
+            // No exchange old enough to shed: a no-op, not an event.
             return;
         };
         self.recorder()
-            .transient(Transient::State(AgentState::Compacting));
-        match provider.summarize(&self.agent.system, &plan.prefix, summary_cap, token) {
-            Ok(summary) => {
-                let recorded = self.log.lock().record_usage(summary.usage.into());
-                if let Err(e) = recorded {
-                    self.note_error(format!("compact failed: {e}"));
-                    return;
-                }
-                let edited = self.log.lock().apply_edit(
-                    ContextOp::Fold {
-                        through_exchange: plan.through_exchange,
-                        digest: summary.summary,
-                    },
-                    EditAuthority::Harness,
-                );
-                // `apply_edit` records `ContextEdited` through the seam, and
-                // the live row derives from the published record — there is
-                // no separate notification left to keep in step with it.
-                if let Err(e) = edited {
-                    self.note_error(format!("compact failed: {e}"));
-                }
-            }
-            Err(e) => self.note_error(format!("compact failed: {e}")),
+            .transient(Transient::State(AgentState::Evicting));
+        // `apply_edit` records `ContextEdited` through the seam, and the live
+        // row derives from the published record — there is no separate
+        // notification left to keep in step with it.
+        let edited = self.log.lock().apply_edit(
+            ContextOp::Evict {
+                through_exchange: plan.through_exchange,
+                note: None,
+            },
+            EditAuthority::Harness,
+        );
+        if let Err(e) = edited {
+            self.note_error(format!("evict failed: {e}"));
         }
     }
 
@@ -788,8 +786,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            !session.token_compaction_due(100_000),
-            "a stale token measure must not trigger compaction"
+            !session.token_eviction_due(100_000),
+            "a stale token measure must not trigger an eviction"
         );
         assert_eq!(
             session.token_pressure(100_000),

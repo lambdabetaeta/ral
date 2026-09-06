@@ -252,7 +252,7 @@ pub struct Avatar {
     /// and [`Agent::children`].
     pub(crate) fleet: Arc<Fleet>,
     /// Input tokens and the event-log position at which that measurement
-    /// landed — the numerator for the compaction trigger and pressure nudge.
+    /// landed — the numerator for the eviction trigger and pressure nudge.
     last_input: (u64, usize),
     /// The ral-call clock, bumped at the top of every [`Self::run_shell`] — a
     /// failed eval is still a call.  The settled-worker sweep, the
@@ -587,9 +587,9 @@ impl Avatar {
         (!self.log.lock().token_measure_is_stale(measured_at)).then_some(tokens)
     }
 
-    pub(crate) fn token_compaction_due(&self, window: u64) -> bool {
+    pub(crate) fn token_eviction_due(&self, window: u64) -> bool {
         self.measured_input()
-            .is_some_and(|tokens| crate::agent::digest::compaction_due(tokens, window))
+            .is_some_and(|tokens| crate::agent::digest::eviction_due(tokens, window))
     }
 
     pub(crate) fn token_pressure(&self, window: u64) -> Option<String> {
@@ -687,7 +687,7 @@ impl Avatar {
             .collect()
     }
 
-    /// Serialised model-view byte count — the compaction-threshold input.
+    /// Serialised model-view byte count — the eviction-threshold input.
     ///
     /// # Panics
     /// Panics if the log mutex is poisoned.

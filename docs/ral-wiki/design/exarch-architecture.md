@@ -27,9 +27,11 @@ shell, so `let`, `cd`, and env persist across tool calls. Three mechanisms keep
 that context bounded and isolated:
 
 - **persistence.** `let`, `cd`, and env carry across tool calls;
-- **auto-compaction.** Long autonomous runs stay bounded — the history is
-  summarised when it crosses a threshold, and a nudge policy decides whether to
-  stop or loop with a synthetic next prompt;
+- **eviction.** Long autonomous runs stay bounded — when the window fills, the
+  older half of the closed exchanges leaves it for the harness's index of them,
+  and stays readable in the log through `transcript`
+  ([[decisions/260906_context-rollover|context-rollover]]); a nudge policy
+  decides whether to stop or loop with a synthetic next prompt;
 - **sub-agent isolation.** A sub-agent forks a value-snapshot of the parent's
   shell context; its mutations do not propagate back, mirroring the subshell
   isolation of a [[design/pipelines|byte-pipeline stage]].

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 3606091a
-verified_at_date: 2026-08-27
+verified_at_commit: 559e15b3
+verified_at_date: 2026-09-06
 anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
@@ -16,8 +16,8 @@ rule: *read the recovery from the error's typed structure, never from its
 `Display` string.* This page walks the path a genai error takes from the wire
 to a recovery decision.
 
-The transport itself — identity, client building, the streaming and summary
-calls — is [[map/exarch/provider|the provider map]]; this is the failure half.
+The transport itself — identity, client building, the streaming call — is
+[[map/exarch/provider|the provider map]]; this is the failure half.
 It is a different discipline from ral's own [[design/failure|failure model]]:
 there, *failure is a status that propagates*; here, a fault is a *transport
 outcome we classify and recover*, never a value.
@@ -31,7 +31,7 @@ where each keeps it:
 | genai variant | where it comes from | what carries the verdict |
 |---|---|---|
 | `HttpError { status, body }` | a raw HTTP-level failure | a typed `StatusCode` |
-| `WebModelCall` / `WebAdapterCall { webc_error }` | the non-streamed `exec_chat` call (compaction) and adapter model-list calls | a `webc::Error` (below) |
+| `WebModelCall` / `WebAdapterCall { webc_error }` | non-streamed calls: adapter model-list fetches | a `webc::Error` (below) |
 | `WebStream { error: BoxError }` | the streaming `exec_chat_stream` path | a *boxed* leaf — see below |
 | `ChatResponse { body }` | a mid-stream SSE error frame | a status code *inside the JSON*, at `body["error"]["code"]` or `body["code"]` |
 | everything else | bad request, auth gap, mapping failure, stream-parse error | nothing to recover |
@@ -138,8 +138,8 @@ Two more `ProviderError` variants never come from `from_genai`:
 
 ## The retry driver
 
-Both the streaming and summary paths run through one driver,
-`retry_with_backoff`, over an `Attempt<T>`:
+The streaming path runs through one driver, `retry_with_backoff`, over an
+`Attempt<T>`:
 
 ```
 enum Attempt<T> { Done(T), Failed(ProviderError) }
@@ -155,9 +155,9 @@ The loop is small and the rules read straight off it:
 - Between attempts it `select!`s the backoff sleep against the cancel token, so
   a user can interrupt a wait.
 
-Each retry re-**manufactures** the request rather than cloning one. Both
-`Engine::complete` and `Engine::summarize` (`provider/stream.rs`) hold
-`&Transcript` — the shared, `Arc`-backed history — and call
+Each retry re-**manufactures** the request rather than cloning one.
+`Engine::complete` (`provider/stream.rs`) holds
+`&Transcript` — the shared, `Arc`-backed history — and calls
 `provider/wire.rs::manufacture` inside the retry closure, once per attempt.
 There is no request template kept alive across attempts to clone: `manufacture`
 returns a `Sealed(ChatRequest)` that is deliberately not `Clone`, so a second
@@ -217,8 +217,7 @@ long-thinking model alive. A read timeout surfaces as a stream error and enters
 the same transient-or-committed rule above.
 
 The worst pre-stream idle burn is bounded by construction at 180 + 60 + 60 =
-300 seconds. A non-streaming summary has no incremental events, so its
-per-attempt `idle_timeout` bounds the whole `exec_chat` call. Tests pin the
+300 seconds. Tests pin the
 first-attempt/retry distinction and the aggregate budget; the transport rule is
 the local slice of [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
 
@@ -244,7 +243,7 @@ carried the fault) and the *outcome* (`RateLimited` / `Transient` / `Api` /
 `Other`) — and pins each **once**, not their cross product. A handful of
 hand-built `genai::Error` fixtures cover every source: a `WebStream` boxing an
 `HttpError` (recursion + 4xx, the named 400 regression), a `WebModelCall` with a
-`Retry-After` header (429 + the header read), a compaction 5xx, a `ChatResponse`
+`Retry-After` header (429 + the header read), a non-streamed 5xx, a `ChatResponse`
 JSON frame, a non-JSON `WebModelCall` (the contract-breach `Terminal`), and a
 `WebStream` with an unrecognised boxed cause (the `Terminal` floor).
 
@@ -261,12 +260,12 @@ attempt count.
 ## See also
 
 - [[map/exarch/provider|provider]] — the transport this classifies for:
-  identity, client building, the streaming and summary calls, the idle timeout,
+  identity, client building, the streaming call, the idle timeout,
   usage and pricing.
 - [[internals/cancellation|cancellation]] — the per-exchange `Token` the
   `Cancelled` variant reports, and the cancel-aware backoff select.
 - [[map/exarch/agent|agent]] — the deliberate loop above the provider, where a
-  `Truncated` compaction summary and the nudge-retry rules live.
+  `Truncated` reply and the nudge-retry rules live.
 - [[map/exarch/cards|cards]] / [[map/exarch/frontend|frontend]] — the structured
   error chrome that reads the parsed JSON `body`.
 - [[design/failure|failure]] — ral's own status-vs-truth failure model, a

@@ -368,19 +368,27 @@ impl Avatar {
 
     /// One reading of the pressure gauge, no state.  The soft line is
     /// [`crate::agent::digest::pressure_due`], one reserve ahead of
-    /// auto-compaction; an unknown window falls back to the byte heuristic
-    /// against [`PRESSURE_THRESHOLD_FALLBACK`].
+    /// auto-eviction; an unknown window falls back to the byte heuristic
+    /// against [`PRESSURE_THRESHOLD_FALLBACK`].  Either way the reading
+    /// carries the cut [`Avatar::planned_eviction`] would make, so the nudge
+    /// can name it.
     fn pressure_gauge(&self, provider: &Provider) -> nudge::Pressure {
         match provider.context_window() {
             Some(w) if w > 0 => match self.token_pressure(w) {
-                Some(detail) => nudge::Pressure::Over(detail),
+                Some(detail) => nudge::Pressure::Over {
+                    detail,
+                    through: self.planned_eviction(),
+                },
                 None if self.measured_input().is_some() => nudge::Pressure::Under,
                 None => nudge::Pressure::Unknown,
             },
             _ => {
                 let bytes = self.log.lock().history_bytes();
                 if bytes >= PRESSURE_THRESHOLD_FALLBACK {
-                    nudge::Pressure::Over(format!("{} KB", bytes / 1024))
+                    nudge::Pressure::Over {
+                        detail: format!("{} KB", bytes / 1024),
+                        through: self.planned_eviction(),
+                    }
                 } else {
                     nudge::Pressure::Under
                 }

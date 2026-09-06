@@ -132,12 +132,12 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         help: "Attach to a live agent by name.",
     },
     SlashCommand {
-        name: "/compact",
+        name: "/evict",
         aliases: &[],
         arg: None,
         rewrites: true,
         any_tab: false,
-        help: "Summarize the conversation to reclaim context.",
+        help: "Evict the older half of the conversation to the log; it stays readable to the model.",
     },
     SlashCommand {
         name: "/context",
