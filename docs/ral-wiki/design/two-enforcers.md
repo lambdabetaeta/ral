@@ -64,9 +64,25 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | `net: false` | `--unshare-net` | refuse: `projection_enforceable` |
 | `exec` — which binary, which subcommand | in-process gate | the gate stands alone |
 | die with parent, new session, no core, nproc cap, seccomp blocklist | bwrap + `pre_exec` | applied where possible |
-| private ipc / uts / cgroup | `--unshare-*` | never refused |
+| private ipc / uts | `--unshare-*` | never refused |
+| `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | reported: the tree is the host's |
 | no signalling the host; host process table hidden | pid namespace + fresh `/proc` | reported: the table is the container's own |
 | private ptys | `--dev` | reported: `/dev` by hand over the host's `/dev/pts` |
+
+**Neither enforcer is the body's to rewrite.** The launcher pinned at boot —
+bwrap on Linux, ral itself where it re-execs — is closed to a confined child by
+its own read-only bind, and to ral's own writes by the gate's `Guarded`
+verdict: judged by inode, so a hard link names it too, and *before* any grant
+is folded, since a stack with no `fs` opinion is `Unrestricted` and exactly the
+case to catch. It is the discard device's twin — a name no grant needs to
+mention, always yes; an inode no grant can name, always no. A deny entry could
+not carry it, never being reached under an open stack; a sealed-memfd copy
+would lose a setuid bwrap its bit and Ubuntu's AppArmor userns profile, which
+attaches to the exec'd file's path; a content digest detects the change, not
+the poison, and the restart it demands pins the poisoned bytes. What stays open
+— another same-uid process, a later session — the profile dump names, with its
+remedy: a root-owned bwrap
+([[internals/capability-enforcement|capability-enforcement]]).
 
 The discipline this draws: **the in-process gate is authority over dispatch, not
 confinement of children.** Treating it as the latter is the mistake; pairing it

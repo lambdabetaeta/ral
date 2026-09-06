@@ -95,6 +95,29 @@ pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(
     Ok(())
 }
 
+/// The boot-pinned binary `path` names — `"bwrap"` for the Linux envelope,
+/// `"ral"` for our own executable — or `None`.  Judged by inode, so a hard
+/// link or a rename since boot still answers; a name with nothing on disk
+/// under it names no pin.  `capability::fs_verdict` asks this of every write
+/// ral itself dispatches: the enforcer's inode is not the body's to rewrite,
+/// whatever the grant admits ([`launch`] binds it read-only for the confined
+/// child, and this is the same fact for the in-process half).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:pin-identity] stats a write's resolved target to compare its inode against the boot pins; a predicate stat for the fs gate's own verdict, not the model's data I/O"
+)]
+pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(target_os = "linux")]
+    if linux::envelope().is_ok_and(|envelope| envelope.is_inode(&meta)) {
+        return Some(linux::BWRAP);
+    }
+    reexec::SANDBOX_SELF
+        .get()
+        .is_some_and(|own| own.is_inode(&meta))
+        .then_some("ral")
+}
+
 /// Carries the JSON-encoded [`SandboxProjection`] into a re-exec'd ral process.
 const SANDBOX_PROJECTION_FLAG: &str = "--sandbox-projection";
 
@@ -154,9 +177,16 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
                     line.push(' ');
                     line.push_str(&arg.to_string_lossy());
                 }
-                eprintln!(
-                    "--- bwrap argv ---\n{line}\n--- host envelope ---\n{host}--- end bwrap argv ---"
-                );
+                eprint!("--- bwrap argv ---\n{line}\n--- host envelope ---\n{host}");
+                if envelope.writable_by_us() {
+                    eprintln!(
+                        "envelope writable by this uid: {} — any process running as you can \
+                         rewrite it between launches; ral refuses its own writes and cannot \
+                         see another's.  Lifted by a root-owned bwrap (the distro package).",
+                        envelope.arg0().display()
+                    );
+                }
+                eprintln!("--- end bwrap argv ---");
             }
             Err(e) => eprintln!("--- bwrap argv error ---\n{e}"),
         }

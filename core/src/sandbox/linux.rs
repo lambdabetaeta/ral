@@ -3,9 +3,10 @@
 //! which forks the payload, whose `setsid` (`--new-session`) makes its pid the
 //! group of everything inside — the group ral addresses, read over
 //! `--info-fd`; the monitor leads an inert group nobody signals.  The
-//! envelope is the child's whole world on every projection: own ipc, uts and
-//! cgroup namespaces, a pid namespace with a fresh `/proc` where the host can
-//! build one ([`HostEnvelope`]), a seccomp blocklist on x86-64 and aarch64.
+//! envelope is the child's whole world on every projection: own ipc and uts
+//! namespaces, a cgroup namespace with `/sys/fs/cgroup` re-rooted on it and a
+//! pid namespace with a fresh `/proc` where the host can build them
+//! ([`HostEnvelope`]), a seccomp blocklist on x86-64 and aarch64.
 //! bwrap has no endpoint filter — `--unshare-net` drops the network namespace
 //! whole — so `SandboxProjection::net` is a bit, not a list.
 //!
@@ -144,9 +145,12 @@ pub(crate) fn make_command_with_policy(
     rw_binds.retain(|bind| crate::path::exists(bind.as_str()));
 
     c.arg("--new-session");
-    c.args(["--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try"]);
+    c.args(["--unshare-ipc", "--unshare-uts"]);
     if host.private_pids {
         c.arg("--unshare-pid");
+    }
+    if host.private_cgroup {
+        c.arg("--unshare-cgroup");
     }
     let info_fd = if ownership == super::launch::Ownership::Kept {
         c.arg("--die-with-parent");
@@ -182,6 +186,7 @@ pub(crate) fn make_command_with_policy(
             c.args(["--proc", "/proc"]);
         }
     }
+    render_cgroup(&mut c, host);
     // The file we exec, read-only over whatever the projection bound — `/`
     // wholesale under `Unrestricted` — so no confined child rewrites the
     // pinned inode in place, nor moves it: a mountpoint cannot be renamed.
@@ -244,6 +249,43 @@ fn render_dev(c: &mut Command, host: HostEnvelope) {
     }
     // After `/dev`'s tmpfs, or it is buried.
     c.args(["--tmpfs", "/dev/shm"]);
+}
+
+/// The envelope's `/sys/fs/cgroup`: the tree the payload's own
+/// `/proc/self/cgroup` names.  Under a cgroup namespace that file reads
+/// `0::/`, and a runtime joining it onto the host's tree reads the root's
+/// limits — none — so the bind re-roots the tree on ral's own cgroup, the
+/// namespace's root: what a fresh cgroup2 mount inside it would show, built
+/// from the op bwrap has.  Without the namespace the host's tree is the true
+/// one.  Over the projection's binds, so a grant reading `/sys` wholesale
+/// still gets the tree its `/proc` describes.
+fn render_cgroup(c: &mut Command, host: HostEnvelope) {
+    const TREE: &str = "/sys/fs/cgroup";
+    let source = if host.private_cgroup {
+        own_cgroup().map(|own| format!("{TREE}{own}"))
+    } else {
+        Some(TREE.to_string())
+    };
+    if let Some(source) = source.filter(|source| crate::path::exists(source)) {
+        c.args(["--ro-bind", &source, TREE]);
+    }
+}
+
+/// ral's cgroup, `/`-rooted and without its trailing slash, from the one
+/// `0::` line cgroup2 writes to `/proc/self/cgroup`; `None` on a v1 or
+/// hybrid host, whose lines are many and name no single tree.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:own-cgroup] reads ral's own /proc/self/cgroup to re-root the envelope's cgroup tree; envelope construction, not the model's data I/O"
+)]
+fn own_cgroup() -> Option<String> {
+    let table = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let mut lines = table.lines();
+    let own = lines.next()?.strip_prefix("0::")?;
+    lines
+        .next()
+        .is_none()
+        .then(|| own.trim_end_matches('/').to_string())
 }
 
 /// Fixed fd bwrap's `--info-fd` document travels on, chosen next to the
@@ -496,19 +538,23 @@ fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
     }
 }
 
-/// System paths always bound read-only.  `/etc` wholesale is excluded —
-/// only the files dynamic linking, name resolution, user lookup and
-/// toolchain resolution need.
+/// System paths always bound read-only.  `/etc` and `/sys` wholesale are
+/// excluded — only what dynamic linking, name resolution, user lookup,
+/// toolchain resolution and hardware sizing need.  The rest of `/sys`
+/// describes the host, not the envelope: `class/net` is the mounter's netns
+/// whatever `--unshare-net` did, `class/dmi` and `bus` name the machine.  A
+/// grant that wants it reads `/sys` by name.
 fn default_ro_binds() -> Vec<String> {
     [
         "/bin",
         "/usr",
         "/lib",
         "/lib64",
-        // `/dev` and `/proc` are absent: the mounts emitted first supply
-        // minimal versions of both, and a real bind here would shadow them.
-        // `/sys` has no bwrap virtual op, so it is bound.
-        "/sys",
+        // `/dev`, `/proc` and `/sys/fs/cgroup` are absent: the mounts
+        // emitted around these supply the envelope's own, and a real bind
+        // here would shadow them.
+        "/sys/devices/system/cpu",
+        "/sys/kernel/mm/transparent_hugepage",
         "/etc/ld.so.conf",
         "/etc/ld.so.conf.d",
         "/etc/ld.so.cache",
@@ -549,6 +595,7 @@ mod tests {
     const WHOLE: HostEnvelope = HostEnvelope {
         private_pids: true,
         virtual_dev: true,
+        private_cgroup: true,
         landlock: Some(super::landlock::Abi::SIGNAL_SCOPE),
     };
 
@@ -1031,31 +1078,142 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The namespaces key on there being an envelope, the pid one on the host fact.
+    /// The namespaces key on there being an envelope; the pid and cgroup ones
+    /// on the host fact each.
     #[test]
-    fn every_envelope_owns_its_namespaces_and_the_pid_one_where_the_host_allows() {
+    fn every_envelope_owns_its_namespaces_and_the_probed_ones_where_the_host_allows() {
         let restricted = deny_within(&workdir("namespaces"), &[]);
         let masked = HostEnvelope {
             private_pids: false,
+            private_cgroup: false,
             ..WHOLE
         };
-        for (host, private_pids) in [(WHOLE, true), (masked, false)] {
+        for (host, probed) in [(WHOLE, true), (masked, false)] {
             for policy in [&unrestricted(), &restricted] {
                 for ownership in [Ownership::Kept, Ownership::Surrendered] {
                     let args = argv_on(host, policy, ownership);
-                    for flag in ["--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try"] {
+                    for flag in ["--unshare-ipc", "--unshare-uts"] {
                         assert!(
                             args.iter().any(|a| a == flag),
                             "{flag} must be on every envelope: {args:?}"
                         );
                     }
-                    assert_eq!(
-                        args.iter().any(|a| a == "--unshare-pid"),
-                        private_pids,
-                        "--unshare-pid must follow the host fact alone: {args:?}"
-                    );
+                    for flag in ["--unshare-pid", "--unshare-cgroup"] {
+                        assert_eq!(
+                            args.iter().any(|a| a == flag),
+                            probed,
+                            "{flag} must follow the host fact alone: {args:?}"
+                        );
+                    }
                 }
             }
+        }
+    }
+
+    /// `/sys` describes the host — `class/net` is the mounter's netns whatever
+    /// `--unshare-net` did — so only what sizes a program is bound, and the
+    /// cgroup tree goes on last as the payload's own: under the namespace its
+    /// `/proc/self/cgroup` reads `0::/`, and a tree rooted anywhere else
+    /// answers that path with somebody else's limits.
+    #[test]
+    fn sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads() {
+        let dir = workdir("sys");
+        let dir_s = dir.to_string_lossy();
+        let tree = "/sys/fs/cgroup";
+        let own = format!("{tree}{}", super::own_cgroup().expect("a cgroup2 host"));
+        for (label, policy, bind) in [
+            ("unrestricted", unrestricted(), ["--dev-bind", "/", "/"]),
+            (
+                "restricted",
+                deny_within(&dir, &[]),
+                ["--bind", dir_s.as_ref(), dir_s.as_ref()],
+            ),
+        ] {
+            let args = argv(&policy);
+            assert!(
+                position_of(&args, &["--ro-bind", "/sys", "/sys"]).is_none(),
+                "{label}: the host's /sys must not be bound wholesale: {args:?}"
+            );
+            let bound = position_of(&args, &bind).expect("the projection's bind");
+            let cgroup = position_of(&args, &["--ro-bind", &own, tree])
+                .unwrap_or_else(|| panic!("{label}: no re-rooted cgroup tree: {args:?}"));
+            assert!(bound < cgroup, "{label}: the tree goes over the projection's binds: {args:?}");
+        }
+        let restricted = argv(&deny_within(&dir, &[]));
+        assert!(
+            position_of(
+                &restricted,
+                &["--ro-bind", "/sys/devices/system/cpu", "/sys/devices/system/cpu"]
+            )
+            .is_some(),
+            "a program must still count its cpus: {restricted:?}"
+        );
+        let shared = argv_on(
+            HostEnvelope {
+                private_cgroup: false,
+                ..WHOLE
+            },
+            &deny_within(&dir, &[]),
+            Ownership::Kept,
+        );
+        assert!(
+            position_of(&shared, &["--ro-bind", tree, tree]).is_some(),
+            "without the namespace the host's tree is the true one: {shared:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the argv cannot show: that a program inside reads its own limits
+    /// where its `/proc/self/cgroup` says they are, and finds no interface
+    /// the netns it is in does not have.
+    #[test]
+    fn a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces() {
+        use std::os::unix::fs::MetadataExt;
+        let restricted = deny_within(&workdir("sys-spawn"), &[]);
+        let script = "echo READY\n\
+                      ls /sys/class/net >/dev/null 2>&1 && echo NET-VISIBLE\n\
+                      echo NPROC=$(nproc)\n\
+                      echo CGROUP=$(cat /proc/self/cgroup)\n\
+                      echo TREE=$(stat -c %i /sys/fs/cgroup)\n";
+        for (label, policy) in [("unrestricted", &unrestricted()), ("restricted", &restricted)] {
+            let Some(envelope) = envelope_launches(policy) else {
+                continue;
+            };
+            let host = HostEnvelope::probe(envelope);
+            let out = run_confined(envelope, host, policy, script).expect("spawn bwrap");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("READY"),
+                "{label}: the envelope did not launch: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if label == "restricted" {
+                assert!(
+                    !emitted(&stdout, "NET-VISIBLE"),
+                    "the host's interfaces were listed under a restricted fs: {stdout}"
+                );
+            }
+            let nproc: u32 = field(&stdout, "NPROC=").and_then(|n| n.parse().ok()).expect("a cpu count");
+            assert!(nproc > 0, "{label}: a program must still count its cpus: {stdout}");
+            let Some(own) = super::own_cgroup() else {
+                continue;
+            };
+            let expected = if host.private_cgroup {
+                assert_eq!(
+                    field(&stdout, "CGROUP="),
+                    Some("0::/"),
+                    "{label}: the payload must be the root of its own namespace: {stdout}"
+                );
+                format!("/sys/fs/cgroup{own}")
+            } else {
+                "/sys/fs/cgroup".to_string()
+            };
+            let expected = std::fs::metadata(&expected).expect("ral's own cgroup").ino();
+            assert_eq!(
+                field(&stdout, "TREE=").and_then(|n| n.parse().ok()),
+                Some(expected),
+                "{label}: /sys/fs/cgroup inside must be the tree /proc/self/cgroup names: {stdout}"
+            );
         }
     }
 

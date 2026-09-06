@@ -76,6 +76,34 @@ impl Pinned {
     pub(super) fn current_path(&self) -> std::io::Result<PathBuf> {
         std::fs::read_link(&self.exec_path)
     }
+
+    /// Whether `meta` is the pinned inode, under whatever name — a hard link
+    /// names it too.  Never on Windows, where nothing is pinned.
+    #[cfg_attr(windows, allow(unused_variables))]
+    pub(super) fn is_inode(&self, meta: &std::fs::Metadata) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let (dev, ino) = match &self.pin {
+                #[cfg(target_os = "linux")]
+                Pin::Fd { dev, ino, .. } => (*dev, *ino),
+                #[cfg(not(target_os = "linux"))]
+                Pin::Stat { dev, ino } => (*dev, *ino),
+            };
+            meta.dev() == dev && meta.ino() == ino
+        }
+        #[cfg(windows)]
+        {
+            false
+        }
+    }
+
+    /// Whether this uid may rewrite the pinned bytes in place: the one change
+    /// a pin by fd or inode cannot see.
+    #[cfg(unix)]
+    pub(super) fn writable_by_us(&self) -> bool {
+        rustix::fs::access(&self.exec_path, rustix::fs::Access::WRITE_OK).is_ok()
+    }
 }
 
 /// The pinned `argv[0]`, or the live `current_exe()`.  Every Linux launch
@@ -112,9 +140,15 @@ pub(super) fn self_exec_path() -> Option<PathBuf> {
 
 /// How `exec_path` stays bound to the binary we registered.
 enum Pin {
-    /// Never dropped, so `/proc/self/fd/<N>` keeps naming the boot inode.
+    /// Never dropped, so `/proc/self/fd/<N>` keeps naming the boot inode;
+    /// `(dev, ino)` is that inode's identity for [`Pinned::is_inode`].
     #[cfg(target_os = "linux")]
-    Fd(#[allow(dead_code)] std::os::fd::OwnedFd),
+    Fd {
+        #[allow(dead_code)]
+        fd: std::os::fd::OwnedFd,
+        dev: u64,
+        ino: u64,
+    },
     /// Compared against a fresh stat before each spawn.
     #[cfg(all(unix, not(target_os = "linux")))]
     Stat { dev: u64, ino: u64 },
@@ -152,13 +186,21 @@ pub(super) fn register_sandbox_self() {
 )]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::unix::fs::MetadataExt;
 
-    let exe: OwnedFd = std::fs::File::open(arg0).ok()?.into();
+    let file = std::fs::File::open(arg0).ok()?;
+    let meta = file.metadata().ok()?;
+    let fd: OwnedFd = file.into();
     // Rust opens with FD_CLOEXEC set; clear it, or the fd dies in the
     // execve and `/proc/self/fd/<N>` has nothing to resolve to.
-    let raw = exe.as_raw_fd();
-    let _ = rustix::io::fcntl_setfd(&exe, rustix::io::FdFlags::empty());
-    Some((Pin::Fd(exe), crate::path::proc_fd_path(raw)))
+    let raw = fd.as_raw_fd();
+    let _ = rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::empty());
+    let pin = Pin::Fd {
+        fd,
+        dev: meta.dev(),
+        ino: meta.ino(),
+    };
+    Some((pin, crate::path::proc_fd_path(raw)))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]

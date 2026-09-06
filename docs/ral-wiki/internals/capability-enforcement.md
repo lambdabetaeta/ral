@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 0e45e6ab
+verified_at_commit: 92ff8756
 verified_at_date: 2026-09-06
-anchors: [check_exec_args, check_fs_op, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, Pinned, register_envelope]
+anchors: [check_exec_args, check_fs_op, fs_verdict, pinned_binary, sandbox_projection, evaluate_exec, allow_region, deny_region, admitted_literal_paths, GrantStack, sandboxed_command, build_command, projection_enforceable, maybe_enter_process_sandbox, SessionSandbox, fs_capability_name, ensure_fs_grant, policy_names, deny_names_from, longest_dir_match, deputy_prefixes, confinement_unavailable, spawn_error, Envelope, InfoFd, HostEnvelope, render_dev, render_cgroup, default_ro_binds, Pinned, register_envelope]
 ---
 
 # Capability enforcement: one chokepoint, two enforcers
@@ -115,7 +115,14 @@ spawned process does on its own.**
   the disk through it. `GrantStack::admits_fs` deliberately does not share the
   exemption: it decides *membership* in a region, and a device excused from an
   access is not thereby a member of anything. The same predicate settles
-  whether the act is a fact at all ([[design/audit|audit]]).
+  whether the act is a fact at all ([[design/audit|audit]]). Its twin on the
+  other side is the one write no grant admits: `fs_verdict` answers `Guarded`
+  for a write onto a binary the sandbox pinned at boot — bwrap on Linux, ral's
+  own executable — *before* the stack is folded, because a stack with no `fs`
+  opinion is `Unrestricted` and exactly the case to catch. `sandbox::pinned_binary`
+  judges by inode, so a hard link or a rename since boot names the pin too,
+  and a replace-by-rename stays admitted: the pinned copy survives it
+  ([[design/two-enforcers|two-enforcers]]).
 - *Network* — no in-process gate at all, since ral dispatches no network
   operation itself, so the OS sandbox is the sole enforcer; on Windows the
   enforcement is the withheld network capability SIDs — a LowBox token
@@ -203,6 +210,25 @@ assert both shapes from literals rather than from whichever host runs them.
 Such hosts still refuse the read-only rebind of their own locked `/etc/hosts`
 and `/etc/resolv.conf`, which remains open.
 
+**A kernel pseudo-filesystem inside the envelope describes the envelope; one
+that cannot is a host bind like any other, present only where something needs
+it.** `--proc /proc` is fresh with the pid namespace. bwrap has no sysfs op,
+and a bound `/sys` is the *mounter's*: its `class/net` lists the host's
+interfaces whatever `--unshare-net` did, its `class/dmi` and `bus` name the
+machine. So `default_ro_binds` narrows `/sys` as it narrows `/etc`, to what
+sizes a program — `devices/system/cpu`, `kernel/mm/transparent_hugepage` — and a
+grant that wants the rest reads `/sys` by name. `/sys/fs/cgroup` is the case
+that is *wrong* rather than revealing: under the cgroup namespace a child's
+`/proc/self/cgroup` reads `0::/`, and a runtime joining that onto the host's
+tree reads the root's limits, which are none. `render_cgroup` re-roots the tree
+on ral's own cgroup — the namespace's root, what a fresh cgroup2 mount inside it
+would show — on both projections, over the projection's binds; where the host
+builds no cgroup namespace (`HostEnvelope::private_cgroup`) the host's tree is
+the true one and is bound as it is, and the dump says so
+([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a-process-namespace]]).
+Pinned by `sandbox::linux::tests::sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`
+and `::a_confined_program_reads_its_own_cgroup_and_none_of_the_hosts_interfaces`.
+
 **The envelope's identity is fixed at boot, and nothing a session does can
 change it.** The launcher a confined command runs under is exactly as trusted
 as the file it is, so that file is never chosen by name at spawn time — where
@@ -214,14 +240,20 @@ on the absolute entries of the `PATH` ral was started with, before any shell
 exists, as a `reexec::Pinned` — the same fd-pin ral uses for its own re-exec —
 and every launch execs `/proc/self/fd/N`, so neither a `PATH` override nor a
 replace-by-rename at the pinned path reaches it. In-place rewriting of the
-pinned inode is closed by the envelope itself: `make_command_with_policy`
-read-only binds the envelope's own file after the projection's binds, `/`
-wholesale under `Unrestricted` included, and before the masks, the Linux twin
-of macOS's `freeze_admitted_set`. A host with no bwrap to pin is reported by
-`linux::envelope` at the first launch that needs it, through
+pinned inode — the one change a pin by descriptor cannot see — is closed on
+both sides of the dispatch boundary: for a confined child by the envelope
+itself, `make_command_with_policy` read-only binding the envelope's own file
+after the projection's binds, `/` wholesale under `Unrestricted` included, and
+before the masks, the Linux twin of macOS's `freeze_admitted_set`; for ral's
+own writes by the `Guarded` verdict above. What stays open is another same-uid
+process, and any session after this one — a session cannot vet the enforcer it
+boots on — so where the pinned bwrap is writable by ral's uid the profile dump
+says so and names the remedy, a root-owned bwrap. A host with no bwrap to pin
+is reported by `linux::envelope` at the first launch that needs it, through
 `confinement_unavailable`; `Launch::envelope` names the binary for a spawn
-failure's wording only. Pinned by `sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`
-and `::the_envelope_binary_is_read_only_inside_every_envelope`.
+failure's wording only. Pinned by `sandbox::linux::tests::the_launcher_is_the_pinned_envelope_and_never_a_name`,
+`::the_envelope_binary_is_read_only_inside_every_envelope` and
+`capability::enforce::tests::a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted`.
 
 **The sandbox is applied per external command, not by re-execing the grant
 body.** A `grant` is a *local* dynamic effect scope: its body evaluates in

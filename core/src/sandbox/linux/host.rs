@@ -16,6 +16,9 @@ pub(crate) struct HostEnvelope {
     pub(crate) private_pids: bool,
     /// `--dev /dev` mounts; otherwise [`super::render_dev`] stands in.
     pub(crate) virtual_dev: bool,
+    /// `--unshare-cgroup` builds, so [`super::render_cgroup`] re-roots the
+    /// tree; otherwise the payload sees the host's.
+    pub(crate) private_cgroup: bool,
     /// The kernel's Landlock level, or `None` where it has none.
     pub(crate) landlock: Option<Abi>,
 }
@@ -27,6 +30,7 @@ impl HostEnvelope {
         *PROBED.get_or_init(|| Self {
             private_pids: bwrap_builds(envelope, &["--unshare-pid", "--proc", "/proc"]),
             virtual_dev: bwrap_builds(envelope, &["--dev", "/dev"]),
+            private_cgroup: bwrap_builds(envelope, &["--unshare-cgroup"]),
             landlock: Abi::probe(),
         })
     }
@@ -51,6 +55,15 @@ impl fmt::Display for HostEnvelope {
                 f,
                 "  the container refuses a fresh devpts, so /dev is built by hand over the \
                  host's /dev/pts.  Lifted by running the container --privileged."
+            )?;
+        }
+        writeln!(f, "host cgroup tree hidden: {}", held(self.private_cgroup))?;
+        if !self.private_cgroup {
+            writeln!(
+                f,
+                "  this kernel builds no cgroup namespace, so a confined child's \
+                 /sys/fs/cgroup is the host's whole tree — its own limits are still \
+                 the ones its /proc/self/cgroup names."
             )?;
         }
         let exec = self.landlock.is_some_and(|abi| abi >= Abi::EXEC);

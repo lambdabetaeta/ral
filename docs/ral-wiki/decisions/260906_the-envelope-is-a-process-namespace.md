@@ -8,7 +8,8 @@ generated_at_commit: 39934600
 **A grant's envelope confines process identity and lifetime, not only the
 filesystem and network — on every projection, wherever the host can build the
 namespace, and it says when it cannot.** What `grant` means for `ps`, `kill`,
-orphans and `detach` changes accordingly.
+orphans and `detach` changes accordingly — and so does what the filesystem
+inside it says about the host.
 
 ## Why
 
@@ -32,12 +33,29 @@ never ran.
 ## Decision
 
 - **Namespaces on every launch**, keyed on nothing in the grant:
-  `--unshare-ipc --unshare-uts --unshare-cgroup-try` unconditionally, and
-  `--unshare-pid` iff the host can mount a fresh procfs
-  (`HostEnvelope::private_pids`, probed once per process). `--proc /proc` on
-  both projections; its meaning follows bwrap's own rule — a fresh table with
-  the namespace, a bind of the host's without — so `/proc/self` is always the
-  payload's own.
+  `--unshare-ipc --unshare-uts` unconditionally, `--unshare-pid` iff the host
+  can mount a fresh procfs and `--unshare-cgroup` iff the kernel builds the
+  namespace (`HostEnvelope::private_pids`, `::private_cgroup`, probed once per
+  process). `--proc /proc` on both projections; its meaning follows bwrap's own
+  rule — a fresh table with the namespace, a bind of the host's without — so
+  `/proc/self` is always the payload's own.
+- **A pseudo-filesystem inside the envelope describes the envelope; one that
+  cannot is a host bind like any other under `Restricted`, present only where
+  something needs it.** sysfs is its *mounter's*: a bound `/sys` lists the
+  host's interfaces under `--unshare-net` and names the machine (`class/dmi`,
+  `bus`, `block`). bwrap has no sysfs op, so `default_ro_binds` narrows `/sys`
+  as it narrows `/etc` — `devices/system/cpu`, `kernel/mm/transparent_hugepage`,
+  what sizes a program — and a grant that wants the rest reads `/sys` by name.
+  Not keyed on `net`: the identifiers leak under `net: true` too.
+  `Unrestricted` *is* the host's filesystem and keeps the host's `/sys`.
+- **`/sys/fs/cgroup` is the tree the payload's own `/proc/self/cgroup`
+  names.** Under the cgroup namespace that file reads `0::/`, and a runtime
+  joining it onto the host's tree — Rust's `available_parallelism`, the JVM,
+  Go — reads the root's limits, which are none; so `render_cgroup` re-roots the
+  tree on ral's own cgroup, on both projections, over the projection's binds:
+  what a fresh cgroup2 mount inside the namespace would show, built from the
+  op bwrap has. Without the namespace the host's tree is the true one and is
+  bound as it is; cgroup v1 names no single tree and binds nothing.
 - **The ladder addresses the payload's session, never the supervisor.** A
   `Kept` launch passes `--info-fd` and reads back `child-pid`; that pid is the
   group. `kill(-P, grace)` reaches the payload — a namespace init drops every
@@ -96,6 +114,12 @@ never ran.
   give. Per-envelope is the meet-safe default; sharing is a later widening.
 - *`--unshare-all --share-net`*: its manual defines it as "currently equivalent
   with …"; the argv should say what it means.
+- *`--unshare-cgroup-try`*: the re-rooted tree is right exactly when the
+  namespace exists, so the flag follows the probe as `--unshare-pid` does.
+- *`--tmpfs /sys/class/net`*: a symlink farm — the directories stay reachable
+  at `/sys/devices/**/net/*`; a wall built from a list of doors.
+- *A trampoline that mounts sysfs from inside*: mount authority in the
+  payload's hands unmounts every deny mask.
 
 ## Left open, deliberately
 
@@ -106,10 +130,16 @@ never ran.
   seccomp — is a second design.
 - Rootless containers still refuse the read-only rebind of their locked
   `/etc/hosts` and `/etc/resolv.conf`, so `Restricted` does not launch there.
+- Under `grant [net: false]` alone the filesystem is the host's,
+  `/sys/class/net` included: `net` governs sockets, not the filesystem's
+  description of the host.
 
 Pinned by tests that spawn the envelope (`sandbox::linux::tests`): the grace
 signal reaching the payload rather than the monitor, no host pid nameable
-inside, `/proc/self` the payload's own on both projections, and a confined
-pipeline stage's trap running (`ral/tests/pipeline.rs`). See
+inside, `/proc/self` the payload's own on both projections, `/sys/fs/cgroup`
+the inode of ral's own cgroup with `/sys/class/net` absent under `Restricted`,
+and a confined pipeline stage's trap running (`ral/tests/pipeline.rs`); the
+`/sys` binds and their order by
+`sys_is_narrowed_to_what_sizes_a_program_and_the_cgroup_tree_is_the_payloads`. See
 [[design/grant|grant]], [[internals/capability-enforcement|capability-enforcement]],
 `docs/SPEC.md` §12.6 and §12.11.

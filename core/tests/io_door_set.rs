@@ -149,6 +149,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "core/src/sandbox.rs",
         "io-door:silent:restricted-envelope-probe",
     ),
+    ("core/src/sandbox.rs", "io-door:silent:pin-identity"),
     ("core/src/sandbox.rs", "io-door:silent:self-reexec"),
     ("core/src/sandbox.rs", "io-door:surface:make-command"),
     ("core/src/sandbox/diag.rs", "io-door:silent:ps-sample"),
@@ -159,6 +160,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/sandbox/diag/macos.rs", "io-door:silent:log-show"),
     ("core/src/sandbox/launch.rs", "io-door:silent:respawn-exec"),
     ("core/src/sandbox/launch.rs", "io-door:silent:respawn-spawn"),
+    ("core/src/sandbox/linux.rs", "io-door:silent:own-cgroup"),
     ("core/src/sandbox/linux.rs", "io-door:surface:bwrap-launch"),
     (
         "core/src/sandbox/linux/host.rs",

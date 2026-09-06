@@ -1,5 +1,5 @@
 ---
-generated_at_commit: dcb5ad01
+generated_at_commit: 92ff8756
 generated_at_date: 2026-09-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -29,7 +29,9 @@ Submodules:
 - `enforce.rs` — the point-of-use gates: head admission, the
   audit-bearing exec/fs checks (`check_exec_args`, `check_fs_op`), and
   the editor/shell bool gates. The fs gate is split so the judgment is
-  reusable without the report: `fs_verdict` is the pure decision, and
+  reusable without the report: `fs_verdict` is the decision — `Guarded`
+  first, for a write onto a boot-pinned sandbox binary
+  (`sandbox::pinned_binary`, by inode), before any grant is folded — and
   `check_fs_op` is the layer that audits it and mints the `Break`, and the
   one layer that excuses the discard device (`ResolvedPath::is_discard`)
   before either region is consulted;

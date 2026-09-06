@@ -81,13 +81,16 @@ pub(crate) fn check_exec_args(
     result
 }
 
-/// The pure half of [`check_fs_op`]'s decision: does the stack admit `op`
-/// on the resolved path?  `Unrestricted` exactly when no layer held an `fs`
-/// opinion.
+/// The decision half of [`check_fs_op`]: does the stack admit `op` on the
+/// resolved path?  `Unrestricted` exactly when no layer held an `fs`
+/// opinion.  `Guarded` is the one verdict no grant decides: a write onto a
+/// binary the sandbox pinned at boot, refused before the stack is consulted
+/// — the twin of the discard device, which is admitted before it is.
 pub(super) enum FsVerdict {
     Unrestricted,
     Granted,
     Denied,
+    Guarded(&'static str),
 }
 
 /// Test the resolved path against the regions [`super::fs`] folds: it passes
@@ -106,6 +109,12 @@ pub(super) fn fs_verdict(
     resolved: &std::path::Path,
     op: &FsOp,
 ) -> FsVerdict {
+    // Before the stack: an empty stack is exactly the case it must catch.
+    if matches!(op, FsOp::Write)
+        && let Some(pinned) = crate::sandbox::pinned_binary(resolved)
+    {
+        return FsVerdict::Guarded(pinned);
+    }
     let Some(allowed) = allow_region(grants, resolver, op) else {
         return FsVerdict::Unrestricted;
     };
@@ -133,9 +142,9 @@ impl GrantStack {
         resolver: &Resolver,
         path: &crate::path::ResolvedPath,
     ) -> bool {
-        !matches!(
+        matches!(
             fs_verdict(self, resolver, &path.canonicalise_lenient(), op),
-            FsVerdict::Denied
+            FsVerdict::Unrestricted | FsVerdict::Granted
         )
     }
 }
@@ -158,10 +167,13 @@ pub(crate) fn check_fs_op(
     let resolved = path.canonicalise_lenient();
     let verdict = fs_verdict(&ctx.grants, &ctx.resolver(), &resolved, op);
 
-    if matches!(verdict, FsVerdict::Denied) {
+    if let FsVerdict::Denied | FsVerdict::Guarded(_) = verdict {
         emit_capability_denial(ctx, "fs", audit, site, |f| {
             f.insert("op".into(), op.label().into());
             f.insert("path".into(), path.display().to_string());
+            if let FsVerdict::Guarded(pinned) = verdict {
+                f.insert("pinned".into(), pinned.into());
+            }
         });
     }
 
@@ -171,6 +183,16 @@ pub(crate) fn check_fs_op(
             op.label(),
             resolved.display()
         ))),
+        FsVerdict::Guarded(pinned) => Err(sig_hint(
+            format!(
+                "fs write refused: {} is the {pinned} binary ral pinned at startup, which \
+                 confines every command run under a grant",
+                resolved.display()
+            ),
+            "ral never writes into the binary that enforces its grants, whatever the \
+             grant allows. Install a new one by replacing the file rather than \
+             rewriting it: a rename leaves this session's pinned copy intact",
+        )),
         FsVerdict::Unrestricted | FsVerdict::Granted => Ok(()),
     }
 }
@@ -321,6 +343,43 @@ mod tests {
             !admits_read(&grants, &tmp.path().join("outside")),
             "the region is still the prefix, not the world"
         );
+    }
+
+    /// The threat is a stack with no `fs` opinion at all — the one shape
+    /// the fold answers `Unrestricted` before consulting anything — so the
+    /// guard is tested on exactly that stack, and by inode: a hard link is
+    /// the same file under another name.
+    #[test]
+    fn a_write_onto_a_pinned_binary_is_guarded_before_any_grant_is_consulted() {
+        use super::{FsVerdict, fs_verdict};
+        crate::sandbox::early_init(&[]).expect("pins register");
+        let open = GrantStack::of(Capabilities::default());
+        let resolver = Resolver::shell_less();
+        let own = std::env::current_exe().expect("own path");
+        let verdict = |path: &std::path::Path, op: &FsOp| fs_verdict(&open, &resolver, path, op);
+
+        assert!(
+            matches!(verdict(&own, &FsOp::Write), FsVerdict::Guarded("ral")),
+            "a write onto the pinned executable must be guarded under an open stack"
+        );
+        assert!(
+            matches!(verdict(&own, &FsOp::Read), FsVerdict::Unrestricted),
+            "the guard is over rewriting, not reading"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let other = tmp.path().join("other");
+        std::fs::write(&other, "x").unwrap();
+        assert!(
+            matches!(verdict(&other, &FsOp::Write), FsVerdict::Unrestricted),
+            "an unpinned file is the stack's to decide"
+        );
+        let link = tmp.path().join("link-to-own");
+        if std::fs::hard_link(&own, &link).is_ok() {
+            assert!(
+                matches!(verdict(&link, &FsOp::Write), FsVerdict::Guarded("ral")),
+                "a hard link names the pinned inode too"
+            );
+        }
     }
 
     #[test]
