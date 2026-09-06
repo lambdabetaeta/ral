@@ -191,6 +191,7 @@ pub fn dump_profile_if_requested(policy: &crate::types::SandboxProjection) {
             Err(e) => eprintln!("--- bwrap argv error ---\n{e}"),
         }
         linux::landlock::dump(policy, host.landlock);
+        linux::seccomp::dump();
     }
     #[cfg(windows)]
     {

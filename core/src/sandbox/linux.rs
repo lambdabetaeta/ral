@@ -6,7 +6,7 @@
 //! envelope is the child's whole world on every projection: own ipc and uts
 //! namespaces, a cgroup namespace with `/sys/fs/cgroup` re-rooted on it and a
 //! pid namespace with a fresh `/proc` where the host can build them
-//! ([`HostEnvelope`]), a seccomp blocklist on x86-64 and aarch64.
+//! ([`HostEnvelope`]), the [`seccomp`] deny-set on x86-64 and aarch64.
 //! bwrap has no endpoint filter — `--unshare-net` drops the network namespace
 //! whole — so `SandboxProjection::net` is a bit, not a list.
 //!
@@ -17,6 +17,7 @@
 
 mod host;
 pub(crate) mod landlock;
+pub(crate) mod seccomp;
 
 pub(crate) use host::HostEnvelope;
 
@@ -205,9 +206,10 @@ pub(crate) fn make_command_with_policy(
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
-        let filter = build_seccomp_filter();
-        apply_seccomp(&mut c, filter);
-        c.args(["--seccomp", "100"]);
+        let programs = seccomp::Filter::ENVELOPE
+            .programs()
+            .map_err(|e| format!("sandbox: {e}"))?;
+        apply_seccomp(&mut c, programs);
     }
     c.arg("--");
     c.arg(payload.program);
@@ -288,9 +290,12 @@ fn own_cgroup() -> Option<String> {
         .then(|| own.trim_end_matches('/').to_string())
 }
 
-/// Fixed fd bwrap's `--info-fd` document travels on, chosen next to the
-/// seccomp filter's 100.
-const INFO_FD: libc::c_int = 101;
+/// The envelope's fixed fd table: the one that is always present goes first,
+/// the run whose length varies with the deny-set starts right after it.
+const INFO_FD: libc::c_int = 100;
+/// First of the seccomp programs' fds, `apply_seccomp` parking program `i` at
+/// `SECCOMP_FD_BASE + i`.
+const SECCOMP_FD_BASE: libc::c_int = 101;
 
 /// Both ends of a `Kept` launch's `--info-fd` pipe.  Our copy of the write
 /// end must outlive the fork that gives bwrap its own, then go: a read
@@ -398,143 +403,95 @@ impl<'p> DenyMask<'p> {
     }
 }
 
-/// A seccomp-BPF program: kill on an ABI mismatch, kill each denied
-/// syscall, allow the rest.  `bwrap` reads these raw `sock_filter` bytes
-/// from the `--seccomp` fd and builds the `sock_fprog` itself.
+/// Stack every compiled program: `--seccomp` on the first fd, `--add-seccomp-fd`
+/// on each further one — the kernel applies every installed filter and keeps
+/// the most severe result, so which program lands on which fd carries no
+/// meaning.  Each is parked in its own memfd, `CLOEXEC` cleared so it survives
+/// the exec into `bwrap`, which reads them and applies them to itself and
+/// everything it spawns.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn build_seccomp_filter() -> Vec<u8> {
-    const LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
-    const JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
-    #[cfg(target_arch = "x86_64")]
-    const JGE_K: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K
-    const RET_K: u16 = 0x06; // BPF_RET | BPF_K
-    // SECCOMP_RET_KILL_THREAD; KILL_PROCESS (0x8000_0000) would kill bwrap too.
-    const KILL: u32 = 0x0000_0000;
-    const ALLOW: u32 = 0x7fff_0000;
-    // Offsets into the kernel's seccomp_data struct.
-    const NR: u32 = 0;
-    const ARCH: u32 = 4;
-
-    #[cfg(target_arch = "x86_64")]
-    const AUDIT_ARCH: u32 = 0xC000_003E;
-    #[cfg(target_arch = "aarch64")]
-    const AUDIT_ARCH: u32 = 0xC000_00B7;
-
-    let denied: &[i64] = &[
-        libc::SYS_ptrace,
-        libc::SYS_kexec_load,
-        libc::SYS_perf_event_open,
-        libc::SYS_bpf,
-        libc::SYS_process_vm_readv,
-        libc::SYS_process_vm_writev,
-        libc::SYS_keyctl,
-        libc::SYS_add_key,
-    ];
-
-    let mut prog = BpfProg::new();
-    // Syscall numbers are per-ABI, so the arch check must precede every
-    // comparison against `nr` or a foreign ABI renumbers past the denies.
-    prog.insn(LD_W_ABS, 0, 0, ARCH);
-    prog.insn(JEQ_K, 1, 0, AUDIT_ARCH); // jt=1: skip the next kill on match
-    prog.insn(RET_K, 0, 0, KILL);
-    prog.insn(LD_W_ABS, 0, 0, NR);
-    // x32 shares AUDIT_ARCH_X86_64 but sets bit 30 in the syscall number,
-    // so it must be rejected before any equality compare below is trusted.
-    #[cfg(target_arch = "x86_64")]
-    {
-        prog.insn(JGE_K, 0, 1, 0x4000_0000); // jf=1: skip past the kill
-        prog.insn(RET_K, 0, 0, KILL);
-    }
-    for &nr in denied {
+fn apply_seccomp(cmd: &mut Command, programs: &'static seccomp::Programs) {
+    let bytes: Vec<&'static [u8]> = programs.iter().collect();
+    for (i, _) in bytes.iter().enumerate() {
         #[allow(
             clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "nr is a libc::SYS_* syscall number: small and non-negative, always within u32"
+            clippy::cast_possible_wrap,
+            reason = "a handful of stacked programs, never near c_int::MAX"
         )]
-        prog.insn(JEQ_K, 0, 1, nr as u32); // jf=1: skip past the kill
-        prog.insn(RET_K, 0, 0, KILL);
+        let fd = SECCOMP_FD_BASE + i as libc::c_int;
+        if i == 0 {
+            cmd.args(["--seccomp", &fd.to_string()]);
+        } else {
+            cmd.args(["--add-seccomp-fd", &fd.to_string()]);
+        }
     }
-    prog.insn(RET_K, 0, 0, ALLOW);
-    prog.into_bytes()
-}
-
-/// Accumulates `(opcode, jt, jf, k)` instructions packed little-endian,
-/// exactly the `sock_filter` layout the kernel expects.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-struct BpfProg(Vec<u8>);
-
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-impl BpfProg {
-    fn new() -> Self {
-        Self(Vec::new())
-    }
-
-    fn insn(&mut self, code: u16, jt: u8, jf: u8, k: u32) {
-        let [c0, c1] = code.to_le_bytes();
-        let [k0, k1, k2, k3] = k.to_le_bytes();
-        self.0.extend_from_slice(&[c0, c1, jt, jf, k0, k1, k2, k3]);
-    }
-
-    fn into_bytes(self) -> Vec<u8> {
-        self.0
-    }
-}
-
-/// Park the filter in a memfd on FD 100 with `CLOEXEC` cleared, so it
-/// survives the exec into `bwrap`, which reads it for `--seccomp 100` and
-/// applies it to itself and everything it spawns.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn apply_seccomp(cmd: &mut Command, filter: Vec<u8>) {
-    const SECCOMP_FD: libc::c_int = 100;
     unsafe {
         cmd.pre_exec(move || {
-            let name = c"seccomp".as_ptr();
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "memfd_create returns a small fd or -1, both within c_int"
-            )]
-            let fd = libc::syscall(libc::SYS_memfd_create, name, 0u32) as libc::c_int;
-            if fd < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut written = 0usize;
-            while written < filter.len() {
-                let n = libc::write(
-                    fd,
-                    filter[written..].as_ptr().cast::<libc::c_void>(),
-                    filter.len() - written,
-                );
-                if n < 0 {
-                    libc::close(fd);
-                    return Err(std::io::Error::last_os_error());
-                }
-                if n == 0 {
-                    libc::close(fd);
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "seccomp memfd write returned 0",
-                    ));
-                }
+            for (i, filter) in bytes.iter().enumerate() {
                 #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "n > 0 is guaranteed: the n < 0 and n == 0 branches return above"
+                    clippy::cast_possible_truncation,
+                    clippy::cast_possible_wrap,
+                    reason = "a handful of stacked programs, never near c_int::MAX"
                 )]
-                {
-                    written += n as usize;
-                }
+                let fd = SECCOMP_FD_BASE + i as libc::c_int;
+                park_seccomp_program(filter, fd)?;
             }
-            if libc::lseek(fd, 0, libc::SEEK_SET) < 0 {
-                libc::close(fd);
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::dup2(fd, SECCOMP_FD) < 0 {
-                libc::close(fd);
-                return Err(std::io::Error::last_os_error());
-            }
-            libc::close(fd);
-            libc::fcntl(SECCOMP_FD, libc::F_SETFD, 0i32); // clear CLOEXEC
             Ok(())
         });
+    }
+}
+
+/// Park `filter`'s bytes in a fresh memfd, `dup2`'d onto `fd` with `CLOEXEC`
+/// cleared.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn park_seccomp_program(filter: &[u8], fd: libc::c_int) -> std::io::Result<()> {
+    unsafe {
+        let name = c"seccomp".as_ptr();
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "memfd_create returns a small fd or -1, both within c_int"
+        )]
+        let memfd = libc::syscall(libc::SYS_memfd_create, name, 0u32) as libc::c_int;
+        if memfd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut written = 0usize;
+        while written < filter.len() {
+            let n = libc::write(
+                memfd,
+                filter[written..].as_ptr().cast::<libc::c_void>(),
+                filter.len() - written,
+            );
+            if n < 0 {
+                libc::close(memfd);
+                return Err(std::io::Error::last_os_error());
+            }
+            if n == 0 {
+                libc::close(memfd);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "seccomp memfd write returned 0",
+                ));
+            }
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "n > 0 is guaranteed: the n < 0 and n == 0 branches return above"
+            )]
+            {
+                written += n as usize;
+            }
+        }
+        if libc::lseek(memfd, 0, libc::SEEK_SET) < 0 {
+            libc::close(memfd);
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::dup2(memfd, fd) < 0 {
+            libc::close(memfd);
+            return Err(std::io::Error::last_os_error());
+        }
+        libc::close(memfd);
+        libc::fcntl(fd, libc::F_SETFD, 0i32); // clear CLOEXEC
+        Ok(())
     }
 }
 
@@ -1305,7 +1262,7 @@ mod tests {
             "a child we keep must not outlive us: {kept:?}"
         );
         assert!(
-            kept.windows(2).any(|w| w == ["--info-fd", "101"]),
+            kept.windows(2).any(|w| w == ["--info-fd", "100"]),
             "a kept launch must carry an `--info-fd` naming its payload's session: {kept:?}"
         );
         assert!(
@@ -1316,7 +1273,7 @@ mod tests {
             !surrendered.contains(&"--info-fd".to_string()),
             "a surrendered launch has no session left here to address: {surrendered:?}"
         );
-        let ownership_ties = ["--die-with-parent", "--info-fd", "101"];
+        let ownership_ties = ["--die-with-parent", "--info-fd", "100"];
         assert_eq!(
             kept.iter()
                 .filter(|a| !ownership_ties.contains(&a.as_str()))
@@ -1836,28 +1793,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    // ── The seccomp deny-set ──────────────────────────────────────────────
+    //
+    // The filter is projection-independent (`seccomp::Filter::ENVELOPE` is
+    // keyed on nothing in the grant), so the open exec projection is the
+    // right one to prove it on — these tests are not about exec at all.
+
+    fn on_path(tool: &str) -> bool {
+        let path = std::env::var("PATH").unwrap_or_default();
+        crate::path::which::locate(tool, Some(&path), crate::path::which::SearchCwd::nowhere())
+            .is_some()
+    }
+
+    /// `RC=159` is `128 + SIGSYS`: an `EPERM` here (`RC=32`, the errno for a
+    /// missing `CAP_SYS_ADMIN`) would mean the filter never ran and only the
+    /// lack of capability refused the mount.  Requires `mount`.
     #[test]
-    fn seccomp_filter_rejects_x32_high_bit() {
-        // 0x35/0x06 mirror JGE_K/RET_K; k is read from bytes 4..8 of each insn.
-        let bytes = super::build_seccomp_filter();
-        let insns: Vec<&[u8]> = bytes.chunks(8).collect();
-        let has_x32_guard = insns.windows(2).any(|pair| {
-            let (insn, next) = (pair[0], pair[1]);
-            u16::from_le_bytes([insn[0], insn[1]]) == 0x35
-                && u32::from_le_bytes([insn[4], insn[5], insn[6], insn[7]]) == 0x4000_0000
-                && u16::from_le_bytes([next[0], next[1]]) == 0x06
-                && u32::from_le_bytes([next[4], next[5], next[6], next[7]]) == 0
-        });
-        #[cfg(target_arch = "x86_64")]
-        assert!(
-            has_x32_guard,
-            "x86-64 must reject the x32 high bit before any equality compare"
+    fn a_mount_inside_the_envelope_is_killed() {
+        if !on_path("mount") {
+            eprintln!("skipping: no `mount` on this host's PATH");
+            return;
+        }
+        let policy = exec_policy(ExecProjection::Unrestricted);
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let out = run_confined(
+            envelope,
+            HostEnvelope::probe(envelope),
+            &policy,
+            "mount -t tmpfs none /tmp 2>/dev/null; echo RC=$?",
+        )
+        .expect("spawn bwrap");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            field(&stdout, "RC="),
+            Some("159"),
+            "mount inside the envelope must be killed with SIGSYS, not merely denied: {stdout}"
         );
-        #[cfg(target_arch = "aarch64")]
+    }
+
+    /// A user namespace is refused with `EPERM`, not killed: `unshare`'s own
+    /// self-check must print "Operation not permitted", and the exit must be
+    /// neither a clean `0` nor a `159` SIGSYS. Requires `unshare` (util-linux).
+    #[test]
+    fn a_user_namespace_is_refused_not_killed() {
+        if !on_path("unshare") {
+            eprintln!("skipping: no `unshare` on this host's PATH");
+            return;
+        }
+        let policy = exec_policy(ExecProjection::Unrestricted);
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let out = run_confined(
+            envelope,
+            HostEnvelope::probe(envelope),
+            &policy,
+            "unshare -U true 2>&1; echo RC=$?",
+        )
+        .expect("spawn bwrap");
+        let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            !has_x32_guard,
-            "aarch64 has no x32 ABI; filter must be unchanged"
+            stdout.contains("Operation not permitted"),
+            "unshare -U must fail with EPERM, worded by unshare itself: {stdout}"
+        );
+        let rc = field(&stdout, "RC=");
+        assert!(
+            rc.is_some_and(|rc| rc != "0" && rc != "159"),
+            "a user namespace must be refused, neither allowed nor killed: {stdout}"
+        );
+    }
+
+    /// `strace` opens with `PTRACE_TRACEME`/`ptrace`, killed with SIGSYS; then
+    /// `describe_denial` must name it from the very syscall number the kernel
+    /// logged. Requires `strace`.
+    #[test]
+    fn a_confined_ptrace_is_killed_and_named() {
+        if !on_path("strace") {
+            eprintln!("skipping: no `strace` on this host's PATH");
+            return;
+        }
+        let policy = exec_policy(ExecProjection::Unrestricted);
+        let Some(envelope) = envelope_launches(&policy) else {
+            return;
+        };
+        let out = run_confined(
+            envelope,
+            HostEnvelope::probe(envelope),
+            &policy,
+            "strace -o /dev/null true 2>/dev/null; echo RC=$?",
+        )
+        .expect("spawn bwrap");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            field(&stdout, "RC="),
+            Some("159"),
+            "a confined ptrace must be killed with SIGSYS: {stdout}"
+        );
+
+        let described = crate::sandbox::diag::platform::describe_denial(&libc::SYS_ptrace.to_string());
+        assert!(
+            described.is_some_and(|d| d.contains("ptrace")),
+            "describe_denial must name ptrace from its syscall number"
         );
     }
 }

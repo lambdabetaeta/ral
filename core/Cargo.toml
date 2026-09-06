@@ -139,6 +139,7 @@ uu_tac       = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
+seccompiler = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 ctrlc        = "3"

@@ -49,41 +49,116 @@ pub(super) fn extract_pid(line: &str) -> Option<u32> {
     after_pid[..end].parse().ok()
 }
 
-/// The blocked `syscall=<n>`; a `type=1326` record carries no path, so always `None`.
-pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
-    let after = line.split_once("syscall=")?.1;
-    let end = after
+/// This host's `AUDIT_ARCH`, the diagnostic's own copy: `sandbox::linux::seccomp`
+/// owns the same two constants for the kernel-facing arch-validation program,
+/// but this is a record attribution, not an enforcement decision.
+#[cfg(target_arch = "x86_64")]
+const AUDIT_ARCH: u32 = 0xC000_003E;
+#[cfg(target_arch = "aarch64")]
+const AUDIT_ARCH: u32 = 0xC000_00B7;
+
+/// The record's `arch=<hex>` field.
+fn extract_arch(line: &str) -> Option<u32> {
+    let after = line.split_once("arch=")?.1;
+    let end = after.find(|c: char| c.is_whitespace()).unwrap_or(after.len());
+    u32::from_str_radix(&after[..end], 16).ok()
+}
+
+/// The blocked syscall, as `(op, path)`; a `type=1326` record carries no
+/// path, so the second element is always `None`.  A record whose `arch=`
+/// does not match this host's own `AUDIT_ARCH` names a syscall table
+/// `seccomp::Filter` never numbered — the filter's own x32 guard is exactly
+/// this case — so `op` becomes a sentence [`describe_denial`] recognises
+/// rather than a bare number [`seccomp::Filter::explain`] would silently miss.
+pub(super) fn parse_denial(line: &str) -> Option<(String, Option<&str>)> {
+    let after_syscall = line.split_once("syscall=")?.1;
+    let end = after_syscall
         .find(|c: char| c.is_whitespace())
-        .unwrap_or(after.len());
-    let syscall = &after[..end];
+        .unwrap_or(after_syscall.len());
+    let syscall = &after_syscall[..end];
     if syscall.is_empty() {
         return None;
     }
-    Some((syscall, None))
+    let op = match extract_arch(line) {
+        Some(arch) if arch != AUDIT_ARCH => format!("foreign-ABI syscall {syscall} (arch={arch:x})"),
+        _ => syscall.to_string(),
+    };
+    Some((op, None))
+}
+
+/// What `seccomp::Filter::ENVELOPE` says about a denied syscall, in prose —
+/// or, for a foreign-ABI record, the one sentence that number could never
+/// earn from the filter, since it names no syscall in any table the filter
+/// reads.
+pub(crate) fn describe_denial(op: &str) -> Option<String> {
+    if op.starts_with("foreign-ABI syscall") {
+        return Some("the filter refuses every syscall from a foreign ABI outright".to_string());
+    }
+    let nr: i64 = op.parse().ok()?;
+    let denied = super::super::linux::seccomp::Filter::ENVELOPE.explain(nr)?;
+    let mut hint = format!(
+        "the sandboxed command was stopped by the envelope's seccomp deny-set for calling \
+         {denied}. This is an invariant of running under any grant, not something the grant's \
+         `fs`, `net` or `exec` sets can widen; if the tool needs it, it cannot run confined."
+    );
+    if denied.verdict == super::super::linux::seccomp::Verdict::Kill {
+        hint.push_str(" The kernel record carries no path: a killed syscall names only itself.");
+    }
+    Some(hint)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const LINE: &str = "audit: type=1326 audit(1719400000.123:789): auid=1000 ppid=54321 \
-                        pid=12345 comm=\"rustc\" arch=c00000b7 syscall=101 ip=0x0 code=0x0";
+    fn line(arch: u32, syscall: i64) -> String {
+        format!(
+            "audit: type=1326 audit(1719400000.123:789): auid=1000 ppid=54321 pid=12345 \
+             comm=\"rustc\" arch={arch:x} syscall={syscall} ip=0x0 code=0x0"
+        )
+    }
 
     #[test]
     fn is_denial_line_matches_only_type_1326() {
-        assert!(is_denial_line(LINE));
+        assert!(is_denial_line(&line(AUDIT_ARCH, 101)));
         assert!(!is_denial_line("audit: type=1300 audit(...): syscall=101"));
     }
 
     #[test]
     fn extract_pid_picks_pid_not_ppid() {
-        assert_eq!(extract_pid(LINE), Some(12345));
+        assert_eq!(extract_pid(&line(AUDIT_ARCH, 101)), Some(12345));
         assert_eq!(extract_pid("no pid token here"), None);
     }
 
     #[test]
     fn parse_denial_returns_syscall_and_no_path() {
-        assert_eq!(parse_denial(LINE), Some(("101", None)));
+        assert_eq!(parse_denial(&line(AUDIT_ARCH, 101)), Some(("101".to_string(), None)));
         assert_eq!(parse_denial("type=1326 with no syscall token"), None);
+    }
+
+    #[test]
+    fn parse_denial_names_a_foreign_abi_record() {
+        // Not this host's own AUDIT_ARCH, whichever arch that is.
+        const FOREIGN: u32 = 0xC0DE_0001;
+        assert_eq!(
+            parse_denial(&line(FOREIGN, 101)),
+            Some(("foreign-ABI syscall 101 (arch=c0de0001)".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn describe_denial_names_a_denied_syscall_and_withholds_an_undenied_one() {
+        let ptrace = describe_denial(&libc::SYS_ptrace.to_string()).expect("ptrace is denied");
+        assert!(ptrace.contains("ptrace"), "{ptrace:?}");
+        assert!(ptrace.contains("carries no path"), "{ptrace:?}");
+
+        assert!(describe_denial(&libc::SYS_read.to_string()).is_none());
+    }
+
+    #[test]
+    fn describe_denial_answers_a_foreign_abi_record_without_consulting_the_filter() {
+        let hint = describe_denial("foreign-ABI syscall 101 (arch=c0de0001)")
+            .expect("a foreign-ABI record is always described");
+        assert!(hint.contains("foreign ABI"), "{hint:?}");
     }
 }

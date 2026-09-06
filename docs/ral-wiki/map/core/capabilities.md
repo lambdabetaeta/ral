@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 92ff8756
+generated_at_commit: 1c0ceaeb
 generated_at_date: 2026-09-06
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -254,7 +254,8 @@ device for `net` to govern; the in-process gates apply unchanged
   `Pinned` envelope, exec'd by descriptor and never by name, its own file
   read-only bound inside every envelope after the projection's binds; the
   argv — `--new-session`, the ipc/uts/cgroup namespaces and, by host fact, the
-  pid one, `--proc` on both projections, the seccomp filter; `InfoFd`, the
+  pid one, `--proc` on both projections, the seccomp deny-set
+  (`sandbox/linux/seccomp.rs`: `Filter`, `Syscall`, `explain`); `InfoFd`, the
   payload's pid read back for a `Kept` launch; `linux/host.rs`, `HostEnvelope`,
   the probed host facts the render is pure in, printed by the profile dump),
   and
@@ -360,12 +361,17 @@ attributable to the call's descendant PIDs, and appends them. **Only a `file-*`
 denial yields a concrete path to grant** — ipc/mach/network operands name a
 service or endpoint, not a filesystem path, so they reproduce verbatim for
 transparency but never fill the path-to-grant slot. macOS logs fully-resolved
-paths, so the hint names the exact path with the symlink caveat; the Linux audit
-record carries no path, so the hint degrades to "a sandboxed syscall was denied".
-Windows has no kernel denial log to scrape at all, so its arm gates on the exit
-code alone: only an access-denied-shaped exit (`ERROR_ACCESS_DENIED` /
-`STATUS_ACCESS_DENIED`) under an active sandbox yields the fixed, pathless hint —
-never a fabricated path.
+paths, so the hint names the exact path with the symlink caveat; on Linux, a
+pathless denial first tries `describe_denial`, which consults
+[[decisions/260906_seccomp-is-a-typed-deny-set|the seccomp deny-set]] by
+syscall number and, when it names one, repeats that rule's own reason instead
+of guessing at an fs grant — a foreign-ABI record (an `arch=` mismatch) is
+named as such rather than misread as an unlisted syscall; only where the
+deny-set has nothing to say does the hint degrade to the generic "widen the
+grant's fs read set" wording. Windows has no kernel denial log to scrape at
+all, so its arm gates on the exit code alone: only an access-denied-shaped
+exit (`ERROR_ACCESS_DENIED` / `STATUS_ACCESS_DENIED`) under an active sandbox
+yields the fixed, pathless hint — never a fabricated path.
 
 This boundary is what [[map/exarch|exarch]] reuses as its sandbox. Bundled
 tools route through the *exec* chokepoint in-process; their **filesystem**

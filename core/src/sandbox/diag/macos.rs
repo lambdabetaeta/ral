@@ -65,6 +65,12 @@ pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
     Some((op, path))
 }
 
+/// Seatbelt's log line already names the operation; there is no typed
+/// deny-set here to add anything to it.
+pub(crate) fn describe_denial(_op: &str) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -119,15 +119,15 @@ never ran.
 - *`--tmpfs /sys/class/net`*: a symlink farm — the directories stay reachable
   at `/sys/devices/**/net/*`; a wall built from a list of doors.
 - *A trampoline that mounts sysfs from inside*: mount authority in the
-  payload's hands unmounts every deny mask.
+  payload's hands unmounts every deny mask (now killed by the deny-set).
 
 ## Left open, deliberately
 
 - A confined interactive command has no controlling terminal: Ctrl-C reaches
   ral and the ladder delivers a real `SIGINT`, but `open("/dev/tty")` fails and
   `SIGWINCH` never arrives. The fix — a trampoline inside the envelope that
-  `setpgid`s, `SO_PASSCRED` for its pid, `tcsetpgrp`, `TIOCSTI` closed in
-  seccomp — is a second design.
+  `setpgid`s, `SO_PASSCRED` for its pid, `tcsetpgrp` — is a second design;
+  `TIOCSTI` is already refused by the seccomp deny-set.
 - Rootless containers still refuse the read-only rebind of their locked
   `/etc/hosts` and `/etc/resolv.conf`, so `Restricted` does not launch there.
 - Under `grant [net: false]` alone the filesystem is the host's,

@@ -18,14 +18,18 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::time::Instant;
 
+// `pub(super)`, not private: Linux's live seccomp tests
+// (`sandbox::linux::tests`) call `platform::describe_denial` directly, to
+// prove the whole diagnostic pipeline names a denial the envelope actually
+// produced, not just the module that renders it.
 #[cfg(target_os = "macos")]
 #[path = "diag/macos.rs"]
-mod platform;
+pub(super) mod platform;
 #[cfg(target_os = "linux")]
 #[path = "diag/linux.rs"]
-mod platform;
+pub(super) mod platform;
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-mod platform {
+pub(super) mod platform {
     use std::time::Duration;
     pub(super) fn read_window(_: Duration) -> Option<String> {
         None
@@ -37,6 +41,9 @@ mod platform {
         None
     }
     pub(super) fn parse_denial(_: &str) -> Option<(&str, Option<&str>)> {
+        None
+    }
+    pub(crate) fn describe_denial(_: &str) -> Option<String> {
         None
     }
 }
@@ -161,16 +168,22 @@ fn build_hint(denials: &[&str]) -> String {
         let op = denials
             .iter()
             .find_map(|l| platform::parse_denial(l).map(|(op, _)| op));
-        let what = op.map_or_else(
-            || "A sandboxed operation was denied".to_string(),
-            |op| format!("The sandboxed operation `{op}` was denied"),
-        );
-        let _ = write!(
-            out,
-            "\n\n{what} (the kernel record carries no path here). The access lies outside the \
-             active grant; widen the grant's fs read set — the `grant [ fs: [read: […]] ] \
-             {{ … }}` block in ral, or `--extend-base` for exarch."
-        );
+        // A typed deny-set (Linux) names the syscall in its own words; only
+        // where it has nothing to say does the generic fs-read wording apply.
+        if let Some(described) = op.as_deref().and_then(platform::describe_denial) {
+            let _ = write!(out, "\n\n{described}");
+        } else {
+            let what = op.map_or_else(
+                || "A sandboxed operation was denied".to_string(),
+                |op| format!("The sandboxed operation `{op}` was denied"),
+            );
+            let _ = write!(
+                out,
+                "\n\n{what} (the kernel record carries no path here). The access lies outside \
+                 the active grant; widen the grant's fs read set — the \
+                 `grant [ fs: [read: […]] ] {{ … }}` block in ral, or `--extend-base` for exarch."
+            );
+        }
     }
     out
 }

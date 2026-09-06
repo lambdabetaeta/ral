@@ -63,7 +63,7 @@ serves ([[decisions/260906_the-envelope-is-a-process-namespace|the-envelope-is-a
 | `fs` read/write prefixes, `deny` masks | bwrap mounts | refuse: `confinement_unavailable` |
 | `net: false` | `--unshare-net` | refuse: `projection_enforceable` |
 | `exec` — which binary, which subcommand | in-process gate | the gate stands alone |
-| die with parent, new session, no core, nproc cap, seccomp blocklist | bwrap + `pre_exec` | applied where possible |
+| die with parent, new session, no core, nproc cap, the seccomp deny-set (kills kernel attack surface; refuses mounting, user namespaces and `TIOCSTI` with an errno) | bwrap + `pre_exec` | applied where possible |
 | private ipc / uts | `--unshare-*` | never refused |
 | `/sys/fs/cgroup` is the payload's own tree | cgroup namespace + re-rooted bind | reported: the tree is the host's |
 | no signalling the host; host process table hidden | pid namespace + fresh `/proc` | reported: the table is the container's own |
