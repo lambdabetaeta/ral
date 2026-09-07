@@ -62,8 +62,16 @@ const KEXEC_LOAD: Syscall = Syscall {
     nr: libc::SYS_kexec_load,
     name: "kexec_load",
 };
+/// `libc` omits this one number from its musl/aarch64 bindings alone, so it is
+/// spelled here rather than the rule going missing on a shipping target: 294
+/// is the asm-generic number, which libc itself carries for glibc/aarch64 and
+/// for musl/loongarch64.
+#[cfg(all(target_arch = "aarch64", target_env = "musl"))]
+const SYS_KEXEC_FILE_LOAD: i64 = 294;
+#[cfg(not(all(target_arch = "aarch64", target_env = "musl")))]
+const SYS_KEXEC_FILE_LOAD: i64 = libc::SYS_kexec_file_load;
 const KEXEC_FILE_LOAD: Syscall = Syscall {
-    nr: libc::SYS_kexec_file_load,
+    nr: SYS_KEXEC_FILE_LOAD,
     name: "kexec_file_load",
 };
 const REBOOT: Syscall = Syscall {
