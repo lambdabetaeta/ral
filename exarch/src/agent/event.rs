@@ -119,6 +119,7 @@ pub enum EditAuthority {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContextOp {
     /// Every span through `through_exchange` leaves the view at once; the
     /// model reads the harness's index of them in their place, and `note` —
@@ -696,10 +697,10 @@ impl AgentLog {
 
     /// The parent half of a `mnemon` fork — the seed, where ownership
     /// genuinely transfers into the child's own ledger via
-    /// [`Self::import_context`].  A spawn from inside a tool batch leaves the
-    /// parent waiting on the very call that made the child, so that
-    /// unfinished assistant frame is dropped: the child starts from the
-    /// request context, not a dangling tool protocol.
+    /// [`Self::import_context`]. The tail span is cut to the longest run
+    /// that owes no tool result, whatever left it that way — a batch in
+    /// flight, or a `ContextEdited` record landing after the assistant frame
+    /// it answers.
     pub fn inherited_context(&mut self) -> Inherited {
         let source = self.durable.then(|| self.dir.join("record.jsonl"));
         let evictions = self.model_memo.view().evictions.clone();
@@ -1249,6 +1250,7 @@ pub(crate) fn validate_result_ids(
 )]
 mod tests {
     use super::*;
+    use crate::agent::digest::suffix_keep_budget;
     use genai::chat::{ContentPart, ToolCall};
     use std::io::Write as _;
 
@@ -1593,6 +1595,41 @@ mod tests {
         );
     }
 
+    /// A note is drawn only alongside a row of its own eviction, so an
+    /// eviction collapsed away entirely takes its note with it — message 0
+    /// stays bounded by the row cap rather than growing with how many
+    /// evictions the session has run.
+    #[test]
+    fn a_note_collapses_with_its_rows() {
+        let mut s = fresh_root();
+        for n in 1..=45u64 {
+            let prompt = format!("prompt {n}");
+            complete_exchange(&mut s, &prompt, "answer");
+            s.apply_edit(
+                ContextOp::Evict {
+                    through_exchange: n,
+                    note: Some(format!("note {n}")),
+                },
+                EditAuthority::Model,
+            )
+            .unwrap();
+        }
+        let marker = head_marker(&mut s).expect("45 evictions render one marker");
+        assert!(
+            marker.contains("\"note 45\""),
+            "the newest note must survive, got: {marker}"
+        );
+        assert!(
+            !marker.contains("\"note 1\""),
+            "a note collapsed with its rows must not survive, got: {marker}"
+        );
+        assert_eq!(
+            marker.lines().count(),
+            1 + 1 + 2 * 40,
+            "bounded by the row cap, not by how many evictions ran"
+        );
+    }
+
     /// A drop of a late exchange keeps the provider's prefix cached, so it
     /// must leave message 0 exactly as it was.
     #[test]
@@ -1869,6 +1906,41 @@ mod tests {
                 .messages()
                 .any(|message| { message.content.first_text() == Some("one") })
         );
+    }
+
+    /// A newest exchange heavy enough to fill the whole keep budget on its
+    /// own must never be the one a plan names: that would leave the model
+    /// with nothing, and the id would be the live exchange `validate_edit`
+    /// refuses.
+    #[test]
+    fn a_plan_never_takes_the_newest_span() {
+        let mut s = fresh_root();
+        complete_exchange(&mut s, "one", "one");
+        let big = "x".repeat(100_000);
+        complete_exchange(&mut s, "two", &big);
+        let keep = suffix_keep_budget(s.history_bytes());
+        let plan = s.plan_eviction(keep).expect("the older exchange to shed");
+        assert_eq!(plan.through_exchange, 1);
+        s.apply_edit(
+            ContextOp::Evict {
+                through_exchange: plan.through_exchange,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        assert_eq!(
+            s.view().spans.iter().map(|span| span.id).collect::<Vec<_>>(),
+            vec![2],
+            "the newest span must survive the eviction it could not itself be named by"
+        );
+    }
+
+    #[test]
+    fn a_lone_span_is_never_planned_away() {
+        let mut s = fresh_root();
+        complete_exchange(&mut s, "one", "one");
+        assert!(s.plan_eviction(0).is_none());
     }
 
     #[test]
@@ -2520,6 +2592,70 @@ mod tests {
             .expect("child log");
         child.import_context(inherited).expect("import");
         child
+    }
+
+    fn seed_has_a_tool_call(log: &mut AgentLog) -> bool {
+        log.history_transcript().messages().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|part| matches!(part, ContentPart::ToolCall(_)))
+        })
+    }
+
+    /// A `ContextEdited` record with no exchange id of its own glues onto
+    /// whatever span is still open, so a `drop` run mid-batch lands right
+    /// after the dangling assistant frame rather than replacing it. The seed
+    /// must still cut at the tool call, not at the edit that followed it.
+    #[test]
+    fn a_seed_cut_never_owes_a_tool_result() {
+        let mut parent = fresh_root();
+        complete_exchange(&mut parent, "one", "one");
+        parent.append_user("two".into(), None).unwrap();
+        parent
+            .append_assistant(assistant_with_tool("call-1"), vec!["call-1".into()], None)
+            .unwrap();
+        parent
+            .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
+            .unwrap();
+
+        let mut child = mnemon(&mut parent, 1);
+        assert!(
+            !seed_has_a_tool_call(&mut child),
+            "a mnemon seed must never carry an unanswered tool call"
+        );
+        assert!(
+            child
+                .history_transcript()
+                .messages()
+                .any(|message| message.content.first_text() == Some("two")),
+            "the prompt behind the dangling call must still seed"
+        );
+    }
+
+    /// The plain in-batch fork: no edit lands after the dangling assistant
+    /// frame, so the frame itself is the span's last record, and the cut
+    /// must still land in front of it.
+    #[test]
+    fn a_seed_cut_never_owes_a_tool_result_with_no_edit() {
+        let mut parent = fresh_root();
+        complete_exchange(&mut parent, "one", "one");
+        parent.append_user("two".into(), None).unwrap();
+        parent
+            .append_assistant(assistant_with_tool("call-1"), vec!["call-1".into()], None)
+            .unwrap();
+
+        let mut child = mnemon(&mut parent, 1);
+        assert!(
+            !seed_has_a_tool_call(&mut child),
+            "the plain in-batch fork must not regress"
+        );
+        assert!(
+            child
+                .history_transcript()
+                .messages()
+                .any(|message| message.content.first_text() == Some("two")),
+        );
     }
 
     fn openings(span: &TranscriptSpan) -> Vec<&str> {

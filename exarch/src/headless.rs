@@ -858,7 +858,7 @@ mod tests {
             Signal::Fact(
                 root,
                 Recorded::new(
-                    Stamp::new(Seq::new(1), 0..0),
+                    Stamp::placeholder(Seq::new(1)),
                     Record::Forensic(Forensic::Error {
                         text: format!("{}boom", crate::bus::WORKER_PANIC_PREFIX),
                     }),
@@ -892,7 +892,7 @@ mod tests {
             Signal::Fact(
                 id,
                 Recorded::new(
-                    Stamp::new(Seq::new(seq), 0..0),
+                    Stamp::placeholder(Seq::new(seq)),
                     Record::Display(Display::Step { n }),
                 ),
             )
@@ -925,7 +925,7 @@ mod tests {
             Signal::Fact(
                 root,
                 Recorded::new(
-                    Stamp::new(Seq::new(1), 0..0),
+                    Stamp::placeholder(Seq::new(1)),
                     Record::Display(Display::Card { marks }),
                 ),
             ),

@@ -48,9 +48,13 @@ Three commit-time obligations, all in `Agent::deliberate` (the deep-review X-tag
 
 Three adjacent obligations keep the invariant whole:
 
-- **Eviction runs where it can (X1).** It needs `ReadyForUser` (`can_evict`),
-  which holds at the top of `deliberate`, never mid-loop in
-  `AwaitingAssistantAfterToolResults` — the prior placement was dead code.
+- **Eviction runs where it can (X1).** It needs only `Memo::can_evict`
+  (`is_ready` → `admits_new_span`) — false solely at `AwaitingToolResults`,
+  strictly weaker than `ReadyForUser`: an edit may land at any rest but a
+  batch in flight, because outstanding tool calls name the assistant frame
+  their results answer and nothing may come between. What keeps a cut off
+  the *live* exchange is not this predicate but `plan_eviction`'s own shape
+  — it never names the newest span in view.
 - **`Inherited` stands only at a fork's opening.** `Admission` refuses
   `Protocol::Inherited` anywhere but the first protocol record of a child log:
   at `ReadyForUser`, with `max_exchange == 0`, and never twice. The record is

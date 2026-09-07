@@ -53,7 +53,7 @@ mod common;
 
 use ral_core::path::NormalizedPrefix;
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Break, Capabilities, FsPolicy, Settled, Shell, Value};
+use ral_core::types::{Break, Capabilities, FsPolicy, GrantStack, Settled, Shell, Value};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
 /// A `Shell` matching what every front end ends up with after bootstrap:
@@ -104,7 +104,7 @@ fn top_level_under(shell: &mut Shell, caps: Capabilities, src: &str) -> Settled<
         run: Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
-            caps,
+            caps: GrantStack::of(caps),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

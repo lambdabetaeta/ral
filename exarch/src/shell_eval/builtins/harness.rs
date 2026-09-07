@@ -685,7 +685,8 @@ pub(crate) fn context_exchanges_payload(value: &Value, verb: &str) -> Settled<FO
 ///
 /// The scheme leaves the record open on `note`, since a closed row cannot
 /// express an optional field, so the door is where a `note` of the wrong
-/// type is caught.
+/// type is caught; every rule on what a well-typed note may contain — empty,
+/// oversized, multi-line — is the desk's.
 pub(crate) fn context_evict_payload(value: &Value) -> Settled<FOValue> {
     const VERB: &str = "context `evict";
     let Value::Map(spec) = value else {
@@ -1005,8 +1006,9 @@ fn context_receipt_ty() -> Ty {
 ///
 /// `evict`'s record row is open on `ρ1` because `note` is optional and a
 /// closed row cannot say so; [`context_evict_payload`] refuses a `note` of
-/// the wrong type, and the desk an empty one — a required `note` would
-/// invite `''`, and a marker reading `Your note at eviction: ""` is a defect.
+/// the wrong type, and the desk an empty, oversized, or multi-line one — a
+/// required `note` would invite `''`, and a marker reading
+/// `Your note at eviction: ""` is a defect.
 ///
 /// One answer for all three tags: an edit changes what is addressable, so
 /// the survey the transition leaves behind is what the next edit must be
@@ -1099,7 +1101,7 @@ static HARNESS_BUILTINS_ARR: [BuiltinEntry; 6] = [
     BuiltinEntry::new(
         Cow::Borrowed("context"),
         scheme_context,
-        "context <tag>  — the window: what the provider is sent. Every tag answers the survey afterwards, [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], evicted: Int, total-bytes: Int, total-steps: Int].\n\ncontext `survey  — one span per exchange in your context, oldest first; `evicted` counts the closed exchanges that have left it (readable with transcript). `total-bytes` against your window is the number that decides whether to edit at all. Changes nothing.\n\ncontext `drop <exchanges>  — shed whole closed exchanges from the window; they remain in the store. The provider re-reads everything after the earliest dropped exchange on your next request, so a drop that sheds little can cost more than it saves.\n\ncontext `evict [through: <Int>, note: <Str>]  — every exchange through a closed one leaves the window at once, replaced by the harness's index of them; `note` is optional and is shown beside that index to your future self. This is what the harness does for you when the window fills, without a note; do it yourself only to leave one, or to cut early on purpose.\n\nEach tag is one exchange with the host, and the survey it answers is the model view as it stands once the transition has landed; an edit lands at the desk immediately and is recorded as a model context event. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
+        "context <tag>  — the window: what the provider is sent. Every tag answers the survey afterwards, [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int, steps: Int, live: Bool]], evicted: Int, total-bytes: Int, total-steps: Int].\n\ncontext `survey  — one span per exchange in your context, oldest first; `evicted` counts the closed exchanges that have left it (readable with transcript). `total-bytes` against your window is the number that decides whether to edit at all. Changes nothing.\n\ncontext `drop <exchanges>  — shed whole closed exchanges from the window; they remain in the store. The provider re-reads everything after the earliest dropped exchange on your next request, so a drop that sheds little can cost more than it saves.\n\ncontext `evict [through: <Int>, note: <Str>]  — every exchange through a closed one leaves the window at once, replaced by the harness's index of them; `note` is optional, one short line for your future self shown beside that index. This is what the harness does for you when the window fills, without a note; do it yourself only to leave one, or to cut early on purpose.\n\nEach tag is one exchange with the host, and the survey it answers is the model view as it stands once the transition has landed; an edit lands at the desk immediately and is recorded as a model context event. A raise still does not prove nothing happened: the transition may have landed and its answer failed to reach you. Answered only on the run that calls it: inside spawn { … } this errors.",
         BuiltinBody::Static(builtin_context),
     ),
     BuiltinEntry::new(
@@ -2084,11 +2086,11 @@ mod tests {
 
         let read = session.run_shell(
             "call-7".to_string(),
-            r#"let [t, _] = !{tasks-decode !{pin-read "tasks"}}
-               echo $t[desc]
-               echo $t[status]
-               echo !{intercalate "," $t[tags]}
-               echo $t[notes]"#,
+            r#"let [decoded-task, _] = !{tasks-decode !{pin-read "tasks"}}
+               echo $decoded-task[desc]
+               echo $decoded-task[status]
+               echo !{intercalate "," $decoded-task[tags]}
+               echo $decoded-task[notes]"#,
             BUDGET,
             &emit,
         );
@@ -2357,7 +2359,7 @@ mod tests {
     }
 
     /// §2.4's shape, end to end: `` `read ``'s answer is a list, so a slice
-    /// is `$t[0]`, addressed by its own `exchange` field, and its messages
+    /// is `$spans[0]`, addressed by its own `exchange` field, and its messages
     /// are ral records with variant parts rather than a rendered string.
     #[test]
     fn transcript_answers_span_records_with_variant_parts() {
@@ -2367,10 +2369,10 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r#"let t = transcript `read [1]
-               echo !{length $t}
-               echo $t[0][exchange]
-               let msgs = $t[0][messages]
+            r#"let spans = transcript `read [1]
+               echo !{length $spans}
+               echo $spans[0][exchange]
+               let msgs = $spans[0][messages]
                echo !{length $msgs}
                let say-role = { |r| case $r [
                  `system: { |_| echo "role=system" },
@@ -2441,12 +2443,15 @@ mod tests {
 
         let result = session.run_shell(
             "call-1".to_string(),
-            r"let i = transcript `index
-               echo $i[0][exchange] $i[0][in-view]
-               let g = transcript `grep [pattern: 'first (prompt|answer)']
-               echo !{length $g[hits]} $g[total]
-               let n = transcript `grep [pattern: 'nothing here', exchanges: [1]]
-               echo $n[total]",
+            // Bindings are named, not lettered: ral keeps value and command
+            // names disjoint, so a one-letter binding fails on any host with
+            // that letter on PATH (plan9port ships a `g`).
+            r"let listed = transcript `index
+               echo $listed[0][exchange] $listed[0][in-view]
+               let matched = transcript `grep [pattern: 'first (prompt|answer)']
+               echo !{length $matched[hits]} $matched[total]
+               let missed = transcript `grep [pattern: 'nothing here', exchanges: [1]]
+               echo $missed[total]",
             5,
             &emit,
         );

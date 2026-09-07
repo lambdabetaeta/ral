@@ -120,6 +120,11 @@ fi
 # unlike check-windows it needs nothing the box does not already install.
 step check-linux
 
+# The Seatbelt half, for the same reason read the other way: a Linux `lint`
+# compiles none of it, and a helper it leaves uncalled is a break on macOS
+# alone.  Redundant on a macOS host exactly as check-linux is on a Linux one.
+step check-macos
+
 # Always this host's python: the box's image carries neither uv nor the
 # tree-sitter CLI, and render-site.py has no highlighting fallback.
 banner 'just site'

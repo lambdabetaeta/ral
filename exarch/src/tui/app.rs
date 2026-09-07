@@ -848,7 +848,7 @@ mod tests {
             },
             &rx,
         );
-        let stamp = Stamp::new(Seq::new(1), 0..0);
+        let stamp = Stamp::placeholder(Seq::new(1));
         app.fact(
             helper,
             &Recorded::new(
@@ -866,7 +866,7 @@ mod tests {
             .probe_figures()
             .0;
 
-        let stamp = Stamp::new(Seq::new(2), 0..0);
+        let stamp = Stamp::placeholder(Seq::new(2));
         app.fact(
             helper,
             &Recorded::new(

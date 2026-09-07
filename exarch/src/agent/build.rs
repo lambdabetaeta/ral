@@ -522,6 +522,11 @@ impl Avatar {
         // and belongs to the new one.  Sweeping it afterwards eats it in
         // silence — the queue holds no record of what it dropped.
         self.inbox.clear();
+        // Abandon the subtree — this agent itself stays live — before the
+        // segment rotates below, so no live descendant can still resolve an
+        // ancestry link into a replaced file.
+        self.agent.clear_subtree();
+        self.agent.schedules.clear();
         let record = self.log.lock().clear(self.agent.system.len(), at_unix_ms)?;
         let error = record.rotation_error;
         // Rebooting the seat drops the outgoing shell, whose teardown cancels
@@ -533,11 +538,6 @@ impl Avatar {
         if let Some(nudges) = &mut self.nudges {
             *nudges = nudge::Nudges::new();
         }
-        // Abandon the subtree — this agent itself stays live — and disarm the
-        // schedules.  The one fence bump is the inbox drain above, which
-        // already ran first, so nothing here is load-bearing for a straggler.
-        self.agent.clear_subtree();
-        self.agent.schedules.clear();
         // The frontend wipes its pin register on `/clear`, so the session's
         // mirror must follow.
         self.agent

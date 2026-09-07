@@ -405,6 +405,7 @@ impl Grant {
 mod tests {
     use super::*;
     use crate::test_fixture::workshop;
+    use ral_core::capability::FsOp;
     use ral_core::types::Shell;
 
     fn refusal(folder: &Path) -> String {
@@ -505,14 +506,19 @@ mod tests {
         let caps = grant.capabilities();
 
         let mut shell = Shell::default();
+        // Read asks the gate, write asks the stack directly: the write door
+        // is `locate`, which walks the name first and would fail on these
+        // paths for not existing, long before it reached the grant.
         shell.with_capabilities(caps, |sh| {
             for admitted in ["/work/letter.docx", "/tmp/draft.docx"] {
                 let path = sh.resolve(admitted);
                 sh.check_fs_read(&path)
                     .unwrap_or_else(|_| panic!("{admitted} must be readable"));
                 let path = sh.resolve(admitted);
-                sh.check_fs_write(&path)
-                    .unwrap_or_else(|_| panic!("{admitted} must be writable"));
+                assert!(
+                    sh.admits_fs_exact(&FsOp::Write, &path.canonicalise_lenient()),
+                    "{admitted} must be writable"
+                );
             }
             // The folder's host path names nothing inside the guest; a
             // grant that admitted it would strand the agent in exactly
@@ -525,7 +531,7 @@ mod tests {
             );
             let path = sh.resolve(&host.to_string_lossy());
             assert!(
-                sh.check_fs_write(&path).is_err(),
+                !sh.admits_fs_exact(&FsOp::Write, &path.canonicalise_lenient()),
                 "the granted folder's host path must not be writable"
             );
         });

@@ -1493,7 +1493,7 @@ mod tests {
             View::step(
                 memo,
                 &Recorded::new(
-                    Stamp::new(Seq::new(seq), 0..0),
+                    Stamp::placeholder(Seq::new(seq)),
                     Record::Display(Display::Answer { text: text.into() }),
                 ),
             )
@@ -1646,7 +1646,7 @@ mod tests {
         );
 
         let mut memo = Blocks::default();
-        let stamp = Stamp::new(Seq::new(1), 0..0);
+        let stamp = Stamp::placeholder(Seq::new(1));
         View::step(
             &mut memo,
             &Recorded::new(
@@ -1832,7 +1832,7 @@ mod tests {
         use crate::record::{BlockId, Display};
         let mut vp = viewport();
         let mut memo = Blocks::default();
-        let call_stamp = Stamp::new(Seq::new(1), 0..0);
+        let call_stamp = Stamp::placeholder(Seq::new(1));
         View::step(
             &mut memo,
             &Recorded::new(
@@ -1848,7 +1848,7 @@ mod tests {
         View::step(
             &mut memo,
             &Recorded::new(
-                Stamp::new(Seq::new(2), 0..0),
+                Stamp::placeholder(Seq::new(2)),
                 Record::Display(Display::HarnessCall {
                     verb: "cancel".into(),
                     subject: Some("hunter".into()),
@@ -1861,7 +1861,7 @@ mod tests {
         View::step(
             &mut memo,
             &Recorded::new(
-                Stamp::new(Seq::new(3), 0..0),
+                Stamp::placeholder(Seq::new(3)),
                 Record::Display(Display::Result {
                     text: "a line\n".repeat(40),
                     call: BlockId::new(call_stamp.seq()),
@@ -1892,7 +1892,7 @@ mod tests {
     fn step(memo: &mut Blocks, records: impl IntoIterator<Item = Record>) -> Result<(), Refusal> {
         for (i, r) in records.into_iter().enumerate() {
             #[allow(clippy::cast_possible_truncation, reason = "test record count")]
-            let stamp = Stamp::new(Seq::new(i as u64), 0..0);
+            let stamp = Stamp::placeholder(Seq::new(i as u64));
             View::step(memo, &Recorded::new(stamp, r))?;
         }
         Ok(())
@@ -1982,7 +1982,7 @@ mod tests {
     /// on the same `Seq`.
     fn advance(memo: &mut Blocks, seq: &mut u64, record: Record) {
         *seq += 1;
-        let stamp = Stamp::new(Seq::new(*seq), 0..0);
+        let stamp = Stamp::placeholder(Seq::new(*seq));
         View::step(memo, &Recorded::new(stamp, record)).expect("a display-only fold never refuses");
     }
 
@@ -2162,7 +2162,7 @@ mod tests {
     #[test]
     fn a_result_reopens_the_call_it_patches() {
         let mut memo = Blocks::default();
-        let call = Stamp::new(Seq::new(1), 0..0);
+        let call = Stamp::placeholder(Seq::new(1));
         View::step(
             &mut memo,
             &Recorded::new(

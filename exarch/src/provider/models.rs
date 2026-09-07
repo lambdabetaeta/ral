@@ -21,9 +21,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// How long a cached model list stays fresh — an account's catalog moves on
-/// the order of weeks.
-const TTL: Duration = Duration::from_hours(24);
+/// How long a cached model list stays fresh.
+const TTL: Duration = Duration::from_hours(6);
 
 const CHATGPT_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 

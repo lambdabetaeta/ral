@@ -250,7 +250,7 @@ impl Ledger {
 fn read_records(path: &Path, stamps: &[Stamp]) -> io::Result<Vec<Protocol>> {
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:model-fold-freed-read] reads evicted protocol records back off record.jsonl by their own Stamps; output infra, not turn-time data I/O"
+        reason = "[io-door:silent:model-fold-freed-read] reads record.jsonl back by Stamp for the fold's own freed slots and the model's `transcript` store door alike; surfaced as a Display::HarnessCall, not the model's own data I/O"
     )]
     let mut file = File::open(path)?;
     stamps
@@ -334,6 +334,14 @@ struct AncestorIndex {
     broken: Option<Break>,
 }
 
+impl AncestorIndex {
+    /// An unreadable file may be a transient; a link to a parent that kept no
+    /// log will never grow one.
+    fn is_transient(&self) -> bool {
+        matches!(self.broken, Some(Break::Unreadable { .. }))
+    }
+}
+
 /// One ancestor's exchange: where its records lie, and the row the store
 /// index weighs it by. `source` is per-span because a lineage of three
 /// spreads its ids over three files.
@@ -403,6 +411,10 @@ impl Memo {
         admits_new_span(&self.state)
     }
 
+    /// An edit may land at any rest but a batch in flight: outstanding tool
+    /// calls name the assistant frame their results answer, so nothing may
+    /// come between. What keeps a cut off the *live exchange* is
+    /// [`Self::plan_eviction`]'s own shape, not this.
     pub fn can_evict(&self) -> bool {
         self.is_ready()
     }
@@ -490,12 +502,10 @@ impl Memo {
     /// transfers, beside the wire door. The head marker is not among them —
     /// the child re-renders it from the evictions the link carries.
     ///
-    /// A spawn from inside a tool batch leaves the parent waiting on the very
-    /// call that made the child, so that unfinished assistant frame is
-    /// dropped: the child starts from the request context, not a dangling
-    /// tool protocol.
+    /// The last span seeds through [`Self::seed_tail`], cut to the longest
+    /// run that owes no tool result — a batch in flight and a dangling edit
+    /// left after it both fall out of that same rule.
     pub(crate) fn inherited_context(&mut self) -> Vec<(u64, Vec<ChatMessage>)> {
-        let omit_tail_assistant = matches!(self.state, State::AwaitingToolResults { .. });
         let spans = self.view.spans.clone();
         let Some((last, closed)) = spans.split_last() else {
             return Vec::new();
@@ -504,7 +514,7 @@ impl Memo {
             .iter()
             .map(|span| (span.id, self.render_closed_entry(span).segment.to_vec()))
             .collect();
-        inherited.push((last.id, self.render_tail(last, omit_tail_assistant)));
+        inherited.push((last.id, self.seed_tail(last)));
         inherited
     }
 
@@ -514,10 +524,10 @@ impl Memo {
     /// `repair_end` flags depend on which span is currently last and must
     /// stay free to change retroactively when an edit removes the tail.
     pub fn transcript(&mut self) -> Transcript {
-        self.assemble(false)
+        self.assemble()
     }
 
-    fn assemble(&mut self, omit_tail_assistant: bool) -> Transcript {
+    fn assemble(&mut self) -> Transcript {
         let mut transcript = Transcript::default();
         if let Some((segment, bytes)) = &self.head_render {
             transcript.push(Arc::clone(segment), *bytes);
@@ -528,7 +538,7 @@ impl Memo {
                 let entry = self.render_closed_entry(span);
                 transcript.push(Arc::clone(&entry.segment), entry.bytes);
             }
-            let tail = self.render_tail(last, omit_tail_assistant);
+            let tail = self.render_tail(last);
             let bytes = message_bytes(&tail);
             transcript.push(Arc::from(tail), bytes);
         }
@@ -544,7 +554,7 @@ impl Memo {
             .get(&span.id)
             .is_none_or(|cached| cached.end != span.events.end);
         if stale {
-            let messages = self.span_messages(span, false, true);
+            let messages = closed_messages(&self.span_events(span));
             let bytes = message_bytes(&messages);
             let _ = self.render.insert(
                 span.id,
@@ -570,36 +580,30 @@ impl Memo {
         });
     }
 
-    /// The last span only, never cached and never dropped: the tail is the
-    /// exchange in flight, so it renders whatever state it rests in.
-    fn render_tail(&self, span: &Span, omit_tail_assistant: bool) -> Vec<ChatMessage> {
-        self.span_messages(span, omit_tail_assistant, false)
+    /// # Panics
+    /// Panics if a view span is not resident in the ledger.
+    fn span_events(&self, span: &Span) -> Vec<&Protocol> {
+        self.ledger
+            .resident_events(span.events.clone())
+            .expect("view spans are resident in the ledger")
     }
 
-    /// A span's messages — or, when a `closed` span's own fold never settles,
-    /// the one note standing for the exchange it abandoned. None of that
-    /// exchange's own content reaches the model; `record.jsonl` keeps every
-    /// record of it regardless, this being the projection, not the log.
-    ///
-    /// An imported span settles on its own, [`Protocol::ContextMessage`] being
-    /// neutral in [`advance`], so inherited context always renders.
-    fn span_messages(
-        &self,
-        span: &Span,
-        omit_tail_assistant: bool,
-        closed: bool,
-    ) -> Vec<ChatMessage> {
-        let end = span.events.end - usize::from(omit_tail_assistant);
-        let events = self
-            .ledger
-            .resident_events(span.events.start..end)
-            .expect("view spans are resident in the ledger");
-        if closed {
-            return closed_messages(&events);
-        }
-        events
+    /// The last span only, never cached and never dropped: the tail is the
+    /// exchange in flight, so it renders whatever state it rests in.
+    fn render_tail(&self, span: &Span) -> Vec<ChatMessage> {
+        self.span_events(span)
             .into_iter()
             .cloned()
+            .flat_map(into_chat_messages)
+            .collect()
+    }
+
+    /// The tail as a `mnemon` child receives it, cut to what admits the
+    /// child's own first prompt.
+    fn seed_tail(&self, span: &Span) -> Vec<ChatMessage> {
+        admissible_prefix(&self.span_events(span))
+            .iter()
+            .map(|event| (*event).clone())
             .flat_map(into_chat_messages)
             .collect()
     }
@@ -668,7 +672,7 @@ impl Memo {
         for (index, span) in spans.iter().enumerate() {
             // The last span is weighed as it lies, never cached as closed.
             let row = if index == last {
-                let bytes = message_bytes(&self.render_tail(span, false));
+                let bytes = message_bytes(&self.render_tail(span));
                 self.weighed_row(span, bytes)
             } else {
                 self.span_row(span)
@@ -694,11 +698,7 @@ impl Memo {
     }
 
     fn weighed_row(&self, span: &Span, bytes: usize) -> EvictedRow {
-        let events = self
-            .ledger
-            .resident_events(span.events.clone())
-            .expect("view spans are resident in the ledger");
-        evicted_row(span.id, &events, bytes)
+        evicted_row(span.id, &self.span_events(span), bytes)
     }
 
     /// Read named, closed exchanges in store order — one [`TranscriptSpan`]
@@ -792,12 +792,17 @@ impl Memo {
         }
     }
 
-    /// The lineage's store, walked once: O(ancestor file) on the first read
-    /// that reaches past this log's own ledger, and free thereafter.
+    /// The lineage's store, re-walked whenever no cached index exists or the
+    /// one cached is a transient failure: O(ancestor file) then, and free
+    /// otherwise.
     fn ancestor_index(&mut self) -> &AncestorIndex {
-        if self.ancestry_index.is_none() {
-            let index = self
-                .ancestry
+        let stale = self
+            .ancestry_index
+            .as_ref()
+            .is_none_or(AncestorIndex::is_transient);
+        if stale {
+            let ancestry = self.ancestry.clone();
+            let index = ancestry
                 .as_ref()
                 .map_or_else(AncestorIndex::default, index_ancestry);
             self.ancestry_index = Some(index);
@@ -1055,48 +1060,43 @@ impl Memo {
         }
     }
 
-    /// Planning only ever runs at a ready boundary ([`Self::can_evict`]), so
-    /// no span it weighs — the one last in `view.spans` included — is still
-    /// growing, and every one is safe to cache through
-    /// [`Self::render_closed_entry`].
+    /// A plan never names the newest span in view: an eviction exists to keep
+    /// the task in hand, and the newest span is also the only one that can be
+    /// live, so a cut `validate_edit` would refuse is unrepresentable. Every
+    /// span the walk below weighs is therefore strictly older than the
+    /// newest, so none of them can still be growing.
     pub(crate) fn plan_eviction(
         &mut self,
         keep_budget_bytes: usize,
         before_exchange: Option<u64>,
     ) -> Option<EvictionPlan> {
         let spans = self.view.spans.clone();
-        let cap = before_exchange.map(|id| {
-            spans
+        let (_, older) = spans.split_last()?;
+        // A continued exchange and everything after it stay, as does the newest.
+        let cap = before_exchange.map_or(older.len(), |id| {
+            older
                 .iter()
                 .position(|span| span.id >= id)
-                .unwrap_or(spans.len())
+                .unwrap_or(older.len())
         });
-        let mut suffix_start = cap.unwrap_or(spans.len());
-        if suffix_start == 0 {
-            return None;
+        let mut spent = 0usize;
+        for span in &spans[cap..] {
+            spent = spent.saturating_add(self.render_closed_entry(span).bytes);
         }
-
-        let mut suffix_bytes: usize = spans[suffix_start..]
-            .iter()
-            .map(|span| self.render_closed_entry(span).bytes)
-            .sum();
-        for index in (0..suffix_start).rev() {
+        let mut start = cap;
+        for index in (0..cap).rev() {
             let bytes = self.render_closed_entry(&spans[index]).bytes;
-            let Some(total) = suffix_bytes.checked_add(bytes) else {
+            let Some(total) = spent.checked_add(bytes) else {
                 break;
             };
             if total > keep_budget_bytes {
                 break;
             }
-            suffix_bytes = total;
-            suffix_start = index;
+            spent = total;
+            start = index;
         }
-        if suffix_start == 0 {
-            return None;
-        }
-
-        Some(EvictionPlan {
-            through_exchange: spans[suffix_start - 1].id,
+        (start > 0).then(|| EvictionPlan {
+            through_exchange: spans[start - 1].id,
         })
     }
 }
@@ -1606,6 +1606,21 @@ fn admits_new_span(state: &State) -> bool {
     !matches!(state, State::AwaitingToolResults { .. })
 }
 
+/// The longest prefix of `events` that owes no tool result — the only
+/// shape a `mnemon` seed may take, the child's own launch prompt landing
+/// behind it.
+fn admissible_prefix<'a, 'b>(events: &'b [&'a Protocol]) -> &'b [&'a Protocol] {
+    let mut state = State::default();
+    let mut end = 0;
+    for (index, event) in events.iter().enumerate() {
+        state = advance(&state, event);
+        if admits_new_span(&state) {
+            end = index + 1;
+        }
+    }
+    &events[..end]
+}
+
 /// Whether a record inadmissible at `state` is one [`quiesce_records`] can
 /// still make way for, rather than foreign data no live door could produce.
 fn stub_repairable(protocol: &Protocol) -> bool {
@@ -1646,8 +1661,9 @@ fn abandoned_note(events: &[&Protocol]) -> String {
 /// collapses into one line naming the range.
 const HEAD_ROWS: usize = 40;
 
-/// What a row's opening line is clipped to, in bytes.
-const HEAD_OPENING_BYTES: usize = 72;
+/// What a row's opening line is clipped and padded to. One measure for
+/// both, so the table cannot be knocked out of column.
+const HEAD_OPENING: usize = 50;
 
 /// The head marker: the one user-voice message standing where an evicted
 /// prefix was, indexing every exchange that has left so the model can ask for
@@ -1692,26 +1708,50 @@ fn render_head(evictions: &[Eviction], readable: bool) -> String {
             "{range:>4}  ({collapsed} earlier exchanges — transcript `index)"
         ));
     }
-    let mut seen = 0usize;
-    for eviction in evictions {
-        for row in &eviction.rows {
-            seen += 1;
-            if seen > collapsed {
-                lines.push(head_row(row));
-            }
+    for drawn in drawn_evictions(evictions, collapsed) {
+        for row in drawn.rows {
+            lines.push(head_row(row));
         }
-        if let Some(note) = &eviction.note {
-            lines.push(format!("Your note at eviction: \"{note}\""));
+        if let Some(note) = drawn.note {
+            // `Debug`-quoted, so no note — the model's own, or one inherited
+            // off an ancestor's link — can add a line to the marker.
+            lines.push(format!("Your note at eviction: {note:?}"));
         }
     }
     format!("{}]", lines.join("\n"))
 }
 
+/// What the marker draws: one entry per eviction that still has a row on
+/// screen, with its own rows and its own note. One shape, so a note
+/// cannot survive the rows it belongs to.
+struct Drawn<'a> {
+    rows: &'a [EvictedRow],
+    note: Option<&'a str>,
+}
+
+/// The evictions still on screen past the collapse: each kept to its own
+/// surviving suffix of rows, its note carried along only when a row of its
+/// own survives.
+fn drawn_evictions(evictions: &[Eviction], collapsed: usize) -> Vec<Drawn<'_>> {
+    let mut drawn = Vec::new();
+    let mut seen = 0usize;
+    for eviction in evictions {
+        let start = collapsed.saturating_sub(seen).min(eviction.rows.len());
+        seen += eviction.rows.len();
+        if start < eviction.rows.len() {
+            drawn.push(Drawn {
+                rows: &eviction.rows[start..],
+                note: eviction.note.as_deref(),
+            });
+        }
+    }
+    drawn
+}
+
 fn head_row(row: &EvictedRow) -> String {
-    let opening =
-        &row.opening[..ral_core::text::floor_char_boundary(&row.opening, HEAD_OPENING_BYTES)];
+    let opening: String = row.opening.chars().take(HEAD_OPENING).collect();
     format!(
-        "{:>4}  {opening:<50}{:>3} steps {:>5} KB",
+        "{:>4}  {opening:<HEAD_OPENING$}{:>3} steps {:>5} KB",
         row.exchange,
         row.steps,
         row.bytes / 1024

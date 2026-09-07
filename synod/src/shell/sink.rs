@@ -290,6 +290,7 @@ fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
         | Protocol::SessionEnded
         | Protocol::UserPrompt { .. }
         | Protocol::ContextMessage { .. }
+        | Protocol::Inherited { .. }
         | Protocol::StepStarted { .. }
         | Protocol::AssistantMessage { .. }
         | Protocol::ToolResults { .. }
@@ -332,7 +333,9 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
             marks: marks_dto(card),
         }),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
-        Display::Context { rows } => process_card(Some(context_rows_card(rows))),
+        Display::Context { rows, evicted } => {
+            process_card(Some(context_rows_card(rows, *evicted)))
+        }
         Display::Step { n } => Some(SynodEvent::Step { n: *n }),
         // The trunk's committed reasoning, its prose cut line by line for
         // the durable scrollback, a tool result already said on its call row,
@@ -363,7 +366,9 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         Display::Observation { value } => process_card(observation_display_card(value)),
         Display::Card { marks } => process_card(decode_card(marks)),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
-        Display::Context { rows } => process_card(Some(context_rows_card(rows))),
+        Display::Context { rows, evicted } => {
+            process_card(Some(context_rows_card(rows, *evicted)))
+        }
         Display::Done { .. }
         | Display::Thinking { .. }
         | Display::Prompt { .. }
@@ -737,7 +742,10 @@ mod tests {
                 idle_calls: vec![0],
             },
         });
-        let context = Record::Display(Display::Context { rows: Vec::new() });
+        let context = Record::Display(Display::Context {
+            rows: Vec::new(),
+            evicted: 0,
+        });
         let observation = Record::Display(Display::Observation {
             value: observation_wire(Observed::Worker {
                 id: ral_core::types::WorkerId(1),

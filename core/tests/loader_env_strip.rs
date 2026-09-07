@@ -29,7 +29,7 @@ mod common;
 
 use ral_core::path::NormalizedPrefix;
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{Capabilities, FsPolicy, Shell, Value};
+use ral_core::types::{Capabilities, FsPolicy, GrantStack, Shell, Value};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
 fn boot() -> Shell {
@@ -63,7 +63,7 @@ fn confined_child_env(src: &str) -> String {
         run: Run {
             program: Program::Source(src.into()),
             script_name: "<test>".into(),
-            caps: restrict_to(&dir.to_string_lossy()),
+            caps: GrantStack::of(restrict_to(&dir.to_string_lossy())),
             wall: None,
             deferred_lease: None,
             worker_cap: None,

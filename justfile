@@ -56,6 +56,18 @@ check-linux $RUSTFLAGS=deny:
     cargo check -p ral-core --all-targets --target aarch64-unknown-linux-musl
     cargo check -p ral-core --all-targets --target x86_64-unknown-linux-musl
 
+# Cross-check the macOS half, which a Linux `lint` never compiles — check-linux
+# read the other way round, and the gap a `cfg(unix)` helper falls through when
+# its only caller is `cfg(target_os = "linux")`: live on a Linux host, dead code
+# on a Mac, and a build break there alone.
+#
+# One arch, Seatbelt being no more arch-conditional than the rest of it. Never
+# links, so a Linux host can run it, and the bogus CC sends blake3's build
+# script down its pure-Rust path as check-windows does. Unlike check-linux's,
+# this target is one rust-toolchain.toml installs for this recipe's sake alone.
+check-macos $RUSTFLAGS=deny $CC_aarch64_apple_darwin='cc-absent-use-blake3-pure-fallback':
+    cargo check -p ral-core --all-targets --target aarch64-apple-darwin
+
 # plugins/*.ral are left out: the `_ed-*` builtins they call live only on the
 # interactive shell's table, so a batch --check cannot type them — the REPL
 # checks each plugin as rc loads it. One shell for all hundred files: under

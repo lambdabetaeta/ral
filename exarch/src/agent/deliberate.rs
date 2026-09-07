@@ -74,9 +74,9 @@ impl Avatar {
         // or an error lands between `invoke` and the post-batch drain; entry is
         // the one point every route into a deliberation is guaranteed to cross.
         self.reply = None;
-        // Entry, before the prompt is committed, is the one place
-        // `can_evict()` is guaranteed to hold, and every exchange and nudge
-        // alike crosses it.
+        // Entry, before the prompt is committed, is the one point with no
+        // exchange in flight — `can_evict()` alone would admit other points
+        // too, since it only forbids a batch of tool results mid-flight.
         self.evict(provider, false, token, continues);
         if let Some(p) = prompt {
             self.log
@@ -306,8 +306,9 @@ impl Avatar {
     }
 
     /// The exchange an eviction would cut through were it to run now, `None`
-    /// when nothing is old enough to shed.  Planning caches closed renderings,
-    /// so it never runs over a live span.
+    /// when nothing is old enough to shed.
+    /// [`crate::record::model::Memo::plan_eviction`] never names the newest
+    /// span, so this never answers with the live exchange either.
     pub(crate) fn planned_eviction(&self) -> Option<u64> {
         let mut log = self.log.lock();
         if !log.can_evict() {

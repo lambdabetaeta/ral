@@ -1650,6 +1650,10 @@ impl ExarchDesk {
         )
     }
 
+    /// What a note may weigh. It lands in the head marker at message 0 and
+    /// stays there for the session, so it is one short line, not a summary.
+    const NOTE_CAP: usize = 240;
+
     /// `` `context `evict `` — every exchange through `through` leaves the
     /// window at once, with the model's optional `note` beside the index that
     /// replaces them.
@@ -1667,6 +1671,24 @@ impl ExarchDesk {
                 if note.is_empty() {
                     return Err(Error::new(
                         format!("`{CLASS}`: `note` must not be empty — omit it to leave none"),
+                        1,
+                    ));
+                }
+                if note.len() > Self::NOTE_CAP {
+                    return Err(Error::new(
+                        format!(
+                            "`{CLASS}`: `note` is {} bytes; the head marker keeps one short line — {} at most. What is the one thing your future self needs to know?",
+                            note.len(),
+                            Self::NOTE_CAP
+                        ),
+                        1,
+                    ));
+                }
+                if note.contains(['\n', '\r']) {
+                    return Err(Error::new(
+                        format!(
+                            "`{CLASS}`: `note` must be a single line — the head marker draws one row per evicted exchange, and a line break in a note reads as one of them."
+                        ),
                         1,
                     ));
                 }
@@ -2966,6 +2988,48 @@ mod tests {
             err.message,
             "`context `evict`: `note` must not be empty — omit it to leave none"
         );
+    }
+
+    /// The head marker keeps the note forever, so the cap is what stands
+    /// between one short line and a summary.
+    #[test]
+    fn context_evict_refuses_a_note_over_the_cap() {
+        let desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            complete_exchange(&mut log, "one", "answer");
+            complete_exchange(&mut log, "two", "answer");
+        }
+        let note = "x".repeat(241);
+        let err = desk
+            .handle(context_evict_request(1, Some(&note)))
+            .expect_err("241 bytes is over the 240-byte cap");
+        assert_eq!(
+            err.message,
+            "`context `evict`: `note` is 241 bytes; the head marker keeps one short line — 240 at most. What is the one thing your future self needs to know?"
+        );
+    }
+
+    /// A line break in a note would draw an extra row in the head marker,
+    /// read as one of the harness's own — the door refuses it rather than the
+    /// renderer alone standing between the two.
+    #[test]
+    fn context_evict_refuses_a_multiline_note() {
+        let desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            complete_exchange(&mut log, "one", "answer");
+            complete_exchange(&mut log, "two", "answer");
+        }
+        for note in ["line one\nline two", "line one\rline two"] {
+            let err = desk
+                .handle(context_evict_request(1, Some(note)))
+                .expect_err("a note that breaks a line is not one row");
+            assert_eq!(
+                err.message,
+                "`context `evict`: `note` must be a single line — the head marker draws one row per evicted exchange, and a line break in a note reads as one of them."
+            );
+        }
     }
 
     /// A `` `pin [key, body] `` surface value carrying a one-span text card —

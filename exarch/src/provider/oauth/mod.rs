@@ -36,8 +36,9 @@ pub(crate) const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/re
 /// The Codex CLI version exarch presents as `client_version` and in the
 /// `codex_cli_rs/<v>` user-agent. It must be a real, current Codex release,
 /// **not** exarch's own `CARGO_PKG_VERSION`: each model carries a
-/// `minimal_client_version`, so a low version is served an *empty* model list.
-const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.144.3";
+/// `minimal_client_version`, so a low version is served a *shortened* model
+/// list — a newly released model is simply absent until the pin catches up.
+const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.153.4";
 
 /// [`DEFAULT_CODEX_CLIENT_VERSION`], or a non-blank
 /// `EXARCH_CODEX_CLIENT_VERSION` override — the valve for when the backend

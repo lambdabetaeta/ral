@@ -225,9 +225,10 @@ surveys; `transcript` only reads.
     left. `note` is the model's own line to its future self, rendered beside
     that index; the harness's own eviction writes none. The `evict` row is
     **open** precisely because `note` is optional and a closed row cannot say
-    so, with `context_evict_payload` refusing an empty one at the door — a
-    marker reading `Your note at eviction: ""` is a defect the type should
-    prevent, and making `note` required would invite exactly that.
+    so: `context_evict_payload` checks its type at the door, and the desk
+    refuses a note it will not draw — a marker reading
+    `Your note at eviction: ""` is a defect the type should prevent, and
+    making `note` required would invite exactly that.
 
   Each edit records a `ContextEdited` model event at the desk immediately,
   under `DeskAct::ContextEvict` or `ContextDrop`. There is no byte-delta

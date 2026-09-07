@@ -88,8 +88,8 @@ fn disk_cache_serves_a_fresh_entry_and_refetches_a_stale_one() {
         serde_json::json!(["deepseek-chat"])
     );
 
-    // Aged past the 24-hour TTL, the entry stops being served and is refetched.
-    let stale = now_secs() - 25 * 3600;
+    // Aged past the TTL, the entry stops being served and is refetched.
+    let stale = now_secs() - 7 * 3600;
     file["providers"]["anthropic"]["fetched_at"] = stale.into();
     std::fs::write(&path, file.to_string()).expect("rewrite the cache");
 

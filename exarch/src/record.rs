@@ -455,8 +455,9 @@ impl Seq {
     }
 }
 
-/// Where one record lives: its [`Seq`] and the byte range `append` wrote it
-/// to.
+/// Where one record lives: its [`Seq`], the byte range `append` wrote it to,
+/// and a digest of its own bytes that a stale range fails rather than reads
+/// past.
 ///
 /// The model fold's ledger stores one of these per protocol record, so a
 /// freed run reads back through them one record at a time rather than by
@@ -466,11 +467,45 @@ impl Seq {
 pub struct Stamp {
     seq: Seq,
     bytes: Range<u64>,
+    /// Blake3 of the record's own bytes, truncated: a range read back
+    /// against a file it was not measured in — a rotated segment, a
+    /// copied directory, a torn write — fails to match rather than
+    /// returning a plausible neighbour.
+    digest: u64,
 }
 
 impl Stamp {
-    pub(crate) fn new(seq: Seq, bytes: Range<u64>) -> Self {
-        Self { seq, bytes }
+    /// `body` is the record's JSON without its line terminator; the range it
+    /// occupies includes that terminator.
+    pub(crate) fn over(seq: Seq, at: u64, body: &[u8]) -> Self {
+        Self {
+            seq,
+            bytes: at..at + body.len() as u64 + 1,
+            digest: Self::digest_of(body),
+        }
+    }
+
+    /// The digest a body must hash to. Truncated to 64 bits: this guards
+    /// against a stale offset, not an adversary.
+    pub(crate) fn digest_of(body: &[u8]) -> u64 {
+        u64::from_le_bytes(
+            blake3::hash(body).as_bytes()[..8]
+                .try_into()
+                .expect("blake3 digests are 32 bytes"),
+        )
+    }
+
+    /// A stamp that names no bytes. The view fold never reads a record back
+    /// through one, so its tests need no file behind it — the one stamp not
+    /// derived from a record's own bytes, and `cfg(test)` so no production
+    /// path can mint one.
+    #[cfg(test)]
+    pub(crate) fn placeholder(seq: Seq) -> Self {
+        Self {
+            seq,
+            bytes: 0..0,
+            digest: Self::digest_of(&[]),
+        }
     }
 
     pub fn seq(&self) -> Seq {
@@ -479,6 +514,10 @@ impl Stamp {
 
     pub fn bytes(&self) -> Range<u64> {
         self.bytes.clone()
+    }
+
+    pub fn digest(&self) -> u64 {
+        self.digest
     }
 }
 

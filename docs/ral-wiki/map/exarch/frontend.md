@@ -17,7 +17,7 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
   seam's own fault — with no sequence number and no durable form, published
   through `Emitter::transient`. Together these are the two `Signal` variants
   (`bus/signal.rs`) a `Sink` (`bus/sink.rs`) consumes. `AgentState` is the five
-  states an agent is ever in (`Ready`/`AwaitingModel`/`Evaluating`/`Compacting`/
+  states an agent is ever in (`Ready`/`AwaitingModel`/`Evaluating`/`Evicting`/
   `WaitingOnAgents` — a total state named on the status rule, never recorded:
   the model never sees it), riding as `Transient::State`. A decoded surface
   class — a `Card` render document a kit raises through the `surface` builtin,

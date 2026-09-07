@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 3606091a
-verified_at_date: 2026-08-27
+verified_at_commit: 9278d3e8
+verified_at_date: 2026-09-07
 anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Printer::sync, replay, model::resume, Viewport::commit_fact, seed, enforce_window_caps, flush_log, rotate, clear, Transcript, SpanRender, render_closed_entry, render_tail, Memo::transcript]
 ---
 
@@ -105,9 +105,10 @@ variation gets its own function with no cached path to leak into:
 - `render_tail` renders only the live last span, carrying the two retroactive
   flags, and its result is never cached.
 
-`transcript()` assembles the digest segment (replaced wholesale when a `Fold`
-replaces the digest text), `render_closed_entry` per non-last span through
-the memo, and `render_tail` fresh for the tail. `history_bytes` and
+`transcript()` assembles the head marker segment (recomputed by
+`recompute_head` on each `ContextOp::Evict`, present exactly when
+`View::evictions` is non-empty), `render_closed_entry` per non-last span
+through the memo, and `render_tail` fresh for the tail. `history_bytes` and
 `context_survey` read each closed segment's byte count from the same cache
 entry; only the live tail is ever re-serialised. This preserves the model
 fold's recompute invariant rather than contradicting it: correctness never
@@ -117,10 +118,12 @@ rebuilt from nothing by this fold on resume. "Recomputed on every call"
 becomes cheap instead of false.
 
 The one remaining place an owned whole-history `Vec<ChatMessage>` is
-materialised outside the wire is `Memo::inherited_context_messages` — the
-context a `mnemon` child inherits at spawn, where ownership genuinely
-transfers into the child's own ledger. Every other crossing — the provider
-seam, `CompactionPlan.prefix` — carries a `Transcript` by shared reference;
+materialised outside the wire is `Memo::inherited_context` — returning
+`Vec<(u64, Vec<ChatMessage>)>`, one entry per in-view parent span under the
+parent's own exchange id — for the context a `mnemon` child inherits at
+spawn, where ownership genuinely transfers into the child's own ledger. Every
+other crossing carries a `Transcript` by shared reference, the provider seam
+included;
 [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] is
 the ADR, and [[map/exarch/provider|the provider map]] describes the one door,
 `provider/wire.rs`, where a `Transcript` is finally turned into an owned

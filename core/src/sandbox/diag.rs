@@ -40,7 +40,7 @@ pub(super) mod platform {
     pub(super) fn extract_pid(_: &str) -> Option<u32> {
         None
     }
-    pub(super) fn parse_denial(_: &str) -> Option<(&str, Option<&str>)> {
+    pub(super) fn parse_denial(_: &str) -> Option<(String, Option<&str>)> {
         None
     }
     pub(crate) fn describe_denial(_: &str) -> Option<String> {

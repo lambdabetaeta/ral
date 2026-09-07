@@ -185,7 +185,8 @@ impl Log {
         let end = start + line.len() as u64;
         inner.pos = end;
         inner.seq += 1;
-        let stamp = Stamp::new(Seq::new(inner.seq), start..end);
+        let body = &line[..line.len() - 1];
+        let stamp = Stamp::over(Seq::new(inner.seq), start, body);
         if let Some(sink) = &inner.sink {
             if let Record::Forensic(super::Forensic::UsageDelta { usage }) = &record {
                 sink.meter.add(usage.into());
@@ -252,7 +253,7 @@ impl Log {
                 return Some(
                     serde_json::from_slice::<Entry>(&line)
                         .map(|entry| {
-                            Recorded::new(Stamp::new(Seq::new(seq), start..pos), entry.record)
+                            Recorded::new(Stamp::over(Seq::new(seq), start, &line), entry.record)
                         })
                         .map_err(|error| {
                             io::Error::other(format!(
@@ -321,5 +322,47 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("Entry"), "{text}");
         assert!(text.contains("older exarch"), "{text}");
+    }
+
+    #[test]
+    fn a_stamp_round_trips_identically_through_append_and_read() {
+        let path = temp_path("stamp-round-trip");
+        let log = Log::create(&path).expect("temp record log");
+        let first = log
+            .append(Record::Forensic(Forensic::Error {
+                text: "first".into(),
+            }))
+            .expect("append");
+        let second = log
+            .append(Record::Forensic(Forensic::Error {
+                text: "second".into(),
+            }))
+            .expect("append");
+
+        let back: Vec<_> = Log::read(&path).expect("read back").collect();
+        assert_eq!(back.len(), 2);
+        let mut back = back.into_iter();
+        let first_back = back.next().unwrap().expect("parses");
+        let second_back = back.next().unwrap().expect("parses");
+        assert_eq!(*first_back.stamp(), first);
+        assert_eq!(*second_back.stamp(), second);
+    }
+
+    #[test]
+    fn a_mismatched_body_misses_the_digest() {
+        let path = temp_path("digest-mismatch");
+        let log = Log::create(&path).expect("temp record log");
+        let _stamp = log
+            .append(Record::Forensic(Forensic::Error {
+                text: "boom".into(),
+            }))
+            .expect("append");
+
+        let recorded = Log::read(&path)
+            .expect("read back")
+            .next()
+            .expect("one record")
+            .expect("parses");
+        assert_ne!(Stamp::digest_of(b"something else"), recorded.stamp().digest());
     }
 }

@@ -273,11 +273,18 @@ mod tests {
         walk(&resolver.resolve(rel))
     }
 
+    /// The temp root as the walk resolves it: macOS hands out `/var/folders/…`,
+    /// a link to `/private/var/folders/…`, and following one is the point.
+    fn root(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        std::fs::canonicalize(tmp.path()).expect("the temp root canonicalises")
+    }
+
     #[test]
     fn a_plain_new_file_locates_where_its_name_says() {
         let tmp = tempfile::tempdir().unwrap();
-        let loc = located(tmp.path(), "fresh").unwrap();
-        assert_eq!(loc.real(), tmp.path().join("fresh"));
+        let dir = root(&tmp);
+        let loc = located(&dir, "fresh").unwrap();
+        assert_eq!(loc.real(), dir.join("fresh"));
         assert!(loc.stat().unwrap().is_none());
     }
 
@@ -286,20 +293,22 @@ mod tests {
     #[test]
     fn a_dangling_link_locates_its_target() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("work")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("outside")).unwrap();
-        std::os::unix::fs::symlink("../outside/marker", tmp.path().join("work/dangling")).unwrap();
-        let loc = located(tmp.path(), "work/dangling").unwrap();
-        assert_eq!(loc.real(), tmp.path().join("outside/marker"));
+        let dir = root(&tmp);
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        std::os::unix::fs::symlink("../outside/marker", dir.join("work/dangling")).unwrap();
+        let loc = located(&dir, "work/dangling").unwrap();
+        assert_eq!(loc.real(), dir.join("outside/marker"));
     }
 
     #[test]
     fn a_link_in_the_directory_chain_is_spliced() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("top/deep")).unwrap();
-        std::os::unix::fs::symlink("top/deep", tmp.path().join("alias")).unwrap();
-        let loc = located(tmp.path(), "alias/secret").unwrap();
-        assert_eq!(loc.real(), tmp.path().join("top/deep/secret"));
+        let dir = root(&tmp);
+        std::fs::create_dir_all(dir.join("top/deep")).unwrap();
+        std::os::unix::fs::symlink("top/deep", dir.join("alias")).unwrap();
+        let loc = located(&dir, "alias/secret").unwrap();
+        assert_eq!(loc.real(), dir.join("top/deep/secret"));
     }
 
     #[test]

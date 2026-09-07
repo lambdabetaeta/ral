@@ -50,7 +50,10 @@ pub(super) fn extract_pid(line: &str) -> Option<u32> {
 /// `build_hint` must never offer the user as a path to grant.  Seatbelt
 /// resolves the filesystem paths it logs, so the path returned is exactly the
 /// one the grant needs.
-pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
+///
+/// The operation is owned because Linux's counterpart builds a syscall name
+/// rather than borrowing one, and one caller reads both.
+pub(super) fn parse_denial(line: &str) -> Option<(String, Option<&str>)> {
     let after_tag = line.split_once("Sandbox: ")?.1;
     let after_deny = after_tag.split_once("deny(")?.1.split_once(')')?.1;
     let mut rest = after_deny.trim_start().splitn(2, char::is_whitespace);
@@ -62,7 +65,7 @@ pub(super) fn parse_denial(line: &str) -> Option<(&str, Option<&str>)> {
         .next()
         .map(str::trim)
         .filter(|p| !p.is_empty() && op.starts_with("file-"));
-    Some((op, path))
+    Some((op.to_string(), path))
 }
 
 /// Seatbelt's log line already names the operation; there is no typed
@@ -95,7 +98,7 @@ mod tests {
         assert_eq!(
             parse_denial(LINE),
             Some((
-                "file-read-data",
+                "file-read-data".to_string(),
                 Some("/private/var/folders/ab/secret/data.txt")
             ))
         );
@@ -108,7 +111,7 @@ mod tests {
         assert_eq!(
             parse_denial(line),
             Some((
-                "file-read-data",
+                "file-read-data".to_string(),
                 Some("/Users/me/My Documents/the file.txt")
             ))
         );
@@ -117,18 +120,18 @@ mod tests {
     #[test]
     fn parse_denial_handles_op_without_a_path() {
         let line = "kernel[0] (Sandbox) Sandbox: foo(1) deny(1) network-outbound";
-        assert_eq!(parse_denial(line), Some(("network-outbound", None)));
+        assert_eq!(parse_denial(line), Some(("network-outbound".to_string(), None)));
     }
 
     #[test]
     fn parse_denial_drops_non_filesystem_operand() {
         let shm = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                    ipc-posix-shm-read-data apple.shm.notification_center";
-        assert_eq!(parse_denial(shm), Some(("ipc-posix-shm-read-data", None)));
+        assert_eq!(parse_denial(shm), Some(("ipc-posix-shm-read-data".to_string(), None)));
 
         let mach = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                     mach-lookup com.apple.system.notification_center";
-        assert_eq!(parse_denial(mach), Some(("mach-lookup", None)));
+        assert_eq!(parse_denial(mach), Some(("mach-lookup".to_string(), None)));
     }
 
     #[test]
