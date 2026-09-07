@@ -169,12 +169,12 @@ struct Ledger {
     resident: BTreeMap<usize, Recorded<Protocol>>,
     freed: BTreeMap<usize, Stamp>,
     /// `record.jsonl`'s own path — the only thing a freed index needs to read
-    /// itself back, and `None` exactly when the session keeps no log.
+    /// itself back.
     ///
     /// Reading a completed record by byte range from the file this process is
     /// still appending to is safe: a [`Stamp`] exists only once the seam has
     /// written the whole record under its lock.
-    source: Option<PathBuf>,
+    source: PathBuf,
 }
 
 impl Ledger {
@@ -227,13 +227,8 @@ impl Ledger {
             .map(|(index, recorded)| (*index, recorded.value().clone()))
             .collect();
         if !self.freed.is_empty() {
-            let Some(path) = self.source.as_ref() else {
-                return Err(io::Error::other(
-                    "the freed record ledger has no readable record.jsonl",
-                ));
-            };
             let stamps: Vec<Stamp> = self.freed.values().cloned().collect();
-            let read = read_records(path, &stamps)?;
+            let read = read_records(&self.source, &stamps)?;
             events.extend(self.freed.keys().copied().zip(read));
             events.sort_unstable_by_key(|(index, _)| *index);
         }
@@ -248,15 +243,20 @@ impl Ledger {
 /// Returns `Err` if the file cannot be opened, a range cannot be read, or a
 /// stamp names anything but a protocol record.
 fn read_records(path: &Path, stamps: &[Stamp]) -> io::Result<Vec<Protocol>> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:silent:model-fold-freed-read] reads record.jsonl back by Stamp for the fold's own freed slots and the model's `transcript` store door alike; surfaced as a Display::HarnessCall, not the model's own data I/O"
-    )]
-    let mut file = File::open(path)?;
+    let mut file = open_store(path)?;
     stamps
         .iter()
         .map(|stamp| read_stamped(&mut file, stamp))
         .collect()
+}
+
+/// One handle on a record log, carrying the model fold's io-door allow.
+fn open_store(path: &Path) -> io::Result<File> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[io-door:silent:model-fold-freed-read] reads record.jsonl back by Stamp for the fold's own freed slots and the model's `transcript` store door alike; surfaced as a Display::HarnessCall, not the model's own data I/O"
+    )]
+    File::open(path)
 }
 
 fn read_stamped(reader: &mut File, stamp: &Stamp) -> io::Result<Protocol> {
@@ -267,6 +267,15 @@ fn read_stamped(reader: &mut File, stamp: &Stamp) -> io::Result<Protocol> {
     let mut buf = vec![0; length];
     reader.read_exact(&mut buf)?;
     let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
+    // Before the parse, not after: a stale range can hold a well-formed
+    // record, and refusing it as bad JSON would name the wrong fault.
+    if Stamp::digest_of(line) != stamp.digest() {
+        return Err(io::Error::other(
+            "a record did not hash to the stamp that named it — the log at this \
+             path is no longer the file those byte ranges were measured in; a \
+             rotated segment, a copied session directory, or an edited log",
+        ));
+    }
     let entry: super::Entry = serde_json::from_slice(line).map_err(io::Error::other)?;
     match entry.record {
         Record::Protocol(p) => Ok(p),
@@ -318,8 +327,8 @@ struct Departed {
 /// how far down they reach.
 #[derive(Clone)]
 struct Ancestry {
-    /// That ancestor's `record.jsonl`, or `None` when it kept no log.
-    source: Option<PathBuf>,
+    /// That ancestor's `record.jsonl`.
+    source: PathBuf,
     /// Ids at or below this belong to the ancestry; above it they are this
     /// log's own.
     through_exchange: u64,
@@ -334,14 +343,6 @@ struct AncestorIndex {
     broken: Option<Break>,
 }
 
-impl AncestorIndex {
-    /// An unreadable file may be a transient; a link to a parent that kept no
-    /// log will never grow one.
-    fn is_transient(&self) -> bool {
-        matches!(self.broken, Some(Break::Unreadable { .. }))
-    }
-}
-
 /// One ancestor's exchange: where its records lie, and the row the store
 /// index weighs it by. `source` is per-span because a lineage of three
 /// spreads its ids over three files.
@@ -351,48 +352,128 @@ struct AncestorSpan {
     row: EvictedRow,
 }
 
-/// Why a lineage walk stopped before the ancestry's root.
-enum Break {
-    /// That ancestor kept no log at all.
-    NoLog,
-    /// Its `record.jsonl` could not be read. `/clear` cancels every
-    /// descendant before it rotates, so no live child holds a link to a
-    /// rotated file: the reachable cause is a hand-deleted directory.
-    Unreadable { source: PathBuf, error: String },
+/// Why a lineage walk stopped before the ancestry's root: an ancestor's
+/// `record.jsonl` could not be read. `/clear` cancels every descendant before
+/// it rotates, so no live child holds a link to a rotated file: the reachable
+/// cause is a hand-deleted directory.
+struct Break {
+    source: PathBuf,
+    error: String,
 }
 
 impl Break {
     fn refusal(&self, exchange: u64) -> String {
-        match self {
-            Self::NoLog => format!(
-                "an ancestor of this session ran `--no-logs`, so exchange {exchange} is unreadable; only what was handed down at the fork is still in your view."
-            ),
-            Self::Unreadable { source, error } => format!(
-                "exchange {exchange} was recorded by an ancestor, but the ancestor's log at {} is gone: {error}",
-                source.display()
-            ),
-        }
+        format!(
+            "exchange {exchange} was recorded by an ancestor, but the ancestor's log at {} is gone: {}",
+            self.source.display(),
+            self.error
+        )
     }
 }
 
-/// Several exchanges lying in one file, in store order, each with the stamps
-/// its own records were written under.
-type StampedSpans = Vec<(u64, Vec<Stamp>)>;
-
-/// Where one closed exchange's records lie. Slots and [`Stamp`]s rather than
+/// Where one closed exchange's records lie. Spans and [`Stamp`]s rather than
 /// the records themselves: resolution is a `&mut self` walk, and a borrow of
 /// the ledger taken here would outlive it.
 enum Located {
-    Resident(Range<usize>),
+    Resident(Span),
     Freed(Vec<Stamp>),
     Ancestor { source: PathBuf, stamps: Vec<Stamp> },
 }
 
+/// One closed exchange's material, or where to read it back from.
+enum Sourced {
+    /// The render cache's own segment — already in memory.
+    Resident(Arc<[ChatMessage]>),
+    Stamped {
+        source: PathBuf,
+        stamps: Vec<Stamp>,
+    },
+}
+
+/// Where every exchange a store read names lies, owned outright: the read
+/// borrows nothing from the memo, so the desk can drop the session lock
+/// before it touches a file.
+pub(crate) struct StoreRead {
+    spans: Vec<(u64, Sourced)>,
+}
+
+impl StoreRead {
+    /// The named exchanges as material, one [`TranscriptSpan`] each, narrowed
+    /// to [`TranscriptPart`]s rather than the provider's own content parts.
+    ///
+    /// # Errors
+    /// Refuses an exchange whose file will not read back.
+    pub(crate) fn spans(self) -> Result<Vec<TranscriptSpan>, String> {
+        let mut spans = Vec::with_capacity(self.spans.len());
+        self.walk(read_back_refusal, |exchange, messages| {
+            spans.push(TranscriptSpan {
+                exchange,
+                messages: messages.iter().map(transcript_message).collect(),
+            });
+        })?;
+        Ok(spans)
+    }
+
+    /// One hit per matching line, oldest first and bounded by [`GREP_HITS`].
+    ///
+    /// # Errors
+    /// Refuses a file that will not read back.
+    pub(crate) fn grep(self, pattern: &Regex) -> Result<GrepAnswer, String> {
+        let mut tally = Tally::default();
+        self.walk(
+            |_, path, error| {
+                format!(
+                    "the exchanges recorded in {} could not be read back: {error}",
+                    path.display()
+                )
+            },
+            |exchange, messages| grep_messages(pattern, exchange, messages, &mut tally),
+        )?;
+        Ok(tally.answer())
+    }
+
+    /// Hand every named exchange's messages to `visit`, in order, holding at
+    /// most one open file: consecutive entries naming one store share it, so
+    /// each file is read in a single pass in stamp order, one exchange decoded
+    /// at a time.
+    fn walk(
+        self,
+        refusal: impl Fn(u64, &Path, &io::Error) -> String,
+        mut visit: impl FnMut(u64, &[ChatMessage]),
+    ) -> Result<(), String> {
+        let mut open: Option<(PathBuf, File)> = None;
+        for (exchange, sourced) in self.spans {
+            match sourced {
+                Sourced::Resident(segment) => visit(exchange, &segment),
+                Sourced::Stamped { source, stamps } => {
+                    if open.as_ref().is_none_or(|(path, _)| *path != source) {
+                        // Closed before the next is opened, so a lineage of
+                        // many files costs one descriptor, never two.
+                        drop(open.take());
+                        let file = open_store(&source)
+                            .map_err(|error| refusal(exchange, &source, &error))?;
+                        open = Some((source, file));
+                    }
+                    let (path, file) = open.as_mut().expect("just opened, or already open");
+                    let records = stamps
+                        .iter()
+                        .map(|stamp| read_stamped(file, stamp))
+                        .collect::<io::Result<Vec<_>>>()
+                        .map_err(|error| refusal(exchange, path, &error))?;
+                    let span: Vec<&Protocol> = records.iter().collect();
+                    visit(exchange, &closed_messages(&span));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Memo {
-    /// The one constructor: `source` is `record.jsonl`'s path, or `None` for
-    /// a session that keeps no log, and is fixed for this memo's life.
+    /// The one constructor: `source` is `record.jsonl`'s path, fixed for this
+    /// memo's life.
     #[must_use]
-    pub fn new(source: Option<PathBuf>) -> Self {
+    pub fn new(source: PathBuf) -> Self {
         Self {
             ledger: Ledger {
                 source,
@@ -572,9 +653,8 @@ impl Memo {
     /// the one place [`Self::head_render`] is written, so it cannot drift
     /// from them.
     fn recompute_head(&mut self) {
-        let readable = self.ledger.source.is_some();
         self.head_render = (!self.view.evictions.is_empty()).then(|| {
-            let message = ChatMessage::user(render_head(&self.view.evictions, readable));
+            let message = ChatMessage::user(render_head(&self.view.evictions));
             let bytes = message_bytes(std::slice::from_ref(&message));
             (Arc::from(vec![message]), bytes)
         });
@@ -703,55 +783,57 @@ impl Memo {
 
     /// Read named, closed exchanges in store order — one [`TranscriptSpan`]
     /// each, addressed by its own `exchange` field rather than by argument
-    /// position. Every arm of [`Self::resolve`] renders through
+    /// position. Every arm of [`Self::sourced`] renders through
     /// [`closed_messages`], so what comes back is what the model was sent,
     /// whether the exchange is still in view, evicted to this log's own file,
     /// or an ancestor's. All are narrowed to [`TranscriptPart`]s rather than
     /// the provider's own content parts.
     ///
+    /// Both halves in one call — [`Self::locate_read`] then
+    /// [`StoreRead::spans`]; the desk keeps them apart so only the first runs
+    /// under the session lock.
+    ///
     /// # Errors
     /// Refuses an empty list, a duplicate name, an exchange this lineage never
-    /// recorded, the exchange still in progress, or one behind a `--no-logs`
-    /// boundary.
+    /// recorded, the exchange still in progress, or one behind a broken link.
     pub(crate) fn read_context(
         &mut self,
         exchanges: &[u64],
     ) -> Result<Vec<TranscriptSpan>, String> {
+        self.locate_read(exchanges)?.spans()
+    }
+
+    /// [`Self::read_context`]'s first half: resolve every named exchange under
+    /// the caller's lock, borrowing nothing, so the read itself can run once
+    /// that lock is gone.
+    ///
+    /// # Errors
+    /// Refuses whatever [`Self::read_context`] refuses.
+    pub(crate) fn locate_read(&mut self, exchanges: &[u64]) -> Result<StoreRead, String> {
         self.validate_read(exchanges)?;
         let mut named: Vec<u64> = exchanges.to_vec();
         named.sort_unstable();
         let mut spans = Vec::with_capacity(named.len());
         for exchange in named {
-            let messages = self
-                .located_messages(exchange)?
-                .iter()
-                .map(transcript_message)
-                .collect();
-            spans.push(TranscriptSpan { exchange, messages });
+            let sourced = self.sourced(exchange)?;
+            spans.push((exchange, sourced));
         }
-        Ok(spans)
+        Ok(StoreRead { spans })
     }
 
-    /// One closed exchange's messages, wherever the lineage keeps them.
-    fn located_messages(&mut self, exchange: u64) -> Result<Vec<ChatMessage>, String> {
-        match self.resolve(exchange)? {
-            Located::Resident(events) => {
-                let events = self
-                    .ledger
-                    .resident_events(events)
-                    .expect("view spans are resident in the ledger");
-                Ok(closed_messages(&events))
+    /// One closed exchange's material, or the file and stamps to read it back
+    /// by — wherever the lineage keeps it.
+    fn sourced(&mut self, exchange: u64) -> Result<Sourced, String> {
+        Ok(match self.resolve(exchange)? {
+            Located::Resident(span) => {
+                Sourced::Resident(Arc::clone(&self.render_closed_entry(&span).segment))
             }
-            Located::Freed(stamps) => {
-                let path = self
-                    .ledger
-                    .source
-                    .clone()
-                    .expect("a freed exchange resolves only where there is a file to read");
-                read_span(&path, &stamps, exchange)
-            }
-            Located::Ancestor { source, stamps } => read_span(&source, &stamps, exchange),
-        }
+            Located::Freed(stamps) => Sourced::Stamped {
+                source: self.ledger.source.clone(),
+                stamps,
+            },
+            Located::Ancestor { source, stamps } => Sourced::Stamped { source, stamps },
+        })
     }
 
     /// Where one closed exchange's records lie: own resident, own freed, then
@@ -759,16 +841,13 @@ impl Memo {
     /// fork's reach, every id above it being this log's own.
     ///
     /// # Errors
-    /// Refuses an id no lineage record answers for, one whose records were
-    /// freed in a session that keeps no log, and one behind a broken link.
+    /// Refuses an id no lineage record answers for, and one behind a broken
+    /// link.
     fn resolve(&mut self, exchange: u64) -> Result<Located, String> {
         if let Some(span) = self.view.spans.iter().find(|span| span.id == exchange) {
-            return Ok(Located::Resident(span.events.clone()));
+            return Ok(Located::Resident(span.clone()));
         }
         if self.departed.contains_key(&exchange) {
-            if self.ledger.source.is_none() {
-                return Err(no_log_refusal(exchange));
-            }
             return Ok(Located::Freed(self.departed_stamps(exchange)?));
         }
         let unreached = never_recorded_refusal(exchange, self.last_closed_exchange());
@@ -793,13 +872,14 @@ impl Memo {
     }
 
     /// The lineage's store, re-walked whenever no cached index exists or the
-    /// one cached is a transient failure: O(ancestor file) then, and free
-    /// otherwise.
+    /// one cached broke: O(ancestor file) then, and free otherwise.
     fn ancestor_index(&mut self) -> &AncestorIndex {
+        // A broken walk is never remembered: an unreadable file may be a
+        // transient.
         let stale = self
             .ancestry_index
             .as_ref()
-            .is_none_or(AncestorIndex::is_transient);
+            .is_none_or(|index| index.broken.is_some());
         if stale {
             let ancestry = self.ancestry.clone();
             let index = ancestry
@@ -871,6 +951,10 @@ impl Memo {
     /// when the whole store was: the head marker has already told the model
     /// which of its exchanges it cannot have back.
     ///
+    /// Both halves in one call — [`Self::locate_grep`] then
+    /// [`StoreRead::grep`]; the desk keeps them apart so only the first runs
+    /// under the session lock.
+    ///
     /// # Errors
     /// Refuses a named list [`Self::validate_read`] refuses, and any named
     /// exchange [`Self::resolve`] cannot reach.
@@ -879,6 +963,15 @@ impl Memo {
         pattern: &Regex,
         exchanges: Option<&[u64]>,
     ) -> Result<GrepAnswer, String> {
+        self.locate_grep(exchanges)?.grep(pattern)
+    }
+
+    /// [`Self::grep_store`]'s first half: where every searchable exchange
+    /// lies, resolved under the caller's lock and borrowing nothing.
+    ///
+    /// # Errors
+    /// Refuses whatever [`Self::grep_store`] refuses.
+    pub(crate) fn locate_grep(&mut self, exchanges: Option<&[u64]>) -> Result<StoreRead, String> {
         if let Some(named) = exchanges {
             self.validate_read(named)?;
             // Every name is resolved before any is searched: a hit list is no
@@ -888,33 +981,27 @@ impl Memo {
             }
         }
         let wanted = |id: u64| exchanges.is_none_or(|named| named.contains(&id));
-        let mut tally = Tally::default();
+        let mut spans: Vec<(u64, Sourced)> = Vec::new();
 
         for span in self.view.spans.clone() {
             if wanted(span.id) && !self.is_live_exchange(span.id) {
                 let segment = Arc::clone(&self.render_closed_entry(&span).segment);
-                grep_messages(pattern, span.id, &segment, &mut tally);
+                spans.push((span.id, Sourced::Resident(segment)));
             }
         }
 
-        let mut owners: StampedSpans = Vec::new();
-        if let Some(path) = self.ledger.source.clone() {
-            for exchange in self.departed.keys().copied().filter(|id| wanted(*id)) {
-                owners.push((exchange, self.departed_stamps(exchange)?));
-            }
-            grep_records(pattern, &path, &owners, &mut tally)?;
+        for exchange in self.departed.keys().copied().filter(|id| wanted(*id)) {
+            spans.push((
+                exchange,
+                Sourced::Stamped {
+                    source: self.ledger.source.clone(),
+                    stamps: self.departed_stamps(exchange)?,
+                },
+            ));
         }
 
-        for (path, owners) in self.ancestor_groups(&wanted) {
-            grep_records(pattern, &path, &owners, &mut tally)?;
-        }
-        Ok(tally.answer())
-    }
-
-    /// The ancestry's searchable exchanges, grouped by the file they lie in
-    /// and in store order — never one this log's own ledger already answered
-    /// for.
-    fn ancestor_groups(&mut self, wanted: &impl Fn(u64) -> bool) -> Vec<(PathBuf, StampedSpans)> {
+        // Never an ancestor's copy of an id this log's own ledger just
+        // answered for.
         let own: HashSet<u64> = self
             .view
             .spans
@@ -922,18 +1009,19 @@ impl Memo {
             .map(|span| span.id)
             .chain(self.departed.keys().copied())
             .collect();
-        let mut groups: Vec<(PathBuf, StampedSpans)> = Vec::new();
         for (exchange, span) in &self.ancestor_index().spans {
             if own.contains(exchange) || !wanted(*exchange) {
                 continue;
             }
-            let owner = (*exchange, span.stamps.clone());
-            match groups.last_mut() {
-                Some((path, owners)) if *path == span.source => owners.push(owner),
-                _ => groups.push((span.source.clone(), vec![owner])),
-            }
+            spans.push((
+                *exchange,
+                Sourced::Stamped {
+                    source: span.source.clone(),
+                    stamps: span.stamps.clone(),
+                },
+            ));
         }
-        groups
+        Ok(StoreRead { spans })
     }
 
     /// Every named exchange must be closed, named once, and one this lineage
@@ -1138,43 +1226,6 @@ fn closed_messages(events: &[&Protocol]) -> Vec<ChatMessage> {
         .collect()
 }
 
-/// One closed exchange read back off a file it was stamped into.
-fn read_span(path: &Path, stamps: &[Stamp], exchange: u64) -> Result<Vec<ChatMessage>, String> {
-    let records =
-        read_records(path, stamps).map_err(|error| read_back_refusal(exchange, path, &error))?;
-    Ok(closed_messages(&records.iter().collect::<Vec<_>>()))
-}
-
-/// Search several exchanges lying in one file: their stamps in store order,
-/// read in a single pass and split back onto the exchanges that own them.
-fn grep_records(
-    pattern: &Regex,
-    path: &Path,
-    owners: &[(u64, Vec<Stamp>)],
-    tally: &mut Tally,
-) -> Result<(), String> {
-    if owners.is_empty() {
-        return Ok(());
-    }
-    let stamps: Vec<Stamp> = owners
-        .iter()
-        .flat_map(|(_, stamps)| stamps.iter().cloned())
-        .collect();
-    let records = read_records(path, &stamps).map_err(|error| {
-        format!(
-            "the exchanges recorded in {} could not be read back: {error}",
-            path.display()
-        )
-    })?;
-    let mut at = 0;
-    for (exchange, stamps) in owners {
-        let span: Vec<&Protocol> = records[at..at + stamps.len()].iter().collect();
-        at += stamps.len();
-        grep_messages(pattern, *exchange, &closed_messages(&span), tally);
-    }
-    Ok(())
-}
-
 /// Walk a lineage from one link, indexing every closed exchange it can
 /// reach: one pass per ancestor file, each stopping at that link's own
 /// `through_exchange`, and following the ancestor's own [`Protocol::Inherited`]
@@ -1188,15 +1239,11 @@ fn index_ancestry(ancestry: &Ancestry) -> AncestorIndex {
         through_exchange,
     }) = link
     {
-        let Some(path) = source else {
-            index.broken = Some(Break::NoLog);
-            return index;
-        };
-        match index_ancestor(&path, through_exchange, &mut index.spans) {
+        match index_ancestor(&source, through_exchange, &mut index.spans) {
             Ok(next) => link = next,
             Err(error) => {
-                index.broken = Some(Break::Unreadable {
-                    source: path,
+                index.broken = Some(Break {
+                    source,
                     error: error.to_string(),
                 });
                 return index;
@@ -1218,8 +1265,11 @@ fn index_ancestor(
 ) -> io::Result<Option<Ancestry>> {
     let mut view = View::default();
     let mut max_exchange = 0u64;
-    let mut records: Vec<Protocol> = Vec::new();
-    let mut stamps: Vec<Stamp> = Vec::new();
+    // Only the last span pushed can still grow, so the records from its start
+    // are all a row ever needs.
+    let mut buffer: Vec<(Protocol, Stamp)> = Vec::new();
+    let mut buffer_start = 0usize;
+    let mut index = 0usize;
     let mut link = None;
     for record in Log::read(path)? {
         let record = record?;
@@ -1242,19 +1292,44 @@ fn index_ancestor(
                 through_exchange: *through_exchange,
             });
         }
-        record_event_span(&mut view, &mut max_exchange, protocol, records.len());
-        records.push(protocol.clone());
-        stamps.push(record.stamp().clone());
+        let open = view.spans.len();
+        record_event_span(&mut view, &mut max_exchange, protocol, index);
+        if view.spans.len() > open {
+            // A span begins at `index`; the one before it can no longer grow.
+            if let Some(closed) = open.checked_sub(1) {
+                index_span(spans, path, &view.spans[closed], &buffer, buffer_start);
+            }
+            buffer.clear();
+            buffer_start = index;
+        }
+        buffer.push((protocol.clone(), record.stamp().clone()));
+        index += 1;
     }
-    for span in &view.spans {
-        let events: Vec<&Protocol> = records[span.events.clone()].iter().collect();
-        let _ = spans.entry(span.id).or_insert_with(|| AncestorSpan {
-            source: path.to_path_buf(),
-            stamps: stamps[span.events.clone()].to_vec(),
-            row: ancestor_row(span.id, &events),
-        });
+    if let Some(last) = view.spans.last() {
+        index_span(spans, path, last, &buffer, buffer_start);
     }
     Ok(link)
+}
+
+/// One ancestor span's row and stamps, sliced out of the records buffered
+/// from `buffer_start` on. The nearest copy of an id wins, so an id already
+/// indexed stands.
+fn index_span(
+    spans: &mut BTreeMap<u64, AncestorSpan>,
+    path: &Path,
+    span: &Span,
+    buffer: &[(Protocol, Stamp)],
+    buffer_start: usize,
+) {
+    let held = &buffer[span.events.start - buffer_start..span.events.end - buffer_start];
+    let _ = spans.entry(span.id).or_insert_with(|| AncestorSpan {
+        source: path.to_path_buf(),
+        stamps: held.iter().map(|(_, stamp)| stamp.clone()).collect(),
+        row: ancestor_row(
+            span.id,
+            &held.iter().map(|(protocol, _)| protocol).collect::<Vec<_>>(),
+        ),
+    });
 }
 
 /// One ancestor exchange's row, weighed exactly as [`Memo::span_row`] weighs
@@ -1495,12 +1570,6 @@ fn read_back_refusal(exchange: u64, path: &Path, error: &io::Error) -> String {
     )
 }
 
-fn no_log_refusal(id: u64) -> String {
-    format!(
-        "this session runs without a log (`--no-logs`), so exchange {id} left your context for good; only exchanges still in view can be read back."
-    )
-}
-
 fn rewind_unknown_exchange_refusal(id: u64, last: Option<u64>) -> String {
     match last {
         Some(last) => format!(
@@ -1669,15 +1738,13 @@ const HEAD_OPENING: usize = 50;
 /// prefix was, indexing every exchange that has left so the model can ask for
 /// any of them back.
 ///
-/// A pure function of its two arguments — no clock, no path, no
+/// A pure function of the eviction list — no clock, no path, no
 /// ordering-unstable container — so between two evictions the provider's
-/// prompt cache sees a byte-stable message 0. `readable` is fixed for a
-/// memo's life, a session either keeping a log or not, so the marker remains
-/// a function of `evictions` alone within one session.
+/// prompt cache sees a byte-stable message 0.
 ///
 /// Voice and bracket as [`abandoned_note`]: the harness may state a fact
 /// about the conversation, never speak in the model's own voice.
-fn render_head(evictions: &[Eviction], readable: bool) -> String {
+fn render_head(evictions: &[Eviction]) -> String {
     let rows: Vec<&EvictedRow> = evictions
         .iter()
         .flat_map(|eviction| eviction.rows.iter())
@@ -1693,13 +1760,9 @@ fn render_head(evictions: &[Eviction], readable: bool) -> String {
             first.exchange, last.exchange
         )
     };
-    let whereabouts = if readable {
-        "They are still readable: `transcript `read [n]` reads one back as material, \
-         `transcript `grep 're'` searches them all, `transcript `index` lists every \
-         closed exchange."
-    } else {
-        "They are not readable: this session keeps no log."
-    };
+    let whereabouts = "They are still readable: `transcript `read [n]` reads one back as \
+                       material, `transcript `grep 're'` searches them all, `transcript \
+                       `index` lists every closed exchange.";
     let mut lines = vec![format!("[EXARCH // {departed} {whereabouts}")];
     let collapsed = rows.len().saturating_sub(HEAD_ROWS);
     if collapsed > 0 {
@@ -2164,7 +2227,7 @@ pub fn resume(path: &Path) -> io::Result<(Memo, String, String)> {
     if let Some(tail) = find_crash_tail(path)? {
         quarantine_tail(path, &tail)?;
     }
-    let mut memo = Memo::new(Some(path.to_path_buf()));
+    let mut memo = Memo::new(path.to_path_buf());
     let mut admission = Admission::default();
     let mut identity = None;
     for record in Log::read(path)? {

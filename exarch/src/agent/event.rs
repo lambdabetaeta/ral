@@ -9,7 +9,7 @@
 use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
-use crate::record::model::{Eviction, Memo, Transcript, View};
+use crate::record::model::{Eviction, Memo, StoreRead, Transcript, View};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
 use regex::Regex;
@@ -331,7 +331,6 @@ pub enum TranscriptPart {
 pub struct AgentLog {
     id: AgentId,
     dir: PathBuf,
-    durable: bool,
     /// Held, with [`Self::account`], so `clear` re-emits `SessionStarted`
     /// unchanged and `fork` passes both down to the child.
     model: String,
@@ -356,8 +355,8 @@ pub struct AgentLog {
 /// under the parent's own exchange ids, beside the link that makes every
 /// older ancestor exchange readable too.
 pub struct Inherited {
-    /// The parent's `record.jsonl`, or `None` when the parent kept no log.
-    pub source: Option<PathBuf>,
+    /// The parent's `record.jsonl`.
+    pub source: PathBuf,
     /// The parent's head-marker state, so the child's marker opens where the
     /// parent's stood.
     pub evictions: Vec<Eviction>,
@@ -396,7 +395,6 @@ impl AgentLog {
             session_id,
             model.to_string(),
             account.clone(),
-            true,
         )?;
         s.record_started(None, system_prompt_bytes, crate::bootstrap::now_unix_ms())?;
         Ok(s)
@@ -425,28 +423,6 @@ impl AgentLog {
         })
     }
 
-    /// Build a mirror-only root: `--no-logs`, no `record.jsonl` ever created.
-    ///
-    /// # Errors
-    /// Returns an error when the session directory cannot be created.
-    pub fn root_without_logs(
-        sessions_root: &Path,
-        session_id: AgentId,
-        model: &str,
-        account: &RecordedAccount,
-        system_prompt_bytes: usize,
-    ) -> io::Result<Self> {
-        let mut s = Self::open_fresh(
-            sessions_root.to_path_buf(),
-            session_id,
-            model.to_string(),
-            account.clone(),
-            false,
-        )?;
-        s.record_started_lossy(None, system_prompt_bytes, crate::bootstrap::now_unix_ms());
-        Ok(s)
-    }
-
     /// Build a forked child log, inheriting `sessions_root` and recording this
     /// log's id as the child's parent.
     ///
@@ -469,21 +445,12 @@ impl AgentLog {
             child_id,
             model.to_string(),
             account.clone(),
-            self.durable,
         )?;
-        if self.durable {
-            s.record_started(
-                Some(self.id),
-                system_prompt_bytes,
-                crate::bootstrap::now_unix_ms(),
-            )?;
-        } else {
-            s.record_started_lossy(
-                Some(self.id),
-                system_prompt_bytes,
-                crate::bootstrap::now_unix_ms(),
-            );
-        }
+        s.record_started(
+            Some(self.id),
+            system_prompt_bytes,
+            crate::bootstrap::now_unix_ms(),
+        )?;
         Ok(s)
     }
 
@@ -534,7 +501,6 @@ impl AgentLog {
         let mut resumed = Self {
             id: session_id,
             dir,
-            durable: true,
             model,
             account,
             sessions_root: sessions_root.to_path_buf(),
@@ -546,10 +512,6 @@ impl AgentLog {
             resumed.quiesce(QuiesceReason::Aborted);
         }
         Ok(resumed)
-    }
-
-    pub fn is_durable(&self) -> bool {
-        self.durable
     }
 
     pub fn resumed_summary(&self) -> (u64, u64) {
@@ -640,7 +602,8 @@ impl AgentLog {
         self.model_memo.context_survey()
     }
 
-    /// Read named, closed exchanges in store order — in view or evicted.
+    /// Read named, closed exchanges in store order — in view or evicted. Both
+    /// halves in one call; the desk splits them across its lock.
     ///
     /// # Errors
     /// Refuses an empty list, a duplicate name, an exchange this session never
@@ -650,13 +613,23 @@ impl AgentLog {
         self.model_memo.read_context(exchanges)
     }
 
+    /// [`Self::read_context`]'s locating half, for a caller that means to
+    /// read outside the session lock.
+    ///
+    /// # Errors
+    /// Refuses whatever [`Self::read_context`] refuses.
+    pub(crate) fn locate_read(&mut self, exchanges: &[u64]) -> Result<StoreRead, String> {
+        self.model_memo.locate_read(exchanges)
+    }
+
     /// Every closed exchange the store holds, oldest first.
     pub fn store_index(&mut self) -> Vec<StoreIndexItem> {
         self.model_memo.store_index()
     }
 
     /// Search the closed exchanges' text — the named ones, or the whole
-    /// store when `exchanges` is `None`.
+    /// store when `exchanges` is `None`. Both halves in one call; the desk
+    /// splits them across its lock.
     ///
     /// # Errors
     /// Refuses a named list the way [`Self::read_context`] does, and a named
@@ -667,6 +640,15 @@ impl AgentLog {
         exchanges: Option<&[u64]>,
     ) -> Result<GrepAnswer, String> {
         self.model_memo.grep_store(pattern, exchanges)
+    }
+
+    /// [`Self::grep_store`]'s locating half, for a caller that means to
+    /// search outside the session lock.
+    ///
+    /// # Errors
+    /// Refuses whatever [`Self::grep_store`] refuses.
+    pub(crate) fn locate_grep(&mut self, exchanges: Option<&[u64]>) -> Result<StoreRead, String> {
+        self.model_memo.locate_grep(exchanges)
     }
 
     /// Approximate context size in serialised model-view bytes.  The fallback
@@ -702,7 +684,7 @@ impl AgentLog {
     /// flight, or a `ContextEdited` record landing after the assistant frame
     /// it answers.
     pub fn inherited_context(&mut self) -> Inherited {
-        let source = self.durable.then(|| self.dir.join("record.jsonl"));
+        let source = self.dir.join("record.jsonl");
         let evictions = self.model_memo.view().evictions.clone();
         let through_exchange = self.model_memo.exchange_floor();
         Inherited {
@@ -930,13 +912,6 @@ impl AgentLog {
         system_prompt_bytes: usize,
         at_unix_ms: u64,
     ) -> io::Result<ClearRecord> {
-        if !self.durable {
-            self.model_memo = Memo::new(None);
-            let rotation_error = self.seam.rotate(None).err();
-            self.record_started_lossy(None, system_prompt_bytes, at_unix_ms);
-            return Ok(ClearRecord { rotation_error });
-        }
-
         let record_path = self.dir.join("record.jsonl");
         let rotation = match first_free_rotation(&record_path) {
             Ok(n) => n,
@@ -948,7 +923,7 @@ impl AgentLog {
             }
         };
         let rotation_error = self.rotate_record(&record_path, rotation);
-        self.model_memo = Memo::new(Some(record_path));
+        self.model_memo = Memo::new(record_path);
         let started = self.started_event(None, system_prompt_bytes, at_unix_ms);
         let seam_error = self.record_protocol(started).err();
         Ok(ClearRecord {
@@ -1050,22 +1025,17 @@ impl AgentLog {
         session_id: AgentId,
         model: String,
         account: RecordedAccount,
-        durable: bool,
     ) -> io::Result<Self> {
         let dir = sessions_root.join(session_id.to_string());
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
         }
         fs::create_dir_all(&dir)?;
-        let source = durable.then(|| dir.join("record.jsonl"));
-        let seam = match &source {
-            Some(path) => crate::record::Emitter::create(path)?,
-            None => crate::record::Emitter::none(),
-        };
+        let source = dir.join("record.jsonl");
+        let seam = crate::record::Emitter::create(&source)?;
         Ok(Self {
             id: session_id,
             dir,
-            durable,
             model,
             account,
             sessions_root,
@@ -1084,16 +1054,6 @@ impl AgentLog {
     ) -> io::Result<()> {
         let started = self.started_event(parent, system_prompt_bytes, at_unix_ms);
         self.record_protocol(started)
-    }
-
-    fn record_started_lossy(
-        &mut self,
-        parent: Option<AgentId>,
-        system_prompt_bytes: usize,
-        at_unix_ms: u64,
-    ) {
-        let started = self.started_event(parent, system_prompt_bytes, at_unix_ms);
-        self.record_protocol_lossy(started);
     }
 
     fn started_event(
@@ -1148,12 +1108,11 @@ impl AgentLog {
 
     /// [`Self::record_protocol`] with the emit made best-effort: its remit is
     /// exactly the harness-synthesized records where refusing would wedge the
-    /// session — what [`Self::quiesce`] owes, and the `SessionStarted` bookends
-    /// of a mirror-only session, which a `--no-logs` seam never actually fails
-    /// to accept.  A genuine append failure here still leaves the model fold
-    /// unadvanced for this one record, since there is no witnessed result to
-    /// advance it with — the honest price of the law that a failed append is
-    /// a session error, not a shrug, even when the caller cannot propagate it.
+    /// session — what [`Self::quiesce`] owes.  A genuine append failure here
+    /// still leaves the model fold unadvanced for this one record, since there
+    /// is no witnessed result to advance it with — the honest price of the law
+    /// that a failed append is a session error, not a shrug, even when the
+    /// caller cannot propagate it.
     fn record_protocol_lossy(&mut self, p: Protocol) {
         match self.seam.emit(p) {
             Ok(recorded) => self.advance(&widen(recorded)),
@@ -1731,6 +1690,44 @@ mod tests {
         );
     }
 
+    /// A stamp measures a file, not a path: bytes that changed under a live
+    /// range are refused as the mismatch they are, not as bad JSON.
+    #[test]
+    fn a_record_that_does_not_hash_to_its_stamp_is_refused_by_name() {
+        let mut s = fresh_root();
+        complete_exchange(&mut s, "alpha", "alpha answered");
+        complete_exchange(&mut s, "beta", "beta answered");
+        s.apply_edit(
+            ContextOp::Evict {
+                through_exchange: 1,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+
+        // Equal-length substitution: every stamp's byte range still names a
+        // whole, well-formed record — just not the one it measured.
+        let path = record_path(&s);
+        let recorded = fs::read_to_string(&path).expect("record.jsonl is utf-8");
+        let rewritten = recorded.replace("alpha", "gamma");
+        assert_ne!(recorded, rewritten, "the substitution must reach the log");
+        assert_eq!(
+            recorded.len(),
+            rewritten.len(),
+            "the stamps' byte ranges must still hold whole records"
+        );
+        fs::write(&path, &rewritten).expect("rewrite record.jsonl in place");
+
+        let refusal = s
+            .read_context(&[1])
+            .expect_err("a record that no longer hashes to its stamp is unreadable");
+        assert!(
+            refusal.contains("did not hash to the stamp that named it"),
+            "the refusal must name the digest mismatch, got: {refusal}"
+        );
+    }
+
     /// The store is every closed exchange, wherever it lies: the evicted one
     /// carries the weight it left at, the in-view ones the weight they still
     /// cost, and the exchange in flight is in no store at all.
@@ -1832,50 +1829,6 @@ mod tests {
             answer.hits[99].line, 100,
             "the oldest hundred, in store order"
         );
-    }
-
-    #[test]
-    fn no_logs_refuses_reading_an_evicted_exchange_and_names_the_mode() {
-        let sessions = sessions_root("no-logs-read-back");
-        let mut s = AgentLog::root_without_logs(
-            sessions.path(),
-            0,
-            "model",
-            &RecordedAccount::for_test("provider"),
-            0,
-        )
-        .unwrap();
-        complete_exchange(&mut s, "one", "one");
-        complete_exchange(&mut s, "two", "two");
-        s.apply_edit(
-            ContextOp::Evict {
-                through_exchange: 1,
-                note: None,
-            },
-            EditAuthority::Harness,
-        )
-        .unwrap();
-        assert_eq!(
-            s.read_context(&[1]).unwrap_err(),
-            "this session runs without a log (`--no-logs`), so exchange 1 left your context for good; only exchanges still in view can be read back."
-        );
-        assert_eq!(
-            s.grep_store(&regex("one"), Some(&[1])).unwrap_err(),
-            "this session runs without a log (`--no-logs`), so exchange 1 left your context for good; only exchanges still in view can be read back."
-        );
-        assert_eq!(
-            s.grep_store(&regex("one"), None)
-                .expect("what is resident is still searchable")
-                .total,
-            0,
-            "the head marker has already said the evicted exchanges are unreadable"
-        );
-        let marker = head_marker(&mut s).expect("an eviction renders a marker");
-        assert!(
-            marker.contains("They are not readable: this session keeps no log."),
-            "a session with no store says so, got: {marker}"
-        );
-        assert!(!marker.contains("transcript"));
     }
 
     #[test]
@@ -2164,15 +2117,7 @@ mod tests {
 
     #[test]
     fn transient_eviction_keeps_no_resident_state() {
-        let sessions = sessions_root("residency-no-logs");
-        let mut s = AgentLog::root_without_logs(
-            sessions.path(),
-            0,
-            "model",
-            &RecordedAccount::for_test("provider"),
-            0,
-        )
-        .unwrap();
+        let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
             .unwrap();
@@ -2758,38 +2703,6 @@ mod tests {
         assert_eq!(child.current_exchange(), Some(3));
     }
 
-    /// A link to a parent that kept no log ends the lineage, and the refusal
-    /// names the parent rather than blaming the child's own mode.
-    #[test]
-    fn a_no_logs_link_refuses_naming_the_ancestor() {
-        let sessions = sessions_root("lineage-no-logs");
-        let mut parent = AgentLog::root_without_logs(
-            sessions.path(),
-            0,
-            "model",
-            &RecordedAccount::for_test("provider"),
-            0,
-        )
-        .unwrap();
-        complete_exchange(&mut parent, "one", "one");
-        complete_exchange(&mut parent, "two", "two");
-        parent
-            .apply_edit(
-                ContextOp::Evict {
-                    through_exchange: 1,
-                    note: None,
-                },
-                EditAuthority::Harness,
-            )
-            .unwrap();
-
-        let mut child = mnemon(&mut parent, 1);
-        assert_eq!(
-            child.read_context(&[1]).unwrap_err(),
-            "an ancestor of this session ran `--no-logs`, so exchange 1 is unreadable; only what was handed down at the fork is still in your view."
-        );
-    }
-
     /// Only a fork's opening may link a log to an ancestry: a link found
     /// after the log has a context of its own is foreign data.
     #[test]
@@ -2807,7 +2720,7 @@ mod tests {
         let path = sessions.path().join("0/record.jsonl");
         drop(live);
         let late = Record::Protocol(Protocol::Inherited {
-            source: None,
+            source: path.clone(),
             evictions: Vec::new(),
             through_exchange: 0,
         });
@@ -2982,20 +2895,5 @@ mod tests {
             ]
         );
         assert_eq!(answer.hits[0].text, "the parser is broken");
-    }
-
-    #[test]
-    fn mirror_only_roots_have_no_durable_records() {
-        let sessions = sessions_root("no-logs");
-        let log = AgentLog::root_without_logs(
-            sessions.path(),
-            0,
-            "model",
-            &RecordedAccount::for_test("provider"),
-            0,
-        )
-        .unwrap();
-        assert!(!log.is_durable());
-        assert!(!log.dir().join("record.jsonl").exists());
     }
 }

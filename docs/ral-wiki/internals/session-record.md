@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 9278d3e8
+verified_at_commit: 7e129df6
 verified_at_date: 2026-09-07
 anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Printer::sync, replay, model::resume, Viewport::commit_fact, seed, enforce_window_caps, flush_log, rotate, clear, Transcript, SpanRender, render_closed_entry, render_tail, Memo::transcript]
 ---
@@ -21,23 +21,22 @@ delegates to `record::Log::append`, whose mutex protects the whole critical
 section:
 
 1. Wrap the record with its append timestamp and serialize the `Entry` envelope.
-2. Write and flush the line when the session is durable; `--no-logs` keeps the
-   same seam with no writer.
+2. Write and flush the line.
 3. Advance the `Seq` and byte cursor and build the `Recorded<Record>` stamp.
 4. Meter usage where applicable and publish `Signal::Fact(AgentId, recorded)`
    through the attached weak fleet sink before releasing the lock.
 
-Append-then-publish makes channel order log order. In a durable session, a
-missing or slow receiver cannot lose the fact: it is already in the file and a
-later replay can catch up. The sink is attachable because the session log
-outlives a TUI session bus and the headless per-exchange buses that are attached
-to it in turn.
+Append-then-publish makes channel order log order, so a missing or slow
+receiver cannot lose the fact: it is already in the file and a later replay
+can catch up. The sink is attachable because the session log outlives a TUI
+session bus and the headless per-exchange buses that are attached to it in
+turn.
 
 `Emitter::transient` uses the same log mutex for ordering but never writes a
 line or takes a sequence number. It publishes the other channel passenger,
 `Signal::Transient(AgentId, Transient)`. A `Signal::Fact` is the recorded,
-stamped half (file-backed in durable sessions); a `Signal::Transient` is
-live-only and has no replay path.
+stamped, file-backed half; a `Signal::Transient` is live-only and has no
+replay path.
 
 ## Three durable classes, one live edge
 
@@ -76,9 +75,15 @@ seam returns from `emit`. Its `Memo` owns the protocol state, exchange view,
 and ledger. When context edits evict old protocol records, the ledger keeps
 their `Stamp` byte ranges and reads those lines back from `record.jsonl` when a
 refold needs them; no recorded protocol fact is deleted and the whole log is
-never held in memory. The refold is no longer the only reader: `transcript`
-reads those same ranges back on demand, so the log is the model's store as
-well as its identity ([[decisions/260906_context-rollover|context-rollover]]).
+never held in memory. Every read of a range checks the record's bytes against
+the digest the `Stamp` carries, before the parse, so a range that no longer
+names what it measured — a rotated segment, a copied session directory, an
+edited log — is refused as the mismatch it is rather than answered with
+whatever now lies at those offsets. The refold is no longer the only reader:
+`transcript` reads those same ranges back on demand, decoding one exchange at
+a time so that a search never holds more than one span. The log is thereby the
+model's store as well as its identity
+([[decisions/260906_context-rollover|context-rollover]]).
 
 ### The provider-facing transcript is a persistent value
 
@@ -180,7 +185,6 @@ renames the current segment, then `Emitter::rotate` asks the same shared
 `record::Log` to open a fresh `record.jsonl` and reset its sequence/cursor while
 retaining the attached `FleetSink`. Existing `Emitter` clones and the bus
 coupled before the clear therefore continue publishing into the new segment.
-The `--no-logs` branch rotates to the same mirror-only seam with no writer.
 
 The resulting trust boundary is small: `record.jsonl` is the durable fact
 stream, `Record` classes say which fold may project each fact, `Signal::Fact`

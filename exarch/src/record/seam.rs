@@ -44,8 +44,10 @@ impl Emitter {
         })
     }
 
-    /// A seam with no file — `--no-logs` — that still stamps facts and
-    /// publishes them to an attached bus.
+    /// A recorder that publishes nowhere, for tests: it still stamps facts and
+    /// hands them to an attached bus, but keeps no store. Not a session mode —
+    /// every real session has a `record.jsonl`.
+    #[cfg(test)]
     pub fn none() -> Self {
         Self {
             log: Arc::new(Log::none()),
@@ -53,7 +55,7 @@ impl Emitter {
     }
 
     /// Point this seam at a fresh segment — `Some(path)` a new file, `None`
-    /// the mirror-only seam `--no-logs` keeps.  `/clear` rotates the file, not
+    /// the store-less seam tests build.  `/clear` rotates the file, not
     /// the seam, so the attached bus and every clone already handed out follow
     /// the new segment rather than going quiet on the old one.
     ///

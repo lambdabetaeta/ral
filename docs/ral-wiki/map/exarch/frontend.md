@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c5df4203
-generated_at_date: 2026-09-06
+generated_at_commit: 7e129df6
+generated_at_date: 2026-09-07
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -118,7 +118,7 @@ stays visible until quiescence.
   caps before they ever enter the log. A directory with no `record.jsonl`
   refuses to resume, with a named error. `/clear` rotates the record segment
   behind the same seam, so existing emitters and the attached bus continue
-  into the fresh file (and `--no-logs` keeps the mirror-only seam).
+  into the fresh file.
 
 The TUI renders a sibling `user.log` — the "user view" — as a stream the
 viewport is a window over: a block is written once, when eviction drops it

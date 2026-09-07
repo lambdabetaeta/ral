@@ -253,7 +253,6 @@ impl Conversation {
             caps: ral_core::types::GrantStack::of(caps),
             run_dir,
             resume: None,
-            no_logs: false,
             run_lock: None,
             model,
             account: RecordedAccount {

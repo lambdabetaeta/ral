@@ -173,8 +173,10 @@ log with no independent sibling.
 - "Recorded" means surrendered to the OS: per-record flush, never `fsync` —
   process-crash durable, not power-loss durable; the quarantined tail covers
   the torn write either way.
-- A pre-plan session does not resume; `--no-logs` has a fileless seam that
-  still stamps and publishes, and no resumable history, unchanged.
+- A pre-plan session does not resume. (`--no-logs`, whose fileless seam
+  stamped and published with no resumable history, is since deleted: the
+  transient exception is withdrawn and every session has a `record.jsonl`
+  — [[decisions/260623_recording-follows-the-event|recording-follows-the-event]].)
 - Dial state and the provisional thinking seat are UI state, not records,
   and do not survive a resume.
 

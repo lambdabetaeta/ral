@@ -13,8 +13,8 @@ use exarch::bootstrap::{EXARCH, SYNOD, Scratch};
 use exarch::policy::for_invocation;
 use exarch::prompt::host_section;
 use ral_core::capability::FsOp;
-use ral_core::path::NormalizedPrefix;
 use ral_core::path::basedir::XdgKind;
+use ral_core::path::{NormalizedPrefix, SearchCwd, resolve_in_path};
 use ral_core::types::{Break, GrantStack, Settled, Shell};
 use std::path::PathBuf;
 
@@ -43,6 +43,16 @@ fn bullet<'a>(text: &'a str, label: &str) -> &'a str {
     text.lines()
         .find(|l| l.starts_with(label))
         .unwrap_or_else(|| panic!("no `{label}` line in:\n{text}"))
+}
+
+/// Where `name` really lives on this host, for the resolved half of an exec
+/// check.  `/usr/bin/ls` is `/bin/ls` on macOS and `rustc` is wherever rustup
+/// put it, so the fixture asks `PATH` rather than naming a directory.
+fn on_path(name: &str) -> String {
+    let path = std::env::var("PATH").expect("PATH is set");
+    resolve_in_path(name, &path, SearchCwd::nowhere()).unwrap_or_else(|| {
+        panic!("no executable '{name}' on this host's PATH, so the fixture has no real path for it:\n{path}")
+    })
 }
 
 /// The gate's refusal message, or a panic naming what arrived instead.
@@ -84,10 +94,10 @@ fn an_extend_base_grant_cannot_survive_a_restrict_that_omits_it() {
     let mut shell = Shell::default();
     install(&mut shell, &stack);
     shell
-        .check_exec_args("rustc", &["rustc", "/usr/bin/rustc"], &[])
+        .check_exec_args("rustc", &["rustc", &on_path("rustc")], &[])
         .expect_err("--extend-base must not outlive a --restrict that omits it");
     shell
-        .check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
+        .check_exec_args("ls", &["ls", &on_path("ls")], &[])
         .expect("what both sides name survives the fold");
 }
 
@@ -118,14 +128,15 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
     let (ba, _) =
         for_invocation(&cwd, "dangerous", None, &[b, a]).expect("profiles compose");
 
+    let ls = on_path("ls");
     for stack in [&ab, &ba] {
         let mut shell = Shell::default();
         install(&mut shell, stack);
         shell
-            .check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
+            .check_exec_args("ls", &["ls", &ls], &[])
             .expect("what both files name is admitted regardless of restrict argv order");
         for one_sided in ["git", "cat"] {
-            let resolved = format!("/usr/bin/{one_sided}");
+            let resolved = on_path(one_sided);
             let message = refusal(shell.check_exec_args(one_sided, &[one_sided, &resolved], &[]));
             assert!(
                 message.contains(one_sided),

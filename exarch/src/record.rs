@@ -153,9 +153,8 @@ pub enum Protocol {
     /// [`Protocol::ContextMessage`]s that carry the parent's view.
     Inherited {
         /// The parent's `record.jsonl`, where every inherited exchange — in
-        /// the parent's view or long evicted — reads back from; `None` when
-        /// the parent ran `--no-logs`.
-        source: Option<PathBuf>,
+        /// the parent's view or long evicted — reads back from.
+        source: PathBuf,
         /// The parent's head-marker state, by value, so the child's marker
         /// renders without reading the parent's file.
         evictions: Vec<model::Eviction>,

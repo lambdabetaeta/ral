@@ -1,6 +1,6 @@
 ---
 status: active
-generated_at_commit: c5df4203
+generated_at_commit: 7e129df6
 ---
 
 # Context rollover: evict, don't summarise
@@ -30,8 +30,8 @@ recorded.
 
 An exchange is *closed* once it is not the live one, *in view* while a span
 for it is in `View.spans`, and *departed* once it has left. Every closed
-exchange is in the store for the life of the log. `--no-logs` is the one seat
-with no store, and says so where it matters rather than pretending otherwise.
+exchange is in the store for the life of the log, and every session has a
+store: there is no seat where a departed exchange is gone for good.
 
 ## The eviction op and the head marker
 
@@ -51,14 +51,25 @@ never be two opinions.
 
 The **head marker** is one user-voice `ChatMessage` at position 0 of the
 view, present exactly when `evictions` is non-empty, rendered by
-`render_head` — a pure function of the eviction list and one bit saying
-whether this session keeps a log. It names the range that left, says how to
-get it back, and draws one line per exchange: number, opening line clipped at
-72 bytes, step count, KB. Past `HEAD_ROWS` (40) the oldest rows collapse into
-a single `1–17  (17 earlier exchanges — transcript `index)` line. Each
-eviction's `note` renders after its own rows; the harness never writes one.
-Voice and bracket follow `abandoned_note`: the harness may state a fact about
-the conversation, never speak in the model's own voice.
+`render_head` — a pure function of the eviction list. It names the range that
+left, says how to get it back, and draws one line per exchange: number,
+opening line, step count, KB. `HEAD_OPENING` (50 characters) is one measure
+for both the clip and the pad, so no opening can knock the table out of
+column. Past `HEAD_ROWS` (40) the oldest rows collapse into a single
+`1–17  (17 earlier exchanges — transcript `index)` line. Voice and bracket
+follow `abandoned_note`: the harness may state a fact about the conversation,
+never speak in the model's own voice.
+
+**The marker is bounded, and message 0 does not grow with the session.** Each
+eviction's `note` renders after its own rows, and the harness never writes
+one. A note is a single line by construction: the desk caps it at 240 bytes
+and refuses a line break in one, and `render_head` draws it `Debug`-quoted
+besides, so nothing that reaches the marker — the model's own note, or one
+inherited by value off an ancestor's link — can add a line to it. An eviction
+is drawn only while a row of its own survives the collapse
+(`drawn_evictions`), so a note cannot outlive the rows it belongs to and
+contributes at most one line beside them. The marker's height is therefore
+bounded by `HEAD_ROWS`, not by how many cuts the session has run.
 
 **A `Drop` writes no row.** Prefix caching invalidates from the earliest
 changed message onward, so an `Evict` — which removes the prefix — costs
@@ -89,6 +100,16 @@ one rewrite of the survivor, while the task in hand is nearly always in the
 recent half, and re-fetching it through the door costs door prices. Cutting
 seldom and big is the cache-optimal shape, and 85 % → 50 % is that shape. The
 fraction is one constant; the mechanism does not depend on it.
+
+**The newest span survives structurally, not arithmetically.**
+`plan_eviction` draws its candidates from `split_last`'s older half, so the
+newest span is not in the slice a plan can name at all. Before, the budget
+walk alone decided it, and a budget can be exhausted: a newest span heavier
+than the whole keep budget left the walk nothing to keep and cut everything,
+the live exchange included. That case is now unrepresentable rather than
+merely unlikely — an eviction exists to keep the task in hand, and the newest
+span is also the only one that can still be growing, so a cut
+`validate_edit` would refuse cannot be planned in the first place.
 
 The pressure nudge announces the cut before it happens rather than
 outsourcing durability to the model: it names the exchange the plan would cut
@@ -121,18 +142,46 @@ run alone.
   everything costs one window rather than the store, and `total` tells the
   model to narrow rather than to page.
 
+**The door decodes an exchange, never a file.** A read opens a file once and
+then decodes and searches one exchange at a time, so what is in flight is a
+single span. Holding a whole file's decoded records instead
+would have made the door's peak memory the departed history in full, which is
+precisely what freeing residency paid to stop holding: a search would have
+cost more than never having evicted. The ancestry walk keeps the same
+discipline, below.
+
+**And it does not hold the session lock while it reads.** The two halves want
+different things: deciding *where* to read needs the fold, doing the reading
+needs only owned data. `Memo::locate_read` and `locate_grep` resolve every
+named exchange under the desk's lock into a `StoreRead` — a resident span as
+the render cache's segment by `Arc`, a departed or inherited one as its path
+and `Stamp`s by value — and `StoreRead::spans` and `::grep` read once the
+guard has dropped, borrowing nothing. A `` `grep `` over a long lineage
+therefore no longer blocks the seam, the bus and `/resources` for its
+duration. `` `index `` stays whole under the lock on purpose: it needs `&mut`
+for every row it weighs, and its one costly part is the ancestry walk, paid
+once per session. That walk is also the one file read still taken under the
+lock by the other two — on the first read that reaches past this log's own
+ledger, and never again.
+
 The refusals name the state rather than the error: an id already gone is told
 "exchange 7 has already left your context — the earliest still in view is
-12"; one never recorded is told what the last closed exchange is; the live
-exchange is refused as always; and under `--no-logs` a departed exchange is
-refused with the mode named, the head marker having already said "They are
-not readable: this session keeps no log."
+12"; one never recorded is told what the last closed exchange is; and the live
+exchange is refused as always.
 
 Reading a completed record by byte range from the file this process is still
 appending to is safe, which is what makes the door work in a live session: a
 `Stamp` exists only once the seam has written the whole record under its
-lock. `Ledger.source` is therefore fixed at construction (`Memo::new`) rather
-than attached at resume.
+lock. `Ledger.source` is `record.jsonl`'s path, fixed at construction
+(`Memo::new`) rather than attached at resume.
+
+**A byte range is meaningless without the file it was measured in**, so
+`read_stamped` compares the record's bytes against the truncated blake3 the
+`Stamp` already carried and refuses a mismatch by name: a rotated segment, a
+copied session directory, an edited log. The check runs *before* the JSON
+parse, not after, because a stale range can hold a perfectly well-formed
+record — parsing first would either refuse it as bad JSON, naming the wrong
+fault, or accept the wrong exchange and never notice.
 
 ## Lineage: one address space, ancestors by reference
 
@@ -155,22 +204,27 @@ those are its own.
 
 **The link is a record.** `Protocol::Inherited { source, evictions,
 through_exchange }` is written once, before the imported messages. `source`
-is the parent's `record.jsonl` (`None` when the parent ran `--no-logs`);
-`evictions` is the parent's head-marker state by value, so the child's marker
-opens where the parent's stood without reading the parent's file;
-`through_exchange` is the fork's reach. Resolution then goes: own resident,
-own departed by `Stamp`, then the ancestry — walked once by `index_ancestry`
-into a memoised `AncestorIndex`, each pass stopping at that link's reach and
-following the ancestor's own `Inherited` on to the grandparent. A link the
-walk cannot follow is remembered as a `Break` — `NoLog`, or `Unreadable` with
-the path and the io error — so an id behind it is refused with the reason
-rather than called unrecorded. `Admission` admits `Inherited` only as a
+is the parent's `record.jsonl`; `evictions` is the parent's head-marker state
+by value, so the child's marker opens where the parent's stood without reading
+the parent's file; `through_exchange` is the fork's reach. Resolution then
+goes: own resident, own departed by `Stamp`, then the ancestry — walked once
+by `index_ancestry` into a memoised `AncestorIndex`, each pass stopping at
+that link's reach and following the ancestor's own `Inherited` on to the
+grandparent. A link the walk cannot follow is remembered as a `Break`, with
+the path and the io error, so an id behind it is refused with the reason
+rather than called unrecorded — and a break is never cached, since an
+unreadable file may be a transient. `Admission` admits `Inherited` only as a
 fork's opening: at `ReadyForUser`, with `max_exchange == 0`, and never twice.
 
 The cost is one JSON pass over an ancestor file on the first read that
-reaches past the child's own ledger, and never again. Copying the parent's
-store into the child at fork was rejected: megabytes per spawn, and a new
-class of record that is in the log but not in the view.
+reaches past the child's own ledger, and never again. The pass is O(file) in
+time and O(span) in memory: only the last span pushed can still grow, so
+`index_ancestor` buffers the records from that span's start and nothing
+older. It partitions them by calling `record_event_span` on a `View` — the
+live fold's own function, on the live fold's own type — so the ancestry's
+notion of where an exchange begins cannot drift from the session's. Copying
+the parent's store into the child at fork was rejected: megabytes per spawn,
+and a new class of record that is in the log but not in the view.
 
 ## What it costs the cache
 
@@ -181,8 +235,10 @@ previous request, so a change at message *k* rewrites *k* onward. Therefore:
   window of growth. The old design paid this *and* a summariser call over the
   older half; this one pays only the rewrite.
 - Between cuts the head marker is byte-stable, because it is a pure function
-  of `evictions` — no clock, no path, no ordering-unstable container. Any
-  nondeterminism in that rendering is a cache bug, not a cosmetic one.
+  of `evictions` alone — no clock, no path, no ordering-unstable container,
+  and no second argument that would have to be argued constant for the memo's
+  life. Any nondeterminism in that rendering is a cache bug, not a cosmetic
+  one.
 - A `Drop` rewrites from the dropped exchange onward and never touches
   message 0.
 - Nudges and pin reminders arrive at the tail, as before, and never touch the
@@ -234,10 +290,13 @@ file.
   pressure nudge — not a summariser.
 - **`Drop` is unindexed in the marker**, by the cache argument above.
   `` transcript `index `` is the recourse, and it does list dropped spans.
-- **Ancestry needs the ancestor's file.** `/clear` rotates `record.jsonl` but
-  also cancels every descendant, so no live child ever holds a link to a
-  rotated file; the reachable cause of a missing `source` is a hand-deleted
-  directory, refused naming the path.
+- **Ancestry needs the ancestor's file** — that file, not a file at that
+  path. `/clear` rotates `record.jsonl` but also cancels every descendant, so
+  no live child ever holds a link to a rotated file; the reachable cause of a
+  missing `source` is a hand-deleted directory, refused naming the path. A
+  file that is present but is no longer the one the stamps were measured in
+  is refused too, by the digest, rather than answering with whatever now lies
+  at those offsets.
 - **`bytes` for a departed exchange in `` `index ``** is the weight it
   carried when it left, not a fresh render: weighing it again would defeat
   the point of not rendering it.
@@ -245,9 +304,10 @@ file.
   `Inherited` replays correctly if it ever does.
 - **Segment rotation** of a mammoth `record.jsonl` stays deferred, as in
   [[decisions/260812_context-is-a-projection|context-is-a-projection]]. The
-  ancestry index makes the O(file) cost visible in one more place — a child's
-  first out-of-view read — which raises that deferred work's priority
-  slightly without changing its trigger.
+  ancestry index makes the O(file) *time* cost visible in one more place — a
+  child's first out-of-view read — which raises that deferred work's priority
+  slightly without changing its trigger. Memory is not at issue anywhere in
+  the door: neither the walk nor a grep holds more than one span.
 
 ## What this supersedes
 

@@ -164,6 +164,22 @@ is no digest left to be a privileged kind of span, `` `fold `` becoming
 The law itself is untouched — eviction frees residency and keeps the
 `Stamp` — and so is everything this page says about the fold.
 
+## Superseding note: there is no transient regime
+
+`--no-logs` is deleted, and the transient exception is withdrawn
+([[decisions/260623_recording-follows-the-event|recording-follows-the-event]]).
+Two passages above are emptied rather than falsified. §The law's carve-out —
+"a `--no-logs` session deliberately has no `events.jsonl`, no transcript, no
+lock, and no rotation … the law is out of scope rather than breached" — now
+quantifies over nothing: every session has a `record.jsonl`, a run lock and a
+rotation, and there is no election for a child to inherit. §The price per
+regime's "in every regime, including transient `--no-logs`; that mode
+discards removed spans instead of spilling them" loses its second regime: a
+span that leaves the view always leaves a `Stamp` behind, and O(view)
+residency is the price everywhere. Transience is now where a session
+directory lives — a `TempDir` that unlinks at exit — not a second shape for
+the fold.
+
 ## Accepted losses
 
 The design accepts the following costs and boundaries rather than smuggling

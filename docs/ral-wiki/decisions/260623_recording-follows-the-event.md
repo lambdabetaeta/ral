@@ -77,6 +77,27 @@ the transcript, but the one log's own vocabulary for UI-authored facts
 (`Forensic::SystemNote`, `ModelChanged`) has no production emit site yet — a
 model switch records in the trace, not in the log.
 
+## Superseding note: the transient exception is withdrawn
+
+`--no-logs` — named above as "the explicit transient exception" — is deleted
+outright, and with it the second code path it forced through the whole record
+layer: an optional writer, an optional `Ledger.source`, a `NoLog` break in the
+lineage walk, a two-branch `fork` and `clear`, and a head marker that had to
+say the store was unreachable. Every session now has a `record.jsonl`, so
+"written for every *durable* session" reads simply as *every session*.
+
+It is withdrawn because it bought nothing. The flag's own help offered
+transience, not secrecy — the session cannot be resumed after Exarch exits —
+and a session directory inside a `TempDir`, which `AgentLog::for_test` already
+builds, gives exactly that: nothing survives the process, and the record layer
+does not have to know. Transience is a property of *where the session
+directory lives*, not a mode the seam and both folds must carry. What the
+exception actually cost was the door: a departed exchange under the flag was
+gone for good, and every read path had to carry the refusal that said so
+([[decisions/260906_context-rollover|context-rollover]]). `Emitter::none()`
+survives as a `#[cfg(test)]` recorder that stamps and publishes with no store,
+which is a different thing from a session mode.
+
 ## The diagnosis
 
 The bus began life as a *display* stream with exactly one consumer — the frontend

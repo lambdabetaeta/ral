@@ -41,8 +41,8 @@ pub(crate) struct Log {
 }
 
 struct Inner {
-    /// `None` for a `--no-logs` session: facts still stamp and publish, they
-    /// just have no durable form.
+    /// `None` for the store-less log tests build: facts still stamp and
+    /// publish, they just have no durable form.
     writer: Option<BufWriter<File>>,
     sink: Option<FleetSink>,
     seq: u64,
@@ -102,7 +102,8 @@ impl Log {
         Ok(Self::over(Some(BufWriter::new(file)), seq, pos))
     }
 
-    /// A log with no file — `--no-logs` — that still stamps and publishes.
+    /// A log with no file, for tests: it still stamps and publishes.
+    #[cfg(test)]
     pub(crate) fn none() -> Self {
         Self::over(None, 0, 0)
     }
@@ -119,8 +120,8 @@ impl Log {
     }
 
     /// Rotate onto a fresh segment — `Some(path)` a new file, `None` the
-    /// mirror-only seam a `--no-logs` session keeps — restarting the sequence
-    /// and cursor while leaving the attached sink in place.  The segment is
+    /// store-less log tests build — restarting the sequence and cursor while
+    /// leaving the attached sink in place.  The segment is
     /// the file's, never the session's: swapping the `Log` instead would
     /// strand the bus and every `Emitter` clone on the rotated-away file.
     ///

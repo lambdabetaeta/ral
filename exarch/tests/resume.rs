@@ -42,7 +42,6 @@ fn root_config(run_dir: &Path, resume: bool) -> RootConfig {
         caps: ral_core::types::GrantStack::root(),
         run_dir: run_dir.to_path_buf(),
         resume: resume.then(|| run_dir.to_path_buf()),
-        no_logs: false,
         run_lock: None,
         model: "test-model".into(),
         account: RecordedAccount::for_test("test"),

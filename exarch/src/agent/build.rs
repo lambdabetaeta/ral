@@ -183,7 +183,6 @@ pub struct RootConfig {
     pub caps: ral_core::types::GrantStack,
     pub run_dir: std::path::PathBuf,
     pub resume: Option<std::path::PathBuf>,
-    pub no_logs: bool,
     pub run_lock: Option<crate::bootstrap::RunLock>,
     pub model: String,
     pub account: RecordedAccount,
@@ -343,7 +342,6 @@ impl Avatar {
             caps,
             run_dir,
             resume,
-            no_logs,
             run_lock,
             model,
             account,
@@ -356,13 +354,8 @@ impl Avatar {
             dial,
             bureau,
         } = cfg;
-        // The CLI rejects both pairings at parse; these hold the invariant for
+        // The CLI rejects this pairing at parse; this holds the invariant for
         // every other caller that builds a root.
-        if resume.is_some() && no_logs {
-            return Err(io::Error::other(
-                "cannot resume a logless session — it writes nothing to reopen",
-            ));
-        }
         if resume.is_some() && chat {
             return Err(io::Error::other(
                 "cannot resume a chat session — chat keeps no resumable harness history",
@@ -421,14 +414,10 @@ impl Avatar {
         };
         let root_dir = resume.as_deref().unwrap_or(&run_dir);
         let sessions_root = root_dir.join("sessions");
-        let run_lock = if no_logs {
-            None
-        } else {
-            match run_lock {
-                Some(lock) => Some(lock),
-                None => Some(crate::bootstrap::RunLock::try_acquire(root_dir)?),
-            }
-        };
+        let run_lock = Some(match run_lock {
+            Some(lock) => lock,
+            None => crate::bootstrap::RunLock::try_acquire(root_dir)?,
+        });
         let (log, resume_summary) = if resume.is_some() {
             seed_id_counter(&sessions_root)?;
             let mut log = AgentLog::resume(&sessions_root, 0)?;
@@ -438,17 +427,7 @@ impl Avatar {
             (log, Some(summary))
         } else {
             let id = fresh_id();
-            let log = if no_logs {
-                AgentLog::root_without_logs(
-                    &sessions_root,
-                    id,
-                    &model,
-                    &account,
-                    system_prompt.len(),
-                )?
-            } else {
-                AgentLog::root(&sessions_root, id, &model, &account, system_prompt.len())?
-            };
+            let log = AgentLog::root(&sessions_root, id, &model, &account, system_prompt.len())?;
             (log, None)
         };
         let seat = match root_seat {
@@ -1036,7 +1015,6 @@ mod tests {
                 caps: ral_core::types::GrantStack::root(),
                 run_dir: dir.path().to_owned(),
                 resume: None,
-                no_logs: false,
                 run_lock: None,
                 model: "test-model".into(),
                 account: RecordedAccount::for_test("test"),
@@ -1432,7 +1410,6 @@ mod tests {
                 caps: ral_core::types::GrantStack::root(),
                 run_dir: dir.path().to_owned(),
                 resume: Some(dir.path().to_owned()),
-                no_logs: false,
                 run_lock: None,
                 model: "new-model".into(),
                 account: RecordedAccount::for_test("new-provider"),
@@ -1549,51 +1526,6 @@ mod tests {
     }
 
     #[test]
-    fn no_logs_is_process_wide_and_never_mints_durable_files() {
-        let dir = tmp("no-logs-agent");
-        let scratch =
-            Scratch::for_test(crate::bootstrap::EXARCH, "no-logs-agent").expect("scratch dir");
-        let agent = Avatar::root(
-            RootConfig {
-                system: "system".into(),
-                caps: ral_core::types::GrantStack::root(),
-                run_dir: dir.path().to_owned(),
-                resume: None,
-                no_logs: true,
-                run_lock: None,
-                model: "test-model".into(),
-                account: RecordedAccount::for_test("test"),
-                allow_schedule: false,
-                interactive: true,
-                chat: false,
-                disk_warn_bytes: None,
-                fuel: 1,
-                egress: crate::egress::Egress::for_test(),
-                dial: None,
-                bureau: Arc::new(crate::provider::Bureau::Scripted),
-            },
-            RootSeat::Identity {
-                scratch: Arc::new(scratch),
-                cwd: std::env::current_dir().expect("test process has a cwd"),
-                detach: false,
-            },
-            scripted("test-model", Script::new()),
-        )
-        .expect("mirror-only agent");
-        let root_log = agent.log_dir();
-        let child = agent
-            .fork(ral_core::types::GrantStack::root())
-            .expect("mirror-only child");
-        let child_log = child.log_dir();
-        for log_dir in [&root_log, &child_log] {
-            assert!(!log_dir.join("record.jsonl").exists());
-        }
-        assert!(!dir.path().join("run.lock").exists());
-        drop(child);
-        drop(agent);
-    }
-
-    #[test]
     fn resume_seeds_child_ids_past_existing_session_directories() {
         let dir = tmp("resume-id-seed");
         let sessions = dir.path().join("sessions");
@@ -1617,7 +1549,6 @@ mod tests {
                 caps: ral_core::types::GrantStack::root(),
                 run_dir: dir.path().to_owned(),
                 resume: Some(dir.path().to_owned()),
-                no_logs: false,
                 run_lock: None,
                 model: "new-model".into(),
                 account: RecordedAccount::for_test("new-provider"),

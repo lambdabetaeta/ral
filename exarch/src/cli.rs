@@ -107,15 +107,9 @@ pub struct Cli {
     /// With no TARGET, Exarch chooses the newest unlocked run for the current
     /// working directory. You can instead name a run directory or its
     /// `sessions/0` directory. A headless resume still needs a new opening
-    /// prompt. You cannot resume in chat mode or when using `--no-logs`.
-    #[arg(long, value_name = "TARGET", num_args = 0..=1, conflicts_with_all = ["no_logs", "chat"])]
+    /// prompt. You cannot resume in chat mode.
+    #[arg(long, value_name = "TARGET", num_args = 0..=1, conflicts_with = "chat")]
     pub resume: Option<Option<std::path::PathBuf>>,
-    /// Keep the conversation record in memory instead of writing session logs.
-    ///
-    /// The session cannot be resumed after Exarch exits. You cannot use this
-    /// option with `--resume`.
-    #[arg(long = "no-logs")]
-    pub no_logs: bool,
     /// Choose the format written to standard output in headless mode.
     ///
     /// `text`, the default, writes the agent's final reply as readable ral
@@ -152,9 +146,9 @@ pub struct Cli {
     /// Start a simple interactive conversation with the model.
     ///
     /// Chat mode gives the model no tools and none of Exarch's normal agent
-    /// instructions. Exarch still records the conversation unless you use
-    /// `--no-logs`. You cannot combine chat mode with `--headless`, `--system`,
-    /// `--resume`, `--allow-schedule` or `--edit`.
+    /// instructions. Exarch still records the conversation. You cannot combine
+    /// chat mode with `--headless`, `--system`, `--resume`, `--allow-schedule`
+    /// or `--edit`.
     #[arg(long = "chat", conflicts_with_all = ["headless", "system_files"])]
     pub chat: bool,
 }

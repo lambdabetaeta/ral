@@ -1573,9 +1573,14 @@ impl ExarchDesk {
     fn transcript(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let (tag, payload) = family_tag(payload, "transcript")?;
         match tag.as_str() {
-            "index" => self.traced("index".to_string(), |log| {
-                Ok(store_index_answer(log.store_index()))
-            }),
+            // The index stays whole under the lock: it needs `&mut AgentLog`
+            // for every row it weighs, and its one costly part — the ancestry
+            // walk — is paid once per session.
+            "index" => self.traced(
+                "index".to_string(),
+                |log| Ok(store_index_answer(log.store_index())),
+                Ok,
+            ),
             "read" => self.transcript_read(payload),
             "grep" => self.transcript_grep(payload),
             other => Err(unknown_tag("transcript", other)),
@@ -1587,9 +1592,11 @@ impl ExarchDesk {
     fn transcript_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let exchanges = payload_exchanges(payload, "transcript `read")?;
         let subject = format!("read {}", exchanges_list(&exchanges));
-        self.traced(subject, |log| {
-            log.read_context(&exchanges).map(transcript_answer)
-        })
+        self.traced(
+            subject,
+            |log| log.locate_read(&exchanges),
+            |read| read.spans().map(transcript_answer),
+        )
     }
 
     /// `` `transcript `grep `` — a Rust regex over the store's text, the
@@ -1611,22 +1618,29 @@ impl ExarchDesk {
             Some(exchanges) => format!("grep {pattern} in {}", exchanges_list(exchanges)),
             None => format!("grep {pattern}"),
         };
-        self.traced(subject, |log| {
-            let regex = Regex::new(&pattern).map_err(|error| error.to_string())?;
-            log.grep_store(&regex, exchanges.as_deref())
-                .map(grep_answer)
-        })
+        self.traced(
+            subject,
+            |log| {
+                let regex = Regex::new(&pattern).map_err(|error| error.to_string())?;
+                Ok((log.locate_grep(exchanges.as_deref())?, regex))
+            },
+            |(read, regex)| read.grep(&regex).map(grep_answer),
+        )
     }
 
-    /// The tail every `` `transcript `` tag shares: answer off the log, and
-    /// mirror the call — refused or not — onto the trace under its own
-    /// subject.
-    fn traced(
+    /// The tail every `` `transcript `` tag shares: `locate` under the session
+    /// lock, `read` once it is gone, and the call — refused or not — mirrored
+    /// onto the trace under its own subject.
+    fn traced<P>(
         &self,
         subject: String,
-        answer: impl FnOnce(&mut AgentLog) -> Result<FOValue, String>,
+        locate: impl FnOnce(&mut AgentLog) -> Result<P, String>,
+        read: impl FnOnce(P) -> Result<FOValue, String>,
     ) -> Result<FOValue, Error> {
-        let result = answer(&mut self.services.log.lock());
+        // Its own statement: the guard dies at this semicolon, so a long read
+        // never holds the seam, the bus and `/resources` behind it.
+        let located = locate(&mut self.services.log.lock());
+        let result = located.and_then(read);
         self.services
             .record_display(crate::record::Display::HarnessCall {
                 verb: "transcript".to_string(),

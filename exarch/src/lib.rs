@@ -189,7 +189,7 @@ pub fn run() -> Result<(), String> {
     let scratch = Arc::new(
         bootstrap::Scratch::new(bootstrap::EXARCH).map_err(|e| format!("scratch dir: {e}"))?,
     );
-    let (run_dir, run_lock, resume) = resolve_run(&cwd, c.resume, c.no_logs)?;
+    let (run_dir, run_lock, resume) = resolve_run(&cwd, c.resume)?;
     let config_dir = bootstrap::EXARCH.xdg_dir(ral_core::path::basedir::XdgKind::Config);
     let cwd_path = std::path::PathBuf::from(&cwd);
     // Whether the double fork exists on this host at all; whether a given call
@@ -226,8 +226,7 @@ pub fn run() -> Result<(), String> {
             caps,
             run_dir: run_dir.clone(),
             resume,
-            no_logs: c.no_logs,
-            run_lock,
+            run_lock: Some(run_lock),
             model,
             account: recorded_account,
             allow_schedule: c.allow_schedule,
@@ -274,11 +273,10 @@ pub fn run() -> Result<(), String> {
 fn resolve_run(
     cwd: &str,
     resume: Option<Option<std::path::PathBuf>>,
-    no_logs: bool,
 ) -> Result<
     (
         std::path::PathBuf,
-        Option<bootstrap::RunLock>,
+        bootstrap::RunLock,
         Option<std::path::PathBuf>,
     ),
     String,
@@ -304,7 +302,7 @@ fn resolve_run(
                 continue;
             }
             match bootstrap::RunLock::try_acquire(&run_dir) {
-                Ok(lock) => return Ok((run_dir.clone(), Some(lock), Some(run_dir))),
+                Ok(lock) => return Ok((run_dir.clone(), lock, Some(run_dir))),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if explicit {
                         return Err(format!(
@@ -331,9 +329,7 @@ fn resolve_run(
     let run_dir = bootstrap::EXARCH
         .log_run_dir(cwd)
         .map_err(|error| format!("log dir: {error}"))?;
-    let lock = (!no_logs)
-        .then(|| bootstrap::RunLock::try_acquire(&run_dir))
-        .transpose()
+    let lock = bootstrap::RunLock::try_acquire(&run_dir)
         .map_err(|error| format!("could not lock {}: {error}", run_dir.display()))?;
     Ok((run_dir, lock, None))
 }

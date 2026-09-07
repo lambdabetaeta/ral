@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c5df4203
-generated_at_date: 2026-09-06
+generated_at_commit: 7e129df6
+generated_at_date: 2026-09-07
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -615,11 +615,6 @@ shell is fresh and receives a note describing the bindings, workers, cwd,
 scratch, pins, and schedules that were not durable. Wire seats and child logs
 are refused rather than half-resumed.
 
-`--no-logs` chooses the mirror-only path at birth: no durable event ledger or
-transcript, and no run lock, is created. The in-memory model view and live bus
-still operate, children inherit the choice, and there is consequently nothing
-for `--resume` to reopen.
-
 `evict` sheds the older half of the window when context pressure crosses the
 window's reserve (`digest.rs`'s `eviction_due` — used tokens into the top 15%
 of a known window; `EVICT_THRESHOLD`, 500 KiB of serialised history, is the
@@ -630,9 +625,13 @@ and the gate actually holds — every provider round-trip (`step`) passes throug
 here, so long autonomous and headless sessions stay bounded without an
 interactive `/evict`. `suffix_keep_budget` (half the history bytes) sets the
 cut and `Memo::plan_eviction` walks back from the newest closed span until that
-budget is spent; the plan carries only `through_exchange`. **No provider call
-is involved**, so an exchange-boundary Esc has nothing to interrupt and simply
-leaves the window as it lies
+budget is spent; the plan carries only `through_exchange`. The walk draws its
+candidates from `split_last`'s older half, so the newest span is not in the
+slice a plan can name and a cut through the live exchange is unrepresentable
+rather than merely improbable — the budget alone would cut everything when the
+newest span outweighs the whole of it. **No provider call is involved**, so an
+exchange-boundary Esc has nothing to interrupt and simply leaves the window as
+it lies
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 
 A successful eviction records `ContextEdited { op: Evict { through_exchange,

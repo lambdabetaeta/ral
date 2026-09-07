@@ -268,7 +268,6 @@ fn root(interactive: bool, chat: bool) -> Avatar {
             caps: ral_core::types::GrantStack::root(),
             run_dir,
             resume: None,
-            no_logs: false,
             run_lock: None,
             model: "test-model".into(),
             account: RecordedAccount::for_test("test"),

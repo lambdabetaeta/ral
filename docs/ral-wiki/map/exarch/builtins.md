@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c5df4203
-generated_at_date: 2026-09-06
+generated_at_commit: 7e129df6
+generated_at_date: 2026-09-07
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -228,7 +228,10 @@ surveys; `transcript` only reads.
     so: `context_evict_payload` checks its type at the door, and the desk
     refuses a note it will not draw — a marker reading
     `Your note at eviction: ""` is a defect the type should prevent, and
-    making `note` required would invite exactly that.
+    making `note` required would invite exactly that. Its size and shape are
+    the desk's too — at most `NOTE_CAP` (240) bytes, and no line break, since
+    the marker draws one row per evicted exchange and a note that could add a
+    row would unbound the one message an eviction never reclaims.
 
   Each edit records a `ContextEdited` model event at the desk immediately,
   under `DeskAct::ContextEvict` or `ContextDrop`. There is no byte-delta

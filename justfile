@@ -17,10 +17,15 @@ default:
 # third-party crates included (measured 2026-08-25: 408 rebuilt).
 deny := '-D warnings'
 
+# `--keep-going`, here and on `lint`: a catch-up session walks into a pile of
+# drift at once — a cross-platform half nothing has compiled in weeks — and
+# stopping at the first crate turns one pass into one fix-and-rebuild cycle per
+# failure. Exit status is unchanged; only how much of the pile one run reports.
+
 # Private, and a dependency of `test`: `cargo test` alone does not reliably
 # refresh the `ral` binary that ral/tests/ shells out to.
 _build $RUSTFLAGS=deny:
-    cargo build --workspace {{gui}} --all-targets
+    cargo build --workspace {{gui}} --all-targets --keep-going
 
 # Run the workspace test suite.
 test $RUSTFLAGS=deny: _build
@@ -32,7 +37,7 @@ test $RUSTFLAGS=deny: _build
 
 # Clippy across the workspace, warnings as errors.
 lint $RUSTFLAGS=deny:
-    cargo clippy --workspace {{gui}} --all-targets
+    cargo clippy --workspace {{gui}} --all-targets --keep-going
 
 # Never links, so a Unix host can run it. exarch and synod are excluded because
 # rustls -> aws-lc-sys compiles C against Windows system headers; guest-net

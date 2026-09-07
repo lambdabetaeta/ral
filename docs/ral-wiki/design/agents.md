@@ -153,9 +153,10 @@ index and following that ancestor's own link on to the grandparent, so a
 `mnemon` child can `` transcript `read `` or `` `grep `` anything its lineage
 ever recorded, evicted from the parent's window long before the fork included.
 Ids are therefore lineage-monotone: the child mints its first prompt above the
-parent's floor, and along any lineage an id names exactly one exchange. Only
-`--no-logs` breaks the chain, and the refusal names the ancestor rather than
-calling the exchange unrecorded ([[decisions/260906_context-rollover|context-rollover]]).
+parent's floor, and along any lineage an id names exactly one exchange. The
+chain breaks only where an ancestor's file has been taken away by hand, and
+the refusal names the ancestor and the path rather than calling the exchange
+unrecorded ([[decisions/260906_context-rollover|context-rollover]]).
 
 The spawn's **`provider`** and **`model`** fields choose what the child runs
 on. ral has no optional record field and no null: absence is *data*, carried

@@ -139,7 +139,6 @@ fn main() {
         caps: GrantStack::root(),
         run_dir,
         resume: None,
-        no_logs: false,
         run_lock: None,
         model: "test-model".to_string(),
         account: RecordedAccount {
