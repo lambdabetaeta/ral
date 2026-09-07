@@ -1883,7 +1883,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            s.view().spans.iter().map(|span| span.id).collect::<Vec<_>>(),
+            s.view()
+                .spans
+                .iter()
+                .map(|span| span.id)
+                .collect::<Vec<_>>(),
             vec![2],
             "the newest span must survive the eviction it could not itself be named by"
         );
@@ -2735,6 +2739,68 @@ mod tests {
             .expect("a late link is foreign data");
         let text = error.to_string();
         assert!(text.contains("only a fork's opening may do"), "{text}");
+    }
+
+    /// A lineage the walk cannot follow refuses the id behind it by the fault
+    /// it actually met — a line that will not read back, or a file that will
+    /// not open — and never by calling an exchange the ancestry owns
+    /// unrecorded. A break is not remembered, so the second read walks again.
+    ///
+    /// A break bounds only what the walk had not reached: the pass indexes
+    /// each span as it closes, so an exchange already indexed stays readable
+    /// and only the ones behind the fault are refused.
+    #[test]
+    fn a_broken_ancestry_link_is_refused_by_the_fault_it_met() {
+        let sessions = sessions_root("lineage-broken");
+        let mut parent = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        for prompt in ["one", "two"] {
+            complete_exchange(&mut parent, prompt, prompt);
+        }
+        parent
+            .apply_edit(
+                ContextOp::Evict {
+                    through_exchange: 1,
+                    note: None,
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+        let source = record_path(&parent);
+        let mut child = mnemon(&mut parent, 1);
+        drop(parent);
+
+        // The walk indexes as it goes, so only a fault standing *before* an
+        // exchange's own records puts that exchange out of reach.
+        let recorded = fs::read_to_string(&source).expect("record.jsonl is utf-8");
+        let mut torn = String::new();
+        for (line, text) in recorded.lines().enumerate() {
+            if line == 1 {
+                torn.push_str("{\"not\":\"an envelope\"}\n");
+            }
+            torn.push_str(text);
+            torn.push('\n');
+        }
+        fs::write(&source, &torn).expect("rewrite the ancestor's log");
+        let refusal = child
+            .read_context(&[1])
+            .expect_err("a line the walk cannot read stops the lineage");
+        assert!(
+            refusal.contains("line 2 of the ancestor's log") && refusal.contains("read back"),
+            "{refusal}"
+        );
+
+        fs::remove_file(&source).expect("delete the ancestor's log");
+        let refusal = child
+            .read_context(&[1])
+            .expect_err("a deleted ancestor's log stops the lineage");
+        assert!(refusal.contains("would not open"), "{refusal}");
     }
 
     /// The link is folded, not just recorded: a refold reads the parent's

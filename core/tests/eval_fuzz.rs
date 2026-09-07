@@ -8,10 +8,10 @@ mod common;
 use ral_core::builtins;
 use ral_core::protocol::{Program, Run};
 #[cfg(unix)]
-use ral_core::types::{ExecMap, ExecPolicy};
-#[cfg(unix)]
 use ral_core::types::Capabilities;
 use ral_core::types::{Break, GrantStack, Shell, Value};
+#[cfg(unix)]
+use ral_core::types::{ExecMap, ExecPolicy};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 #[cfg(unix)]
 use std::collections::{BTreeMap, BTreeSet};
@@ -1758,10 +1758,7 @@ fn lexical_non_head_name_is_literal_without_deref() {
 #[test]
 fn lexical_non_head_name_uses_deref_to_get_value() {
     let v = must_succeed("let f = { |x| return $x }\nreturn $f");
-    assert!(
-        matches!(v, Value::Thunk(_)),
-        "expected thunk, got {v:?}"
-    );
+    assert!(matches!(v, Value::Thunk(_)), "expected thunk, got {v:?}");
 }
 
 #[test]
@@ -2585,9 +2582,13 @@ fn earlier_use_of_a_later_non_thunk_let_is_not_shadowed() {
 fn audit_fs_write_denied_recorded() {
     // The grant body evaluates in-process and the redirect is an
     // RAL-owned fs effect, so the fs/denied capability-check fires
-    // through `check_fs_op` before the write — no OS sandbox subprocess
+    // through `Shell::locate` before the write — no OS sandbox subprocess
     // is involved, so this runs on every host.
-    let outside = format!("/nonexistent_ralaudit_test_{}/file.txt", std::process::id());
+    //
+    // The leaf is absent but its directory is the root: the door judges the
+    // object a create would put there, and a *missing directory* would fail
+    // the walk before there is any object to judge.
+    let outside = format!("/ralaudit_test_{}.txt", std::process::id());
     let script =
         format!("audit {{ grant [fs: [write: ['/tmp']]] {{ to-string 'x' > '{outside}' }} }}");
     let children = trail_of(&must_succeed(&script));
@@ -2774,10 +2775,7 @@ fn audit_nested_audit_flattens_into_outer_children() {
     // straight into the outer audit's children, and no `audit`-named
     // observation ever appears.
     let tree = must_succeed("audit { audit { /bin/true } }");
-    let names: Vec<String> = trail_of(&tree)
-        .iter()
-        .filter_map(command_argv0)
-        .collect();
+    let names: Vec<String> = trail_of(&tree).iter().filter_map(command_argv0).collect();
     assert!(
         names.iter().any(|n| n.contains("/bin/true")),
         "inner audit's real command must flatten into the outer audit's children: {names:?}"
@@ -2794,10 +2792,7 @@ fn audit_direct_external_pipeline_stage_appears_in_tree() {
     // off), so the first external stage takes the direct-spawn path.
     // The synthesised command observation must still show up.
     let tree = must_succeed("audit { /bin/echo hi | /bin/cat }");
-    let cmds: Vec<String> = trail_of(&tree)
-        .iter()
-        .filter_map(command_argv0)
-        .collect();
+    let cmds: Vec<String> = trail_of(&tree).iter().filter_map(command_argv0).collect();
     assert!(
         cmds.iter().any(|c| c.contains("echo")),
         "direct-spawn echo stage must appear in audit tree: {cmds:?}"
@@ -2913,12 +2908,13 @@ fn failing_bundled_byte_stage_surfaces_failure() {
 fn audit_captures_stderr_in_full() {
     let script = "audit { /bin/sh -c 'head -c 80000 /dev/zero >&2' }";
     let report = must_succeed(script);
-    let stderr_buf = trail_of(&report)
-        .iter()
-        .find_map(|c| match fact_field(c, "command", "stderr") {
-            Value::Bytes(b) if !b.is_empty() => Some(b),
-            _ => None,
-        });
+    let stderr_buf =
+        trail_of(&report)
+            .iter()
+            .find_map(|c| match fact_field(c, "command", "stderr") {
+                Value::Bytes(b) if !b.is_empty() => Some(b),
+                _ => None,
+            });
     // Some build environments lack /bin/sh or head; tolerate that.
     let Some(b) = stderr_buf else {
         return;

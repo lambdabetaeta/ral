@@ -8,7 +8,7 @@ use exarch::bootstrap::{EXARCH, Scratch};
 use exarch::bus::{Emitter, channel};
 use exarch::provider::Provider;
 use exarch::provider::scripted::{Reply, Script};
-use exarch::record::{self, Refusal, View};
+use exarch::record::{self, Blocks, Refusal, View};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -111,7 +111,7 @@ fn scripted_run_kill_resume_and_continue() {
     // above) but the *user's* — the view fold `record.jsonl` folds into,
     // which a resumed TUI seeds its scrollback from (`tui_loop::run`).
     let record_path = resumed.log_dir().join("record.jsonl");
-    let blocks = record::replay::<View>(&record_path)
+    let blocks = record::replay::<View>(&record_path, Blocks::default())
         .expect("the resumed session's record log replays cleanly");
     assert!(
         blocks.render_log().contains("before kill"),
@@ -138,7 +138,7 @@ fn scripted_run_kill_resume_and_continue() {
         "the pre-kill exchange must still be present after driving the resumed session further"
     );
 
-    let blocks = record::replay::<View>(&record_path)
+    let blocks = record::replay::<View>(&record_path, Blocks::default())
         .expect("the record log still replays cleanly after driving the resumed session");
     let rendered = blocks.render_log();
     assert!(
@@ -176,10 +176,10 @@ fn the_view_folds_render_is_a_pure_function_of_the_log() {
         })
         .expect("a forensic record records");
 
-    let first = record::replay::<View>(&path)
+    let first = record::replay::<View>(&path, Blocks::default())
         .expect("a fresh log replays cleanly")
         .render_log();
-    let second = record::replay::<View>(&path)
+    let second = record::replay::<View>(&path, Blocks::default())
         .expect("replaying the same log twice must agree")
         .render_log();
     assert_eq!(
@@ -219,7 +219,7 @@ fn replay_refuses_a_ledger_line_it_does_not_recognise() {
     .expect("append a foreign line");
     file.flush().expect("flush the foreign line");
 
-    match record::replay::<View>(&path) {
+    match record::replay::<View>(&path, Blocks::default()) {
         Err(Refusal::Unreadable(_)) => {}
         Err(other) => panic!("expected an Unreadable refusal, not: {other}"),
         Ok(_) => panic!(

@@ -1,5 +1,5 @@
-//! The one generic replay driver: `records.try_fold(Memo::default(),
-//! F::step)`, carrying the `fold == memo` proof once for every [`Fold`]
+//! The one generic replay driver: `records.try_fold(seed, F::step)`,
+//! carrying the `fold == memo` proof once for every [`Fold`]
 //! rather than once per consumer.  No fold lives here — `record::model` and
 //! `record::view` bring their own `step` in a later parcel — only the
 //! driver and the error it can refuse a session with.
@@ -39,14 +39,17 @@ impl From<io::Error> for Refusal {
     }
 }
 
-/// Fold `path` into `F::Memo`, refusing the session at the first record `F`
+/// Fold `path` into `seed`, refusing the session at the first record `F`
 /// does not recognise.
+///
+/// The caller brings the seed, since not every memo exists at nothing: the
+/// model fold's needs its log's path.
 ///
 /// # Errors
 /// Returns [`Refusal`] if the file will not read back, or if `F::step`
 /// refuses one of its records.
-pub fn replay<F: Fold>(path: &Path) -> Result<F::Memo, Refusal> {
-    Log::read(path)?.try_fold(F::Memo::default(), |mut memo, record| {
+pub fn replay<F: Fold>(path: &Path, seed: F::Memo) -> Result<F::Memo, Refusal> {
+    Log::read(path)?.try_fold(seed, |mut memo, record| {
         let record: Recorded<Record> = record?;
         F::step(&mut memo, &record)?;
         Ok(memo)

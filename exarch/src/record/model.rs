@@ -163,7 +163,6 @@ fn message_bytes(messages: &[ChatMessage]) -> usize {
 
 /// One resident protocol record, or the [`Stamp`] to read it back by once a
 /// context edit evicts its span.
-#[derive(Default)]
 struct Ledger {
     len: usize,
     resident: BTreeMap<usize, Recorded<Protocol>>,
@@ -290,7 +289,9 @@ fn read_stamped(reader: &mut File, stamp: &Stamp) -> io::Result<Protocol> {
 /// under the recompute invariant — a memo of a pure function at immutable
 /// arguments, never serialised, rebuilt from nothing by this same fold on
 /// resume.
-#[derive(Default)]
+///
+/// No `Default`: a memo without its log's path is a memo whose every store
+/// read fails, so [`Self::new`] is the only way to one.
 pub struct Memo {
     ledger: Ledger,
     state: State,
@@ -302,7 +303,7 @@ pub struct Memo {
     /// maximum), so `(id, end)` determines a rendering globally and forever.
     render: HashMap<u64, SpanRender>,
     /// The head marker, recomputed whenever [`View::evictions`] changes and
-    /// present exactly when that list is non-empty.
+    /// present exactly when one of them carries a row.
     head_render: Option<(Arc<[ChatMessage]>, usize)>,
     /// Every span that has left the view, by eviction or by drop: where its
     /// records lie in the ledger, and the row it was weighed at while the
@@ -353,22 +354,46 @@ struct AncestorSpan {
 }
 
 /// Why a lineage walk stopped before the ancestry's root: an ancestor's
-/// `record.jsonl` could not be read. `/clear` cancels every descendant before
-/// it rotates, so no live child holds a link to a rotated file: the reachable
-/// cause is a hand-deleted directory.
+/// `record.jsonl` would not open, or one of its records would not read back.
+/// `/clear` cancels every descendant before it rotates, so no live child
+/// holds a link to a rotated file; a hand-deleted directory is what a walk
+/// usually meets, but an ancestor is appended to while its children read it,
+/// so a record can fail on its own account too.
 struct Break {
     source: PathBuf,
+    fault: Fault,
     error: String,
+}
+
+/// Which half of the walk failed, so a refusal names the fault met rather
+/// than the likelier one.
+enum Fault {
+    /// The file itself.
+    Open,
+    /// One record within it, by line.
+    Record(usize),
 }
 
 impl Break {
     fn refusal(&self, exchange: u64) -> String {
-        format!(
-            "exchange {exchange} was recorded by an ancestor, but the ancestor's log at {} is gone: {}",
-            self.source.display(),
-            self.error
-        )
+        let at = self.source.display();
+        let error = &self.error;
+        match self.fault {
+            Fault::Open => format!(
+                "exchange {exchange} was recorded by an ancestor, but the ancestor's log at {at} would not open: {error}"
+            ),
+            Fault::Record(line) => format!(
+                "exchange {exchange} was recorded by an ancestor, but line {line} of the ancestor's log at {at} would not read back: {error}"
+            ),
+        }
     }
+}
+
+/// [`index_ancestor`]'s failure, before the walk binds it to the file it
+/// happened in.
+struct Broken {
+    fault: Fault,
+    error: io::Error,
 }
 
 /// Where one closed exchange's records lie. Spans and [`Stamp`]s rather than
@@ -476,10 +501,20 @@ impl Memo {
     pub fn new(source: PathBuf) -> Self {
         Self {
             ledger: Ledger {
+                len: 0,
+                resident: BTreeMap::new(),
+                freed: BTreeMap::new(),
                 source,
-                ..Ledger::default()
             },
-            ..Self::default()
+            state: State::default(),
+            view: View::default(),
+            max_exchange: 0,
+            newest_edit: None,
+            render: HashMap::new(),
+            head_render: None,
+            departed: BTreeMap::new(),
+            ancestry: None,
+            ancestry_index: None,
         }
     }
 
@@ -651,10 +686,11 @@ impl Memo {
 
     /// Re-render the head marker from the evictions the view now carries —
     /// the one place [`Self::head_render`] is written, so it cannot drift
-    /// from them.
+    /// from them. Whether there is a marker at all is [`render_head`]'s to
+    /// say, so the two cannot disagree about it.
     fn recompute_head(&mut self) {
-        self.head_render = (!self.view.evictions.is_empty()).then(|| {
-            let message = ChatMessage::user(render_head(&self.view.evictions));
+        self.head_render = render_head(&self.view.evictions).map(|text| {
+            let message = ChatMessage::user(text);
             let bytes = message_bytes(std::slice::from_ref(&message));
             (Arc::from(vec![message]), bytes)
         });
@@ -1150,16 +1186,19 @@ impl Memo {
 
     /// A plan never names the newest span in view: an eviction exists to keep
     /// the task in hand, and the newest span is also the only one that can be
-    /// live, so a cut `validate_edit` would refuse is unrepresentable. Every
-    /// span the walk below weighs is therefore strictly older than the
-    /// newest, so none of them can still be growing.
+    /// live, so a cut `validate_edit` would refuse is unrepresentable.
+    ///
+    /// Each span is weighed as [`Self::assemble`] weighs it — the newest as
+    /// it lies, since it may still be growing, every older one off the
+    /// closed-render cache — so the budget is spent in the same currency
+    /// [`Self::history_bytes`] counted it in.
     pub(crate) fn plan_eviction(
         &mut self,
         keep_budget_bytes: usize,
         before_exchange: Option<u64>,
     ) -> Option<EvictionPlan> {
         let spans = self.view.spans.clone();
-        let (_, older) = spans.split_last()?;
+        let (newest, older) = spans.split_last()?;
         // A continued exchange and everything after it stay, as does the newest.
         let cap = before_exchange.map_or(older.len(), |id| {
             older
@@ -1167,8 +1206,8 @@ impl Memo {
                 .position(|span| span.id >= id)
                 .unwrap_or(older.len())
         });
-        let mut spent = 0usize;
-        for span in &spans[cap..] {
+        let mut spent = message_bytes(&self.render_tail(newest));
+        for span in &older[cap..] {
             spent = spent.saturating_add(self.render_closed_entry(span).bytes);
         }
         let mut start = cap;
@@ -1189,8 +1228,19 @@ impl Memo {
     }
 }
 
+/// What an exchange's opening line is clipped to as a row is built, and the
+/// column the head marker pads that row to. One measure, so no reader of a
+/// row — the marker's own table, a survey, the store index, or an ancestor's
+/// link as it lands in a child's log — holds or aligns a different length.
+const OPENING_CHARS: usize = 50;
+
 fn opening_line(text: &str) -> String {
-    text.lines().next().unwrap_or_default().to_string()
+    text.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(OPENING_CHARS)
+        .collect()
 }
 
 /// A span is an import iff its first record is one; nothing else opens one.
@@ -1241,9 +1291,10 @@ fn index_ancestry(ancestry: &Ancestry) -> AncestorIndex {
     {
         match index_ancestor(&source, through_exchange, &mut index.spans) {
             Ok(next) => link = next,
-            Err(error) => {
+            Err(Broken { fault, error }) => {
                 index.broken = Some(Break {
                     source,
+                    fault,
                     error: error.to_string(),
                 });
                 return index;
@@ -1262,7 +1313,7 @@ fn index_ancestor(
     path: &Path,
     through_exchange: u64,
     spans: &mut BTreeMap<u64, AncestorSpan>,
-) -> io::Result<Option<Ancestry>> {
+) -> Result<Option<Ancestry>, Broken> {
     let mut view = View::default();
     let mut max_exchange = 0u64;
     // Only the last span pushed can still grow, so the records from its start
@@ -1271,8 +1322,15 @@ fn index_ancestor(
     let mut buffer_start = 0usize;
     let mut index = 0usize;
     let mut link = None;
-    for record in Log::read(path)? {
-        let record = record?;
+    let records = Log::read(path).map_err(|error| Broken {
+        fault: Fault::Open,
+        error,
+    })?;
+    for (line, record) in records.enumerate() {
+        let record = record.map_err(|error| Broken {
+            fault: Fault::Record(line + 1),
+            error,
+        })?;
         let Record::Protocol(protocol) = record.value() else {
             continue;
         };
@@ -1327,7 +1385,10 @@ fn index_span(
         stamps: held.iter().map(|(_, stamp)| stamp.clone()).collect(),
         row: ancestor_row(
             span.id,
-            &held.iter().map(|(protocol, _)| protocol).collect::<Vec<_>>(),
+            &held
+                .iter()
+                .map(|(protocol, _)| protocol)
+                .collect::<Vec<_>>(),
         ),
     });
 }
@@ -1730,13 +1791,14 @@ fn abandoned_note(events: &[&Protocol]) -> String {
 /// collapses into one line naming the range.
 const HEAD_ROWS: usize = 40;
 
-/// What a row's opening line is clipped and padded to. One measure for
-/// both, so the table cannot be knocked out of column.
-const HEAD_OPENING: usize = 50;
+/// The exchange-id column both a row and the collapse line are set in.
+const HEAD_ID: usize = 4;
 
 /// The head marker: the one user-voice message standing where an evicted
 /// prefix was, indexing every exchange that has left so the model can ask for
-/// any of them back.
+/// any of them back. `None` when no eviction carries a row, which is the one
+/// notion of "no marker" there is — an eviction of nothing indexes nothing,
+/// however it reached the fold.
 ///
 /// A pure function of the eviction list — no clock, no path, no
 /// ordering-unstable container — so between two evictions the provider's
@@ -1744,14 +1806,12 @@ const HEAD_OPENING: usize = 50;
 ///
 /// Voice and bracket as [`abandoned_note`]: the harness may state a fact
 /// about the conversation, never speak in the model's own voice.
-fn render_head(evictions: &[Eviction]) -> String {
+fn render_head(evictions: &[Eviction]) -> Option<String> {
     let rows: Vec<&EvictedRow> = evictions
         .iter()
         .flat_map(|eviction| eviction.rows.iter())
         .collect();
-    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
-        return String::new();
-    };
+    let (first, last) = (rows.first()?, rows.last()?);
     let departed = if rows.len() == 1 {
         format!("Exchange {} has left your context.", first.exchange)
     } else {
@@ -1768,7 +1828,7 @@ fn render_head(evictions: &[Eviction]) -> String {
     if collapsed > 0 {
         let range = format!("{}–{}", first.exchange, rows[collapsed - 1].exchange);
         lines.push(format!(
-            "{range:>4}  ({collapsed} earlier exchanges — transcript `index)"
+            "{range:>HEAD_ID$}  ({collapsed} earlier exchanges — transcript `index)"
         ));
     }
     for drawn in drawn_evictions(evictions, collapsed) {
@@ -1781,7 +1841,7 @@ fn render_head(evictions: &[Eviction]) -> String {
             lines.push(format!("Your note at eviction: {note:?}"));
         }
     }
-    format!("{}]", lines.join("\n"))
+    Some(format!("{}]", lines.join("\n")))
 }
 
 /// What the marker draws: one entry per eviction that still has a row on
@@ -1812,10 +1872,10 @@ fn drawn_evictions(evictions: &[Eviction], collapsed: usize) -> Vec<Drawn<'_>> {
 }
 
 fn head_row(row: &EvictedRow) -> String {
-    let opening: String = row.opening.chars().take(HEAD_OPENING).collect();
     format!(
-        "{:>4}  {opening:<HEAD_OPENING$}{:>3} steps {:>5} KB",
+        "{:>HEAD_ID$}  {:<OPENING_CHARS$}{:>3} steps {:>5} KB",
         row.exchange,
+        row.opening,
         row.steps,
         row.bytes / 1024
     )

@@ -26,8 +26,8 @@ pub use view::{Block, BlockKind, View};
 
 pub(crate) use log::FleetSink;
 
-use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord, ToolResult, UsageDelta};
 use crate::agent::Agent;
+use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord, ToolResult, UsageDelta};
 use crate::bus::card::Card;
 use crate::bus::{AgentId, AgentState};
 use crate::provider::Tuning;
@@ -587,7 +587,9 @@ pub use view::Blocks;
 /// fold's take `&Display` / `&Forensic`); no arm is a wildcard, and a
 /// [`Refusal`] during replay refuses the whole session.
 pub trait Fold {
-    type Memo: Default;
+    /// No `Default` bound: a memo the fold cannot build from nothing — the
+    /// model's, which needs its log's path — seeds [`replay`] by value.
+    type Memo;
 
     /// # Errors
     /// Returns [`Refusal`] when this fold does not recognise the record —

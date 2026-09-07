@@ -50,12 +50,17 @@ survey weighs a span with (`Memo::span_row`), so a row and a survey line can
 never be two opinions.
 
 The **head marker** is one user-voice `ChatMessage` at position 0 of the
-view, present exactly when `evictions` is non-empty, rendered by
-`render_head` — a pure function of the eviction list. It names the range that
-left, says how to get it back, and draws one line per exchange: number,
-opening line, step count, KB. `HEAD_OPENING` (50 characters) is one measure
-for both the clip and the pad, so no opening can knock the table out of
-column. Past `HEAD_ROWS` (40) the oldest rows collapse into a single
+view, present exactly when some eviction carries a row, rendered by
+`render_head` — a pure function of the eviction list, and the one thing that
+decides whether there is a marker at all, so no second notion of "no marker"
+exists to disagree with it. It names the range that left, says how to get it
+back, and draws one line per exchange: number, opening line, step count, KB.
+`OPENING_CHARS` (50 characters) is one measure for the whole system: an
+opening is clipped to it as a row is built, so the marker's table, a survey,
+the store index, and an ancestor's rows as they land in a child's log all
+carry the same length, and the marker pads to that same column rather than
+clipping a second time. Past `HEAD_ROWS` (40) the oldest rows collapse into a
+single
 `1–17  (17 earlier exchanges — transcript `index)` line. Voice and bracket
 follow `abandoned_note`: the harness may state a fact about the conversation,
 never speak in the model's own voice.
@@ -211,9 +216,13 @@ goes: own resident, own departed by `Stamp`, then the ancestry — walked once
 by `index_ancestry` into a memoised `AncestorIndex`, each pass stopping at
 that link's reach and following the ancestor's own `Inherited` on to the
 grandparent. A link the walk cannot follow is remembered as a `Break`, with
-the path and the io error, so an id behind it is refused with the reason
-rather than called unrecorded — and a break is never cached, since an
-unreadable file may be a transient. `Admission` admits `Inherited` only as a
+the path, the io error, and which half of the walk met it — the file would
+not open, or one numbered line of it would not read back — so an id behind it
+is refused with the fault actually met rather than called unrecorded, and an
+ancestor still being appended to is not reported as a deleted one. The pass
+indexes each span as it closes, so a break bounds only what the walk had not
+yet reached: an exchange already indexed stays readable. A break is never
+cached, since an unreadable file may be a transient. `Admission` admits `Inherited` only as a
 fork's opening: at `ReadyForUser`, with `max_exchange == 0`, and never twice.
 
 The cost is one JSON pass over an ancestor file on the first read that
@@ -292,8 +301,9 @@ file.
   `` transcript `index `` is the recourse, and it does list dropped spans.
 - **Ancestry needs the ancestor's file** — that file, not a file at that
   path. `/clear` rotates `record.jsonl` but also cancels every descendant, so
-  no live child ever holds a link to a rotated file; the reachable cause of a
-  missing `source` is a hand-deleted directory, refused naming the path. A
+  no live child ever holds a link to a rotated file; a hand-deleted directory
+  is the usual cause, refused naming the path, and a line that will not parse
+  is refused as itself rather than as a deletion. A
   file that is present but is no longer the one the stamps were measured in
   is refused too, by the digest, rather than answering with whatever now lies
   at those offsets.
