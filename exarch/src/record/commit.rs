@@ -4,7 +4,7 @@
 //!
 //! Two producers live here.  [`Stream`] is the model's: one [`Chopper`] per
 //! lane, each cutting its deltas into records at the last newline it holds
-//! and flushing the tail at the step boundary, so the screen shows the text
+//! and flushing the tail at the turn boundary, so the screen shows the text
 //! as it arrives.  Where a cut falls carries no meaning — the view fold
 //! joins consecutive records of one lane back into a single block — which is
 //! why the rule is a newline and not a paragraph.  The reasoning lane

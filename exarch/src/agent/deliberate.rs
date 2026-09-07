@@ -1,9 +1,10 @@
 //! One prompt run to quiescence against the provider.
 //!
-//! [`Avatar::deliberate`] steps the provider until it stops calling tools,
-//! bounded by [`MAX_STEPS`] since a headless run has no Esc to hand.
-//! Auto-eviction is checked once, at entry — the sole boundary with no
-//! exchange in flight — against the policy in [`digest`](crate::agent::digest).
+//! [`Avatar::deliberate`] drives the provider until it stops calling tools,
+//! bounded by [`MAX_TURNS`] since a headless run has no Esc to hand.
+//! Auto-eviction is weighed at every turn boundary, against the policy in
+//! [`digest`](crate::agent::digest); the pressure reminder that precedes it
+//! rides the steering channel at a tool boundary.
 //! [`Avatar::attend`] is the loop around this, one call per inbox item.
 
 use crate::agent::Avatar;
@@ -35,8 +36,8 @@ pub enum Outcome {
         reason: String,
     },
     Cancelled,
-    /// Hit [`MAX_STEPS`] without a tool-call-free reply.  Terminal and
-    /// nudge-free: re-attending would just spend another [`MAX_STEPS`].
+    /// Hit [`MAX_TURNS`] without a tool-call-free reply.  Terminal and
+    /// nudge-free: re-attending would just spend another [`MAX_TURNS`].
     Capped,
     /// The engine died mid-deliberation: no further tool call can dispatch.
     Severed(ral_core::protocol::Severed),
@@ -45,18 +46,18 @@ pub enum Outcome {
 /// Hard ceiling on provider round-trips in one [`Avatar::deliberate`].  The
 /// interactive frontend has Esc to halt a runaway; headless and autonomous runs
 /// have nothing.  Generous enough that no genuine deliberation reaches it.
-const MAX_STEPS: u32 = 250;
+const MAX_TURNS: u32 = 250;
 
 impl Avatar {
-    /// Run one deliberation: optionally commit `prompt`, then step the provider
-    /// round-trip loop to quiescence.
+    /// Run one deliberation: optionally commit `prompt`, then drive the
+    /// provider round-trip loop to quiescence.
     ///
     /// # Errors
     /// Returns `Err` if a provider round-trip fails, or if a session-log
     /// mutation does and is surfaced as `ProviderError::Other`.
     ///
     /// # Panics
-    /// Panics if a step is truncated with no tool calls yet no cut-short cause
+    /// Panics if a turn is truncated with no tool calls yet no cut-short cause
     /// was recorded.
     pub fn deliberate(
         &mut self,
@@ -74,10 +75,6 @@ impl Avatar {
         // or an error lands between `invoke` and the post-batch drain; entry is
         // the one point every route into a deliberation is guaranteed to cross.
         self.reply = None;
-        // Entry, before the prompt is committed, is the one point with no
-        // exchange in flight — `can_evict()` alone would admit other points
-        // too, since it only forbids a batch of tool results mid-flight.
-        self.evict(provider, false, token, continues);
         if let Some(p) = prompt {
             self.log
                 .lock()
@@ -87,15 +84,19 @@ impl Avatar {
         let mut n = 0u32;
         loop {
             n += 1;
-            if n > MAX_STEPS {
+            if n > MAX_TURNS {
                 return Ok(self.capped());
             }
-            // The step's live row derives from the published `Display::Step`
-            // record, which `record_step` authors alongside the protocol
-            // one — so this is the one authoring site.
+            // Every turn boundary is weighed, this one included: the turn a
+            // cut would take is never the one in hand, so there is no point in
+            // the loop where the work at issue could leave.
+            self.evict(provider, false, token);
+            // The turn's live row derives from the published `Display::Turn`
+            // record, which `record_turn_start` authors alongside the
+            // protocol one — so this is the one authoring site.
             self.log
                 .lock()
-                .record_step(n, provider.tuning().clone())
+                .record_turn_start(provider.tuning().clone())
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
             #[cfg(debug_assertions)]
             let t_render = std::time::Instant::now();
@@ -115,14 +116,14 @@ impl Avatar {
             #[cfg(debug_assertions)]
             let mut first_token: Option<std::time::Duration> = None;
             recorder.transient(Transient::State(AgentState::AwaitingModel));
-            // One producer per step, sealed at whichever boundary ends the
+            // One producer per turn, sealed at whichever boundary ends the
             // stream below.  A streaming callback has no error channel of its
             // own, so the first failed commit is stashed and answered at that
             // boundary; nothing commits after it, a half-ordered scrollback
             // being worse than a short one.
             let mut stream = crate::record::commit::Stream::default();
             let mut unrecorded: Option<std::io::Error> = None;
-            let step_out = {
+            let taken = {
                 let stream = &mut stream;
                 let unrecorded = &mut unrecorded;
                 provider.complete(
@@ -158,7 +159,7 @@ impl Avatar {
                 t_req.elapsed()
             );
             if token.is_cancelled() {
-                abandon_step(&mut stream, unrecorded, &recorder);
+                abandon_turn(&mut stream, unrecorded, &recorder);
                 return Ok(self.cancelled());
             }
             let StepOut {
@@ -167,18 +168,18 @@ impl Avatar {
                 usage,
                 stop_reason,
                 cut_short,
-            } = match step_out {
+            } = match taken {
                 Ok(s) => s,
                 Err(ProviderError::Cancelled(_)) => {
-                    abandon_step(&mut stream, unrecorded, &recorder);
+                    abandon_turn(&mut stream, unrecorded, &recorder);
                     return Ok(self.cancelled());
                 }
                 Err(e) => {
-                    abandon_step(&mut stream, unrecorded, &recorder);
+                    abandon_turn(&mut stream, unrecorded, &recorder);
                     return Err(e);
                 }
             };
-            close_step(&mut stream, unrecorded, &recorder)
+            close_turn(&mut stream, unrecorded, &recorder)
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
             // The committed message is the outcome's source of truth, not the
             // streaming accumulator: a provider that returns final text with
@@ -279,19 +280,17 @@ impl Avatar {
                 return Ok(Outcome::Severed(s));
             }
             // `announce` draws each arrival's own chrome; the texts coalesce
-            // into the one steering message the protocol admits after a batch.
-            if !injected.is_empty() {
-                for item in &injected {
-                    announce(item, &recorder);
-                }
-                let text = injected
-                    .iter()
-                    .map(Item::text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+            // with the pressure reminder into the one steering message the
+            // protocol admits after a batch.
+            for item in &injected {
+                announce(item, &recorder);
+            }
+            let mut steering: Vec<String> = injected.iter().map(Item::text).collect();
+            steering.extend(self.pressure_reminder(provider));
+            if !steering.is_empty() {
                 self.log
                     .lock()
-                    .append_steering(text)
+                    .append_steering(steering.join("\n"))
                     .map_err(ProviderError::Other)?;
             }
             if token.is_cancelled() {
@@ -305,28 +304,33 @@ impl Avatar {
         }
     }
 
-    /// The exchange an eviction would cut through were it to run now, `None`
+    /// The turn an eviction would cut through were it to run now, `None`
     /// when nothing is old enough to shed.
     /// [`crate::record::model::Memo::plan_eviction`] never names the newest
-    /// span, so this never answers with the live exchange either.
+    /// turn, so this never answers with the work in hand either.
     pub(crate) fn planned_eviction(&self) -> Option<u64> {
         let mut log = self.log.lock();
         if !log.can_evict() {
             return None;
         }
         let keep = suffix_keep_budget(log.history_bytes());
-        log.plan_eviction(keep).map(|plan| plan.through_exchange)
+        log.plan_eviction(keep).map(|plan| plan.through)
     }
 
-    /// Shed the older half of the window, the harness writing no note of its
+    /// The context-pressure reminder this tool boundary owes the model, to
+    /// join the one steering message the protocol admits after a batch.
+    /// Budget-free and edge-triggered: the latch is
+    /// [`Nudges`](crate::agent::nudge::Nudges)'s, so an excursion is announced
+    /// once and a `--chat` trunk, which keeps none, is never told.
+    fn pressure_reminder(&mut self, provider: &Provider) -> Option<String> {
+        let pressure = self.pressure_gauge(provider);
+        let nudges = self.nudges.as_mut()?;
+        nudges.pressure_reminder(&pressure, &mut self.log.lock())
+    }
+
+    /// Shed the older half of the context, the harness writing no note of its
     /// own: the model's own `` context `evict `` is where a note comes from.
-    pub(crate) fn evict(
-        &self,
-        provider: &Arc<Provider>,
-        requested: bool,
-        token: &cancel::Token,
-        continues: Option<u64>,
-    ) {
+    pub(crate) fn evict(&self, provider: &Arc<Provider>, requested: bool, token: &cancel::Token) {
         if !self.log.lock().can_evict() {
             if requested {
                 self.note_error("cannot evict while tool results are pending".into());
@@ -344,19 +348,15 @@ impl Avatar {
         if !requested && !due {
             return;
         }
-        // An exchange-boundary Esc leaves the window as it lies; the next
-        // entry weighs it again.
+        // A boundary Esc leaves the context as it lies; the next boundary
+        // weighs it again.
         if token.is_cancelled() {
             return;
         }
-        // Keep the recent half verbatim; the older prefix leaves the window.
+        // Keep the recent half verbatim; the older prefix leaves the context.
         let keep = suffix_keep_budget(self.log.lock().history_bytes());
-        let plan = match continues {
-            Some(exchange) => self.log.lock().plan_eviction_before(keep, exchange),
-            None => self.log.lock().plan_eviction(keep),
-        };
-        let Some(plan) = plan else {
-            // No exchange old enough to shed: a no-op, not an event.
+        let Some(plan) = self.log.lock().plan_eviction(keep) else {
+            // No turn old enough to shed: a no-op, not an event.
             return;
         };
         self.recorder()
@@ -366,7 +366,7 @@ impl Avatar {
         // notification left to keep in step with it.
         let edited = self.log.lock().apply_edit(
             ContextOp::Evict {
-                through_exchange: plan.through_exchange,
+                through: plan.through,
                 note: None,
             },
             EditAuthority::Harness,
@@ -446,15 +446,15 @@ impl Avatar {
         Outcome::Cancelled
     }
 
-    /// The step count would exceed [`MAX_STEPS`].  History is left mid-protocol
+    /// The turn count would exceed [`MAX_TURNS`].  History is left mid-protocol
     /// for the attend loop's per-item quiesce to wind back; the [`StopReason`]
     /// reaches the headless JSON so a harness can tell a cap from a completion.
     fn capped(&self) -> Outcome {
         self.note_error(format!(
-            "step cap reached ({MAX_STEPS} provider round-trips); ending the deliberation"
+            "turn cap reached ({MAX_TURNS} provider round-trips); ending the deliberation"
         ));
         self.recorder()
-            .transient(Transient::StopReason("step_cap".into()));
+            .transient(Transient::StopReason("turn_cap".into()));
         Outcome::Capped
     }
 }
@@ -466,9 +466,9 @@ fn cancelled_result(id: String) -> SessionToolResult {
     }
 }
 
-/// Close a streaming step: every commit it still owes, then the boundary
+/// Close a streaming turn: every commit it still owes, then the boundary
 /// that lets a printer retire its live edge.  The boundary follows the seal
-/// whether or not it held — a live edge outliving its step is the one
+/// whether or not it held — a live edge outliving its turn is the one
 /// failure the printer cannot recover from on its own.
 ///
 /// A commit the streaming callback could not make is answered here, since a
@@ -476,8 +476,8 @@ fn cancelled_result(id: String) -> SessionToolResult {
 /// the order being broken already.
 ///
 /// # Errors
-/// The first commit that failed anywhere in the step.
-fn close_step(
+/// The first commit that failed anywhere in the turn.
+fn close_turn(
     stream: &mut crate::record::commit::Stream,
     unrecorded: Option<std::io::Error>,
     recorder: &crate::record::Emitter,
@@ -490,17 +490,17 @@ fn close_step(
     sealed
 }
 
-/// [`close_step`] on an exit path that is already cancelling or erroring:
+/// [`close_turn`] on an exit path that is already cancelling or erroring:
 /// the streamed prefix is what the user saw, so it still commits,
 /// best-effort — the exit in flight is the error being reported, and this
 /// one must not mask it.
-fn abandon_step(
+fn abandon_turn(
     stream: &mut crate::record::commit::Stream,
     unrecorded: Option<std::io::Error>,
     recorder: &crate::record::Emitter,
 ) {
-    if let Err(error) = close_step(stream, unrecorded, recorder) {
-        eprintln!("exarch: a cancelled step's streamed prefix was not recorded: {error}");
+    if let Err(error) = close_turn(stream, unrecorded, recorder) {
+        eprintln!("exarch: a cancelled turn's streamed prefix was not recorded: {error}");
     }
 }
 
@@ -722,6 +722,76 @@ mod tests {
             "the arrival must be announced as it enters context"
         );
         assert!(session.is_ready());
+    }
+
+    /// Context pressure reaches the model at a tool boundary, on the one
+    /// steering message the protocol admits after a batch: an agentic run may
+    /// take two hundred tool turns before the next exchange, by which time the
+    /// cut has long since happened.  Edge-triggered, so two boundaries under
+    /// one excursion carry one reminder.
+    #[test]
+    fn pressure_rides_the_steering_channel_once_per_excursion() {
+        use crate::agent::digest::PRESSURE_THRESHOLD_FALLBACK;
+        const EXCHANGES: usize = 6;
+        let mut session = Avatar::for_test("system").unwrap();
+        // A scripted model has no catalogued context window, so the gauge
+        // reads bytes: sized between the soft line and the eviction trigger,
+        // so pressure is due and nothing has been shed yet.
+        {
+            let mut log = session.log.lock();
+            let bulk = "x".repeat(
+                usize::midpoint(PRESSURE_THRESHOLD_FALLBACK, EVICT_THRESHOLD) / (EXCHANGES * 2),
+            );
+            for _ in 0..EXCHANGES {
+                log.append_user(bulk.clone(), None).unwrap();
+                log.append_assistant(
+                    genai::chat::ChatMessage::assistant(bulk.clone()),
+                    vec![],
+                    None,
+                )
+                .unwrap();
+            }
+        }
+        let provider = scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![ral_call(
+                    "c1",
+                    "let pressure_a = 1",
+                )]))
+                .then(Reply::tool_calls(vec![ral_call(
+                    "c2",
+                    "let pressure_b = 2",
+                )]))
+                .then(Reply::text("noted")),
+        );
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.agent.id);
+        match session.deliberate(
+            &provider,
+            Some("go".into()),
+            None,
+            &cancel::Token::new(),
+            &emit,
+        ) {
+            Ok(Outcome::Complete(s)) => assert_eq!(s, "noted"),
+            other => panic!("the run must reach its reply, got {other:?}"),
+        }
+
+        let reminders: Vec<String> = session
+            .rendered_messages()
+            .into_iter()
+            .filter_map(|m| m.content.first_text().map(str::to_string))
+            .filter(|text| text.contains("Context pressure"))
+            .collect();
+        let [reminder] = reminders.as_slice() else {
+            panic!("one excursion owes exactly one reminder, got {reminders:?}")
+        };
+        assert!(
+            reminder.contains("At the next turn boundary")
+                && reminder.contains("`context `evict [through:"),
+            "the reminder must name the cut and offer the note: {reminder}"
+        );
     }
 
     /// A provider error mid-deliberation strands the session in

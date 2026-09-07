@@ -284,8 +284,9 @@ fn resume_child() {
     let provider = scripted("test-model", Script::new().then(Reply::text("before kill")));
     drive(&mut session, &provider, "before the kill");
 
+    // Exchange 1 spent ids 1 and 2, so the next prompt is 3.
     let record = exarch::record::Record::Protocol(exarch::record::Protocol::UserPrompt {
-        exchange: 2,
+        exchange: 3,
         text: "crash prompt".into(),
     });
     let path = dir.join("sessions/0/record.jsonl");

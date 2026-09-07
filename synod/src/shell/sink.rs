@@ -201,8 +201,10 @@ pub enum SynodEvent {
     /// to know when to re-render the streaming bubble as markdown instead of
     /// plain text, not to draw anything itself.
     Boundary,
-    Step {
-        n: u32,
+    /// The id the request now going out will produce.  A cancelled request
+    /// retaken shows the same id twice — accurately.
+    Turn {
+        id: u64,
     },
     /// The session's whole state, not a passing label: the status bar names
     /// this one until the next arrives, and `pending` says whether anything is
@@ -293,7 +295,7 @@ fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
         | Protocol::UserPrompt { .. }
         | Protocol::ContextMessage { .. }
         | Protocol::Inherited { .. }
-        | Protocol::StepStarted { .. }
+        | Protocol::TurnStarted { .. }
         | Protocol::AssistantMessage { .. }
         | Protocol::ToolResults { .. }
         | Protocol::ContextEdited { .. } => None,
@@ -336,7 +338,7 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         }),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
         Display::Context { rows, evicted } => process_card(Some(context_rows_card(rows, *evicted))),
-        Display::Step { n } => Some(SynodEvent::Step { n: *n }),
+        Display::Turn { id } => Some(SynodEvent::Turn { id: *id }),
         // The trunk's committed reasoning, its prose cut line by line for
         // the durable scrollback, a tool result already said on its call row,
         // a settled background block — a worker thread is no business of a
@@ -374,7 +376,7 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         | Display::ToolCall { .. }
         | Display::HarnessCall { .. }
         | Display::Result { .. }
-        | Display::Step { .. }
+        | Display::Turn { .. }
         | Display::ContextEdited { .. } => None,
         Display::SubagentDone { .. } => None,
     }
@@ -441,9 +443,9 @@ fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
 /// Fold one durable [`Record`] the trunk itself produced into the event the
 /// window renders, or `None` for a record the window has no use for.
 ///
-/// `Step`'s protocol twin's `tuning` is dropped, exactly as the `Display`
-/// class that carries it already drops it: the window narrates exchanges,
-/// not the provider's effort dial.
+/// `Turn`'s protocol twin's `tuning` is dropped, exactly as the `Display`
+/// class that carries it already drops it: the window narrates turns, not
+/// the provider's effort dial.
 pub fn project(record: &Record) -> Option<SynodEvent> {
     match record {
         Record::Protocol(protocol) => project_protocol(protocol),

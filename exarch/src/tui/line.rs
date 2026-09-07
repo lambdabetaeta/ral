@@ -150,9 +150,9 @@ pub(super) fn thinking_header(
 
 // ── Public line builders ─────────────────────────────────────────────────────
 
-/// Step separator: one blank line.  The number itself reaches only
+/// Turn separator: one blank line.  The number itself reaches only
 /// `events.jsonl` / `user.log`; on screen the boundary is whitespace alone.
-pub(super) fn step() -> Vec<Line<'static>> {
+pub(super) fn turn() -> Vec<Line<'static>> {
     vec![Line::default()]
 }
 

@@ -20,6 +20,7 @@ mod replay;
 mod seam;
 mod view;
 
+pub use model::{Cut, Held, Turn};
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
 pub use view::{Block, BlockKind, View};
@@ -143,30 +144,40 @@ pub enum Protocol {
         exchange: u64,
         text: String,
     },
-    /// A message a `mnemon` child inherits from its parent's context.
+    /// A message a `mnemon` child inherits from its parent's context, under
+    /// the turn and exchange ids the parent gave it.
     ContextMessage {
+        id: u64,
         exchange: u64,
         message: ChatMessage,
     },
-    /// The link a `mnemon` child opens with: the ancestry its inherited
-    /// exchange ids resolve against.  Written once, before the
-    /// [`Protocol::ContextMessage`]s that carry the parent's view.
+    /// The link a `mnemon` child opens with: the parent's whole turn table,
+    /// and the ancestry the turns below the fork read back from.  Written
+    /// once, before the [`Protocol::ContextMessage`]s that re-record the
+    /// resident ones as this log's own.
     Inherited {
-        /// The parent's `record.jsonl`, where every inherited exchange — in
-        /// the parent's view or long evicted — reads back from.
+        /// The parent's `record.jsonl`, where every inherited turn — in the
+        /// parent's context or long departed — reads back from.
         source: PathBuf,
-        /// The parent's head-marker state, by value, so the child's marker
-        /// renders without reading the parent's file.
-        evictions: Vec<model::Eviction>,
-        /// The parent's own exchange floor at the fork: ids at or below it
-        /// resolve against the ancestry, ids above it are the child's own.
-        through_exchange: u64,
+        /// The parent's own id floor at the fork: ids at or below it resolve
+        /// against the ancestry, ids above it are the child's own.
+        through: u64,
+        /// The parent's table at the fork, every turn `kind: Inherited` and
+        /// `held` as the parent had it.  The child's marker, survey and index
+        /// are the same projections of it.
+        turns: Vec<model::Turn>,
+        /// The cuts made in that table, so the child's `render_head` is the
+        /// same projection of the same fold — the parent's notes included.
+        cuts: Vec<model::Cut>,
     },
-    StepStarted {
-        n: u32,
+    /// The meta half of taking a turn: the effort dial the request goes out
+    /// under.  The id the request will produce is the display twin's.
+    TurnStarted {
         tuning: Tuning,
     },
     AssistantMessage {
+        /// This turn's id, minted by the log.
+        turn: u64,
         message: ChatMessage,
         pending_tool_ids: Vec<String>,
         stop_reason: Option<String>,
@@ -266,18 +277,17 @@ pub enum Display {
         notice: NoticeFact,
     },
     Context {
-        rows: Vec<ContextRow>,
-        /// Closed exchanges that have left the window by eviction; drawn as
-        /// one leading line when non-zero. Defaulted on deserialize, so a
-        /// `record.jsonl` written before the count existed still reads.
-        #[serde(default)]
+        rows: Vec<model::Turn>,
+        /// Turns that have left the context by eviction; drawn as one leading
+        /// line when non-zero.
         evicted: usize,
     },
-    /// Beside `Protocol::StepStarted`, whose `tuning` the screen never
+    /// Beside `Protocol::TurnStarted`, whose `tuning` the screen never
     /// showed — the display class never derives from the protocol twin it
-    /// duplicates a field of.
-    Step {
-        n: u32,
+    /// duplicates a field of.  `id` is the id the request will produce, so a
+    /// cancelled request retaken shows the same one twice.
+    Turn {
+        id: u64,
     },
     /// Beside `Protocol::ContextEdited`, for the same reason.
     ContextEdited {
@@ -312,19 +322,6 @@ pub enum NoticeFact {
         names: Vec<String>,
         idle_calls: Vec<u64>,
     },
-}
-
-/// One row of a `/context` survey, minus its rendered card.  `kind` mirrors
-/// `ContextSpanKind::as_str`'s spellings for the same reason.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextRow {
-    pub exchange: u64,
-    pub kind: String,
-    pub opening: String,
-    pub bytes: usize,
-    pub steps: usize,
-    pub live: bool,
 }
 
 /// Breadcrumbs that determine no model projection but are worth keeping.
@@ -459,8 +456,8 @@ impl Seq {
 /// past.
 ///
 /// The model fold's ledger stores one of these per protocol record, so a
-/// freed run reads back through them one record at a time rather than by
-/// contiguous span.
+/// freed run reads back through them one record at a time rather than as one
+/// contiguous range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct Stamp {

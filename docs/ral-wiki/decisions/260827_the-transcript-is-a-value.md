@@ -1,8 +1,15 @@
 ---
-status: accepted
+status: 'accepted; amended in carrier by [[decisions/260907_the-turn-is-the-atom]] — the property, the wire door and the rejected candidates stand whole. The value is spelled `Rendered`, its cache is keyed per **turn** (`TurnRender`) rather than per span, and the renderer split dissolves: `render_turn` is the one renderer, taking no flags, and the exchange in hand is assembled turn by turn like any other.'
 ---
 
 # The transcript is a value
+
+> Amended in carrier by
+> [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]: read
+> `Rendered` for `Transcript`, `TurnRender`/`render_turn` for
+> `SpanRender`/`render_closed_entry`, and one turn-by-turn assembly for the
+> closed/tail split. The property below — sharing follows immutability, owned
+> wire values at exactly one door — is unchanged.
 
 **The provider-facing history is a persistent value shared by reference across
 the fold, and owned `genai` wire values are manufactured at exactly one door,
@@ -150,8 +157,10 @@ types carry the guarantee.
 
 ## See also
 
-[[internals/session-record|session-record]] (the transcript-as-value
-narrative and the renderer split in the model fold),
+[[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]] (what amends
+this in carrier: one table of turns, one renderer),
+[[internals/session-record|session-record]] (the value-as-shared-reference
+narrative in the model fold),
 [[internals/provider-fault-recovery|provider-fault-recovery]] (a retry now
 re-manufactures the request rather than cloning one),
 [[map/exarch/provider|provider]] (the wire door and the transport it sits

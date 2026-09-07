@@ -29,7 +29,7 @@ pub(super) struct AgentSlot(pub u8);
 /// Every other kind derives its shape from its [`BlockKind`] variant.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(super) enum ChromeKind {
-    Step,
+    Turn,
     /// A detached block that settled — the `` `done `` a deferred worker flushes
     /// at completion. It wears the `↘` of [`RailKind::Subagent`]: background
     /// work landing in root's scrollback turns after the run that spawned it is
@@ -396,7 +396,7 @@ impl Block {
 
     /// True for a block the coalescing projection folds into a ral block — a
     /// tool call, or a read / grep / exec effect.  Everything else is a
-    /// *barrier* splitting one block from the next, save a step boundary
+    /// *barrier* splitting one block from the next, save a turn boundary
     /// interior to a run, which the viewport's run scan bridges as bookkeeping.
     pub(super) fn observation(&self) -> bool {
         matches!(
@@ -474,12 +474,12 @@ impl Block {
         matches!(self.kind, BlockKind::Thinking(_))
     }
 
-    /// True for a step boundary — what the matrix's per-agent step cells count.
-    pub(super) fn is_step(&self) -> bool {
+    /// True for a turn boundary — what the matrix's per-agent turn cells count.
+    pub(super) fn is_turn(&self) -> bool {
         matches!(
             self.kind,
             BlockKind::Chrome {
-                shape: ChromeKind::Step,
+                shape: ChromeKind::Turn,
                 ..
             }
         )
@@ -702,7 +702,7 @@ impl Block {
             BlockKind::Chrome { lines, .. } => {
                 let body = trim_blanks(lines, |l| line::is_blank(l));
                 if body.is_empty() {
-                    // The step rule *is* a gap; there is nothing to frame.
+                    // The turn rule *is* a gap; there is nothing to frame.
                     vec![Line::default()]
                 } else {
                     std::iter::once(Line::default())
@@ -742,7 +742,7 @@ impl Block {
                 }
             }
             BlockKind::Chrome { shape, .. } => match shape {
-                ChromeKind::Step => Some(RailKind::Step),
+                ChromeKind::Turn => Some(RailKind::Turn),
                 ChromeKind::Settled => Some(RailKind::Subagent),
                 ChromeKind::Spawned => Some(RailKind::FleetAct),
                 ChromeKind::Error | ChromeKind::Cancelled => Some(RailKind::Error),

@@ -13,4 +13,8 @@ The user can see neither `VALUE`, nor `STDOUT`, nor `STDERR`. Anything you `echo
 There are a few standard tools that control your session; use `explain` to find out more about each:
 - `schedules` arms an alarm at a chosen time, and lists what is armed
 - `agents` calls sub-models on your bindings and reads back the values they reply with
-- `context` surveys the window you are paying for and edits it; `transcript` reads back any closed exchange this session or its ancestors ever recorded, in your context or not.
+- `context` surveys what the provider is sent and edits it; `transcript` reads back any closed turn this session or its ancestors ever recorded, in your context or not
+
+Your context is a list of **turns**: your prompt and anything before the first reply is one, and each assistant message with the tool results it called for is another. An **exchange** is the run of turns from a prompt, and it carries that prompt's turn id, so exchange numbers go sparse. `context `survey` lists every turn you are paying for, and an eviction — `context `evict [through: <turn>, note: '…']` — makes every turn through the one you name leave at once, never the newest, leaving the harness's index of what went and your one-line note beside it. Nothing is lost: `transcript `read [turns: [from, to]]` or `[exchanges: [n]]` reads those turns back as material, and `transcript `grep [pattern: '…']` searches them all.
+
+When the context fills, the harness evicts for you at the next turn boundary, with no note, and tells you first: nothing is required of you, but that warning is your chance to leave your future self a line by evicting yourself.

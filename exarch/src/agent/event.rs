@@ -9,7 +9,7 @@
 use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
-use crate::record::model::{Eviction, Memo, StoreRead, Transcript, View};
+use crate::record::model::{Cut, Folded, Memo, Rendered, TranscriptRead, Turn};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
 use regex::Regex;
@@ -121,11 +121,13 @@ pub enum EditAuthority {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextOp {
-    /// Every span through `through_exchange` leaves the view at once; the
-    /// model reads the harness's index of them in their place, and `note` —
-    /// the model's own, never the harness's — beside it.
+    /// Every turn at or below `through` leaves the context at once — bar a
+    /// user turn whose exchange still has an assistant turn in it, which
+    /// stays with its survivors.  The model reads the harness's index of what
+    /// left in their place, and `note` — the model's own, never the
+    /// harness's — beside it.
     Evict {
-        through_exchange: u64,
+        through: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
@@ -194,17 +196,17 @@ pub enum QuiesceReason {
     Replied,
 }
 
+/// Where a turn came from: this session's own exchange, a harness-authored
+/// import, or a turn a fork inherited from its parent's table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ContextSpanKind {
+pub enum TurnKind {
     Exchange,
     Import,
-    /// An ancestor's exchange, resolved through this log's lineage rather
-    /// than its own ledger.
     Inherited,
 }
 
-impl ContextSpanKind {
+impl TurnKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Exchange => "exchange",
@@ -214,51 +216,26 @@ impl ContextSpanKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ContextSurveyItem {
-    pub exchange: u64,
-    pub kind: ContextSpanKind,
-    pub opening: String,
-    pub bytes: usize,
-    pub steps: usize,
-    pub live: bool,
-}
-
+/// `` context `survey ``'s answer: one row per turn in the context, beside
+/// the count of turns evicted from it and the truth about what is sent.
+///
+/// `total_bytes` is the assembled context's own weight, not the sum of the
+/// rows: an abandoned exchange's turns report their own weights while the
+/// context sends only its one-line note.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContextSurvey {
-    pub items: Vec<ContextSurveyItem>,
-    /// Closed exchanges that have left the view by eviction — the rows of
-    /// every [`crate::record::model::Eviction`] the view carries.
+    pub rows: Vec<Turn>,
     pub evicted: usize,
     pub total_bytes: usize,
-    pub total_steps: usize,
-}
-
-impl ContextSurvey {
-    pub(crate) fn add(&mut self, item: ContextSurveyItem) {
-        self.total_bytes = self.total_bytes.saturating_add(item.bytes);
-        self.total_steps = self.total_steps.saturating_add(item.steps);
-        self.items.push(item);
-    }
-}
-
-/// `` transcript `index ``'s answer: one element per closed exchange the
-/// store holds, in view or not.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoreIndexItem {
-    pub exchange: u64,
-    pub kind: ContextSpanKind,
-    pub opening: String,
-    pub steps: usize,
-    /// The weight the exchange carried while the model held it.
-    pub bytes: usize,
-    pub in_view: bool,
 }
 
 /// One line of one message that matched `` transcript `grep ``'s pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrepHit {
     pub exchange: u64,
+    /// The turn the line lies in — the search walks turn by turn, so a hit
+    /// names one rather than the exchange holding it alone.
+    pub turn: u64,
     pub role: ChatRole,
     /// 1-based, within that message's searched text.
     pub line: usize,
@@ -273,13 +250,16 @@ pub struct GrepAnswer {
     pub total: usize,
 }
 
-/// `` transcript `read ``'s answer: one element per named closed exchange.
+/// `` transcript `read ``'s answer: one element per exchange the read
+/// touched, naming the turns it covered.
 ///
-/// In store order, addressed by `exchange` rather than by argument position —
-/// [`super::model::AgentLog::read_context`]'s doc comment.
+/// In transcript order, addressed by `exchange` rather than by argument
+/// position — [`Memo::read_transcript`](crate::record::model::Memo::read_transcript)'s
+/// doc comment.
 #[derive(Clone, Debug)]
-pub struct TranscriptSpan {
+pub struct TranscriptExchange {
     pub exchange: u64,
+    pub turns: Vec<u64>,
     pub messages: Vec<TranscriptMessage>,
 }
 
@@ -351,26 +331,29 @@ pub struct AgentLog {
     seam: crate::record::Emitter,
 }
 
-/// What a `mnemon` child is forked with: its parent's window, span by span
-/// under the parent's own exchange ids, beside the link that makes every
-/// older ancestor exchange readable too.
+/// What a `mnemon` child is forked with: its parent's whole turn table,
+/// turn by turn under the parent's own ids, beside the link that makes every
+/// older ancestor turn readable too.
 pub struct Inherited {
     /// The parent's `record.jsonl`.
     pub source: PathBuf,
-    /// The parent's head-marker state, so the child's marker opens where the
-    /// parent's stood.
-    pub evictions: Vec<Eviction>,
-    /// The parent's own exchange floor: ids at or below it are the
-    /// ancestry's, and the child mints its first above it.
-    pub through_exchange: u64,
-    /// One entry per in-view parent span, in view order.
-    pub spans: Vec<(u64, Vec<ChatMessage>)>,
+    /// The parent's own id floor: ids at or below it are the ancestry's, and
+    /// the child mints its first above it.
+    pub through: u64,
+    /// The parent's table at the fork.
+    pub turns: Vec<Turn>,
+    /// The cuts made in that table: the child folds them in, so its head
+    /// marker is the same projection the parent's was.
+    pub cuts: Vec<Cut>,
+    /// The material for each resident turn the seed could carry — turn id,
+    /// exchange id, messages — in id order.
+    pub seed: Vec<(u64, u64, Vec<ChatMessage>)>,
 }
 
-/// A planned cut: every visible span through `through_exchange` leaves the
-/// window, while the newer ones stay verbatim.
+/// A planned cut: every turn in the context at or below `through` leaves it,
+/// while the newer ones stay verbatim.
 pub struct EvictionPlan {
-    pub through_exchange: u64,
+    pub through: u64,
 }
 
 pub(crate) struct ClearRecord {
@@ -454,7 +437,7 @@ impl AgentLog {
         Ok(s)
     }
 
-    /// Fold `record.jsonl` into the model view, quarantining a torn tail, and
+    /// Fold `record.jsonl` into the turn table, quarantining a torn tail, and
     /// reopen the seam in append mode.
     ///
     /// A session recorded before `record.jsonl` existed cannot be resumed —
@@ -586,112 +569,133 @@ impl AgentLog {
         self.model_memo.can_evict()
     }
 
-    /// Number of event slots still owned by the model view, for the host's
+    /// Number of event slots still owned by the context, for the host's
     /// resource probe; the append-only log retains the slots an edit removes.
     pub fn event_count(&self) -> usize {
         self.model_memo.event_count()
     }
 
-    pub fn view(&self) -> &View {
-        self.model_memo.view()
+    /// The turn table and its cuts — the one shape every projection reads.
+    pub fn folded(&self) -> &Folded {
+        self.model_memo.folded()
     }
 
     /// # Panics
-    /// Panics if a view span is not resident in the ledger.
+    /// Panics if a resident turn's records are not resident in the ledger.
     pub fn context_survey(&mut self) -> ContextSurvey {
         self.model_memo.context_survey()
     }
 
-    /// Read named, closed exchanges in store order — in view or evicted. Both
+    /// Read closed turns in transcript order — the exchanges named outright,
+    /// the turns a range covers, or both, in the context or departed. Both
     /// halves in one call; the desk splits them across its lock.
     ///
     /// # Errors
-    /// Refuses an empty list, a duplicate name, an exchange this session never
-    /// recorded, the exchange still in progress, or an evicted exchange in a
-    /// session that keeps no log.
-    pub fn read_context(&mut self, exchanges: &[u64]) -> Result<Vec<TranscriptSpan>, String> {
-        self.model_memo.read_context(exchanges)
+    /// Refuses a read that names nothing, a duplicate name, an exchange or
+    /// range this lineage never recorded, or the turn still being written.
+    pub fn read_transcript(
+        &mut self,
+        exchanges: &[u64],
+        turns: Option<(u64, u64)>,
+    ) -> Result<Vec<TranscriptExchange>, String> {
+        self.model_memo.read_transcript(exchanges, turns)
     }
 
-    /// [`Self::read_context`]'s locating half, for a caller that means to
+    /// [`Self::read_transcript`]'s locating half, for a caller that means to
     /// read outside the session lock.
     ///
     /// # Errors
-    /// Refuses whatever [`Self::read_context`] refuses.
-    pub(crate) fn locate_read(&mut self, exchanges: &[u64]) -> Result<StoreRead, String> {
-        self.model_memo.locate_read(exchanges)
+    /// Refuses whatever [`Self::read_transcript`] refuses.
+    pub(crate) fn locate_read(
+        &mut self,
+        exchanges: &[u64],
+        turns: Option<(u64, u64)>,
+    ) -> Result<TranscriptRead, String> {
+        self.model_memo.locate_read(exchanges, turns)
     }
 
-    /// Every closed exchange the store holds, oldest first.
-    pub fn store_index(&mut self) -> Vec<StoreIndexItem> {
-        self.model_memo.store_index()
+    /// Every turn the transcript holds, in id order, each saying whether it
+    /// is still in the context.
+    pub fn transcript_index(&self) -> Vec<Turn> {
+        self.model_memo.transcript_index()
     }
 
-    /// Search the closed exchanges' text — the named ones, or the whole
-    /// store when `exchanges` is `None`. Both halves in one call; the desk
-    /// splits them across its lock.
+    /// Search the closed turns' text — those a narrowing names, or the whole
+    /// transcript when neither narrowing is given. Both halves in one call;
+    /// the desk splits them across its lock.
     ///
     /// # Errors
-    /// Refuses a named list the way [`Self::read_context`] does, and a named
-    /// evicted exchange in a session that keeps no log.
-    pub fn grep_store(
+    /// Refuses a narrowing the way [`Self::read_transcript`] does.
+    pub fn grep_transcript(
         &mut self,
         pattern: &Regex,
         exchanges: Option<&[u64]>,
+        turns: Option<(u64, u64)>,
     ) -> Result<GrepAnswer, String> {
-        self.model_memo.grep_store(pattern, exchanges)
+        self.model_memo.grep_transcript(pattern, exchanges, turns)
     }
 
-    /// [`Self::grep_store`]'s locating half, for a caller that means to
+    /// [`Self::grep_transcript`]'s locating half, for a caller that means to
     /// search outside the session lock.
     ///
     /// # Errors
-    /// Refuses whatever [`Self::grep_store`] refuses.
-    pub(crate) fn locate_grep(&mut self, exchanges: Option<&[u64]>) -> Result<StoreRead, String> {
-        self.model_memo.locate_grep(exchanges)
+    /// Refuses whatever [`Self::grep_transcript`] refuses.
+    pub(crate) fn locate_grep(
+        &mut self,
+        exchanges: Option<&[u64]>,
+        turns: Option<(u64, u64)>,
+    ) -> Result<TranscriptRead, String> {
+        self.model_memo.locate_grep(exchanges, turns)
     }
 
-    /// Approximate context size in serialised model-view bytes.  The fallback
-    /// eviction trigger in [`crate::agent::Avatar::evict`] when the model's
-    /// context window is unknown; otherwise that tracks token pressure instead.
+    /// Approximate context size in serialised bytes.  The fallback eviction
+    /// trigger in [`crate::agent::Avatar::evict`] when the model's context
+    /// window is unknown; otherwise that tracks token pressure instead.
     pub fn history_bytes(&mut self) -> usize {
         self.model_memo.history_bytes()
     }
 
-    /// Render the model-view transcript for the next provider request.
+    /// Render the context for the next provider request.
     ///
     /// # Errors
     /// The session is not awaiting an assistant reply.
-    pub fn render_messages(&mut self) -> Result<Transcript, String> {
+    pub fn render_messages(&mut self) -> Result<Rendered, String> {
         if !self.model_memo.is_awaiting_assistant() {
             return Err(format!(
                 "cannot render request while session is in state {}",
                 self.model_memo.state_description()
             ));
         }
-        Ok(self.model_memo.transcript())
+        Ok(self.model_memo.rendered())
     }
 
     /// Every committed message whatever the phase.
-    pub fn history_transcript(&mut self) -> Transcript {
-        self.model_memo.transcript()
+    pub fn history_rendered(&mut self) -> Rendered {
+        self.model_memo.rendered()
     }
 
     /// The parent half of a `mnemon` fork — the seed, where ownership
     /// genuinely transfers into the child's own ledger via
-    /// [`Self::import_context`]. The tail span is cut to the longest run
+    /// [`Self::import_context`]. The last turn is cut to the longest run
     /// that owes no tool result, whatever left it that way — a batch in
     /// flight, or a `ContextEdited` record landing after the assistant frame
     /// it answers.
     pub fn inherited_context(&mut self) -> Inherited {
-        let source = self.dir.join("record.jsonl");
-        let evictions = self.model_memo.view().evictions.clone();
-        let through_exchange = self.model_memo.exchange_floor();
         Inherited {
-            source,
-            evictions,
-            through_exchange,
-            spans: self.model_memo.inherited_context(),
+            source: self.dir.join("record.jsonl"),
+            through: self.model_memo.id_floor(),
+            turns: self
+                .model_memo
+                .folded()
+                .turns()
+                .iter()
+                .map(|turn| Turn {
+                    kind: TurnKind::Inherited,
+                    ..turn.clone()
+                })
+                .collect(),
+            cuts: self.model_memo.folded().cuts().to_vec(),
+            seed: self.model_memo.inherited_seed(),
         }
     }
 
@@ -699,9 +703,11 @@ impl AgentLog {
     /// child's launch prompt arrives through its inbox, and `deliberate`
     /// commits it through [`Self::append_user`] like any other exchange.
     ///
-    /// The link goes down first, then one `ContextMessage` per message under
-    /// the parent's own exchange id, so the child's view reproduces the
-    /// parent's spans and can name any of them.
+    /// The link goes down first, carrying the parent's whole table and the
+    /// cuts made in it, then one
+    /// `ContextMessage` per message under the parent's own turn id — so the
+    /// child's context reproduces the parent's turns and can name any of
+    /// them.
     ///
     /// # Errors
     /// The session is not at a ready boundary, or recording a record failed.
@@ -709,20 +715,26 @@ impl AgentLog {
         self.ready_to_import()?;
         let Inherited {
             source,
-            evictions,
-            through_exchange,
-            spans,
+            through,
+            turns,
+            cuts,
+            seed,
         } = inherited;
         self.record_protocol(Protocol::Inherited {
             source,
-            evictions,
-            through_exchange,
+            through,
+            turns,
+            cuts,
         })
         .map_err(|e| e.to_string())?;
-        for (exchange, messages) in spans {
+        for (id, exchange, messages) in seed {
             for message in messages {
-                self.record_protocol(Protocol::ContextMessage { exchange, message })
-                    .map_err(|e| e.to_string())?;
+                self.record_protocol(Protocol::ContextMessage {
+                    id,
+                    exchange,
+                    message,
+                })
+                .map_err(|e| e.to_string())?;
             }
         }
         Ok(())
@@ -735,9 +747,13 @@ impl AgentLog {
     /// The session is not at a ready boundary, or recording failed.
     pub fn import_note(&mut self, message: ChatMessage) -> Result<(), String> {
         self.ready_to_import()?;
-        let exchange = self.next_exchange();
-        self.record_protocol(Protocol::ContextMessage { exchange, message })
-            .map_err(|e| e.to_string())
+        let id = self.model_memo.next_id();
+        self.record_protocol(Protocol::ContextMessage {
+            id,
+            exchange: id,
+            message,
+        })
+        .map_err(|e| e.to_string())
     }
 
     fn ready_to_import(&self) -> Result<(), String> {
@@ -763,17 +779,18 @@ impl AgentLog {
                 self.model_memo.state_description()
             ));
         }
-        let max_exchange = self.model_memo.current_exchange().unwrap_or(0);
+        // A prompt naming the exchange in hand extends the turn it answers;
+        // anything else opens a fresh exchange under a fresh id.
+        let current = self.model_memo.current_exchange().unwrap_or(0);
         let exchange = continues
-            .filter(|id| *id == max_exchange)
+            .filter(|id| *id == current)
             .filter(|id| {
                 self.model_memo
-                    .view()
-                    .spans
-                    .iter()
-                    .any(|span| span.id == *id)
+                    .folded()
+                    .resident()
+                    .any(|turn| turn.exchange == *id)
             })
-            .unwrap_or_else(|| self.next_exchange());
+            .unwrap_or_else(|| self.model_memo.next_id());
         self.record_protocol(Protocol::UserPrompt { exchange, text })
             .map_err(|e| e.to_string())
     }
@@ -822,7 +839,9 @@ impl AgentLog {
                 message.role,
             ));
         }
+        let turn = self.model_memo.next_id();
         self.record_protocol(Protocol::AssistantMessage {
+            turn,
             message,
             pending_tool_ids,
             stop_reason,
@@ -866,21 +885,14 @@ impl AgentLog {
     }
 
     pub fn plan_eviction(&mut self, keep_budget_bytes: usize) -> Option<EvictionPlan> {
-        self.model_memo.plan_eviction(keep_budget_bytes, None)
-    }
-
-    pub fn plan_eviction_before(
-        &mut self,
-        keep_budget_bytes: usize,
-        before_exchange: u64,
-    ) -> Option<EvictionPlan> {
         self.model_memo
-            .plan_eviction(keep_budget_bytes, Some(before_exchange))
+            .plan_eviction(keep_budget_bytes)
+            .map(|through| EvictionPlan { through })
     }
 
     /// # Errors
-    /// Refuses an empty drop, an unknown or already-evicted exchange, or a
-    /// live exchange.
+    /// Refuses an empty drop, an unknown or already-departed target, the
+    /// newest turn, or the exchange being written.
     pub fn apply_edit(&mut self, op: ContextOp, by: EditAuthority) -> Result<(), String> {
         self.model_memo.validate_edit(&op)?;
         self.record_protocol(Protocol::ContextEdited { op: op.clone(), by })
@@ -969,13 +981,17 @@ impl AgentLog {
     // One non-protocol breadcrumb each; all fail only on serialising or
     // appending to `record.jsonl`.
 
+    /// The act of taking a turn: the meta half through the protocol class,
+    /// and the id the request will produce through the display one.
+    ///
     /// # Errors
     /// See the meta-records note above.
-    pub fn record_step(&mut self, n: u32, tuning: Tuning) -> io::Result<()> {
-        self.record_protocol(Protocol::StepStarted { n, tuning })?;
-        // The display twin: `tuning` never showed on screen, so only `n`
-        // duplicates across the pair.
-        self.record_display(Display::Step { n })
+    pub fn record_turn_start(&mut self, tuning: Tuning) -> io::Result<()> {
+        let id = self.model_memo.next_id();
+        self.record_protocol(Protocol::TurnStarted { tuning })?;
+        // The display twin: `tuning` never showed on screen, and the id is
+        // the screen's alone — nothing duplicates across the pair.
+        self.record_display(Display::Turn { id })
     }
 
     /// # Errors
@@ -1122,13 +1138,6 @@ impl AgentLog {
         }
     }
 
-    /// Exchange ids are lineage-monotone: a child's first is minted above its
-    /// ancestry's reach, not above its own view, which a fork may leave
-    /// empty.
-    fn next_exchange(&self) -> u64 {
-        self.model_memo.exchange_floor().saturating_add(1)
-    }
-
     pub fn current_exchange(&self) -> Option<u64> {
         self.model_memo.current_exchange()
     }
@@ -1210,6 +1219,7 @@ pub(crate) fn validate_result_ids(
 mod tests {
     use super::*;
     use crate::agent::digest::suffix_keep_budget;
+    use crate::record::model::Held;
     use genai::chat::{ContentPart, ToolCall};
     use std::io::Write as _;
 
@@ -1252,9 +1262,11 @@ mod tests {
     fn records(log: &AgentLog) -> Vec<Record> {
         crate::record::read_records(&record_path(log)).expect("record.jsonl round-trip")
     }
-
+    /// Every id-bearing record opens a turn; everything else extends the last.
+    /// Steering names the exchange in hand, so it joins the assistant turn it
+    /// answers rather than opening one.
     #[test]
-    fn span_partition_records_steering_imports_and_unaddressable_prefixes() {
+    fn turn_partition_joins_steering_and_opens_one_turn_per_id() {
         let mut s = fresh_root();
         s.record_error("before the first prompt".into()).unwrap();
         s.import_note(ChatMessage::user("inherited")).unwrap();
@@ -1272,49 +1284,51 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            s.view()
-                .spans
+            s.folded()
+                .turns()
                 .iter()
-                .map(|span| span.id)
+                .map(|turn| (turn.id, turn.exchange))
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            vec![(1, 1), (2, 2), (3, 2), (4, 4), (5, 4), (6, 4)]
         );
+        assert_eq!(s.folded().turns()[0].kind, TurnKind::Import);
         assert!(
-            !s.history_transcript()
+            !s.history_rendered()
                 .messages()
                 .any(|message| message.content.first_text() == Some("before the first prompt"))
         );
     }
 
+    /// One id space, so exchange numbers go sparse — intended.
     #[test]
-    fn exchange_ids_mint_monotonically_across_edits() {
+    fn ids_mint_monotonically_and_exchange_numbers_go_sparse() {
         let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
-        assert_eq!(s.current_exchange(), Some(2));
-        s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::Model)
+        assert_eq!(s.current_exchange(), Some(3));
+        s.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::Model)
             .unwrap();
         complete_exchange(&mut s, "three", "three");
-        assert_eq!(s.current_exchange(), Some(3));
+        assert_eq!(s.current_exchange(), Some(5));
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 1,
+                through: 2,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
         complete_exchange(&mut s, "four", "four");
-        assert_eq!(s.current_exchange(), Some(4));
+        assert_eq!(s.current_exchange(), Some(7));
     }
 
     #[test]
-    fn continues_resolution_requires_maximum_and_survival() {
+    fn continues_resolution_requires_the_exchange_in_hand_and_survival() {
         let mut joins = fresh_root();
         complete_exchange(&mut joins, "one", "one");
         joins.append_user("nudge".into(), Some(1)).unwrap();
         assert_eq!(joins.current_exchange(), Some(1));
-        assert_eq!(joins.view().spans.len(), 1);
+        assert_eq!(joins.folded().turns().len(), 2, "steering opens no turn");
 
         let mut rewound = fresh_root();
         complete_exchange(&mut rewound, "one", "one");
@@ -1322,32 +1336,30 @@ mod tests {
             .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
             .unwrap();
         rewound.append_user("fresh".into(), Some(1)).unwrap();
-        assert_eq!(rewound.current_exchange(), Some(2));
+        assert_eq!(rewound.current_exchange(), Some(3));
 
         let mut intervened = fresh_root();
         complete_exchange(&mut intervened, "one", "one");
         complete_exchange(&mut intervened, "two", "two");
         intervened.append_user("fresh".into(), Some(1)).unwrap();
-        assert_eq!(intervened.current_exchange(), Some(3));
+        assert_eq!(intervened.current_exchange(), Some(5));
 
-        let mut drop_n_plus_one = fresh_root();
-        complete_exchange(&mut drop_n_plus_one, "one", "one");
-        complete_exchange(&mut drop_n_plus_one, "two", "two");
-        drop_n_plus_one
-            .apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::Model)
+        let mut moved_past = fresh_root();
+        complete_exchange(&mut moved_past, "one", "one");
+        complete_exchange(&mut moved_past, "two", "two");
+        moved_past
+            .apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::Model)
             .unwrap();
-        drop_n_plus_one
-            .append_user("fresh".into(), Some(1))
-            .unwrap();
+        moved_past.append_user("fresh".into(), Some(1)).unwrap();
         assert_eq!(
-            drop_n_plus_one.current_exchange(),
-            Some(3),
-            "last-in-view is not enough when the log has moved past n"
+            moved_past.current_exchange(),
+            Some(5),
+            "the log has moved past exchange 1, whatever is still in context"
         );
     }
 
     #[test]
-    fn edit_admissibility_refuses_live_unknown_departed_and_empty_names() {
+    fn drop_refuses_live_unknown_departed_and_empty_names() {
         let mut live = fresh_root();
         live.append_user("live".into(), None).unwrap();
         let err = live
@@ -1363,7 +1375,7 @@ mod tests {
         let err = unknown
             .apply_edit(ContextOp::Drop { exchanges: vec![7] }, EditAuthority::User)
             .unwrap_err();
-        assert_eq!(err, "exchange 7 is not present in the current view");
+        assert_eq!(err, "exchange 7 is not present in your context");
 
         let err = unknown
             .apply_edit(ContextOp::Drop { exchanges: vec![] }, EditAuthority::User)
@@ -1374,7 +1386,7 @@ mod tests {
         unknown
             .apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 1,
+                    through: 2,
                     note: None,
                 },
                 EditAuthority::Harness,
@@ -1385,32 +1397,32 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "exchange 1 has already left your context — the earliest still in view is 2"
+            "exchange 1 has already left your context — the earliest still in it is 3"
         );
     }
 
-    /// One [`TranscriptSpan`] per named span, addressed by its own
-    /// `exchange` field rather than by argument order, since the order is
-    /// the view's. A step marker carries no model content, so it contributes
-    /// no message — [`into_chat_messages`] drops it the same way for a live
-    /// provider request.
+    /// One [`TranscriptExchange`] per named exchange, addressed by its own
+    /// `exchange` field rather than by argument order, and naming the turns
+    /// it covered. A turn marker carries no model content, so it contributes
+    /// no message.
     #[test]
-    fn transcript_addresses_spans_by_exchange_and_carries_their_messages() {
+    fn transcript_addresses_exchanges_and_names_their_turns() {
         let mut s = fresh_root();
         s.append_user("first prompt".into(), None).unwrap();
-        s.record_step(1, Tuning::default()).unwrap();
+        s.record_turn_start(Tuning::default()).unwrap();
         s.append_assistant(ChatMessage::assistant("first answer"), vec![], None)
             .unwrap();
         complete_exchange(&mut s, "second prompt", "second answer");
 
-        let transcript = s.read_context(&[1]).expect("closed exchange is readable");
-        let [exchange] = transcript.as_slice() else {
-            panic!("one named span answers one TranscriptSpan, got {transcript:?}")
+        let read = s.read_transcript(&[1], None).expect("closed exchange is readable");
+        let [exchange] = read.as_slice() else {
+            panic!("one named exchange answers one record, got {read:?}")
         };
         assert_eq!(exchange.exchange, 1);
+        assert_eq!(exchange.turns, vec![1, 2]);
         let [user_msg, assistant_msg] = exchange.messages.as_slice() else {
             panic!(
-                "a step marker carries no message, got {:?}",
+                "a turn marker carries no message, got {:?}",
                 exchange.messages
             )
         };
@@ -1424,23 +1436,76 @@ mod tests {
         );
 
         complete_exchange(&mut s, "third prompt", "third answer");
-        s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+        s.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::User)
             .unwrap();
         assert_eq!(
             s.rewind_exchanges(9).unwrap_err(),
-            "exchange 9 is not present in the current view — the last exchange is 3"
+            "exchange 9 is not present in your context — the last exchange is 5"
         );
     }
 
     /// The head marker's first message, or `None` when nothing has been
     /// evicted.
     fn head_marker(s: &mut AgentLog) -> Option<String> {
-        s.history_transcript()
+        s.history_rendered()
             .messages()
             .next()
             .and_then(|message| message.content.first_text())
-            .filter(|text| text.starts_with("[EXARCH // Exchange"))
+            .filter(|text| text.contains("left your context"))
             .map(str::to_string)
+    }
+
+    /// A cut leaves a user turn whose exchange still has an assistant turn in
+    /// context standing with its survivors, and the marker says which turns
+    /// of that exchange went.
+    #[test]
+    fn a_cut_into_an_exchange_keeps_its_user_turn() {
+        let mut s = fresh_root();
+        s.append_user("work on the parser".into(), None).unwrap();
+        s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
+        s.append_tool_results(vec![ToolResult {
+            id: "call".into(),
+            content: "result".into(),
+        }])
+        .unwrap();
+        s.append_assistant(ChatMessage::assistant("done"), vec![], None)
+            .unwrap();
+        assert_eq!(
+            s.folded()
+                .turns()
+                .iter()
+                .map(|turn| turn.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+
+        s.apply_edit(
+            ContextOp::Evict {
+                through: 2,
+                note: None,
+            },
+            EditAuthority::Model,
+        )
+        .unwrap();
+        assert_eq!(
+            s.folded()
+                .resident()
+                .map(|turn| turn.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3],
+            "the prompt stays with the reply that survived the cut"
+        );
+        let marker = head_marker(&mut s).expect("a cut renders a marker");
+        assert!(
+            marker.starts_with("[EXARCH // Turn 2 of exchange 1 has left your context."),
+            "{marker}"
+        );
+        assert!(
+            s.history_rendered()
+                .messages()
+                .any(|message| message.content.first_text() == Some("done"))
+        );
     }
 
     #[test]
@@ -1451,7 +1516,7 @@ mod tests {
         }
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 1,
+                through: 2,
                 note: Some("the parser is fixed".into()),
             },
             EditAuthority::Model,
@@ -1459,41 +1524,35 @@ mod tests {
         .unwrap();
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 2,
+                through: 4,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
 
-        assert_eq!(s.view().evictions.len(), 2);
+        assert_eq!(s.folded().cuts().len(), 2);
         assert_eq!(
-            s.view()
-                .evictions
-                .iter()
-                .flat_map(|eviction| eviction.rows.iter())
-                .map(|row| row.exchange)
+            s.folded()
+                .resident()
+                .map(|turn| turn.id)
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![5, 6]
         );
-        assert_eq!(
-            s.view()
-                .spans
-                .iter()
-                .map(|span| span.id)
-                .collect::<Vec<_>>(),
-            vec![3]
+        let marker = head_marker(&mut s).expect("two cuts render one marker");
+        assert!(
+            marker.starts_with("[EXARCH // Exchanges 1–3 have left your context."),
+            "{marker}"
         );
-        let marker = head_marker(&mut s).expect("two evictions render one marker");
-        assert!(marker.starts_with("[EXARCH // Exchanges 1–2 have left your context."));
         assert!(marker.contains("Your note at eviction: \"the parser is fixed\""));
     }
 
     /// The prompt cache reads message 0 byte for byte, so the marker must
-    /// depend on the evictions and nothing else — not on how many times it is
-    /// rendered, and not on whether the view was built live or refolded.
+    /// depend on the table and its cuts and nothing else — not on how many
+    /// times it is rendered, and not on whether the fold was built live or
+    /// refolded.
     #[test]
-    fn head_marker_is_a_pure_function_of_evictions() {
+    fn head_marker_is_a_pure_function_of_the_table() {
         let sessions = sessions_root("head-marker-purity");
         let mut live = AgentLog::root(
             sessions.path(),
@@ -1508,13 +1567,13 @@ mod tests {
         }
         live.apply_edit(
             ContextOp::Evict {
-                through_exchange: 2,
+                through: 4,
                 note: Some("keep going".into()),
             },
             EditAuthority::Model,
         )
         .unwrap();
-        let first = head_marker(&mut live).expect("an eviction renders a marker");
+        let first = head_marker(&mut live).expect("a cut renders a marker");
         assert_eq!(head_marker(&mut live).as_ref(), Some(&first));
         drop(live);
 
@@ -1529,22 +1588,24 @@ mod tests {
             let prompt = format!("prompt {n}");
             complete_exchange(&mut s, &prompt, "answer");
         }
+        // 45 exchanges hold turns 1..90 under exchange ids 1, 3, …, 89; a cut
+        // through turn 88 takes the first 44 of them whole.
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 44,
+                through: 88,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
-        let marker = head_marker(&mut s).expect("an eviction renders a marker");
+        let marker = head_marker(&mut s).expect("a cut renders a marker");
         assert!(
-            marker.contains("1–4  (4 earlier exchanges — transcript `index)"),
+            marker.contains("1–7  (4 earlier exchanges — transcript `index)"),
             "the rows past the cap collapse to one line, got: {marker}"
         );
         assert!(
             !marker.lines().any(|line| line.starts_with("   1  "))
-                && marker.lines().any(|line| line.starts_with("   5  ")),
+                && marker.lines().any(|line| line.starts_with("   9  ")),
             "the collapsed rows are the oldest, got: {marker}"
         );
         assert_eq!(
@@ -1554,38 +1615,40 @@ mod tests {
         );
     }
 
-    /// A note is drawn only alongside a row of its own eviction, so an
-    /// eviction collapsed away entirely takes its note with it — message 0
-    /// stays bounded by the row cap rather than growing with how many
-    /// evictions the session has run.
+    /// A note is drawn only alongside a fragment of its own cut, so a cut
+    /// collapsed away entirely takes its note with it — message 0 stays
+    /// bounded by the row cap rather than growing with how many cuts the
+    /// session has run.
     #[test]
     fn a_note_collapses_with_its_rows() {
         let mut s = fresh_root();
         for n in 1..=45u64 {
             let prompt = format!("prompt {n}");
             complete_exchange(&mut s, &prompt, "answer");
-            s.apply_edit(
-                ContextOp::Evict {
-                    through_exchange: n,
-                    note: Some(format!("note {n}")),
-                },
-                EditAuthority::Model,
-            )
-            .unwrap();
+            if n > 1 {
+                s.apply_edit(
+                    ContextOp::Evict {
+                        through: 2 * (n - 1),
+                        note: Some(format!("note {n}")),
+                    },
+                    EditAuthority::Model,
+                )
+                .unwrap();
+            }
         }
-        let marker = head_marker(&mut s).expect("45 evictions render one marker");
+        let marker = head_marker(&mut s).expect("44 cuts render one marker");
         assert!(
             marker.contains("\"note 45\""),
             "the newest note must survive, got: {marker}"
         );
         assert!(
-            !marker.contains("\"note 1\""),
+            !marker.contains("\"note 2\""),
             "a note collapsed with its rows must not survive, got: {marker}"
         );
         assert_eq!(
             marker.lines().count(),
             1 + 1 + 2 * 40,
-            "bounded by the row cap, not by how many evictions ran"
+            "bounded by the row cap, not by how many cuts ran"
         );
     }
 
@@ -1599,94 +1662,95 @@ mod tests {
         }
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 2,
+                through: 4,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
-        let before = head_marker(&mut s).expect("an eviction renders a marker");
-        s.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::Model)
+        let before = head_marker(&mut s).expect("a cut renders a marker");
+        s.apply_edit(ContextOp::Drop { exchanges: vec![5] }, EditAuthority::Model)
             .unwrap();
         assert_eq!(head_marker(&mut s), Some(before));
         assert!(
-            s.view()
-                .evictions
+            s.folded()
+                .turns()
                 .iter()
-                .all(|eviction| eviction.rows.iter().all(|row| row.exchange != 3))
+                .filter(|turn| turn.exchange == 5)
+                .all(|turn| turn.held == Held::Dropped)
         );
     }
 
     #[test]
-    fn evict_refuses_an_exchange_already_gone() {
+    fn evict_refuses_a_turn_already_gone_and_the_newest_one() {
         let mut s = fresh_root();
         for prompt in ["one", "two", "three"] {
             complete_exchange(&mut s, prompt, prompt);
         }
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 2,
+                through: 4,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
-        let err = s
-            .apply_edit(
+        assert_eq!(
+            s.apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 1,
+                    through: 2,
                     note: None,
                 },
                 EditAuthority::Model,
             )
-            .unwrap_err();
-        assert_eq!(
-            err,
-            "exchange 1 has already left your context — the earliest still in view is 3"
+            .unwrap_err(),
+            "turn 2 has already left your context — the earliest still in it is 5"
         );
-    }
-
-    #[test]
-    fn evict_refuses_the_live_exchange() {
-        let mut s = fresh_root();
-        complete_exchange(&mut s, "one", "one");
-        s.append_user("two".into(), None).unwrap();
-        let err = s
-            .apply_edit(
+        assert_eq!(
+            s.apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 2,
+                    through: 6,
                     note: None,
                 },
                 EditAuthority::Model,
             )
-            .unwrap_err();
+            .unwrap_err(),
+            "6 is the newest turn; an eviction keeps the work in hand"
+        );
         assert_eq!(
-            err,
-            "exchange 2 is the one you are in — a context edit may only name closed exchanges"
+            s.apply_edit(
+                ContextOp::Evict {
+                    through: 99,
+                    note: None,
+                },
+                EditAuthority::Model,
+            )
+            .unwrap_err(),
+            "turn 99 is not recorded — the latest is 6"
         );
     }
 
     /// What comes back from the log is what the model was sent: the records
     /// hold the clipped strings, and one rendering serves both.
     #[test]
-    fn read_context_reads_an_evicted_exchange_byte_identically() {
+    fn read_transcript_reads_an_evicted_exchange_byte_identically() {
         let mut s = fresh_root();
         complete_exchange(&mut s, "one", "answer one");
         complete_exchange(&mut s, "two", "answer two");
-        let before = format!("{:?}", s.read_context(&[1]).expect("in view"));
+        let before = format!("{:?}", s.read_transcript(&[1], None).expect("in context"));
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 1,
+                through: 2,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
-        let after = format!("{:?}", s.read_context(&[1]).expect("evicted but recorded"));
+        let after = format!("{:?}", s.read_transcript(&[1], None).expect("evicted but recorded"));
         assert_eq!(after, before);
         assert_eq!(
-            s.read_context(&[9]).unwrap_err(),
-            "exchange 9 was never recorded — the last closed exchange is 2"
+            s.read_transcript(&[9], None).unwrap_err(),
+            "exchange 9 is not recorded — the latest turn is 4"
         );
     }
 
@@ -1699,7 +1763,7 @@ mod tests {
         complete_exchange(&mut s, "beta", "beta answered");
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 1,
+                through: 2,
                 note: None,
             },
             EditAuthority::Harness,
@@ -1720,7 +1784,7 @@ mod tests {
         fs::write(&path, &rewritten).expect("rewrite record.jsonl in place");
 
         let refusal = s
-            .read_context(&[1])
+            .read_transcript(&[1], None)
             .expect_err("a record that no longer hashes to its stamp is unreadable");
         assert!(
             refusal.contains("did not hash to the stamp that named it"),
@@ -1728,44 +1792,73 @@ mod tests {
         );
     }
 
-    /// The store is every closed exchange, wherever it lies: the evicted one
-    /// carries the weight it left at, the in-view ones the weight they still
-    /// cost, and the exchange in flight is in no store at all.
+    /// The index is every turn the transcript holds, whatever took it out of
+    /// the context — and the exchange in flight is listed like any other.
     #[test]
-    fn store_index_lists_in_view_and_evicted() {
+    fn transcript_index_lists_every_turn_with_how_it_is_held() {
         let mut s = fresh_root();
         for prompt in ["one", "two", "three"] {
             complete_exchange(&mut s, prompt, prompt);
         }
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 1,
+                through: 2,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
+        s.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::Model)
+            .unwrap();
         s.append_user("live".into(), None).unwrap();
 
-        let index = s.store_index();
+        let index = s.transcript_index();
         assert_eq!(
             index
                 .iter()
-                .map(|item| (item.exchange, item.in_view))
+                .map(|turn| (turn.id, turn.exchange, turn.held))
                 .collect::<Vec<_>>(),
-            vec![(1, false), (2, true), (3, true)]
+            vec![
+                (1, 1, Held::Evicted),
+                (2, 1, Held::Evicted),
+                (3, 3, Held::Dropped),
+                (4, 3, Held::Dropped),
+                (5, 5, Held::Resident),
+                (6, 5, Held::Resident),
+                (7, 7, Held::Resident),
+            ]
         );
-        assert_eq!(index[0].opening, "one");
+        assert_eq!(index[0].label, "one");
         assert!(
             index
                 .iter()
-                .all(|item| item.bytes > 0 && item.kind == ContextSpanKind::Exchange)
+                .all(|turn| turn.bytes > 0 && turn.kind == TurnKind::Exchange)
+        );
+    }
+
+    /// The exchange still being written is refused by name, and told which of
+    /// its own turns have closed.
+    #[test]
+    fn the_door_refuses_the_exchange_in_progress() {
+        let mut s = fresh_root();
+        s.append_user("work".into(), None).unwrap();
+        s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
+        s.append_tool_results(vec![ToolResult {
+            id: "call".into(),
+            content: "result".into(),
+        }])
+        .unwrap();
+        assert_eq!(
+            s.read_transcript(&[1], None).unwrap_err(),
+            "exchange 1 is still in progress — its closed turns 1–1 are readable with \
+             `transcript `read [turns: [1, 1]]`"
         );
     }
 
     /// One search over both sides of the ledger: the freed records read back
-    /// off `record.jsonl`, the resident ones off the render cache, and the
-    /// hits in store order across the seam between them.
+    /// off `record.jsonl`, the resident ones rendered in place, and the hits
+    /// in transcript order across the seam between them.
     #[test]
     fn grep_walks_resident_then_freed() {
         let mut s = fresh_root();
@@ -1773,7 +1866,7 @@ mod tests {
         complete_exchange(&mut s, "the lexer is fine", "nothing to do");
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: 1,
+                through: 2,
                 note: None,
             },
             EditAuthority::Harness,
@@ -1781,8 +1874,8 @@ mod tests {
         .unwrap();
 
         let answer = s
-            .grep_store(&regex(r"\bthe\b"), None)
-            .expect("the whole store is searchable");
+            .grep_transcript(&regex(r"\bthe\b"), None, None)
+            .expect("the whole transcript is searchable");
         assert_eq!(answer.total, 3);
         assert_eq!(
             answer
@@ -1793,23 +1886,24 @@ mod tests {
             vec![
                 (1, ChatRole::User, 1),
                 (1, ChatRole::Assistant, 1),
-                (2, ChatRole::User, 1),
+                (3, ChatRole::User, 1),
             ]
         );
         assert_eq!(answer.hits[0].text, "the parser is broken");
 
         let named = s
-            .grep_store(&regex("parser"), Some(&[2]))
+            .grep_transcript(&regex("parser"), Some(&[3]), None)
             .expect("a named closed exchange is searchable");
         assert_eq!(named.total, 0);
         assert_eq!(
-            s.grep_store(&regex("parser"), Some(&[9])).unwrap_err(),
-            "exchange 9 was never recorded — the last closed exchange is 2"
+            s.grep_transcript(&regex("parser"), Some(&[9]), None)
+                .unwrap_err(),
+            "exchange 9 is not recorded — the latest turn is 4"
         );
     }
 
-    /// A pattern that matches everything answers a window, not the store:
-    /// `total` is what tells the model to narrow.
+    /// A pattern that matches everything answers one page, not the whole
+    /// transcript: `total` is what tells the model to narrow.
     #[test]
     fn grep_caps_hits_and_reports_total() {
         let mut s = fresh_root();
@@ -1820,95 +1914,89 @@ mod tests {
         complete_exchange(&mut s, "count", &many);
 
         let answer = s
-            .grep_store(&regex("matches"), None)
-            .expect("the whole store is searchable");
+            .grep_transcript(&regex("matches"), None, None)
+            .expect("the whole transcript is searchable");
         assert_eq!(answer.total, 150);
         assert_eq!(answer.hits.len(), 100);
         assert_eq!(answer.hits[0].line, 1);
         assert_eq!(
             answer.hits[99].line, 100,
-            "the oldest hundred, in store order"
+            "the oldest hundred, in transcript order"
         );
     }
 
     #[test]
-    fn eviction_plan_walks_newest_spans_and_cuts_by_exchange() {
+    fn eviction_plan_walks_back_from_the_turn_in_hand() {
         let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
         complete_exchange(&mut s, "three", "three");
-        let keep = s
-            .context_survey()
-            .items
-            .last()
-            .expect("the newest exchange has a survey row")
-            .bytes;
-        let plan = s.plan_eviction(keep).expect("old spans to shed");
-        assert_eq!(plan.through_exchange, 2);
+        let rows = s.context_survey().rows;
+        let keep = rows[4].bytes + rows[5].bytes;
+        let plan = s.plan_eviction(keep).expect("old turns to shed");
+        assert_eq!(plan.through, 4);
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: plan.through_exchange,
+                through: plan.through,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
-        assert_eq!(s.context_survey().evicted, 2);
+        assert_eq!(s.context_survey().evicted, 4);
         assert!(
-            !s.history_transcript()
+            !s.history_rendered()
                 .messages()
                 .any(|message| { message.content.first_text() == Some("one") })
         );
     }
 
-    /// A newest exchange heavy enough to fill the whole keep budget on its
-    /// own must never be the one a plan names: that would leave the model
-    /// with nothing, and the id would be the live exchange `validate_edit`
-    /// refuses.
+    /// A turn in hand heavy enough to fill the whole keep budget on its own
+    /// must never be the one a plan names: that would leave the model with
+    /// nothing, and the id would be one `validate_edit` refuses.
     #[test]
-    fn a_plan_never_takes_the_newest_span() {
+    fn a_plan_never_takes_the_newest_turn() {
         let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         let big = "x".repeat(100_000);
         complete_exchange(&mut s, "two", &big);
         let keep = suffix_keep_budget(s.history_bytes());
         let plan = s.plan_eviction(keep).expect("the older exchange to shed");
-        assert_eq!(plan.through_exchange, 1);
+        assert_eq!(plan.through, 2);
         s.apply_edit(
             ContextOp::Evict {
-                through_exchange: plan.through_exchange,
+                through: plan.through,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
         assert_eq!(
-            s.view()
-                .spans
-                .iter()
-                .map(|span| span.id)
+            s.folded()
+                .resident()
+                .map(|turn| turn.id)
                 .collect::<Vec<_>>(),
-            vec![2],
-            "the newest span must survive the eviction it could not itself be named by"
+            vec![3, 4],
+            "the work in hand must survive the eviction it could not itself be named by"
         );
     }
 
     #[test]
-    fn a_lone_span_is_never_planned_away() {
+    fn a_lone_exchange_is_never_planned_away() {
         let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         assert!(s.plan_eviction(0).is_none());
     }
 
     #[test]
-    fn user_ending_import_span_is_never_torn() {
+    fn a_user_ending_import_turn_is_never_torn() {
         let mut s = fresh_root();
         s.import_note(ChatMessage::user("imported user")).unwrap();
         complete_exchange(&mut s, "normal", "answer");
 
-        let transcript = s.history_transcript();
+        let rendered = s.history_rendered();
         assert_eq!(
-            transcript
+            rendered
                 .messages()
                 .filter_map(|message| message.content.first_text())
                 .collect::<Vec<_>>(),
@@ -1933,8 +2021,8 @@ mod tests {
             "no assistant turn the model never took may enter the log"
         );
         complete_exchange(&mut s, "next", "answer");
-        let transcript = s.history_transcript();
-        let read: Vec<&str> = transcript
+        let rendered = s.history_rendered();
+        let read: Vec<&str> = rendered
             .messages()
             .filter_map(|message| message.content.first_text())
             .collect();
@@ -1948,7 +2036,7 @@ mod tests {
             ]
         );
         assert!(
-            transcript
+            rendered
                 .messages()
                 .all(|message| message.role == ChatRole::User
                     || message.content.first_text() == Some("answer")),
@@ -1979,7 +2067,7 @@ mod tests {
         s.quiesce(QuiesceReason::Cancelled);
         complete_exchange(&mut s, "next", "answer");
         assert!(
-            s.history_transcript().messages().any(|message| {
+            s.history_rendered().messages().any(|message| {
                 message
                     .content
                     .first_text()
@@ -2019,7 +2107,7 @@ mod tests {
 
     /// A `reply` ends a complete exchange, so its capstone is earned — and
     /// without one the fold could not tell it from an interrupted exchange,
-    /// and would drop the whole turn from the child's own view.
+    /// and would read the whole exchange as its note.
     #[test]
     fn a_replied_exchange_keeps_its_capstone_and_stays_visible() {
         let mut s = fresh_root();
@@ -2034,11 +2122,11 @@ mod tests {
         s.quiesce(QuiesceReason::Replied);
         complete_exchange(&mut s, "follow-up", "answer");
         assert!(
-            s.history_transcript().messages().any(|message| {
+            s.history_rendered().messages().any(|message| {
                 message.content.first_text()
                     == Some("[EXARCH // Exchange ended: replied to parent.]")
             }),
-            "a replied exchange stays whole in the child's own view"
+            "a replied exchange stays whole in the child's own context"
         );
     }
 
@@ -2105,22 +2193,22 @@ mod tests {
     }
 
     #[test]
-    fn clear_rotates_record_jsonl_and_resets_the_view() {
+    fn clear_rotates_record_jsonl_and_resets_the_table() {
         let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         complete_exchange(&mut s, "two", "two");
-        s.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+        s.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::User)
             .unwrap();
 
         let record = s.dir().join("record.jsonl");
         s.clear(0, 2).expect("clear");
         assert!(record.with_extension("jsonl.0").exists());
-        assert!(s.view().spans.is_empty());
+        assert!(s.folded().turns().is_empty());
         assert!(s.is_ready());
     }
 
     #[test]
-    fn transient_eviction_keeps_no_resident_state() {
+    fn a_departed_turn_keeps_no_resident_state() {
         let mut s = fresh_root();
         complete_exchange(&mut s, "one", "one");
         s.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::User)
@@ -2129,7 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_replays_a_scripted_history_and_preserves_the_model_view() {
+    fn resume_replays_a_scripted_history_and_preserves_the_context() {
         let sessions = sessions_root("resume-round-trip");
         let mut live = AgentLog::root(
             sessions.path(),
@@ -2144,21 +2232,20 @@ mod tests {
         complete_exchange(&mut live, "two", "answer two");
         live.apply_edit(
             ContextOp::Evict {
-                through_exchange: 2,
+                through: 3,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
         let expected =
-            serde_json::to_vec(&live.history_transcript().messages().collect::<Vec<_>>()).unwrap();
+            serde_json::to_vec(&live.history_rendered().messages().collect::<Vec<_>>()).unwrap();
         drop(live);
 
         let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
         assert!(resumed.is_ready());
         assert_eq!(
-            serde_json::to_vec(&resumed.history_transcript().messages().collect::<Vec<_>>())
-                .unwrap(),
+            serde_json::to_vec(&resumed.history_rendered().messages().collect::<Vec<_>>()).unwrap(),
             expected
         );
     }
@@ -2262,6 +2349,7 @@ mod tests {
         let path = sessions.path().join("0/record.jsonl");
         drop(live);
         let foreign = Record::Protocol(Protocol::AssistantMessage {
+            turn: 1,
             message: ChatMessage::user("wrong role"),
             pending_tool_ids: Vec::new(),
             stop_reason: None,
@@ -2282,7 +2370,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_refuses_a_stale_exchange_id_as_foreign_data() {
+    fn resume_refuses_a_stale_id_as_foreign_data() {
         let sessions = sessions_root("resume-stale-id");
         let mut live = AgentLog::root(
             sessions.path(),
@@ -2309,9 +2397,9 @@ mod tests {
 
         let error = AgentLog::resume(sessions.path(), 0)
             .err()
-            .expect("a stale exchange id is foreign data");
+            .expect("a stale id is foreign data");
         let text = error.to_string();
-        assert!(text.contains("names exchange 1"), "{text}");
+        assert!(text.contains("names turn 1"), "{text}");
         assert!(text.contains("moved past"), "{text}");
         assert_eq!(fs::read(&path).unwrap(), before);
     }
@@ -2385,9 +2473,9 @@ mod tests {
 
         let mut resumed = AgentLog::resume(sessions.path(), 0).expect("interior seam repair");
         assert!(resumed.is_ready());
-        let transcript = resumed.history_transcript();
+        let rendered = resumed.history_rendered();
         assert!(
-            transcript.messages().any(|message| {
+            rendered.messages().any(|message| {
                 message
                     .content
                     .first_text()
@@ -2396,7 +2484,7 @@ mod tests {
             "the repaired seam admits the log; the abandoned exchange reads as its note"
         );
         assert!(
-            !transcript
+            !rendered
                 .messages()
                 .any(|message| message.content.first_text() == Some("first")),
             "none of the abandoned exchange's own content reaches the model"
@@ -2422,13 +2510,13 @@ mod tests {
             match pattern {
                 0 => {}
                 1 => {
-                    live.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::User)
                         .unwrap();
                 }
                 2 => {
                     live.apply_edit(
                         ContextOp::Evict {
-                            through_exchange: 2,
+                            through: 4,
                             note: None,
                         },
                         EditAuthority::Harness,
@@ -2438,30 +2526,30 @@ mod tests {
                 3 => {
                     live.apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
                         .unwrap();
-                    live.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::User)
                         .unwrap();
                 }
                 4 => {
                     live.apply_edit(
                         ContextOp::Evict {
-                            through_exchange: 2,
+                            through: 4,
                             note: Some("halfway".into()),
                         },
                         EditAuthority::Harness,
                     )
                     .unwrap();
-                    live.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::Model)
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![5] }, EditAuthority::Model)
                         .unwrap();
                 }
                 5 => {
-                    live.apply_edit(ContextOp::Drop { exchanges: vec![2] }, EditAuthority::User)
+                    live.apply_edit(ContextOp::Drop { exchanges: vec![3] }, EditAuthority::User)
                         .unwrap();
                     complete_exchange(&mut live, "four", "four");
                 }
                 6 => {
                     live.apply_edit(
                         ContextOp::Evict {
-                            through_exchange: 1,
+                            through: 2,
                             note: None,
                         },
                         EditAuthority::Harness,
@@ -2469,7 +2557,7 @@ mod tests {
                     .unwrap();
                     live.apply_edit(
                         ContextOp::Evict {
-                            through_exchange: 2,
+                            through: 4,
                             note: Some("second cut".into()),
                         },
                         EditAuthority::Model,
@@ -2483,13 +2571,13 @@ mod tests {
                 _ => unreachable!(),
             }
             let expected =
-                serde_json::to_vec(&live.history_transcript().messages().collect::<Vec<_>>())
+                serde_json::to_vec(&live.history_rendered().messages().collect::<Vec<_>>())
                     .unwrap();
             drop(live);
             let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume edit sequence");
             assert!(resumed.is_ready());
             assert_eq!(
-                serde_json::to_vec(&resumed.history_transcript().messages().collect::<Vec<_>>())
+                serde_json::to_vec(&resumed.history_rendered().messages().collect::<Vec<_>>())
                     .unwrap(),
                 expected,
                 "pattern {pattern}"
@@ -2498,9 +2586,9 @@ mod tests {
     }
 
     /// `resume` refuses unless its from-scratch refold agrees with the
-    /// incremental memo, and an eviction's rows are part of that agreement —
-    /// so a refold that re-rendered a freed span differently would refuse
-    /// here rather than serve the model a marker that had drifted.
+    /// incremental table, and every turn's weight is part of that agreement —
+    /// so a refold that misplaced a freed record would refuse here rather
+    /// than serve the model a marker that had drifted.
     #[test]
     fn fold_equals_memo_across_evict() {
         let sessions = sessions_root("fold-equals-memo-evict");
@@ -2519,21 +2607,23 @@ mod tests {
         }
         live.apply_edit(
             ContextOp::Evict {
-                through_exchange: 3,
+                through: 5,
                 note: Some("the abandoned exchange is indexed too".into()),
             },
             EditAuthority::Model,
         )
         .unwrap();
-        let evictions = live.view().evictions.clone();
+        let turns = live.folded().turns().to_vec();
+        let cuts = live.folded().cuts().to_vec();
         drop(live);
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
-        assert_eq!(resumed.view().evictions, evictions);
+        assert_eq!(resumed.folded().turns(), turns.as_slice());
+        assert_eq!(resumed.folded().cuts(), cuts.as_slice());
     }
 
     /// A `mnemon` child of `parent`: its own log under the same sessions
-    /// root, opened with the spans and the link the parent hands over.
+    /// root, opened with the table and the link the parent hands over.
     fn mnemon(parent: &mut AgentLog, child_id: AgentId) -> AgentLog {
         let inherited = parent.inherited_context();
         let mut child = parent
@@ -2544,7 +2634,7 @@ mod tests {
     }
 
     fn seed_has_a_tool_call(log: &mut AgentLog) -> bool {
-        log.history_transcript().messages().any(|message| {
+        log.history_rendered().messages().any(|message| {
             message
                 .content
                 .iter()
@@ -2552,10 +2642,10 @@ mod tests {
         })
     }
 
-    /// A `ContextEdited` record with no exchange id of its own glues onto
-    /// whatever span is still open, so a `drop` run mid-batch lands right
-    /// after the dangling assistant frame rather than replacing it. The seed
-    /// must still cut at the tool call, not at the edit that followed it.
+    /// A `ContextEdited` record with no id of its own glues onto whatever
+    /// turn is still open, so a `drop` run mid-batch lands right after the
+    /// dangling assistant frame rather than replacing it. The seed must still
+    /// cut at the tool call, not at the edit that followed it.
     #[test]
     fn a_seed_cut_never_owes_a_tool_result() {
         let mut parent = fresh_root();
@@ -2575,7 +2665,7 @@ mod tests {
         );
         assert!(
             child
-                .history_transcript()
+                .history_rendered()
                 .messages()
                 .any(|message| message.content.first_text() == Some("two")),
             "the prompt behind the dangling call must still seed"
@@ -2583,7 +2673,7 @@ mod tests {
     }
 
     /// The plain in-batch fork: no edit lands after the dangling assistant
-    /// frame, so the frame itself is the span's last record, and the cut
+    /// frame, so the frame itself is the turn's last record, and the cut
     /// must still land in front of it.
     #[test]
     fn a_seed_cut_never_owes_a_tool_result_with_no_edit() {
@@ -2601,14 +2691,14 @@ mod tests {
         );
         assert!(
             child
-                .history_transcript()
+                .history_rendered()
                 .messages()
                 .any(|message| message.content.first_text() == Some("two")),
         );
     }
 
-    fn openings(span: &TranscriptSpan) -> Vec<&str> {
-        span.messages
+    fn openings(read: &TranscriptExchange) -> Vec<&str> {
+        read.messages
             .iter()
             .filter_map(|message| match message.parts.first() {
                 Some(TranscriptPart::Text(text)) => Some(text.as_str()),
@@ -2637,7 +2727,7 @@ mod tests {
         parent
             .apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 3,
+                    through: 6,
                     note: None,
                 },
                 EditAuthority::Harness,
@@ -2647,39 +2737,102 @@ mod tests {
         let mut child = mnemon(&mut parent, 1);
         assert_eq!(
             child
-                .view()
-                .spans
-                .iter()
-                .map(|span| span.id)
+                .folded()
+                .resident()
+                .map(|turn| turn.id)
                 .collect::<Vec<_>>(),
-            vec![4],
-            "the parent's surviving span crosses under the parent's own id"
+            vec![7, 8],
+            "the parent's surviving turns cross under the parent's own ids"
         );
         complete_exchange(&mut child, "the child's own", "answer");
-        assert_eq!(child.current_exchange(), Some(5));
+        assert_eq!(child.current_exchange(), Some(9));
 
         let read = child
-            .read_context(&[2])
-            .expect("an ancestor's evicted exchange is in the lineage's store");
-        let [span] = read.as_slice() else {
-            panic!("one named exchange answers one span, got {read:?}")
+            .read_transcript(&[3], None)
+            .expect("an ancestor's evicted exchange is in the lineage's transcript");
+        let [exchange] = read.as_slice() else {
+            panic!("one named exchange answers one record, got {read:?}")
         };
-        assert_eq!(span.exchange, 2);
-        assert_eq!(openings(span), vec!["two", "two"]);
+        assert_eq!(exchange.exchange, 3);
+        assert_eq!(openings(exchange), vec!["two", "two"]);
 
         let mut grandchild = mnemon(&mut child, 2);
         let read = grandchild
-            .read_context(&[2])
-            .expect("two links back is still the same store");
+            .read_transcript(&[3], None)
+            .expect("two links back is still the same transcript");
         assert_eq!(openings(&read[0]), vec!["two", "two"]);
         complete_exchange(&mut grandchild, "the grandchild's own", "answer");
-        assert_eq!(grandchild.current_exchange(), Some(6));
+        assert_eq!(grandchild.current_exchange(), Some(11));
     }
 
-    /// A `/rewind` at a ready boundary can leave a parent with no span at
-    /// all; the ids it minted are still spent, and the child says so.
+    /// A cut into an exchange, then a fork, leaves that exchange's turns in
+    /// two files: the evicted one in the ancestor's, the survivors re-recorded
+    /// as the child's own. Each turn reads back from wherever its placement
+    /// says, so the read answers the whole exchange rather than the local
+    /// half of it.
     #[test]
-    fn an_empty_parent_view_still_floors_the_childs_first_exchange() {
+    fn a_split_exchange_reads_back_out_of_both_files() {
+        let sessions = sessions_root("lineage-split");
+        let mut parent = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        parent.append_user("work on the parser".into(), None).unwrap();
+        parent
+            .append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
+        parent
+            .append_tool_results(vec![ToolResult {
+                id: "call".into(),
+                content: "result".into(),
+            }])
+            .unwrap();
+        parent
+            .append_assistant(ChatMessage::assistant("done"), vec![], None)
+            .unwrap();
+        parent
+            .apply_edit(
+                ContextOp::Evict {
+                    through: 2,
+                    note: None,
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+
+        let mut child = mnemon(&mut parent, 1);
+        let read = child
+            .read_transcript(&[1], None)
+            .expect("both halves of the exchange are in the lineage's transcript");
+        let [exchange] = read.as_slice() else {
+            panic!("one named exchange answers one record, got {read:?}")
+        };
+        assert_eq!(exchange.turns, vec![1, 2, 3]);
+        assert_eq!(
+            exchange
+                .messages
+                .iter()
+                .map(|message| message.role.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                ChatRole::User,
+                ChatRole::Assistant,
+                ChatRole::Tool,
+                ChatRole::Assistant
+            ],
+            "the evicted turn's records come off the ancestor's file, the survivors off the child's"
+        );
+    }
+
+    /// A `/rewind` at a ready boundary can leave a parent with no turn in
+    /// context at all; the ids it minted are still spent, and the child says
+    /// so.
+    #[test]
+    fn an_empty_parent_context_still_floors_the_childs_first_id() {
         let sessions = sessions_root("lineage-floor");
         let mut parent = AgentLog::root(
             sessions.path(),
@@ -2694,17 +2847,17 @@ mod tests {
         parent
             .apply_edit(
                 ContextOp::Drop {
-                    exchanges: vec![1, 2],
+                    exchanges: vec![1, 3],
                 },
                 EditAuthority::User,
             )
             .unwrap();
-        assert!(parent.view().spans.is_empty());
+        assert_eq!(parent.folded().resident().count(), 0);
 
         let mut child = mnemon(&mut parent, 1);
-        assert!(child.view().spans.is_empty());
+        assert_eq!(child.folded().resident().count(), 0);
         child.append_user("first".into(), None).unwrap();
-        assert_eq!(child.current_exchange(), Some(3));
+        assert_eq!(child.current_exchange(), Some(5));
     }
 
     /// Only a fork's opening may link a log to an ancestry: a link found
@@ -2725,8 +2878,9 @@ mod tests {
         drop(live);
         let late = Record::Protocol(Protocol::Inherited {
             source: path.clone(),
-            evictions: Vec::new(),
-            through_exchange: 0,
+            through: 0,
+            turns: Vec::new(),
+            cuts: Vec::new(),
         });
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(&crate::record::envelope_line(&late))
@@ -2741,14 +2895,10 @@ mod tests {
         assert!(text.contains("only a fork's opening may do"), "{text}");
     }
 
-    /// A lineage the walk cannot follow refuses the id behind it by the fault
-    /// it actually met — a line that will not read back, or a file that will
-    /// not open — and never by calling an exchange the ancestry owns
+    /// A lineage the walk cannot follow refuses the turn behind it by the
+    /// fault it actually met — a line that will not read back, or a file that
+    /// will not open — and never by calling an exchange the ancestry owns
     /// unrecorded. A break is not remembered, so the second read walks again.
-    ///
-    /// A break bounds only what the walk had not reached: the pass indexes
-    /// each span as it closes, so an exchange already indexed stays readable
-    /// and only the ones behind the fault are refused.
     #[test]
     fn a_broken_ancestry_link_is_refused_by_the_fault_it_met() {
         let sessions = sessions_root("lineage-broken");
@@ -2766,7 +2916,7 @@ mod tests {
         parent
             .apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 1,
+                    through: 2,
                     note: None,
                 },
                 EditAuthority::Harness,
@@ -2776,8 +2926,6 @@ mod tests {
         let mut child = mnemon(&mut parent, 1);
         drop(parent);
 
-        // The walk indexes as it goes, so only a fault standing *before* an
-        // exchange's own records puts that exchange out of reach.
         let recorded = fs::read_to_string(&source).expect("record.jsonl is utf-8");
         let mut torn = String::new();
         for (line, text) in recorded.lines().enumerate() {
@@ -2789,7 +2937,7 @@ mod tests {
         }
         fs::write(&source, &torn).expect("rewrite the ancestor's log");
         let refusal = child
-            .read_context(&[1])
+            .read_transcript(&[1], None)
             .expect_err("a line the walk cannot read stops the lineage");
         assert!(
             refusal.contains("line 2 of the ancestor's log") && refusal.contains("read back"),
@@ -2798,14 +2946,15 @@ mod tests {
 
         fs::remove_file(&source).expect("delete the ancestor's log");
         let refusal = child
-            .read_context(&[1])
+            .read_transcript(&[1], None)
             .expect_err("a deleted ancestor's log stops the lineage");
         assert!(refusal.contains("would not open"), "{refusal}");
     }
 
     /// The link is folded, not just recorded: a refold reads the parent's
-    /// head-marker state back off it, so the `fold == memo` law covers an
-    /// inherited view as it covers an evicted one.
+    /// table and its cuts back off it, so the `fold == memo` law covers an
+    /// inherited context as it covers an evicted one — and the child's head
+    /// marker, being that same projection, carries the parent's own note.
     #[test]
     fn fold_equals_memo_across_evict_and_inherited() {
         let ancestry = sessions_root("fold-equals-memo-ancestor");
@@ -2823,7 +2972,7 @@ mod tests {
         ancestor
             .apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 2,
+                    through: 4,
                     note: Some("the parser is fixed".into()),
                 },
                 EditAuthority::Model,
@@ -2841,28 +2990,52 @@ mod tests {
         )
         .unwrap();
         live.import_context(inherited).unwrap();
+        assert_eq!(
+            live.folded()
+                .cuts()
+                .iter()
+                .map(|cut| (cut.through, cut.note.clone()))
+                .collect::<Vec<_>>(),
+            vec![(4, Some("the parser is fixed".into()))],
+            "the parent's cut crosses the link"
+        );
+        let head = live
+            .history_rendered()
+            .messages()
+            .next()
+            .expect("an inherited context that was cut renders a head marker")
+            .content
+            .first_text()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            head.starts_with("[EXARCH //") && head.contains("the parser is fixed"),
+            "the child's marker is the same projection of the same fold: {head}"
+        );
+
         complete_exchange(&mut live, "own", "own");
         live.apply_edit(
             ContextOp::Evict {
-                through_exchange: 3,
+                through: 6,
                 note: None,
             },
             EditAuthority::Harness,
         )
         .unwrap();
-        let evictions = live.view().evictions.clone();
-        assert_eq!(evictions.len(), 2, "the parent's cut and this log's own");
+        let turns = live.folded().turns().to_vec();
+        let cuts = live.folded().cuts().to_vec();
         drop(live);
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
-        assert_eq!(resumed.view().evictions, evictions);
+        assert_eq!(resumed.folded().turns(), turns.as_slice());
+        assert_eq!(resumed.folded().cuts(), cuts.as_slice());
     }
 
-    /// The index is the whole lineage, oldest first, each exchange listed
-    /// once: an inherited exchange the child holds itself is an import of its
-    /// own, never a second row from the ancestry.
+    /// The index is the whole lineage's table, in id order: a child inherits
+    /// every turn its ancestry recorded, `held` as the parent had it, and its
+    /// own turns land above them.
     #[test]
-    fn store_index_lists_in_view_and_evicted_and_inherited() {
+    fn transcript_index_carries_the_inherited_table() {
         let sessions = sessions_root("lineage-index");
         let mut parent = AgentLog::root(
             sessions.path(),
@@ -2878,7 +3051,7 @@ mod tests {
         parent
             .apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 2,
+                    through: 4,
                     note: None,
                 },
                 EditAuthority::Harness,
@@ -2888,26 +3061,29 @@ mod tests {
         let mut child = mnemon(&mut parent, 1);
         complete_exchange(&mut child, "four", "four");
 
-        let index = child.store_index();
+        let index = child.transcript_index();
         assert_eq!(
             index
                 .iter()
-                .map(|item| (item.exchange, item.kind, item.in_view))
+                .map(|turn| (turn.id, turn.kind, turn.held))
                 .collect::<Vec<_>>(),
             vec![
-                (1, ContextSpanKind::Inherited, false),
-                (2, ContextSpanKind::Inherited, false),
-                (3, ContextSpanKind::Import, true),
-                (4, ContextSpanKind::Exchange, true),
+                (1, TurnKind::Inherited, Held::Evicted),
+                (2, TurnKind::Inherited, Held::Evicted),
+                (3, TurnKind::Inherited, Held::Evicted),
+                (4, TurnKind::Inherited, Held::Evicted),
+                (5, TurnKind::Inherited, Held::Resident),
+                (6, TurnKind::Inherited, Held::Resident),
+                (7, TurnKind::Exchange, Held::Resident),
+                (8, TurnKind::Exchange, Held::Resident),
             ]
         );
-        assert_eq!(index[0].opening, "one");
-        assert!(index.iter().all(|item| item.bytes > 0));
+        assert_eq!(index[0].label, "one");
     }
 
-    /// One search over the whole lineage: the child's resident span, its own
-    /// freed records, and then the ancestor's file — in store order across
-    /// all three, and never the same exchange twice.
+    /// One search over the whole lineage: the child's resident turns, its own
+    /// freed records, and then the ancestor's file — in transcript order
+    /// across all three, and never the same exchange twice.
     #[test]
     fn grep_walks_resident_then_freed_then_ancestors() {
         let sessions = sessions_root("lineage-grep");
@@ -2924,7 +3100,7 @@ mod tests {
         parent
             .apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 1,
+                    through: 2,
                     note: None,
                 },
                 EditAuthority::Harness,
@@ -2936,7 +3112,7 @@ mod tests {
         child
             .apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 2,
+                    through: 4,
                     note: None,
                 },
                 EditAuthority::Harness,
@@ -2944,8 +3120,8 @@ mod tests {
             .unwrap();
 
         let answer = child
-            .grep_store(&regex(r"\bthe\b"), None)
-            .expect("the lineage's whole store is searchable");
+            .grep_transcript(&regex(r"\bthe\b"), None, None)
+            .expect("the lineage's whole transcript is searchable");
         assert_eq!(answer.total, 4);
         assert_eq!(
             answer
@@ -2956,8 +3132,8 @@ mod tests {
             vec![
                 (1, ChatRole::User),
                 (1, ChatRole::Assistant),
-                (2, ChatRole::User),
                 (3, ChatRole::User),
+                (5, ChatRole::User),
             ]
         );
         assert_eq!(answer.hits[0].text, "the parser is broken");

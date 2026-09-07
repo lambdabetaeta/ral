@@ -30,8 +30,8 @@ pub(super) enum MatrixSort {
 
 /// Name characters a row label keeps; the column is then measured, not fixed here.
 pub(super) const MATRIX_LABEL_W: usize = 10;
-/// Step cells a row shows, the most recent kept.
-pub(super) const MATRIX_STEPS_W: usize = 8;
+/// Turn cells a row shows, the most recent kept.
+pub(super) const MATRIX_TURNS_W: usize = 8;
 
 /// The matrix's whole retained state: which agent the navigation cursor names,
 /// or nothing while the strip is a status display.
@@ -306,7 +306,7 @@ pub(super) fn neighbour(
 #[derive(Clone, Copy)]
 struct MatrixWidths {
     label: usize,
-    steps: usize,
+    turns: usize,
     tokens: usize,
     bar: usize,
 }
@@ -316,13 +316,13 @@ impl MatrixWidths {
         rows.iter().fold(
             Self {
                 label: 0,
-                steps: 0,
+                turns: 0,
                 tokens: 0,
                 bar: 0,
             },
             |w, row| Self {
                 label: w.label.max(row.label.chars().count()),
-                steps: w.steps.max(row.steps.chars().count()),
+                turns: w.turns.max(row.turns.chars().count()),
                 tokens: w.tokens.max(row.tokens.chars().count()),
                 bar: w.bar.max(row.bar.chars().count()),
             },
@@ -333,7 +333,7 @@ impl MatrixWidths {
 struct MatrixRow {
     id: AgentId,
     label: String,
-    steps: String,
+    turns: String,
     tokens: String,
     bar: String,
     label_style: Style,
@@ -342,7 +342,7 @@ struct MatrixRow {
     dim: bool,
     cursor: bool,
     /// Idle span if demoted, `None` if promoted: the switch [`Self::render`]
-    /// right-aligns steps by.
+    /// right-aligns turns by.
     idle: Option<Duration>,
 }
 
@@ -387,12 +387,12 @@ impl MatrixRow {
         Self {
             id,
             label,
-            steps: if id == root {
+            turns: if id == root {
                 String::new()
             } else if let Some(idle) = idle {
                 idle_age_mark(idle)
             } else {
-                step_cells(vp, dim)
+                turn_cells(vp, dim)
             },
             tokens: if id == root {
                 String::new()
@@ -419,18 +419,18 @@ impl MatrixRow {
         } else {
             Modifier::empty()
         });
-        let (label_w, steps_w, tokens_w, bar_w) =
-            (widths.label, widths.steps, widths.tokens, widths.bar);
+        let (label_w, turns_w, tokens_w, bar_w) =
+            (widths.label, widths.turns, widths.tokens, widths.bar);
         // The caret is the human's mark, so it takes the human's ink.
         let caret = Style::default().fg(PROMPT_INK).add_modifier(Modifier::BOLD);
-        let steps = if self.idle.is_some() {
+        let turns = if self.idle.is_some() {
             Span::styled(
-                format!("{:>steps_w$}", self.steps),
+                format!("{:>turns_w$}", self.turns),
                 Style::default().fg(SLATE),
             )
         } else {
             Span::styled(
-                format!("{:<steps_w$}", self.steps),
+                format!("{:<turns_w$}", self.turns),
                 Style::default().fg(self.hue),
             )
         };
@@ -438,7 +438,7 @@ impl MatrixRow {
             Span::styled(if self.cursor { "›" } else { " " }, caret),
             Span::styled(format!("{:<label_w$}", self.label), self.label_style),
             Span::raw("  "),
-            steps,
+            turns,
             Span::raw("  "),
             Span::styled(format!("{:>tokens_w$}", self.tokens), self.token_style),
             Span::raw("  "),
@@ -458,18 +458,18 @@ fn idle_age_mark(idle: Duration) -> String {
     }
 }
 
-/// The row's step glyphs, most recent [`MATRIX_STEPS_W`] kept: `●` a step that
+/// The row's turn glyphs, most recent [`MATRIX_TURNS_W`] kept: `●` a turn that
 /// made a tool call, `○` one that did not.  A `dying` row — one in its linger
 /// window — leads with `√`, or `╳` if it ended on an error.
-fn step_cells(vp: &Viewport, dying: bool) -> String {
-    let steps = vp.steps();
-    let tail = steps.len().saturating_sub(MATRIX_STEPS_W);
+fn turn_cells(vp: &Viewport, dying: bool) -> String {
+    let turns = vp.turns();
+    let tail = turns.len().saturating_sub(MATRIX_TURNS_W);
     let mut s = String::new();
     if dying {
         s.push(if vp.last_is_error() { '╳' } else { '√' });
     }
-    let room = MATRIX_STEPS_W.saturating_sub(s.chars().count());
-    for &had_call in steps[tail..].iter().rev().take(room).rev() {
+    let room = MATRIX_TURNS_W.saturating_sub(s.chars().count());
+    for &had_call in turns[tail..].iter().rev().take(room).rev() {
         s.push(if had_call { '●' } else { '○' });
     }
     s

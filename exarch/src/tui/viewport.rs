@@ -79,7 +79,7 @@ pub(super) struct Viewport {
     /// record the worker has cut.  It seats below the block it will join
     /// ([`Self::streaming_seat`]).
     answer: String,
-    /// The reasoning's open line — `answer`'s twin for the step's own `∴`
+    /// The reasoning's open line — `answer`'s twin for the turn's own `∴`
     /// seat ([`Self::thinking_seat`]), grown by [`Self::push_thinking`].
     reasoning: String,
     /// The fold's own memo, stepped by every [`Self::commit_fact`] and
@@ -390,20 +390,20 @@ impl Viewport {
         self.context_window = window;
     }
 
-    /// Per-step "had a tool call" flags, oldest first — one bool per
-    /// [`Block::is_step`] boundary, which the matrix renders `●` or `○`.
-    pub(super) fn steps(&self) -> Vec<bool> {
-        let mut steps: Vec<bool> = Vec::new();
+    /// Per-turn "had a tool call" flags, oldest first — one bool per
+    /// [`Block::is_turn`] boundary, which the matrix renders `●` or `○`.
+    pub(super) fn turns(&self) -> Vec<bool> {
+        let mut turns: Vec<bool> = Vec::new();
         for entry in &self.blocks {
-            if entry.block.is_step() {
-                steps.push(false);
+            if entry.block.is_turn() {
+                turns.push(false);
             } else if entry.block.is_tool_call()
-                && let Some(last) = steps.last_mut()
+                && let Some(last) = turns.last_mut()
             {
                 *last = true;
             }
         }
-        steps
+        turns
     }
 
     /// Summed [`Block::lines_changed`] over this session's diffs — the matrix's
@@ -432,7 +432,7 @@ impl Viewport {
         )
     }
     /// Enter `state`, restarting the clock and the streamed count.  Re-entering
-    /// the state already held is a no-op: a step that re-drives the same wait
+    /// the state already held is a no-op: a turn that re-drives the same wait
     /// must not reset the clock measuring how long that wait has run.
     pub(super) fn set_state(&mut self, state: crate::bus::AgentState) {
         if self.state.state != state {
@@ -876,7 +876,7 @@ impl Viewport {
                 segment
             };
             // A segment's leading blanks collapse against an already-blank tail,
-            // so a step separator before leading-blank chrome reads as one gap.
+            // so a turn separator before leading-blank chrome reads as one gap.
             let mut first = 0;
             if rows.last().is_some_and(Row::is_blank) {
                 while first < seg_rows.len() && seg_rows[first].is_blank() {
@@ -897,15 +897,15 @@ impl Viewport {
     }
 
     /// End (exclusive) of the maximal [`Block::observation`] run at `start`,
-    /// bridged across step boundaries.  Each call is its own provider
-    /// round-trip, so a [`Block::is_step`] chrome lands between consecutive
+    /// bridged across turn boundaries.  Each call is its own provider
+    /// round-trip, so a [`Block::is_turn`] chrome lands between consecutive
     /// calls; left a barrier it would cut every burst back to one call.
     fn observation_run_end(&self, start: usize) -> usize {
         let mut end = start;
         let mut i = start;
         while i < self.blocks.len() {
             let block = &self.blocks[i].block;
-            if block.observation() || block.is_step() {
+            if block.observation() || block.is_turn() {
                 i += 1;
                 end = i;
             } else {
@@ -1019,11 +1019,11 @@ impl Printer for Viewport {
             Transient::Fault { text } => {
                 self.push_chrome(ChromeKind::Error, super::line::error(text));
             }
-            // The step's stream is sealed: the worker has recorded every
+            // The turn's stream is sealed: the worker has recorded every
             // line it means to, tails included, so an open line still
             // standing here stands for text the producer chose not to record
             // — a cancelled trace, a whitespace-only tail.  Dropping it is
-            // what keeps a seat from outliving the step it was reading.
+            // what keeps a seat from outliving the turn it was reading.
             Transient::Boundary => {
                 self.answer.clear();
                 self.reasoning.clear();
@@ -1331,7 +1331,7 @@ impl Viewport {
                 ChromeKind::Plain,
                 super::line::note(&format!("model changed: {provider}/{model}")),
             )],
-            K::Step { .. } => vec![Block::chrome(ChromeKind::Step, super::line::step())],
+            K::Turn { .. } => vec![Block::chrome(ChromeKind::Turn, super::line::turn())],
             K::ContextEdited { op, by } => {
                 let authority = match by {
                     EditAuthority::Model => "model",
@@ -1339,11 +1339,9 @@ impl Viewport {
                     EditAuthority::Harness => "harness",
                 };
                 let text = match op {
-                    ContextOp::Evict {
-                        through_exchange, ..
-                    } => format!(
-                        "[context evicted through exchange {through_exchange} ({authority})]"
-                    ),
+                    ContextOp::Evict { through, .. } => {
+                        format!("[context evicted through turn {through} ({authority})]")
+                    }
                     ContextOp::Drop { exchanges } => {
                         let list = exchanges
                             .iter()
@@ -1528,7 +1526,7 @@ mod tests {
     }
 
     /// At most one lane is ever open, because prose ends the reasoning run on
-    /// the printer's side exactly as it does on the worker's — and the step's
+    /// the printer's side exactly as it does on the worker's — and the turn's
     /// boundary clears whatever is left.
     #[test]
     fn prose_ends_the_open_reasoning_line_and_the_boundary_clears_both() {
@@ -1575,7 +1573,7 @@ mod tests {
             .join("\n");
         assert!(
             !all.contains("First words"),
-            "no open line outlives the step it was read from: {all:?}"
+            "no open line outlives the turn it was read from: {all:?}"
         );
     }
 

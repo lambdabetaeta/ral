@@ -109,9 +109,9 @@ fn plain_text_reaches_quiescence() {
     assert_admissible(&session);
 }
 
-/// A step's reasoning commits ahead of *every* paragraph of the answer it
+/// A turn's reasoning commits ahead of *every* paragraph of the answer it
 /// deliberated into, not merely ahead of the tail.  The chopper commits
-/// prose paragraph by paragraph, so a `∴` authored at the step's end lands
+/// prose paragraph by paragraph, so a `∴` authored at the turn's end lands
 /// between the paragraphs already committed and the tail not yet — which is
 /// what the reader sees as thinking arriving mid-answer.
 #[test]
@@ -135,7 +135,7 @@ fn reasoning_commits_ahead_of_every_paragraph_of_the_answer() {
     let thinking = kinds
         .iter()
         .position(|d| matches!(d, Display::Thinking { .. }))
-        .unwrap_or_else(|| panic!("the step's reasoning never committed: {kinds:?}"));
+        .unwrap_or_else(|| panic!("the turn's reasoning never committed: {kinds:?}"));
     let answers: Vec<usize> = kinds
         .iter()
         .enumerate()
@@ -337,15 +337,15 @@ fn empty_reply_commits_a_stub_not_empty_content() {
     );
 }
 
-/// Auto-eviction fires at the one boundary `deliberate` checks — its own
-/// entry — and rewrites the model view to the head marker plus the recent
+/// Auto-eviction is weighed at every turn boundary, before the request is
+/// taken, and rewrites the context to the head marker plus the recent
 /// exchange, verbatim, with no provider round-trip of its own.  `test-model`
-/// has no pricing-catalog entry, so the window is unknown and the byte
-/// fallback (`digest::EVICT_THRESHOLD`, 500 KiB) is the live trigger: the
-/// older exchange is the larger, so half the history holds the newer one
+/// has no pricing-catalog entry, so the context window is unknown and the
+/// byte fallback (`digest::EVICT_THRESHOLD`, 500 KiB) is the live trigger:
+/// the older exchange is the larger, so half the history holds the newer one
 /// whole.
 #[test]
-fn eviction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
+fn eviction_fires_at_the_turn_boundary_and_keeps_the_recent_exchange() {
     let mut session = Avatar::for_test("system").unwrap();
     let provider = scripted(
         "test-model",
@@ -357,26 +357,28 @@ fn eviction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
 
     let first = format!("EXCHANGE1 {}", "x".repeat(450_000));
     let second = format!("EXCHANGE2 {}", "y".repeat(150_000));
-    for prompt in [&first, &second] {
-        let Drive { outcome: acked, .. } = drive_deliberate(&mut session, &provider, Some(prompt));
-        assert!(matches!(acked, Ok(deliberate::Outcome::Complete(_))));
-    }
+    let Drive { outcome: acked, .. } = drive_deliberate(&mut session, &provider, Some(&first));
+    assert!(matches!(acked, Ok(deliberate::Outcome::Complete(_))));
+    // The second prompt tips the history over the threshold, so its own
+    // first turn boundary sheds the first exchange — the prompt in hand
+    // being the one turn no cut may take.
     let Drive {
-        outcome,
+        outcome: acked,
         transients,
         ..
-    } = drive_deliberate(&mut session, &provider, Some("after"));
-
-    match outcome {
-        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
-        other => panic!("expected Complete, got {other:?}"),
-    }
+    } = drive_deliberate(&mut session, &provider, Some(&second));
+    assert!(matches!(acked, Ok(deliberate::Outcome::Complete(_))));
     assert!(
         transients
             .iter()
             .any(|t| matches!(t, Transient::State(AgentState::Evicting))),
         "the eviction must announce its own state"
     );
+    let Drive { outcome, .. } = drive_deliberate(&mut session, &provider, Some("after"));
+    match outcome {
+        Ok(deliberate::Outcome::Complete(s)) => assert_eq!(s, "done"),
+        other => panic!("expected Complete, got {other:?}"),
+    }
     // Three scripted replies for three deliberations: a request of the
     // eviction's own would have drained the queue and panicked the scripted
     // provider before this line.
@@ -385,7 +387,7 @@ fn eviction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
     let marker = view[0].content.first_text().unwrap_or_default();
     assert!(
         marker.starts_with("[EXARCH // Exchange") && marker.contains("left your context"),
-        "the model view must open on the head marker, got {marker:?}"
+        "the context must open on the head marker, got {marker:?}"
     );
     assert!(
         marker.contains("EXCHANGE1"),
@@ -394,7 +396,7 @@ fn eviction_fires_at_the_entry_boundary_and_keeps_the_recent_exchange() {
     let rendered = serde_json::to_string(&view).unwrap();
     assert!(
         !rendered.contains(&"x".repeat(1000)),
-        "the evicted prefix's body must leave the model view"
+        "the evicted prefix's body must leave the context"
     );
     assert!(
         rendered.contains("EXCHANGE2") && rendered.contains("ack two"),

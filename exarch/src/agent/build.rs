@@ -952,7 +952,7 @@ mod tests {
             &child
                 .log
                 .lock()
-                .history_transcript()
+                .history_rendered()
                 .messages()
                 .collect::<Vec<_>>(),
         )
@@ -1295,7 +1295,7 @@ mod tests {
 
         assert_eq!(
             session.rewind(9, &emit).unwrap_err(),
-            "exchange 9 is not present in the current view — the last exchange is 3"
+            "exchange 9 is not present in your context — the last exchange is 5"
         );
 
         session
@@ -1303,7 +1303,7 @@ mod tests {
             .lock()
             .apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 2,
+                    through: 2,
                     note: None,
                 },
                 EditAuthority::Harness,
@@ -1311,18 +1311,21 @@ mod tests {
             .unwrap();
         assert_eq!(
             session.rewind(1, &emit).unwrap_err(),
-            "exchange 1 has already left your context — the earliest still in view is 3"
+            "exchange 1 has already left your context — the earliest still in it is 3"
         );
 
         session.inbox.push(Post::Nudge {
-            exchange: 3,
+            exchange: 5,
             text: "stale continuation".into(),
         });
         session
             .rewind(3, &emit)
-            .expect("an in-view anchor is legal");
-        let view = session.log.lock().view().clone();
-        assert!(view.spans.is_empty(), "the rewind removes the whole suffix");
+            .expect("an anchor still in context is legal");
+        assert_eq!(
+            session.log.lock().folded().resident().count(),
+            0,
+            "the rewind removes the whole suffix"
+        );
         assert!(
             !matches!(session.inbox.next_item(), Some(Item::Nudge { .. })),
             "a queued nudge for a rewound exchange must not commit"
@@ -1338,7 +1341,7 @@ mod tests {
                     crate::record::Record::Protocol(crate::record::Protocol::ContextEdited {
                         op: ContextOp::Drop { exchanges },
                         by: EditAuthority::User,
-                    }) if exchanges == vec![3]
+                    }) if exchanges == vec![3, 5]
                 )),
             "rewind must be durable on the trace"
         );
@@ -1401,7 +1404,7 @@ mod tests {
         log.append_user("before the crash".into(), None).unwrap();
         log.append_assistant(ChatMessage::assistant("saved answer"), vec![], None)
             .unwrap();
-        let before: Vec<_> = log.history_transcript().messages().cloned().collect();
+        let before: Vec<_> = log.history_rendered().messages().cloned().collect();
         drop(log);
 
         let scratch =

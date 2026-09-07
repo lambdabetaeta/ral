@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7e129df6
+generated_at_commit: 4bc5006c
 generated_at_date: 2026-09-07
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -211,10 +211,11 @@ Three nested loops, the same for trunk and child alike:
   state: it is a plain `Arc` `Avatar::run_shell` builds and holds on its own
   stack, so a panic unwinding through `deliberate` drops it with everything
   else there, with nothing separate to retire.
-- `deliberate` — one prompt stepped to quiescence over the agent's *own* provider
+- `deliberate` — one prompt driven to quiescence over the agent's *own* provider
   (`self.provider.current()`, read once at the top by `take_up` so a `/model` swap
-  lands next item, never mid-deliberation): render the transcript, stream a reply through
-  `provider.complete` (one `step`), **admit** then append the assistant message, run the
+  lands next item, never mid-deliberation): weigh the context for an eviction,
+  record the turn's start, render the context, stream a reply through
+  `provider.complete` (one turn), **admit** then append the assistant message, run the
   resulting tool-call batch (`run_batch`), append their results, optionally append a drained steering prompt,
   repeat until the model emits no tool call. The admission step (`admit_assistant`,
   at the commit boundary) enforces the [[invariants/transcript-admission|transcript-admission invariant]]:
@@ -225,12 +226,12 @@ Three nested loops, the same for trunk and child alike:
   the partial, so a `continue` nudge keeps the work as context; *with* captured
   tool calls it dispatches them and continues instead, since returning `Truncated`
   there would strand the protocol in `AwaitingToolResults` and fail the nudge's
-  next `append_user` (X6). A hard `MAX_STEPS` ceiling (250) ends a deliberation whose
+  next `append_user` (X6). A hard `MAX_TURNS` ceiling (250) ends a deliberation whose
   model never stops calling tools — the headless/autonomous counterpart to
   interactive Esc — returning `deliberate::Outcome::Capped`. That outcome matches no
   nudge rule, so `attend` treats it as terminal; re-attending would only spend
   the ceiling again.
-- `run_batch` — runs one step's tool-call batch in order, each call through
+- `run_batch` — runs one turn's tool-call batch in order, each call through
   `invoke`. Every call returns a
   `SessionToolResult` synchronously — and there is only `ral` to call
   ([[map/exarch/tools|tools]]); a spawn verb inside it hands the script a start
@@ -238,17 +239,19 @@ Three nested loops, the same for trunk and child alike:
   a result,
   `run_batch` drains this agent's [[map/exarch/frontend|inbox]]'s tool-boundary
   steering. A non-slash steering prompt is appended after the complete
-  tool-result batch, and the next step asks the provider with the user's steering
+  tool-result batch, and the next turn asks the provider with the user's steering
   in context
   ([[decisions/260616_tool-boundary-steering|tool-boundary-steering]]). A
-  sub-agent has no human writer, so its inbox holds no steering and this is always
-  empty.
+  sub-agent has no human writer, so its inbox holds no steering — but the
+  channel is never idle for it either: the context-pressure reminder joins that
+  same one admitted message
+  ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
 
-  A streamed step closes through one `close_step` door: it seals the answer and
+  A streamed turn closes through one `close_turn` door: it seals the answer and
   reasoning choppers, then publishes `Transient::Boundary`, even when the
-  provider or cancellation path already carries an error. `abandon_step` uses
+  provider or cancellation path already carries an error. `abandon_turn` uses
   the same ordering best-effort, so a live display edge cannot survive into the
-  next step ([[map/exarch/frontend|frontend]]).
+  next turn ([[map/exarch/frontend|frontend]]).
 
 Worker-reap and large-binding notices need no drain at `attend`'s top:
 core's own engine pushes both as `` `notice `` surface classes at the ready
@@ -342,46 +345,55 @@ remains splits into two disciplines, named and owned by `agent/nudge.rs`'s
 **repair** — `Empty`, `Stopped`, `Truncated`, or a returning agent's
 `Complete` without `reply` — is event-shaped, exceptional, and spends the
 per-exchange repair budget (`BUDGET`, 3); a **standing condition** — the pin
-register, the context-pressure gauge — is a fact about the agent's own live
+register, context pressure — is a fact about the agent's own live
 state, **edge-triggered**: told once when it changes, silent while it holds,
-budget-free. Both still compose into at most one `EXARCH_REMINDER` message
-per completion, self-posted as `Post::Nudge`, committed by `append_user`
-inside the same exchange. `react`, the sole post-attempt entry point, gates
-everything on `quiet` — no standing reply, no detached shell work, no busy
-children, the one condition every nudge kind shares — before it reads the
-attempt:
+budget-free.
 
-| kind | trigger | budget |
-|---|---|---|
-| empty-turn repair | quiet ∧ `Ok(Empty)` | spends |
-| early-stop repair | quiet ∧ `Ok(Stopped)` | spends |
-| truncation repair | quiet ∧ `Err(Truncated)` | spends |
-| reply repair | quiet ∧ `Ok(Complete)` ∧ `must_reply` | spends |
-| pin reminder | quiet ∧ `Ok(Complete)` ∧ register non-empty ∧ digest changed | free |
-| pressure warning | quiet ∧ `Ok(Complete)` ∧ gauge `Over` ∧ excursion untold | free |
+**The two kinds ride two channels, because they are owed at different
+boundaries.** `react`, the post-deliberation entry point, composes the repairs
+and the pin reminder into at most one `EXARCH_REMINDER` message per
+completion, self-posted as `Post::Nudge` and committed by `append_user` inside
+the same exchange, gated on `quiet` — no standing reply, no detached shell
+work, no busy children, the one condition those kinds share.
+`Nudges::pressure_reminder` is the other entry point, called by `deliberate`
+at a *tool* boundary, where its text joins the one steering message the
+protocol admits after a batch: an agentic run takes one prompt and then two
+hundred tool turns, so a warning that waited for the next completion would
+arrive after the cut ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
 
-The pressure warning names the cut it is warning about: `pressure_gauge` calls
-`Avatar::planned_eviction` (a cheap walk over cached span bytes) and carries
-the answer as `Pressure::Over { detail, through }`, so the message tells the
-model which exchange the next boundary will evict through, that the material
-stays readable with `transcript`, and how to leave itself a line —
-`` context `evict [through: n, note: '…'] `` — before it goes. With nothing old
-enough to shed, `through` is `None` and the reading alone is the whole message.
-Durability is the log's job, so the nudge no longer asks the model to write
-state to files.
+| kind | channel | trigger | budget |
+|---|---|---|---|
+| empty-turn repair | `react` | quiet ∧ `Ok(Empty)` | spends |
+| early-stop repair | `react` | quiet ∧ `Ok(Stopped)` | spends |
+| truncation repair | `react` | quiet ∧ `Err(Truncated)` | spends |
+| reply repair | `react` | quiet ∧ `Ok(Complete)` ∧ `must_reply` | spends |
+| pin reminder | `react` | quiet ∧ `Ok(Complete)` ∧ register non-empty ∧ digest changed | free |
+| pressure reminder | steering | gauge `Over` ∧ excursion untold | free |
+
+The pressure reminder names the cut it is warning about: `pressure_gauge`
+calls `Avatar::planned_eviction` — a walk back over the turn table's own
+summed weights, no rendering — and carries the answer as
+`Pressure::Over { detail, through }`, so the message tells the model which
+*turn* the next boundary will evict through (and that every exchange wholly
+before it goes with it), that the material stays readable with `transcript`,
+and how to leave itself a line — `` context `evict [through: n, note: '…'] ``
+— before it goes. With nothing old enough to shed, `through` is `None` and the
+reading alone is the whole message. Durability is the log's job, so the nudge
+no longer asks the model to write state to files.
 
 Everything else is accepted as-is, unspent, and deliberately so: `Replied` (a
 reply is final), `Cancelled` (the human asked), `Capped` (a nudge would only
-buy the deliberation another `MAX_STEPS` after it already burned 250 round
+buy the deliberation another `MAX_TURNS` after it already burned 250 round
 trips without quiescing — the wrong channel for a terminal condition, which
-already reaches its consumer through `AgentOutcome::Stopped("step cap
+already reaches its consumer through `AgentOutcome::Stopped("turn cap
 reached")`), and every unclassified provider error (the transport's own).
 
 `Nudges` is the one owner of every nudge-relevant latch: the repair budget
 `used`, the pin digest last told (`pinned_told`), and whether the live
-pressure excursion has been told (`pressure_told`). Nobody else holds
+pressure excursion has been told (`pressure_told`, re-armed by the `Under`
+reading `pressure_reminder` itself takes). Nobody else holds
 state — `pressure_gauge` is a pure `&self` reading with no latch of its own,
-and `take_up` neither latches nor unlatches around it. An edge is **consumed
+and `deliberate` neither latches nor unlatches around it. An edge is **consumed
 at decide time, in the same act as the part's emission**, so "told but not
 sent" and "sent but not told" have no spelling. `reset()`, called on every
 exchange-opening item, clears only the budget — a new exchange is not a new
@@ -415,7 +427,7 @@ since the model's view would stop being reproducible from the record; a
 dedicated "standing condition" record class still has to enter the fold to
 reach the model, so it is a user turn with a fancier name plus a new record
 variant, fold arm, and admission rule — machinery for no semantic gain. An
-eviction may carry a telling out of the window without harm either way: both
+eviction may carry a telling out of the context without harm either way: both
 conditions self-heal regardless — pressure re-fires per excursion by
 construction, the pin reminder re-fires on the next register change, and the
 model can always `pin-list`.
@@ -505,7 +517,7 @@ and the envelope a worker carries is its *reader's* by construction — a
 `/clear` in one tab must not throw away work another tab is still waiting
 on. Each cancelled node is
 stopped **across both layers**:
-its cooperative `Token` (read by `deliberate` between steps and raced by
+its cooperative `Token` (read by `deliberate` between turns and raced by
 the provider's mid-stream cancel) *and* the eval layer through its own
 `reach: EvalReach` (fixed at construction — every agent carries one, the
 trunk included) —
@@ -615,46 +627,54 @@ shell is fresh and receives a note describing the bindings, workers, cwd,
 scratch, pins, and schedules that were not durable. Wire seats and child logs
 are refused rather than half-resumed.
 
-`evict` sheds the older half of the window when context pressure crosses the
+`evict` sheds the older half of the context when pressure crosses the context
 window's reserve (`digest.rs`'s `eviction_due` — used tokens into the top 15%
 of a known window; `EVICT_THRESHOLD`, 500 KiB of serialised history, is the
 fallback when the window is unknown) and `AgentLog::can_evict` holds (no
-pending tool results). It is called at the **top of `deliberate`**, where the
-agent is `ReadyForUser` ([[invariants/turn-ends-ready|exchange-ends-ready]])
-and the gate actually holds — every provider round-trip (`step`) passes through
-here, so long autonomous and headless sessions stay bounded without an
-interactive `/evict`. `suffix_keep_budget` (half the history bytes) sets the
-cut and `Memo::plan_eviction` walks back from the newest closed span until that
-budget is spent; the plan carries only `through_exchange`. The walk draws its
-candidates from `split_last`'s older half, so the newest span is not in the
-slice a plan can name and a cut through the live exchange is unrepresentable
+pending tool results). It is called **at the top of every `deliberate` loop
+iteration**, before `record_turn_start`: every turn boundary is a boundary the
+protocol is well-formed at, and the turn a cut would take is never the one in
+hand, so there is no iteration where weighing is unsafe
+([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]). Long
+autonomous and headless sessions therefore stay bounded *within* one
+deliberation, without an interactive `/evict`.
+`suffix_keep_budget` (half the history bytes) sets the cut and
+`Memo::plan_eviction` walks back over the turn table's summed weights until
+that budget is spent; the plan carries only `through`. The walk's candidates
+are every resident turn but the last, so the work in hand is not in the slice
+a plan can name and a cut `validate_edit` would refuse is unrepresentable
 rather than merely improbable — the budget alone would cut everything when the
-newest span outweighs the whole of it. **No provider call is involved**, so an
-exchange-boundary Esc has nothing to interrupt and simply leaves the window as
-it lies
+newest turn outweighs the whole of it. A user turn whose exchange still has a
+resident turn above the cut stays with it, so a cut into an exchange keeps its
+prompt; a user turn that overshoots takes its whole exchange, the cut falling
+through that exchange's newest resident turn. **No provider call is
+involved**, so a boundary Esc has nothing to interrupt and simply leaves the
+context as it lies
 ([[decisions/260608_esc-non-escalating-interrupt|esc-non-escalating-interrupt]]).
 
-A successful eviction records `ContextEdited { op: Evict { through_exchange,
+A successful eviction records `ContextEdited { op: Evict { through,
 note: None }, by: Harness }`, wrapped in `Transient::State(AgentState::Evicting)`
 for the state row — momentary, since the edit is the whole of it. The same fold
-step removes the prefix spans from the model view, computes one `EvictedRow`
-per removed span, and frees their resident events, retaining only their byte
-ranges in `record.jsonl`; this is residency following the view, not a second
-drain rule. The rows are what the head marker renders, so what left is still
-named and still readable through `transcript`
-([[decisions/260906_context-rollover|context-rollover]]). Nothing old enough to
-shed is a no-op, not an event. The durable log is appended to, never rewritten.
+step marks the departing turns `Held::Evicted` and frees their resident
+records, retaining only their byte ranges in `record.jsonl`; this is residency
+following the context, not a second drain rule. `render_head` draws the marker
+from those very turns and the `Cut` beside them, so what left is still named
+and still readable through `transcript`. Nothing old enough to shed is a no-op,
+not an event. The durable log is appended to, never rewritten.
 
 Harness eviction is one authority over the same `Evict`/`Drop` edit
 ([[decisions/260812_context-is-a-projection|context-is-a-projection]]). The
 model reaches the other two: `` context `survey ``/`` `drop ``/``
-`evict [through, note] `` edit the window and `transcript`'s ``
-`index ``/`` `read ``/`` `grep `` read the store, each edit recording
+`evict [through, note] `` edit the context and `transcript`'s ``
+`index ``/`` `read ``/`` `grep `` read the record, each edit recording
 `ContextEdited` with `EditAuthority::Model` rather than `Harness`; only the
 model's own `` `evict `` carries a `note`. The user's own hand is
 `/rewind <exchange>`, which desugars to the same `Drop` at
 `EditAuthority::User`, sheds queued self-nudges, and rebuilds the nudge state;
-`/context` surveys the window without editing it, the read-only sibling
+`/context` surveys the context without editing it — `emit_context_survey`
+posts the survey's turns as a `Display::Context` fact, and `context_rows_card`
+groups them into exchange runs at draw time, one field per exchange with its
+resident turn range and weight — the read-only sibling
 `ReplControl::command` serves alongside `/clear`, `/evict`, `/branch`, and
 `/quit`.
 
@@ -832,5 +852,8 @@ worker/schedule teardown edge are chapters of),
 seat is one engine process, one connection),
 [[decisions/260827_agent-and-avatar|agent-and-avatar]] (why `Agent` and
 `Avatar` split this way, what the three-copy shape it replaced deleted),
+[[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]] (the turn as
+the unit of eviction, the loop-top weighing, and the pressure reminder's
+channel),
 [[map/synod|synod]] (`MachineDial`, and synod's own helper surface built over
 the wire-seat spawn above).

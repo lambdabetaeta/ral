@@ -8,7 +8,7 @@
 //! carries no model-context state, so it has nothing to fold a protocol
 //! record into.
 
-use super::{ContextRow, Display, Fold, Forensic, Recorded, Refusal, Seq};
+use super::{Display, Fold, Forensic, Recorded, Refusal, Seq, Turn};
 use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
 use ral_core::serial::FOValue;
 
@@ -63,7 +63,7 @@ pub enum BlockKind {
         notice: NoticeFact,
     },
     Context {
-        rows: Vec<ContextRow>,
+        rows: Vec<Turn>,
         evicted: usize,
     },
     Cancelled,
@@ -91,8 +91,8 @@ pub enum BlockKind {
         model: String,
         provider: String,
     },
-    Step {
-        n: u32,
+    Turn {
+        id: u64,
     },
     ContextEdited {
         op: ContextOp,
@@ -338,12 +338,15 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
         BlockKind::Context { rows, evicted } => {
             let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
             if *evicted > 0 {
-                lines.push(format!("[context: evicted {evicted} exchanges]"));
+                lines.push(format!("[context: evicted {evicted} turns]"));
             }
             lines.extend(rows.iter().map(|row| {
                 format!(
-                    "[context: exchange {} {} {}]",
-                    row.exchange, row.kind, row.opening
+                    "[context: turn {} of exchange {} {} {}]",
+                    row.id,
+                    row.exchange,
+                    row.kind.as_str(),
+                    row.label
                 )
             }));
             lines.join("\n")
@@ -356,7 +359,7 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
         BlockKind::ModelChanged { model, provider } => {
             format!("[model changed: {provider}/{model}]")
         }
-        BlockKind::Step { n } => format!("[step {n}]"),
+        BlockKind::Turn { id } => format!("[turn {id}]"),
         BlockKind::ContextEdited { op, by } => {
             let authority = match by {
                 EditAuthority::Model => "model",
@@ -364,9 +367,9 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
                 EditAuthority::Harness => "harness",
             };
             match op {
-                ContextOp::Evict {
-                    through_exchange, ..
-                } => format!("[context evicted through exchange {through_exchange} ({authority})]"),
+                ContextOp::Evict { through, .. } => {
+                    format!("[context evicted through turn {through} ({authority})]")
+                }
                 ContextOp::Drop { exchanges } => {
                     let list = exchanges
                         .iter()
@@ -433,7 +436,7 @@ fn step_display(memo: &mut Blocks, seq: Seq, d: Display) {
         Display::Done { outcome } => memo.push(seq, BlockKind::Done { outcome }),
         Display::Notice { notice } => memo.push(seq, BlockKind::Notice { notice }),
         Display::Context { rows, evicted } => memo.push(seq, BlockKind::Context { rows, evicted }),
-        Display::Step { n } => memo.push(seq, BlockKind::Step { n }),
+        Display::Turn { id } => memo.push(seq, BlockKind::Turn { id }),
         Display::ContextEdited { op, by } => {
             memo.push(seq, BlockKind::ContextEdited { op, by });
         }

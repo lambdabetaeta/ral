@@ -31,7 +31,7 @@ pub(super) enum RailKind {
     FleetAct,
     /// `schedule`, `unschedule` — an act that lands on a clock instead.
     TimeAct,
-    Step,
+    Turn,
     Error,
     /// The human's turn — the one kind not tinted by an agent's hue.
     Prompt,
@@ -52,7 +52,7 @@ impl RailKind {
             Self::Subagent => "↘",
             Self::FleetAct => "↗",
             Self::TimeAct => "◷",
-            Self::Step => "━",
+            Self::Turn => "━",
             Self::Error => "╳",
             Self::Prompt => "❖",
             Self::Note => "▪",
@@ -76,7 +76,7 @@ pub(super) const RAIL_SHAPES: &[(RailKind, &str)] = &[
         "fleet act — spawn, cancel, message, reply",
     ),
     (RailKind::TimeAct, "time act — schedule, unschedule"),
-    (RailKind::Step, "step boundary"),
+    (RailKind::Turn, "turn boundary"),
     (RailKind::Error, "error, or a turn you stopped"),
     (RailKind::Prompt, "your prompt — the fence"),
     (RailKind::Note, "system note"),

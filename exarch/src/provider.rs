@@ -39,7 +39,7 @@ pub use usage::{Usage, UsageParts, humanize_tokens};
 pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
 use crate::agent::cancel;
-use crate::record::model::Transcript;
+use crate::record::model::Rendered;
 use credential::{Credential, CredentialStore};
 use models::{LiveSource, ModelCatalog};
 use std::sync::Arc;
@@ -154,7 +154,7 @@ impl Provider {
     pub(crate) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         system: &str,
-        transcript: &Transcript,
+        transcript: &Rendered,
         tool_enabled: bool,
         search: bool,
         on_delta: &mut F,

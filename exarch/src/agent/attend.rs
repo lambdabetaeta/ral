@@ -241,7 +241,7 @@ impl Avatar {
                 return Flow::Continue;
             }
         };
-        // A provider error or step cap can leave the session mid-protocol.
+        // A provider error or turn cap can leave the session mid-protocol.
         // The caller's guard would only fire on loop exit; quiesce now so the
         // next prompt — nudge or user — is admissible.
         if !self.log.lock().is_ready() {
@@ -272,12 +272,9 @@ impl Avatar {
             Ok(workers) => workers.is_empty(),
             Err(s) => return self.severed(&s, final_outcome),
         };
-        // `last_input` is fresh off `deliberate`, so the gauge reads this
-        // completion's own pressure, not the one it was called with.
         let facts = nudge::Facts {
             must_reply: self.returns(),
             pinned: self.pinned_digest(),
-            pressure: self.pressure_gauge(&active),
             // Nudged only when nothing else is already carrying this agent
             // forward: no reply standing for a parent to fetch, no detached
             // shell work, no busy children.
@@ -366,13 +363,14 @@ impl Avatar {
         ParkMode::Quiesce
     }
 
-    /// One reading of the pressure gauge, no state.  The soft line is
-    /// [`crate::agent::digest::pressure_due`], one reserve ahead of
-    /// auto-eviction; an unknown window falls back to the byte heuristic
+    /// One reading of the pressure gauge, no state — taken at a tool boundary
+    /// by [`Avatar::deliberate`], where `last_input` is this turn's own.  The
+    /// soft line is [`crate::agent::digest::pressure_due`], one reserve ahead
+    /// of auto-eviction; an unknown window falls back to the byte heuristic
     /// against [`PRESSURE_THRESHOLD_FALLBACK`].  Either way the reading
-    /// carries the cut [`Avatar::planned_eviction`] would make, so the nudge
-    /// can name it.
-    fn pressure_gauge(&self, provider: &Provider) -> nudge::Pressure {
+    /// carries the cut [`Avatar::planned_eviction`] would make, so the
+    /// reminder can name it.
+    pub(super) fn pressure_gauge(&self, provider: &Provider) -> nudge::Pressure {
         match provider.context_window() {
             Some(w) if w > 0 => match self.token_pressure(w) {
                 Some(detail) => nudge::Pressure::Over {
@@ -569,7 +567,7 @@ fn agent_outcome(
             (AgentOutcome::Stopped(reason.clone()), None)
         }
         Ok(deliberate::Outcome::Cancelled) => (AgentOutcome::Cancelled, None),
-        Ok(deliberate::Outcome::Capped) => (AgentOutcome::Stopped("step cap reached".into()), None),
+        Ok(deliberate::Outcome::Capped) => (AgentOutcome::Stopped("turn cap reached".into()), None),
         Ok(deliberate::Outcome::Severed(s)) => (AgentOutcome::Failed(engine_gone(s)), None),
         Err(e) => (AgentOutcome::Failed(e.summary()), None),
     }

@@ -82,9 +82,9 @@ order); `record/log.rs` (the `record.jsonl` io-door, with the attachable
 time); `record/commit.rs` (the worker-side
 commit producer: one `Chopper` per lane of the model's stream, and
 `SurfaceBuffer`, moved whole from `tui/surface.rs`); `record/model.rs` (the model fold, `Protocol` alone, with
-streaming resume/admission, and the `Transcript` persistent value + closed-span
+streaming resume/admission, and the `Rendered` persistent value + per-turn
 render cache the provider-facing projection is built from — see
-[[internals/session-record#The provider-facing transcript is a persistent value|the transcript-as-value section]]
+[[internals/session-record#The provider-facing context is a persistent value|the context-as-value section]]
 and [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 `record/view.rs` (the view fold into `Blocks`; block construction is private).
 `Viewport` and `Headless` both implement `record::Printer`
@@ -112,7 +112,7 @@ stays visible until quiescence.
   HTTP attempt ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 - the record seam (`record::Emitter`) onto `sessions/<n>/record.jsonl` — the
   one durable log every fact this session authors crosses, whose protocol
-  fold is the model view, with display commits and forensic breadcrumbs
+  fold is the model's context, with display commits and forensic breadcrumbs
   beside it ([[decisions/260814_one-seam-one-log|one-seam-one-log]]).
   Oversize tool-result sections are elided head+tail at the [[map/exarch/agent|digest]]
   caps before they ever enter the log. A directory with no `record.jsonl`

@@ -34,7 +34,7 @@ pub enum OutputFormat {
     /// Write the agent's final reply as readable ral text. This is the default.
     Text,
     /// Write one JSON result object after the run ends. It contains the reply,
-    /// stop reason, step count, duration, token use and cost.
+    /// stop reason, turn count, duration, token use and cost.
     Json,
 }
 
@@ -59,9 +59,9 @@ pub struct Headless<'a> {
     root_id: AgentId,
     started: Instant,
     projection: Projection,
-    /// Counted, not tracked: the per-segment `Display::Step { n }` index
-    /// restarts each time the root resumes after an async-spawned block.
-    steps: u32,
+    /// Counted, not tracked: a `Display::Turn { id }` names the request's own
+    /// id, and a cancelled request retaken names it twice.
+    turns: u32,
     last_stop: Option<String>,
     /// The root's deliberate `reply`, kept as a value until the consuming
     /// projection chooses ral text or [`user_json`].
@@ -93,7 +93,7 @@ impl<'a> Headless<'a> {
             root_id,
             started: Instant::now(),
             projection,
-            steps: 0,
+            turns: 0,
             last_stop: None,
             reply: None,
             panicked: false,
@@ -190,7 +190,7 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
                 "completed".into()
             }
         }),
-        "num_steps": h.steps,
+        "num_turns": h.turns,
         "duration_ms": duration_ms,
         "total_cost_usd": u.dollars,
         "usage": {
@@ -293,7 +293,6 @@ impl Printer for Headless<'_> {
                     self.ended_with_newline = *last == b'\n';
                 }
             }
-            Transient::Boundary => self.steps += 1,
             Transient::StopReason(raw) => {
                 self.last_stop = Some(raw.clone());
                 let _ = writeln!(self.err, "[stop: {raw}]");
@@ -308,8 +307,11 @@ impl Printer for Headless<'_> {
                     let _ = writeln!(self.err, "{line}");
                 }
             }
-            // A pin overwrites a TUI register; headless has none.
-            Transient::Token(_)
+            // A pin overwrites a TUI register; headless has none.  The stream
+            // boundary retires a live edge nothing here holds, and the turn
+            // it closes is counted off `Display::Turn` instead.
+            Transient::Boundary
+            | Transient::Token(_)
             | Transient::Thinking(_)
             | Transient::State(_)
             | Transient::Born { .. }
@@ -421,10 +423,10 @@ impl Headless<'_> {
             K::Context { rows, evicted } => {
                 self.print_card(&card::context_rows_card(rows, *evicted));
             }
-            K::Step { n } => {
+            K::Turn { id: turn } => {
                 if id == self.root_id {
-                    self.steps += 1;
-                    let _ = writeln!(self.err, "[step {n}]");
+                    self.turns += 1;
+                    let _ = writeln!(self.err, "[turn {turn}]");
                 }
             }
             K::ContextEdited { op, by } => {
@@ -434,12 +436,10 @@ impl Headless<'_> {
                     EditAuthority::Harness => "harness",
                 };
                 match op {
-                    ContextOp::Evict {
-                        through_exchange, ..
-                    } => {
+                    ContextOp::Evict { through, .. } => {
                         let _ = writeln!(
                             self.err,
-                            "[context evicted through exchange {through_exchange} ({authority})]"
+                            "[context evicted through turn {through} ({authority})]"
                         );
                     }
                     ContextOp::Drop { exchanges } => {
@@ -617,8 +617,8 @@ pub fn run(
     let _ = writeln!(headless.err, "Agent log: {}", session.log_dir().display());
     let _ = writeln!(
         headless.err,
-        "[done] {} steps · {:.1}s · {}",
-        headless.steps,
+        "[done] {} turns · {:.1}s · {}",
+        headless.turns,
         elapsed.as_secs_f64(),
         headless.usage
     );
@@ -871,13 +871,11 @@ mod tests {
         assert_eq!(v["stop_reason"], serde_json::json!("panicked"), "{out}");
     }
 
-    /// A `Display::Step` fact through the real live path — `absorb`, which
+    /// A `Display::Turn` fact through the real live path — `absorb`, which
     /// `drive` calls in production — folded into blocks and drawn from there.
-    /// `n`'s index restarts each time the root resumes after an async-spawned
-    /// block, so storing it would report only the last segment; a child's own
-    /// steps never count toward root's.
+    /// A child's own turns never count toward root's.
     #[test]
-    fn num_steps_counts_root_steps_across_segments() {
+    fn num_turns_counts_root_turns() {
         use crate::record::{Display, Record, Recorded, Seq, Stamp};
         let root: AgentId = 1;
         let sub: AgentId = 2;
@@ -886,24 +884,23 @@ mod tests {
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
         let mut blocks = HashMap::new();
         let mut seq = 0u64;
-        let mut step_started = |id: AgentId, n: u32| {
+        let mut turn_started = |id: AgentId, turn: u64| {
             seq += 1;
             Signal::Fact(
                 id,
                 Recorded::new(
                     Stamp::placeholder(Seq::new(seq)),
-                    Record::Display(Display::Step { n }),
+                    Record::Display(Display::Turn { id: turn }),
                 ),
             )
         };
-        // Two segments whose indices reset (1..3, then 1..2).
-        for n in [1, 2, 3, 1, 2] {
-            h.absorb(step_started(root, n), &mut blocks);
+        for turn in [1, 2, 3, 4, 5] {
+            h.absorb(turn_started(root, turn), &mut blocks);
         }
-        h.absorb(step_started(sub, 1), &mut blocks);
+        h.absorb(turn_started(sub, 1), &mut blocks);
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
-        assert_eq!(v["num_steps"], serde_json::json!(5), "{out}");
+        assert_eq!(v["num_turns"], serde_json::json!(5), "{out}");
     }
 
     /// A `Display::Card` fact reaches stderr only through the view fold
@@ -1111,9 +1108,10 @@ mod tests {
             "reply text must land on `out`: {:?}",
             String::from_utf8_lossy(&out)
         );
+        // One exchange spends two ids: the prompt takes 1, the reply 2.
         assert!(
-            String::from_utf8_lossy(&err).contains("[step"),
-            "step breadcrumbs must land on `err`: {:?}",
+            String::from_utf8_lossy(&err).contains("[turn 2]"),
+            "turn breadcrumbs must land on `err`: {:?}",
             String::from_utf8_lossy(&err)
         );
     }

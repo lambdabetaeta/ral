@@ -9,8 +9,8 @@
 //! output.
 
 use crate::agent::event::{
-    AgentLog, ContextOp, ContextSurvey, EditAuthority, GrepAnswer, StoreIndexItem,
-    TranscriptMessage, TranscriptPart, TranscriptSpan,
+    AgentLog, ContextOp, ContextSurvey, EditAuthority, GrepAnswer, TranscriptExchange,
+    TranscriptMessage, TranscriptPart,
 };
 use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
@@ -342,17 +342,20 @@ fn payload_int(v: FOValue, class: &str, field: &str) -> Result<i64, Error> {
     }
 }
 
-fn payload_exchange(v: FOValue, class: &str, field: &str) -> Result<u64, Error> {
+/// A turn or exchange id: one non-negative Int, refused under the name of
+/// what the field holds.
+fn payload_id(v: FOValue, class: &str, field: &str, what: &str) -> Result<u64, Error> {
     let value = payload_int(v, class, field)?;
     u64::try_from(value).map_err(|_| {
         Error::new(
-            format!("`{class}`: `{field}` must be a non-negative exchange number"),
+            format!("`{class}`: `{field}` must be a non-negative {what} number"),
             1,
         )
     })
 }
 
-/// The exchange list *is* the payload, not an argument wrapping one.
+/// The exchange list, whether it *is* the payload — `` `context `drop `` —
+/// or one field of it.
 fn payload_exchanges(payload: Option<Box<FOValue>>, class: &str) -> Result<Vec<u64>, Error> {
     let Some(FOValue::List { items }) = payload.map(|payload| *payload) else {
         return Err(Error::new(
@@ -363,8 +366,38 @@ fn payload_exchanges(payload: Option<Box<FOValue>>, class: &str) -> Result<Vec<u
     items
         .into_iter()
         .enumerate()
-        .map(|(index, item)| payload_exchange(item, class, &format!("exchanges[{index}]")))
+        .map(|(index, item)| payload_id(item, class, &format!("exchanges[{index}]"), "exchange"))
         .collect()
+}
+
+/// A turn range: exactly two non-negative Ints, the earlier first. Both ends
+/// are read, so `[n, n]` is the one turn `n`.
+fn payload_turns(v: FOValue, class: &str) -> Result<(u64, u64), Error> {
+    let FOValue::List { items } = v else {
+        return Err(Error::new(
+            format!("`{class}`: `turns` must be a list of two Ints, [from, to]"),
+            1,
+        ));
+    };
+    let [from, to] = <[FOValue; 2]>::try_from(items).map_err(|items: Vec<FOValue>| {
+        Error::new(
+            format!(
+                "`{class}`: `turns` is a range and takes exactly two Ints, [from, to] — got {}. \
+                 One turn is [n, n].",
+                items.len()
+            ),
+            1,
+        )
+    })?;
+    let from = payload_id(from, class, "turns[0]", "turn")?;
+    let to = payload_id(to, class, "turns[1]", "turn")?;
+    if from > to {
+        return Err(Error::new(
+            format!("`{class}`: `turns` is [from, to] and {from} is after {to} — did you mean [{to}, {from}]?"),
+            1,
+        ));
+    }
+    Ok((from, to))
 }
 
 /// The rail subject `` `context `drop `` mints from an exchange list:
@@ -379,6 +412,19 @@ fn exchanges_list(exchanges: &[u64]) -> String {
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// What a `` `transcript `` tag reaches, as the trace line names it:
+/// `"exchanges [1, 3] turns [12, 40]"`, either half absent when unasked.
+fn reach_subject(exchanges: &[u64], turns: Option<(u64, u64)>) -> String {
+    let mut said = Vec::new();
+    if !exchanges.is_empty() {
+        said.push(exchanges_subject(exchanges));
+    }
+    if let Some((from, to)) = turns {
+        said.push(format!("turns [{from}, {to}]"));
+    }
+    said.join(" ")
 }
 
 fn usize_to_i64(value: usize) -> i64 {
@@ -1547,27 +1593,27 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `context `` — the model view, one class for the whole family.
-    /// Every tag answers the survey: an edit changes what is addressable, so
-    /// what the model reads back is what its next edit must be written
-    /// against, never a receipt for the one it just made.
+    /// `` `context `` — what the provider is sent, one class for the whole
+    /// family. Every tag answers the survey: an edit changes what is
+    /// addressable, so what the model reads back is what its next edit must be
+    /// written against, never a receipt for the one it just made.
     fn context(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let (tag, payload) = family_tag(payload, "context")?;
         match tag.as_str() {
-            "survey" => Ok(survey_answer(self.context_survey())),
+            "survey" => Ok(survey_answer(&self.context_survey())),
             "drop" => self.context_drop(payload),
             "evict" => self.context_evict(payload),
             other => Err(unknown_tag("context", other)),
         }
     }
 
-    /// The view as the log holds it. Silent, like the roster: a survey
+    /// The context as the log holds it. Silent, like the roster: a survey
     /// commits no act, and every edit tag answers one of these too.
     fn context_survey(&self) -> ContextSurvey {
         self.services.log.lock().context_survey()
     }
 
-    /// `` `transcript `` — the store: every tag reads it and none writes it.
+    /// `` `transcript `` — the record: every tag reads it and none writes it.
     /// A read commits no act, so the verb string its trace line carries is a
     /// second mint outside [`DeskAct::verb`] on purpose.
     fn transcript(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
@@ -1578,7 +1624,7 @@ impl ExarchDesk {
             // walk — is paid once per session.
             "index" => self.traced(
                 "index".to_string(),
-                |log| Ok(store_index_answer(log.store_index())),
+                |log| Ok(transcript_index_answer(log.transcript_index())),
                 Ok,
             ),
             "read" => self.transcript_read(payload),
@@ -1587,26 +1633,37 @@ impl ExarchDesk {
         }
     }
 
-    /// `` `transcript `read `` — the named closed exchanges as material, one
-    /// span record each.
+    /// `` `transcript `read `` — the exchanges named outright and the turns a
+    /// range covers, as material: one record per exchange the read touched.
+    /// Both fields are optional and the door refuses a read that names
+    /// neither.
     fn transcript_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
-        let exchanges = payload_exchanges(payload, "transcript `read")?;
-        let subject = format!("read {}", exchanges_list(&exchanges));
+        const CLASS: &str = "transcript `read";
+        let mut spec = Fields::payload(payload, CLASS, "[exchanges: [Int], turns: [Int, Int]]")?;
+        let exchanges = match spec.optional("exchanges") {
+            Some(value) => payload_exchanges(Some(Box::new(value)), CLASS)?,
+            None => Vec::new(),
+        };
+        let turns = spec
+            .optional("turns")
+            .map(|value| payload_turns(value, CLASS))
+            .transpose()?;
+        let subject = format!("read {}", reach_subject(&exchanges, turns));
         self.traced(
             subject,
-            |log| log.locate_read(&exchanges),
-            |read| read.spans().map(transcript_answer),
+            |log| log.locate_read(&exchanges, turns),
+            |read| read.exchanges().map(transcript_answer),
         )
     }
 
-    /// `` `transcript `grep `` — a Rust regex over the store's text, the
-    /// whole of it or the named exchanges alone. The pattern is compiled
+    /// `` `transcript `grep `` — a Rust regex over the transcript's text, the
+    /// whole of it or the turns a narrowing names. The pattern is compiled
     /// here, so an invalid one is refused in the regex crate's own words.
     fn transcript_grep(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         const CLASS: &str = "transcript `grep";
         let mut spec = Fields::payload(payload, CLASS, "[pattern: Str]")?;
         let pattern = payload_string(
-            spec.take("pattern", "the Rust regex to search the store for")?,
+            spec.take("pattern", "the Rust regex to search the transcript for")?,
             CLASS,
             "pattern",
         )?;
@@ -1614,15 +1671,21 @@ impl ExarchDesk {
             .optional("exchanges")
             .map(|value| payload_exchanges(Some(Box::new(value)), CLASS))
             .transpose()?;
-        let subject = match &exchanges {
-            Some(exchanges) => format!("grep {pattern} in {}", exchanges_list(exchanges)),
-            None => format!("grep {pattern}"),
+        let turns = spec
+            .optional("turns")
+            .map(|value| payload_turns(value, CLASS))
+            .transpose()?;
+        let narrowing = reach_subject(exchanges.as_deref().unwrap_or_default(), turns);
+        let subject = if narrowing.is_empty() {
+            format!("grep {pattern}")
+        } else {
+            format!("grep {pattern} in {narrowing}")
         };
         self.traced(
             subject,
             |log| {
                 let regex = Regex::new(&pattern).map_err(|error| error.to_string())?;
-                Ok((log.locate_grep(exchanges.as_deref())?, regex))
+                Ok((log.locate_grep(exchanges.as_deref(), turns)?, regex))
             },
             |(read, regex)| read.grep(&regex).map(grep_answer),
         )
@@ -1651,7 +1714,7 @@ impl ExarchDesk {
         result.map_err(|error| Error::new(error, 1))
     }
 
-    /// `` `context `drop `` — shed the named exchanges from the view.
+    /// `` `context `drop `` — shed the named exchanges from the context.
     fn context_drop(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         const CLASS: &str = "context `drop";
         let exchanges = payload_exchanges(payload, CLASS)?;
@@ -1668,16 +1731,18 @@ impl ExarchDesk {
     /// stays there for the session, so it is one short line, not a summary.
     const NOTE_CAP: usize = 240;
 
-    /// `` `context `evict `` — every exchange through `through` leaves the
-    /// window at once, with the model's optional `note` beside the index that
-    /// replaces them.
+    /// `` `context `evict `` — every turn through `through` leaves the context
+    /// at once, but for a user turn whose exchange still has a later turn in
+    /// it, with the model's optional `note` beside the index that replaces
+    /// them.
     fn context_evict(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         const CLASS: &str = "context `evict";
         let mut spec = Fields::payload(payload, CLASS, "[through: …]")?;
-        let through = payload_exchange(
-            spec.take("through", "the last exchange to evict")?,
+        let through = payload_id(
+            spec.take("through", "the last turn to evict")?,
             CLASS,
             "through",
+            "turn",
         )?;
         let note = match spec.optional("note") {
             Some(value) => {
@@ -1701,7 +1766,7 @@ impl ExarchDesk {
                 if note.contains(['\n', '\r']) {
                     return Err(Error::new(
                         format!(
-                            "`{CLASS}`: `note` must be a single line — the head marker draws one row per evicted exchange, and a line break in a note reads as one of them."
+                            "`{CLASS}`: `note` must be a single line — the head marker draws one row per exchange the eviction names, and a line break in a note reads as one of them."
                         ),
                         1,
                     ));
@@ -1719,10 +1784,7 @@ impl ExarchDesk {
             DeskAct::ContextEvict,
             Some(&subject),
             payload,
-            ContextOp::Evict {
-                through_exchange: through,
-                note,
-            },
+            ContextOp::Evict { through, note },
         )
     }
 
@@ -1751,7 +1813,7 @@ impl ExarchDesk {
                 let text = format!("context is now {} serialized bytes", survey.total_bytes);
                 self.services
                     .record_forensic(crate::record::Forensic::HarnessResult { text });
-                Ok(survey_answer(survey))
+                Ok(survey_answer(&survey))
             }
             Err(error) => {
                 self.services.commit_act(act, subject, payload, true);
@@ -1765,51 +1827,23 @@ impl ExarchDesk {
     }
 }
 
-/// The `` `context `` family's one answer: the model view as it stands, spans
-/// first, then the count of exchanges that have left it.
-fn survey_answer(survey: ContextSurvey) -> FOValue {
-    let spans = survey
-        .items
-        .into_iter()
-        .map(|item| FOValue::Map {
-            entries: vec![
-                (
-                    "exchange".to_string(),
-                    FOValue::Int {
-                        value: u64_to_i64(item.exchange),
-                    },
-                ),
-                (
-                    "kind".to_string(),
-                    FOValue::String {
-                        value: item.kind.as_str().to_string(),
-                    },
-                ),
-                (
-                    "prompt".to_string(),
-                    FOValue::String {
-                        value: item.opening,
-                    },
-                ),
-                (
-                    "bytes".to_string(),
-                    FOValue::Int {
-                        value: usize_to_i64(item.bytes),
-                    },
-                ),
-                (
-                    "steps".to_string(),
-                    FOValue::Int {
-                        value: usize_to_i64(item.steps),
-                    },
-                ),
-                ("live".to_string(), FOValue::Bool { value: item.live }),
-            ],
-        })
-        .collect();
+/// The `` `context `` family's one answer: one row per turn in the context,
+/// then the count of turns evicted from it and what the whole of it weighs.
+fn survey_answer(survey: &ContextSurvey) -> FOValue {
     FOValue::Map {
         entries: vec![
-            ("spans".to_string(), FOValue::List { items: spans }),
+            (
+                "rows".to_string(),
+                FOValue::List {
+                    items: survey
+                        .rows
+                        .iter()
+                        .map(|turn| FOValue::Map {
+                            entries: turn_row(turn),
+                        })
+                        .collect(),
+                },
+            ),
             (
                 "evicted".to_string(),
                 FOValue::Int {
@@ -1822,52 +1856,47 @@ fn survey_answer(survey: ContextSurvey) -> FOValue {
                     value: usize_to_i64(survey.total_bytes),
                 },
             ),
-            (
-                "total-steps".to_string(),
-                FOValue::Int {
-                    value: usize_to_i64(survey.total_steps),
-                },
-            ),
         ],
     }
 }
 
-/// `` `transcript `index ``'s answer: one row per closed exchange the store
-/// holds, oldest first, `in-view` saying which of them the model is still
-/// paying for.
-fn store_index_answer(items: Vec<StoreIndexItem>) -> FOValue {
+/// One turn as both `` context `survey `` and `` transcript `index `` name
+/// it, so a row and an index line can never be two opinions.
+fn turn_row(turn: &crate::record::Turn) -> Vec<(String, FOValue)> {
+    vec![
+        (
+            "id".to_string(),
+            FOValue::Int {
+                value: u64_to_i64(turn.id),
+            },
+        ),
+        (
+            "exchange".to_string(),
+            FOValue::Int {
+                value: u64_to_i64(turn.exchange),
+            },
+        ),
+        text_field("kind", turn.kind.as_str().to_string()),
+        text_field("label", turn.label.clone()),
+        (
+            "bytes".to_string(),
+            FOValue::Int {
+                value: usize_to_i64(turn.bytes),
+            },
+        ),
+    ]
+}
+
+/// `` `transcript `index ``'s answer: one row per turn the transcript holds,
+/// oldest first, `held` saying which of them the model is still paying for.
+fn transcript_index_answer(turns: Vec<crate::record::Turn>) -> FOValue {
     FOValue::List {
-        items: items
+        items: turns
             .into_iter()
-            .map(|item| FOValue::Map {
-                entries: vec![
-                    (
-                        "exchange".to_string(),
-                        FOValue::Int {
-                            value: u64_to_i64(item.exchange),
-                        },
-                    ),
-                    text_field("kind", item.kind.as_str().to_string()),
-                    text_field("prompt", item.opening),
-                    (
-                        "steps".to_string(),
-                        FOValue::Int {
-                            value: usize_to_i64(item.steps),
-                        },
-                    ),
-                    (
-                        "bytes".to_string(),
-                        FOValue::Int {
-                            value: usize_to_i64(item.bytes),
-                        },
-                    ),
-                    (
-                        "in-view".to_string(),
-                        FOValue::Bool {
-                            value: item.in_view,
-                        },
-                    ),
-                ],
+            .map(|turn| {
+                let mut entries = turn_row(&turn);
+                entries.push(text_field("held", turn.held.as_str().to_string()));
+                FOValue::Map { entries }
             })
             .collect(),
     }
@@ -1885,6 +1914,12 @@ fn grep_answer(answer: GrepAnswer) -> FOValue {
                     "exchange".to_string(),
                     FOValue::Int {
                         value: u64_to_i64(hit.exchange),
+                    },
+                ),
+                (
+                    "turn".to_string(),
+                    FOValue::Int {
+                        value: u64_to_i64(hit.turn),
                     },
                 ),
                 text_field("role", role_label(&hit.role).to_string()),
@@ -1911,28 +1946,41 @@ fn grep_answer(answer: GrepAnswer) -> FOValue {
     }
 }
 
-/// `` `transcript `read ``'s answer: one span record per named exchange, each
-/// carrying the model's own messages narrowed to variant parts — never a
-/// serialization of the provider's own content structs.
-fn transcript_answer(spans: Vec<TranscriptSpan>) -> FOValue {
+/// `` `transcript `read ``'s answer: one record per exchange the read
+/// touched, each naming the turns it covered and carrying the model's own
+/// messages narrowed to variant parts — never a serialization of the
+/// provider's own content structs.
+fn transcript_answer(read: Vec<TranscriptExchange>) -> FOValue {
     FOValue::List {
-        items: spans.into_iter().map(transcript_span_value).collect(),
+        items: read.into_iter().map(transcript_exchange_value).collect(),
     }
 }
 
-fn transcript_span_value(span: TranscriptSpan) -> FOValue {
+fn transcript_exchange_value(read: TranscriptExchange) -> FOValue {
     FOValue::Map {
         entries: vec![
             (
                 "exchange".to_string(),
                 FOValue::Int {
-                    value: u64_to_i64(span.exchange),
+                    value: u64_to_i64(read.exchange),
+                },
+            ),
+            (
+                "turns".to_string(),
+                FOValue::List {
+                    items: read
+                        .turns
+                        .into_iter()
+                        .map(|turn| FOValue::Int {
+                            value: u64_to_i64(turn),
+                        })
+                        .collect(),
                 },
             ),
             (
                 "messages".to_string(),
                 FOValue::List {
-                    items: span
+                    items: read
                         .messages
                         .into_iter()
                         .map(transcript_message_value)
@@ -2387,10 +2435,20 @@ mod tests {
         family_req("context", "survey", None)
     }
 
-    fn transcript_read_request(exchanges: &[i64]) -> FOValue {
+    fn turns_value(turns: (i64, i64)) -> RalValue {
+        RalValue::list(vec![RalValue::Int(turns.0), RalValue::Int(turns.1)])
+    }
+
+    /// Neither field is required, so a request naming neither is the shape the
+    /// door refuses rather than one the encoder cannot build.
+    fn transcript_read_request(exchanges: Option<&[i64]>, turns: Option<(i64, i64)>) -> FOValue {
+        let mut fields = Vec::new();
+        fields.extend(
+            exchanges.map(|exchanges| ("exchanges".to_string(), exchanges_value(exchanges))),
+        );
+        fields.extend(turns.map(|turns| ("turns".to_string(), turns_value(turns))));
         let payload =
-            harness::context_exchanges_payload(&exchanges_value(exchanges), "transcript `read")
-                .expect("valid exchange list");
+            harness::transcript_read_payload(&RalValue::map(fields)).expect("valid read spec");
         family_req("transcript", "read", Some(payload))
     }
 
@@ -2681,7 +2739,7 @@ mod tests {
     }
 
     #[test]
-    fn context_survey_lists_import_and_live_exchange_beside_the_evicted_count() {
+    fn context_survey_rows_every_resident_turn_beside_the_evicted_count() {
         let desk = desk();
         {
             let mut log = desk.services.log.lock();
@@ -2689,7 +2747,7 @@ mod tests {
             complete_exchange(&mut log, "evicted", "answer");
             log.apply_edit(
                 ContextOp::Evict {
-                    through_exchange: 1,
+                    through: 2,
                     note: None,
                 },
                 EditAuthority::Model,
@@ -2707,19 +2765,18 @@ mod tests {
         else {
             panic!("context must answer a record")
         };
-        let spans = entries
+        let rows = entries
             .iter()
-            .find_map(|(key, value)| (key == "spans").then_some(value))
-            .expect("survey spans");
-        let FOValue::List { items } = spans else {
-            panic!("survey spans must be a list")
+            .find_map(|(key, value)| (key == "rows").then_some(value))
+            .expect("survey rows");
+        let FOValue::List { items } = rows else {
+            panic!("survey rows must be a list")
         };
-        assert_eq!(items.len(), 3);
         let kinds = items
             .iter()
             .map(|item| {
                 let FOValue::Map { entries } = item else {
-                    panic!("survey item must be a record")
+                    panic!("survey row must be a record")
                 };
                 entries
                     .iter()
@@ -2732,7 +2789,7 @@ mod tests {
                     .expect("survey kind")
             })
             .collect::<Vec<_>>();
-        assert_eq!(kinds, vec!["exchange", "import", "exchange"]);
+        assert_eq!(kinds, vec!["exchange", "exchange", "import", "exchange"]);
         let evicted = entries
             .iter()
             .find_map(|(key, value)| {
@@ -2742,10 +2799,7 @@ mod tests {
                 })
             })
             .expect("survey evicted");
-        assert_eq!(
-            evicted, 1,
-            "the one evicted exchange is counted, not listed"
-        );
+        assert_eq!(evicted, 2, "the evicted turns are counted, not rowed");
         let total_bytes = entries
             .iter()
             .find_map(|(key, value)| {
@@ -2756,18 +2810,13 @@ mod tests {
             })
             .expect("survey total bytes");
         assert_eq!(total_bytes, i64::try_from(expected_bytes).unwrap());
-        let live = items.last().expect("live exchange");
-        assert!(matches!(
-            live,
-            FOValue::Map { entries }
-                if entries.iter().any(|(key, value)| key == "live" && matches!(value, FOValue::Bool { value: true }))
-        ));
     }
 
-    /// One record per named span, not one concatenated blob: the list is the
-    /// shape the doc's own "read in slices" advice needs to be sayable.
+    /// One record per exchange the read touched, not one concatenated blob:
+    /// the list is the shape the doc's own "read in slices" advice needs to be
+    /// sayable.
     #[test]
-    fn transcript_answers_one_record_per_span_without_committing_an_act() {
+    fn transcript_answers_one_record_per_exchange_without_committing_an_act() {
         let mut desk = desk();
         {
             let mut log = desk.services.log.lock();
@@ -2782,23 +2831,23 @@ mod tests {
         desk.services.emit = Emitter::new(tx, 0);
 
         let FOValue::List { items } = desk
-            .handle(transcript_read_request(&[1]))
+            .handle(transcript_read_request(Some(&[1]), None))
             .expect("transcript `read")
         else {
-            panic!("transcript `read must answer a list of spans")
+            panic!("transcript `read must answer a list, one record per exchange")
         };
         let [FOValue::Map { entries }] = items.as_slice() else {
-            panic!("one named span must answer exactly one record, got {items:?}")
+            panic!("one named exchange must answer exactly one record, got {items:?}")
         };
         let field = |name: &str| {
             let Some((_, value)) = entries.iter().find(|(key, _)| key == name) else {
-                panic!("a span carries `{name}`, got {entries:?}")
+                panic!("a read carries `{name}`, got {entries:?}")
             };
             value
         };
         assert!(matches!(field("exchange"), FOValue::Int { value: 1 }));
         let FOValue::List { items: messages } = field("messages") else {
-            panic!("a span's messages are a list, got {entries:?}")
+            panic!("a read's messages are a list, got {entries:?}")
         };
         assert_eq!(
             messages.len(),
@@ -2817,13 +2866,19 @@ mod tests {
                 subject: Some(subject),
                 payload,
                 failed: false,
-            }) if verb == "transcript" && subject == "read 1" && payload == "read 1"
+            }) if verb == "transcript"
+                && subject == "read exchanges [1]"
+                && payload == "read exchanges [1]"
         ));
 
         let error = desk
-            .handle(transcript_read_request(&[]))
-            .expect_err("an empty read is not meaningful");
-        assert_eq!(error.message, "transcript must name at least one exchange");
+            .handle(transcript_read_request(None, None))
+            .expect_err("a read that names nothing is not meaningful");
+        assert_eq!(
+            error.message,
+            "transcript `read` must name what to read — `exchanges: [n, …]`, \
+             `turns: [from, to]`, or both"
+        );
         let record = crate::bus::drain_records(&rx)
             .into_iter()
             .next()
@@ -2836,6 +2891,68 @@ mod tests {
                 ..
             }) if verb == "transcript"
         ));
+    }
+
+    /// A range reads the turns it covers wherever they lie, one record per
+    /// exchange it reaches into, and names them back; a range past what is
+    /// recorded, and one reaching the turn being written, are refused by the
+    /// state they meet.
+    #[test]
+    fn transcript_read_addresses_a_turn_range() {
+        let desk = desk();
+        {
+            let mut log = desk.services.log.lock();
+            complete_exchange(&mut log, "first prompt", "first answer");
+            complete_exchange(&mut log, "second prompt", "second answer");
+        }
+        let FOValue::List { items } = desk
+            .handle(transcript_read_request(None, Some((2, 3))))
+            .expect("a closed range is readable")
+        else {
+            panic!("transcript `read must answer a list, one record per exchange")
+        };
+        let reached = items
+            .iter()
+            .map(|item| {
+                let FOValue::Map { entries } = item else {
+                    panic!("a read answers records, got {item:?}")
+                };
+                let turns = entries
+                    .iter()
+                    .find_map(|(key, value)| (key == "turns").then_some(value))
+                    .expect("a read names its turns");
+                let FOValue::List { items } = turns else {
+                    panic!("a read's turns are a list, got {turns:?}")
+                };
+                (
+                    int_field(item.clone(), "exchange"),
+                    items.len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reached,
+            vec![(1, 1), (3, 1)],
+            "the range clips one turn out of each exchange"
+        );
+
+        let error = desk
+            .handle(transcript_read_request(None, Some((3, 9))))
+            .expect_err("a range must not reach past what is recorded");
+        assert_eq!(error.message, "turn 9 is not recorded — the latest is 4");
+
+        desk.services
+            .log
+            .lock()
+            .append_user("live".into(), None)
+            .expect("live prompt");
+        let error = desk
+            .handle(transcript_read_request(None, Some((4, 5))))
+            .expect_err("the turn being written is not readable");
+        assert_eq!(
+            error.message,
+            "exchange 5 is still in progress — no turn of it has closed yet"
+        );
     }
 
     /// The pattern is compiled at the desk, so an invalid one is refused in
@@ -2880,7 +2997,7 @@ mod tests {
         let err = unknown_desk
             .handle(context_drop_request(&[7]))
             .expect_err("an unknown exchange is not editable");
-        assert_eq!(err.message, "exchange 7 is not present in the current view");
+        assert_eq!(err.message, "exchange 7 is not present in your context");
 
         let evicted_desk = desk();
         {
@@ -2897,7 +3014,7 @@ mod tests {
             .expect_err("an exchange that has left is not addressable");
         assert_eq!(
             err.message,
-            "exchange 1 has already left your context — the earliest still in view is 3"
+            "exchange 1 has already left your context — the earliest still in it is 3"
         );
 
         let err = evicted_desk
@@ -2926,26 +3043,37 @@ mod tests {
         assert_eq!(
             int_field(answer.clone(), "total-bytes"),
             i64::try_from(desk.services.log.lock().history_bytes()).unwrap(),
-            "the survey's total is the model view's own weight"
+            "the survey's total is the context's own weight"
         );
+        let rows = survey_rows(&answer);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (int_field(row.clone(), "id"), int_field(row.clone(), "exchange")))
+                .collect::<Vec<_>>(),
+            vec![(3, 3), (4, 3)],
+            "the dropped exchange's turns are gone from the answer"
+        );
+    }
+
+    /// The survey rows an answer carries, in id order.
+    fn survey_rows(answer: &FOValue) -> Vec<FOValue> {
         let FOValue::Map { entries } = answer else {
-            panic!("a drop must answer the survey record")
+            panic!("a context tag answers the survey record")
         };
-        let spans = entries
+        let rows = entries
             .iter()
-            .find_map(|(key, value)| (key == "spans").then_some(value))
-            .expect("survey spans");
-        let FOValue::List { items } = spans else {
-            panic!("survey spans must be a list")
+            .find_map(|(key, value)| (key == "rows").then_some(value))
+            .expect("survey rows");
+        let FOValue::List { items } = rows else {
+            panic!("survey rows must be a list")
         };
-        assert_eq!(items.len(), 1, "the dropped span is gone from the answer");
-        assert_eq!(int_field(items[0].clone(), "exchange"), 2);
+        items.clone()
     }
 
     /// The eviction counterpart: it commits [`DeskAct::ContextEvict`], not
     /// [`DeskAct::ContextDrop`] — the audit sentence names the act it actually
     /// took, which nothing else in this suite pins — and its answer counts
-    /// what left beside the spans that survive it.
+    /// what left beside the turns that survive it.
     #[test]
     fn context_evict_commits_the_evict_act_and_counts_what_left() {
         let desk = desk();
@@ -2958,22 +3086,21 @@ mod tests {
         let answer = desk
             .handle(context_evict_request(2, Some("the parser is fixed")))
             .expect("context evict");
-        assert_eq!(int_field(answer.clone(), "evicted"), 2);
-        let FOValue::Map { entries } = answer else {
-            panic!("an eviction must answer the survey record")
-        };
-        let spans = entries
-            .iter()
-            .find_map(|(key, value)| (key == "spans").then_some(value))
-            .expect("survey spans");
-        let FOValue::List { items } = spans else {
-            panic!("survey spans must be a list")
-        };
-        let [survivor] = items.as_slice() else {
-            panic!("the eviction leaves one span in the view, got {items:?}")
-        };
-        assert_eq!(str_field(survivor, "kind").as_deref(), Some("exchange"));
-        assert_eq!(int_field(survivor.clone(), "exchange"), 3);
+        assert_eq!(
+            int_field(answer.clone(), "evicted"),
+            2,
+            "the cut takes the first exchange's two turns"
+        );
+        let rows = survey_rows(&answer);
+        assert_eq!(
+            rows.iter()
+                .map(|row| int_field(row.clone(), "id"))
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5, 6],
+            "every turn above the cut stays"
+        );
+        assert_eq!(str_field(&rows[0], "kind").as_deref(), Some("exchange"));
+        assert_eq!(int_field(rows[0].clone(), "exchange"), 3);
         let audit = desk
             .services
             .acts
@@ -3041,7 +3168,7 @@ mod tests {
                 .expect_err("a note that breaks a line is not one row");
             assert_eq!(
                 err.message,
-                "`context `evict`: `note` must be a single line — the head marker draws one row per evicted exchange, and a line break in a note reads as one of them."
+                "`context `evict`: `note` must be a single line — the head marker draws one row per exchange the eviction names, and a line break in a note reads as one of them."
             );
         }
     }
@@ -4371,7 +4498,7 @@ mod tests {
     #[test]
     fn ms_lease_child_never_renewed_is_cancelled() {
         // The ttl must expire well inside the round-trip loop's own
-        // `MAX_STEPS` cap, so the lease and not the step cap ends the exchange.
+        // `MAX_TURNS` cap, so the lease and not that cap ends the exchange.
         let ttl = Duration::from_millis(25);
         let parent = Avatar::for_test_with(crate::agent::TestTrunk {
             lease: ttl,

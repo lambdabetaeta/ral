@@ -96,8 +96,8 @@ pub struct Agent {
     /// Where this agent's own session log is written.
     log_dir: PathBuf,
     started: Instant,
-    /// The resolved prompt that reaches the model on every step.  `Arc<str>`
-    /// so a fork's per-step read and the desk's own copy are refcount bumps,
+    /// The resolved prompt that reaches the model on every turn.  `Arc<str>`
+    /// so a fork's per-turn read and the desk's own copy are refcount bumps,
     /// never a re-copy of the ~38 KB template.
     pub(crate) system: Arc<str>,
     /// The template [`Self::system`] came from, still carrying
@@ -683,7 +683,7 @@ impl Avatar {
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
         self.log
             .lock()
-            .history_transcript()
+            .history_rendered()
             .messages()
             .cloned()
             .collect()

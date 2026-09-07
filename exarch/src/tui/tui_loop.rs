@@ -115,7 +115,7 @@ impl Control for ReplControl {
             "/evict" => {
                 let p = session.current_provider();
                 let token = session.cancel_token().clone();
-                session.evict(&p, true, &token, None);
+                session.evict(&p, true, &token);
                 Verdict::Continue
             }
             // Surveyed on the thread that owns the shell the rows describe,

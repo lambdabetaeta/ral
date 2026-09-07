@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7e129df6
+generated_at_commit: 4bc5006c
 generated_at_date: 2026-09-07
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
@@ -198,31 +198,42 @@ the desk checks again because a guest can send whatever it likes — which is wh
 
 ### Context stewardship
 
-Two verbs over two things: `context` is **the window** — what the provider is
-sent and the model pays for — and `transcript` is **the store**, every closed
-exchange this session or its ancestors ever recorded
-([[decisions/260906_context-rollover|context-rollover]]). `context` edits and
-surveys; `transcript` only reads.
+Two verbs over two things: `context` is **what the provider is sent** and the
+model pays for, and `transcript` is **the record**, every turn this session or
+its ancestors ever recorded
+([[decisions/260906_context-rollover|context-rollover]],
+[[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]). `context`
+edits and surveys; `transcript` only reads. Both speak **turns**: a user turn
+is a prompt (or an import's opening) and anything before the first reply, an
+assistant turn is the assistant message with the tool results it called for,
+and an exchange is the run of turns from a user turn, carrying that turn's id.
 
 - **`context <tag>`** → `∀ρ1 ρ2. <survey | drop [Int] | evict [through: Int |
-  ρ1] | ρ2> → F [spans: [[exchange: Int, kind: Str, prompt: Str, bytes: Int,
-  steps: Int, live: Bool]], evicted: Int, total-bytes: Int, total-steps: Int]`.
+  ρ1] | ρ2> → F [rows: [[id: Int, exchange: Int, kind: Str, label: Str,
+  bytes: Int]], evicted: Int, total-bytes: Int]`.
   One verb per addressable state: the tag selects the transition, and **every**
   tag answers the survey afterwards. That is not a shared prefix collapsed but
-  the rule the registries already follow, and it fits the view better than
-  either, because an edit changes *what is addressable* — an evicted exchange
-  stops being nameable in the window — so the edit is also the resurvey the
+  the rule the registries already follow, and it fits this surface better than
+  either, because an edit changes *what is addressable* — an evicted turn
+  stops being nameable — so the edit is also the resurvey the
   next edit must be written against.
-  - `` `survey `` describes the finite window, one span per exchange or import,
-    beside `evicted`, the count of closed exchanges that have left it. It
-    changes nothing.
-  - `` `drop <exchanges> `` sheds whole closed exchanges from the window; they
-    remain in the store. The live, already-gone, duplicate, or empty selection
+  - `` `survey `` describes the context, one row per resident turn (`turn_row`,
+    the very shape `` transcript `index `` answers with), beside `evicted`, the
+    count of turns that have left it, and `total-bytes`, which is what is
+    actually sent rather than the sum of the rows: an abandoned exchange's
+    turns report their own weights while the context carries only its one-line
+    note. It changes nothing.
+  - `` `drop <exchanges> `` sheds whole closed exchanges; they remain in the
+    transcript. The live, already-gone, duplicate, or empty selection
     is refused with an explanation; a user-shaped rewind is the same
     closed-range operation.
-  - `` `evict [through, note] `` removes every span through a closed exchange
-    at once, replaced at the head of the window by the harness's index of what
-    left. `note` is the model's own line to its future self, rendered beside
+  - `` `evict [through, note] `` removes every turn through the one named, and
+    with it every exchange wholly before them, replaced at the head by the
+    harness's index of what
+    left; a user turn whose exchange still has a resident turn above the cut
+    stays with it, so a cut into an exchange keeps its prompt, and the newest
+    turn can never be named at all. `note` is the model's own line to its
+    future self, rendered beside
     that index; the harness's own eviction writes none. The `evict` row is
     **open** precisely because `note` is optional and a closed row cannot say
     so: `context_evict_payload` checks its type at the door, and the desk
@@ -230,46 +241,62 @@ surveys; `transcript` only reads.
     `Your note at eviction: ""` is a defect the type should prevent, and
     making `note` required would invite exactly that. Its size and shape are
     the desk's too — at most `NOTE_CAP` (240) bytes, and no line break, since
-    the marker draws one row per evicted exchange and a note that could add a
-    row would unbound the one message an eviction never reclaims.
+    the marker draws one row per exchange fragment the eviction names and a
+    note that could add a row would unbound the one message an eviction never
+    reclaims.
 
   Each edit records a `ContextEdited` model event at the desk immediately,
   under `DeskAct::ContextEvict` or `ContextDrop`. There is no byte-delta
   receipt: the decision-relevant number is `total-bytes` now against the
   budget ([[decisions/260812_context-is-a-projection|context-is-a-projection]]).
-- **`transcript <tag>`** → `∀α ρ1 ρ2. <index | read [Int] | grep [pattern: Str
-  | ρ1] | ρ2> → F α`. Read-only: no tag records a protocol event, though each
+- **`transcript <tag>`** → `∀α ρ1 ρ2 ρ3. <index | read [ρ1] | grep [pattern: Str
+  | ρ2] | ρ3> → F α`. Read-only: no tag records a protocol event, though each
   records a `Display::HarnessCall` for the screen. The answer type is a bare
-  `α` because the three tags answer three shapes.
-  - `` `index `` → `[[exchange: Int, kind: Str, prompt: Str, steps: Int,
-    bytes: Int, in-view: Bool]]`, oldest first. `kind` is `exchange`, `import`,
-    or `inherited` (an ancestor's). A departed exchange — evicted *or* dropped —
-    is listed at the weight it carried when it left.
-  - `` `read <exchanges> `` → `[[exchange: Int, messages: [Message]]]`, the
-    named closed exchanges as material, in store order, each addressed by its
+  `α` because the three tags answer three shapes. `` `read ``'s row is open
+  *outright* because both of its fields are optional and a record row can
+  anchor only a required one; `transcript_read_payload` checks whichever
+  arrive, and naming neither is the desk's to refuse.
+  - `` `index `` → the survey's own rows over every turn the transcript holds,
+    plus `held: Str` — `resident`, `evicted`, or `dropped` — oldest first.
+    `kind` is `exchange`, `import`, or `inherited` (an ancestor's). A departed
+    turn is listed at the weight it carried when it left.
+  - `` `read [exchanges: [Int], turns: [Int, Int]] `` →
+    `[[exchange: Int, turns: [Int], messages: [Message]]]`, one record per
+    exchange the read touched, in transcript order, each addressed by its
     own `exchange` field rather than by a `=== … ===` header a reader had to
-    re-parse. In view, evicted to this log's file, or an ancestor's: all three
-    render through the same `closed_messages`, so what comes back is what the
-    model was sent.
-  - `` `grep [pattern, exchanges] `` → `[hits: [[exchange: Int, role: Str,
-    line: Int, text: Str]], total: Int]`. A Rust regex — ral's own `re-*`
+    re-parse, and naming the turns it covered. `exchanges` names whole closed
+    exchanges, `turns` is one inclusive range (`[n, n]` is the single turn
+    `n`), and the two **compose as a union**. An exchange the read reaches
+    whole renders through `closed_messages` — what the model was sent, whether
+    resident, departed to this log's file, or an ancestor's — while a range
+    that reaches only part of one answers those turns' own material; a
+    fork-split exchange renders per turn, since a mixture of two files' records
+    would fold as abandoned.
+  - `` `grep [pattern, exchanges, turns] `` → `[hits: [[exchange: Int,
+    turn: Int, role: Str, line: Int, text: Str]], total: Int]`. A Rust regex —
+    ral's own `re-*`
     dialect, compiled at the desk so a bad pattern is refused in the regex
     crate's words — over prompts, programs, results, and reasoning, per line.
-    `exchanges` is optional and narrows the search. At most `GREP_HITS` (100)
+    Both narrowings are optional and compose as the same union; with neither,
+    the whole transcript is searched. At most `GREP_HITS` (100)
     hits, oldest first, each line clipped at 200 bytes, with `total` the true
     count so a large one says *narrow*, not *page*.
 
+  Only the turn being written *now* is unreadable: the earlier turns of the
+  exchange in hand have closed and read back like any other, which is what the
+  live-exchange refusal names when it points at them.
+
   `` `read `` is the one harness answer whose size is the size of the thing it
-  describes: the survey spends a few hundred bytes to describe a 200 KB view,
-  and this returns the 200 KB. That is why it is a tag of `transcript` and not
-  of `context` — the distinct name is the cheapest safety mechanism a
+  describes: the survey spends a few hundred bytes to describe a 200 KB
+  context, and this returns the 200 KB. That is why it is a tag of `transcript`
+  and not of `context` — the distinct name is the cheapest safety mechanism a
   model-facing surface has, and the only one that acts before the call rather
   than after — and why the docstring points a long search at a `mnemon` child,
-  which shares the store and spends its own context on it.
+  which shares the transcript and spends its own context on it.
 
   A `Message` is `[role: `system|`user|`assistant|`tool, parts: [Part]]`, one
-  per model turn the span holds — a step boundary is not a turn and
-  contributes no message, the same as it contributes no message to a live
+  per message the turns hold — the meta half of taking a turn carries no
+  message of its own, the same as it contributes none to a live
   provider request. A `Part` is a variant, one arm per
   `genai::chat::ContentPart` — `` `text ``, `` `program `` (the ral tool call
   itself: the script source for exarch's own tool, or a name and argument
@@ -283,9 +310,9 @@ surveys; `transcript` only reads.
   builtin's job: it is `filter`/`take`/`view-text` over the records, the way
   `tasks-list` puts querying on the caller rather than the kit
   ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]
-  for the private `Transcript` cache this reads through,
-  `render_closed_entry`'s cached segment converted to material rather than
-  re-rendered). `` `grep `` searches that same narrowing — `` `text ``,
+  for the private `Rendered` value this reads through, a cached turn's segment
+  converted to material rather than re-rendered). `` `grep `` searches that
+  same narrowing — `` `text ``,
   `` `program ``'s source, `` `result ``, `` `reasoning ``, a binary payload
   and a provider extension carrying no text a pattern could mean — so nothing
   is searchable that is not readable.

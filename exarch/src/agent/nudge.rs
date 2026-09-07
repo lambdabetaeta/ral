@@ -13,6 +13,14 @@
 //! emission, so "told but not sent" and "sent but not told" are
 //! inexpressible.
 //!
+//! The two standing conditions ride different channels, because they are owed
+//! at different boundaries.  The pin register joins [`Nudges::react`]'s
+//! post-deliberation message; context pressure is owed at every turn
+//! boundary, so [`Nudges::pressure_reminder`] hands it to the deliberate loop
+//! for the one steering message the protocol admits after a tool batch — an
+//! agentic run takes one prompt and then two hundred tool turns, and a
+//! warning that waited for the next exchange would arrive after the cut.
+//!
 //! [`Nudges`] is per-session because the attend loop runs one
 //! `Avatar::deliberate` per inbox item, not one per exchange, so this state
 //! must outlive a single deliberation.  [`Nudges::reset`] clears the budget at
@@ -45,8 +53,8 @@ pub(crate) enum Pressure {
     Over {
         /// The rendered detail, e.g. "173000 of 200000 tokens".
         detail: String,
-        /// The cut the next boundary would apply, `None` when no exchange is
-        /// old enough to shed.
+        /// The turn the next boundary's cut would reach, `None` when nothing
+        /// is old enough to shed.
         through: Option<u64>,
     },
     Under,
@@ -62,7 +70,6 @@ pub(crate) struct Facts {
     /// One-line digest of the whole pin register, `None` when nothing is
     /// pinned.
     pub pinned: Option<String>,
-    pub pressure: Pressure,
     /// Nothing else is already carrying this agent forward: no reply standing
     /// for a parent to fetch, no detached shell work, no busy children.  The
     /// one gate every nudge kind shares — `false` and `react` returns `None`
@@ -70,8 +77,8 @@ pub(crate) struct Facts {
     pub quiet: bool,
 }
 
-/// Per-session nudge state; [`Self::react`] is the only post-attempt entry
-/// point.
+/// Per-session nudge state, entered from [`Self::react`] at the end of a
+/// deliberation and [`Self::pressure_reminder`] at a tool boundary within one.
 pub(crate) struct Nudges {
     /// Repairs spent this exchange.
     used: u32,
@@ -97,6 +104,27 @@ impl Nudges {
         self.used = 0;
     }
 
+    /// The context-pressure reminder the deliberate loop owes this tool
+    /// boundary, or `None`.  Budget-free: the cut is announced before it
+    /// happens, so the model can leave its future self a line.
+    pub fn pressure_reminder(&mut self, pressure: &Pressure, log: &mut AgentLog) -> Option<String> {
+        match pressure {
+            // The excursion has ended; the next one is a new condition.
+            Pressure::Under => {
+                self.pressure_told = false;
+                None
+            }
+            // A stale measure relieves nothing and warns of nothing.
+            Pressure::Unknown => None,
+            Pressure::Over { .. } if self.pressure_told => None,
+            Pressure::Over { detail, through } => {
+                self.pressure_told = true;
+                record_nudge(log, self.used, "context pressure".into());
+                Some(wrap_reminder(&pressure_message(detail, *through)))
+            }
+        }
+    }
+
     /// Decide the synthetic prompt the attend loop self-posts, or `None` to
     /// accept the attempt as it stands.
     pub fn react(
@@ -105,12 +133,6 @@ impl Nudges {
         facts: &Facts,
         log: &mut AgentLog,
     ) -> Option<String> {
-        // The gauge re-arms on every attempt, ahead of the quiet gate: an
-        // excursion can end while a reply or busy children hold the nudge
-        // back.
-        if matches!(facts.pressure, Pressure::Under) {
-            self.pressure_told = false;
-        }
         if !facts.quiet {
             return None;
         }
@@ -123,8 +145,8 @@ impl Nudges {
             Err(ProviderError::Truncated { .. }) => {
                 self.repair("truncated".into(), TRUNCATED_MESSAGE, log)
             }
-            // A reply is final; a cancel was asked for; a step cap would only
-            // buy another MAX_STEPS; every other provider error is the
+            // A reply is final; a cancel was asked for; a turn cap would only
+            // buy another MAX_TURNS; every other provider error is the
             // transport's own.
             _ => None,
         }
@@ -174,13 +196,6 @@ impl Nudges {
             // An emptied register re-arms even an identical future digest.
             None => self.pinned_told = None,
         }
-        if let Pressure::Over { detail, through } = &facts.pressure
-            && !self.pressure_told
-        {
-            self.pressure_told = true;
-            record_nudge(log, self.used, "context pressure".into());
-            parts.push(pressure_message(detail, *through));
-        }
         (!parts.is_empty()).then(|| wrap_reminder(&parts.join(" ")))
     }
 }
@@ -205,18 +220,17 @@ const REPLY_MESSAGE: &str = "You ended your turn without calling `reply`, so you
     or a quote, write it as a raw string `#'…'#`. This is the only way to hand your work back; \
     a final message on its own is not delivered.";
 
-/// Shown once [`Facts::pressure`] crosses its soft line, budget-free like the
-/// pinned-state reminder: the cut is announced before it happens, so the model
-/// can leave its future self a line.  With nothing old enough to shed there is
-/// no cut to announce, and the reading alone is the whole message.
+/// Shown once the gauge crosses its soft line, budget-free like the
+/// pinned-state reminder.  With nothing old enough to shed there is no cut to
+/// announce, and the reading alone is the whole message.
 fn pressure_message(detail: &str, through: Option<u64>) -> String {
     match through {
         Some(through) => format!(
-            "Context pressure: {detail}. At the next exchange boundary exchanges through \
-             {through} will leave your context; they stay readable with `transcript` (`read, \
-             `grep, `index) and your pinned state stays in view. If you want to leave your \
-             future self a line, run `context `evict [through: {through}, note: '…']` now; \
-             otherwise nothing is required of you."
+            "Context pressure: {detail}. At the next turn boundary, turns through {through} \
+             will leave your context (and every exchange wholly before them); they stay \
+             readable with `transcript`. To leave your future self a line, run \
+             `context `evict [through: {through}, note: '…']` now; otherwise nothing is \
+             required of you."
         ),
         None => format!("Context pressure: {detail}."),
     }
@@ -257,7 +271,6 @@ mod tests {
             must_reply: false,
             pinned: None,
             quiet: true,
-            pressure: Pressure::Under,
         }
     }
 
@@ -458,30 +471,22 @@ mod tests {
         assert_eq!(nudges.used, 1, "only the reply half spends budget");
     }
 
-    /// The pressure gauge composes on a clean completion, budget-free, and
-    /// carries both the reading and the planned cut.
+    /// The reminder carries both the reading and the turn the next boundary
+    /// would cut through, and spends no budget.
     #[test]
-    fn pressure_part_composes_budget_free_on_complete() {
+    fn pressure_reminder_names_the_cut_and_offers_the_note() {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
-        let f = Facts {
-            pressure: over(Some(7)),
-            ..facts()
-        };
         let msg = nudges
-            .react(
-                &Ok(deliberate::Outcome::Complete("done".into())),
-                &f,
-                &mut log,
-            )
-            .expect("pressure due should nudge");
+            .pressure_reminder(&over(Some(7)), &mut log)
+            .expect("pressure due should remind");
         assert!(msg.contains("400 of 500 tokens"), "{msg}");
         assert!(
-            msg.contains("exchanges through 7 will leave your context")
+            msg.contains("turns through 7 will leave your context")
                 && msg.contains("`context `evict [through: 7"),
             "must name the cut and offer the note: {msg}"
         );
-        assert_eq!(nudges.used, 0, "the pressure nudge is budget-free");
+        assert_eq!(nudges.used, 0, "the pressure reminder is budget-free");
     }
 
     /// Nothing old enough to shed: the reading stands alone, with no cut to
@@ -490,96 +495,13 @@ mod tests {
     fn pressure_without_a_planned_cut_states_the_reading_alone() {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
-        let f = Facts {
-            pressure: over(None),
-            ..facts()
-        };
         let msg = nudges
-            .react(
-                &Ok(deliberate::Outcome::Complete("done".into())),
-                &f,
-                &mut log,
-            )
-            .expect("pressure due should nudge");
+            .pressure_reminder(&over(None), &mut log)
+            .expect("pressure due should remind");
         assert!(msg.contains("400 of 500 tokens"), "{msg}");
         assert!(
             !msg.contains("evict") && !msg.contains("will leave your context"),
             "with no cut planned there is nothing to announce: {msg}"
-        );
-    }
-
-    /// All three obligations join one message: the returning agent's `reply`,
-    /// its pinned state, and its context pressure — only the first spends
-    /// budget.
-    #[test]
-    fn pressure_composes_alongside_reply_and_pinned_parts() {
-        let mut nudges = Nudges::new();
-        let mut log = fresh_log();
-        let f = Facts {
-            must_reply: true,
-            pinned: Some("tasks 3/8".into()),
-            pressure: over(Some(7)),
-            ..facts()
-        };
-        let msg = nudges
-            .react(
-                &Ok(deliberate::Outcome::Complete("prose, no reply".into())),
-                &f,
-                &mut log,
-            )
-            .expect("all three obligations should nudge");
-        assert!(msg.contains("`reply`"), "{msg}");
-        assert!(msg.contains("There is pinned state: tasks 3/8"), "{msg}");
-        assert!(msg.contains("400 of 500 tokens"), "{msg}");
-        assert_eq!(nudges.used, 1, "only the reply half spends budget");
-    }
-
-    /// `quiet` is the one gate every nudge kind shares: a live child suppresses
-    /// the pressure gauge exactly as it suppresses the pin reminder.
-    #[test]
-    fn pressure_waits_while_children_live_too() {
-        let mut nudges = Nudges::new();
-        let mut log = fresh_log();
-        let f = Facts {
-            pinned: Some("tasks 3/8".into()),
-            quiet: false,
-            pressure: over(Some(7)),
-            ..facts()
-        };
-        assert!(
-            nudges
-                .react(
-                    &Ok(deliberate::Outcome::Complete(
-                        "waiting on a descendant".into(),
-                    )),
-                    &f,
-                    &mut log,
-                )
-                .is_none(),
-            "not quiet: nothing nudges, pressure included"
-        );
-    }
-
-    /// A `reply` is accepted outright, whatever else is true.
-    #[test]
-    fn pressure_is_not_delivered_on_replied() {
-        let mut nudges = Nudges::new();
-        let mut log = fresh_log();
-        let f = Facts {
-            pressure: over(Some(7)),
-            ..facts()
-        };
-        assert!(
-            nudges
-                .react(
-                    &Ok(deliberate::Outcome::Replied(FOValue::String {
-                        value: "done".into(),
-                    })),
-                    &f,
-                    &mut log,
-                )
-                .is_none(),
-            "a reply is accepted outright; pressure does not apply to it"
         );
     }
 
@@ -669,24 +591,19 @@ mod tests {
     fn pressure_fires_once_per_excursion() {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
-        let over = Facts {
-            pressure: over(Some(7)),
-            ..facts()
-        };
-        let under = Facts {
-            pressure: Pressure::Under,
-            ..facts()
-        };
-        let complete = || Ok(deliberate::Outcome::Complete("done".into()));
 
-        assert!(nudges.react(&complete(), &over, &mut log).is_some());
+        assert!(nudges.pressure_reminder(&over(Some(7)), &mut log).is_some());
         assert!(
-            nudges.react(&complete(), &over, &mut log).is_none(),
+            nudges.pressure_reminder(&over(Some(7)), &mut log).is_none(),
             "the same excursion must not re-fire"
         );
-        assert!(nudges.react(&complete(), &under, &mut log).is_none());
         assert!(
-            nudges.react(&complete(), &over, &mut log).is_some(),
+            nudges
+                .pressure_reminder(&Pressure::Under, &mut log)
+                .is_none()
+        );
+        assert!(
+            nudges.pressure_reminder(&over(Some(7)), &mut log).is_some(),
             "a fresh excursion after Under must fire again"
         );
     }
@@ -697,73 +614,32 @@ mod tests {
     fn stale_measure_neither_warns_nor_rearms() {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
-        let over = Facts {
-            pressure: over(Some(7)),
-            ..facts()
-        };
-        let unknown = Facts {
-            pressure: Pressure::Unknown,
-            ..facts()
-        };
-        let under = Facts {
-            pressure: Pressure::Under,
-            ..facts()
-        };
-        let complete = || Ok(deliberate::Outcome::Complete("done".into()));
 
-        assert!(nudges.react(&complete(), &over, &mut log).is_some());
+        assert!(nudges.pressure_reminder(&over(Some(7)), &mut log).is_some());
         for _ in 0..3 {
             assert!(
-                nudges.react(&complete(), &unknown, &mut log).is_none(),
-                "an unknown reading must not re-fire"
+                nudges
+                    .pressure_reminder(&Pressure::Unknown, &mut log)
+                    .is_none(),
+                "an unknown reading must neither re-fire nor re-arm"
             );
         }
         assert!(
-            nudges.react(&complete(), &unknown, &mut log).is_none(),
-            "an unknown reading must not re-arm the told warning either"
+            nudges
+                .pressure_reminder(&Pressure::Under, &mut log)
+                .is_none()
         );
-        assert!(nudges.react(&complete(), &under, &mut log).is_none());
         assert!(
-            nudges.react(&complete(), &over, &mut log).is_some(),
+            nudges.pressure_reminder(&over(Some(7)), &mut log).is_some(),
             "a genuine Under reading re-arms; the next Over then fires"
         );
     }
 
-    /// The re-arm runs ahead of the `quiet` gate: an excursion that ends and
-    /// re-begins entirely while the agent is un-quiet still re-fires.
+    /// A must-reply completion at budget with a pin due returns `None` and
+    /// leaves that edge armed — the regression for the old three-owner latch
+    /// bug.
     #[test]
-    fn pressure_rearms_even_while_unquiet() {
-        let mut nudges = Nudges::new();
-        let mut log = fresh_log();
-        let unquiet_under = Facts {
-            pressure: Pressure::Under,
-            quiet: false,
-            ..facts()
-        };
-        let quiet_over = Facts {
-            pressure: over(Some(7)),
-            ..facts()
-        };
-        let complete = || Ok(deliberate::Outcome::Complete("done".into()));
-
-        assert!(nudges.react(&complete(), &quiet_over, &mut log).is_some());
-        assert!(
-            nudges
-                .react(&complete(), &unquiet_under, &mut log)
-                .is_none(),
-            "unquiet never nudges, but the Under reading still re-arms"
-        );
-        assert!(
-            nudges.react(&complete(), &quiet_over, &mut log).is_some(),
-            "the re-arm from the unquiet Under reading carries through"
-        );
-    }
-
-    /// A must-reply completion at budget with pins and pressure both due
-    /// returns `None` and leaves both edges armed — the regression for the
-    /// old three-owner latch bug.
-    #[test]
-    fn exhausted_reply_budget_leaves_edges_armed() {
+    fn exhausted_reply_budget_leaves_the_pin_edge_armed() {
         let mut nudges = Nudges::new();
         let mut log = fresh_log();
         let must_reply = Facts {
@@ -781,17 +657,16 @@ mod tests {
                     .is_some()
             );
         }
-        let both_due = Facts {
+        let pin_due = Facts {
             must_reply: true,
             pinned: Some("tasks 3/8".into()),
-            pressure: over(Some(7)),
             ..facts()
         };
         assert!(
             nudges
                 .react(
                     &Ok(deliberate::Outcome::Complete("still no reply".into())),
-                    &both_due,
+                    &pin_due,
                     &mut log,
                 )
                 .is_none(),
@@ -801,7 +676,6 @@ mod tests {
         nudges.reset();
         let no_must_reply = Facts {
             pinned: Some("tasks 3/8".into()),
-            pressure: over(Some(7)),
             ..facts()
         };
         let msg = nudges
@@ -810,9 +684,8 @@ mod tests {
                 &no_must_reply,
                 &mut log,
             )
-            .expect("after reset both edges must still be armed");
+            .expect("after reset the pin edge must still be armed");
         assert!(msg.contains("There is pinned state: tasks 3/8"), "{msg}");
-        assert!(msg.contains("400 of 500 tokens"), "{msg}");
     }
 
     /// `reset()` clears only the budget, not the edges; `Nudges::new()` — the

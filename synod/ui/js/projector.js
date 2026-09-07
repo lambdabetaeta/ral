@@ -197,8 +197,8 @@ export function onSynodEvent(p) {
     case "state":
       setStatus(p.pending ? (p.label ? p.label.charAt(0).toUpperCase() + p.label.slice(1) : p.label) + "…" : "");
       break;
-    case "step":
-      dialAddNote("[step " + p.n + "]", "muted");
+    case "turn":
+      dialAddNote("[turn " + p.id + "]", "muted");
       break;
     case "tool_call":
       dialAddCall(p);

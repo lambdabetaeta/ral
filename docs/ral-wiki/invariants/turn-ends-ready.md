@@ -9,7 +9,7 @@ two kinds of phase:
   `AwaitingAssistantAfterToolResults`) carry an exchange in flight.
 
 **`is_ready` is the single predicate for "a fresh prompt is admissible", and it
-is weaker than `ReadyForUser`.** A record that opens a span — a
+is weaker than `ReadyForUser`.** A record that opens a turn — a
 `Protocol::UserPrompt`, an imported `Protocol::ContextMessage` — is admissible
 in every phase but `AwaitingToolResults`: an exchange the model never replied to
 is *abandoned* by the next prompt, not closed by a fabricated one. Only
@@ -28,9 +28,9 @@ phases exist to prevent.
 
 The invariant that keeps the loop sound: **`Agent::take_up` never hands control
 back to `Agent::attend`'s loop until a fresh prompt is admissible, however the
-exchange ended** — a clean reply, a user cancellation, the step cap, or a
+exchange ended** — a clean reply, a user cancellation, the turn cap, or a
 surfaced provider error. `Agent::deliberate` commits a prompt (or a tool-result
-batch) before the round-trip it drives, so a failure or a capped step count
+batch) before the round-trip it drives, so a failure or a capped turn count
 between that commit and the next assistant reply leaves the machine in an
 `AwaitingAssistant*` phase with no reply recorded. That phase is now a legal
 resting place, and costs nothing: `replied`/`cancelled` call `AgentLog::quiesce`
@@ -48,13 +48,14 @@ not take:
   calls were really made, and "not executed" is really the answer;
 - a capstone for an exchange that ended on `reply`, because the fold cannot
   otherwise tell a reply from an interruption at the resting phase the two
-  share, and would drop the child's whole turn from its own view.
+  share, and would drop the child's whole exchange from its own context.
 
 Nothing else is synthesised, and an abandoned exchange is left exactly as it
 lies. `record.jsonl` keeps it unabridged for the TUI, resume, and the human
-audit trail; the model reads none of its content. A *closed* span whose own
+audit trail; the model reads none of its content. A *closed* exchange whose own
 fold does not settle renders as exactly one `User`-role note in place of
-everything it held — which catches by the same test the exchange abandoned
+everything its turns held — which catches by the same test the exchange
+abandoned
 with pending tool ids, whose dangling tool-call block must never reach the
 wire. The note is cause-neutral, a cancel and an abort being told apart only
 by a `Forensic` record this fold never sees, and says whether tools had been
@@ -73,9 +74,13 @@ every system message anywhere in history into one preamble resent on every
 request, so a marker meant to stay pinned where it happened would colonise the
 system prompt instead.
 
-`is_live_exchange` — the exchange a context edit may not name — stays keyed to
-`ReadyForUser` rather than `is_ready`, so an edit can never land on an exchange
-a deliberation is still driving.
+`is_live_exchange` — the exchange still owed a reply — stays keyed to
+`ReadyForUser` rather than `is_ready`. It is no longer an eviction concept: a
+cut is kept off the work in hand by `plan_eviction`'s own shape and by
+`validate_edit`, and what this predicate answers for is the *door*, refusing to
+read the exchange still being written — though that refusal names its own
+closed turns, which are readable
+([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
 
 The hard rule: a path that ends an exchange must leave a fresh prompt
 admissible. Add a new exchange-ending outcome through `quiesce` (extend

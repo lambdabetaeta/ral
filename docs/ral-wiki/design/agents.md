@@ -130,7 +130,7 @@ isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
 
 - **`` `amnemon ``** is tabula rasa. The child starts with no conversation history;
   only the shell value-snapshot and the chosen prompt cross the edge. It has no
-  ancestry: its store is its own and nothing else's.
+  ancestry: its transcript is its own and nothing else's.
 - **`` `mnemon ``** remembers. The child imports the parent's model-visible context
   and appends the call's `prompt` as a fresh final user prompt. Left on the
   parent's own selection it reuses that provider's prompt cache; sent to
@@ -140,22 +140,27 @@ isolation ([[decisions/260702_subagent-memory-modes|subagent-memory-modes]]):
   tool-call frame is
   not inherited; the child forks the request context, not a dangling protocol.
 
-Inheritance is **per exchange, under the parent's own ids**. The parent hands
-its window over span by span, and the child records one `ContextMessage` per
-message carrying the *parent's* exchange id, so the child's view reproduces the
-parent's spans: `` context `survey `` shows them as individual `import` rows and
-`` context `drop `` can shed exactly one of them. Ahead of them goes one
-`Protocol::Inherited { source, evictions, through_exchange }` — the parent's
-`record.jsonl`, the parent's head-marker state by value, and the fork's reach.
-That link is what makes the two logs **one store**: an id at or below the reach
+Inheritance is **the parent's table, under the parent's own ids**. Ahead of
+everything goes one `Protocol::Inherited { source, through, turns, cuts }` —
+the parent's `record.jsonl`, the fork's reach, and the parent's whole turn
+table with the cuts made in it, every turn `kind: Inherited` and `held` as the
+parent had it. The child then records one `ContextMessage` per message under
+the parent's own turn and exchange ids, re-recording the resident turns as its
+own: `` context `survey `` shows them as individual `import` rows and
+`` context `drop `` can shed exactly one exchange of them. Nothing
+marker-shaped crosses by value — the child's marker, survey and index are the
+same projections of the same fold
+([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
+That link is what makes the two logs **one transcript**: an id at or below the
+reach
 resolves against the ancestry, walking each ancestor file once into a memoised
 index and following that ancestor's own link on to the grandparent, so a
 `mnemon` child can `` transcript `read `` or `` `grep `` anything its lineage
-ever recorded, evicted from the parent's window long before the fork included.
+ever recorded, evicted from the parent's context long before the fork included.
 Ids are therefore lineage-monotone: the child mints its first prompt above the
-parent's floor, and along any lineage an id names exactly one exchange. The
+parent's floor, and along any lineage an id names exactly one turn. The
 chain breaks only where an ancestor's file has been taken away by hand, and
-the refusal names the ancestor and the path rather than calling the exchange
+the refusal names the ancestor and the path rather than calling the turn
 unrecorded ([[decisions/260906_context-rollover|context-rollover]]).
 
 The spawn's **`provider`** and **`model`** fields choose what the child runs
@@ -193,12 +198,12 @@ and refuses a named selection in one sentence saying so.
 ### Bind and hand: context as a value
 
 Selective delegation is ordinary data flow, not a new memory mode. The parent
-surveys and reads closed spans, binds the returned span records without
+surveys and reads closed turns, binds the returned records without
 printing them, slices or reshapes them in ral, drops the originals, and hands
 the binding to an `` `amnemon `` child:
 
 ```ral
-let ctx = transcript `read [4, 7]
+let ctx = transcript `read [exchanges: [4, 7]]
 let handoff = take 12 $ctx[0][messages]
 context `drop [4, 7]
 agents `start [
@@ -338,7 +343,7 @@ abandon unfinished children, but never leave live agents registered beneath a
 node that has answered — and **parks**, waiting for a message under its idle
 lease. `` agents `message `` wakes it into a new exchange; a later `reply`
 overwrites the deposit and notifies again. Only a non-reply finish — failure,
-step cap, cancellation — settles the entry at once, with its one-line tag.
+turn cap, cancellation — settles the entry at once, with its one-line tag.
 
 ## Focus is presentation; the idle lease is lifecycle
 

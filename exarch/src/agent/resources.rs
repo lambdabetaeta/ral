@@ -301,7 +301,7 @@ fn pressure_rows(measured: Option<u64>, history_bytes: u64, window: Option<u64>)
                 None,
                 "evict",
                 Some(
-                    "model-view bytes (fallback eviction gauge when the window is unknown)"
+                    "context bytes (fallback eviction gauge when the context window is unknown)"
                         .to_string(),
                 ),
             ),
@@ -422,7 +422,7 @@ impl Avatar {
             self.log.lock().event_count() as u64,
             None,
             "evict",
-            Some("counts the events still owned by the model view".to_string()),
+            Some("counts the events the context still owns".to_string()),
         ));
         rows.extend(pressure_rows(
             self.measured_input(),
@@ -530,25 +530,15 @@ impl Avatar {
         recorder.transient(crate::record::Transient::Resources { rows, card });
     }
 
+    /// `/context`'s one fact: the survey's turns as they stand, for the
+    /// scrollback fold to draw.
     pub(crate) fn emit_context_survey(&self) {
         let survey = self.log.lock().context_survey();
-        // The card is a rendering the view fold rebuilds at draw time, never
-        // what the log carries.
-        let rows = survey
-            .items
-            .iter()
-            .map(|item| crate::record::ContextRow {
-                exchange: item.exchange,
-                kind: item.kind.as_str().to_string(),
-                opening: item.opening.clone(),
-                bytes: item.bytes,
-                steps: item.steps,
-                live: item.live,
-            })
-            .collect();
+        // The card is a rendering the scrollback fold rebuilds at draw time,
+        // never what the log carries.
         let recorder = self.recorder();
         if let Err(error) = recorder.emit(crate::record::Display::Context {
-            rows,
+            rows: survey.rows,
             evicted: survey.evicted,
         }) {
             recorder.report_fault(&error);
@@ -715,8 +705,8 @@ mod tests {
                 _ => None,
             })
             .expect("the survey records a Display::Context commit");
-        assert_eq!(fact[0].exchange, 1);
-        assert_eq!(fact[0].kind, "exchange");
+        assert_eq!((fact[0].id, fact[0].exchange), (1, 1));
+        assert_eq!(fact[0].kind, crate::agent::event::TurnKind::Exchange);
     }
 
     /// The agent half surveys what this thread owns: the worker registry's

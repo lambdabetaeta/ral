@@ -279,22 +279,21 @@ pub fn to_card_notice(notice: &crate::record::NoticeFact) -> Notice {
 /// A `/context` survey's rows as one [`Mark::Fields`] matrix under a
 /// "context" header — the one rendering `tui` and `headless` both draw from,
 /// and `pub` for synod.
-pub fn context_rows_card(rows: &[crate::record::ContextRow], evicted: usize) -> Card {
-    let fields = rows
-        .iter()
-        .map(|row| Field {
-            label: format!("{} {}", row.kind, row.exchange),
+///
+/// The survey is one row per turn; the card groups them into their exchanges
+/// at draw time, since an exchange of two hundred tool turns is one thing the
+/// human is reading about. No live marker: the newest turn is the one an
+/// eviction structurally cannot name, so saying so twice would say nothing.
+pub fn context_rows_card(rows: &[crate::record::Turn], evicted: usize) -> Card {
+    let fields = context_exchanges(rows)
+        .into_iter()
+        .map(|group| Field {
+            label: format!("exchange {}", group.exchange),
             value: FieldVal::Inline(vec![
-                Span::plain(row.opening.clone()),
+                Span::plain(group.label),
                 Span::new(
                     Role::Muted,
-                    format!(
-                        "  {} B · {} step{}{}",
-                        row.bytes,
-                        row.steps,
-                        if row.steps == 1 { "" } else { "s" },
-                        if row.live { " · live" } else { "" }
-                    ),
+                    format!("  {} · {} KB", group.turns, group.bytes / 1024),
                 ),
             ]),
         })
@@ -307,7 +306,7 @@ pub fn context_rows_card(rows: &[crate::record::ContextRow], evicted: usize) -> 
             spans: vec![Span::new(
                 Role::Muted,
                 format!(
-                    "evicted: {evicted} exchange{}",
+                    "evicted: {evicted} turn{}",
                     if evicted == 1 { "" } else { "s" }
                 ),
             )],
@@ -315,6 +314,45 @@ pub fn context_rows_card(rows: &[crate::record::ContextRow], evicted: usize) -> 
     }
     marks.push(Mark::Fields { rows: fields });
     Card(marks)
+}
+
+/// One drawn exchange: its opening line, the turns of it still in the
+/// context, and what they weigh together.
+struct ContextExchange {
+    exchange: u64,
+    label: String,
+    /// `turns 13–15`, or `turn 13` where one stands alone.
+    turns: String,
+    bytes: usize,
+}
+
+/// The survey's turns grouped into contiguous runs sharing an exchange. The
+/// label is the exchange's own opening line where its user turn is still in
+/// the context, and the run's first line where a cut took that turn.
+fn context_exchanges(rows: &[crate::record::Turn]) -> Vec<ContextExchange> {
+    let mut drawn: Vec<(&crate::record::Turn, u64, usize)> = Vec::new();
+    for row in rows {
+        match drawn.last_mut() {
+            Some((first, last, bytes)) if first.exchange == row.exchange => {
+                *last = row.id;
+                *bytes += row.bytes;
+            }
+            _ => drawn.push((row, row.id, row.bytes)),
+        }
+    }
+    drawn
+        .into_iter()
+        .map(|(first, last, bytes)| ContextExchange {
+            exchange: first.exchange,
+            label: first.label.clone(),
+            turns: if first.id == last {
+                format!("turn {last}")
+            } else {
+                format!("turns {}–{last}", first.id)
+            },
+            bytes,
+        })
+        .collect()
 }
 
 /// The one observation a producer didn't group.
