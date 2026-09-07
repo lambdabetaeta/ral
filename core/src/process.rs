@@ -27,20 +27,20 @@ pub use lease::TerminalLease;
 pub use deadline::{Deadline, arm_callback, arm_lifetime};
 pub use reaper::{Watch, watch};
 
+#[cfg(unix)]
+pub(crate) use cancel::TEARDOWN_GRACE;
 pub use cancel::{
     CancelCause, CancelScope, CancelWatch, DurableRoot, ForegroundScope, request_foreground_cancel,
     request_root_cancel, watch_cancel,
 };
-#[cfg(unix)]
-pub(crate) use cancel::TEARDOWN_GRACE;
 
 #[cfg(unix)]
 pub(crate) use signal::grace_signal;
 pub use signal::{ChildHandle, Pgid, PgidPolicy, check, clear, escalation_pending};
 
-pub use spawn_lock::{cloexec_pipe, output, spawn, status};
 #[cfg(unix)]
 pub use spawn_lock::cloexec_socketpair;
+pub use spawn_lock::{cloexec_pipe, output, spawn, status};
 pub use wake::Wake;
 
 #[cfg(unix)]
@@ -54,8 +54,8 @@ pub use slot::clobber_slot;
 
 #[cfg(windows)]
 pub use signal::{
-    ForegroundGuard, ReapStatus, apply_group_active_process_limit,
-    break_pipeline_group, disown_pipeline_group, install_handlers, is_known_group,
-    kill_pipeline_group, relay_interrupt, release_win_group, reset_child_signals,
-    set_active_process_limit, try_reap_leader, wait_leader_blocking,
+    ForegroundGuard, ReapStatus, apply_group_active_process_limit, break_pipeline_group,
+    disown_pipeline_group, install_handlers, is_known_group, kill_pipeline_group, relay_interrupt,
+    release_win_group, reset_child_signals, set_active_process_limit, try_reap_leader,
+    wait_leader_blocking,
 };

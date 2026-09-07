@@ -138,8 +138,8 @@ fn enqueue(q: &mut VecDeque<Post>, msg: Post) {
             ..
         } => replace_or_push(q, msg, |m| queued_wakeup_for(m, id)),
         Post::UserSteering(text) => {
-            let merge = !is_slash(&text)
-                && matches!(q.back(), Some(Post::UserSteering(s)) if !is_slash(s));
+            let merge =
+                !is_slash(&text) && matches!(q.back(), Some(Post::UserSteering(s)) if !is_slash(s));
             if merge {
                 if let Some(Post::UserSteering(s)) = q.back_mut() {
                     s.push('\n');
@@ -662,8 +662,9 @@ mod tests {
         let worker_inbox = inbox.clone();
         let token = cancel::Token::new();
         let worker_token = token;
-        let handle =
-            std::thread::spawn(move || worker_inbox.next_or_idle(|_| ParkMode::Held, &worker_token));
+        let handle = std::thread::spawn(move || {
+            worker_inbox.next_or_idle(|_| ParkMode::Held, &worker_token)
+        });
 
         assert!(
             eventually(Duration::from_secs(1), || inbox.waiting_for_input()),
@@ -867,8 +868,7 @@ mod tests {
     fn inbox_wakeup_drains_at_tool_boundary_marked() {
         let inbox = Inbox::new();
         inbox.push_user("steer".into());
-        inbox
-            .push(wakeup(1, "nightly", "0 3 * * *", "run the tests"));
+        inbox.push(wakeup(1, "nightly", "0 3 * * *", "run the tests"));
 
         assert!(
             matches!(
@@ -904,12 +904,11 @@ mod tests {
     #[test]
     fn inbox_agent_message_drains_marked_at_tool_boundary() {
         let inbox = Inbox::new();
-        inbox
-            .push(Post::AgentMessage(AgentMessage {
-                from: 7,
-                from_name: "review".into(),
-                text: "please inspect the parser branch".into(),
-            }));
+        inbox.push(Post::AgentMessage(AgentMessage {
+            from: 7,
+            from_name: "review".into(),
+            text: "please inspect the parser branch".into(),
+        }));
 
         assert!(matches!(
             inbox.drain_steering().as_slice(),
@@ -1163,12 +1162,15 @@ mod tests {
     #[test]
     fn current_epoch_agent_result_is_delivered() {
         let inbox = Inbox::new();
-        inbox.mailbox().stamp().post(Stamped::AgentResult(AgentResult {
-            id: 1,
-            name: "worker".into(),
-            outcome: AgentOutcome::Stopped("done".into()),
-            elapsed: Duration::ZERO,
-        }));
+        inbox
+            .mailbox()
+            .stamp()
+            .post(Stamped::AgentResult(AgentResult {
+                id: 1,
+                name: "worker".into(),
+                outcome: AgentOutcome::Stopped("done".into()),
+                elapsed: Duration::ZERO,
+            }));
         assert!(matches!(inbox.next_item(), Some(Item::Agent(_))));
     }
 
@@ -1210,10 +1212,8 @@ mod tests {
     fn inbox_scheduled_wakeup_dedupes_by_schedule_id_newest_wins() {
         let inbox = Inbox::new();
         inbox.push(wakeup(1, "nightly", "@daily", "first"));
-        inbox
-            .push(wakeup(1, "nightly", "@daily", "second"));
-        inbox
-            .push(wakeup(2, "morning", "@daily", "other schedule"));
+        inbox.push(wakeup(1, "nightly", "@daily", "second"));
+        inbox.push(wakeup(2, "morning", "@daily", "other schedule"));
         assert_eq!(
             depth_of(&inbox, Source::Schedule),
             2,
@@ -1279,21 +1279,18 @@ mod tests {
     #[test]
     fn inbox_nudge_replaces_a_still_queued_one_newest_wins() {
         let inbox = Inbox::new();
-        inbox
-            .push(Post::Nudge {
-                exchange: 1,
-                text: "retry".into(),
-            });
-        inbox
-            .push(Post::Nudge {
-                exchange: 1,
-                text: "retry".into(),
-            });
-        inbox
-            .push(Post::Nudge {
-                exchange: 2,
-                text: "different".into(),
-            });
+        inbox.push(Post::Nudge {
+            exchange: 1,
+            text: "retry".into(),
+        });
+        inbox.push(Post::Nudge {
+            exchange: 1,
+            text: "retry".into(),
+        });
+        inbox.push(Post::Nudge {
+            exchange: 2,
+            text: "different".into(),
+        });
         assert_eq!(
             depth_of(&inbox, Source::Nudge),
             1,
@@ -1304,5 +1301,4 @@ mod tests {
             "the newest nudge is the one delivered"
         );
     }
-
 }

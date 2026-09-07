@@ -527,7 +527,9 @@ mod tests {
         )
         .expect("build Linux host command");
         assert!(
-            cmd.get_program().to_string_lossy().starts_with("/proc/self/fd/"),
+            cmd.get_program()
+                .to_string_lossy()
+                .starts_with("/proc/self/fd/"),
             "the launcher is the fd-pinned envelope, never a name PATH resolves: {:?}",
             cmd.get_program()
         );

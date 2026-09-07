@@ -122,7 +122,10 @@ pub(crate) enum Post {
     /// unforgeable outside `bus`), so the destination's clear-epoch is
     /// captured together with its mailbox at composition and judged at that
     /// same inbox's own pop.
-    Stamped { epoch: Minted, kind: Stamped },
+    Stamped {
+        epoch: Minted,
+        kind: Stamped,
+    },
     AgentMessage(AgentMessage),
     /// The synthetic continuation the agent posts to *itself* when the nudge
     /// registry turns an attempt back — the same exchange continuing, pushed

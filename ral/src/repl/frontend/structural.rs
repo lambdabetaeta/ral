@@ -661,7 +661,9 @@ fn find_pipeline_in(comp: &Comp) -> Option<&Comp> {
         CompKind::Bind {
             comp: bound, rest, ..
         } => find_pipeline_in(bound).or_else(|| find_pipeline_in(rest)),
-        CompKind::Source { path, rest } => find_pipeline_in(path).or_else(|| find_pipeline_in(rest)),
+        CompKind::Source { path, rest } => {
+            find_pipeline_in(path).or_else(|| find_pipeline_in(rest))
+        }
         _ => None,
     }
 }

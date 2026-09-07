@@ -305,9 +305,7 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<u32> {
     // above is what now owns its wait.
     drop(intermediate);
     let born = rx.recv().map_err(|_| {
-        std::io::Error::other(
-            "could not detach: the reaper never reported the intermediate's exit",
-        )
+        std::io::Error::other("could not detach: the reaper never reported the intermediate's exit")
     })?;
     watch.reap()?;
     if born != crate::process::WaitOutcome::Exited(0) {

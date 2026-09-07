@@ -133,7 +133,9 @@ fn suffix(prefix: &str, text: &str) -> String {
 fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
     let body = match record {
         ProviderErrorRecord::Cancelled { where_ } => format!("cancelled{}", suffix(" at ", where_)),
-        ProviderErrorRecord::Transient { cause, attempts, .. } => {
+        ProviderErrorRecord::Transient {
+            cause, attempts, ..
+        } => {
             format!("transient{} (attempt {attempts})", suffix(" — ", cause))
         }
         ProviderErrorRecord::RateLimited {
@@ -333,9 +335,7 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
             marks: marks_dto(card),
         }),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
-        Display::Context { rows, evicted } => {
-            process_card(Some(context_rows_card(rows, *evicted)))
-        }
+        Display::Context { rows, evicted } => process_card(Some(context_rows_card(rows, *evicted))),
         Display::Step { n } => Some(SynodEvent::Step { n: *n }),
         // The trunk's committed reasoning, its prose cut line by line for
         // the durable scrollback, a tool result already said on its call row,
@@ -366,9 +366,7 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         Display::Observation { value } => process_card(observation_display_card(value)),
         Display::Card { marks } => process_card(decode_card(marks)),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
-        Display::Context { rows, evicted } => {
-            process_card(Some(context_rows_card(rows, *evicted)))
-        }
+        Display::Context { rows, evicted } => process_card(Some(context_rows_card(rows, *evicted))),
         Display::Done { .. }
         | Display::Thinking { .. }
         | Display::Prompt { .. }
@@ -486,9 +484,10 @@ fn project_transient(t: &Transient) -> Option<SynodEvent> {
         // A live reasoning chunk has no block of its own here, a cleared
         // segment draws nothing on its own, and the live pin register is a
         // slot the window does not have.
-        Transient::Thinking(_) | Transient::Cleared | Transient::Pin { .. } | Transient::Unpin { .. } => {
-            None
-        }
+        Transient::Thinking(_)
+        | Transient::Cleared
+        | Transient::Pin { .. }
+        | Transient::Unpin { .. } => None,
         // Intercepted by `Router::route_transient` before this fold ever
         // runs — a helper's own lifecycle, folded into `Helpers` instead.
         Transient::Born { .. } | Transient::Died => None,
@@ -930,5 +929,4 @@ mod tests {
         };
         assert_eq!(message, "record.jsonl: permission denied");
     }
-
 }

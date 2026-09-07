@@ -391,9 +391,7 @@ impl Observed {
                     optional(old_bytes.clone().map(Value::Bytes)),
                 ),
             ]),
-            Self::Read { path } => {
-                Value::map(vec![("path".into(), Value::String(path.clone()))])
-            }
+            Self::Read { path } => Value::map(vec![("path".into(), Value::String(path.clone()))]),
             Self::Grep { scope, pattern } => Value::map(vec![
                 ("scope".into(), Value::String(scope.clone())),
                 ("pattern".into(), Value::String(pattern.clone())),
@@ -544,7 +542,10 @@ fn bytes_at(m: &Map, key: &str) -> Option<Vec<u8>> {
 fn optional_at<T>(m: &Map, key: &str, of: fn(&Value) -> Option<T>) -> Option<Option<T>> {
     match m.get(key)? {
         Value::Variant { label, payload } if label == "just" => of(payload.as_deref()?).map(Some),
-        Value::Variant { label, payload: None } if label == "none" => Some(None),
+        Value::Variant {
+            label,
+            payload: None,
+        } if label == "none" => Some(None),
         _ => None,
     }
 }

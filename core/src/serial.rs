@@ -227,7 +227,9 @@ fn value_carries_handle(value: &Value) -> bool {
             payload: Some(p), ..
         } => value_carries_handle(p),
         Value::Native { applied, .. } => applied.iter().any(value_carries_handle),
-        Value::Variant { payload: None, .. } | Value::Thunk(_) | Value::Unit
+        Value::Variant { payload: None, .. }
+        | Value::Thunk(_)
+        | Value::Unit
         | Value::Bool(_)
         | Value::Int(_)
         | Value::Float(_)
@@ -667,7 +669,10 @@ impl SerialEnvSnapshot {
             .and_then(std::clone::Clone::clone)
             .ok_or_else(|| {
                 Error::new(
-                    format!("serial: scope ref {} out of range or unresolved", self.bindings),
+                    format!(
+                        "serial: scope ref {} out of range or unresolved",
+                        self.bindings
+                    ),
                     1,
                 )
             })?;

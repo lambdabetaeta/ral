@@ -13,8 +13,8 @@ use crate::agent::{Avatar, deliberate, panic_msg};
 use crate::bus::{AgentOutcome, AgentState, Emitter, Item, ParkMode, Post, WORKER_PANIC_PREFIX};
 use crate::provider::{Provider, ProviderError};
 use crate::shell_eval;
-use ral_core::serial::FOValue;
 use ral_core::protocol::Severed;
+use ral_core::serial::FOValue;
 
 /// What the surrounding loop does next: `Stop` on `/quit` or a headless root's `reply`.
 enum Flow {

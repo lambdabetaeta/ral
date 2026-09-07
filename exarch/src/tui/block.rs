@@ -533,7 +533,6 @@ impl Block {
         }
     }
 
-
     /// One click: a rung up, the ceiling wrapping to the floor, so clicking
     /// walks every reachable rung rather than toggling the extremes.
     pub(super) fn cycle(&mut self) {

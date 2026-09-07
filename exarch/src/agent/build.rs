@@ -1318,7 +1318,9 @@ mod tests {
             exchange: 3,
             text: "stale continuation".into(),
         });
-        session.rewind(3, &emit).expect("an in-view anchor is legal");
+        session
+            .rewind(3, &emit)
+            .expect("an in-view anchor is legal");
         let view = session.log.lock().view().clone();
         assert!(view.spans.is_empty(), "the rewind removes the whole suffix");
         assert!(

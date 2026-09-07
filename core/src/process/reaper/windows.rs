@@ -59,9 +59,16 @@ pub fn watch<E: Send + 'static>(
             pid,
         )
     };
-    assert!(!handle.is_null(), "OpenProcess for a watched pid must not fail");
+    assert!(
+        !handle.is_null(),
+        "OpenProcess for a watched pid must not fail"
+    );
 
-    let ctx = Box::into_raw(Box::new(CallbackCtx { handle, tx, f: Box::new(f) }));
+    let ctx = Box::into_raw(Box::new(CallbackCtx {
+        handle,
+        tx,
+        f: Box::new(f),
+    }));
     let mut wait_handle: HANDLE = std::ptr::null_mut();
     let ok = unsafe {
         RegisterWaitForSingleObject(

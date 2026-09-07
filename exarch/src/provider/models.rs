@@ -13,9 +13,9 @@
 use crate::provider::credential::{Credential, CredentialStore};
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::oauth;
-use ral_core::sync::LockExt;
 use genai::Client;
 use genai::resolver::{AuthData, Endpoint, ProviderConfig};
+use ral_core::sync::LockExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;

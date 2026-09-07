@@ -9,21 +9,19 @@
 
 use std::sync::Arc;
 
-use crate::ir::{
-    Args, CaseArm, Comp, CompKind, RedirectV, Val, ValListElem, ValRedirectTarget,
-};
 use crate::io::{self, Sink};
+use crate::ir::{Args, CaseArm, Comp, CompKind, RedirectV, Val, ValListElem, ValRedirectTarget};
 use crate::path::sigil::FreezeCtx;
 use crate::runtime::command::{EvalRedirect, EvalRedirectV};
 use crate::runtime::command_call::{self, Resolution};
 use crate::runtime::pipeline;
 use crate::source::Span;
+#[cfg(unix)]
+use crate::types::HandlerEntry;
 use crate::types::{
     Binding, Break, CapturePolicy, Closure, Env, Error, HandlerArity, HandlerFrame, Mooring,
     Settled, Shell, TrailScope, Value, as_map, error_record_of, report_value,
 };
-#[cfg(unix)]
-use crate::types::HandlerEntry;
 
 use super::pattern;
 use super::redirect::{RedirectState, WriteFate};
@@ -186,7 +184,10 @@ pub(crate) fn close_args(args: &Args, env: &Env) -> Result<Vec<Value>, Error> {
     Ok(out)
 }
 
-pub(crate) fn close_redirects(redirects: &[RedirectV], env: &Env) -> Result<Vec<EvalRedirectV>, Error> {
+pub(crate) fn close_redirects(
+    redirects: &[RedirectV],
+    env: &Env,
+) -> Result<Vec<EvalRedirectV>, Error> {
     redirects
         .iter()
         .map(|r| {
@@ -217,7 +218,13 @@ fn render_handler_args(name: &str, arity: HandlerArity, argv: &[Value]) -> Vec<V
 
 impl Machine {
     /// The initial state for `apply`: an empty stack, focus set by `apply_rule` (§2.4).
-    fn applying(f: Value, args: Vec<Value>, env: &Env, mooring: &Mooring, shell: &mut Shell) -> Self {
+    fn applying(
+        f: Value,
+        args: Vec<Value>,
+        env: &Env,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Self {
         let mut m = Self::default();
         m.focus = m.apply_rule(f, args, env, None, mooring, shell);
         m
@@ -303,7 +310,10 @@ impl Machine {
                 span,
             });
         }
-        Focus::Eval(Closure { comp: Arc::clone(body), env: env2 })
+        Focus::Eval(Closure {
+            comp: Arc::clone(body),
+            env: env2,
+        })
     }
 
     /// `apply(f, args, &env)`: a closed value meeting arguments under the
@@ -323,7 +333,11 @@ impl Machine {
                 if let Err(b) = self.reserve(shell) {
                     return Focus::Halt(b);
                 }
-                self.push(Frame::Apply { args, env: env.clone(), span });
+                self.push(Frame::Apply {
+                    args,
+                    env: env.clone(),
+                    span,
+                });
                 Focus::Eval(c)
             }
             Value::Native { entry, applied } => {
@@ -333,7 +347,10 @@ impl Machine {
                 let rest = args.split_off(take);
                 collected.extend(args);
                 if collected.len() < needed {
-                    return Focus::Return(Terminal::Value(Value::Native { entry, applied: collected }));
+                    return Focus::Return(Terminal::Value(Value::Native {
+                        entry,
+                        applied: collected,
+                    }));
                 }
                 match super::audit::run_native(&entry, &collected, env, mooring, shell) {
                     Ok(v) => {
@@ -341,7 +358,11 @@ impl Machine {
                             if let Err(b) = self.reserve(shell) {
                                 return Focus::Halt(b);
                             }
-                            self.push(Frame::Apply { args: rest, env: env.clone(), span });
+                            self.push(Frame::Apply {
+                                args: rest,
+                                env: env.clone(),
+                                span,
+                            });
                         }
                         Focus::Return(Terminal::Value(v))
                     }
@@ -355,7 +376,8 @@ impl Machine {
                     "only Lambdas, Blocks, and natives are functions"
                 };
                 Focus::Halt(Break::Error(
-                    Error::new(format!("{} is not a function", other.type_name()), 1).with_hint(hint),
+                    Error::new(format!("{} is not a function", other.type_name()), 1)
+                        .with_hint(hint),
                 ))
             }
         }
@@ -494,7 +516,11 @@ impl Machine {
                 Focus::Return(Terminal::Value(v))
             }
 
-            CompKind::Bind { comp: rhs, pattern: _, rest: _ } => 'arm: {
+            CompKind::Bind {
+                comp: rhs,
+                pattern: _,
+                rest: _,
+            } => 'arm: {
                 if let Err(b) = crate::process::check(mooring) {
                     break 'arm Focus::Halt(b);
                 }
@@ -513,7 +539,6 @@ impl Machine {
                 })
             }
 
-
             CompKind::If { cond, then, else_ } => match close(&cond.item, &env) {
                 Ok(Value::Bool(b)) => {
                     let branch = if b { then } else { else_ };
@@ -522,16 +547,16 @@ impl Machine {
                         env,
                     })
                 }
-                Ok(other) => Focus::Halt(Break::Error(
-                    shell.err(
-                        format!("if: expected Bool, got {} '{}'", other.type_name(), other),
-                        1,
-                    ),
-                )),
+                Ok(other) => Focus::Halt(Break::Error(shell.err(
+                    format!("if: expected Bool, got {} '{}'", other.type_name(), other),
+                    1,
+                ))),
                 Err(e) => Focus::Halt(Break::Error(e)),
             },
 
-            CompKind::Case { scrutinee, arms } => Self::step_case(scrutinee, arms, &env, mooring, shell),
+            CompKind::Case { scrutinee, arms } => {
+                Self::step_case(scrutinee, arms, &env, mooring, shell)
+            }
 
             CompKind::App { head, args } => 'arm: {
                 if let Err(b) = crate::process::check(mooring) {
@@ -722,7 +747,10 @@ impl Machine {
                 if let Err(err) = self.reserve(shell) {
                     break 'arm Focus::Halt(err);
                 }
-                self.push(Frame::Try { handler: h, env: Box::new(env.clone()) });
+                self.push(Frame::Try {
+                    handler: h,
+                    env: Box::new(env.clone()),
+                });
                 Self::force(b, &env, mooring, shell)
             }
 
@@ -738,7 +766,10 @@ impl Machine {
                 if let Err(err) = self.reserve(shell) {
                     break 'arm Focus::Halt(err);
                 }
-                self.push(Frame::Guard { cleanup: c, env: Box::new(env.clone()) });
+                self.push(Frame::Guard {
+                    cleanup: c,
+                    env: Box::new(env.clone()),
+                });
                 Self::force(b, &env, mooring, shell)
             }
 
@@ -873,9 +904,19 @@ impl Machine {
 
     // ── §2.3: frames, and their two rules each ──────────────────────────
 
-    fn step_return(&mut self, frame: Frame, t: Terminal, mooring: &Mooring, shell: &mut Shell) -> Focus {
+    fn step_return(
+        &mut self,
+        frame: Frame,
+        t: Terminal,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Focus {
         match frame {
-            Frame::To { bind, env, prev_stdout } => {
+            Frame::To {
+                bind,
+                env,
+                prev_stdout,
+            } => {
                 shell.io.stdout = prev_stdout;
                 let v = match as_value(t) {
                     Ok(v) => v,
@@ -894,7 +935,9 @@ impl Machine {
             }
 
             Frame::Apply { args, env, span } => match t {
-                Terminal::Lambda(c) => stamp_focus(self.beta(c, args, env, span, mooring, shell), span),
+                Terminal::Lambda(c) => {
+                    stamp_focus(self.beta(c, args, env, span, mooring, shell), span)
+                }
                 Terminal::Value(v) => {
                     stamp_focus(self.apply_rule(v, args, &env, span, mooring, shell), span)
                 }
@@ -952,7 +995,14 @@ impl Machine {
                         span,
                     ));
                 };
-                match crate::builtins::modules::source(&p, env, super::Mode::Local, span, mooring, shell) {
+                match crate::builtins::modules::source(
+                    &p,
+                    env,
+                    super::Mode::Local,
+                    span,
+                    mooring,
+                    shell,
+                ) {
                     Ok(ran) => match ran.outcome {
                         Ok(_) => Focus::Eval(Closure {
                             comp: rest,
@@ -1115,7 +1165,10 @@ impl Frame {
     /// `Apply`, `Source`, `Try`, `Guard`, `Cleanup` do nothing.
     fn abandon(self, shell: &mut Shell) {
         match self {
-            Self::To { prev_stdout, .. } | Self::Capture { prev: prev_stdout, .. } => {
+            Self::To { prev_stdout, .. }
+            | Self::Capture {
+                prev: prev_stdout, ..
+            } => {
                 shell.io.stdout = prev_stdout;
             }
             Self::Redirect(state) => state.abandon(shell),
@@ -1147,7 +1200,9 @@ fn end_of_run(focus: Focus) -> Settled<Value> {
         Focus::Return(Terminal::Lambda(_)) => Err(Break::Error(bare_lambda_error())),
         Focus::Halt(s) => Err(s),
         Focus::Eval(_) => {
-            unreachable!("the loop only stops when the stack is empty and focus is a terminal or a halt")
+            unreachable!(
+                "the loop only stops when the stack is empty and focus is a terminal or a halt"
+            )
         }
     }
 }
@@ -1200,7 +1255,12 @@ pub(crate) fn evaluate(closure: Closure, mooring: &Mooring, shell: &mut Shell) -
 
 /// The same, from a closed value meeting arguments — `Machine::applying`
 /// (§2.4) sets the first state.
-pub(crate) fn apply(f: Value, args: Vec<Value>, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub(crate) fn apply(
+    f: Value,
+    args: Vec<Value>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     run(
         |m, mooring, shell| {
             let env = shell.env.clone();
@@ -1236,7 +1296,14 @@ pub(crate) fn apply_handler(
             let frame = Box::new(shell.context.handlers.strip_matched(depth));
             m.push(Frame::Unmask { frame });
             let call_args = render_handler_args(&entry.name, entry.arity, args);
-            m.focus = m.apply_rule(entry.thunk.clone(), call_args, &shell.env.clone(), None, mooring, shell);
+            m.focus = m.apply_rule(
+                entry.thunk.clone(),
+                call_args,
+                &shell.env.clone(),
+                None,
+                mooring,
+                shell,
+            );
         },
         mooring,
         shell,
@@ -1270,9 +1337,11 @@ mod tests {
 
     fn toplevel(source: &str) -> Toplevel {
         let ast = crate::syntax::parser::parse_with(source, FileId::DUMMY).expect("parse");
-        let top = crate::elaborator::elaborate(&ast, std::collections::HashSet::default(), "<test>")
-            .expect("elaborate");
-        crate::typecheck::typecheck(&top, crate::typecheck::SessionSchemes::default()).expect("typecheck")
+        let top =
+            crate::elaborator::elaborate(&ast, std::collections::HashSet::default(), "<test>")
+                .expect("elaborate");
+        crate::typecheck::typecheck(&top, crate::typecheck::SessionSchemes::default())
+            .expect("typecheck")
     }
 
     /// Run every phrase of `source` through the machine: a `Define` binds
@@ -1290,11 +1359,25 @@ mod tests {
         for phrase in &top.phrases {
             match &phrase.item {
                 Phrase::Run(comp) => {
-                    value = evaluate(Closure { comp: comp.clone(), env: env.clone() }, mooring, shell);
+                    value = evaluate(
+                        Closure {
+                            comp: comp.clone(),
+                            env: env.clone(),
+                        },
+                        mooring,
+                        shell,
+                    );
                     value.as_ref().map_err(Clone::clone)?;
                 }
                 Phrase::Define { pattern, comp, .. } => {
-                    let v = evaluate(Closure { comp: comp.clone(), env: env.clone() }, mooring, shell)?;
+                    let v = evaluate(
+                        Closure {
+                            comp: comp.clone(),
+                            env: env.clone(),
+                        },
+                        mooring,
+                        shell,
+                    )?;
                     env = pattern::bind_pattern(pattern, &v, &[], env, mooring, shell)?;
                     value = Ok(Value::Unit);
                 }
@@ -1333,9 +1416,8 @@ mod tests {
     #[test]
     fn bind_rhs_writes_ambient_tail_writes_stdout() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
-            run("echo rhs; echo tail", shell)
-        });
+        let (result, bytes, _overflowed) =
+            with_capture(&mut shell, |shell| run("echo rhs; echo tail", shell));
         result.expect("both echoes must succeed");
         assert_eq!(bytes, b"rhs\ntail\n");
     }
@@ -1343,9 +1425,8 @@ mod tests {
     #[test]
     fn bind_rhs_writes_ambient_even_when_the_tail_halts() {
         let mut shell = new_shell();
-        let (result, bytes, _overflowed) = with_capture(&mut shell, |shell| {
-            run("echo rhs; exit 3", shell)
-        });
+        let (result, bytes, _overflowed) =
+            with_capture(&mut shell, |shell| run("echo rhs; exit 3", shell));
         assert!(result.is_err(), "exit 3 must halt");
         assert_eq!(bytes, b"rhs\n");
     }
@@ -1392,8 +1473,16 @@ mod tests {
         let out = evaluate(closure, &Mooring::adrift(), &mut shell);
         match out {
             Err(Break::Error(e)) => {
-                assert!(e.message.contains("is not a function"), "got {:?}", e.message);
-                assert_eq!(e.span, Some(span), "the over-application error must carry the call's span");
+                assert!(
+                    e.message.contains("is not a function"),
+                    "got {:?}",
+                    e.message
+                );
+                assert_eq!(
+                    e.span,
+                    Some(span),
+                    "the over-application error must carry the call's span"
+                );
             }
             other => panic!("expected a not-a-function error, got {other:?}"),
         }
@@ -1435,7 +1524,10 @@ mod tests {
             &mut shell,
         )
         .expect("mutual recursion must terminate");
-        assert!(matches!(out, Value::Bool(true)), "expected true, got {out:?}");
+        assert!(
+            matches!(out, Value::Bool(true)),
+            "expected true, got {out:?}"
+        );
     }
 
     /// A `source`d file's halt halts the block that sourced it.
@@ -1473,7 +1565,11 @@ mod tests {
         );
         match out {
             Err(Break::Error(e)) => {
-                assert!(e.message.contains("recursion limit exceeded"), "got {:?}", e.message);
+                assert!(
+                    e.message.contains("recursion limit exceeded"),
+                    "got {:?}",
+                    e.message
+                );
             }
             other => panic!("expected a recursion-limit error, got {other:?}"),
         }
@@ -1494,7 +1590,10 @@ mod tests {
             .cancel
             .cancel(crate::process::cancel::CancelCause::Explicit);
         let out = run_with("let f = { !$f }\n!$f", &mooring, &mut shell);
-        assert!(out.is_err(), "a cancelled tight loop must halt rather than spin");
+        assert!(
+            out.is_err(),
+            "a cancelled tight loop must halt rather than spin"
+        );
     }
 
     /// §2.1/§4: a native (`map`) applying a function that itself calls `map`

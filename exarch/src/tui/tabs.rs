@@ -140,7 +140,8 @@ impl Tabs {
 
     /// The focused tab's label, for the watch-only prompt hint.
     pub(super) fn focused_name(&self) -> &str {
-        self.tab(self.focused()).map_or("?", |tab| tab.name.as_str())
+        self.tab(self.focused())
+            .map_or("?", |tab| tab.name.as_str())
     }
 
     /// The live agent behind `id`, for one handler's duration — the frontend's
@@ -169,7 +170,10 @@ impl Tabs {
     pub(super) fn parent_focus(&self, id: AgentId) -> AgentId {
         let mut cur = id;
         while let Some(parent) = self.tab(cur).and_then(|t| t.parent) {
-            if self.tab(parent).is_some_and(|t| t.in_bar() && !t.lingering()) {
+            if self
+                .tab(parent)
+                .is_some_and(|t| t.in_bar() && !t.lingering())
+            {
                 return parent;
             }
             cur = parent;

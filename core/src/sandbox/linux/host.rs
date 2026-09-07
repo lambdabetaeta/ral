@@ -79,7 +79,10 @@ impl fmt::Display for HostEnvelope {
             )?,
             Landlock::At(_) => {}
         }
-        let scoped = self.landlock.abi().is_some_and(|abi| abi >= Abi::SIGNAL_SCOPE);
+        let scoped = self
+            .landlock
+            .abi()
+            .is_some_and(|abi| abi >= Abi::SIGNAL_SCOPE);
         writeln!(f, "signals scoped to the envelope: {}", held(scoped))?;
         if !scoped {
             if let at @ (Landlock::At(_) | Landlock::Absent) = self.landlock {

@@ -111,8 +111,7 @@ mod tests {
             ChatMessage::user("two"),
             ChatMessage::user("three"),
         ]);
-        let request =
-            manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
+        let request = manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
         assert!(request.system.is_none());
         assert_eq!(request.messages[0].role, ChatRole::System);
         let marked = |index: usize| {
@@ -130,8 +129,7 @@ mod tests {
     #[test]
     fn openai_gets_a_bare_system_prompt_and_no_breakpoints() {
         let transcript = Transcript::for_test(vec![ChatMessage::user("hi")]);
-        let request =
-            manufacture(AdapterKind::OpenAIResp, "SYS", &transcript, &[]).into_request();
+        let request = manufacture(AdapterKind::OpenAIResp, "SYS", &transcript, &[]).into_request();
         assert_eq!(request.system.as_deref(), Some("SYS"));
         assert!(request.messages[0].options.is_none());
     }
@@ -152,8 +150,7 @@ mod tests {
     #[test]
     fn no_tools_leaves_the_request_tools_unset() {
         let transcript = Transcript::default();
-        let request =
-            manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
+        let request = manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
         assert!(request.tools.is_none());
     }
 

@@ -13,8 +13,8 @@ use crate::agent::seat::engine_gone;
 use crate::bus::{AgentState, Emitter};
 use crate::fleet::desk;
 use crate::shell_eval;
-use ral_core::serial::FOValue;
 use ral_core::protocol::Severed;
+use ral_core::serial::FOValue;
 use std::sync::{Arc, Mutex};
 
 /// One `ral` call's reply slot, minted fresh per call so a reply staged and

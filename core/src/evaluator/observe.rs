@@ -19,7 +19,13 @@ pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
     match reg {
         Register::Env => Ok(env_map(shell)),
         Register::Args => Ok(Value::list(
-            shell.context.args.iter().cloned().map(Value::String).collect(),
+            shell
+                .context
+                .args
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
         )),
         Register::Nproc => Ok(Value::Int(std::thread::available_parallelism().map_or(
             1,
@@ -68,7 +74,13 @@ fn env_map(shell: &Shell) -> Value {
     let mut merged: HashMap<String, String> = std::env::vars()
         .filter(|(k, _)| !matches!(k.as_str(), "PWD" | "OLDPWD"))
         .collect();
-    merged.extend(shell.context.env_overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
+    merged.extend(
+        shell
+            .context
+            .env_overrides
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
     Value::map(
         merged
             .into_iter()
@@ -83,7 +95,11 @@ fn cwd_string(shell: &Shell) -> String {
     let p = shell.cwd();
     let home = shell.context.home();
     let cwd_str = crate::path::abbreviate_home(&p, home.as_deref());
-    if cwd_str.is_empty() { "?".into() } else { cwd_str }
+    if cwd_str.is_empty() {
+        "?".into()
+    } else {
+        cwd_str
+    }
 }
 
 #[cfg(test)]

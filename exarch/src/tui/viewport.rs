@@ -694,7 +694,8 @@ impl Viewport {
         if lo.row == hi.row {
             return slice(lo.row, lo.col, hi.col).unwrap_or_default();
         }
-        let interior = (lo.row + 1..hi.row).filter_map(|row| self.flat.rows.get(row).map(Row::plain));
+        let interior =
+            (lo.row + 1..hi.row).filter_map(|row| self.flat.rows.get(row).map(Row::plain));
         slice(lo.row, lo.col, u16::MAX)
             .into_iter()
             .chain(interior)

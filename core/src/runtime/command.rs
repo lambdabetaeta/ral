@@ -132,7 +132,8 @@ pub(crate) fn run(
     // and to signal/kill as a whole; an `Inherit` child has no group at all,
     // and a `Join` child borrowed a group it does not own — both read as
     // `None`.
-    let owned_group = wait_pgid.filter(|_| !matches!(fg.pgid_policy(), crate::process::PgidPolicy::Join(_)));
+    let owned_group =
+        wait_pgid.filter(|_| !matches!(fg.pgid_policy(), crate::process::PgidPolicy::Join(_)));
     // Nothing fallible may run between `spawn` and this assembly: until
     // `RunningChild` owns it the bare child leaks on an early return,
     // whereas afterwards its `Drop` SIGKILLs the pgid and reaps.

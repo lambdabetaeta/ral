@@ -16,9 +16,7 @@ mod common;
 
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{GrantStack, Shell};
-use ral_core::{
-    RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value,
-};
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.

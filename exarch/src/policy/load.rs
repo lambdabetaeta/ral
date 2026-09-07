@@ -22,10 +22,7 @@ pub(super) fn load_capabilities_ral(
     ctx: &ral_core::path::sigil::FreezeCtx<'_>,
 ) -> Result<Capabilities, String> {
     if !path.exists() {
-        return Err(format!(
-            "{flag} path does not exist: {}",
-            path.display()
-        ));
+        return Err(format!("{flag} path does not exist: {}", path.display()));
     }
     ral_core::capability::load_capabilities_from_path(mooring, shell, path, ctx).map_err(|e| {
         let detail = match e {

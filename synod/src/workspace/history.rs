@@ -305,9 +305,7 @@ impl HistoryStore {
     pub fn scratch_dir(&self) -> Result<PathBuf, String> {
         let dir = self.dir.join("earlier");
         std::fs::create_dir_all(&dir).map_err(|e| {
-            format!(
-                "Synod could not set out a place to open the older version from: {e}."
-            )
+            format!("Synod could not set out a place to open the older version from: {e}.")
         })?;
         Ok(dir)
     }

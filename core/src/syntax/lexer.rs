@@ -2237,7 +2237,13 @@ mod tests {
     /// refused at the lexer, so nothing downstream ever names one.
     #[test]
     fn redirect_fd_above_two_is_refused() {
-        for src in ["cmd 3> f", "cmd 3>> f", "cmd 4< f", "cmd 2>&3", "cmd 99999999999> f"] {
+        for src in [
+            "cmd 3> f",
+            "cmd 3>> f",
+            "cmd 4< f",
+            "cmd 2>&3",
+            "cmd 99999999999> f",
+        ] {
             let err = lex(src).expect_err("numbered descriptors must not lex");
             assert!(
                 err.message().contains("standard error (2)"),

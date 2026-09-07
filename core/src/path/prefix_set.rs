@@ -177,8 +177,16 @@ mod tests {
     /// host ceiling could narrow the guest grants `synod`'s `grant.rs` mints.
     #[test]
     fn meet_keeps_cross_namespace_prefixes_from_overlapping() {
-        let host = set(&[NormalizedPrefix::for_test("/work", "/work", Namespace::Host)]);
-        let guest = set(&[NormalizedPrefix::for_test("/work", "/work", Namespace::Guest)]);
+        let host = set(&[NormalizedPrefix::for_test(
+            "/work",
+            "/work",
+            Namespace::Host,
+        )]);
+        let guest = set(&[NormalizedPrefix::for_test(
+            "/work",
+            "/work",
+            Namespace::Guest,
+        )]);
         assert!(
             host.meet(guest).surface().is_empty(),
             "a host prefix and a guest prefix resolving to the same string must not overlap"

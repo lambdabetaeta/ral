@@ -29,7 +29,9 @@ static LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 )]
 pub fn cloexec_pipe() -> std::io::Result<(os_pipe::PipeReader, os_pipe::PipeWriter)> {
     #[cfg(target_vendor = "apple")]
-    let _guard = LOCK.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = LOCK
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     os_pipe::pipe()
 }
 
@@ -43,10 +45,14 @@ pub fn cloexec_pipe() -> std::io::Result<(os_pipe::PipeReader, os_pipe::PipeWrit
     clippy::disallowed_methods,
     reason = "[io-door:silent:cloexec-socketpair] the one door to a socketpair; wraps UnixStream::pair() under the spawn lock's shared side"
 )]
-pub fn cloexec_socketpair()
--> std::io::Result<(std::os::unix::net::UnixStream, std::os::unix::net::UnixStream)> {
+pub fn cloexec_socketpair() -> std::io::Result<(
+    std::os::unix::net::UnixStream,
+    std::os::unix::net::UnixStream,
+)> {
     #[cfg(target_vendor = "apple")]
-    let _guard = LOCK.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = LOCK
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::os::unix::net::UnixStream::pair()
 }
 
@@ -63,7 +69,9 @@ pub fn cloexec_socketpair()
 )]
 pub fn spawn(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     #[cfg(target_vendor = "apple")]
-    let _guard = LOCK.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = LOCK
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     cmd.spawn()
 }
 

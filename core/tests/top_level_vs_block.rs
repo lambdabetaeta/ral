@@ -493,8 +493,11 @@ fn let_extent_is_the_rest_of_its_block() {
     .expect("a let is visible to the rest of its own block");
     assert_eq!(within, Value::Int(42));
 
-    let err = top_level(&mut shell, "!{ let extent_y = 1; return $extent_y }\n!{ return $extent_y }")
-        .expect_err("a second block must not see the first block's let");
+    let err = top_level(
+        &mut shell,
+        "!{ let extent_y = 1; return $extent_y }\n!{ return $extent_y }",
+    )
+    .expect_err("a second block must not see the first block's let");
     match err {
         Break::Error(e) => assert!(
             e.message.contains("undefined variable"),
@@ -512,8 +515,10 @@ fn let_extent_is_the_rest_of_its_block() {
 #[test]
 fn sequence_inside_a_forced_block_prints_the_non_final_step_and_binds_the_tail() {
     let mut shell = fresh_shell();
-    let (result, stdout) =
-        top_level_capturing(&mut shell, "let seq_out = !{ echo one; echo two }\nreturn $seq_out");
+    let (result, stdout) = top_level_capturing(
+        &mut shell,
+        "let seq_out = !{ echo one; echo two }\nreturn $seq_out",
+    );
     assert_eq!(
         result.expect("sequence inside a forced block must succeed"),
         Value::String("two".into()),
@@ -553,10 +558,16 @@ fn source_in_a_block_scopes_over_the_rest_of_the_block() {
     );
     let result = top_level(
         &mut shell,
-        &format!("!{{ source '{}'; return $scoped_from_file }}", path.display()),
+        &format!(
+            "!{{ source '{}'; return $scoped_from_file }}",
+            path.display()
+        ),
     );
     let _ = std::fs::remove_file(&path);
-    assert_eq!(result.expect("sourced name must be visible to the rest of the block"), Value::Int(99));
+    assert_eq!(
+        result.expect("sourced name must be visible to the rest of the block"),
+        Value::Int(99)
+    );
 }
 
 /// A block-local `source` leases nothing (`Mode::Local`): the run's own

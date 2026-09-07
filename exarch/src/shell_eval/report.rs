@@ -9,8 +9,8 @@
 use crate::agent::ProbedWorker;
 use crate::fleet::desk::ActFragment;
 use ral_core::Value as RalValue;
-use ral_core::serial::FOValue;
 use ral_core::protocol::Ending;
+use ral_core::serial::FOValue;
 use ral_core::types::{Observation, Observed};
 use std::collections::HashSet;
 

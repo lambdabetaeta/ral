@@ -388,7 +388,6 @@ impl Shell {
             ))),
         }
     }
-
 }
 
 impl Default for Shell {
@@ -399,8 +398,8 @@ impl Default for Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::value::Value;
+    use super::*;
     use crate::types::Nursery;
     use std::sync::Mutex;
 

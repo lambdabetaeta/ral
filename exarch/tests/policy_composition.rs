@@ -123,10 +123,9 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
     );
     let cwd = dir.path().to_string_lossy().into_owned();
 
-    let (ab, _) = for_invocation(&cwd, "dangerous", None, &[a.clone(), b.clone()])
-        .expect("profiles compose");
-    let (ba, _) =
-        for_invocation(&cwd, "dangerous", None, &[b, a]).expect("profiles compose");
+    let (ab, _) =
+        for_invocation(&cwd, "dangerous", None, &[a.clone(), b.clone()]).expect("profiles compose");
+    let (ba, _) = for_invocation(&cwd, "dangerous", None, &[b, a]).expect("profiles compose");
 
     let ls = on_path("ls");
     for stack in [&ab, &ba] {

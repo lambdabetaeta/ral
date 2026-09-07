@@ -796,10 +796,8 @@ mod tests {
             var("r_interp_a"),
             var("r_interp_b"),
         ]));
-        let rec_group: Arc<[(String, Arc<Comp>)]> = Arc::from(vec![(
-            "rec_name_bound".to_string(),
-            ret("r_rec_member"),
-        )]);
+        let rec_group: Arc<[(String, Arc<Comp>)]> =
+            Arc::from(vec![("rec_name_bound".to_string(), ret("r_rec_member"))]);
         let rec = Spanned::synthetic(CompKind::Rec {
             group: rec_group,
             index: 0,

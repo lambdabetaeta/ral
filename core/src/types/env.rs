@@ -32,8 +32,7 @@ pub(crate) type BindingMap =
 /// Shared empty tiers, so `Env::new` and `Env::with_natives` clone an `Arc`
 /// rather than allocate a fresh empty map.
 static EMPTY_NATIVES: LazyLock<Arc<NativeMap>> = LazyLock::new(|| Arc::new(NativeMap::default()));
-static EMPTY_PRELUDE: LazyLock<Arc<PreludeMap>> =
-    LazyLock::new(|| Arc::new(PreludeMap::default()));
+static EMPTY_PRELUDE: LazyLock<Arc<PreludeMap>> = LazyLock::new(|| Arc::new(PreludeMap::default()));
 
 /// Lexical environment: three tiers, checked in order.
 ///

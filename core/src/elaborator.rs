@@ -15,8 +15,8 @@
 //! `./x`, `~/x`, `$f`, `{ … }`) declares which it is syntactically.
 
 use crate::ir::{
-    Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, PipeYield,
-    Phrase, RedirectV, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRedirectTarget,
+    Args, ArmBody, CaseArm, CommandName, CommandWord, Comp, CompKind, Exec, IrPattern, Phrase,
+    PipeYield, RedirectV, Register, Toplevel, Val, ValListElem, ValMapEntry, ValRedirectTarget,
 };
 use crate::prelude_manifest;
 use crate::source::Span;
@@ -318,8 +318,7 @@ impl Elaborator {
         else {
             return None;
         };
-        if name != "source" || args.len() != 1 || !redirects.is_empty() || self.is_bound("source")
-        {
+        if name != "source" || args.len() != 1 || !redirects.is_empty() || self.is_bound("source") {
             return None;
         }
         args.first()
@@ -706,29 +705,36 @@ impl Elaborator {
                 // the fresh binds vector `elab_guarded` gives it.
                 let mut arms: Vec<(Option<Span>, Comp)> = parts
                     .iter()
-                    .map(|a| (a.span, self.with_span(a.span, |this| this.elab_guarded(&a.item))))
+                    .map(|a| {
+                        (
+                            a.span,
+                            self.with_span(a.span, |this| this.elab_guarded(&a.item)),
+                        )
+                    })
                     .collect();
                 match arms.pop() {
                     None => comp!(self, CompKind::Return(Val::Unit)),
                     Some((_, last)) => {
-                        arms.into_iter().rev().fold(last, |handler_body, (span, arm)| {
-                            self.with_span(span, |this| {
-                                let handler = Val::Thunk(Arc::new(comp!(
-                                    this,
-                                    CompKind::Lam {
-                                        param: IrPattern::Wildcard,
-                                        body: Arc::new(handler_body),
-                                    }
-                                )));
-                                comp!(
-                                    this,
-                                    CompKind::Try {
-                                        body: Val::Thunk(Arc::new(arm)),
-                                        handler,
-                                    }
-                                )
+                        arms.into_iter()
+                            .rev()
+                            .fold(last, |handler_body, (span, arm)| {
+                                self.with_span(span, |this| {
+                                    let handler = Val::Thunk(Arc::new(comp!(
+                                        this,
+                                        CompKind::Lam {
+                                            param: IrPattern::Wildcard,
+                                            body: Arc::new(handler_body),
+                                        }
+                                    )));
+                                    comp!(
+                                        this,
+                                        CompKind::Try {
+                                            body: Val::Thunk(Arc::new(arm)),
+                                            handler,
+                                        }
+                                    )
+                                })
                             })
-                        })
                     }
                 }
             }
@@ -1149,16 +1155,19 @@ impl Elaborator {
 /// Fold `binds` into a chain of `Comp::Bind` nodes around `inner`, the first
 /// binding outermost so the chain runs in the order the hoists were pushed.
 fn wrap_binds(span: Option<Span>, binds: Vec<(IrPattern, Comp)>, inner: Comp) -> Comp {
-    binds.into_iter().rev().fold(inner, |rest, (pattern, comp)| {
-        Spanned::with_span(
-            span,
-            CompKind::Bind {
-                comp: Arc::new(comp),
-                pattern: Arc::new(pattern),
-                rest: Arc::new(rest),
-            },
-        )
-    })
+    binds
+        .into_iter()
+        .rev()
+        .fold(inner, |rest, (pattern, comp)| {
+            Spanned::with_span(
+                span,
+                CompKind::Bind {
+                    comp: Arc::new(comp),
+                    pattern: Arc::new(pattern),
+                    rest: Arc::new(rest),
+                },
+            )
+        })
 }
 
 /// One statement of a block, elaborated but not yet nested over what
@@ -1178,7 +1187,11 @@ enum NestedUnit {
 fn nested_tail(span: Option<Span>, unit: NestedUnit) -> Comp {
     match unit {
         NestedUnit::Other { comp } => comp,
-        other => nested_wrap(span, other, Spanned::with_span(span, CompKind::Return(Val::Unit))),
+        other => nested_wrap(
+            span,
+            other,
+            Spanned::with_span(span, CompKind::Return(Val::Unit)),
+        ),
     }
 }
 
@@ -1268,7 +1281,11 @@ fn prelude_scope() -> Arc<HashSet<String>> {
     clippy::implicit_hasher,
     reason = "elaboration entry point; every caller passes a default HashSet of REPL/prelude bindings, so generalizing over the hasher would be signature ceremony with no call site to exercise it."
 )]
-pub fn elaborate(ast: &[Stmt], bindings: HashSet<String>, name: &str) -> Result<Toplevel, ParseError> {
+pub fn elaborate(
+    ast: &[Stmt],
+    bindings: HashSet<String>,
+    name: &str,
+) -> Result<Toplevel, ParseError> {
     let mut elaborator = Elaborator::new_with_bindings(bindings, name);
     let mut phrases = Vec::new();
     for group in group_stmts(ast) {
@@ -1317,10 +1334,9 @@ mod tests {
                 entries
                     .iter()
                     .map(|entry| match entry {
-                        ValMapEntry::Entry(k, v) => ValMapEntry::Entry(
-                            strip_val(k),
-                            Spanned::synthetic(strip_val(&v.item)),
-                        ),
+                        ValMapEntry::Entry(k, v) => {
+                            ValMapEntry::Entry(strip_val(k), Spanned::synthetic(strip_val(&v.item)))
+                        }
                         ValMapEntry::Spread(v) => {
                             ValMapEntry::Spread(Spanned::synthetic(strip_val(&v.item)))
                         }
@@ -1478,7 +1494,10 @@ mod tests {
             pattern, comp: rhs, ..
         } = &top.phrases[1].item
         else {
-            panic!("expected a self-recursive Define, got {:?}", top.phrases[1].item);
+            panic!(
+                "expected a self-recursive Define, got {:?}",
+                top.phrases[1].item
+            );
         };
         assert!(matches!(pattern.as_ref(), IrPattern::Name(n) if n == "g"));
         let CompKind::Return(Val::Thunk(rec)) = &rhs.item else {
@@ -1605,7 +1624,10 @@ mod tests {
             ..
         } = &rest.item
         else {
-            panic!("expected the let to right-nest over echo hi, got {:?}", rest.item);
+            panic!(
+                "expected the let to right-nest over echo hi, got {:?}",
+                rest.item
+            );
         };
         assert!(matches!(inner_pattern.as_ref(), IrPattern::Wildcard));
         let (name, _, _) = expect_exec_name(inner_rest);
@@ -1632,7 +1654,10 @@ mod tests {
             panic!("expected a Source phrase, got {:?}", top.phrases[0].item);
         };
         let CompKind::Bind { comp, .. } = &path.item else {
-            panic!("expected a Bind over the hoisted temporary, got {:?}", path.item);
+            panic!(
+                "expected a Bind over the hoisted temporary, got {:?}",
+                path.item
+            );
         };
         assert!(matches!(comp.item, CompKind::Observe(Register::Tilde(_))));
     }
@@ -1713,7 +1738,10 @@ mod tests {
         }
         let g1 = group_arc(&top.phrases[0].item);
         let g2 = group_arc(&top.phrases[1].item);
-        assert!(Arc::ptr_eq(&g1, &g2), "both binders must share one group Arc");
+        assert!(
+            Arc::ptr_eq(&g1, &g2),
+            "both binders must share one group Arc"
+        );
         assert_eq!(g1[0].0, "f");
         assert_eq!(g1[1].0, "g");
     }
@@ -1725,8 +1753,14 @@ mod tests {
         let Phrase::Run(comp) = &top.phrases[0].item else {
             panic!("expected a Run phrase, got {:?}", top.phrases[0].item);
         };
-        let CompKind::Bind { comp: rhs, rest, .. } = &comp.item else {
-            panic!("expected a Bind over the hoisted temporary, got {:?}", comp.item);
+        let CompKind::Bind {
+            comp: rhs, rest, ..
+        } = &comp.item
+        else {
+            panic!(
+                "expected a Bind over the hoisted temporary, got {:?}",
+                comp.item
+            );
         };
         assert!(matches!(rhs.item, CompKind::Observe(Register::Cwd)));
         assert!(matches!(rest.item, CompKind::Exec(_)));

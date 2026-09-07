@@ -652,7 +652,10 @@ mod tests {
 
         // Unpin, then re-pin the identical digest: the edge re-arms through
         // `None`.
-        let none = Facts { pinned: None, ..facts() };
+        let none = Facts {
+            pinned: None,
+            ..facts()
+        };
         assert!(nudges.react(&complete(), &none, &mut log).is_none());
         let refired = nudges
             .react(&complete(), &with("tasks 4/8"), &mut log)

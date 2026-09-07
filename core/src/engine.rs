@@ -14,12 +14,12 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use crate::process::{CancelCause, ForegroundScope};
-use crate::serial::FOValue;
-use crate::sync::LockExt;
 use crate::protocol::{
     Control, DispatchId, EnquiryError, EnquiryId, Event, Frame, Report, Run, SessionEvent,
     answer_probe,
 };
+use crate::serial::FOValue;
+use crate::sync::LockExt;
 use crate::types::{DeferredSink, EnquiryDesk, Error, Fork, Shell, SurfaceSink};
 use crate::wire::WireChannel;
 
@@ -581,12 +581,7 @@ fn engine_session(
                 Claimed::WorkerGone
             }
         } else {
-            write_report(
-                &writer,
-                &wire_fault,
-                id,
-                Report::host_fault("engine busy"),
-            );
+            write_report(&writer, &wire_fault, id, Report::host_fault("engine busy"));
             Claimed::Busy
         }
     };
@@ -858,10 +853,7 @@ mod tests {
 
     /// These tests never hatch, so the honest policy is the one a host with no
     /// grant lexicon states: no seeded child is admitted.
-    fn no_seeded_children(
-        _grant: &str,
-        _cwd: &str,
-    ) -> Result<crate::types::Capabilities, String> {
+    fn no_seeded_children(_grant: &str, _cwd: &str) -> Result<crate::types::Capabilities, String> {
         Err("this engine hatches no children".to_string())
     }
 
@@ -930,10 +922,7 @@ mod engine_session_tests {
 
     /// This engine is attached to in-process and never hatches, so it states
     /// the only policy a host without a grant lexicon can: no seeded child.
-    fn no_seeded_children(
-        _grant: &str,
-        _cwd: &str,
-    ) -> Result<crate::types::Capabilities, String> {
+    fn no_seeded_children(_grant: &str, _cwd: &str) -> Result<crate::types::Capabilities, String> {
         Err("this engine hatches no children".to_string())
     }
 
@@ -1122,9 +1111,8 @@ mod engine_session_tests {
         let _g = REQUEST_SERIAL.lock();
         let mut host = start();
         host.run(1, "let h = spawn { sleep 1 }");
-        let frame = host.await_frame(|f| {
-            matches!(f, Frame::Session(SessionEvent::DeferredSurface(_)))
-        });
+        let frame =
+            host.await_frame(|f| matches!(f, Frame::Session(SessionEvent::DeferredSurface(_))));
         let Frame::Session(SessionEvent::DeferredSurface(batch)) = frame else {
             unreachable!("await_frame matched a deferred batch");
         };

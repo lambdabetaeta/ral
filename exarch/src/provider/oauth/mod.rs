@@ -15,9 +15,9 @@ mod device;
 
 use crate::provider::identity::{self, Account, AccountId};
 use crate::provider::secret_file::write_private;
-use ral_core::sync::LockExt;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ral_core::sync::LockExt;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;

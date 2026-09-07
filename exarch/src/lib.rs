@@ -260,7 +260,15 @@ pub fn run() -> Result<(), String> {
     if c.headless {
         headless::run(&mut session, &info, &provider, seed, c.output_format)
     } else {
-        tui::run(&mut session, &provider, &info, &bureau, &run_dir, seed, c.vi)
+        tui::run(
+            &mut session,
+            &provider,
+            &info,
+            &bureau,
+            &run_dir,
+            seed,
+            c.vi,
+        )
     }
 }
 
@@ -374,10 +382,7 @@ fn resolve_initial_selection(
                 // the model unset — the empty sentinel — so the interactive
                 // frontend lands on its `/model` hint. `run` rejects that for
                 // a headless launch.
-                let account = available
-                    .first()
-                    .ok_or("no provider available")?
-                    .clone();
+                let account = available.first().ok_or("no provider available")?.clone();
                 if let Some(s) = &saved {
                     eprintln!(
                         "exarch: the saved provider '{}' is no longer available; using {} instead",

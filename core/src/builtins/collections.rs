@@ -182,7 +182,12 @@ pub(super) fn builtin_fold_lines(
     let func = args[0].clone();
     let mut acc = args[1].clone();
     super::util::for_each_stdin_line("fold-lines", shell, |line, shell| {
-        acc = apply(&func, vec![acc.clone(), Value::String(line)], mooring, shell)?;
+        acc = apply(
+            &func,
+            vec![acc.clone(), Value::String(line)],
+            mooring,
+            shell,
+        )?;
         Ok(())
     })?;
     Ok(acc)

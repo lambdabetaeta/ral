@@ -277,8 +277,7 @@ impl Report {
     /// failure, so a host never has to know which of the two it is printing.
     #[cfg(unix)]
     pub(crate) fn host_fault(message: impl Into<String>) -> Self {
-        let diagnostics =
-            crate::run::StaticDiagnostics::Host(crate::types::Error::new(message, 1));
+        let diagnostics = crate::run::StaticDiagnostics::Host(crate::types::Error::new(message, 1));
         let (rendered, status) = crate::diagnostic::format_static_diagnostics(&diagnostics);
         Self::Static { rendered, status }
     }

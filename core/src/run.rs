@@ -14,13 +14,13 @@
 
 use crate::io::{Io, Sink, Source};
 use crate::process::{CancelCause, ForegroundScope};
+use crate::protocol::{Program, Run};
 use crate::source::{FileId, Span};
 use crate::syntax::parser::ParseError;
-use crate::protocol::{Program, Run};
 use crate::typecheck::TypeError;
 use crate::types::{
-    Break, DeferredSink, Desk, Error, Escape, Fork, GrantStack, Mooring, NurseryGuard,
-    Observation, Settled, Shell, SurfaceSink, TerminalPolicy, TrailScope, Value,
+    Break, DeferredSink, Desk, Error, Escape, Fork, GrantStack, Mooring, NurseryGuard, Observation,
+    Settled, Shell, SurfaceSink, TerminalPolicy, TrailScope, Value,
 };
 use crate::{CompileOutcome, compile_and_typecheck};
 use serde::{Deserialize, Serialize};
@@ -326,15 +326,15 @@ impl Shell {
                 let foreground = self.durable_root().foreground(under);
                 let wall = req.run.wall.map(|d| arm_wall(d, &foreground));
 
-                let (top, single_command, root) =
-                    match compile_run(self, src, &req.run.script_name) {
-                        Ok(parts) => parts,
-                        Err(diagnostics) => {
-                            return RunReport::Static {
-                                diagnostics: *diagnostics,
-                            };
-                        }
-                    };
+                let (top, single_command, root) = match compile_run(self, src, &req.run.script_name)
+                {
+                    Ok(parts) => parts,
+                    Err(diagnostics) => {
+                        return RunReport::Static {
+                            diagnostics: *diagnostics,
+                        };
+                    }
+                };
 
                 // Reaching evaluation is what renews a lease. Gated so an
                 // unarmed host skips the walk over referenced names.
@@ -1681,8 +1681,7 @@ pub(crate) mod tests {
             },
             ..req
         });
-        let crate::protocol::Report::Ran { trail, .. } = report.into_report(shell.sources())
-        else {
+        let crate::protocol::Report::Ran { trail, .. } = report.into_report(shell.sources()) else {
             panic!("valid source must reach evaluation");
         };
         assert!(

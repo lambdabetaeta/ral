@@ -715,7 +715,10 @@ mod tests {
         let _watch = watch_cancel(scope, move |cause| {
             *recorded.lock().unwrap_or_else(PoisonError::into_inner) = Some(cause);
         });
-        assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), Some(CancelCause::Explicit));
+        assert_eq!(
+            *seen.lock().unwrap_or_else(PoisonError::into_inner),
+            Some(CancelCause::Explicit)
+        );
     }
 
     /// A watch registered before the cause fires when `cancel` scans.
@@ -729,7 +732,10 @@ mod tests {
         });
         assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), None);
         scope.cancel(CancelCause::Deadline);
-        assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), Some(CancelCause::Deadline));
+        assert_eq!(
+            *seen.lock().unwrap_or_else(PoisonError::into_inner),
+            Some(CancelCause::Deadline)
+        );
     }
 
     /// Dropping the guard disarms the registration: a later cancel never
@@ -743,7 +749,10 @@ mod tests {
             flag.store(true, Ordering::Release);
         }));
         scope.cancel(CancelCause::Interrupt);
-        assert!(!fired.load(Ordering::Acquire), "a disarmed watch must not fire");
+        assert!(
+            !fired.load(Ordering::Acquire),
+            "a disarmed watch must not fire"
+        );
     }
 
     /// Two watches on one scope both fire: the table holds independent
@@ -755,10 +764,17 @@ mod tests {
         let fired_b = Arc::new(AtomicBool::new(false));
         let flag_a = fired_a.clone();
         let flag_b = fired_b.clone();
-        let _watch_a = watch_cancel(scope.clone(), move |_| flag_a.store(true, Ordering::Release));
-        let _watch_b = watch_cancel(scope.clone(), move |_| flag_b.store(true, Ordering::Release));
+        let _watch_a = watch_cancel(scope.clone(), move |_| {
+            flag_a.store(true, Ordering::Release);
+        });
+        let _watch_b = watch_cancel(scope.clone(), move |_| {
+            flag_b.store(true, Ordering::Release);
+        });
         scope.cancel(CancelCause::Interrupt);
         assert!(fired_a.load(Ordering::Acquire), "the first watch must fire");
-        assert!(fired_b.load(Ordering::Acquire), "the second watch must fire");
+        assert!(
+            fired_b.load(Ordering::Acquire),
+            "the second watch must fire"
+        );
     }
 }

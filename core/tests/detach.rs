@@ -26,8 +26,8 @@
 
 mod common;
 
-use ral_core::serial::FOValue;
 use ral_core::protocol::{Program, Run};
+use ral_core::serial::FOValue;
 use ral_core::types::{GrantStack, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins};
 use std::path::Path;

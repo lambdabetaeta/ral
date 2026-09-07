@@ -254,10 +254,7 @@ mod tests {
             ral_core::RunReport::Ran { ending, .. } => ending.into_result().unwrap(),
             ral_core::RunReport::Static { .. } => panic!("well-formed source must run: {src:?}"),
         };
-        assert!(
-            matches!(prompt, Value::Thunk(_)),
-            "expected thunk"
-        );
+        assert!(matches!(prompt, Value::Thunk(_)), "expected thunk");
         (shell, prompt)
     }
 

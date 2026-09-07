@@ -109,7 +109,10 @@ pub(super) async fn wait_for_cancel(cancel: &cancel::Token) {
 fn stamp_attempts(error: ProviderError, attempts: u32) -> ProviderError {
     match error {
         ProviderError::Transient {
-            cause, body, status, ..
+            cause,
+            body,
+            status,
+            ..
         } => ProviderError::Transient {
             cause,
             attempts,

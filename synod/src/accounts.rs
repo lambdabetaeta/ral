@@ -244,7 +244,9 @@ pub fn set_key(
     let key = checked_key(&display, key)?;
     KEYCHAIN.store(account.id.as_str(), &key)?;
     let credential = store.lock_ignore_poison().admit_key(&account, key);
-    catalog.lock_ignore_poison().add_credential(account, credential);
+    catalog
+        .lock_ignore_poison()
+        .add_credential(account, credential);
     Ok(())
 }
 
@@ -308,7 +310,9 @@ pub fn add_endpoint(
         None => NO_AUTH_PLACEHOLDER.to_string(),
     };
     let credential = store.lock_ignore_poison().admit_key(&account, secret);
-    catalog.lock_ignore_poison().add_credential(account, credential);
+    catalog
+        .lock_ignore_poison()
+        .add_credential(account, credential);
     Ok(())
 }
 

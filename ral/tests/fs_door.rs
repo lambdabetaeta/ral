@@ -75,7 +75,11 @@ impl Drop for Fixture {
 }
 
 fn assert_denied(out: &common::Output, what: &str) {
-    assert_ne!(out.status, 0, "{what} must be refused; stderr:\n{}", out.stderr);
+    assert_ne!(
+        out.status, 0,
+        "{what} must be refused; stderr:\n{}",
+        out.stderr
+    );
     assert!(
         out.stderr.contains("denied by grant"),
         "{what}: expected the grant's refusal, got:\n{}",
@@ -108,7 +112,12 @@ fn a_dangling_link_inside_the_grant_creates_its_target() {
     let out = fx.run(&[], "echo hi >> 'ROOT/work/link'");
     assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
     assert_eq!(read(&fx.path("work/inner/x")), "hi\n");
-    assert!(fx.path("work/link").symlink_metadata().unwrap().is_symlink());
+    assert!(
+        fx.path("work/link")
+            .symlink_metadata()
+            .unwrap()
+            .is_symlink()
+    );
 }
 
 #[test]
@@ -119,7 +128,12 @@ fn an_atomic_write_over_a_link_replaces_the_target_it_names() {
     let out = fx.run(&[], "echo new > 'ROOT/work/link'");
     assert_eq!(out.status, 0, "stderr:\n{}", out.stderr);
     assert_eq!(read(&fx.path("work/a")), "new\n");
-    assert!(fx.path("work/link").symlink_metadata().unwrap().is_symlink());
+    assert!(
+        fx.path("work/link")
+            .symlink_metadata()
+            .unwrap()
+            .is_symlink()
+    );
 }
 
 #[test]

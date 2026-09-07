@@ -272,9 +272,8 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let shell = Shell::default();
-        let names =
-            CommandIdentity::resolve(CommandName::Path(head.clone()), &shell.context)
-                .policy_names(&shell.context);
+        let names = CommandIdentity::resolve(CommandName::Path(head.clone()), &shell.context)
+            .policy_names(&shell.context);
         assert_eq!(names, vec![head]);
     }
 
@@ -574,8 +573,9 @@ mod tests {
         let dir = std::env::temp_dir().join("jq_src").join("jq-1.7");
         let mut shell = Shell::default();
         shell.seed_cwd(dir.clone());
-        let names = CommandIdentity::resolve(CommandName::Path("./configure".into()), &shell.context)
-            .policy_names(&shell.context);
+        let names =
+            CommandIdentity::resolve(CommandName::Path("./configure".into()), &shell.context)
+                .policy_names(&shell.context);
         assert!(
             names.iter().any(|n| Path::new(n) == dir.join("configure")),
             "got {names:?}",

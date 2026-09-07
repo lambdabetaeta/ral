@@ -236,7 +236,11 @@ fn json_status_code(body: &serde_json::Value) -> Option<u16> {
 /// allows `Retry-After` as either delta-seconds or an HTTP-date; both forms
 /// reach real providers, so both are read.
 fn retry_after_header(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
     if let Ok(secs) = value.parse() {
         return Some(Duration::from_secs(secs));
     }

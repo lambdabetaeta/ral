@@ -972,7 +972,10 @@ fn ral_exits_after_sigint(script: &str, settle: Duration) -> Option<std::process
 
 fn assert_ral_exited_after_sigint(script: &str, settle: Duration, hang: &str) {
     let status = ral_exits_after_sigint(script, settle).unwrap_or_else(|| panic!("{hang}"));
-    assert!(status.code().is_some(), "ral was killed by a signal instead of exiting: {status}");
+    assert!(
+        status.code().is_some(),
+        "ral was killed by a signal instead of exiting: {status}"
+    );
 }
 
 #[test]

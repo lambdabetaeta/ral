@@ -44,13 +44,12 @@ fn engine_boot_shell() -> ral_core::Shell {
 /// engine with no policy is unrepresentable, and a seeded child that reaches
 /// one is told why rather than silently admitted.
 #[cfg(unix)]
-fn no_seeded_children(
-    _grant: &str,
-    _cwd: &str,
-) -> Result<ral_core::types::Capabilities, String> {
-    Err("the ral shell's engine spawns no child engines, so it has no grant policy to hold one \
+fn no_seeded_children(_grant: &str, _cwd: &str) -> Result<ral_core::types::Capabilities, String> {
+    Err(
+        "the ral shell's engine spawns no child engines, so it has no grant policy to hold one \
          to — was this meant to run under exarch?"
-        .to_string())
+            .to_string(),
+    )
 }
 
 fn main() -> ExitCode {

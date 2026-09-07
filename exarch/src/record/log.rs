@@ -364,6 +364,9 @@ mod tests {
             .next()
             .expect("one record")
             .expect("parses");
-        assert_ne!(Stamp::digest_of(b"something else"), recorded.stamp().digest());
+        assert_ne!(
+            Stamp::digest_of(b"something else"),
+            recorded.stamp().digest()
+        );
     }
 }

@@ -189,8 +189,8 @@ impl WithinScope {
         let saved_dir = cwd.map_or(SavedDir::Unset, |path| {
             SavedDir::Prior(shell.swap_cwd_override(path))
         });
-        let handlers = handlers
-            .map(|(entries, catch_all)| shell.context.handlers.push(entries, catch_all));
+        let handlers =
+            handlers.map(|(entries, catch_all)| shell.context.handlers.push(entries, catch_all));
         WithinUndo {
             saved_env,
             saved_dir,
@@ -234,8 +234,8 @@ impl WithinUndo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
     use crate::protocol::{Program, Run};
+    use crate::run::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
     use crate::types::Mooring;
     use crate::types::{BuiltinBody, BuiltinEntry, GrantStack};
 

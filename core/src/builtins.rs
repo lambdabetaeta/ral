@@ -554,7 +554,12 @@ pub use print::{PrintParams, REPL_PRINT_PARAMS, pretty_print};
 ///
 /// # Errors
 /// If `val` is not a function value, or the applied body fails.
-pub fn apply(val: &Value, args: Vec<Value>, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+pub fn apply(
+    val: &Value,
+    args: Vec<Value>,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
     match val {
         // Zero arguments is a force, not an application (the machine's
         // `apply` boundary demands at least one) — the hook door's arity-0

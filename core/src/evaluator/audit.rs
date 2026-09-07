@@ -199,7 +199,13 @@ impl BuiltinEntry {
     ///
     /// # Errors
     /// Propagates a `Break` raised by the body.
-    pub fn run(&self, args: &[Value], env: &Env, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
+    pub fn run(
+        &self,
+        args: &[Value],
+        env: &Env,
+        mooring: &Mooring,
+        shell: &mut Shell,
+    ) -> Settled<Value> {
         run_native(self, args, env, mooring, shell)
     }
 }

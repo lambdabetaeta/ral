@@ -65,7 +65,11 @@ fn subs() -> &'static Mutex<HashMap<u32, Entry>> {
 }
 
 fn install_sigchld() {
-    let action = SigAction::new(SigHandler::Handler(sigchld_handler), SaFlags::SA_RESTART, SigSet::empty());
+    let action = SigAction::new(
+        SigHandler::Handler(sigchld_handler),
+        SaFlags::SA_RESTART,
+        SigSet::empty(),
+    );
     // SA_NOCLDSTOP deliberately absent: a stop must reach the handler too.
     unsafe { sigaction(NixSignal::SIGCHLD, &action) }.expect("install SIGCHLD handler");
 }
@@ -104,8 +108,7 @@ fn spawn_reaper_thread(reader: os_pipe::PipeReader) {
 /// silently stop reaping every other watched pid.
 fn run_with_restart(mut reader: os_pipe::PipeReader) {
     loop {
-        let _ =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reaper_loop(&mut reader)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reaper_loop(&mut reader)));
     }
 }
 
@@ -156,7 +159,10 @@ fn poll_stop(pid: u32) -> bool {
         return false;
     };
     matches!(
-        rustix::process::waitid(WaitId::Pid(target), WaitIdOptions::STOPPED | WaitIdOptions::NOHANG),
+        rustix::process::waitid(
+            WaitId::Pid(target),
+            WaitIdOptions::STOPPED | WaitIdOptions::NOHANG
+        ),
         Ok(Some(_))
     )
 }
@@ -196,7 +202,9 @@ pub fn watch<E: Send + 'static>(
         let _ = tx.send(f(outcome));
     });
     let mut table = subs().lock().unwrap_or_else(PoisonError::into_inner);
-    let entry = table.entry(pid).or_insert(Entry { poster: Some(poster) });
+    let entry = table.entry(pid).or_insert(Entry {
+        poster: Some(poster),
+    });
     // A stop or exit that raced ahead of this registration raised its
     // `SIGCHLD` before the table knew to look; catch it here rather
     // than waiting for a wake that may never come.
@@ -320,7 +328,10 @@ mod tests {
 
         watch.signal(Signal::new(libc::SIGSTOP));
         watch.kill();
-        assert!(!recv_timeout(&rx).is_success(), "SIGKILL is not a clean exit");
+        assert!(
+            !recv_timeout(&rx).is_success(),
+            "SIGKILL is not a clean exit"
+        );
         watch.reap().expect("reap");
         let _ = child.kill();
     }

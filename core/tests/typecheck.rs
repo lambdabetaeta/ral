@@ -1722,9 +1722,7 @@ fn bind_x_is_captured(src: &str) -> bool {
     }
     walk_toplevel(&top, &mut |c| {
         if let CompKind::Bind {
-            comp: rhs,
-            pattern,
-            ..
+            comp: rhs, pattern, ..
         } = &c.item
             && let IrPattern::Name(name) = pattern.as_ref()
             && name == "x"
@@ -2719,9 +2717,7 @@ fn toplevel_define_generalises_scheme() {
 /// one scheme for the whole pattern.
 #[test]
 fn toplevel_define_destructuring_generalises_each_name() {
-    let top = toplevel_ok(
-        "let [a: fa, b: fb] = [a: { |x| return $x }, b: { |y| return $y }]",
-    );
+    let top = toplevel_ok("let [a: fa, b: fb] = [a: { |x| return $x }, b: { |y| return $y }]");
     let Phrase::Define { schemes, .. } = &top.phrases[0].item else {
         panic!("expected a Define phrase, got {:?}", top.phrases[0].item);
     };
@@ -2802,8 +2798,14 @@ fn toplevel_rec_group_members_generalise_independently() {
          let g = { |y| let _ = !{upper $y}; let _ = !{f 1}; return 1 }\n\
          return ()",
     );
-    let (Phrase::Define { schemes: f_schemes, .. }, Phrase::Define { schemes: g_schemes, .. }) =
-        (&top.phrases[0].item, &top.phrases[1].item)
+    let (
+        Phrase::Define {
+            schemes: f_schemes, ..
+        },
+        Phrase::Define {
+            schemes: g_schemes, ..
+        },
+    ) = (&top.phrases[0].item, &top.phrases[1].item)
     else {
         panic!("expected two Define phrases");
     };
@@ -2859,7 +2861,9 @@ fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
     let CompKind::Return(Val::Thunk(body)) = &comp.item else {
         panic!("expected Return(Thunk(..)), got {:?}", comp.item);
     };
-    let (param, lam_body) = body.arrow().expect("g's thunk body must be a syntactic Lam");
+    let (param, lam_body) = body
+        .arrow()
+        .expect("g's thunk body must be a syntactic Lam");
     assert!(matches!(param, IrPattern::Name(_)));
     let CompKind::App { args, .. } = &lam_body.item else {
         panic!("expected an App body, got {:?}", lam_body.item);
@@ -2877,4 +2881,3 @@ fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
         "expected g : U (B → C), got: {rendered}"
     );
 }
-

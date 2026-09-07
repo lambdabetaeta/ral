@@ -10,8 +10,8 @@
 //! Unloading is the exact inverse: it removes the plugin's hooks and
 //! keybindings, undoes the env installation, and drops the record.
 
-use ral_core::source::Span;
 use ral_core::protocol::Program;
+use ral_core::source::Span;
 use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Mooring, Settled};
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, Value};
 use std::sync::{Arc, Mutex};

@@ -269,7 +269,6 @@ impl Sink {
             let _ = sink.flush_pending();
         })
     }
-
 }
 
 impl Clone for Sink {

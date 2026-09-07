@@ -42,7 +42,12 @@ pub fn inflate(archive: &Path, out: &Path, verify: Option<&str>) -> Result<u64, 
         std::io::BufReader::new(source),
         crate::ROOTFS_WINDOW,
     )
-    .map_err(|e| format!("the guest image {} could not be read: {e}", archive.display()))?;
+    .map_err(|e| {
+        format!(
+            "the guest image {} could not be read: {e}",
+            archive.display()
+        )
+    })?;
 
     let mut part = out.as_os_str().to_os_string();
     part.push(".part");

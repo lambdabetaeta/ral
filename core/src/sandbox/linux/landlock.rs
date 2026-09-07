@@ -138,10 +138,7 @@ impl Layer {
                 allow_dirs,
                 ..
             } => {
-                let base: Vec<String> = platform_base()
-                    .into_iter()
-                    .chain([self_path()?])
-                    .collect();
+                let base: Vec<String> = platform_base().into_iter().chain([self_path()?]).collect();
                 let mut admits: Vec<Rendered> = allow_paths
                     .iter()
                     .chain(allow_dirs)
@@ -157,15 +154,17 @@ impl Layer {
                 })
             }
         };
-        Ok((exec.is_some() || scope_signals).then_some(Self { exec, scope_signals }))
+        Ok((exec.is_some() || scope_signals).then_some(Self {
+            exec,
+            scope_signals,
+        }))
     }
 
     /// Apply the layer to the current process, fail-closed: a partially
     /// enforced exec layer is a confinement nobody asked for.
     fn enter(&self) -> Result<(), Error> {
         use landlock::{
-            AccessFs, BitFlags, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus,
-            Scope,
+            AccessFs, BitFlags, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus, Scope,
         };
 
         // Every handled right is a hard requirement: there is nothing to degrade to.
@@ -180,9 +179,7 @@ impl Layer {
                 .map_err(Error::CreateRuleset)?;
         }
         if self.scope_signals {
-            ruleset = ruleset
-                .scope(Scope::Signal)
-                .map_err(Error::CreateRuleset)?;
+            ruleset = ruleset.scope(Scope::Signal).map_err(Error::CreateRuleset)?;
         }
         let mut created = ruleset
             .create()
@@ -239,7 +236,11 @@ impl fmt::Display for Layer {
                 writeln!(
                     f,
                     "cross-directory rename freed (Refer on /): {}",
-                    if exec.frees_refer { "yes" } else { "no (ABI 1)" }
+                    if exec.frees_refer {
+                        "yes"
+                    } else {
+                        "no (ABI 1)"
+                    }
                 )?;
             }
         }
@@ -534,7 +535,13 @@ mod tests {
                     .is_some_and(|n| n.to_string_lossy().starts_with("ld")),
                 "{entry} is not a linker"
             );
-            for dir in ["/bin/", "/usr/bin/", "/sbin/", "/usr/sbin/", "/usr/local/bin/"] {
+            for dir in [
+                "/bin/",
+                "/usr/bin/",
+                "/sbin/",
+                "/usr/sbin/",
+                "/usr/local/bin/",
+            ] {
                 assert!(
                     !entry.starts_with(dir),
                     "{entry} would make the base admit a whole command directory"

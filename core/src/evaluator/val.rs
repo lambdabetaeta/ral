@@ -14,11 +14,10 @@ pub(crate) fn interpolate_piece(v: &Value) -> Result<String, Error> {
         }
         Value::Bytes(_) => Err(Error::new("cannot interpolate Bytes in string", 1)
             .with_hint("render with str (lossy UTF-8), or decode with from-string")),
-        _ => Err(Error::new(
-            format!("cannot interpolate {} in string", v.type_name()),
-            1,
-        )
-        .with_hint("use str to convert, or index into the value")),
+        _ => Err(
+            Error::new(format!("cannot interpolate {} in string", v.type_name()), 1)
+                .with_hint("use str to convert, or index into the value"),
+        ),
     }
 }
 

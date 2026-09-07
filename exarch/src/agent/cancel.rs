@@ -33,8 +33,8 @@
 //! regardless, and for the termination events, which have no key-event twin.
 //! On both, [`crate::bootstrap::boot_shell`] owns the install ceremony.
 
-use ral_core::sync::LockExt;
 use ral_core::process::CancelCause;
+use ral_core::sync::LockExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 

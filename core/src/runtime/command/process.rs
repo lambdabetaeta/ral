@@ -114,7 +114,9 @@ pub(crate) fn spawn_error(
     if let Some(envelope) = confinement {
         return Break::Error(
             crate::sandbox::confinement_unavailable(&format!("cannot start {envelope}: {e}"))
-                .with_hint(format!("The envelope failed to launch, so {name} never ran.")),
+                .with_hint(format!(
+                    "The envelope failed to launch, so {name} never ran."
+                )),
         );
     }
 

@@ -28,8 +28,8 @@ pub mod roster;
 pub mod schedule;
 
 use crate::agent::Agent;
-use ral_core::sync::LockExt;
 use ral_core::process::{self, CancelCause};
+use ral_core::sync::LockExt;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, Weak};
@@ -813,10 +813,7 @@ mod tests {
         assert!(!child.engaged(), "a fresh agent has never been engaged");
 
         inbox.push(Post::UserSteering("hello".into()));
-        assert!(
-            !child.engaged(),
-            "a raw mailbox push is not an exchange"
-        );
+        assert!(!child.engaged(), "a raw mailbox push is not an exchange");
         // Drained, so the steer below lands as its own item rather than
         // coalescing into this one.
         inbox.next_item();
@@ -857,12 +854,15 @@ mod tests {
         );
 
         // The worker epilogue in production order: deliver, then retire.
-        inbox.mailbox().stamp().post(Stamped::AgentResult(AgentResult {
-            id: child.id,
-            name: "child".into(),
-            outcome: AgentOutcome::Stopped("done".into()),
-            elapsed: Duration::ZERO,
-        }));
+        inbox
+            .mailbox()
+            .stamp()
+            .post(Stamped::AgentResult(AgentResult {
+                id: child.id,
+                name: "child".into(),
+                outcome: AgentOutcome::Stopped("done".into()),
+                elapsed: Duration::ZERO,
+            }));
         drop(child);
         assert_eq!(
             park(false),

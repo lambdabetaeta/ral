@@ -323,11 +323,7 @@ impl Shell {
     /// seed vars — becomes permanently exempt from expiry.  A re-arm discards
     /// the prior ledger and reseals; a host that never arms sees no expiry.
     pub fn arm_binding_lease(&mut self, lease: BindingLease) {
-        let baseline = self
-            .env
-            .all_bindings()
-            .into_iter()
-            .map(|(name, _)| name);
+        let baseline = self.env.all_bindings().into_iter().map(|(name, _)| name);
         self.local.bindings.arm(lease, baseline);
     }
 

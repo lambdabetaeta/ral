@@ -120,7 +120,10 @@ impl Shell {
     /// it displaces.  `dir` is private to this module, so `WithinUndo`
     /// (`evaluator::scope`) reaches it through this pair rather than the
     /// field directly.
-    pub(crate) fn swap_cwd_override(&mut self, cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    pub(crate) fn swap_cwd_override(
+        &mut self,
+        cwd: std::path::PathBuf,
+    ) -> Option<std::path::PathBuf> {
         self.context.dir.replace(cwd)
     }
 
@@ -190,7 +193,13 @@ impl Shell {
     /// stay distinct to hold the line an rc draws between its typed
     /// `bindings:` and its untyped `env:` / `prompt:` keys.
     pub fn set_var(&mut self, name: String, value: Value) {
-        self.env.bind(name, Binding { value, scheme: None });
+        self.env.bind(
+            name,
+            Binding {
+                value,
+                scheme: None,
+            },
+        );
     }
 
     /// Record a `Phrase::Define`'s binding on the lease ledger: starts a
@@ -244,10 +253,7 @@ impl Shell {
     /// alike — for tab completion.  The handler-stack counterpart of
     /// [`Self::builtin_names`].
     pub fn handler_names(&self) -> impl Iterator<Item = &str> {
-        self.context
-            .handlers
-            .entries()
-            .map(|e| e.name.as_ref())
+        self.context.handlers.entries().map(|e| e.name.as_ref())
     }
 
     /// Run `f` under a fresh innermost lexical scope, popped on return — the
@@ -282,10 +288,7 @@ impl Shell {
     /// True if an alias frame is installed for `name`.  A scoped `within`
     /// frame is not an alias even when it has the same one-entry shape.
     pub fn has_alias(&self, name: &str) -> bool {
-        self.context
-            .handlers
-            .iter()
-            .any(|f| f.is_alias_for(name))
+        self.context.handlers.iter().any(|f| f.is_alias_for(name))
     }
 
     /// The winning handler for `name` — a run frame (with its depth) or a

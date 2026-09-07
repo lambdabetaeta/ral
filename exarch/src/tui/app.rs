@@ -347,7 +347,8 @@ impl App {
                     reason = "modulus by AGENT_HUES.len() yields 0..6, fits u8"
                 )]
                 let agent_slot = AgentSlot((self.tabs.len() % AGENT_HUES.len()) as u8);
-                self.tabs.born(id, agent, &log_dir, name, parent, agent_slot);
+                self.tabs
+                    .born(id, agent, &log_dir, name, parent, agent_slot);
             }
             // Root never enters the linger window; it outlives the session.
             Transient::Died => self.tabs.died(id),
@@ -884,7 +885,11 @@ mod tests {
             "a dying tab admits no post-mortem text: {all:?}"
         );
         assert_eq!(
-            app.tabs.viewport(helper).expect("viewport").probe_figures().0,
+            app.tabs
+                .viewport(helper)
+                .expect("viewport")
+                .probe_figures()
+                .0,
             blocks,
             "and gains no block from the events it dropped"
         );

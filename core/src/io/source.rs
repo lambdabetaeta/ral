@@ -223,9 +223,13 @@ mod tests {
         w.write_all(b"ab").expect("write");
 
         let mut buf = [0u8; 1];
-        first.read_exact(&mut buf).expect("read from first duplicate");
+        first
+            .read_exact(&mut buf)
+            .expect("read from first duplicate");
         assert_eq!(&buf, b"a");
-        second.read_exact(&mut buf).expect("read from second duplicate");
+        second
+            .read_exact(&mut buf)
+            .expect("read from second duplicate");
         assert_eq!(&buf, b"b");
     }
 }

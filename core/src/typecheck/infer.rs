@@ -384,9 +384,7 @@ impl Inferencer<'_> {
     /// the outermost node's.
     fn discard_tail(comp: &Comp) -> &Comp {
         match &comp.item {
-            CompKind::Bind { rest, .. } | CompKind::Source { rest, .. } => {
-                Self::discard_tail(rest)
-            }
+            CompKind::Bind { rest, .. } | CompKind::Source { rest, .. } => Self::discard_tail(rest),
             _ => comp,
         }
     }
@@ -718,11 +716,7 @@ impl Inferencer<'_> {
             self.with_span(elem.slot().span, |this| match elem {
                 ValListElem::Single(v) => match &v.item {
                     Val::Map(entries) => {
-                        this.check_map_entry_fields(
-                            entries,
-                            "plugin entry",
-                            plugin_entry_field_ty,
-                        );
+                        this.check_map_entry_fields(entries, "plugin entry", plugin_entry_field_ty);
                     }
                     value => {
                         let _ = this.infer_val(value);
@@ -731,11 +725,8 @@ impl Inferencer<'_> {
                 ValListElem::Spread(v) => {
                     let spread_ty = this.infer_val(&v.item);
                     let inner = this.ctx.unifier.fresh_ty();
-                    this.ctx.unify_ty(
-                        &spread_ty,
-                        &Ty::List(Box::new(inner)),
-                        Reason::ListSpread,
-                    );
+                    this.ctx
+                        .unify_ty(&spread_ty, &Ty::List(Box::new(inner)), Reason::ListSpread);
                 }
             });
         }

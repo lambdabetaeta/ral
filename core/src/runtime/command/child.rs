@@ -19,7 +19,10 @@ pub(crate) struct Pumps {
 impl Pumps {
     /// Spawn the drainers `plumbing` asks for, taking `child`'s piped
     /// stdout/stderr for them.
-    pub(crate) fn spawn(plumbing: ExternalPlumbing, child: &mut crate::process::ChildHandle) -> Self {
+    pub(crate) fn spawn(
+        plumbing: ExternalPlumbing,
+        child: &mut crate::process::ChildHandle,
+    ) -> Self {
         let ExternalPlumbing {
             stdout_pump,
             stderr_pump,
@@ -232,7 +235,12 @@ impl RunningChild {
         let outcome = match self.events.recv().expect("tx outlives this recv") {
             ChildEvent::Ended(o) => o,
             ChildEvent::Cancelled(cause) => {
-                crate::dbg_trace!("wait", "cancel name={} pid={} cause={cause:?}", self.name, pid);
+                crate::dbg_trace!(
+                    "wait",
+                    "cancel name={} pid={} cause={cause:?}",
+                    self.name,
+                    pid
+                );
                 self.sent = self.sent.max(Some(cause));
                 match self.terminate(&watch, cause) {
                     Some(o) => o,
@@ -367,8 +375,9 @@ mod tests {
         });
 
         let waited = running.wait();
-        let failure = crate::process::CommandFailure::from_outcome(waited.outcome, waited.sent, false)
-            .expect("a torn-down child is a failure");
+        let failure =
+            crate::process::CommandFailure::from_outcome(waited.outcome, waited.sent, false)
+                .expect("a torn-down child is a failure");
         waited.settle();
         canceller.join().expect("canceller thread");
 

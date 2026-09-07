@@ -85,9 +85,18 @@ pub(super) enum Effect {
 enum Phase {
     Idle,
     /// Pressed but not yet moved; `block` is what a bare click will cycle.
-    Pressed { anchor: Cell, block: Option<usize> },
-    Dragging { anchor: Cell, head: Cell },
-    Selected { anchor: Cell, head: Cell },
+    Pressed {
+        anchor: Cell,
+        block: Option<usize>,
+    },
+    Dragging {
+        anchor: Cell,
+        head: Cell,
+    },
+    Selected {
+        anchor: Cell,
+        head: Cell,
+    },
 }
 
 pub(super) enum Toast {

@@ -25,22 +25,22 @@ use super::reaper::{Watch, watch};
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
+pub(crate) use unix::grace_signal;
+#[cfg(unix)]
 pub use unix::{
     ForegroundGuard, install_handlers, interrupt_foreground_child, interrupt_handler, quit_handler,
     reset_child_signals, spawn_detached, spawn_with_pgid, spawn_with_pgid_after, term_handler,
     termios_snapshot,
 };
-#[cfg(unix)]
-pub(crate) use unix::grace_signal;
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use windows::{
-    ForegroundGuard, ReapStatus, apply_group_active_process_limit,
-    break_pipeline_group, disown_pipeline_group, install_handlers, is_known_group,
-    kill_pipeline_group, relay_interrupt, release_win_group, reset_child_signals,
-    set_active_process_limit, try_reap_leader, wait_leader_blocking,
+    ForegroundGuard, ReapStatus, apply_group_active_process_limit, break_pipeline_group,
+    disown_pipeline_group, install_handlers, is_known_group, kill_pipeline_group, relay_interrupt,
+    release_win_group, reset_child_signals, set_active_process_limit, try_reap_leader,
+    wait_leader_blocking,
 };
 #[cfg(windows)]
 pub(crate) use windows::{
@@ -207,7 +207,9 @@ pub(crate) static ESCALATION: AtomicU8 = AtomicU8::new(0);
 /// chain is cancelled.
 pub fn check(mooring: &crate::types::Mooring) -> Result<(), crate::types::Break> {
     mooring.cancel.cause().map_or(Ok(()), |cause| {
-        Err(crate::types::Break::Error(crate::types::Error::cancelled(cause)))
+        Err(crate::types::Break::Error(crate::types::Error::cancelled(
+            cause,
+        )))
     })
 }
 
@@ -315,4 +317,3 @@ pub enum PgidPolicy {
     /// Join an existing pgid as a non-leader (`setpgid(0, leader)`).
     Join(Pgid),
 }
-

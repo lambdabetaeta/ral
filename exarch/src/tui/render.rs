@@ -261,7 +261,9 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
                 Toast::Copied(n) => format!("[{n} characters copied]"),
                 Toast::CopyFailed => "[copy failed]".to_owned(),
             };
-            let w = u16::try_from(msg.len()).unwrap_or(u16::MAX).min(s.footer.width);
+            let w = u16::try_from(msg.len())
+                .unwrap_or(u16::MAX)
+                .min(s.footer.width);
             let r = Rect {
                 x: s.footer.right() - w,
                 width: w,

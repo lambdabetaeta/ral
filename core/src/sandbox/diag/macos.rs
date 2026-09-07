@@ -120,14 +120,20 @@ mod tests {
     #[test]
     fn parse_denial_handles_op_without_a_path() {
         let line = "kernel[0] (Sandbox) Sandbox: foo(1) deny(1) network-outbound";
-        assert_eq!(parse_denial(line), Some(("network-outbound".to_string(), None)));
+        assert_eq!(
+            parse_denial(line),
+            Some(("network-outbound".to_string(), None))
+        );
     }
 
     #[test]
     fn parse_denial_drops_non_filesystem_operand() {
         let shm = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                    ipc-posix-shm-read-data apple.shm.notification_center";
-        assert_eq!(parse_denial(shm), Some(("ipc-posix-shm-read-data".to_string(), None)));
+        assert_eq!(
+            parse_denial(shm),
+            Some(("ipc-posix-shm-read-data".to_string(), None))
+        );
 
         let mach = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                     mach-lookup com.apple.system.notification_center";

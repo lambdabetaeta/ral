@@ -60,7 +60,9 @@ const AUDIT_ARCH: u32 = 0xC000_00B7;
 /// The record's `arch=<hex>` field.
 fn extract_arch(line: &str) -> Option<u32> {
     let after = line.split_once("arch=")?.1;
-    let end = after.find(|c: char| c.is_whitespace()).unwrap_or(after.len());
+    let end = after
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(after.len());
     u32::from_str_radix(&after[..end], 16).ok()
 }
 
@@ -80,7 +82,9 @@ pub(super) fn parse_denial(line: &str) -> Option<(String, Option<&str>)> {
         return None;
     }
     let op = match extract_arch(line) {
-        Some(arch) if arch != AUDIT_ARCH => format!("foreign-ABI syscall {syscall} (arch={arch:x})"),
+        Some(arch) if arch != AUDIT_ARCH => {
+            format!("foreign-ABI syscall {syscall} (arch={arch:x})")
+        }
         _ => syscall.to_string(),
     };
     Some((op, None))
@@ -132,7 +136,10 @@ mod tests {
 
     #[test]
     fn parse_denial_returns_syscall_and_no_path() {
-        assert_eq!(parse_denial(&line(AUDIT_ARCH, 101)), Some(("101".to_string(), None)));
+        assert_eq!(
+            parse_denial(&line(AUDIT_ARCH, 101)),
+            Some(("101".to_string(), None))
+        );
         assert_eq!(parse_denial("type=1326 with no syscall token"), None);
     }
 

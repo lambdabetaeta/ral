@@ -100,7 +100,10 @@ fn captured_string(body: Comp, ctx: &mut InferCtx) -> CompKind {
     CompKind::Bind {
         comp: Arc::new(Spanned::with_span(span, CompKind::Capture(Arc::new(body)))),
         pattern: Arc::new(IrPattern::Name(name.clone())),
-        rest: Arc::new(Spanned::with_span(span, CompKind::Decode(Val::Variable(name)))),
+        rest: Arc::new(Spanned::with_span(
+            span,
+            CompKind::Decode(Val::Variable(name)),
+        )),
     }
 }
 
@@ -355,7 +358,13 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
 /// One arm of an `If`/`Case` join under `demand`: a byte-side join
 /// walks a byte-payload arm at `Value` and wraps a subsumed (`∅`-`Unit`) arm
 /// whole; otherwise `demand` simply inherits into the arm.
-fn annotate_join_arm(join: &Comp, arm: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -> Comp {
+fn annotate_join_arm(
+    join: &Comp,
+    arm: &Comp,
+    ctx: &mut InferCtx,
+    eta: bool,
+    demand: Demand,
+) -> Comp {
     if byte_side_join(join, ctx, demand) {
         if bytes_result(ctx, comp_key(arm)) {
             return annotate_demand(arm, ctx, eta, Demand::Value);
@@ -451,9 +460,7 @@ fn annotate_val(val: &Val, ctx: &mut InferCtx) -> Val {
                     ValMapEntry::Entry(k, v) => {
                         ValMapEntry::Entry(annotate_val(k, ctx), annotate_spanned_val(v, ctx))
                     }
-                    ValMapEntry::Spread(v) => {
-                        ValMapEntry::Spread(annotate_spanned_val(v, ctx))
-                    }
+                    ValMapEntry::Spread(v) => ValMapEntry::Spread(annotate_spanned_val(v, ctx)),
                 })
                 .collect(),
         ),
@@ -543,10 +550,7 @@ fn annotate_pattern(pattern: &IrPattern, ctx: &mut InferCtx) -> IrPattern {
                 .map(|entry| MapPatternEntry {
                     key: entry.key.clone(),
                     pattern: annotate_pattern(&entry.pattern, ctx),
-                    default: entry
-                        .default
-                        .as_ref()
-                        .map(|d| Arc::new(annotate(d, ctx))),
+                    default: entry.default.as_ref().map(|d| Arc::new(annotate(d, ctx))),
                 })
                 .collect(),
         ),

@@ -199,50 +199,55 @@ where
 
     let worker_mooring = Mooring::for_worker(mooring, &shell.session.root, worker_surface.clone());
     let (_join, cancel) = shell
-        .spawn_thread(worker_mooring, "ral spawn worker", snap, move |mooring, child_env| {
-            // A worker's visible stream *is* its handle buffer: nobody is
-            // watching it until `await` drains one, so both conduits land
-            // there and a discarded statement is held rather than interleaved.
-            child_env.io.ambient = stdout.clone();
-            child_env.io.stdout = stdout;
-            child_env.io.stderr = stderr;
-            // `spawn_thread` builds the worker from a defaulted `Io`, whose stdin
-            // is `Source::Terminal`: without this an external in the body could
-            // `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns the real terminal.
-            child_env.io.stdin = crate::io::Source::Empty;
+        .spawn_thread(
+            worker_mooring,
+            "ral spawn worker",
+            snap,
+            move |mooring, child_env| {
+                // A worker's visible stream *is* its handle buffer: nobody is
+                // watching it until `await` drains one, so both conduits land
+                // there and a discarded statement is held rather than interleaved.
+                child_env.io.ambient = stdout.clone();
+                child_env.io.stdout = stdout;
+                child_env.io.stderr = stderr;
+                // `spawn_thread` builds the worker from a defaulted `Io`, whose stdin
+                // is `Source::Terminal`: without this an external in the body could
+                // `tcgetpgrp(stdin)` / `kill(-fg, …)` whoever owns the real terminal.
+                child_env.io.stdin = crate::io::Source::Empty;
 
-            let guard = FlushGuard {
-                surface: worker_surface,
-                joined: worker_joined,
-                cmd: worker_cmd,
-                armed: true,
-            };
+                let guard = FlushGuard {
+                    surface: worker_surface,
+                    joined: worker_joined,
+                    cmd: worker_cmd,
+                    armed: true,
+                };
 
-            let result = work(mooring, child_env);
-            if flush_pending {
-                let _ = child_env.io.stdout.flush_pending();
-                let _ = child_env.io.stderr.flush_pending();
-            }
-            let outcome = match &result {
-                Ok(_) => Value::Variant {
-                    label: "ok".into(),
-                    payload: Some(Box::new(Value::Unit)),
-                },
-                Err(e) => Value::Variant {
-                    label: "err".into(),
-                    payload: Some(Box::new(break_record(e, child_env))),
-                },
-            };
-            guard.settle(&outcome);
-            let _ = tx.send(result);
-            // Strictly *after* the send, so `Completed` always implies an
-            // outcome already in the channel.  Guarded: an eliminator may have
-            // won the transition, and a `cancel`'s `Cancelled` must not be undone.
-            let mut settled_state = worker_state.lock().unwrap();
-            if *settled_state == HandleState::Running {
-                *settled_state = HandleState::Completed;
-            }
-        })
+                let result = work(mooring, child_env);
+                if flush_pending {
+                    let _ = child_env.io.stdout.flush_pending();
+                    let _ = child_env.io.stderr.flush_pending();
+                }
+                let outcome = match &result {
+                    Ok(_) => Value::Variant {
+                        label: "ok".into(),
+                        payload: Some(Box::new(Value::Unit)),
+                    },
+                    Err(e) => Value::Variant {
+                        label: "err".into(),
+                        payload: Some(Box::new(break_record(e, child_env))),
+                    },
+                };
+                guard.settle(&outcome);
+                let _ = tx.send(result);
+                // Strictly *after* the send, so `Completed` always implies an
+                // outcome already in the channel.  Guarded: an eliminator may have
+                // won the transition, and a `cancel`'s `Cancelled` must not be undone.
+                let mut settled_state = worker_state.lock().unwrap();
+                if *settled_state == HandleState::Running {
+                    *settled_state = HandleState::Completed;
+                }
+            },
+        )
         .map_err(|e| sig(format!("could not start a worker thread: {e}")))?;
 
     let handle = HandleInner {
@@ -647,11 +652,7 @@ pub(super) fn await_handle(
 }
 
 /// `await <handle>` -- wait for a concurrent block to complete and return its result record.
-pub(super) fn builtin_await(
-    args: &[Value],
-    mooring: &Mooring,
-    shell: &Shell,
-) -> Settled<Value> {
+pub(super) fn builtin_await(args: &[Value], mooring: &Mooring, shell: &Shell) -> Settled<Value> {
     let handle = expect_handle(&args[0], "await")?;
     await_handle(handle, mooring, shell)
 }
@@ -909,16 +910,21 @@ mod tests {
         let worker_mooring =
             Mooring::for_worker(&Mooring::adrift(), &shell.session.root, Arc::new(()));
         let (_join, worker_cancel) = shell
-            .spawn_thread(worker_mooring, "test-worker", snap, move |mooring, _child| {
-                ready_tx.send(()).unwrap();
-                loop {
-                    if let Err(b) = crate::process::check(mooring) {
-                        done_tx.send(status(b)).unwrap();
-                        return;
+            .spawn_thread(
+                worker_mooring,
+                "test-worker",
+                snap,
+                move |mooring, _child| {
+                    ready_tx.send(()).unwrap();
+                    loop {
+                        if let Err(b) = crate::process::check(mooring) {
+                            done_tx.send(status(b)).unwrap();
+                            return;
+                        }
+                        std::thread::yield_now();
                     }
-                    std::thread::yield_now();
-                }
-            })
+                },
+            )
             .expect("spawn_thread");
         ready_rx.recv().unwrap();
         cancel_via(&worker_cancel);
@@ -1246,7 +1252,8 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
         while std::time::Instant::now() < deadline {
-            builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell).expect("poll a live handle");
+            builtin_poll(&[Value::Handle(Box::new(handle.clone()))], &shell)
+                .expect("poll a live handle");
             assert!(
                 !scope.is_cancelled(),
                 "a polled worker must never be idle-reaped"

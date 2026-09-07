@@ -314,7 +314,12 @@ fn stack_summary(stack: &GrantStack, scratch_line: &str) -> String {
     };
     let mut s = grant_summary(first, scratch_line);
     for (i, caps) in rest.iter().enumerate() {
-        let _ = writeln!(s, "\nLayer {} of {} further restricting layers:", i + 2, layers.len());
+        let _ = writeln!(
+            s,
+            "\nLayer {} of {} further restricting layers:",
+            i + 2,
+            layers.len()
+        );
         s.push_str(&grant_summary(caps, scratch_line));
     }
     s

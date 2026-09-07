@@ -561,10 +561,7 @@ fn stack_keeps_a_one_sided_subcommand_restriction() {
         }),
         ..Default::default()
     };
-    for (first, second) in [
-        (restricting.clone(), silent.clone()),
-        (silent, restricting),
-    ] {
+    for (first, second) in [(restricting.clone(), silent.clone()), (silent, restricting)] {
         let mut shell = crate::types::Shell::default();
         shell.with_capabilities(first, |sh| {
             sh.with_capabilities(second, |sh| {

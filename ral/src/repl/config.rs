@@ -619,10 +619,7 @@ mod tests {
     #[test]
     fn rc_recursion_limit_zero_rejected() {
         let shell = apply_rc("return [recursion_limit: 0]\n");
-        assert_eq!(
-            shell.stack_limit(),
-            ral_core::types::DEFAULT_STACK_LIMIT
-        );
+        assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
     }
 
     /// A wrong-typed `recursion_limit` is rejected; the default stays.
@@ -632,10 +629,7 @@ mod tests {
             "recursion_limit".into(),
             Value::String("lots".into()),
         )]));
-        assert_eq!(
-            shell.stack_limit(),
-            ral_core::types::DEFAULT_STACK_LIMIT
-        );
+        assert_eq!(shell.stack_limit(), ral_core::types::DEFAULT_STACK_LIMIT);
     }
 
     /// Both an unrecognised string and a wrong-typed `edit_mode` are

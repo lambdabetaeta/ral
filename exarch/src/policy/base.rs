@@ -52,10 +52,9 @@ pub(super) fn resolve_base(
         ctx,
     )
     .map_err(|e| match e {
-        ral_core::types::Break::Error(err) => format!(
-            "built-in base '{name}' failed to parse: {}",
-            err.message
-        ),
+        ral_core::types::Break::Error(err) => {
+            format!("built-in base '{name}' failed to parse: {}", err.message)
+        }
         other @ ral_core::types::Break::Escape(_) => {
             format!("built-in base '{name}' failed: {other:?}")
         }

@@ -74,16 +74,26 @@ pub(crate) fn run_phrases(
                 comp,
                 schemes,
             } => run_phrase_define(
-                DefinePhrase { pattern, comp, schemes },
+                DefinePhrase {
+                    pattern,
+                    comp,
+                    schemes,
+                },
                 mode,
                 &mut env,
                 mooring,
                 shell,
                 &mut defined,
             ),
-            Phrase::Source { path } => {
-                run_phrase_source(path, phrase.span, mode, &mut env, mooring, shell, &mut defined)
-            }
+            Phrase::Source { path } => run_phrase_source(
+                path,
+                phrase.span,
+                mode,
+                &mut env,
+                mooring,
+                shell,
+                &mut defined,
+            ),
         });
         match result {
             Ok(v) => outcome = Ok(v),
@@ -112,8 +122,17 @@ pub(crate) fn run_phrases(
 /// `Run(M)`: the last phrase's value is the run's value; a non-final one
 /// runs under the ambient sink exactly as a `Bind`'s RHS does (S11) — its
 /// bytes are effect, not the run's value.
-fn run_phrase_run(m: &Arc<Comp>, env: &Env, non_final: bool, mooring: &Mooring, shell: &mut Shell) -> Settled<Value> {
-    let closure = crate::types::Closure { comp: Arc::clone(m), env: env.clone() };
+fn run_phrase_run(
+    m: &Arc<Comp>,
+    env: &Env,
+    non_final: bool,
+    mooring: &Mooring,
+    shell: &mut Shell,
+) -> Settled<Value> {
+    let closure = crate::types::Closure {
+        comp: Arc::clone(m),
+        env: env.clone(),
+    };
     if !non_final {
         return machine::evaluate(closure, mooring, shell);
     }
@@ -145,12 +164,20 @@ fn run_phrase_define(
     shell: &mut Shell,
     defined: &mut Vec<String>,
 ) -> Settled<Value> {
-    let DefinePhrase { pattern, comp, schemes } = define;
+    let DefinePhrase {
+        pattern,
+        comp,
+        schemes,
+    } = define;
     if matches!(mode, Mode::Session) {
         pattern::check_pattern_shadow(pattern, shell)?;
     }
-    let closure = crate::types::Closure { comp: Arc::clone(comp), env: env.clone() };
-    let v = capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))?;
+    let closure = crate::types::Closure {
+        comp: Arc::clone(comp),
+        env: env.clone(),
+    };
+    let v =
+        capture::with_ambient_stdout(shell, |shell| machine::evaluate(closure, mooring, shell))?;
     let is_session = matches!(mode, Mode::Session);
     *env = pattern::bind_pattern_staged(
         pattern,
@@ -189,7 +216,10 @@ fn run_phrase_source(
     shell: &mut Shell,
     defined: &mut Vec<String>,
 ) -> Settled<Value> {
-    let closure = crate::types::Closure { comp: Arc::clone(path), env: env.clone() };
+    let closure = crate::types::Closure {
+        comp: Arc::clone(path),
+        env: env.clone(),
+    };
     let path_val = machine::evaluate(closure, mooring, shell)?;
     let Value::String(p) = path_val else {
         return Err(shell
@@ -213,10 +243,11 @@ mod tests {
     /// Compile `source` through the real front end: real source text, never
     /// hand-built IR.
     fn toplevel(source: &str) -> Phrases {
-        let ast = crate::syntax::parser::parse_with(source, crate::source::FileId::DUMMY)
-            .expect("parse");
-        let top = crate::elaborator::elaborate(&ast, std::collections::HashSet::default(), "<test>")
-            .expect("elaborate");
+        let ast =
+            crate::syntax::parser::parse_with(source, crate::source::FileId::DUMMY).expect("parse");
+        let top =
+            crate::elaborator::elaborate(&ast, std::collections::HashSet::default(), "<test>")
+                .expect("elaborate");
         crate::typecheck::typecheck(&top, crate::typecheck::SessionSchemes::default())
             .expect("typecheck")
             .phrases
@@ -319,7 +350,10 @@ mod tests {
         };
         let mut shell = Shell::default();
         let captured = shell.env.clone();
-        let closure = crate::types::Closure { comp: body.clone(), env: captured };
+        let closure = crate::types::Closure {
+            comp: body.clone(),
+            env: captured,
+        };
         let _ = machine::evaluate(closure, &Mooring::adrift(), &mut shell);
         assert!(
             shell.env.get("leak_block").is_none(),

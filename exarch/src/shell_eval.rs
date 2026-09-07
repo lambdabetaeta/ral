@@ -2125,10 +2125,17 @@ return !{{length $hits}}"
             panic!("a committed write opens what landed, got {card:?}")
         };
         let rows: Vec<String> = hunks.iter().flat_map(|h| &h.rows).map(Row::text).collect();
-        assert_eq!(rows.len(), 25, "the complete write must survive, got {rows:?}");
+        assert_eq!(
+            rows.len(),
+            25,
+            "the complete write must survive, got {rows:?}"
+        );
         assert_eq!(rows.first().map(String::as_str), Some("line 1"));
         assert_eq!(rows.last().map(String::as_str), Some("line 25"));
-        assert!(!rows.iter().any(|row| row == "…"), "no synthetic row belongs in the card");
+        assert!(
+            !rows.iter().any(|row| row == "…"),
+            "no synthetic row belongs in the card"
+        );
     }
 
     /// The EXEC door end to end: a bare external raises exactly one `Command`

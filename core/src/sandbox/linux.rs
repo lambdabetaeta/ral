@@ -617,7 +617,11 @@ mod tests {
         Pinned::open(std::env::current_exe().expect("own path")).expect("own binary pins")
     }
 
-    fn argv_on(host: HostEnvelope, policy: &SandboxProjection, ownership: Ownership) -> Vec<String> {
+    fn argv_on(
+        host: HostEnvelope,
+        policy: &SandboxProjection,
+        ownership: Ownership,
+    ) -> Vec<String> {
         let payload = Payload {
             program: "/bin/true",
             args: &[],
@@ -794,7 +798,12 @@ mod tests {
             eprintln!("skipping: this host has no bwrap to pin");
             return None;
         };
-        let control = run_confined(envelope, HostEnvelope::probe(envelope), policy, "echo READY");
+        let control = run_confined(
+            envelope,
+            HostEnvelope::probe(envelope),
+            policy,
+            "echo READY",
+        );
         if control
             .as_ref()
             .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("READY"))
@@ -1119,13 +1128,20 @@ mod tests {
             let bound = position_of(&args, &bind).expect("the projection's bind");
             let cgroup = position_of(&args, &["--ro-bind", &own, tree])
                 .unwrap_or_else(|| panic!("{label}: no re-rooted cgroup tree: {args:?}"));
-            assert!(bound < cgroup, "{label}: the tree goes over the projection's binds: {args:?}");
+            assert!(
+                bound < cgroup,
+                "{label}: the tree goes over the projection's binds: {args:?}"
+            );
         }
         let restricted = argv(&deny_within(&dir, &[]));
         assert!(
             position_of(
                 &restricted,
-                &["--ro-bind", "/sys/devices/system/cpu", "/sys/devices/system/cpu"]
+                &[
+                    "--ro-bind",
+                    "/sys/devices/system/cpu",
+                    "/sys/devices/system/cpu"
+                ]
             )
             .is_some(),
             "a program must still count its cpus: {restricted:?}"
@@ -1157,7 +1173,10 @@ mod tests {
                       echo NPROC=$(nproc)\n\
                       echo CGROUP=$(cat /proc/self/cgroup)\n\
                       echo TREE=$(stat -c %i /sys/fs/cgroup)\n";
-        for (label, policy) in [("unrestricted", &unrestricted()), ("restricted", &restricted)] {
+        for (label, policy) in [
+            ("unrestricted", &unrestricted()),
+            ("restricted", &restricted),
+        ] {
             let Some(envelope) = envelope_launches(policy) else {
                 continue;
             };
@@ -1175,8 +1194,13 @@ mod tests {
                     "the host's interfaces were listed under a restricted fs: {stdout}"
                 );
             }
-            let nproc: u32 = field(&stdout, "NPROC=").and_then(|n| n.parse().ok()).expect("a cpu count");
-            assert!(nproc > 0, "{label}: a program must still count its cpus: {stdout}");
+            let nproc: u32 = field(&stdout, "NPROC=")
+                .and_then(|n| n.parse().ok())
+                .expect("a cpu count");
+            assert!(
+                nproc > 0,
+                "{label}: a program must still count its cpus: {stdout}"
+            );
             let Some(own) = super::own_cgroup() else {
                 continue;
             };
@@ -1190,7 +1214,9 @@ mod tests {
             } else {
                 "/sys/fs/cgroup".to_string()
             };
-            let expected = std::fs::metadata(&expected).expect("ral's own cgroup").ino();
+            let expected = std::fs::metadata(&expected)
+                .expect("ral's own cgroup")
+                .ino();
             assert_eq!(
                 field(&stdout, "TREE=").and_then(|n| n.parse().ok()),
                 Some(expected),
@@ -1314,7 +1340,10 @@ mod tests {
                 &args,
                 &["--ro-bind", "/dev/null", &denied.to_string_lossy()],
             );
-            for (what, path) in [("envelope", own.as_str()), ("trampoline", trampoline.as_str())] {
+            for (what, path) in [
+                ("envelope", own.as_str()),
+                ("trampoline", trampoline.as_str()),
+            ] {
                 let ro = position_of(&args, &["--ro-bind", path, path]).unwrap_or_else(|| {
                     panic!("{label}: no read-only bind of the {what}: {args:?}")
                 });
@@ -1511,8 +1540,13 @@ mod tests {
                     sleeper.try_wait().expect("poll the sleeper").is_none(),
                     "the host-side sleeper was killed from inside the envelope"
                 );
-                let pids: u32 = field(&stdout, "PIDS=").and_then(|n| n.parse().ok()).expect("a pid count");
-                assert!(pids <= 8, "the table inside must be the envelope's own: {stdout}");
+                let pids: u32 = field(&stdout, "PIDS=")
+                    .and_then(|n| n.parse().ok())
+                    .expect("a pid count");
+                assert!(
+                    pids <= 8,
+                    "the table inside must be the envelope's own: {stdout}"
+                );
                 assert!(
                     field(&stdout, "INIT=").is_some_and(|init| init.starts_with("bwrap")),
                     "pid 1 inside must be bwrap's init: {stdout}"
@@ -1551,7 +1585,9 @@ mod tests {
                 "the envelope did not launch: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
-            let own: u32 = field(&stdout, "SELF=").and_then(|n| n.parse().ok()).expect("the shell's pid");
+            let own: u32 = field(&stdout, "SELF=")
+                .and_then(|n| n.parse().ok())
+                .expect("the shell's pid");
             assert_eq!(
                 field(&stdout, "STAT="),
                 Some(own.to_string().as_str()),
@@ -1563,7 +1599,10 @@ mod tests {
                 "/proc/<pid>/exe must name the shell's own binary: {stdout}"
             );
             if host.private_pids {
-                assert!(own < 64, "the shell's pid must be namespace-local: {stdout}");
+                assert!(
+                    own < 64,
+                    "the shell's pid must be namespace-local: {stdout}"
+                );
             }
         }
     }
@@ -1615,7 +1654,9 @@ mod tests {
                 std::io::Error::from_raw_os_error(errno)
             ),
             Landlock::At(abi) if abi < need => {
-                eprintln!("skipping: this kernel's Landlock is ABI {abi}, and this test needs {need}");
+                eprintln!(
+                    "skipping: this kernel's Landlock is ABI {abi}, and this test needs {need}"
+                );
                 false
             }
             Landlock::At(_) => true,
@@ -1882,7 +1923,10 @@ mod tests {
         let Some(envelope) = envelope_launches(&policy) else {
             return;
         };
-        let script = format!("echo READY\n'{copy}' && echo PLANTED-RAN\n", copy = copy.display());
+        let script = format!(
+            "echo READY\n'{copy}' && echo PLANTED-RAN\n",
+            copy = copy.display()
+        );
         let out =
             run_confined(envelope, HostEnvelope::probe(envelope), &policy, &script).expect("spawn");
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1993,7 +2037,8 @@ mod tests {
             "a confined ptrace must be killed with SIGSYS: {stdout}"
         );
 
-        let described = crate::sandbox::diag::platform::describe_denial(&libc::SYS_ptrace.to_string());
+        let described =
+            crate::sandbox::diag::platform::describe_denial(&libc::SYS_ptrace.to_string());
         assert!(
             described.is_some_and(|d| d.contains("ptrace")),
             "describe_denial must name ptrace from its syscall number"

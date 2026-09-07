@@ -60,7 +60,12 @@ pub(crate) fn detach(
             Some(HandlerLookup::Base(entry)) => {
                 let env = shell.env.clone();
                 return crate::runtime::command_call::run_base_frame(
-                    &entry, argv, &[], &env, mooring, shell,
+                    &entry,
+                    argv,
+                    &[],
+                    &env,
+                    mooring,
+                    shell,
                 );
             }
             None => {}
@@ -76,11 +81,7 @@ pub(crate) fn detach(
     // Existence (127/126), argv shape, the grant's verdict on the whole call:
     // the same judgments an ordinary external passes, so a bundled uutils tool
     // falls out as its own image with no special case here.
-    let plan = vet(
-        &CommandIdentity::resolve(name, &shell.context),
-        argv,
-        shell,
-    )?;
+    let plan = vet(&CommandIdentity::resolve(name, &shell.context), argv, shell)?;
 
     let Some(policy) = shell.detach_policy() else {
         return Err(sig(

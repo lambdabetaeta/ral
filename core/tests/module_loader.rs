@@ -220,7 +220,10 @@ fn source_leaks_bindings_into_caller_scope() {
 #[test]
 fn use_sees_the_session_but_not_a_blocks_local_let() {
     let local_module = write_module("ral_use_block_local.ral", "let reads_local = $local\n");
-    let session_module = write_module("ral_use_block_session.ral", "let reads_outer = $outer_define\n");
+    let session_module = write_module(
+        "ral_use_block_session.ral",
+        "let reads_outer = $outer_define\n",
+    );
     let local_p = local_module.to_string_lossy().into_owned();
     let session_p = session_module.to_string_lossy().into_owned();
     let mut shell = fresh_shell();

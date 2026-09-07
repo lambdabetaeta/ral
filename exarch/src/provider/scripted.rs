@@ -187,7 +187,6 @@ impl Script {
         }
         reply.outcome
     }
-
 }
 
 impl Default for Script {

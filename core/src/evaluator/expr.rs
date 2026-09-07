@@ -63,8 +63,10 @@ pub(crate) fn index_value(val: &Value, key: &Value) -> Result<Value, Error> {
                 Error::new(format!("key '{key_str}' not found"), 1).with_hint(hint)
             })
         }
-        _ => Err(Error::new(format!("cannot index into {}", val.type_name()), 1)
-            .with_hint("indexing requires a List or Map")),
+        _ => Err(
+            Error::new(format!("cannot index into {}", val.type_name()), 1)
+                .with_hint("indexing requires a List or Map"),
+        ),
     }
 }
 
@@ -151,8 +153,7 @@ fn arithmetic(l: &Value, op: ArithOp, r: &Value) -> Result<Value, Error> {
     require_numeric(l)?;
     require_numeric(r)?;
     if let (Value::Int(a), Value::Int(b)) = (l, r) {
-        let overflow =
-            || Error::new(format!("integer overflow: {a} and {b} exceed i64 range"), 1);
+        let overflow = || Error::new(format!("integer overflow: {a} and {b} exceed i64 range"), 1);
         Ok(match op {
             ArithOp::Add => a.checked_add(*b).map(Value::Int).ok_or_else(overflow)?,
             ArithOp::Sub => a.checked_sub(*b).map(Value::Int).ok_or_else(overflow)?,
@@ -173,7 +174,9 @@ fn arithmetic(l: &Value, op: ArithOp, r: &Value) -> Result<Value, Error> {
             ArithOp::Div if b == 0.0 => return Err(div_zero()),
             ArithOp::Div => a / b,
             ArithOp::Mod => {
-                return Err(Error::new("% requires Int operands", 1).with_hint("use int to convert"));
+                return Err(
+                    Error::new("% requires Int operands", 1).with_hint("use int to convert")
+                );
             }
         };
         // Finite operands with a nonzero divisor can still overflow to ±∞,
@@ -181,7 +184,10 @@ fn arithmetic(l: &Value, op: ArithOp, r: &Value) -> Result<Value, Error> {
         if v.is_finite() {
             Ok(Value::Float(v))
         } else {
-            Err(Error::new(format!("float overflow: {a} and {b} exceed f64 range"), 1))
+            Err(Error::new(
+                format!("float overflow: {a} and {b} exceed f64 range"),
+                1,
+            ))
         }
     }
 }

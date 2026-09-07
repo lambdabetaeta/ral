@@ -285,10 +285,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "prelude binding `x` is computed at boot")]
     fn non_return_prelude_binding_fails_the_bake() {
-        let ast = crate::parse("let x = if !{_ansi-ok} { return 1 } else { return 2 }")
-            .expect("parse");
-        let top = crate::elaborate(&ast, std::collections::HashSet::default(), "")
-            .expect("elaborate");
+        let ast =
+            crate::parse("let x = if !{_ansi-ok} { return 1 } else { return 2 }").expect("parse");
+        let top =
+            crate::elaborate(&ast, std::collections::HashSet::default(), "").expect("elaborate");
         let (annotated, _schemes) = crate::bake_prelude(&top);
         validate_prelude_shape(&annotated);
     }
@@ -298,8 +298,8 @@ mod tests {
     #[test]
     fn return_prelude_binding_passes_the_bake() {
         let ast = crate::parse("let x = 1\nlet f = { |y| return $y }").expect("parse");
-        let top = crate::elaborate(&ast, std::collections::HashSet::default(), "")
-            .expect("elaborate");
+        let top =
+            crate::elaborate(&ast, std::collections::HashSet::default(), "").expect("elaborate");
         let (annotated, _schemes) = crate::bake_prelude(&top);
         validate_prelude_shape(&annotated);
     }

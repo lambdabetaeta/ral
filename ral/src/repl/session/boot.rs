@@ -9,8 +9,8 @@
 //! them out of `session.rs` keeps the state machine itself focused on the
 //! run/iterate/eval loop.
 
-use ral_core::source::Span;
 use ral_core::protocol::Program;
+use ral_core::source::Span;
 use ral_core::types::{Break, Closure, DefaultPolicy, Escape, HookName, HookSig, Map, Value};
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, diagnostic};
 use std::sync::{Arc, Mutex};

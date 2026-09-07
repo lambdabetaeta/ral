@@ -9,8 +9,8 @@
 
 mod common;
 
-use ral_core::source::FileId;
 use ral_core::protocol::{Program, Run};
+use ral_core::source::FileId;
 use ral_core::types::{GrantStack, Settled};
 use ral_core::{
     CompileOutcome, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,

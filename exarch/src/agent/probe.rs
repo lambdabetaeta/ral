@@ -8,8 +8,8 @@
 //! already recorded instead.
 
 use crate::agent::Avatar;
-use ral_core::serial::FOValue;
 use ral_core::protocol::{ProbeError, Severed};
+use ral_core::serial::FOValue;
 
 /// A `` `workers `` probe row, decoded.  `pub(crate)` so `shell_eval::report`
 /// and the nudge quiet-gate can read it across module boundaries.
@@ -34,9 +34,9 @@ impl Avatar {
             Ok(FOValue::List { items }) => items,
             Err(ProbeError::Severed(s)) => return Err(s),
             other => {
-                return Err(self
-                    .seat
-                    .fault(Severed::Faulted(format!("`workers probe answered {other:?}"))));
+                return Err(self.seat.fault(Severed::Faulted(format!(
+                    "`workers probe answered {other:?}"
+                ))));
             }
         };
         items

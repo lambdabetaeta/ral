@@ -10,10 +10,10 @@
 //! than accumulated.
 
 use crate::bus::{Mailbox, Stamped};
-use ral_core::sync::LockExt;
 use jiff::civil::DateTime;
 use jiff::{ToSpan, Zoned};
 use ral_core::process::{Deadline, arm_callback};
+use ral_core::sync::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;

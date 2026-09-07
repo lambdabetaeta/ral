@@ -69,9 +69,9 @@ use crate::bus::{
 use crate::fleet::Fleet;
 use crate::provider::Provider;
 use crate::shell_eval;
-use ral_core::sync::LockExt;
 use ral_core::process::CancelCause;
 use ral_core::serial::FOValue;
+use ral_core::sync::LockExt;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
@@ -436,7 +436,9 @@ impl Agent {
     /// Deliver `outcome` to the parent's inbox as this agent's result.  A root
     /// has no parent and reports to nobody.
     pub(crate) fn report(&self, outcome: AgentOutcome) {
-        let Some(consumer) = &self.consumer else { return };
+        let Some(consumer) = &self.consumer else {
+            return;
+        };
         consumer.post(Stamped::AgentResult(AgentResult {
             id: self.id,
             name: self.name.clone(),
@@ -709,9 +711,11 @@ impl Avatar {
         }) {
             Ok(FOValue::String { value }) => Ok(std::path::PathBuf::from(value)),
             Err(ral_core::protocol::ProbeError::Severed(s)) => Err(s),
-            other => Err(self.seat.fault(ral_core::protocol::Severed::Faulted(format!(
-                "`cwd probe answered {other:?}"
-            )))),
+            other => Err(self
+                .seat
+                .fault(ral_core::protocol::Severed::Faulted(format!(
+                    "`cwd probe answered {other:?}"
+                )))),
         }
     }
 

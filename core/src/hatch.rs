@@ -433,7 +433,9 @@ fn send_seed(parent_seed: &mut UnixStream, seed: &EngineSeed) -> Result<(), Stri
     // The bound belonged to that one write; the end this process keeps outlives
     // it, and is only ever polled for the child's death.
     let _ = parent_seed.set_write_timeout(None);
-    sent.map_err(|e| format!("hatch: the child engine started, but its seed could not be sent: {e}"))
+    sent.map_err(|e| {
+        format!("hatch: the child engine started, but its seed could not be sent: {e}")
+    })
 }
 
 /// The wire seed this engine was hatched with, if it was hatched at all.
@@ -614,7 +616,10 @@ mod tests {
             (crate::protocol::HATCH_ACK, PROBE),
             "the host learns of the child by its ack, and of its fd 3 by its answer"
         );
-        assert!(recorded(pid), "a started child must be recorded for reaping");
+        assert!(
+            recorded(pid),
+            "a started child must be recorded for reaping"
+        );
 
         sweep_hatched();
         assert!(
