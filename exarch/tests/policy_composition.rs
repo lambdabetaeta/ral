@@ -92,9 +92,12 @@ fn an_extend_base_grant_cannot_survive_a_restrict_that_omits_it() {
 }
 
 /// `--restrict` is documented as order-free.  Each file becomes its own
-/// layer, so the two argv orders build stacks that differ in shape but must
-/// fold to the same verdict on every check, and each file's own deny entry
-/// must survive regardless of which side of the pair it was.
+/// layer, and a layer's exec map is an allowlist over the whole namespace —
+/// `b` naming no directory answers "outside my reach" for `git`, exactly as
+/// the restrict file of the test above answers for `rustc`.  So the fold
+/// admits `ls` alone, the name both files carry, and the two argv orders,
+/// which build stacks differing in shape, must agree on that verdict and on
+/// every other, each file's own deny entry surviving whichever side it was.
 #[test]
 fn two_restricts_compose_to_the_same_grant_in_either_order() {
     let dir = Scratch::for_test(EXARCH, "restrict-commutes").expect("scratch dir");
@@ -119,11 +122,16 @@ fn two_restricts_compose_to_the_same_grant_in_either_order() {
         let mut shell = Shell::default();
         install(&mut shell, stack);
         shell
-            .check_exec_args("git", &["git", "/usr/bin/git"], &[])
-            .expect("git admitted regardless of restrict argv order");
-        shell
-            .check_exec_args("cat", &["cat", "/usr/bin/cat"], &[])
-            .expect("cat admitted regardless of restrict argv order");
+            .check_exec_args("ls", &["ls", "/usr/bin/ls"], &[])
+            .expect("what both files name is admitted regardless of restrict argv order");
+        for one_sided in ["git", "cat"] {
+            let resolved = format!("/usr/bin/{one_sided}");
+            let message = refusal(shell.check_exec_args(one_sided, &[one_sided, &resolved], &[]));
+            assert!(
+                message.contains(one_sided),
+                "a name only one restrict file carries must be refused, by name: {message}"
+            );
+        }
         assert!(
             !stack.net().all(|n| n),
             "net: false in either file must survive the fold, flag order must not reach it"
