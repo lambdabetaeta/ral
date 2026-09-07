@@ -63,14 +63,6 @@ use std::path::{Path, PathBuf};
 /// Keep this sorted by path for review-friendly diffs.
 const DOOR_MANIFEST: &[(&str, &str)] = &[
     // ── core ──────────────────────────────────────────────────────────────
-    ("core/src/builtins/fs.rs", "io-door:silent:file-info"),
-    ("core/src/builtins/fs.rs", "io-door:silent:list-dir"),
-    ("core/src/builtins/fs.rs", "io-door:silent:stat-follow"),
-    ("core/src/builtins/fs.rs", "io-door:silent:stat-nofollow"),
-    (
-        "core/src/builtins/fs.rs",
-        "io-door:silent:writable-stat-nonunix",
-    ),
     ("core/src/builtins/misc.rs", "io-door:silent:ask-tty"),
     ("core/src/builtins/modules.rs", "io-door:silent:module-load"),
     ("core/build.rs", "io-door:silent:prelude-bake-build"),
@@ -79,6 +71,28 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/hatch.rs", "io-door:silent:hatch-spawn"),
     ("core/src/host.rs", "io-door:silent:date-launch"),
     ("core/src/host.rs", "io-door:silent:git-launch"),
+    // The fs door: `path/walk.rs` is the one file that opens a model-named
+    // object, so every door below is a step of the locate-then-open recipe.
+    ("core/src/path/walk.rs", "io-door:silent:discard-device"),
+    ("core/src/path/walk.rs", "io-door:silent:locate-abandon"),
+    ("core/src/path/walk.rs", "io-door:silent:locate-access"),
+    ("core/src/path/walk.rs", "io-door:silent:locate-read-dir"),
+    ("core/src/path/walk.rs", "io-door:silent:locate-read-link"),
+    ("core/src/path/walk.rs", "io-door:silent:locate-stat"),
+    ("core/src/path/walk.rs", "io-door:silent:walk-descend"),
+    ("core/src/path/walk.rs", "io-door:silent:walk-link-probe"),
+    ("core/src/path/walk.rs", "io-door:silent:walk-link-read"),
+    ("core/src/path/walk.rs", "io-door:surface:locate-commit"),
+    ("core/src/path/walk.rs", "io-door:surface:locate-open"),
+    ("core/src/path/walk.rs", "io-door:surface:locate-stage"),
+    (
+        "core/src/path/walk.rs",
+        "io-door:surface:locate-staged-read",
+    ),
+    (
+        "core/src/path/walk.rs",
+        "io-door:surface:locate-staged-write",
+    ),
     ("core/src/path/which.rs", "io-door:silent:which-readdir"),
     ("core/src/path/which.rs", "io-door:silent:which-stat"),
     (
@@ -108,38 +122,6 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     (
         "core/src/process/spawn_lock.rs",
         "io-door:silent:spawn-door",
-    ),
-    (
-        "core/src/runtime/command/redirect.rs",
-        "io-door:silent:atomic-abandon",
-    ),
-    (
-        "core/src/runtime/command/redirect.rs",
-        "io-door:surface:atomic-commit",
-    ),
-    (
-        "core/src/runtime/command/redirect.rs",
-        "io-door:surface:atomic-eligible",
-    ),
-    (
-        "core/src/runtime/command/redirect.rs",
-        "io-door:surface:atomic-old-read",
-    ),
-    (
-        "core/src/runtime/command/redirect.rs",
-        "io-door:surface:atomic-temp-read",
-    ),
-    (
-        "core/src/runtime/command/redirect.rs",
-        "io-door:surface:open-atomic",
-    ),
-    (
-        "core/src/runtime/command/redirect.rs",
-        "io-door:surface:open-file",
-    ),
-    (
-        "core/src/runtime/command/redirect.rs",
-        "io-door:surface:stdin-redirect",
     ),
     (
         "core/src/runtime/pipeline/helper.rs",
@@ -208,14 +190,6 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("core/src/types/shell/cwd.rs", "io-door:silent:cwd-stat"),
     ("core/src/uutils.rs", "io-door:silent:diff-read"),
     // ── exarch ────────────────────────────────────────────────────────────
-    (
-        "exarch/src/shell_eval/builtins.rs",
-        "io-door:surface:witness-read",
-    ),
-    (
-        "exarch/src/shell_eval/builtins.rs",
-        "io-door:surface:grep-read",
-    ),
     (
         "exarch/src/shell_eval/builtins.rs",
         "io-door:surface:grep-walk",
@@ -380,6 +354,10 @@ const BANNED_TOKENS: &[&str] = &[
     "fs::set_permissions",
     "Command::new",
     "CommandExt::exec",
+    // The cap-std twins are imported by name and then called bare, so the
+    // import is the token that betrays them.
+    "cap_primitives::fs::",
+    "cap_fs_ext::",
 ];
 
 fn workspace_root() -> PathBuf {

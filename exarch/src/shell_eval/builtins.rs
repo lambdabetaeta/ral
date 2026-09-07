@@ -8,6 +8,7 @@ use grep::regex::RegexMatcherBuilder;
 use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::WalkBuilder;
 use ral_core::builtins::util::regex_err;
+use ral_core::capability::FsOp;
 use ral_core::typecheck::builtins::{closed_record, fun, mk_scheme as scheme, pure, thunk};
 use ral_core::typecheck::{Scheme, Ty, Unifier};
 use ral_core::types::{
@@ -17,8 +18,7 @@ use ral_core::{HostSurface, Shell, Value};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::fs;
-use std::io::Write;
+use std::io::{Read as _, Write};
 
 mod fff_index;
 #[cfg(target_os = "linux")]
@@ -341,10 +341,6 @@ fn readable(shell: &mut Shell, rel: &str) -> bool {
 /// Recursively search the cwd for `pattern` (ignore-aware, Rust regex), reading
 /// each file's bytes once.  The cancellation poll, the per-file deny skip, and
 /// the binary-detection quit all live here, the one site `grep-files` composes over.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:surface:grep-read] The grep door's per-matched-file read, in Rust below the ral line so it never reaches the redirect frame; the logical search emits exactly one `grep` surface (scope + pattern), not one read card per file."
-)]
 fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<Vec<SearchHit>> {
     let matcher = RegexMatcherBuilder::new()
         .build(pattern)
@@ -368,10 +364,17 @@ fn search_tree(mooring: &Mooring, shell: &mut Shell, pattern: &str) -> Settled<V
             .unwrap_or(abs)
             .to_string_lossy()
             .into_owned();
-        if !readable(shell, &rel) {
+        let rp = shell.resolve(&rel);
+        let Some(located) = shell.locate_if_admitted(&rp, &FsOp::Read) else {
+            continue;
+        };
+        let Ok(mut file) = located.read() else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() {
             continue;
         }
-        let Ok(bytes) = fs::read(abs) else { continue };
         searcher
             .search_slice(
                 &matcher,
@@ -601,14 +604,10 @@ fn surface_edit(mooring: &Mooring, path: &str, old: &str, new: &str) {
 /// The witness layer's shared read door, gating on the live grant as a `< path`
 /// redirect would but staying in Rust, below the redirect frame — so each caller
 /// owns its own surface.  `tool` names the calling builtin in the error.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:surface:witness-read] The readers' and editors' shared read door (view-text/view-hash/edit-hash/edit-replace), in Rust below the ral line so it never reaches the redirect frame. The readers surface their own read card; edit-hash/edit-replace read silently and emit only their write event. The grant is still checked, as a `< path` redirect would."
-)]
 fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> {
     let rp = shell.resolve(path);
-    shell.check_fs_read(&rp)?;
-    let bytes = fs::read(rp.as_path()).map_err(|e| {
+    let located = shell.locate(&rp, &FsOp::Read)?;
+    let mut file = located.read().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             sig(format!(
                 "{tool}: {path} does not exist — {tool} never creates a file; \
@@ -618,6 +617,9 @@ fn read_text_file(shell: &mut Shell, path: &str, tool: &str) -> Settled<String> 
             sig(format!("{tool}: cannot read {path}: {e}"))
         }
     })?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| sig(format!("{tool}: cannot read {path}: {e}")))?;
     String::from_utf8(bytes).map_err(|_| {
         sig(format!(
             "{tool}: '{path}' is not valid UTF-8 — these tools read and edit text only."
@@ -1110,6 +1112,7 @@ pub static EXARCH_BUILTINS: &[BuiltinEntry] = &EXARCH_BUILTINS_ARR;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// Dress a bare test shell with exarch's host surface.
     fn dress(shell: &mut Shell) {

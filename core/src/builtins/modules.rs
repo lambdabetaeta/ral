@@ -16,8 +16,6 @@
 //! below — `source` is a binder form now (S2), so [`evaluate_checked`] and
 //! friends serve every *other* loader (rc, plugin, capability) alone.
 
-use std::path::Path;
-
 use crate::evaluator::{Mode, Ran};
 use crate::ir::Toplevel;
 use crate::source::Span;
@@ -66,13 +64,8 @@ pub fn evaluate_checked(
     }
     shell.install_script_context(&key, source);
     shell.context.modules.stack.push(key);
-    let ran = crate::evaluator::run_phrases(
-        &top.phrases,
-        shell.env.clone(),
-        Mode::Local,
-        mooring,
-        shell,
-    );
+    let ran =
+        crate::evaluator::run_phrases(&top.phrases, shell.env.clone(), Mode::Local, mooring, shell);
     shell.context.modules.stack.pop();
     // Unlike a nested `source`/`use`, this loader's whole point is to install
     // its defines into the running session — rc, a plugin, a capability
@@ -127,15 +120,17 @@ pub(crate) fn source(
             |_| resolved.to_string_lossy().into_owned(),
             |p| p.to_string_lossy().into_owned(),
         );
-    let text = read_and_normalize(&resolved, &abs_path, "source", shell)?;
-    let top = compile_toplevel(&text, &abs_path, shell).map_err(|e| tag_loader_error("source", e))?;
+    let text = read_and_normalize(&abs_path, "source", shell)?;
+    let top =
+        compile_toplevel(&text, &abs_path, shell).map_err(|e| tag_loader_error("source", e))?;
     let load = ModuleLoad {
         top: &top,
         virtual_path: &abs_path,
         source_text: &text,
         span,
     };
-    let ran = source_phrases(load, env, mode, mooring, shell).map_err(|e| tag_loader_error("source", e))?;
+    let ran = source_phrases(load, env, mode, mooring, shell)
+        .map_err(|e| tag_loader_error("source", e))?;
     Ok(Ran {
         outcome: ran.outcome.map_err(|e| tag_loader_error("source", e)),
         ..ran
@@ -148,13 +143,10 @@ pub(crate) fn source(
 /// `install_script_context` call, a moment later, is the one registration
 /// in between.  Also the binding-lease harvest seam, mirroring
 /// [`check_source`]: every name the file references counts as a real use.
-fn compile_toplevel(
-    source_text: &str,
-    virtual_path: &str,
-    shell: &mut Shell,
-) -> Settled<Toplevel> {
+fn compile_toplevel(source_text: &str, virtual_path: &str, shell: &mut Shell) -> Settled<Toplevel> {
     let file = shell.session.sources.next_id();
-    let ast = crate::syntax::parser::parse_with(source_text, file).map_err(|e| sig(e.to_string()))?;
+    let ast =
+        crate::syntax::parser::parse_with(source_text, file).map_err(|e| sig(e.to_string()))?;
     let bindings = shell
         .session_schemes()
         .bindings
@@ -296,27 +288,25 @@ fn check_source(
     Ok(top)
 }
 
-/// Read and normalise a module's text.  `check_fs_read` and the errors key
-/// on `abs_path`, the path as the caller resolved it; `who` names the verb.
+/// Read and normalise a module's text, located and authorised as one walk
+/// (`abs_path`, the path as the caller resolved it); `who` names the verb.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:module-load] `source`/`use` module loading reads program text from disk, gated by `check_fs_read`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
+    reason = "[io-door:silent:module-load] `source`/`use` module loading reads program text from disk, gated by `locate`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
 )]
-fn read_and_normalize(
-    resolved: &Path,
-    abs_path: &str,
-    who: &str,
-    shell: &mut Shell,
-) -> Settled<String> {
+fn read_and_normalize(abs_path: &str, who: &str, shell: &mut Shell) -> Settled<String> {
     let rp = shell.resolve(abs_path);
-    shell.check_fs_read(&rp)?;
-    let source = std::fs::read_to_string(resolved).map_err(|e| {
+    let located = shell.locate(&rp, &crate::capability::FsOp::Read)?;
+    let mut file = located.read().map_err(|e| {
         sig(match e.kind() {
             std::io::ErrorKind::NotFound => format!("{who}: {abs_path}: not found"),
             std::io::ErrorKind::PermissionDenied => format!("{who}: {abs_path}: permission denied"),
             _ => format!("{who}: {abs_path}: {e}"),
         })
     })?;
+    let mut source = String::new();
+    std::io::Read::read_to_string(&mut file, &mut source)
+        .map_err(|e| sig(format!("{who}: {abs_path}: {e}")))?;
     Ok(crate::source::normalize_source_text(source))
 }
 
@@ -367,8 +357,9 @@ pub(crate) fn builtin_use(args: &[Value], mooring: &Mooring, shell: &mut Shell) 
         .or_else(|| crate::path::ral_path::find_file(&path, shell.context.env_overrides()))
         .map_or_else(|| path.clone(), |p| p.to_string_lossy().into_owned());
 
-    let source = read_and_normalize(abs_path.as_ref(), &abs_path, "use", shell)?;
-    let top = compile_toplevel(&source, &abs_path, shell).map_err(|e| tag_loader_error("use", e))?;
+    let source = read_and_normalize(&abs_path, "use", shell)?;
+    let top =
+        compile_toplevel(&source, &abs_path, shell).map_err(|e| tag_loader_error("use", e))?;
 
     let env = shell.env.clone();
     let load = ModuleLoad {

@@ -1,13 +1,13 @@
 //! Opening redirect targets: the atomic `>` recipe and the `< file` handoff
 //! into `shell.io.stdin`.  The frames in `evaluator::redirect` drive both.
 //!
-//! Every open here goes through [`Shell::locate`], so the object authorised
-//! is the object the handle then names — the door never re-walks a string
-//! the gate has already judged.
+//! No open lives here.  Every one goes through [`Shell::locate`] into
+//! `path::walk`, so the object authorised is the object the handle then
+//! names — the door never re-walks a string the gate has already judged.
 
 use crate::capability::FsOp;
 use crate::evaluator::audit::observe;
-use crate::path::{Located, ResolvedPath};
+use crate::path::{Located, walk::Kind};
 use crate::syntax::ast::RedirectMode;
 use crate::types::{Break, Error, Mooring, Observed, Settled, Shell};
 use std::ffi::OsString;
@@ -82,7 +82,10 @@ impl PendingWrite {
     /// # Errors
     /// Returns the first I/O error of the flush or the rename.
     pub(crate) fn commit(mut self) -> std::io::Result<()> {
-        let staged = self.0.take().expect("commit consumes a freshly staged write");
+        let staged = self
+            .0
+            .take()
+            .expect("commit consumes a freshly staged write");
         if let Err(e) = staged.rename_durable() {
             staged.unlink();
             return Err(e);
@@ -220,20 +223,6 @@ fn open_atomic(
     Ok((file, pending))
 }
 
-/// The discard device is exempt from the grant and from the walk alike: there
-/// is no object to locate, and on Windows `NUL` is a name the Win32 layer
-/// resolves anywhere rather than an entry in any directory.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:discard-device] `/dev/null` / `NUL` opened by name: no bytes reach or leave the model, and no grant region can contain a device that is not a file."
-)]
-fn open_discard(rp: &ResolvedPath) -> std::io::Result<File> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(rp.as_path())
-}
-
 /// Open a redirect target.  `>` to a regular file returns a [`PendingWrite`]
 /// the caller must commit or abandon once the writer finishes; every other
 /// shape streams.
@@ -245,11 +234,10 @@ pub(crate) fn open_file(
     shell: &mut Shell,
 ) -> Settled<(File, Option<PendingWrite>)> {
     let rp = shell.resolve(path);
-    let stream = |opened: std::io::Result<File>| {
-        opened.map(|f| (f, None)).map_err(|e| io_error(path, &e))
-    };
+    let stream =
+        |opened: std::io::Result<File>| opened.map(|f| (f, None)).map_err(|e| io_error(path, &e));
     if rp.is_discard() {
-        return stream(open_discard(&rp));
+        return stream(crate::path::walk::open_discard(&rp));
     }
     let op = match mode {
         RedirectMode::Read => FsOp::Read,
@@ -269,7 +257,7 @@ pub(crate) fn open_file(
             let existing = target.stat().map_err(|e| io_error(path, &e))?;
             // TTYs and named pipes stream: there is no inode to rename.
             match existing {
-                Some(s) if !s.is_file => stream(target.truncate()),
+                Some(s) if s.kind != Kind::File => stream(target.truncate()),
                 existing => {
                     let (file, commit) = open_atomic(path, target, existing.as_ref())?;
                     Ok((file, Some(commit)))

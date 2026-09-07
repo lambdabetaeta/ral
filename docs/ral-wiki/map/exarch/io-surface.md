@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 53eb1950
-generated_at_date: 2026-09-02
-covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+generated_at_commit: 4b075384
+generated_at_date: 2026-09-07
+covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
 ---
 
 # Map: exarch / io surface
@@ -254,6 +254,41 @@ There is no independent operational trace: the record log
 as a display commit so a resumed scrollback can rebuild its card, but never
 the rendered mark tree itself — a rendering is not a fact.
 
+## One file opens everything
+
+Every filesystem operation on a model-named path happens in
+`core/src/path/walk.rs`. `Shell::locate` walks the name from the root, one
+component at a time through directory handles, never letting the kernel follow
+a symlink — each link is spliced into the name and re-walked — and the grant
+judges the *object* it lands on. The `Located` it returns performs every open,
+stat, listing, staging, rename and unlink relative to that directory's handle
+with `FollowSymlinks::No`, so what was judged is what gets opened.
+
+That is why the door set is short enough to read: `redirect.rs` drives the
+recipe but contains no open, and `builtins/fs.rs`, `builtins/modules.rs` and
+exarch's readers, editors and grep all reach the filesystem through a
+`Located` rather than by re-walking a string the gate already judged. The one
+exception is the discard device, which has no object to locate — on Windows
+`NUL` is a name the Win32 layer resolves anywhere rather than an entry in any
+directory.
+
+Three entry points, differing only in how they answer a refusal, because the
+callers genuinely need different answers:
+
+| | walk fails | grant refuses |
+|---|---|---|
+| `locate` | `Err` | `Err` |
+| `locate_existing` | `Ok(None)` | `Err` |
+| `locate_if_admitted` | `None` | `None` |
+
+`locate` is the door proper. `locate_existing` is what `exists`/`is-file` and
+their siblings need: an absent path is `false`, a denied one still raises —
+and where the walk found nothing to judge, the refusal falls back to the name,
+so a denied path that does not exist cannot leak the difference by reading as
+merely absent. `locate_if_admitted` is for scans — `grep-files`, `list-dir`'s
+per-entry filter — where one off-limits entry must skip rather than blank the
+whole listing.
+
 ## Enforcement — every door is accounted for
 
 That "all I/O surfaces" holds is the conjunction of two mechanically-checked
@@ -266,7 +301,11 @@ child-wait.
   metadata,symlink_metadata,read_link,remove_file,remove_dir_all,create_dir_all,
   rename,copy,set_permissions}`, `Command::new`, `CommandExt::exec`, and
   `ignore::WalkBuilder::build` (directory walks root at the one cancellable
-  grep door). Enforcement rides the pre-existing
+  grep door). The whole `cap_primitives::fs` surface is banned alongside it,
+  not just the entries `path/walk.rs` uses today: a ban naming only the
+  current callers is exactly what let the fs door move out from under this
+  list once already, when the opens migrated from `runtime/command/redirect.rs`
+  to the handle-relative walk and every tag went with them. Enforcement rides the pre-existing
   `[workspace.lints.clippy] disallowed_methods = "deny"` table, which all ten
   crates opt into via `[lints] workspace = true`; plain `cargo clippy --workspace
   --all-targets` is the command CI runs. A call site is then a door or a lint
@@ -285,8 +324,9 @@ child-wait.
   would break the build on vendored code.
 - **Each door is accounted for, surfacing or silent (reasoned allow).** Each
   allowlisted site carries an `#[allow(clippy::disallowed_methods, reason = …)]`
-  whose reason opens with a stable tag — `[io-door:surface:<slug>]` (the redirect,
-  exec, grep, and edit doors that fuse a surface into the operation),
+  whose reason opens with a stable tag — `[io-door:surface:<slug>]` (the open
+  and the atomic-write steps in `path/walk.rs`, plus the exec and grep-walk
+  doors, that fuse a surface into the operation),
   `[io-door:silent:<slug>]` (fs work that is not the model's data I/O —
   canonicalisation, `which` probes, module loading, stat predicates, capability
   load, sandbox respawn/exec, prelude bake, exarch/ral infra), or `[io-door:test]`

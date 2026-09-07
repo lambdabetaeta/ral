@@ -90,12 +90,16 @@
 # (see decisions/260619_surface-reads-writes-execs).  The handle is the
 # capability, so banning construction suffices — once the only way to get
 # a `File`, a `ReadDir`, or a `Command` is a door, every read, write,
-# spawn, and exec is accounted for.  Each banned constructor's call sites
-# split in two, and the `#[allow]`'s `reason` records which:
+# spawn, and exec is accounted for.  `cap_primitives`' handle-relative
+# twins are banned on the same ground: `path/walk.rs` is where a name
+# becomes a judged object, and a cap-std call outside it opens an object
+# no grant saw.  Each banned constructor's call sites split in two, and
+# the `#[allow]`'s `reason` records which:
 #   * SURFACING door — the model's own turn-time I/O, fused with a
-#     surface card.  Redirect read/write in `runtime/command/redirect.rs`
-#     (`open_file`, `install_stdin_redirect`, the atomic-commit dir fsync
-#     and mode-preservation stat); external and bundled exec in
+#     surface card.  Redirect read/write: the frames in
+#     `runtime/command/redirect.rs` (`open_file`,
+#     `install_stdin_redirect`) drive the opens, which `path/walk.rs`
+#     performs on the located object; external and bundled exec in
 #     `runtime/command.rs` (`build_command`); grep + edit in
 #     `exarch/agent_builtins.rs` (`search_tree`, the edit
 #     read/write-atomic helpers).
@@ -139,6 +143,45 @@ disallowed-methods = [
     { path = "std::fs::rename", reason = "I/O goes through a known door. The atomic-commit rename is a surfacing write door's commit step; other renames are reasoned-silent. #[allow] with a reason naming which." },
     { path = "std::fs::copy", reason = "I/O goes through a known door. A file copy is reasoned-silent infrastructure unless it is the model's own exec image; #[allow] with a reason." },
     { path = "std::fs::set_permissions", reason = "I/O goes through a known door. The atomic-commit mode restore is a surfacing write door's sub-step; other chmods are reasoned-silent. #[allow] with a reason naming which." },
+    # `cap_primitives::fs` is `std::fs` with the walk made explicit: every
+    # entry takes the directory handle to act relative to.  The whole surface
+    # is banned rather than the handful `path/walk.rs` uses today, because a
+    # ban that only names the current callers is what let the fs door move out
+    # from under this list once already.  `allow-invalid` on the four
+    # platform-gated symlink entries: each resolves on one OS only, and the
+    # ban has to be written for the OS where the door is real.
+    { path = "cap_primitives::fs::access", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::canonicalize", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::copy", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::create_dir", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::hard_link", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::is_file_read_write", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::open", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::open_ambient", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::open_ambient_dir", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::open_dir", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::open_dir_nofollow", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::open_parent_dir", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::read_base_dir", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::read_dir", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::read_link", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::read_link_contents", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::remove_dir", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::remove_dir_all", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::remove_file", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::remove_open_dir", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::remove_open_dir_all", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::rename", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::reopen", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::set_permissions", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::set_symlink_permissions", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::set_times", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::set_times_nofollow", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::stat", reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::symlink", allow-invalid = true, reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::symlink_contents", allow-invalid = true, reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::symlink_dir", allow-invalid = true, reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
+    { path = "cap_primitives::fs::symlink_file", allow-invalid = true, reason = "Route it through crate::path::walk — Shell::locate judges the object the handle then opens. Any other cap-std fs call opens an object no grant judged; #[allow] with an [io-door:…] reason." },
     { path = "std::process::Command::new", reason = "Process spawning goes through a known door. The model's external exec is the door in runtime/command.rs (build_command) that surfaces an exec card; every other Command::new (sandbox respawn, which probes, infra subprocesses) is reasoned-silent and #[allow]s with a reason." },
     { path = "os_pipe::pipe", reason = "Use crate::process::cloexec_pipe — Apple sets CLOEXEC after pipe(), and a concurrent fork on another thread inherits the window." },
     { path = "std::os::unix::net::UnixStream::pair", reason = "Use crate::process::cloexec_socketpair — same window." },

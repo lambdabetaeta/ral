@@ -367,7 +367,9 @@ pub fn value_to_json_lossy_bytes(v: &Value) -> serde_json::Value {
                 .collect(),
         ),
         Value::Thunk(c) => match c.comp.arrow() {
-            Some((param, _)) => serde_json::json!({"type": "Lambda", "param": format!("{param:?}")}),
+            Some((param, _)) => {
+                serde_json::json!({"type": "Lambda", "param": format!("{param:?}")})
+            }
             None => serde_json::json!({"type": "Block"}),
         },
         Value::Native { entry, applied } => {

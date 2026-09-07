@@ -5,6 +5,7 @@
 
 use super::Shell;
 use crate::capability::FsOp;
+use crate::path::walk::Leaf;
 use crate::types::{Audit, CallSite, Context, SandboxProjection, Settled};
 
 impl Shell {
@@ -120,7 +121,7 @@ impl Shell {
         path: &crate::path::ResolvedPath,
         op: &FsOp,
     ) -> Settled<crate::path::Located> {
-        let located = crate::path::walk::walk(path).map_err(|e| {
+        let located = crate::path::walk::walk(path, Leaf::Resolve).map_err(|e| {
             let name = path.display();
             let msg = match e.kind() {
                 std::io::ErrorKind::NotFound => format!("{name}: no such file or directory"),
@@ -135,6 +136,47 @@ impl Shell {
             })?;
         }
         Ok(located)
+    }
+
+    /// [`locate`](Self::locate) for a probe, which must tell *absent* from
+    /// *refused*: `Ok(None)` where the walk finds nothing, so `exists` and its
+    /// siblings answer `false` rather than raising, while a grant refusal is
+    /// still an `Err`.
+    ///
+    /// The refusal is judged on the object where there is one, and on the
+    /// name where the walk found nothing — otherwise a denied path that does
+    /// not exist would leak the difference by reading as merely absent.
+    ///
+    /// # Errors
+    /// The grant's refusal, on the object or on the name.
+    pub fn locate_existing(
+        &mut self,
+        path: &crate::path::ResolvedPath,
+        op: &FsOp,
+        leaf: Leaf,
+    ) -> Settled<Option<crate::path::Located>> {
+        let Ok(located) = crate::path::walk::walk(path, leaf) else {
+            self.audit_call(|ctx, audit, site| {
+                crate::capability::check_fs_op(ctx, path, op, audit, site)
+            })?;
+            return Ok(None);
+        };
+        self.audit_call(|ctx, audit, site| {
+            crate::capability::check_fs_exact(ctx, located.real(), op, audit, site)
+        })?;
+        Ok(Some(located))
+    }
+
+    /// [`locate`](Self::locate) as a predicate: `None` where the walk fails
+    /// or the grant refuses, so a scan skips what it may not read instead of
+    /// aborting.  One off-limits entry must not blank a whole listing.
+    pub fn locate_if_admitted(
+        &mut self,
+        path: &crate::path::ResolvedPath,
+        op: &FsOp,
+    ) -> Option<crate::path::Located> {
+        let located = crate::path::walk::walk(path, Leaf::Resolve).ok()?;
+        self.admits_fs_exact(op, located.real()).then_some(located)
     }
 
     /// Whether the live stack admits `op` on a path already located — no

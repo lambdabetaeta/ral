@@ -1,35 +1,23 @@
 //! Filesystem queries, temp-path minting, and the `exists` / `is-file` /
 //! `is-dir` / `is-link` / `is-readable` / `is-writable` predicates.
 //!
-//! Every path routes through [`super::util::checked_read_path`], so a probe
-//! answers about the `within [dir: …]` cwd, not the OS cwd — bare
-//! `Path::exists` would miss a file a redirect just wrote there.
-//! `absolute-path` is exempt: lexical, with no filesystem to gate.
+//! Every path routes through [`super::util::checked_read_path`] or
+//! [`Shell::locate`]/[`Shell::locate_existing`], so a probe answers about
+//! the `within [dir: …]` cwd, not the OS cwd — bare `Path::exists` would
+//! miss a file a redirect just wrote there.  `absolute-path` is exempt:
+//! lexical, with no filesystem to gate.
 
+use crate::capability::FsOp;
+use crate::path::walk::{Entry, Kind, Leaf, Stat};
 use crate::types::{Break, Settled, Shell, Value, sig};
-use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::util::{admits_read, arg0_str, checked_read_path};
 
-/// Symlink first, so a `symlink_metadata` caller sees the link, not its target.
-fn classify(ft: fs::FileType) -> &'static str {
-    if ft.is_symlink() {
-        "symlink"
-    } else if ft.is_dir() {
-        "dir"
-    } else if ft.is_file() {
-        "file"
-    } else {
-        "other"
-    }
-}
-
 /// Seconds since the epoch, or 0 when the field is unrecorded or pre-epoch.
-fn secs_since_epoch(t: std::io::Result<SystemTime>) -> i64 {
-    t.ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+fn secs_since_epoch(t: Option<SystemTime>) -> i64 {
+    t.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| {
             #[allow(
                 clippy::cast_possible_wrap,
@@ -41,23 +29,22 @@ fn secs_since_epoch(t: std::io::Result<SystemTime>) -> i64 {
         })
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:list-dir] `list-dir` builtin: reads a directory's entries as a stat/listing predicate, gated by `check_fs_read`; not turn-time model data I/O, raises no surface card."
-)]
 pub(super) fn builtin_list_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let path = checked_read_path(shell, &args[0].to_string())?;
-    let dir = path.as_path();
+    let rp = shell.resolve(&args[0].to_string());
+    let located = shell.locate(&rp, &FsOp::Read)?;
+    let dir = located.real();
     let mut entries: Vec<(String, Value)> = Vec::new();
-    for entry in fs::read_dir(dir).map_err(|e| io_err("list-dir", dir, &e))? {
-        let entry = entry.map_err(|e| io_err("list-dir", dir, &e))?;
-        // `checked_read_path` admitted the directory; each entry is a
-        // distinct path whose metadata this returns.  Drop a denied entry
-        // rather than abort, as `grep-files` and `explore-dir` do.
-        if !admits_read(shell, &entry.path().to_string_lossy()) {
+    for entry in located
+        .read_dir()
+        .map_err(|e| io_err("list-dir", dir, &e))?
+    {
+        // `locate` admitted the directory; each entry is a distinct path
+        // whose metadata this returns.  Drop a denied entry rather than
+        // abort, as `grep-files` and `explore-dir` do.
+        if !shell.admits_fs_exact(&FsOp::Read, &dir.join(&entry.name)) {
             continue;
         }
-        entries.push(dir_entry_value(&entry)?);
+        entries.push(dir_entry_value(&entry));
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(Value::list(entries.into_iter().map(|(_, v)| v).collect()))
@@ -142,18 +129,11 @@ fn io_err(ctx: &str, path: &Path, e: &std::io::Error) -> Break {
 }
 
 /// One `list-dir` entry, paired with the filename its caller sorts on.
-fn dir_entry_value(entry: &fs::DirEntry) -> Settled<(String, Value)> {
-    let name = entry.file_name().to_string_lossy().into_owned();
-    let path = entry.path();
-    let file_type = entry
-        .file_type()
-        .map_err(|e| io_err("list-dir", &path, &e))?;
-    let meta = entry
-        .metadata()
-        .map_err(|e| io_err("list-dir", &path, &e))?;
+fn dir_entry_value(entry: &Entry) -> (String, Value) {
+    let name = entry.name.to_string_lossy().into_owned();
     let v = Value::map(vec![
         ("name".into(), Value::String(name.clone())),
-        ("type".into(), Value::String(classify(file_type).into())),
+        ("type".into(), Value::String(entry.stat.kind.name().into())),
         (
             "size".into(),
             Value::Int({
@@ -162,33 +142,36 @@ fn dir_entry_value(entry: &fs::DirEntry) -> Settled<(String, Value)> {
                     reason = "u64 file size in bytes is far below i64::MAX (8 EiB)"
                 )]
                 {
-                    meta.len() as i64
+                    entry.stat.len as i64
                 }
             }),
         ),
         (
             "mtime".into(),
-            Value::Int(secs_since_epoch(meta.modified())),
+            Value::Int(secs_since_epoch(entry.stat.mtime)),
         ),
     ]);
-    Ok((name, v))
+    (name, v)
 }
 
 /// Portable per-path metadata: the `stat` fields `std::fs::Metadata` carries
 /// everywhere — mode bits, uid/gid, nlink and inode would want a `cfg(unix)`
 /// companion.  Stats the link itself, not its target; compose with
 /// `resolve-path` for the latter.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:file-info] `file-info` builtin: `symlink_metadata`/`read_link` stat a path and read a symlink target as a metadata predicate, gated by `check_fs_read`; not turn-time model data I/O, raises no surface card."
-)]
 pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    let resolved = checked_read_path(shell, &args[0].to_string())?;
-    let path = resolved.as_path();
-    let meta = fs::symlink_metadata(path).map_err(|e| io_err("file-info", path, &e))?;
-    let ft = meta.file_type();
-    let target = if ft.is_symlink() {
-        fs::read_link(path)
+    let raw = args[0].to_string();
+    let rp = shell.resolve(&raw);
+    let path = rp.as_path().to_path_buf();
+    let located = shell
+        .locate_existing(&rp, &FsOp::Read, Leaf::AsNamed)?
+        .ok_or_else(|| sig(format!("file-info: {raw}: no such file or directory")))?;
+    let stat = located
+        .stat()
+        .map_err(|e| io_err("file-info", &path, &e))?
+        .ok_or_else(|| sig(format!("file-info: {raw}: no such file or directory")))?;
+    let target = if stat.kind == Kind::Symlink {
+        located
+            .read_link()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default()
     } else {
@@ -200,7 +183,7 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
     );
     Ok(Value::map(vec![
         ("name".into(), Value::String(name)),
-        ("type".into(), Value::String(classify(ft).into())),
+        ("type".into(), Value::String(stat.kind.name().into())),
         (
             "size".into(),
             Value::Int({
@@ -209,23 +192,14 @@ pub(super) fn builtin_file_info(args: &[Value], shell: &mut Shell) -> Settled<Va
                     reason = "u64 file size in bytes is far below i64::MAX (8 EiB)"
                 )]
                 {
-                    meta.len() as i64
+                    stat.len as i64
                 }
             }),
         ),
-        (
-            "mtime".into(),
-            Value::Int(secs_since_epoch(meta.modified())),
-        ),
-        (
-            "atime".into(),
-            Value::Int(secs_since_epoch(meta.accessed())),
-        ),
-        ("btime".into(), Value::Int(secs_since_epoch(meta.created()))),
-        (
-            "readonly".into(),
-            Value::Bool(meta.permissions().readonly()),
-        ),
+        ("mtime".into(), Value::Int(secs_since_epoch(stat.mtime))),
+        ("atime".into(), Value::Int(secs_since_epoch(stat.atime))),
+        ("btime".into(), Value::Int(secs_since_epoch(stat.btime))),
+        ("readonly".into(), Value::Bool(stat.readonly)),
         ("target".into(), Value::String(target)),
     ]))
 }
@@ -246,100 +220,58 @@ pub(super) fn builtin_absolute_path(args: &[Value], shell: &Shell) -> Value {
     Value::String(resolved.as_path().to_string_lossy().into_owned())
 }
 
-/// Shared predicate body.  `probe` sees `None` when the path is missing or
-/// unreadable, so every predicate answers `false` there rather than raising.
-fn fs_probe_with(
-    args: &[Value],
-    shell: &mut Shell,
-    read_meta: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
-    probe: impl FnOnce(Option<fs::Metadata>) -> bool,
-) -> Settled<Value> {
-    let rp = checked_read_path(shell, &args[0].to_string())?;
-    let meta = read_meta(rp.as_path()).ok();
-    let r = probe(meta);
-    Ok(Value::Bool(r))
-}
-
-/// Stats without following: a dangling link still `exists`, a link is `is-link`.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:stat-nofollow] `exists`/stat predicates: `symlink_metadata` stats a path without following symlinks, gated by `check_fs_read`; a metadata predicate, not turn-time model data I/O, raises no surface card."
-)]
+/// Shared predicate body.  `leaf` is the whole difference between the two
+/// families: `Resolve` gives `test -f`/`test -d`/`test -r` semantics, where a
+/// link to a file is `is-file` and a dangling link fails every probe;
+/// `AsNamed` gives `exists`/`is-link`, where a dangling link still exists and
+/// a link is a link.  `probe` sees `None` when the path is missing or under a
+/// directory that does not exist, so every predicate answers `false` there
+/// rather than raising.
 fn fs_probe(
     args: &[Value],
     shell: &mut Shell,
-    probe: impl FnOnce(Option<fs::Metadata>) -> bool,
+    leaf: Leaf,
+    probe: impl FnOnce(Option<Stat>) -> bool,
 ) -> Settled<Value> {
-    fs_probe_with(args, shell, |p| fs::symlink_metadata(p), probe)
-}
-
-/// Follows, as `test -f` / `test -d` / `test -r` do: a link to a file is
-/// `is-file`, a dangling link fails every probe.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:stat-follow] `is-file`/`is-dir` predicates: `metadata` stats a path following symlinks, gated by `check_fs_read`; a metadata predicate, not turn-time model data I/O, raises no surface card."
-)]
-fn fs_probe_follow(
-    args: &[Value],
-    shell: &mut Shell,
-    probe: impl FnOnce(Option<fs::Metadata>) -> bool,
-) -> Settled<Value> {
-    fs_probe_with(args, shell, |p| fs::metadata(p), probe)
+    let rp = shell.resolve(&args[0].to_string());
+    let stat = shell
+        .locate_existing(&rp, &FsOp::Read, leaf)?
+        .and_then(|located| located.stat().ok().flatten());
+    Ok(Value::Bool(probe(stat)))
 }
 
 pub(super) fn builtin_exists(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(args, shell, |m| m.is_some())
+    fs_probe(args, shell, Leaf::AsNamed, |s| s.is_some())
 }
 
 pub(super) fn builtin_is_file(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe_follow(args, shell, |m| m.is_some_and(|m| m.is_file()))
+    fs_probe(args, shell, Leaf::Resolve, |s| {
+        s.is_some_and(|s| s.kind == Kind::File)
+    })
 }
 
 pub(super) fn builtin_is_dir(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe_follow(args, shell, |m| m.is_some_and(|m| m.is_dir()))
+    fs_probe(args, shell, Leaf::Resolve, |s| {
+        s.is_some_and(|s| s.kind == Kind::Dir)
+    })
 }
 
 pub(super) fn builtin_is_link(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe(args, shell, |m| {
-        m.is_some_and(|m| m.file_type().is_symlink())
+    fs_probe(args, shell, Leaf::AsNamed, |s| {
+        s.is_some_and(|s| s.kind == Kind::Symlink)
     })
 }
 
 pub(super) fn builtin_is_readable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
     // Exact on Windows, where `readonly` governs writes alone; on Unix an
     // approximation of `test -r`, the truth needing uid/gid/acl logic.
-    fs_probe_follow(args, shell, |m| m.is_some())
-}
-
-/// [`fs_probe_with`] for predicates whose honest answer needs the path
-/// itself, not just `Metadata` — an `access(2)` against the real uid/gid.
-fn fs_probe_path(
-    args: &[Value],
-    shell: &mut Shell,
-    probe: impl FnOnce(&Path) -> bool,
-) -> Settled<Value> {
-    let rp = checked_read_path(shell, &args[0].to_string())?;
-    let r = probe(rp.as_path());
-    Ok(Value::Bool(r))
-}
-
-/// `access(2)`, not `permissions().readonly()` — the latter ignores
-/// ownership, so another user's 0644 file would read as writable.
-#[cfg(unix)]
-fn is_writable_path(path: &Path) -> bool {
-    rustix::fs::access(path, rustix::fs::Access::WRITE_OK).is_ok()
-}
-
-/// Windows has no `access(2)`: the read-only attribute is what governs writes.
-#[cfg(not(unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:silent:writable-stat-nonunix] Stat behind the `is-writable` predicate on non-unix (readonly-attribute test). A stat predicate, not turn-time model data I/O — raises no card, like its unix sibling."
-)]
-fn is_writable_path(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|m| !m.permissions().readonly())
+    fs_probe(args, shell, Leaf::Resolve, |s| s.is_some())
 }
 
 pub(super) fn builtin_is_writable(args: &[Value], shell: &mut Shell) -> Settled<Value> {
-    fs_probe_path(args, shell, is_writable_path)
+    let rp = shell.resolve(&args[0].to_string());
+    let writable = shell
+        .locate_existing(&rp, &FsOp::Read, Leaf::Resolve)?
+        .is_some_and(|located| located.is_writable());
+    Ok(Value::Bool(writable))
 }
