@@ -267,12 +267,12 @@ pub(super) fn setup_terminal(shell: &mut Shell) {
 /// login profiles as well as the RC file — so a `-l --norc` session boots
 /// from a clean slate.
 pub(super) fn load_profiles(
-    is_login: bool,
-    no_rc: bool,
+    opts: &crate::cli::InteractiveOpts,
     shell: &mut Shell,
     runtime: &Arc<Mutex<PluginRuntime>>,
 ) -> RcSettings {
-    if is_login && !no_rc {
+    let no_rc = opts.no_rc;
+    if opts.login && !no_rc {
         let system_profile = "/etc/ral/profile".to_string();
         let user_profile = ral_core::path::config::home_dot(".ral_profile")
             .map(|p| p.to_string_lossy().into_owned());

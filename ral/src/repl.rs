@@ -57,8 +57,8 @@ use std::process::ExitCode;
 /// Boots a [`Session`] (signals, terminal, builtins, profiles, capabilities,
 /// frontend) and drives its loop to completion.  Returns the exit code
 /// to hand back to the OS.
-pub(crate) fn run_interactive(is_login: bool, opts: &crate::cli::InteractiveOpts) -> ExitCode {
-    match Session::boot(is_login, opts) {
+pub(crate) fn run_interactive(opts: &crate::cli::InteractiveOpts) -> ExitCode {
+    match Session::boot(opts) {
         Ok(session) => session.run(),
         Err(code) => code,
     }

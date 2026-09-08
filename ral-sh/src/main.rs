@@ -95,10 +95,10 @@ fn short_flag_cluster(arg: &OsStr) -> Option<&str> {
 /// Read the invocation context and exec the chosen binary.
 fn dispatch() -> ! {
     let argv0 = std::env::args_os().next().unwrap_or_default();
-    // ral-sh has no dependency on ral-core (it's the minimal
-    // outer dispatcher binary, intentionally standalone), so it
-    // can't reach for `ral_core::path::basename` like ral/main.rs
-    // does.  Same basename-from-argv0 idiom, inlined.
+    // ral-sh has no dependency on ral-core (it's the minimal outer
+    // dispatcher binary, intentionally standalone), so it can't reach for
+    // `ral_core::path::basename` as `ral/src/cli.rs` does.  Same
+    // basename-from-argv0 idiom, inlined.
     #[allow(clippy::disallowed_methods)]
     let is_login = std::path::Path::new(&argv0)
         .file_name()

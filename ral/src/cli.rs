@@ -5,12 +5,10 @@ use clap::CommandFactory as _;
 /// Execution mode derived from argv. Each variant carries exactly the flags
 /// valid for it, so misassignment between modes is unrepresentable.
 ///
-/// `Login` is the interactive REPL with login-profile sourcing; it carries the
-/// same [`InteractiveOpts`] as `Interactive` so `--norc` and the rest survive.
 /// A login shell with `-c` or a script positional resolves to `Command` or
-/// `Script` instead: the login bit only distinguishes the interactive case.
+/// `Script`: the login bit ([`InteractiveOpts::login`]) only means anything in
+/// the interactive case.
 pub(crate) enum Mode {
-    Login(InteractiveOpts),
     Interactive(InteractiveOpts),
     Script {
         path: String,
@@ -58,7 +56,11 @@ pub(crate) struct BatchOpts {
 
 /// Flags valid only in the interactive REPL.
 #[derive(Default, Clone)]
+// Distinct interactive-mode flags, not a bundle-able group.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct InteractiveOpts {
+    /// `-l`, or a `-`-prefixed argv[0]: source the login profiles.
+    pub login: bool,
     pub no_rc: bool,
     /// `-i` forces interactive mode even when stdin is not a tty.
     pub force_interactive: bool,
@@ -256,7 +258,7 @@ impl Cli {
     /// only selects between the two interactive variants, decided after
     /// `-c`/script are ruled out.
     fn into_mode(self) -> Mode {
-        let is_login = self.login || is_login_shell_argv0();
+        let login = self.login || is_login_shell_argv0();
 
         let capabilities = self
             .capabilities
@@ -311,18 +313,14 @@ impl Cli {
 
         reject_batch_flags_without_batch(self.audit, self.check, self.dump_ast);
 
-        let opts = InteractiveOpts {
+        Mode::Interactive(InteractiveOpts {
+            login,
             no_rc: self.norc,
             force_interactive: self.force_interactive,
             force_stdin: self.force_stdin,
             surface: self.surface,
             run,
-        };
-        if is_login {
-            Mode::Login(opts)
-        } else {
-            Mode::Interactive(opts)
-        }
+        })
     }
 }
 
@@ -440,8 +438,8 @@ mod tests {
     #[test]
     fn login_mode_parse_matrix() {
         match mode_of(&["-l"]) {
-            Mode::Login(o) => assert!(!o.no_rc),
-            m => panic!("`-l` should be Login, got {}", mode_name(&m)),
+            Mode::Interactive(o) => assert!(o.login && !o.no_rc),
+            m => panic!("`-l` should be Interactive, got {}", mode_name(&m)),
         }
 
         match mode_of(&["-lc", "echo hi"]) {
@@ -450,8 +448,11 @@ mod tests {
         }
 
         match mode_of(&["-l", "--norc"]) {
-            Mode::Login(o) => assert!(o.no_rc, "`-l --norc` must keep no_rc"),
-            m => panic!("`-l --norc` should be Login, got {}", mode_name(&m)),
+            Mode::Interactive(o) => {
+                assert!(o.login);
+                assert!(o.no_rc, "`-l --norc` must keep no_rc");
+            }
+            m => panic!("`-l --norc` should be Interactive, got {}", mode_name(&m)),
         }
 
         match mode_of(&["-l", "script.ral"]) {
@@ -462,7 +463,10 @@ mod tests {
 
     #[test]
     fn non_login_mode_parse_matrix() {
-        assert!(matches!(mode_of(&[]), Mode::Interactive(_)));
+        match mode_of(&[]) {
+            Mode::Interactive(o) => assert!(!o.login),
+            m => panic!("no arguments should be Interactive, got {}", mode_name(&m)),
+        }
         match mode_of(&["--norc"]) {
             Mode::Interactive(o) => assert!(o.no_rc),
             m => panic!("`--norc` should be Interactive, got {}", mode_name(&m)),
@@ -484,7 +488,6 @@ mod tests {
 
     fn mode_name(m: &Mode) -> &'static str {
         match m {
-            Mode::Login(_) => "Login",
             Mode::Interactive(_) => "Interactive",
             Mode::Script { .. } => "Script",
             Mode::Command { .. } => "Command",

@@ -62,10 +62,7 @@ impl Session {
     /// Profile/rc errors and escapes are reported and tolerated — a broken
     /// startup file must not strand the user, so the sourcing helpers in
     /// `boot` report and continue.
-    pub(super) fn boot(
-        is_login: bool,
-        opts: &crate::cli::InteractiveOpts,
-    ) -> Result<Self, ExitCode> {
+    pub(super) fn boot(opts: &crate::cli::InteractiveOpts) -> Result<Self, ExitCode> {
         boot::setup_signals();
         let (interactive_mode, terminal) = crate::platform::probe_terminal(true);
         let runtime = Arc::new(Mutex::new(PluginRuntime::default()));
@@ -92,12 +89,12 @@ impl Session {
 
         // Login shell: set umask and source system/user profiles.
         #[cfg(unix)]
-        if is_login {
+        if opts.login {
             rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
         }
 
         boot::setup_terminal(&mut shell);
-        let mut rc = boot::load_profiles(is_login, opts.no_rc, &mut shell, &runtime);
+        let mut rc = boot::load_profiles(opts, &mut shell, &runtime);
         // CLI flags win over rc — apply after load_profiles.
         if let Some(n) = opts.run.recursion_limit {
             shell.set_stack_limit(n);

@@ -28,8 +28,7 @@ fn main() -> ExitCode {
 /// Run the session the arguments named.
 fn run(mode: Mode) -> ExitCode {
     match mode {
-        Mode::Login(opts) => interactive(true, opts),
-        Mode::Interactive(opts) => interactive(false, opts),
+        Mode::Interactive(opts) => interactive(opts),
         Mode::Script {
             path,
             script_args,
@@ -45,10 +44,10 @@ fn run(mode: Mode) -> ExitCode {
 
 /// An interactive invocation whose stdin is a script is not interactive at
 /// all: the script runs in batch, and no REPL is booted.
-fn interactive(is_login: bool, opts: InteractiveOpts) -> ExitCode {
+fn interactive(opts: InteractiveOpts) -> ExitCode {
     if opts.reads_stdin_as_script() {
         batch::run_stdin(opts.run)
     } else {
-        repl::run_interactive(is_login, &opts)
+        repl::run_interactive(&opts)
     }
 }
