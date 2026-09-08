@@ -137,7 +137,7 @@ fn record_call(session: &Avatar, cmd: String, summary: Option<String>) -> Option
         cmd,
         summary,
     }) {
-        Ok(recorded) => Some(BlockId::new(recorded.stamp().seq())),
+        Ok(recorded) => Some(BlockId::new(recorded.locus().seq())),
         Err(error) => {
             session.recorder().report_fault(&error);
             None

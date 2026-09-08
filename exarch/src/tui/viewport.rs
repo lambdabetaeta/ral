@@ -1484,7 +1484,7 @@ mod tests {
     /// claim that says live and committed are the same rendering.
     #[test]
     fn the_record_that_completes_a_line_does_not_change_the_picture() {
-        use crate::record::{Blocks, Display, Fold, Record, Recorded, Seq, Stamp, View};
+        use crate::record::{Blocks, Display, Fold, Locus, Record, Recorded, Seq, View};
 
         let mut vp = viewport();
         let mut memo = Blocks::default();
@@ -1492,7 +1492,7 @@ mod tests {
             View::step(
                 memo,
                 &Recorded::new(
-                    Stamp::placeholder(Seq::new(seq)),
+                    Locus::placeholder(Seq::new(seq)),
                     Record::Display(Display::Answer { text: text.into() }),
                 ),
             )
@@ -1616,7 +1616,7 @@ mod tests {
     /// resync past a full window of chrome carries it in.
     #[test]
     fn committed_thinking_stays_visible_in_sticky_viewport() {
-        use crate::record::{Blocks, Display, Fold, Record, Recorded, Seq, Stamp, View};
+        use crate::record::{Blocks, Display, Fold, Locus, Record, Recorded, Seq, View};
 
         let mut vp = viewport();
         vp.push_chrome(ChromeKind::Prompt, vec![Line::from("hello cutie")]);
@@ -1645,11 +1645,11 @@ mod tests {
         );
 
         let mut memo = Blocks::default();
-        let stamp = Stamp::placeholder(Seq::new(1));
+        let locus = Locus::placeholder(Seq::new(1));
         View::step(
             &mut memo,
             &Recorded::new(
-                stamp,
+                locus,
                 Record::Display(Display::Thinking {
                     text: "considering the shape\n".into(),
                 }),
@@ -1831,11 +1831,11 @@ mod tests {
         use crate::record::{BlockId, Display};
         let mut vp = viewport();
         let mut memo = Blocks::default();
-        let call_stamp = Stamp::placeholder(Seq::new(1));
+        let call_locus = Locus::placeholder(Seq::new(1));
         View::step(
             &mut memo,
             &Recorded::new(
-                call_stamp.clone(),
+                call_locus.clone(),
                 Record::Display(Display::ToolCall {
                     tool: "ral".into(),
                     cmd: "read 'line.rs'".into(),
@@ -1847,7 +1847,7 @@ mod tests {
         View::step(
             &mut memo,
             &Recorded::new(
-                Stamp::placeholder(Seq::new(2)),
+                Locus::placeholder(Seq::new(2)),
                 Record::Display(Display::HarnessCall {
                     verb: "cancel".into(),
                     subject: Some("hunter".into()),
@@ -1860,10 +1860,10 @@ mod tests {
         View::step(
             &mut memo,
             &Recorded::new(
-                Stamp::placeholder(Seq::new(3)),
+                Locus::placeholder(Seq::new(3)),
                 Record::Display(Display::Result {
                     text: "a line\n".repeat(40),
-                    call: BlockId::new(call_stamp.seq()),
+                    call: BlockId::new(call_locus.seq()),
                 }),
             ),
         )
@@ -1886,13 +1886,13 @@ mod tests {
 
     // ── `record::Printer` ───────────────────────────────────────────────────
 
-    use crate::record::{Display, Fold, Record, Recorded, Refusal, Seq, Stamp, View};
+    use crate::record::{Display, Fold, Locus, Record, Recorded, Refusal, Seq, View};
 
     fn step(memo: &mut Blocks, records: impl IntoIterator<Item = Record>) -> Result<(), Refusal> {
         for (i, r) in records.into_iter().enumerate() {
             #[allow(clippy::cast_possible_truncation, reason = "test record count")]
-            let stamp = Stamp::placeholder(Seq::new(i as u64));
-            View::step(memo, &Recorded::new(stamp, r))?;
+            let locus = Locus::placeholder(Seq::new(i as u64));
+            View::step(memo, &Recorded::new(locus, r))?;
         }
         Ok(())
     }
@@ -1981,8 +1981,8 @@ mod tests {
     /// on the same `Seq`.
     fn advance(memo: &mut Blocks, seq: &mut u64, record: Record) {
         *seq += 1;
-        let stamp = Stamp::placeholder(Seq::new(*seq));
-        View::step(memo, &Recorded::new(stamp, record)).expect("a display-only fold never refuses");
+        let locus = Locus::placeholder(Seq::new(*seq));
+        View::step(memo, &Recorded::new(locus, record)).expect("a display-only fold never refuses");
     }
 
     /// A chrome row drawn between two commits keeps its place across a
@@ -2161,7 +2161,7 @@ mod tests {
     #[test]
     fn a_result_reopens_the_call_it_patches() {
         let mut memo = Blocks::default();
-        let call = Stamp::placeholder(Seq::new(1));
+        let call = Locus::placeholder(Seq::new(1));
         View::step(
             &mut memo,
             &Recorded::new(

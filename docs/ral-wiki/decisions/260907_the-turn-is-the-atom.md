@@ -1,6 +1,6 @@
 ---
-status: active
-generated_at_commit: 4bc5006c
+status: 'active; amended in carrier — the same decision carried through to residency: one `Context` holding every turn and *where* it is, `Held` a projection off it. See *Amended: the context is one structure*.'
+generated_at_commit: 14c8cae4
 ---
 
 # The turn is the atom of eviction
@@ -137,7 +137,7 @@ pub struct Folded { state: State, turns: Vec<Turn>, cuts: Vec<Cut> }
   belongs to (`Ledger::placement`, assigned by `record_turn`, recomputed by
   `refold`); runs are contiguous and ids monotone, so `Ledger::events(turn)` is
   two `partition_point`s. `Turn` carries no range. For inherited turns
-  placement is foreign — which file, which stamps — held in the lazily built
+  placement is foreign — which file, which loci — held in the lazily built
   `ancestry_index` and consulted by `read`/`grep` alone.
 - **`Folded` is the fold's pure output** — what `refold` returns and what the
   `fold == memo` law of
@@ -226,6 +226,144 @@ Three points where the landed design departs from the plan's letter.
   is sent, being `history_bytes` rather than a sum of the rows.
 - Old `record.jsonl` files do not resume. No compatibility shim.
 
+## Amended: the context is one structure
+
+Landed the next day, in the commit that carries this paragraph. Every argument
+above stands; what changes is what the one structure *says about a turn*. It
+said whether the turn had left; it now says **where the turn is** — its records
+in memory, or a pointer to the file and byte ranges that hold them. Eviction
+moves a turn from here to there; an enquiry looks in the structure and, if the
+turn is there, in the file. `Folded`/`Ledger`/`Cut`/`Held`-as-state become
+`Context`/`Body`/`Pointer`/`Held { cut }`.
+
+### The defect that forced it
+
+`Folded` recorded that a turn had left, never which cut took it, so the marker
+re-derived that from `(held, cuts[].through)` by an id window
+(`cut_fragments`). The window is wrong wherever a cut leaves a survivor: a user
+turn kept at cut *k* by the survivor rule of decision 2 and taken at cut *k*+1
+has `id ≤ through_k`, so it was drawn under cut *k* — the wrong note — and cut
+*k*'s row for that exchange gained that turn's bytes *after the fact*, an
+already-sent row growing retroactively. Nothing ever vanished; the marker
+misattributed, and a row's weight was not stable. The representation did not
+record what a cut did, so the renderer had to guess. Adjacent to it, because
+the marker was recomputed only at a cut (`recompute_head`), a drop that emptied
+a partially evicted exchange left the sentence still saying "turns 4–5 of
+exchange 3" when exchange 3 had left whole.
+
+Behind the marker, three structures — `Ledger` by slot, `Folded` by turn id,
+and a `Memo` of caches around them — were three partial views of one fact kept
+in step by hand: `resume` needed a second fold (`Admission`) to judge the file
+and a third (`refold`) to check the first two agreed, and "where are this
+turn's bytes?" had two mechanisms (`Ledger.freed`, eager by slot; a lazily
+built `AncestorIndex`, by turn, walking every ancestor file) plus a third
+answer for a turn a seed re-recorded in part.
+
+### The structure
+
+```rust
+pub struct Context {
+    turns: Vec<Turn>,             // every turn this lineage recorded, in id order
+    notes: Vec<Option<String>>,   // one slot per eviction; `Body::There::cut` indexes it
+    state: State,
+    source: PathBuf,              // own record.jsonl: where a turn here points once it leaves
+    len: usize,                   // protocol records folded
+    newest_edit: Option<usize>,
+}
+
+struct Turn { id: u64, exchange: u64, kind: TurnKind, label: String,
+              bytes: usize, body: Body }
+
+enum Body {
+    /// In the context. `origin` is `Some` for a turn first recorded in an
+    /// ancestor's file: `records` are what the seed re-recorded here.
+    Here { records: Vec<Recorded<Protocol>>, origin: Option<Pointer> },
+    /// Departed. `cut` indexes `Context::notes`; `None` for a drop.
+    There { at: Pointer, cut: Option<usize> },
+}
+
+pub struct Pointer { pub source: PathBuf, pub loci: Vec<Locus> }
+pub struct Row { pub id, pub exchange, pub kind, pub label, pub bytes, pub held: Held }
+pub enum Held { Resident, Evicted { cut: usize }, Dropped }
+pub struct Linked { pub row: Row, pub at: Pointer }
+```
+
+`Turn` and `Body` are private to `record/model.rs`. This revises "`Turn` is the
+row; there is no row type" above: a turn holds records, so it is not a value to
+hand out. `Turn::row` projects `Held` off the body — `Here` is `Resident`,
+`There { cut: Some(c) }` is `Evicted { cut: c }`, `There { cut: None }` is
+`Dropped` — and is the one way a turn leaves the structure as a row;
+`Context::linked` is the one way it leaves as an address. `Row`, `Held`,
+`Pointer`, `Linked` are the only public shapes, and `Display::Context` carries
+`Vec<Row>`. `Held` carrying its cut is what makes the marker correct by
+construction: the body says which cut took a turn, so nothing re-derives it,
+and there is no second map to reconcile against the rows.
+
+Everything else is a fold of that one structure, rendered on call and memoised
+nowhere: `rendered()` (owned `Rendered { messages: Vec<ChatMessage>, bytes }`),
+`history_bytes`, `render_head`, `context_survey`, `transcript_index`,
+`plan_eviction`, `sourced`. `Ledger`, `Folded`, `Memo`, `Cut`, `TurnRender`,
+`Ancestry`/`AncestorIndex`/`Break`/`Fault`, `Rendering`, `Admission` and
+`refold` all go, and with them the model fold's *check* of the `fold == memo`
+law of
+[[decisions/260812_context-is-a-projection|context-is-a-projection]]: replay
+still carries that law generically, but there is no second fold to compare a
+resume against, because `Context::step` is the one fold and judges each record
+before applying it — so a hand-edited or foreign file is refused by the very
+function that folds a live one. What guards a read-back is `read_at`'s digest
+check, at the moment of the read, where the risk is. `Fold for Model` keeps
+`type Memo = Context`: the trait is untouched.
+
+### The principle's two corollaries
+
+- **Every protocol record acts on the structure** — it opens or extends a turn,
+  moves turns out, or installs them. A record the fold would ignore is not
+  protocol; hence change 5 below.
+- **A turn's transcript copy is where it was first recorded.** A fork's link
+  carries that address for every row, resident or not, so a turn a seed
+  re-recorded only in part — the assistant turn whose tool call *is* the fork —
+  still reads back whole, and evicting it later in the child points at the
+  original copy, never at the short one. A grandchild's `at` already names the
+  grandparent's file: the lineage is flattened at each fork, so nothing walks
+  it, and `Inherited::source`/`::through` go.
+
+### Accepted changes for the model and the user
+
+1. **The door returns turn material, always.** `` transcript `read `` on an
+   abandoned exchange answers its real records, not the note the context sent
+   in their place — the door is *the record*, the note is what was sent. This
+   promotes the first accepted loss above to a rule, and retires the
+   whole-vs-turns axis with it (`Rendering`, `reached_whole`, `one_file`,
+   `closed_messages`): a whole closed exchange no longer comes back through
+   one rendering, which is the half of the third amendment above that goes. A
+   turn a seed re-recorded in part reads back whole from its origin, where the
+   child used to answer its own short copy.
+2. **An unreadable ancestor file is a read error at the door**, named by path,
+   not a memoised `Break` with a refusal grammar of its own. An unnarrowed
+   `` `grep `` still passes over a turn it cannot reach — now at the read
+   rather than at location time, a pointer being resolved without touching a
+   file; a narrowing that names one is still refused.
+3. **The link carries an address per row.** `Protocol::Inherited { turns:
+   Vec<Linked>, notes }` grows by one `Pointer` per row — a path and one
+   `Locus` per record the row holds; `Locus` derives serde.
+4. **A root log recorded before this does not resume.** `Held::Evicted` carries
+   its cut, so `Display::Context`'s rows change shape, and the bookends change
+   class. No compatibility is owed and none is kept; a child log is never
+   resumed.
+5. **`SessionStarted`, `SessionResumed`, `SessionEnded` and `TurnStarted` are
+   `Forensic`.** They were folded by nothing, and five functions carried an arm
+   to say so; `record_turn` filed them under the last turn, which may already
+   have left. They are durable evidence that is not model context, by the
+   wiki's own definition ([[decisions/260814_one-seam-one-log|one-seam-one-log]]).
+
+The cost paid for holding no memo: the context is built once per provider
+request, on top of the clone per attempt at the wire door that
+[[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] fixed
+there; and the eviction trigger, weighed at every turn boundary, renders the
+marker and walks each unsettled closed exchange's records for the one fact
+`abandoned_note` varies on. Both accepted deliberately, against a memo field
+that would have to be kept in step.
+
 ## What this supersedes
 
 [[decisions/260906_context-rollover|context-rollover]] stands on
@@ -241,7 +379,10 @@ on its law — the provider-facing context is a persistent value of shared
 segments, and the memo is a memo of a pure function at immutable arguments —
 with its cache re-keyed per turn (`TurnRender`) rather than per span, and its
 retroactive-tail split dissolved: `render_turn` takes no flags, and the
-exchange in hand is assembled turn by turn like any other.
+exchange in hand is assembled turn by turn like any other. The amendment above
+then retires the memo itself: `Rendered` is owned and rebuilt per request, and
+what survives of that decision's law is the wire door's one clone per attempt,
+and the context being a pure function of the structure.
 
 ## See also
 

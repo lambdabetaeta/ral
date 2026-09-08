@@ -12,6 +12,12 @@ the run dies — misclassified as fatal). The protocol state machine
 admissibility* at the one place messages enter the log: the `deliberate` commit
 boundary in [[map/exarch/agent|agent]].
 
+Sequencing itself is judged by the very function that folds. `Context::step`
+judges a record before applying it, so a hand-edited or foreign file is refused
+by the same rule a live session is held to; there is no second fold to
+disagree with the first, and nothing for a resume to compare
+([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]).
+
 Sequencing is **not** strict user/assistant alternation, and never was.
 Consecutive same-role messages are routine: a session that has evicted sends
 the head marker — the harness's user-voice index of what left — as message 0,
@@ -48,7 +54,7 @@ Three commit-time obligations, all in `Agent::deliberate` (the deep-review X-tag
 
 Three adjacent obligations keep the invariant whole:
 
-- **Eviction runs where it can (X1).** It needs only `Memo::can_evict`
+- **Eviction runs where it can (X1).** It needs only `Context::can_evict`
   (`is_ready` → `admits_new_turn`) — false solely at `AwaitingToolResults`,
   strictly weaker than `ReadyForUser`: an edit may land at any rest but a
   batch in flight, because outstanding tool calls name the assistant frame
@@ -58,12 +64,12 @@ Three adjacent obligations keep the invariant whole:
   a cut off the work in hand is not this predicate but `plan_eviction`'s own
   shape — it draws its candidates from every resident turn *but the last* —
   and `validate_edit`, which refuses that turn by name.
-- **`Inherited` stands only at a fork's opening.** `Admission` refuses
-  `Protocol::Inherited` anywhere but the first protocol record of a child log:
-  at `ReadyForUser`, with the turn table still empty, and never twice. The
-  record is
+- **`Inherited` stands only at a fork's opening.** `Context::step` refuses
+  `Protocol::Inherited` anywhere but the first protocol record of a child log —
+  the position *is* the rule, `len == 0`, needing no flag and no reading of
+  the table. The record is
   sequencing-neutral — it commits no message and advances no state — so the
-  rule cannot be read off a `State` alone; it is admission's own, and it is
+  rule cannot be read off a `State` alone; it is the fold's own, and it is
   what makes "a log has at most one ancestry, fixed at the fork that opened it"
   a property of the file rather than a habit of the writer
   ([[decisions/260906_context-rollover|context-rollover]]). What the link

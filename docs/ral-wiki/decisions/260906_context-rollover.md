@@ -1,6 +1,6 @@
 ---
 status: 'superseded in part by [[decisions/260907_the-turn-is-the-atom]] — evict-don''t-summarise, the head marker as one message at 0, evictions as prefix operations, the cache arithmetic, the lineage''s one address space and `transcript` as the door all stand. What resolves otherwise: the atom of a cut is the **turn**, not the exchange; its address is `through`, not `through_exchange`; it is weighed at every turn boundary, not at `deliberate` entry; and the model fold''s `View` / `Eviction` / `EvictedRow` / `span_row` carriers dissolve into one `Turn` table with its `Cut`s.'
-generated_at_commit: 7e129df6
+generated_at_commit: 14c8cae4
 ---
 
 # Context rollover: evict, don't summarise
@@ -10,12 +10,19 @@ generated_at_commit: 7e129df6
 > every argument below and changes the unit they act on: a cut is addressed by
 > a turn id and weighed at every turn boundary, and the fold is one table of
 > turns rather than a list of spans and eviction rows. Read that page for the
-> shapes; this one for why eviction replaced summarisation at all.
+> shapes; this one for why eviction replaced summarisation at all. Amended
+> again on 2026-09-08, in the same carrier: a departed turn is not a freed
+> ledger slot but a `Pointer` — the file and the loci in it — held on the turn
+> itself, and an ancestor's turns are reached by the pointer the fork's link
+> copied for every row, so the memoised ancestry walk (`AncestorIndex`,
+> `Break`, `Fault`) is gone with the two-mechanism split it existed to bridge.
+> `Admission` is `Context::step`.
 
 **When the context fills, its older half leaves and nothing is written in its
 place but the harness's own index of what left.** No summariser runs. Nothing
 is lost either: `record.jsonl` already holds every record and the model fold
-already keeps a byte-range `Stamp` for each one it frees, so the material is
+keeps, for every turn that leaves, a `Pointer` — the file, and one `Locus` per
+record of it — so the material is
 still there — it is merely no longer being paid for. What this decision adds is
 the door: `transcript` becomes a tag family that reads the record back, and
 `context` keeps acting on what is sent. The two words are distinct and neither
@@ -130,13 +137,17 @@ run alone.
   or `inherited`. A departed row is listed at the weight it carried when it
   left, which is the honest figure available without re-rendering it.
 - `` `read `` — the material named, whether resident, departed to this log's
-  own file, or an ancestor's. A whole closed exchange renders through
-  `closed_messages`, so what comes back is byte-identical to what the model
-  was sent: the records hold the clipped strings.
+  own file, or an ancestor's. What comes back is each turn's own records, which
+  hold the clipped strings the model saw. (As first landed a whole closed
+  exchange came back byte-identical to what was sent, through
+  `closed_messages`; the carrier amendment retires that axis — the door
+  answers the record, and the note an abandoned exchange was sent instead is
+  not one.)
 - `` `grep `` — a Rust regex (ral's `re-*` dialect, never a second one) over
-  the transcript's text, host-side, per line. What the ledger holds is
-  searched off the render cache, then the departed off `record.jsonl`, then
-  each ancestor file, one sequential pass per file in stamp order. It answers
+  the transcript's text, host-side, per line. What the context holds is
+  searched off its own records, the departed off `record.jsonl`, and an
+  inherited turn off the file its pointer names, one sequential pass per file
+  in locus order. It answers
   `[hits, total]` with at most `GREP_HITS` (100) hits oldest first and each
   line clipped at 200 bytes, so a pattern matching everything costs one answer
   rather than the transcript, and `total` tells the model to narrow rather
@@ -152,17 +163,14 @@ discipline, below.
 
 **And it does not hold the session lock while it reads.** The two halves want
 different things: deciding *where* to read needs the fold, doing the reading
-needs only owned data. `Memo::locate_read` and `locate_grep` resolve
+needs only owned data. `Context::locate_read` and `locate_grep` resolve
 everything named under the desk's lock into a `TranscriptRead` — a resident
-run by value, a departed or inherited one as its path and `Stamp`s — and
-`TranscriptRead::exchanges` and `::grep` read once the
+run by value, a departed or inherited one as the `Pointer` its row carries —
+and `TranscriptRead::exchanges` and `::grep` read once the
 guard has dropped, borrowing nothing. A `` `grep `` over a long lineage
 therefore no longer blocks the seam, the bus and `/resources` for its
-duration. `` `index `` stays whole under the lock on purpose: it needs `&mut`
-for every row it weighs, and its one costly part is the ancestry walk, paid
-once per session. That walk is also the one file read still taken under the
-lock by the other two — on the first read that reaches past this log's own
-ledger, and never again.
+duration. `` `index `` stays whole under the lock, and costs nothing there:
+it is one row per turn off the table, opening no file at all.
 
 The refusals name the state rather than the error: an id already gone is told
 what the earliest still in the context is; one never recorded is told what the
@@ -170,13 +178,13 @@ latest recorded is; and what is still being written is refused as always.
 
 Reading a completed record by byte range from the file this process is still
 appending to is safe, which is what makes the door work in a live session: a
-`Stamp` exists only once the seam has written the whole record under its
-lock. `Ledger.source` is `record.jsonl`'s path, fixed at construction
-(`Memo::new`) rather than attached at resume.
+`Locus` exists only once the seam has written the whole record under its
+lock. The structure's own `source` is `record.jsonl`'s path, fixed at
+construction (`Context::new`) rather than attached at resume.
 
 **A byte range is meaningless without the file it was measured in**, so
-`read_stamped` compares the record's bytes against the truncated blake3 the
-`Stamp` already carried and refuses a mismatch by name: a rotated segment, a
+`read_at` compares the record's bytes against the truncated blake3 the
+`Locus` already carried and refuses a mismatch by name: a rotated segment, a
 copied session directory, an edited log. The check runs *before* the JSON
 parse, not after, because a stale range can hold a perfectly well-formed
 record — parsing first would either refuse it as bad JSON, naming the wrong
@@ -195,8 +203,8 @@ individual `import` rows, and `` context `drop `` can shed exactly one
 exchange of them. The import this replaced minted a single id for the whole
 inherited blob, and a child could name none of it.
 
-**Ids are lineage-monotone.** `Memo::id_floor` is the maximum of this log's
-own reach and the ancestry's, so a child's first prompt is parent-max + 1 and
+**Ids are lineage-monotone.** `Context::id_floor` is the reach of a table that
+already holds the ancestry's turns, so a child's first prompt is parent-max + 1 and
 an id names exactly one thing in the whole ancestry. A child never resolves an
 id above its inherited maximum against an ancestor: those are its own.
 
@@ -206,7 +214,7 @@ and the parent's own fold by value, so the child's marker opens where the
 parent's stood without reading the parent's file
 ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]] for what that
 value is now). Resolution then
-goes: own resident, own departed by `Stamp`, then the ancestry — walked once
+goes: own resident, own departed by `Locus`, then the ancestry — walked once
 by `index_ancestry` into a memoised `AncestorIndex`, each pass stopping at
 that link's reach and following the ancestor's own `Inherited` on to the
 grandparent. A link the walk cannot follow is remembered as a `Break`, with
@@ -221,12 +229,22 @@ fork's opening: at `ReadyForUser`, with the table empty, and never twice.
 
 The cost is one JSON pass over an ancestor file on the first read that
 reaches past the child's own ledger, and never again. The pass is O(file) in
-time and holds only stamps: `index_ancestor` records where each record lies
+time and holds only loci: `index_ancestor` records where each record lies
 rather than the record itself. It partitions them by the live fold's own
 `record_turn`, on the live fold's own type, so the ancestry's notion of where
 a turn begins cannot drift from the session's. Copying the parent's
 transcript into the child at fork was rejected: megabytes per spawn, and a new
 class of record that is in the log but not in the context.
+
+That walk is what the carrier amendment removes, keeping this section's three
+pieces intact. The link now carries a `Pointer` per row — the file a turn was
+*first* recorded in, and the loci of its records there — so resolution is one
+lookup in the table and, where the turn is not here, one read at the address
+the row already names. Nothing walks a lineage, because a fork flattens it:
+a grandchild's row names the grandparent's file directly. The cost moves from
+one O(file) pass per session to ~50 bytes per record on the link, and the
+break's own refusal grammar becomes an ordinary read error at the door, named
+by path.
 
 ## What it costs the cache
 
@@ -297,7 +315,7 @@ file.
   no live child ever holds a link to a rotated file; a hand-deleted directory
   is the usual cause, refused naming the path, and a line that will not parse
   is refused as itself rather than as a deletion. A
-  file that is present but is no longer the one the stamps were measured in
+  file that is present but is no longer the one the loci were measured in
   is refused too, by the digest, rather than answering with whatever now lies
   at those offsets.
 - **`bytes` for a departed row in `` `index ``** is the weight it carried
@@ -318,7 +336,7 @@ file.
 [[decisions/260812_context-is-a-projection|context-is-a-projection]] stands
 whole on its law — no recorded record is ever removed, and the memo is a fold
 of the log, not a second authority — and eviction obeys it exactly: freeing
-residency keeps the `Stamp`. Two of its accepted losses are withdrawn:
+residency keeps the `Locus`. Two of its accepted losses are withdrawn:
 
 - "Dropped and folded spans are intentionally not a queryable history store;
   `transcript` before a drop is the sanctioned handoff." They are now exactly

@@ -161,8 +161,13 @@ store, read through `transcript`'s `` `index ``/`` `read ``/`` `grep ``, so
 anything. And the prefix/set asymmetry is dissolved rather than fixed: there
 is no digest left to be a privileged kind of span, `` `fold `` becoming
 `` `evict `` over a list of prefix removals whose rows `refold` recomputes.
-The law itself is untouched — eviction frees residency and keeps the
-`Stamp` — and so is everything this page says about the fold.
+The law itself is untouched — eviction frees residency and keeps the address,
+a `Pointer` naming the file and the `Locus` of each record
+([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]) — and so is
+everything this page says about the fold. The `fold == memo` law still holds,
+and `replay` still carries it generically; what the model fold no longer does
+is *check* it against a second fold of its own, `Context::step` being the one
+fold on both the live and the resumed path.
 
 ## Superseding note: there is no transient regime
 
@@ -175,7 +180,7 @@ quantifies over nothing: every session has a `record.jsonl`, a run lock and a
 rotation, and there is no election for a child to inherit. §The price per
 regime's "in every regime, including transient `--no-logs`; that mode
 discards removed spans instead of spilling them" loses its second regime: a
-span that leaves the view always leaves a `Stamp` behind, and O(view)
+turn that leaves the context always leaves its address behind, and O(view)
 residency is the price everywhere. Transience is now where a session
 directory lives — a `TempDir` that unlinks at exit — not a second shape for
 the fold.

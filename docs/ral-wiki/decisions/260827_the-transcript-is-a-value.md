@@ -1,15 +1,28 @@
 ---
-status: 'accepted; amended in carrier by [[decisions/260907_the-turn-is-the-atom]] — the property, the wire door and the rejected candidates stand whole. The value is spelled `Rendered`, its cache is keyed per **turn** (`TurnRender`) rather than per span, and the renderer split dissolves: `render_turn` is the one renderer, taking no flags, and the exchange in hand is assembled turn by turn like any other.'
+status: 'accepted; amended in carrier by [[decisions/260907_the-turn-is-the-atom]] — the wire door and the rejected candidates stand whole. The value is spelled `Rendered`, and it is **owned**: there is no render memo and no sharing, the context being rebuilt from the structure per request. What survives is the door — one owned wire value per HTTP attempt — and the property that the context is a pure function of the structure, byte-accounted from its rows.'
 ---
 
 # The transcript is a value
 
 > Amended in carrier by
-> [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]: read
-> `Rendered` for `Transcript`, `TurnRender`/`render_turn` for
-> `SpanRender`/`render_closed_entry`, and one turn-by-turn assembly for the
-> closed/tail split. The property below — sharing follows immutability, owned
-> wire values at exactly one door — is unchanged.
+> [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]], in two
+> steps. First: read `Rendered` for `Transcript`, `TurnRender`/`render_turn`
+> for `SpanRender`/`render_closed_entry`, and one turn-by-turn assembly for
+> the closed/tail split. Then, with residency moved onto the turn itself, the
+> memo goes: `Rendered` is `{ Vec<ChatMessage>, bytes }`, owned, built by
+> `Context::rendered()` per provider request — once per turn, never per loop
+> iteration — and the `Arc` segments and the shared-reference crossings go
+> with it. The half of the property that survives is the door: an owned
+> whole-history value exists at exactly one named place, manufactured at most
+> once per HTTP attempt, `manufacture` still taking `&Rendered` inside
+> `retry_with_backoff`'s per-attempt closure. The cost is one build of the
+> context per request on top of that clone, accepted deliberately for a
+> structure that memoises nothing: `into_chat_messages` allocates a carrier
+> per record in any case, and the byte total is summed from the rows rather
+> than re-serialised. What replaces the memo's guarantee is not a cache key
+> but the structure — the context is a pure function of it, so message 0 is
+> byte-stable between edits because it is a function of something that did not
+> change.
 
 **The provider-facing history is a persistent value shared by reference across
 the fold, and owned `genai` wire values are manufactured at exactly one door,

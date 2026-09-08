@@ -284,18 +284,14 @@ pub enum SynodEvent {
 }
 
 /// `Protocol` is the model fold's own verbatim payload — a `ChatMessage`, a
-/// tool-call id, a session bookend — round-tripped to the provider, never
-/// drawn.  Every arm is named so a ninth class arriving here is a compile
-/// error, not a silent drop.
+/// tool-call id — round-tripped to the provider, never drawn.  Every arm is
+/// named so a ninth class arriving here is a compile error, not a silent
+/// drop.
 fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
     match protocol {
-        Protocol::SessionStarted { .. }
-        | Protocol::SessionResumed { .. }
-        | Protocol::SessionEnded
-        | Protocol::UserPrompt { .. }
+        Protocol::UserPrompt { .. }
         | Protocol::ContextMessage { .. }
         | Protocol::Inherited { .. }
-        | Protocol::TurnStarted { .. }
         | Protocol::AssistantMessage { .. }
         | Protocol::ToolResults { .. }
         | Protocol::ContextEdited { .. } => None,
@@ -413,7 +409,11 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::HarnessResult { .. }
         | Forensic::Pin { .. }
         | Forensic::Unpin { .. }
-        | Forensic::ModelChanged { .. } => None,
+        | Forensic::ModelChanged { .. }
+        | Forensic::SessionStarted { .. }
+        | Forensic::SessionResumed { .. }
+        | Forensic::SessionEnded
+        | Forensic::TurnStarted { .. } => None,
     }
 }
 
@@ -436,7 +436,11 @@ fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::HarnessResult { .. }
         | Forensic::Pin { .. }
         | Forensic::Unpin { .. }
-        | Forensic::ModelChanged { .. } => None,
+        | Forensic::ModelChanged { .. }
+        | Forensic::SessionStarted { .. }
+        | Forensic::SessionResumed { .. }
+        | Forensic::SessionEnded
+        | Forensic::TurnStarted { .. } => None,
     }
 }
 

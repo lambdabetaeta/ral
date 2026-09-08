@@ -847,7 +847,7 @@ mod tests {
     /// in `print_row`'s `K::Error` arm.
     #[test]
     fn recovered_worker_panic_reports_error_not_success() {
-        use crate::record::{Forensic, Record, Recorded, Seq, Stamp};
+        use crate::record::{Forensic, Locus, Record, Recorded, Seq};
         let root: AgentId = 1;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
@@ -857,7 +857,7 @@ mod tests {
             Signal::Fact(
                 root,
                 Recorded::new(
-                    Stamp::placeholder(Seq::new(1)),
+                    Locus::placeholder(Seq::new(1)),
                     Record::Forensic(Forensic::Error {
                         text: format!("{}boom", crate::bus::WORKER_PANIC_PREFIX),
                     }),
@@ -876,7 +876,7 @@ mod tests {
     /// A child's own turns never count toward root's.
     #[test]
     fn num_turns_counts_root_turns() {
-        use crate::record::{Display, Record, Recorded, Seq, Stamp};
+        use crate::record::{Display, Locus, Record, Recorded, Seq};
         let root: AgentId = 1;
         let sub: AgentId = 2;
         let mut sink_out = Vec::new();
@@ -889,7 +889,7 @@ mod tests {
             Signal::Fact(
                 id,
                 Recorded::new(
-                    Stamp::placeholder(Seq::new(seq)),
+                    Locus::placeholder(Seq::new(seq)),
                     Record::Display(Display::Turn { id: turn }),
                 ),
             )
@@ -907,7 +907,7 @@ mod tests {
     /// `absorb` drives.
     #[test]
     fn a_card_fact_reaches_stderr_through_the_view_fold() {
-        use crate::record::{Display, Record, Recorded, Seq, Stamp};
+        use crate::record::{Display, Locus, Record, Recorded, Seq};
         let root: AgentId = 1;
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
@@ -921,7 +921,7 @@ mod tests {
             Signal::Fact(
                 root,
                 Recorded::new(
-                    Stamp::placeholder(Seq::new(1)),
+                    Locus::placeholder(Seq::new(1)),
                     Record::Display(Display::Card { marks }),
                 ),
             ),

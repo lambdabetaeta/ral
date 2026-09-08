@@ -228,9 +228,11 @@ fn replay_refuses_a_ledger_line_it_does_not_recognise() {
     }
 }
 
-/// A `record.jsonl` written before this change carries a bare `"provider"`
-/// field and no `"service"`/`"account"` — the wire shape the rename-not-remove
-/// on `record.rs`'s three identity fields exists to keep resumable.
+/// A `record.jsonl` written before the identity fields split carries a bare
+/// `"provider"` and no `"service"`/`"account"` — the wire shape the
+/// rename-not-remove on `record.rs`'s three identity fields exists to keep
+/// resumable. The bookend is `Forensic`: a log older than *that* change does
+/// not resume at all, and is not what this pins.
 #[test]
 fn a_pre_change_record_log_still_resumes() {
     let root = tempfile::tempdir().expect("run root");
@@ -241,7 +243,7 @@ fn a_pre_change_record_log_still_resumes() {
     let line = serde_json::json!({
         "at_unix_ms": 0,
         "record": {
-            "Protocol": {
+            "Forensic": {
                 "kind": "session_started",
                 "session_id": 0,
                 "parent": null,

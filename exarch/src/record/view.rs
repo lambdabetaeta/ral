@@ -8,7 +8,7 @@
 //! carries no model-context state, so it has nothing to fold a protocol
 //! record into.
 
-use super::{Display, Fold, Forensic, Recorded, Refusal, Seq, Turn};
+use super::{Display, Fold, Forensic, Recorded, Refusal, Row, Seq};
 use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
 use ral_core::serial::FOValue;
 
@@ -63,7 +63,7 @@ pub enum BlockKind {
         notice: NoticeFact,
     },
     Context {
-        rows: Vec<Turn>,
+        rows: Vec<Row>,
         evicted: usize,
     },
     Cancelled,
@@ -156,10 +156,10 @@ pub struct Blocks {
     rev: u64,
     usage: UsageTotal,
     /// The model in force, from the most recent [`Forensic::ModelChanged`].
-    /// A session's *first* model rides `Protocol::SessionStarted`, which is
-    /// outside this fold's class — so a session that never switches models
-    /// has no entry here.  A printer wanting the opening model too must read
-    /// it off the model fold's own memo; this fold does not duplicate it.
+    /// A session's *first* model rides [`Forensic::SessionStarted`], which
+    /// this fold ignores — so a session that never switches models has no
+    /// entry here.  A printer wanting the opening model too must read it off
+    /// the model fold's own memo; this fold does not duplicate it.
     model: Option<(String, String)>,
     /// The [`Seq`] of the first row this fold ever held, remembered past
     /// eviction — the door [`Self::rows`] no longer names once the window
@@ -460,8 +460,14 @@ fn step_forensic(memo: &mut Blocks, seq: Seq, f: Forensic) {
         Forensic::HarnessResult { text } => memo.push(seq, BlockKind::HarnessResult { text }),
         // The history informs a resume note; the live register follows the
         // shell boundary and is not restored — so neither is a scrollback
-        // row this fold draws.
-        Forensic::Pin { .. } | Forensic::Unpin { .. } => {}
+        // row this fold draws.  The session bookends and a turn's effort dial
+        // draw none either: evidence with a display twin, or with none.
+        Forensic::Pin { .. }
+        | Forensic::Unpin { .. }
+        | Forensic::SessionStarted { .. }
+        | Forensic::SessionResumed { .. }
+        | Forensic::SessionEnded
+        | Forensic::TurnStarted { .. } => {}
         Forensic::ModelChanged { model, label, .. } => memo.model = Some((model, label)),
     }
 }
@@ -474,7 +480,7 @@ impl Fold for View {
     type Memo = Blocks;
 
     fn step(memo: &mut Blocks, record: &Recorded<super::Record>) -> Result<(), Refusal> {
-        let seq = record.stamp().seq();
+        let seq = record.locus().seq();
         match record.value().clone() {
             super::Record::Protocol(_) => {}
             super::Record::Display(d) => step_display(memo, seq, d),

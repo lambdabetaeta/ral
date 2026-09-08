@@ -219,7 +219,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ),
     (
         "exarch/src/record/model.rs",
-        "io-door:silent:model-fold-freed-read",
+        "io-door:silent:model-fold-pointer-read",
     ),
     (
         "exarch/src/provider/models.rs",

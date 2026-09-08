@@ -306,8 +306,8 @@ impl Avatar {
 
     /// The turn an eviction would cut through were it to run now, `None`
     /// when nothing is old enough to shed.
-    /// [`crate::record::model::Memo::plan_eviction`] never names the newest
-    /// turn, so this never answers with the work in hand either.
+    /// [`crate::record::model::Context::plan_eviction`] never names the
+    /// newest turn, so this never answers with the work in hand either.
     pub(crate) fn planned_eviction(&self) -> Option<u64> {
         let mut log = self.log.lock();
         if !log.can_evict() {

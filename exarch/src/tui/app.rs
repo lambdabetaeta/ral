@@ -835,7 +835,7 @@ mod tests {
     /// from a worker whose cancel it outran must not paint into it.
     #[test]
     fn a_dying_tab_admits_no_straggler() {
-        use crate::record::{Display, Record, Recorded, Seq, Stamp};
+        use crate::record::{Display, Locus, Record, Recorded, Seq};
 
         let (mut app, rx, root) = app();
         let helper = root.id + 1;
@@ -849,11 +849,11 @@ mod tests {
             },
             &rx,
         );
-        let stamp = Stamp::placeholder(Seq::new(1));
+        let locus = Locus::placeholder(Seq::new(1));
         app.fact(
             helper,
             &Recorded::new(
-                stamp,
+                locus,
                 Record::Display(Display::Answer {
                     text: "alive".into(),
                 }),
@@ -867,11 +867,11 @@ mod tests {
             .probe_figures()
             .0;
 
-        let stamp = Stamp::placeholder(Seq::new(2));
+        let locus = Locus::placeholder(Seq::new(2));
         app.fact(
             helper,
             &Recorded::new(
-                stamp,
+                locus,
                 Record::Display(Display::Answer {
                     text: "straggler".into(),
                 }),

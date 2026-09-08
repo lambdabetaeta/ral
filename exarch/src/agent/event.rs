@@ -1,15 +1,15 @@
 //! `AgentLog`: one session's handle onto `sessions/<n>/record.jsonl`, the one
-//! seam every fact crosses, and [`crate::record::model::Memo`], the model
-//! fold's authoritative in-memory projection of it.
+//! seam every fact crosses, and [`Context`], the model fold's authoritative
+//! in-memory structure over it.
 //!
-//! Every query below reads `model_memo`; nothing here keeps a second copy.
+//! Every query below reads `context`; nothing here keeps a second copy.
 //! `tui::viewport` folds the same log's `Display`/`Forensic` classes into the
 //! rendered `user.log`.
 
 use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
-use crate::record::model::{Cut, Folded, Memo, Rendered, TranscriptRead, Turn};
+use crate::record::model::{Context, Linked, Rendered, Row, TranscriptRead};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
 use regex::Regex;
@@ -224,7 +224,7 @@ impl TurnKind {
 /// context sends only its one-line note.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContextSurvey {
-    pub rows: Vec<Turn>,
+    pub rows: Vec<Row>,
     pub evicted: usize,
     pub total_bytes: usize,
 }
@@ -254,7 +254,7 @@ pub struct GrepAnswer {
 /// touched, naming the turns it covered.
 ///
 /// In transcript order, addressed by `exchange` rather than by argument
-/// position — [`Memo::read_transcript`](crate::record::model::Memo::read_transcript)'s
+/// position — [`Context::read_transcript`](crate::record::model::Context::read_transcript)'s
 /// doc comment.
 #[derive(Clone, Debug)]
 pub struct TranscriptExchange {
@@ -306,7 +306,7 @@ pub enum TranscriptPart {
 /// One session's handle onto `sessions/<n>/record.jsonl`.
 ///
 /// Carries the seam every fact authors through, and the model fold's
-/// [`Memo`] — the one authoritative in-memory projection, per
+/// [`Context`] — the one authoritative in-memory structure, per
 /// `dev/docs/plans/260814_one_seam_one_log.md`.
 pub struct AgentLog {
     id: AgentId,
@@ -321,30 +321,26 @@ pub struct AgentLog {
     /// the log.  A real session's log lives under the session's scratch and
     /// owns no directory of its own.
     _scratch: Option<tempfile::TempDir>,
-    /// The model fold's own projection over `record.jsonl` — the type every
+    /// The model fold's own structure over `record.jsonl` — the type every
     /// query in this file answers from; advanced inline through
     /// [`Self::advance`] on every fact this log authors.
-    model_memo: Memo,
+    context: Context,
     /// The one seam: every fact this log authors crosses here as a `Record` —
     /// appended to `sessions/<n>/record.jsonl` and published on whatever bus
     /// `Avatar::couple` has attached, in that order, under one lock.
     seam: crate::record::Emitter,
 }
 
-/// What a `mnemon` child is forked with: its parent's whole turn table,
-/// turn by turn under the parent's own ids, beside the link that makes every
-/// older ancestor turn readable too.
+/// What a `mnemon` child is forked with: its parent's whole turn table, turn
+/// by turn under the parent's own ids, each row carrying the address that
+/// makes it readable whoever recorded it first.
 pub struct Inherited {
-    /// The parent's `record.jsonl`.
-    pub source: PathBuf,
-    /// The parent's own id floor: ids at or below it are the ancestry's, and
-    /// the child mints its first above it.
-    pub through: u64,
-    /// The parent's table at the fork.
-    pub turns: Vec<Turn>,
-    /// The cuts made in that table: the child folds them in, so its head
-    /// marker is the same projection the parent's was.
-    pub cuts: Vec<Cut>,
+    /// The parent's table at the fork, each row beside the address its
+    /// transcript copy lies at.
+    pub turns: Vec<Linked>,
+    /// The notes made at those evictions: the child folds them in, so its
+    /// head marker is the same projection the parent's was.
+    pub notes: Vec<Option<String>>,
     /// The material for each resident turn the seed could carry — turn id,
     /// exchange id, messages — in id order.
     pub seed: Vec<(u64, u64, Vec<ChatMessage>)>,
@@ -464,7 +460,7 @@ impl AgentLog {
                 dir.display()
             )));
         }
-        let (model_memo, model, label) =
+        let (context, model, label) =
             crate::record::model::resume(&record_path).map_err(|error| {
                 io::Error::new(
                     error.kind(),
@@ -488,7 +484,7 @@ impl AgentLog {
             account,
             sessions_root: sessions_root.to_path_buf(),
             _scratch: None,
-            model_memo,
+            context,
             seam,
         };
         if !resumed.is_ready() {
@@ -500,7 +496,7 @@ impl AgentLog {
     pub fn resumed_summary(&self) -> (u64, u64) {
         let bytes =
             fs::metadata(self.dir.join("record.jsonl")).map_or(0, |metadata| metadata.len());
-        (self.model_memo.current_exchange().unwrap_or(0), bytes)
+        (self.context.current_exchange().unwrap_or(0), bytes)
     }
 
     /// Record the live model selection and the shared resume boundary stamp.
@@ -516,7 +512,7 @@ impl AgentLog {
     ) -> io::Result<()> {
         self.model = model.to_string();
         self.account = account.clone();
-        self.record_protocol(Protocol::SessionResumed {
+        self.record_forensic(Forensic::SessionResumed {
             model: self.model.clone(),
             label: self.account.label.clone(),
             service: Some(self.account.service.clone()),
@@ -531,7 +527,7 @@ impl AgentLog {
     /// no-op for `Display`/`Forensic` records: this fold admits `Protocol`
     /// alone.
     fn advance(&mut self, record: &Recorded<Record>) {
-        if let Err(refusal) = crate::record::model::Model::step(&mut self.model_memo, record) {
+        if let Err(refusal) = crate::record::model::Model::step(&mut self.context, record) {
             // Live authorship is typestate-correct by construction (see
             // record::model's own doc on why its Refusal never fires here),
             // so reaching this arm means a caller handed `advance` a foreign
@@ -562,28 +558,26 @@ impl AgentLog {
     /// Whether a fresh user prompt is admissible.  The attend loop leaves every
     /// exchange here, and an eviction demands it.
     pub fn is_ready(&self) -> bool {
-        self.model_memo.is_ready()
+        self.context.is_ready()
     }
 
     pub fn can_evict(&self) -> bool {
-        self.model_memo.can_evict()
+        self.context.can_evict()
     }
 
-    /// Number of event slots still owned by the context, for the host's
-    /// resource probe; the append-only log retains the slots an edit removes.
+    /// Number of records still owned by the context, for the host's resource
+    /// probe; the structure retains the rows an edit moves out of it.
     pub fn event_count(&self) -> usize {
-        self.model_memo.event_count()
+        self.context.event_count()
     }
 
-    /// The turn table and its cuts — the one shape every projection reads.
-    pub fn folded(&self) -> &Folded {
-        self.model_memo.folded()
+    /// The model's own line to its future self, one slot per eviction.
+    pub fn notes(&self) -> &[Option<String>] {
+        self.context.notes()
     }
 
-    /// # Panics
-    /// Panics if a resident turn's records are not resident in the ledger.
-    pub fn context_survey(&mut self) -> ContextSurvey {
-        self.model_memo.context_survey()
+    pub fn context_survey(&self) -> ContextSurvey {
+        self.context.context_survey()
     }
 
     /// Read closed turns in transcript order — the exchanges named outright,
@@ -594,11 +588,11 @@ impl AgentLog {
     /// Refuses a read that names nothing, a duplicate name, an exchange or
     /// range this lineage never recorded, or the turn still being written.
     pub fn read_transcript(
-        &mut self,
+        &self,
         exchanges: &[u64],
         turns: Option<(u64, u64)>,
     ) -> Result<Vec<TranscriptExchange>, String> {
-        self.model_memo.read_transcript(exchanges, turns)
+        self.context.read_transcript(exchanges, turns)
     }
 
     /// [`Self::read_transcript`]'s locating half, for a caller that means to
@@ -607,17 +601,17 @@ impl AgentLog {
     /// # Errors
     /// Refuses whatever [`Self::read_transcript`] refuses.
     pub(crate) fn locate_read(
-        &mut self,
+        &self,
         exchanges: &[u64],
         turns: Option<(u64, u64)>,
     ) -> Result<TranscriptRead, String> {
-        self.model_memo.locate_read(exchanges, turns)
+        self.context.locate_read(exchanges, turns)
     }
 
     /// Every turn the transcript holds, in id order, each saying whether it
     /// is still in the context.
-    pub fn transcript_index(&self) -> Vec<Turn> {
-        self.model_memo.transcript_index()
+    pub fn transcript_index(&self) -> Vec<Row> {
+        self.context.transcript_index()
     }
 
     /// Search the closed turns' text — those a narrowing names, or the whole
@@ -627,12 +621,12 @@ impl AgentLog {
     /// # Errors
     /// Refuses a narrowing the way [`Self::read_transcript`] does.
     pub fn grep_transcript(
-        &mut self,
+        &self,
         pattern: &Regex,
         exchanges: Option<&[u64]>,
         turns: Option<(u64, u64)>,
     ) -> Result<GrepAnswer, String> {
-        self.model_memo.grep_transcript(pattern, exchanges, turns)
+        self.context.grep_transcript(pattern, exchanges, turns)
     }
 
     /// [`Self::grep_transcript`]'s locating half, for a caller that means to
@@ -641,37 +635,37 @@ impl AgentLog {
     /// # Errors
     /// Refuses whatever [`Self::grep_transcript`] refuses.
     pub(crate) fn locate_grep(
-        &mut self,
+        &self,
         exchanges: Option<&[u64]>,
         turns: Option<(u64, u64)>,
     ) -> Result<TranscriptRead, String> {
-        self.model_memo.locate_grep(exchanges, turns)
+        self.context.locate_grep(exchanges, turns)
     }
 
     /// Approximate context size in serialised bytes.  The fallback eviction
     /// trigger in [`crate::agent::Avatar::evict`] when the model's context
     /// window is unknown; otherwise that tracks token pressure instead.
-    pub fn history_bytes(&mut self) -> usize {
-        self.model_memo.history_bytes()
+    pub fn history_bytes(&self) -> usize {
+        self.context.history_bytes()
     }
 
     /// Render the context for the next provider request.
     ///
     /// # Errors
     /// The session is not awaiting an assistant reply.
-    pub fn render_messages(&mut self) -> Result<Rendered, String> {
-        if !self.model_memo.is_awaiting_assistant() {
+    pub fn render_messages(&self) -> Result<Rendered, String> {
+        if !self.context.is_awaiting_assistant() {
             return Err(format!(
                 "cannot render request while session is in state {}",
-                self.model_memo.state_description()
+                self.context.state_description()
             ));
         }
-        Ok(self.model_memo.rendered())
+        Ok(self.context.rendered())
     }
 
     /// Every committed message whatever the phase.
-    pub fn history_rendered(&mut self) -> Rendered {
-        self.model_memo.rendered()
+    pub fn history_rendered(&self) -> Rendered {
+        self.context.rendered()
     }
 
     /// The parent half of a `mnemon` fork — the seed, where ownership
@@ -680,22 +674,11 @@ impl AgentLog {
     /// that owes no tool result, whatever left it that way — a batch in
     /// flight, or a `ContextEdited` record landing after the assistant frame
     /// it answers.
-    pub fn inherited_context(&mut self) -> Inherited {
+    pub fn inherited_context(&self) -> Inherited {
         Inherited {
-            source: self.dir.join("record.jsonl"),
-            through: self.model_memo.id_floor(),
-            turns: self
-                .model_memo
-                .folded()
-                .turns()
-                .iter()
-                .map(|turn| Turn {
-                    kind: TurnKind::Inherited,
-                    ..turn.clone()
-                })
-                .collect(),
-            cuts: self.model_memo.folded().cuts().to_vec(),
-            seed: self.model_memo.inherited_seed(),
+            turns: self.context.linked(),
+            notes: self.context.notes().to_vec(),
+            seed: self.context.inherited_seed(),
         }
     }
 
@@ -704,7 +687,7 @@ impl AgentLog {
     /// commits it through [`Self::append_user`] like any other exchange.
     ///
     /// The link goes down first, carrying the parent's whole table and the
-    /// cuts made in it, then one
+    /// notes made at its evictions, then one
     /// `ContextMessage` per message under the parent's own turn id — so the
     /// child's context reproduces the parent's turns and can name any of
     /// them.
@@ -713,20 +696,9 @@ impl AgentLog {
     /// The session is not at a ready boundary, or recording a record failed.
     pub fn import_context(&mut self, inherited: Inherited) -> Result<(), String> {
         self.ready_to_import()?;
-        let Inherited {
-            source,
-            through,
-            turns,
-            cuts,
-            seed,
-        } = inherited;
-        self.record_protocol(Protocol::Inherited {
-            source,
-            through,
-            turns,
-            cuts,
-        })
-        .map_err(|e| e.to_string())?;
+        let Inherited { turns, notes, seed } = inherited;
+        self.record_protocol(Protocol::Inherited { turns, notes })
+            .map_err(|e| e.to_string())?;
         for (id, exchange, messages) in seed {
             for message in messages {
                 self.record_protocol(Protocol::ContextMessage {
@@ -747,7 +719,7 @@ impl AgentLog {
     /// The session is not at a ready boundary, or recording failed.
     pub fn import_note(&mut self, message: ChatMessage) -> Result<(), String> {
         self.ready_to_import()?;
-        let id = self.model_memo.next_id();
+        let id = self.context.next_id();
         self.record_protocol(Protocol::ContextMessage {
             id,
             exchange: id,
@@ -757,12 +729,12 @@ impl AgentLog {
     }
 
     fn ready_to_import(&self) -> Result<(), String> {
-        if self.model_memo.is_ready() {
+        if self.context.is_ready() {
             return Ok(());
         }
         Err(format!(
             "cannot import context while session is in state {}",
-            self.model_memo.state_description()
+            self.context.state_description()
         ))
     }
 
@@ -773,24 +745,21 @@ impl AgentLog {
     /// # Errors
     /// The session is mid-exchange, or recording the prompt failed.
     pub fn append_user(&mut self, text: String, continues: Option<u64>) -> Result<(), String> {
-        if !self.model_memo.is_ready() {
+        if !self.context.is_ready() {
             return Err(format!(
                 "cannot accept a new user prompt while session is in state {}",
-                self.model_memo.state_description()
+                self.context.state_description()
             ));
         }
-        // A prompt naming the exchange in hand extends the turn it answers;
-        // anything else opens a fresh exchange under a fresh id.
-        let current = self.model_memo.current_exchange().unwrap_or(0);
+        // A prompt continues `id` iff `id` is the exchange in hand *and* that
+        // exchange is still in the context; anything else opens a fresh
+        // exchange under a fresh id.
         let exchange = continues
-            .filter(|id| *id == current)
             .filter(|id| {
-                self.model_memo
-                    .folded()
-                    .resident()
-                    .any(|turn| turn.exchange == *id)
+                self.context.current_exchange() == Some(*id)
+                    && self.context.last_context_exchange() == Some(*id)
             })
-            .unwrap_or_else(|| self.model_memo.next_id());
+            .unwrap_or_else(|| self.context.next_id());
         self.record_protocol(Protocol::UserPrompt { exchange, text })
             .map_err(|e| e.to_string())
     }
@@ -802,13 +771,13 @@ impl AgentLog {
     /// # Errors
     /// The tool-result batch is incomplete, or recording the prompt failed.
     pub fn append_steering(&mut self, text: String) -> Result<(), String> {
-        if !self.model_memo.is_awaiting_steering() {
+        if !self.context.is_awaiting_steering() {
             return Err(format!(
                 "tool results must be complete before accepting a steering prompt; session is in state {}",
-                self.model_memo.state_description()
+                self.context.state_description()
             ));
         }
-        let Some(exchange) = self.model_memo.current_exchange() else {
+        let Some(exchange) = self.context.current_exchange() else {
             return Err("cannot accept a steering prompt before an exchange has started".into());
         };
         self.record_protocol(Protocol::UserPrompt { exchange, text })
@@ -827,10 +796,10 @@ impl AgentLog {
         pending_tool_ids: Vec<String>,
         stop_reason: Option<String>,
     ) -> Result<(), String> {
-        if !self.model_memo.is_awaiting_assistant() {
+        if !self.context.is_awaiting_assistant() {
             return Err(format!(
                 "assistant message is not expected while session is in state {}",
-                self.model_memo.state_description()
+                self.context.state_description()
             ));
         }
         if message.role != ChatRole::Assistant {
@@ -839,7 +808,7 @@ impl AgentLog {
                 message.role,
             ));
         }
-        let turn = self.model_memo.next_id();
+        let turn = self.context.next_id();
         self.record_protocol(Protocol::AssistantMessage {
             turn,
             message,
@@ -855,10 +824,10 @@ impl AgentLog {
     /// No results are expected, they do not match the pending ids (wrong count,
     /// unknown id, duplicate), or recording the batch failed.
     pub fn append_tool_results(&mut self, results: Vec<ToolResult>) -> Result<(), String> {
-        let Some(pending_ids) = self.model_memo.pending_tool_results() else {
+        let Some(pending_ids) = self.context.pending_tool_results() else {
             return Err(format!(
                 "tool results are not expected while session is in state {}",
-                self.model_memo.state_description()
+                self.context.state_description()
             ));
         };
         validate_result_ids(&pending_ids, &results)?;
@@ -872,7 +841,7 @@ impl AgentLog {
     /// short of a reply is left as it lies — the model reads no trace of it,
     /// and the next prompt opens a fresh one over the top.
     pub fn quiesce(&mut self, reason: QuiesceReason) {
-        for record in self.model_memo.quiesce_records(reason) {
+        for record in self.context.quiesce_records(reason) {
             self.record_protocol_lossy(record);
         }
         // Only a cancellation earns its own breadcrumb; an abort's marker is
@@ -885,7 +854,7 @@ impl AgentLog {
     }
 
     pub fn plan_eviction(&mut self, keep_budget_bytes: usize) -> Option<EvictionPlan> {
-        self.model_memo
+        self.context
             .plan_eviction(keep_budget_bytes)
             .map(|through| EvictionPlan { through })
     }
@@ -894,7 +863,7 @@ impl AgentLog {
     /// Refuses an empty drop, an unknown or already-departed target, the
     /// newest turn, or the exchange being written.
     pub fn apply_edit(&mut self, op: ContextOp, by: EditAuthority) -> Result<(), String> {
-        self.model_memo.validate_edit(&op)?;
+        self.context.validate_edit(&op)?;
         self.record_protocol(Protocol::ContextEdited { op: op.clone(), by })
             .map_err(|e| e.to_string())?;
         // The display twin: the screen never derives from the protocol
@@ -909,7 +878,7 @@ impl AgentLog {
     /// # Errors
     /// Refuses an absent anchor or one that has already left the view.
     pub fn rewind_exchanges(&self, anchor: u64) -> Result<Vec<u64>, String> {
-        self.model_memo.rewind_exchanges(anchor)
+        self.context.rewind_exchanges(anchor)
     }
 
     /// `/clear`: wipe the record in memory and on disk, then restart with a
@@ -935,9 +904,9 @@ impl AgentLog {
             }
         };
         let rotation_error = self.rotate_record(&record_path, rotation);
-        self.model_memo = Memo::new(record_path);
+        self.context = Context::new(record_path);
         let started = self.started_event(None, system_prompt_bytes, at_unix_ms);
-        let seam_error = self.record_protocol(started).err();
+        let seam_error = self.record_forensic(started).err();
         Ok(ClearRecord {
             rotation_error: join_errors([rotation_error, seam_error]),
         })
@@ -987,8 +956,8 @@ impl AgentLog {
     /// # Errors
     /// See the meta-records note above.
     pub fn record_turn_start(&mut self, tuning: Tuning) -> io::Result<()> {
-        let id = self.model_memo.next_id();
-        self.record_protocol(Protocol::TurnStarted { tuning })?;
+        let id = self.context.next_id();
+        self.record_forensic(Forensic::TurnStarted { tuning })?;
         // The display twin: `tuning` never showed on screen, and the id is
         // the screen's alone — nothing duplicates across the pair.
         self.record_display(Display::Turn { id })
@@ -1003,7 +972,7 @@ impl AgentLog {
     /// # Errors
     /// See the meta-records note above.
     pub fn record_session_ended(&mut self) -> io::Result<()> {
-        self.record_protocol(Protocol::SessionEnded)
+        self.record_forensic(Forensic::SessionEnded)
     }
 
     /// # Errors
@@ -1056,7 +1025,7 @@ impl AgentLog {
             account,
             sessions_root,
             _scratch: None,
-            model_memo: Memo::new(source),
+            context: Context::new(source),
             seam,
         })
     }
@@ -1069,7 +1038,7 @@ impl AgentLog {
         at_unix_ms: u64,
     ) -> io::Result<()> {
         let started = self.started_event(parent, system_prompt_bytes, at_unix_ms);
-        self.record_protocol(started)
+        self.record_forensic(started)
     }
 
     fn started_event(
@@ -1077,8 +1046,8 @@ impl AgentLog {
         parent: Option<AgentId>,
         system_prompt_bytes: usize,
         at_unix_ms: u64,
-    ) -> Protocol {
-        Protocol::SessionStarted {
+    ) -> Forensic {
+        Forensic::SessionStarted {
             session_id: self.id,
             parent,
             model: self.model.clone(),
@@ -1139,15 +1108,15 @@ impl AgentLog {
     }
 
     pub fn current_exchange(&self) -> Option<u64> {
-        self.model_memo.current_exchange()
+        self.context.current_exchange()
     }
 
     pub fn log_len(&self) -> usize {
-        self.model_memo.log_len()
+        self.context.log_len()
     }
 
     pub fn token_measure_is_stale(&self, measured_at: usize) -> bool {
-        self.model_memo.token_measure_is_stale(measured_at)
+        self.context.token_measure_is_stale(measured_at)
     }
 }
 
@@ -1284,14 +1253,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            s.folded()
-                .turns()
+            s.transcript_index()
                 .iter()
-                .map(|turn| (turn.id, turn.exchange))
+                .map(|row| (row.id, row.exchange))
                 .collect::<Vec<_>>(),
             vec![(1, 1), (2, 2), (3, 2), (4, 4), (5, 4), (6, 4)]
         );
-        assert_eq!(s.folded().turns()[0].kind, TurnKind::Import);
+        assert_eq!(s.transcript_index()[0].kind, TurnKind::Import);
         assert!(
             !s.history_rendered()
                 .messages()
@@ -1328,7 +1296,7 @@ mod tests {
         complete_exchange(&mut joins, "one", "one");
         joins.append_user("nudge".into(), Some(1)).unwrap();
         assert_eq!(joins.current_exchange(), Some(1));
-        assert_eq!(joins.folded().turns().len(), 2, "steering opens no turn");
+        assert_eq!(joins.transcript_index().len(), 2, "steering opens no turn");
 
         let mut rewound = fresh_root();
         complete_exchange(&mut rewound, "one", "one");
@@ -1446,7 +1414,7 @@ mod tests {
 
     /// The head marker's first message, or `None` when nothing has been
     /// evicted.
-    fn head_marker(s: &mut AgentLog) -> Option<String> {
+    fn head_marker(s: &AgentLog) -> Option<String> {
         s.history_rendered()
             .messages()
             .next()
@@ -1472,10 +1440,9 @@ mod tests {
         s.append_assistant(ChatMessage::assistant("done"), vec![], None)
             .unwrap();
         assert_eq!(
-            s.folded()
-                .turns()
+            s.transcript_index()
                 .iter()
-                .map(|turn| turn.id)
+                .map(|row| row.id)
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
@@ -1489,14 +1456,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            s.folded()
-                .resident()
-                .map(|turn| turn.id)
+            s.context_survey()
+                .rows
+                .iter()
+                .map(|row| row.id)
                 .collect::<Vec<_>>(),
             vec![1, 3],
             "the prompt stays with the reply that survived the cut"
         );
-        let marker = head_marker(&mut s).expect("a cut renders a marker");
+        let marker = head_marker(&s).expect("a cut renders a marker");
         assert!(
             marker.starts_with("[EXARCH // Turn 2 of exchange 1 has left your context."),
             "{marker}"
@@ -1531,15 +1499,16 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(s.folded().cuts().len(), 2);
+        assert_eq!(s.notes().len(), 2);
         assert_eq!(
-            s.folded()
-                .resident()
-                .map(|turn| turn.id)
+            s.context_survey()
+                .rows
+                .iter()
+                .map(|row| row.id)
                 .collect::<Vec<_>>(),
             vec![5, 6]
         );
-        let marker = head_marker(&mut s).expect("two cuts render one marker");
+        let marker = head_marker(&s).expect("two cuts render one marker");
         assert!(
             marker.starts_with("[EXARCH // Exchanges 1–3 have left your context."),
             "{marker}"
@@ -1573,12 +1542,12 @@ mod tests {
             EditAuthority::Model,
         )
         .unwrap();
-        let first = head_marker(&mut live).expect("a cut renders a marker");
-        assert_eq!(head_marker(&mut live).as_ref(), Some(&first));
+        let first = head_marker(&live).expect("a cut renders a marker");
+        assert_eq!(head_marker(&live).as_ref(), Some(&first));
         drop(live);
 
-        let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
-        assert_eq!(head_marker(&mut resumed), Some(first));
+        let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
+        assert_eq!(head_marker(&resumed), Some(first));
     }
 
     #[test]
@@ -1598,7 +1567,7 @@ mod tests {
             EditAuthority::Harness,
         )
         .unwrap();
-        let marker = head_marker(&mut s).expect("a cut renders a marker");
+        let marker = head_marker(&s).expect("a cut renders a marker");
         assert!(
             marker.contains("1–7  (4 earlier exchanges — transcript `index)"),
             "the rows past the cap collapse to one line, got: {marker}"
@@ -1636,7 +1605,7 @@ mod tests {
                 .unwrap();
             }
         }
-        let marker = head_marker(&mut s).expect("44 cuts render one marker");
+        let marker = head_marker(&s).expect("44 cuts render one marker");
         assert!(
             marker.contains("\"note 45\""),
             "the newest note must survive, got: {marker}"
@@ -1668,16 +1637,15 @@ mod tests {
             EditAuthority::Harness,
         )
         .unwrap();
-        let before = head_marker(&mut s).expect("a cut renders a marker");
+        let before = head_marker(&s).expect("a cut renders a marker");
         s.apply_edit(ContextOp::Drop { exchanges: vec![5] }, EditAuthority::Model)
             .unwrap();
-        assert_eq!(head_marker(&mut s), Some(before));
+        assert_eq!(head_marker(&s), Some(before));
         assert!(
-            s.folded()
-                .turns()
+            s.transcript_index()
                 .iter()
-                .filter(|turn| turn.exchange == 5)
-                .all(|turn| turn.held == Held::Dropped)
+                .filter(|row| row.exchange == 5)
+                .all(|row| row.held == Held::Dropped)
         );
     }
 
@@ -1754,10 +1722,10 @@ mod tests {
         );
     }
 
-    /// A stamp measures a file, not a path: bytes that changed under a live
+    /// A locus measures a file, not a path: bytes that changed under a live
     /// range are refused as the mismatch they are, not as bad JSON.
     #[test]
-    fn a_record_that_does_not_hash_to_its_stamp_is_refused_by_name() {
+    fn a_record_that_does_not_hash_to_its_locus_is_refused_by_name() {
         let mut s = fresh_root();
         complete_exchange(&mut s, "alpha", "alpha answered");
         complete_exchange(&mut s, "beta", "beta answered");
@@ -1770,7 +1738,7 @@ mod tests {
         )
         .unwrap();
 
-        // Equal-length substitution: every stamp's byte range still names a
+        // Equal-length substitution: every locus's byte range still names a
         // whole, well-formed record — just not the one it measured.
         let path = record_path(&s);
         let recorded = fs::read_to_string(&path).expect("record.jsonl is utf-8");
@@ -1779,15 +1747,15 @@ mod tests {
         assert_eq!(
             recorded.len(),
             rewritten.len(),
-            "the stamps' byte ranges must still hold whole records"
+            "the loci's byte ranges must still hold whole records"
         );
         fs::write(&path, &rewritten).expect("rewrite record.jsonl in place");
 
         let refusal = s
             .read_transcript(&[1], None)
-            .expect_err("a record that no longer hashes to its stamp is unreadable");
+            .expect_err("a record that no longer hashes to its locus is unreadable");
         assert!(
-            refusal.contains("did not hash to the stamp that named it"),
+            refusal.contains("did not hash to the locus that named it"),
             "the refusal must name the digest mismatch, got: {refusal}"
         );
     }
@@ -1816,11 +1784,11 @@ mod tests {
         assert_eq!(
             index
                 .iter()
-                .map(|turn| (turn.id, turn.exchange, turn.held))
+                .map(|row| (row.id, row.exchange, row.held))
                 .collect::<Vec<_>>(),
             vec![
-                (1, 1, Held::Evicted),
-                (2, 1, Held::Evicted),
+                (1, 1, Held::Evicted { cut: 0 }),
+                (2, 1, Held::Evicted { cut: 0 }),
                 (3, 3, Held::Dropped),
                 (4, 3, Held::Dropped),
                 (5, 5, Held::Resident),
@@ -1832,7 +1800,7 @@ mod tests {
         assert!(
             index
                 .iter()
-                .all(|turn| turn.bytes > 0 && turn.kind == TurnKind::Exchange)
+                .all(|row| row.bytes > 0 && row.kind == TurnKind::Exchange)
         );
     }
 
@@ -1972,9 +1940,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            s.folded()
-                .resident()
-                .map(|turn| turn.id)
+            s.context_survey()
+                .rows
+                .iter()
+                .map(|row| row.id)
                 .collect::<Vec<_>>(),
             vec![3, 4],
             "the work in hand must survive the eviction it could not itself be named by"
@@ -2001,6 +1970,39 @@ mod tests {
                 .filter_map(|message| message.content.first_text())
                 .collect::<Vec<_>>(),
             vec!["imported user", "normal", "answer"]
+        );
+    }
+
+    /// The exchange in hand is the one the request is being built for, so it
+    /// renders as it lies — prompt, the assistant frame that called a tool,
+    /// and the results — never as the note an unsettled *closed* exchange
+    /// would have rendered as.
+    #[test]
+    fn the_exchange_in_hand_renders_as_it_lies() {
+        let mut s = fresh_root();
+        s.append_user("work".into(), None).unwrap();
+        s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
+            .unwrap();
+        s.append_tool_results(vec![ToolResult {
+            id: "call".into(),
+            content: "result".into(),
+        }])
+        .unwrap();
+
+        let rendered = s.render_messages().expect("the request is owed a reply");
+        assert_eq!(
+            rendered
+                .messages()
+                .map(|message| message.role.clone())
+                .collect::<Vec<_>>(),
+            vec![ChatRole::User, ChatRole::Assistant, ChatRole::Tool]
+        );
+        assert!(
+            !rendered.messages().any(|message| message
+                .content
+                .first_text()
+                .is_some_and(|text| text.starts_with("[EXARCH // An exchange here"))),
+            "the exchange in hand is unsettled by definition, and owes no note"
         );
     }
 
@@ -2075,6 +2077,31 @@ mod tests {
             }),
             "an exchange that touched the world must say so"
         );
+    }
+
+    /// The door is the record, not the context: an exchange the context
+    /// replaced with a note reads back as the material the model actually
+    /// sent, since that is what `record.jsonl` holds.
+    #[test]
+    fn an_abandoned_exchange_reads_back_as_its_material() {
+        let mut s = fresh_root();
+        s.append_user("interrupted".into(), None).unwrap();
+        s.quiesce(QuiesceReason::Cancelled);
+        complete_exchange(&mut s, "next", "answer");
+        assert!(
+            s.history_rendered().messages().any(|message| {
+                message
+                    .content
+                    .first_text()
+                    .is_some_and(|text| text.starts_with("[EXARCH // An exchange here"))
+            }),
+            "the context still sends the model the note"
+        );
+
+        let read = s
+            .read_transcript(&[1], None)
+            .expect("the abandoned exchange is recorded, so it is readable");
+        assert_eq!(openings(&read[0]), vec!["interrupted"]);
     }
 
     /// Tool calls that never ran are the one thing a quiesce still owes: the
@@ -2180,7 +2207,7 @@ mod tests {
         let opened = records(&child)
             .into_iter()
             .find_map(|r| match r {
-                Record::Protocol(Protocol::SessionStarted { model, label, .. }) => {
+                Record::Forensic(Forensic::SessionStarted { model, label, .. }) => {
                     Some((model, label))
                 }
                 _ => None,
@@ -2203,7 +2230,7 @@ mod tests {
         let record = s.dir().join("record.jsonl");
         s.clear(0, 2).expect("clear");
         assert!(record.with_extension("jsonl.0").exists());
-        assert!(s.folded().turns().is_empty());
+        assert!(s.transcript_index().is_empty());
         assert!(s.is_ready());
     }
 
@@ -2242,7 +2269,7 @@ mod tests {
             serde_json::to_vec(&live.history_rendered().messages().collect::<Vec<_>>()).unwrap();
         drop(live);
 
-        let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
+        let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
         assert!(resumed.is_ready());
         assert_eq!(
             serde_json::to_vec(&resumed.history_rendered().messages().collect::<Vec<_>>()).unwrap(),
@@ -2441,8 +2468,11 @@ mod tests {
         assert!(!dir.join("record.jsonl").exists());
     }
 
+    /// A live lineage quiesces its unready tail before it records anything
+    /// else, so an interior gap is never something it wrote: the fold refuses
+    /// it as the hand-edited file it is, rather than stubbing it shut.
     #[test]
-    fn resume_repairs_an_interior_tool_answer_lost_from_disk() {
+    fn resume_refuses_an_interior_tool_answer_lost_from_disk() {
         let sessions = sessions_root("resume-interior-seam");
         let mut live = AgentLog::root(
             sessions.path(),
@@ -2461,35 +2491,26 @@ mod tests {
         drop(live);
 
         let data = fs::read(&path).unwrap();
-        let mut repaired = Vec::with_capacity(data.len());
+        let mut torn = Vec::with_capacity(data.len());
         for fragment in data.split_inclusive(|byte| *byte == b'\n') {
             let record = crate::record::record_from_line(&fragment[..fragment.len() - 1]).unwrap();
             if matches!(record, Record::Protocol(Protocol::ToolResults { .. })) {
                 continue;
             }
-            repaired.extend_from_slice(fragment);
+            torn.extend_from_slice(fragment);
         }
-        fs::write(&path, repaired).unwrap();
+        fs::write(&path, &torn).unwrap();
 
-        let mut resumed = AgentLog::resume(sessions.path(), 0).expect("interior seam repair");
-        assert!(resumed.is_ready());
-        let rendered = resumed.history_rendered();
+        let error = AgentLog::resume(sessions.path(), 0)
+            .err()
+            .expect("an interior gap is a hand-edited file");
+        let text = error.to_string();
+        assert!(text.contains("foreign protocol data"), "{text}");
         assert!(
-            rendered.messages().any(|message| {
-                message
-                    .content
-                    .first_text()
-                    .is_some_and(|text| text.starts_with("[EXARCH // An exchange here"))
-            }),
-            "the repaired seam admits the log; the abandoned exchange reads as its note"
+            text.contains("not a seam that quiesce can repair"),
+            "{text}"
         );
-        assert!(
-            !rendered
-                .messages()
-                .any(|message| message.content.first_text() == Some("first")),
-            "none of the abandoned exchange's own content reaches the model"
-        );
-        resumed.append_user("next".into(), None).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), torn);
     }
 
     #[test]
@@ -2574,7 +2595,7 @@ mod tests {
                 serde_json::to_vec(&live.history_rendered().messages().collect::<Vec<_>>())
                     .unwrap();
             drop(live);
-            let mut resumed = AgentLog::resume(sessions.path(), 0).expect("resume edit sequence");
+            let resumed = AgentLog::resume(sessions.path(), 0).expect("resume edit sequence");
             assert!(resumed.is_ready());
             assert_eq!(
                 serde_json::to_vec(&resumed.history_rendered().messages().collect::<Vec<_>>())
@@ -2585,12 +2606,11 @@ mod tests {
         }
     }
 
-    /// `resume` refuses unless its from-scratch refold agrees with the
-    /// incremental table, and every turn's weight is part of that agreement —
-    /// so a refold that misplaced a freed record would refuse here rather
-    /// than serve the model a marker that had drifted.
+    /// The structure is a fold of the log, so replaying the file rebuilds
+    /// every row and every note the live session held — weights included, a
+    /// misplaced departed record showing up as a marker that had drifted.
     #[test]
-    fn fold_equals_memo_across_evict() {
+    fn resume_rebuilds_the_same_rows_and_notes() {
         let sessions = sessions_root("fold-equals-memo-evict");
         let mut live = AgentLog::root(
             sessions.path(),
@@ -2613,18 +2633,65 @@ mod tests {
             EditAuthority::Model,
         )
         .unwrap();
-        let turns = live.folded().turns().to_vec();
-        let cuts = live.folded().cuts().to_vec();
+        let rows = live.transcript_index();
+        let notes = live.notes().to_vec();
         drop(live);
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
-        assert_eq!(resumed.folded().turns(), turns.as_slice());
-        assert_eq!(resumed.folded().cuts(), cuts.as_slice());
+        assert_eq!(resumed.transcript_index(), rows);
+        assert_eq!(resumed.notes(), notes.as_slice());
+    }
+
+    /// A departed turn's address is not written down anywhere: the fold mints
+    /// it from the loci the records arrived with, so a resumed session reads
+    /// the same bytes back with nothing carried over but the file.
+    #[test]
+    fn a_departed_turn_reads_back_after_resume() {
+        let sessions = sessions_root("resume-departed-read");
+        let mut live = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        complete_exchange(&mut live, "one", "answer one");
+        complete_exchange(&mut live, "two", "answer two");
+        live.apply_edit(
+            ContextOp::Evict {
+                through: 2,
+                note: None,
+            },
+            EditAuthority::Harness,
+        )
+        .unwrap();
+        let before = format!("{:?}", live.read_transcript(&[1], None).expect("evicted"));
+        drop(live);
+
+        let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
+        assert_eq!(
+            resumed
+                .context_survey()
+                .rows
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![3, 4],
+            "the cut crossed the resume"
+        );
+        let after = format!(
+            "{:?}",
+            resumed
+                .read_transcript(&[1], None)
+                .expect("the pointer was rebuilt by the fold alone")
+        );
+        assert_eq!(after, before);
     }
 
     /// A `mnemon` child of `parent`: its own log under the same sessions
     /// root, opened with the table and the link the parent hands over.
-    fn mnemon(parent: &mut AgentLog, child_id: AgentId) -> AgentLog {
+    fn mnemon(parent: &AgentLog, child_id: AgentId) -> AgentLog {
         let inherited = parent.inherited_context();
         let mut child = parent
             .fork(child_id, 0, "model", &RecordedAccount::for_test("provider"))
@@ -2633,7 +2700,7 @@ mod tests {
         child
     }
 
-    fn seed_has_a_tool_call(log: &mut AgentLog) -> bool {
+    fn seed_has_a_tool_call(log: &AgentLog) -> bool {
         log.history_rendered().messages().any(|message| {
             message
                 .content
@@ -2658,9 +2725,9 @@ mod tests {
             .apply_edit(ContextOp::Drop { exchanges: vec![1] }, EditAuthority::Model)
             .unwrap();
 
-        let mut child = mnemon(&mut parent, 1);
+        let child = mnemon(&parent, 1);
         assert!(
-            !seed_has_a_tool_call(&mut child),
+            !seed_has_a_tool_call(&child),
             "a mnemon seed must never carry an unanswered tool call"
         );
         assert!(
@@ -2684,9 +2751,9 @@ mod tests {
             .append_assistant(assistant_with_tool("call-1"), vec!["call-1".into()], None)
             .unwrap();
 
-        let mut child = mnemon(&mut parent, 1);
+        let child = mnemon(&parent, 1);
         assert!(
-            !seed_has_a_tool_call(&mut child),
+            !seed_has_a_tool_call(&child),
             "the plain in-batch fork must not regress"
         );
         assert!(
@@ -2695,6 +2762,63 @@ mod tests {
                 .messages()
                 .any(|message| message.content.first_text() == Some("two")),
         );
+    }
+
+    /// A turn's transcript copy is where it was first recorded. The seed cuts
+    /// in front of the dangling tool call, so the child's own copy of that
+    /// turn is short — and the door still answers the call, off the parent's
+    /// file, before and after the child evicts the turn.
+    #[test]
+    fn a_seeded_turn_reads_back_from_its_origin() {
+        let sessions = sessions_root("lineage-origin");
+        let mut parent = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        complete_exchange(&mut parent, "one", "one");
+        parent.append_user("two".into(), None).unwrap();
+        parent
+            .append_assistant(assistant_with_tool("call-1"), vec!["call-1".into()], None)
+            .unwrap();
+
+        let mut child = mnemon(&parent, 1);
+        assert!(
+            !seed_has_a_tool_call(&child),
+            "the child's own copy of the turn stops in front of the call"
+        );
+        let read = child
+            .read_transcript(&[3], None)
+            .expect("the turn is recorded in the parent's file");
+        let called = |read: &[TranscriptExchange]| {
+            read.iter()
+                .flat_map(|exchange| &exchange.messages)
+                .flat_map(|message| &message.parts)
+                .any(|part| matches!(part, TranscriptPart::Program { source, .. } if source == "pwd"))
+        };
+        assert!(
+            called(&read),
+            "the origin answers the whole turn, not the seed's short copy"
+        );
+
+        complete_exchange(&mut child, "the child's own", "answer");
+        child
+            .apply_edit(
+                ContextOp::Evict {
+                    through: 4,
+                    note: None,
+                },
+                EditAuthority::Harness,
+            )
+            .unwrap();
+        let departed = child
+            .read_transcript(&[3], None)
+            .expect("eviction points at the copy, never at the seed");
+        assert_eq!(format!("{departed:?}"), format!("{read:?}"));
+        assert!(called(&departed));
     }
 
     fn openings(read: &TranscriptExchange) -> Vec<&str> {
@@ -2734,12 +2858,13 @@ mod tests {
             )
             .unwrap();
 
-        let mut child = mnemon(&mut parent, 1);
+        let mut child = mnemon(&parent, 1);
         assert_eq!(
             child
-                .folded()
-                .resident()
-                .map(|turn| turn.id)
+                .context_survey()
+                .rows
+                .iter()
+                .map(|row| row.id)
                 .collect::<Vec<_>>(),
             vec![7, 8],
             "the parent's surviving turns cross under the parent's own ids"
@@ -2756,7 +2881,7 @@ mod tests {
         assert_eq!(exchange.exchange, 3);
         assert_eq!(openings(exchange), vec!["two", "two"]);
 
-        let mut grandchild = mnemon(&mut child, 2);
+        let mut grandchild = mnemon(&child, 2);
         let read = grandchild
             .read_transcript(&[3], None)
             .expect("two links back is still the same transcript");
@@ -2804,7 +2929,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut child = mnemon(&mut parent, 1);
+        let child = mnemon(&parent, 1);
         let read = child
             .read_transcript(&[1], None)
             .expect("both halves of the exchange are in the lineage's transcript");
@@ -2852,10 +2977,10 @@ mod tests {
                 EditAuthority::User,
             )
             .unwrap();
-        assert_eq!(parent.folded().resident().count(), 0);
+        assert_eq!(parent.context_survey().rows.len(), 0);
 
-        let mut child = mnemon(&mut parent, 1);
-        assert_eq!(child.folded().resident().count(), 0);
+        let mut child = mnemon(&parent, 1);
+        assert_eq!(child.context_survey().rows.len(), 0);
         child.append_user("first".into(), None).unwrap();
         assert_eq!(child.current_exchange(), Some(5));
     }
@@ -2877,10 +3002,8 @@ mod tests {
         let path = sessions.path().join("0/record.jsonl");
         drop(live);
         let late = Record::Protocol(Protocol::Inherited {
-            source: path.clone(),
-            through: 0,
             turns: Vec::new(),
-            cuts: Vec::new(),
+            notes: Vec::new(),
         });
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(&crate::record::envelope_line(&late))
@@ -2895,12 +3018,13 @@ mod tests {
         assert!(text.contains("only a fork's opening may do"), "{text}");
     }
 
-    /// A lineage the walk cannot follow refuses the turn behind it by the
-    /// fault it actually met — a line that will not read back, or a file that
-    /// will not open — and never by calling an exchange the ancestry owns
-    /// unrecorded. A break is not remembered, so the second read walks again.
+    /// A pointer whose file will not answer refuses the turn behind it by
+    /// path and by the fault the read actually met — a line that will not
+    /// read back, or a file that will not open — and never by calling an
+    /// exchange the lineage recorded unrecorded. Nothing remembers the
+    /// break, so the second read tries the file again.
     #[test]
-    fn a_broken_ancestry_link_is_refused_by_the_fault_it_met() {
+    fn a_broken_ancestry_link_is_refused_by_path_and_fault() {
         let sessions = sessions_root("lineage-broken");
         let mut parent = AgentLog::root(
             sessions.path(),
@@ -2923,7 +3047,7 @@ mod tests {
             )
             .unwrap();
         let source = record_path(&parent);
-        let mut child = mnemon(&mut parent, 1);
+        let child = mnemon(&parent, 1);
         drop(parent);
 
         let recorded = fs::read_to_string(&source).expect("record.jsonl is utf-8");
@@ -2938,9 +3062,12 @@ mod tests {
         fs::write(&source, &torn).expect("rewrite the ancestor's log");
         let refusal = child
             .read_transcript(&[1], None)
-            .expect_err("a line the walk cannot read stops the lineage");
+            .expect_err("a line the read cannot follow stops the lineage");
         assert!(
-            refusal.contains("line 2 of the ancestor's log") && refusal.contains("read back"),
+            refusal.starts_with(&format!(
+                "turn 1 could not be read back from {}: ",
+                source.display()
+            )) && refusal.contains("did not hash to the locus that named it"),
             "{refusal}"
         );
 
@@ -2948,15 +3075,21 @@ mod tests {
         let refusal = child
             .read_transcript(&[1], None)
             .expect_err("a deleted ancestor's log stops the lineage");
-        assert!(refusal.contains("would not open"), "{refusal}");
+        assert!(
+            refusal.starts_with(&format!(
+                "turn 1 could not be read back from {}: ",
+                source.display()
+            )),
+            "{refusal}"
+        );
     }
 
-    /// The link is folded, not just recorded: a refold reads the parent's
-    /// table and its cuts back off it, so the `fold == memo` law covers an
-    /// inherited context as it covers an evicted one — and the child's head
-    /// marker, being that same projection, carries the parent's own note.
+    /// The link is folded, not just recorded: replaying it rebuilds the
+    /// parent's rows and its notes, so a resume covers an inherited context
+    /// as it covers an evicted one — and the child's head marker, being that
+    /// same projection, carries the parent's own note.
     #[test]
-    fn fold_equals_memo_across_evict_and_inherited() {
+    fn resume_rebuilds_the_same_rows_and_notes_across_a_link() {
         let ancestry = sessions_root("fold-equals-memo-ancestor");
         let mut ancestor = AgentLog::root(
             ancestry.path(),
@@ -2991,12 +3124,8 @@ mod tests {
         .unwrap();
         live.import_context(inherited).unwrap();
         assert_eq!(
-            live.folded()
-                .cuts()
-                .iter()
-                .map(|cut| (cut.through, cut.note.clone()))
-                .collect::<Vec<_>>(),
-            vec![(4, Some("the parser is fixed".into()))],
+            live.notes(),
+            [Some("the parser is fixed".to_string())],
             "the parent's cut crosses the link"
         );
         let head = live
@@ -3022,13 +3151,13 @@ mod tests {
             EditAuthority::Harness,
         )
         .unwrap();
-        let turns = live.folded().turns().to_vec();
-        let cuts = live.folded().cuts().to_vec();
+        let rows = live.transcript_index();
+        let notes = live.notes().to_vec();
         drop(live);
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
-        assert_eq!(resumed.folded().turns(), turns.as_slice());
-        assert_eq!(resumed.folded().cuts(), cuts.as_slice());
+        assert_eq!(resumed.transcript_index(), rows);
+        assert_eq!(resumed.notes(), notes.as_slice());
     }
 
     /// The index is the whole lineage's table, in id order: a child inherits
@@ -3058,20 +3187,20 @@ mod tests {
             )
             .unwrap();
 
-        let mut child = mnemon(&mut parent, 1);
+        let mut child = mnemon(&parent, 1);
         complete_exchange(&mut child, "four", "four");
 
         let index = child.transcript_index();
         assert_eq!(
             index
                 .iter()
-                .map(|turn| (turn.id, turn.kind, turn.held))
+                .map(|row| (row.id, row.kind, row.held))
                 .collect::<Vec<_>>(),
             vec![
-                (1, TurnKind::Inherited, Held::Evicted),
-                (2, TurnKind::Inherited, Held::Evicted),
-                (3, TurnKind::Inherited, Held::Evicted),
-                (4, TurnKind::Inherited, Held::Evicted),
+                (1, TurnKind::Inherited, Held::Evicted { cut: 0 }),
+                (2, TurnKind::Inherited, Held::Evicted { cut: 0 }),
+                (3, TurnKind::Inherited, Held::Evicted { cut: 0 }),
+                (4, TurnKind::Inherited, Held::Evicted { cut: 0 }),
                 (5, TurnKind::Inherited, Held::Resident),
                 (6, TurnKind::Inherited, Held::Resident),
                 (7, TurnKind::Exchange, Held::Resident),
@@ -3107,7 +3236,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut child = mnemon(&mut parent, 1);
+        let mut child = mnemon(&parent, 1);
         complete_exchange(&mut child, "the tests pass", "good");
         child
             .apply_edit(
@@ -3137,5 +3266,45 @@ mod tests {
             ]
         );
         assert_eq!(answer.hits[0].text, "the parser is broken");
+    }
+
+    /// A search of the whole transcript answers what it can reach and passes
+    /// over what it cannot — the head marker has already told the model which
+    /// turns it cannot have back. A narrowing that names one of them is
+    /// refused instead, by the path that would not answer.
+    #[test]
+    fn an_unnarrowed_grep_passes_over_an_unreadable_file() {
+        let sessions = sessions_root("lineage-unreadable");
+        let mut parent = AgentLog::root(
+            sessions.path(),
+            0,
+            "model",
+            &RecordedAccount::for_test("provider"),
+            0,
+        )
+        .unwrap();
+        complete_exchange(&mut parent, "the parser is broken", "I will fix the parser");
+        let source = record_path(&parent);
+        let mut child = mnemon(&parent, 1);
+        drop(parent);
+        complete_exchange(&mut child, "the tests pass", "good");
+        fs::remove_file(&source).expect("delete the ancestor's log");
+
+        let answer = child
+            .grep_transcript(&regex(r"\bthe\b"), None, None)
+            .expect("an unnarrowed search answers what it can reach");
+        assert_eq!(answer.total, 1);
+        assert_eq!(answer.hits[0].text, "the tests pass");
+
+        let refusal = child
+            .read_transcript(&[1], None)
+            .expect_err("a read that names an unreadable turn is refused");
+        assert!(
+            refusal.starts_with(&format!(
+                "turn 1 could not be read back from {}: ",
+                source.display()
+            )),
+            "{refusal}"
+        );
     }
 }

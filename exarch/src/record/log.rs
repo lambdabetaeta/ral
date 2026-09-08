@@ -15,7 +15,7 @@
 //! no-op on purpose: the record is already durable, and a consumer that was
 //! not listening catches up from the file, never from the channel.
 
-use super::{Entry, Record, Recorded, Seq, Stamp, Transient};
+use super::{Entry, Locus, Record, Recorded, Seq, Transient};
 use crate::bootstrap::now_unix_ms;
 use crate::bus::{AgentId, Signal, UsageMeter, WeakSender};
 use std::fs::{File, OpenOptions};
@@ -66,7 +66,7 @@ impl Log {
     }
 
     /// Reopen `path` for append — resume — seeding the sequence and cursor
-    /// from the complete lines already on disk, so a resumed session's stamps
+    /// from the complete lines already on disk, so a resumed session's loci
     /// continue the file's own numbering.  Creates the file when a pre-plan
     /// session has none.  The caller quarantines any torn tail first.
     ///
@@ -125,7 +125,7 @@ impl Log {
     /// the file's, never the session's: swapping the `Log` instead would
     /// strand the bus and every `Emitter` clone on the rotated-away file.
     ///
-    /// `Seq`/`Stamp` ranges are per-segment, not per-session: this only stays
+    /// `Seq`/`Locus` ranges are per-segment, not per-session: this only stays
     /// sound because `rotate`'s one caller, `/clear`, resets every fold
     /// (model memo, view) in the same beat, so nothing straddling the old
     /// numbering survives to be confused by the new one starting at zero.
@@ -166,7 +166,7 @@ impl Log {
     /// than beside it.  Flushed per record (never `fsync`): process-crash
     /// durable, which is what lets a killed session resume, but not
     /// power-loss durable.
-    pub(super) fn append(&self, record: Record) -> io::Result<Stamp> {
+    pub(super) fn append(&self, record: Record) -> io::Result<Locus> {
         let mut inner = self
             .inner
             .lock()
@@ -187,12 +187,12 @@ impl Log {
         inner.pos = end;
         inner.seq += 1;
         let body = &line[..line.len() - 1];
-        let stamp = Stamp::over(Seq::new(inner.seq), start, body);
+        let locus = Locus::over(Seq::new(inner.seq), start, body);
         if let Some(sink) = &inner.sink {
             if let Record::Forensic(super::Forensic::UsageDelta { usage }) = &record {
                 sink.meter.add(usage.into());
             }
-            let recorded = Recorded::new(stamp.clone(), record);
+            let recorded = Recorded::new(locus.clone(), record);
             if sink
                 .tx
                 .send_signal(Signal::Fact(sink.id, recorded))
@@ -204,7 +204,7 @@ impl Log {
             }
         }
         drop(inner);
-        Ok(stamp)
+        Ok(locus)
     }
 
     /// Publish a transient that never touches the file, through the same
@@ -221,7 +221,7 @@ impl Log {
         }
     }
 
-    /// Stream every record back, in file order, each stamped with the `Seq`
+    /// Stream every record back, in file order, each located by the `Seq`
     /// and byte range it occupies — what [`super::replay`] folds.
     ///
     /// One line is in memory at a time, so replaying a session costs the size
@@ -254,7 +254,7 @@ impl Log {
                 return Some(
                     serde_json::from_slice::<Entry>(&line)
                         .map(|entry| {
-                            Recorded::new(Stamp::over(Seq::new(seq), start, &line), entry.record)
+                            Recorded::new(Locus::over(Seq::new(seq), start, &line), entry.record)
                         })
                         .map_err(|error| {
                             io::Error::other(format!(
@@ -287,7 +287,7 @@ mod tests {
         let record = Record::Forensic(Forensic::Error {
             text: "boom".into(),
         });
-        let _stamp = log.append(record).expect("append");
+        let _locus = log.append(record).expect("append");
 
         let back: Vec<_> = Log::read(&path).expect("read back").collect();
         assert_eq!(back.len(), 1);
@@ -326,8 +326,8 @@ mod tests {
     }
 
     #[test]
-    fn a_stamp_round_trips_identically_through_append_and_read() {
-        let path = temp_path("stamp-round-trip");
+    fn a_locus_round_trips_identically_through_append_and_read() {
+        let path = temp_path("locus-round-trip");
         let log = Log::create(&path).expect("temp record log");
         let first = log
             .append(Record::Forensic(Forensic::Error {
@@ -345,15 +345,15 @@ mod tests {
         let mut back = back.into_iter();
         let first_back = back.next().unwrap().expect("parses");
         let second_back = back.next().unwrap().expect("parses");
-        assert_eq!(*first_back.stamp(), first);
-        assert_eq!(*second_back.stamp(), second);
+        assert_eq!(*first_back.locus(), first);
+        assert_eq!(*second_back.locus(), second);
     }
 
     #[test]
     fn a_mismatched_body_misses_the_digest() {
         let path = temp_path("digest-mismatch");
         let log = Log::create(&path).expect("temp record log");
-        let _stamp = log
+        let _locus = log
             .append(Record::Forensic(Forensic::Error {
                 text: "boom".into(),
             }))
@@ -365,8 +365,8 @@ mod tests {
             .expect("one record")
             .expect("parses");
         assert_ne!(
-            Stamp::digest_of(b"something else"),
-            recorded.stamp().digest()
+            Locus::digest_of(b"something else"),
+            recorded.locus().digest()
         );
     }
 }

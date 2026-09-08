@@ -284,7 +284,7 @@ pub fn to_card_notice(notice: &crate::record::NoticeFact) -> Notice {
 /// at draw time, since an exchange of two hundred tool turns is one thing the
 /// human is reading about. No live marker: the newest turn is the one an
 /// eviction structurally cannot name, so saying so twice would say nothing.
-pub fn context_rows_card(rows: &[crate::record::Turn], evicted: usize) -> Card {
+pub fn context_rows_card(rows: &[crate::record::Row], evicted: usize) -> Card {
     let fields = context_exchanges(rows)
         .into_iter()
         .map(|group| Field {
@@ -329,8 +329,8 @@ struct ContextExchange {
 /// The survey's turns grouped into contiguous runs sharing an exchange. The
 /// label is the exchange's own opening line where its user turn is still in
 /// the context, and the run's first line where a cut took that turn.
-fn context_exchanges(rows: &[crate::record::Turn]) -> Vec<ContextExchange> {
-    let mut drawn: Vec<(&crate::record::Turn, u64, usize)> = Vec::new();
+fn context_exchanges(rows: &[crate::record::Row]) -> Vec<ContextExchange> {
+    let mut drawn: Vec<(&crate::record::Row, u64, usize)> = Vec::new();
     for row in rows {
         match drawn.last_mut() {
             Some((first, last, bytes)) if first.exchange == row.exchange => {

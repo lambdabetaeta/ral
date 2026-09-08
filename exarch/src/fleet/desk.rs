@@ -993,7 +993,7 @@ impl ExarchDesk {
         let child_account =
             crate::agent::RecordedAccount::of(provider.account(), &s.agent.bureau().available());
         let child_log = {
-            let mut parent_log = s.log.lock();
+            let parent_log = s.log.lock();
             let mut child_log = parent_log
                 .fork(
                     child_id,
@@ -1619,9 +1619,8 @@ impl ExarchDesk {
     fn transcript(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let (tag, payload) = family_tag(payload, "transcript")?;
         match tag.as_str() {
-            // The index stays whole under the lock: it needs `&mut AgentLog`
-            // for every row it weighs, and its one costly part — the ancestry
-            // walk — is paid once per session.
+            // The index stays whole under the lock: it is a projection of
+            // rows the structure already holds, touching no file.
             "index" => self.traced(
                 "index".to_string(),
                 |log| Ok(transcript_index_answer(log.transcript_index())),
@@ -1862,7 +1861,7 @@ fn survey_answer(survey: &ContextSurvey) -> FOValue {
 
 /// One turn as both `` context `survey `` and `` transcript `index `` name
 /// it, so a row and an index line can never be two opinions.
-fn turn_row(turn: &crate::record::Turn) -> Vec<(String, FOValue)> {
+fn turn_row(turn: &crate::record::Row) -> Vec<(String, FOValue)> {
     vec![
         (
             "id".to_string(),
@@ -1889,7 +1888,7 @@ fn turn_row(turn: &crate::record::Turn) -> Vec<(String, FOValue)> {
 
 /// `` `transcript `index ``'s answer: one row per turn the transcript holds,
 /// oldest first, `held` saying which of them the model is still paying for.
-fn transcript_index_answer(turns: Vec<crate::record::Turn>) -> FOValue {
+fn transcript_index_answer(turns: Vec<crate::record::Row>) -> FOValue {
     FOValue::List {
         items: turns
             .into_iter()
@@ -3729,7 +3728,7 @@ mod tests {
             .next()
             .expect("record.jsonl must have at least one record");
         match first {
-            crate::record::Record::Protocol(crate::record::Protocol::SessionStarted {
+            crate::record::Record::Forensic(crate::record::Forensic::SessionStarted {
                 system_prompt_bytes,
                 ..
             }) => system_prompt_bytes,

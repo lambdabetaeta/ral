@@ -20,7 +20,7 @@ mod replay;
 mod seam;
 mod view;
 
-pub use model::{Cut, Held, Turn};
+pub use model::{Held, Linked, Pointer, Row};
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
 pub use view::{Block, BlockKind, View};
@@ -100,46 +100,11 @@ impl From<Forensic> for Record {
     }
 }
 
-/// Verbatim payloads the model fold needs — the provider's exact
-/// `ChatMessage`, tool-call ids, and the session bookends.
+/// Verbatim payloads the model fold needs — the provider's exact `ChatMessage`
+/// and tool-call ids.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Protocol {
-    /// Head bookend, carrying enough metadata that the file reads on its own.
-    SessionStarted {
-        session_id: AgentId,
-        parent: Option<AgentId>,
-        model: String,
-        /// What the account was called when the session started — a
-        /// snapshot, the right thing for a log to hold even once a sibling
-        /// account arrives or a workspace is renamed.
-        #[serde(rename = "provider")]
-        label: String,
-        /// `service` and `account` join `label` once an account carries a
-        /// service name and an id of its own; both absent on a `record.jsonl`
-        /// written before this pair existed, which still resumes on `label`
-        /// alone.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        service: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        account: Option<String>,
-        system_prompt_bytes: usize,
-        log_dir: PathBuf,
-        at_unix_ms: u64,
-    },
-    SessionResumed {
-        model: String,
-        #[serde(rename = "provider")]
-        label: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        service: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        account: Option<String>,
-        system_prompt_bytes: usize,
-        at_unix_ms: u64,
-    },
-    /// Tail bookend.
-    SessionEnded,
     UserPrompt {
         exchange: u64,
         text: String,
@@ -152,28 +117,18 @@ pub enum Protocol {
         message: ChatMessage,
     },
     /// The link a `mnemon` child opens with: the parent's whole turn table,
-    /// and the ancestry the turns below the fork read back from.  Written
+    /// each row carrying the address its transcript copy lies at.  Written
     /// once, before the [`Protocol::ContextMessage`]s that re-record the
     /// resident ones as this log's own.
     Inherited {
-        /// The parent's `record.jsonl`, where every inherited turn — in the
-        /// parent's context or long departed — reads back from.
-        source: PathBuf,
-        /// The parent's own id floor at the fork: ids at or below it resolve
-        /// against the ancestry, ids above it are the child's own.
-        through: u64,
-        /// The parent's table at the fork, every turn `kind: Inherited` and
-        /// `held` as the parent had it.  The child's marker, survey and index
-        /// are the same projections of it.
-        turns: Vec<model::Turn>,
-        /// The cuts made in that table, so the child's `render_head` is the
-        /// same projection of the same fold — the parent's notes included.
-        cuts: Vec<model::Cut>,
-    },
-    /// The meta half of taking a turn: the effort dial the request goes out
-    /// under.  The id the request will produce is the display twin's.
-    TurnStarted {
-        tuning: Tuning,
+        /// The parent's table at the fork, every row `kind: Inherited` and
+        /// `held` as the parent had it, beside where that turn was first
+        /// recorded.  The child's marker, survey and index are the same
+        /// projections of it.
+        turns: Vec<model::Linked>,
+        /// The notes made at those evictions, so the child's `render_head` is
+        /// the same projection of the same structure.
+        notes: Vec<Option<String>>,
     },
     AssistantMessage {
         /// This turn's id, minted by the log.
@@ -277,15 +232,15 @@ pub enum Display {
         notice: NoticeFact,
     },
     Context {
-        rows: Vec<model::Turn>,
+        rows: Vec<model::Row>,
         /// Turns that have left the context by eviction; drawn as one leading
         /// line when non-zero.
         evicted: usize,
     },
-    /// Beside `Protocol::TurnStarted`, whose `tuning` the screen never
-    /// showed — the display class never derives from the protocol twin it
-    /// duplicates a field of.  `id` is the id the request will produce, so a
-    /// cancelled request retaken shows the same one twice.
+    /// Beside `Forensic::TurnStarted`, whose `tuning` the screen never
+    /// showed — the display class never derives from the twin it duplicates a
+    /// field of.  `id` is the id the request will produce, so a cancelled
+    /// request retaken shows the same one twice.
     Turn {
         id: u64,
     },
@@ -331,6 +286,46 @@ pub enum NoticeFact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Forensic {
+    /// Head bookend, carrying enough metadata that the file reads on its own.
+    SessionStarted {
+        session_id: AgentId,
+        parent: Option<AgentId>,
+        model: String,
+        /// What the account was called when the session started — a
+        /// snapshot, the right thing for a log to hold even once a sibling
+        /// account arrives or a workspace is renamed.
+        #[serde(rename = "provider")]
+        label: String,
+        /// `service` and `account` join `label` once an account carries a
+        /// service name and an id of its own; both absent on a `record.jsonl`
+        /// written before this pair existed, which still resumes on `label`
+        /// alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+        system_prompt_bytes: usize,
+        log_dir: PathBuf,
+        at_unix_ms: u64,
+    },
+    SessionResumed {
+        model: String,
+        #[serde(rename = "provider")]
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+        system_prompt_bytes: usize,
+        at_unix_ms: u64,
+    },
+    /// Tail bookend.
+    SessionEnded,
+    /// The meta half of taking a turn: the effort dial the request goes out
+    /// under.  The id the request will produce is the display twin's.
+    TurnStarted {
+        tuning: Tuning,
+    },
     UsageDelta {
         usage: UsageDelta,
     },
@@ -454,13 +449,9 @@ impl Seq {
 /// Where one record lives: its [`Seq`], the byte range `append` wrote it to,
 /// and a digest of its own bytes that a stale range fails rather than reads
 /// past.
-///
-/// The model fold's ledger stores one of these per protocol record, so a
-/// freed run reads back through them one record at a time rather than as one
-/// contiguous range.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[must_use]
-pub struct Stamp {
+pub struct Locus {
     seq: Seq,
     bytes: Range<u64>,
     /// Blake3 of the record's own bytes, truncated: a range read back
@@ -470,7 +461,7 @@ pub struct Stamp {
     digest: u64,
 }
 
-impl Stamp {
+impl Locus {
     /// `body` is the record's JSON without its line terminator; the range it
     /// occupies includes that terminator.
     pub(crate) fn over(seq: Seq, at: u64, body: &[u8]) -> Self {
@@ -491,8 +482,8 @@ impl Stamp {
         )
     }
 
-    /// A stamp that names no bytes. The view fold never reads a record back
-    /// through one, so its tests need no file behind it — the one stamp not
+    /// A locus that names no bytes. The view fold never reads a record back
+    /// through one, so its tests need no file behind it — the one locus not
     /// derived from a record's own bytes, and `cfg(test)` so no production
     /// path can mint one.
     #[cfg(test)]
@@ -517,22 +508,22 @@ impl Stamp {
     }
 }
 
-/// A record witnessed by the seam: its [`Stamp`] beside the value `emit` was
+/// A record witnessed by the seam: its [`Locus`] beside the value `emit` was
 /// given.
 ///
 /// Built only at append time (by [`Emitter::emit`]) and at replay time
 /// (reconstructing history from the file) — nowhere else, since nothing but
-/// those two moments has a `Stamp` to attach.
+/// those two moments has a `Locus` to attach.
 #[derive(Debug, Clone)]
 #[must_use]
-pub struct Recorded<R>(Stamp, R);
+pub struct Recorded<R>(Locus, R);
 
 impl<R> Recorded<R> {
-    pub(crate) fn new(stamp: Stamp, value: R) -> Self {
-        Self(stamp, value)
+    pub(crate) fn new(locus: Locus, value: R) -> Self {
+        Self(locus, value)
     }
 
-    pub fn stamp(&self) -> &Stamp {
+    pub fn locus(&self) -> &Locus {
         &self.0
     }
 
@@ -551,8 +542,8 @@ impl<R> Recorded<R> {
 /// The bridge from `Emitter::emit`'s typed return to the class-blind
 /// dispatcher, for the attend thread's inline advance.
 pub fn widen<C: Class>(recorded: Recorded<C>) -> Recorded<Record> {
-    let stamp = recorded.stamp().clone();
-    Recorded::new(stamp, recorded.into_value().into())
+    let locus = recorded.locus().clone();
+    Recorded::new(locus, recorded.into_value().into())
 }
 
 /// A named commit in the view fold's memo — a block is named by its own

@@ -48,8 +48,8 @@ had already named **two-record unification**, with the bus as the blocker.
   session state is this fold's `Memo`; the `events.jsonl`-backed engine is
   deleted whole. The 260812 laws migrate intact: no recorded fact is ever
   removed, `/clear` rotates rather than truncates, resume quarantines a torn
-  tail, and the ledger indexes the protocol subsequence per record through
-  each `Stamp`'s byte range, never by contiguous run.
+  tail, and the fold indexes the protocol subsequence per record through each
+  `Locus`'s byte range, never by contiguous run.
 - **The view fold exists and follows the same law.** `record/view.rs` folds
   `Display` commits and the `Forensic` rows a scrollback draws into `Blocks`;
   `Block`'s constructor is private, so `Blocks` is unforgeable — only
@@ -248,6 +248,15 @@ log with no independent sibling.
   record. The general lesson: a fold is a streaming operation by
   construction, so collecting its input first is never the shape of the
   computation, only of the code that spells it.
+
+- **260908 — the bookends are forensic.** `SessionStarted`,
+  `SessionResumed`, `SessionEnded` and `TurnStarted` moved from `Protocol` to
+  `Forensic`. The model fold folded none of them, carrying an arm in five
+  functions to say so; the class this decision defined for durable evidence
+  that is not model context was theirs all along. `Protocol` is then exactly
+  what the fold acts on: `resume` reads a session's identity off the file's
+  first record rather than its first protocol record, and a fork's link is
+  admissible exactly as the first protocol record.
 
 ## See also
 

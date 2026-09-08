@@ -28,8 +28,8 @@ It has three facts, and each has a truer home in the one log:
   (`exarch/src/record.rs`). `Entry` is private to the log module — a fold sees a
   bare `Record` — so the clock is a property of the *line*, not of the
   vocabulary, and no projection can come to depend on it.
-- **A child's `born`/`died`** are its own `Protocol::SessionStarted` and
-  `Protocol::SessionEnded` bookends in its own log, where a child's lifetime was
+- **A child's `born`/`died`** are its own `Forensic::SessionStarted` and
+  `Forensic::SessionEnded` bookends in its own log, where a child's lifetime was
   always recorded.
 - **`stop_reason`** already rides `Protocol::AssistantMessage`; the trace held a
   copy.

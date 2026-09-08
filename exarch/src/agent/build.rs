@@ -989,7 +989,7 @@ mod tests {
             .next()
             .expect("record.jsonl must have at least one record");
         match first {
-            crate::record::Record::Protocol(crate::record::Protocol::SessionStarted {
+            crate::record::Record::Forensic(crate::record::Forensic::SessionStarted {
                 system_prompt_bytes,
                 ..
             }) => system_prompt_bytes,
@@ -1322,7 +1322,7 @@ mod tests {
             .rewind(3, &emit)
             .expect("an anchor still in context is legal");
         assert_eq!(
-            session.log.lock().folded().resident().count(),
+            session.log.lock().context_survey().rows.len(),
             0,
             "the rewind removes the whole suffix"
         );
@@ -1462,7 +1462,7 @@ mod tests {
             crate::record::read_records(&dir.path().join("sessions/0/record.jsonl")).unwrap();
         assert!(records.iter().any(|record| matches!(
             record,
-            crate::record::Record::Protocol(crate::record::Protocol::SessionResumed { .. })
+            crate::record::Record::Forensic(crate::record::Forensic::SessionResumed { .. })
         )));
     }
 
@@ -1500,7 +1500,7 @@ mod tests {
         let current_records = crate::record::read_records(&record).unwrap();
         assert!(matches!(
             current_records.first().expect("new session head"),
-            crate::record::Record::Protocol(crate::record::Protocol::SessionStarted { .. })
+            crate::record::Record::Forensic(crate::record::Forensic::SessionStarted { .. })
         ));
         assert!(
             current_records.iter().any(|r| matches!(
