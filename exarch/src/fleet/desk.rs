@@ -393,7 +393,9 @@ fn payload_turns(v: FOValue, class: &str) -> Result<(u64, u64), Error> {
     let to = payload_id(to, class, "turns[1]", "turn")?;
     if from > to {
         return Err(Error::new(
-            format!("`{class}`: `turns` is [from, to] and {from} is after {to} — did you mean [{to}, {from}]?"),
+            format!(
+                "`{class}`: `turns` is [from, to] and {from} is after {to} — did you mean [{to}, {from}]?"
+            ),
             1,
         ));
     }
@@ -2923,10 +2925,7 @@ mod tests {
                 let FOValue::List { items } = turns else {
                     panic!("a read's turns are a list, got {turns:?}")
                 };
-                (
-                    int_field(item.clone(), "exchange"),
-                    items.len(),
-                )
+                (int_field(item.clone(), "exchange"), items.len())
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -3047,7 +3046,10 @@ mod tests {
         let rows = survey_rows(&answer);
         assert_eq!(
             rows.iter()
-                .map(|row| (int_field(row.clone(), "id"), int_field(row.clone(), "exchange")))
+                .map(|row| (
+                    int_field(row.clone(), "id"),
+                    int_field(row.clone(), "exchange")
+                ))
                 .collect::<Vec<_>>(),
             vec![(3, 3), (4, 3)],
             "the dropped exchange's turns are gone from the answer"
