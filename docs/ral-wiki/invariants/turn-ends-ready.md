@@ -15,9 +15,9 @@ in every phase but `AwaitingToolResults`: an exchange the model never replied to
 is *abandoned* by the next prompt, not closed by a fabricated one. Only
 outstanding tool calls hold the log, because their answer is genuinely owed and
 a dangling tool-call block is not a legal request
-([[invariants/transcript-admission|transcript-admission]]). `admissible` in
-`record/model.rs` and `is_ready` read the same rule, so what a live door accepts
-and what a replayed log admits cannot drift.
+([[invariants/transcript-admission|transcript-admission]]). `admissible` and
+`is_ready`, both in `record/model/state.rs`, read the same rule, so what a live
+door accepts and what a replayed log admits cannot drift.
 
 What the phases sequence is *tool-call pairing*, not strict user/assistant
 alternation — which this projection has never maintained and does not aim to.

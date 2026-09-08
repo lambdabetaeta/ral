@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 4bc5006c
+generated_at_commit: c63286ad
 generated_at_date: 2026-09-07
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
@@ -302,8 +302,8 @@ and an exchange is the run of turns from a user turn, carrying that turn's id.
   itself: the script source for exarch's own tool, or a name and argument
   keys for any other), `` `result ``, `` `reasoning ``, `` `binary `` (media
   metadata only), `` `custom `` — matched exhaustively in
-  `exarch/src/record/model.rs`, so a genai variant this arm list has not met
-  is a compile error rather than a serialization of the provider's struct
+  `exarch/src/record/model/door.rs`, so a genai variant this arm list has not
+  met is a compile error rather than a serialization of the provider's struct
   leaking through as content. `` `ThoughtSignature `` carries no part at all:
   an opaque continuation token, dropped rather than rendered. Narrowing this
   material — truncation, elision, byte caps — is deliberately not this

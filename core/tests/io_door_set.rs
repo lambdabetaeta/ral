@@ -210,15 +210,15 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("exarch/src/agent/event.rs", "io-door:silent:session-dir"),
     ("exarch/src/record/log.rs", "io-door:silent:record-file"),
     (
-        "exarch/src/record/model.rs",
+        "exarch/src/record/model/resume.rs",
         "io-door:silent:model-fold-crash-quarantine",
     ),
     (
-        "exarch/src/record/model.rs",
+        "exarch/src/record/model/resume.rs",
         "io-door:silent:model-fold-crash-scan",
     ),
     (
-        "exarch/src/record/model.rs",
+        "exarch/src/record/model/door.rs",
         "io-door:silent:model-fold-pointer-read",
     ),
     (

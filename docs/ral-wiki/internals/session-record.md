@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 14c8cae4
+verified_at_commit: c63286ad
 verified_at_date: 2026-09-08
 anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Printer::sync, replay, model::resume, Viewport::commit_fact, seed, enforce_window_caps, flush_log, rotate, clear, Context, Turn, Body, Pointer, Row, Held, Locus, Rendered, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
 ---
@@ -77,9 +77,12 @@ seam returns from `emit`.
 
 ### One structure, one fold, everything else a projection
 
-The log is the durable structure; `Context` (`record/model.rs`) is its fold in
-memory, and it holds **every turn the lineage has recorded, and where each one
-is** ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]):
+The log is the durable structure; `Context` is its fold in memory — the
+structure in `record/model.rs`, the automaton in `model/state.rs`, the fold in
+`model/fold.rs`, the render in `model/render.rs`, the door in `model/door.rs`,
+resume in `model/resume.rs` — and it holds **every turn the lineage has
+recorded, and where each one is**
+([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]):
 
 - `turns: Vec<Turn>` in id order — `{ id, exchange, kind, label, bytes, body }`
   — where a user turn is the one with `id == exchange`;

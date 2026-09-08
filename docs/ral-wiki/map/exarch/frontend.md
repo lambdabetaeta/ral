@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 7e129df6
+generated_at_commit: c63286ad
 generated_at_date: 2026-09-07
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -81,8 +81,9 @@ order); `record/log.rs` (the `record.jsonl` io-door, with the attachable
 `fold == memo` driver and `Refusal`, with `Log::read` streaming one entry at a
 time); `record/commit.rs` (the worker-side
 commit producer: one `Chopper` per lane of the model's stream, and
-`SurfaceBuffer`, moved whole from `tui/surface.rs`); `record/model.rs` (the model fold, `Protocol` alone, with
-streaming resume/admission, and the `Rendered` persistent value + per-turn
+`SurfaceBuffer`, moved whole from `tui/surface.rs`); `record/model.rs` and its
+`model/` children (the model fold, `Protocol` alone, with streaming
+resume/admission, and the `Rendered` persistent value + per-turn
 render cache the provider-facing projection is built from — see
 [[internals/session-record#The provider-facing context is a persistent value|the context-as-value section]]
 and [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
@@ -102,7 +103,7 @@ stays visible until quiescence.
 
 `agent/event.rs` is the canonical per-session record. `AgentLog` owns two things:
 
-- the model fold's `Memo` (`record/model.rs`) — its only session state:
+- the model fold's `Context` (`record/model.rs`) — its only session state:
   drives the protocol state machine (`is_ready` gates a fresh prompt and
   `quiesce` winds any in-flight exchange back to it, so an exchange never
   strands a prompt mid-protocol; [[invariants/turn-ends-ready|exchange-ends-ready]])
