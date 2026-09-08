@@ -306,7 +306,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
     ("ral-sh/src/main.rs", "io-door:silent:respawn-posix-sh"),
     ("ral-sh/src/main.rs", "io-door:silent:respawn-ral"),
     ("ral/build.rs", "io-door:silent:git-probe"),
-    ("ral/src/main.rs", "io-door:silent:script-read"),
+    ("ral/src/batch.rs", "io-door:silent:script-read"),
     ("ral/src/platform.rs", "io-door:silent:exit-hints-read"),
     (
         "ral/src/repl/completion.rs",

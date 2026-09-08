@@ -12,6 +12,37 @@ use crate::PRELUDE;
 use crate::cli::{BatchOpts, RunOpts};
 use crate::platform::{apply_session_capabilities, exit_byte, load_exit_hints, probe_terminal};
 
+/// Run the script at `path`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[io-door:silent:script-read] startup read of the script file path; not turn-time model I/O"
+)]
+pub(crate) fn run_file(path: &str, script_args: Vec<String>, opts: BatchOpts) -> ExitCode {
+    match std::fs::read_to_string(path) {
+        Ok(source) => run_source(path, source, script_args, opts),
+        Err(e) => {
+            diagnostic::cmd_error("ral", &format!("{path}: {e}"));
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the script arriving on stdin.
+pub(crate) fn run_stdin(run: RunOpts) -> ExitCode {
+    use std::io::Read as _;
+
+    let mut source = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut source) {
+        diagnostic::cmd_error("ral", &format!("<stdin>: {e}"));
+        return ExitCode::from(1);
+    }
+    let batch = BatchOpts {
+        run,
+        ..BatchOpts::default()
+    };
+    run_source("<stdin>", source, Vec::new(), batch)
+}
+
 /// Serialise the run's report envelope to JSON and emit it on stderr — the
 /// same envelope `audit { … }` returns, with the whole run as its body.  An
 /// escape (`exit`) is not a failure: the process still exits with its code,
@@ -40,17 +71,23 @@ fn emit_audit_report(
     eprintln!("{json_str}");
 }
 
-/// Execute `source` non-interactively (script or `-c` mode).
+/// Execute `source` non-interactively, under the name diagnostics will use
+/// for it: a script path, `<stdin>`, or `-c`.
 ///
 /// Parses, elaborates, optionally typechecks, and evaluates the program. When
 /// `--audit` is active, reports the whole execution as one report envelope and
 /// emits it as JSON on stderr.
-pub(crate) fn run_batch(
+///
+/// Every batch source passes through here, so line endings are normalised
+/// here too — one door, one rule.
+pub(crate) fn run_source(
     name: &str,
-    source: &str,
+    source: String,
     script_args: Vec<String>,
     opts: BatchOpts,
 ) -> ExitCode {
+    let normalized = ral_core::source::normalize_source_text(source);
+    let source = normalized.as_str();
     let BatchOpts {
         audit,
         pretty,
@@ -176,7 +213,7 @@ pub(crate) fn run_batch(
     };
     let (ending, compact_root) = match shell.run(RunRequest {
         run: Run {
-            program: Program::Source(source.to_string()),
+            program: Program::Source(normalized),
             script_name: name.to_string(),
             caps: ral_core::types::GrantStack::root(),
             wall: None,

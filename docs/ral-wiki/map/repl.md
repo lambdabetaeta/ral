@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0c6ec335
-generated_at_date: 2026-09-03
+generated_at_commit: cd052a22
+generated_at_date: 2026-09-08
 covers_paths: [ral/src/]
 ---
 
@@ -14,8 +14,9 @@ live in core.
 
 - *Argv dispatch.* `cli.rs` resolves argv to a `Mode` — interactive,
   login, script, or `-c` (`Command`) — each carrying only the flags valid for
-  it; `main.rs` is the thin dispatch over it, and `batch.rs` runs the
-  non-interactive modes.
+  it; `startup.rs` decides whether this process is the shell at all, `main.rs` is
+  the thin dispatch over the answer, and `batch.rs` runs the non-interactive
+  modes.
 - *Framed run.* Every evaluation, batch or interactive, enters core through
   the same *framed run door* (`shell.run`): a run is one
   synchronous call carrying its own policy — capabilities, limits, IO regime,
@@ -38,7 +39,8 @@ REPL makes that state the thing the loop threads.
 
 - [[map/repl/startup|startup]] — argv → `Mode`, batch execution
   through the framed door, the build-baked prelude, platform glue
-  (`ral/src/main.rs`, `cli.rs`, `batch.rs`, `platform.rs`, `build.rs`).
+  (`ral/src/main.rs`, `startup.rs`, `cli.rs`, `batch.rs`, `platform.rs`,
+  `build.rs`).
 - [[map/repl/loop|loop]] — the `Session` state machine and one-run cycle: boot,
   prompt, rc/profile sourcing, value printing, error formatting
   (`ral/src/repl/session*`, `exec.rs`, `prompt.rs`, `config.rs`, `theme.rs`,

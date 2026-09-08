@@ -1,32 +1,43 @@
 ---
-generated_at_commit: c8af3823
-generated_at_date: 2026-09-02
-covers_paths: [ral/src/main.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
+generated_at_commit: cd052a22
+generated_at_date: 2026-09-08
+covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
 # Map: repl / startup
 
-The `ral` binary startup is a three-part front door: **`main.rs` performs
-process dispatch, `cli.rs` distils argv into a `Mode`, and `batch.rs` runs
-non-interactive programs through core's framed run door**. Interactive sessions
-then hand to the REPL, above a pre-clap dispatch that lets the binary re-enter
-itself in confined or helper roles.
+The `ral` binary startup is a four-part front door: **`startup.rs` decides what
+kind of process this is, `cli.rs` distils argv into a `Mode`, `main.rs`
+dispatches the answer, and `batch.rs` runs non-interactive programs through
+core's framed run door**. Interactive sessions then hand to the REPL, above a
+pre-clap dispatch that lets the binary re-enter itself in confined or helper
+roles.
+
+`main` itself holds no substance — it refuses to run setuid, adopts
+the process dispositions, asks `startup::identify()` what this process is, and
+runs the session named. `identify` answers with a two-armed `Invocation`:
+`Shell(Mode)`, or `Exit(ExitCode)` for a re-exec child that has already done
+its work (and for an invocation refused before it could become one).
 
 ## Pre-`main` dispatch
 
-Before argv is parsed, `main` restores the Unix signal dispositions and runs a
-chain of self-re-exec stages that can short-circuit the process. Each returns
-an `Option<u8>` exit code; the currency is normalised so the same chain runs
-identically in `main` and in a test constructor
-([[decisions/260618_run-turn-host-loop|run-turn-host-loop]] keeps hosts
-uniform). The chain is two-staged around the sandbox:
+Before argv is parsed, `main` refuses to run setuid — the shell inherits the
+caller's environment and must not run elevated, and neither must any re-exec
+child, so the refusal precedes the whole chain rather than trailing it —
+restores the Unix signal dispositions, and runs a chain of self-re-exec stages
+that can short-circuit the process. Each core stage returns an `Option<u8>`
+exit code, which `identify` lifts to `Invocation::Exit`. The chain is
+two-staged around the sandbox:
 
 - **Engine entry** (Unix) — `--engine` hands the process to
   `ral_core::engine::run_engine` before anything else: the wire-engine child
-  boots the real shell itself through the installer's boot recipe — the REPL's
-  tag (`ENGINE_INSTALLER_TAG = "repl"`) carries `engine_boot_shell`, the baked
-  prelude over the empty `HostSurface`, since the
-  captured host builtins are boot-time closures a child cannot construct.
+  boots the real shell itself through the installer's boot recipe. That recipe
+  is one `EngineInstaller` const in `startup::engine` — tag (`"repl"`), boot
+  shell, grant policy. The tag carries the baked prelude over the empty
+  `HostSurface`, since the captured host builtins are boot-time closures a
+  child cannot construct; the grant policy is a refusal, because the shell
+  spawns no child engines and has no base-tag lexicon to resolve a grant
+  against.
 - **Helper trampolines** — `try_run_pipeline_anchor` (`--ral-pipeline-anchor`,
   the one multicall re-exec a pipeline still uses: a stage itself now runs on
   a thread of the parent process, but a multi-stage pipeline still needs one
@@ -47,12 +58,14 @@ uniform). The chain is two-staged around the sandbox:
   and each external child launches under the effective policy
   ([[decisions/260617_sandbox-external-children|sandbox-external-children]]).
 
-Both tails exit here, never reaching clap. After dispatch, `main` refuses to
-run setuid on Unix.
+Both tails exit here, never reaching clap.
 
 ## Modes
 
-`ral/src/cli.rs` owns the clap surface. `Cli::into_mode` distils it into a
+`ral/src/cli.rs` owns the clap surface, and `Mode::from_argv` is the one door
+through it: terminator injection, clap, then `Cli::into_mode`. The mode tests
+enter by the same door, so the parse they exercise cannot drift from the one
+`startup::identify` performs. `Cli::into_mode` distils the parsed flags into a
 `Mode`: `Login(InteractiveOpts)`, `Interactive(InteractiveOpts)`, `Script`, or
 `Command`. The login bit (`-l` or a `-`-prefixed argv\[0\]) does not
 short-circuit: a login shell with `-c` or a script positional resolves to
@@ -85,7 +98,10 @@ every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` / `--dump-ast`;
 
 ## Batch execution
 
-`ral/src/batch.rs` owns the whole non-interactive pipeline. `run_batch` parses,
+`ral/src/batch.rs` owns the whole non-interactive pipeline, from the source
+text inwards: `run_file` reads a script path, `run_stdin` reads a piped script,
+and both meet `-c` at `run_source`, which is therefore where line endings are
+normalised — one door, one rule. `run_source` parses,
 elaborates, typechecks, then **runs the program through core's framed run door
 rather than evaluating it directly**
 ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]): the same
@@ -129,9 +145,9 @@ rather than evaluating it directly**
 
 A run-evaluating host needs three things before rc files or capability
 frames: the prelude as a baked [[map/core|`Comp`]], its top-level scheme
-list, and its own builtin surface as a `ral_core::HostSurface`. `main`
-reaches for them through `ral_core::boot` — the Shell-embedding seam — via a
-process-wide `PRELUDE: ral_core::boot::BakedPrelude` static built by the
+list, and its own builtin surface as a `ral_core::HostSurface`. Every mode
+reaches for them through `ral_core::boot` — the Shell-embedding seam — via the
+crate-root `PRELUDE: ral_core::boot::BakedPrelude` static built by the
 `ral_core::baked_prelude!()` macro, and
 `ral_core::boot::boot_shell(terminal, &PRELUDE, surface)`, which constructs
 the shell, installs the surface next to `CORE_BUILTINS`, seeds default env

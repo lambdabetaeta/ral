@@ -24,6 +24,16 @@ pub(crate) enum Mode {
     },
 }
 
+impl Mode {
+    /// Read argv (without the leading program name): terminator injection,
+    /// then clap, then distil to a mode.
+    pub(crate) fn from_argv(args: &[String]) -> Self {
+        use clap::Parser as _;
+        Cli::parse_from(std::iter::once("ral".to_string()).chain(inject_arg_terminator(args)))
+            .into_mode()
+    }
+}
+
 /// Universal flags carried with every mode.
 #[derive(Default, Clone)]
 pub(crate) struct RunOpts {
@@ -116,7 +126,7 @@ Read a report with succeeded and commands. Use --audit to emit the whole \
 run's report as JSON.",
 )]
 #[allow(clippy::struct_excessive_bools)] // clap flag struct: each bool is a distinct CLI switch.
-pub(crate) struct Cli {
+struct Cli {
     /// Start an interactive login shell.
     ///
     /// Ral reads the normal interactive start-up file and the login profile.
@@ -245,7 +255,7 @@ impl Cli {
     /// command rather than dropping it for an interactive REPL. Login therefore
     /// only selects between the two interactive variants, decided after
     /// `-c`/script are ruled out.
-    pub(crate) fn into_mode(self) -> Mode {
+    fn into_mode(self) -> Mode {
         let is_login = self.login || is_login_shell_argv0();
 
         let capabilities = self
@@ -328,7 +338,7 @@ impl Cli {
 /// Long flags that take a separate value token carry that value past the flag.
 /// Which flags those are is read from clap's own model ([`value_taking_longs`])
 /// rather than hand-listed, so it cannot drift from the `Cli` definition.
-pub(crate) fn inject_arg_terminator(raw: &[String]) -> Vec<String> {
+fn inject_arg_terminator(raw: &[String]) -> Vec<String> {
     let value_longs = value_taking_longs();
     let mut out = Vec::with_capacity(raw.len() + 1);
     let mut i = 0;
@@ -421,14 +431,10 @@ fn stdin_is_terminal() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser as _;
 
-    /// Parse argv (without the leading program name) the same way `main` does:
-    /// terminator injection, then clap, then distil to a [`Mode`].
     fn mode_of(args: &[&str]) -> Mode {
         let raw: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
-        Cli::parse_from(std::iter::once("ral".to_string()).chain(inject_arg_terminator(&raw)))
-            .into_mode()
+        Mode::from_argv(&raw)
     }
 
     #[test]

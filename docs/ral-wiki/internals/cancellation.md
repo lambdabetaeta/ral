@@ -39,7 +39,7 @@ resets it at acknowledgment boundaries (a fresh prompt, a run compile, a
 session reboot), and `escalation_pending()` exposes it for observability only.
 
 **The force-exit floor is reachable only in non-interactive paths.** The `ral`
-batch launcher binds SIGINT to `handler` (`main.rs`, `install_handlers`); the
+batch launcher binds SIGINT to `handler` (`batch.rs`, `install_handlers`); the
 interactive REPL rebinds SIGINT to the non-escalating `interrupt_handler`
 (below), which never touches the ladder. So repeated Ctrl-C at an interactive prompt is cooperative, never a
 hard kill — the escalation belongs to batch scripts, to external SIGTERM/SIGHUP,

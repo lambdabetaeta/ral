@@ -128,8 +128,10 @@ impl<T> Spanned<Box<T>> {
 }
 
 /// Fold CRLF and lone CR to LF, so a Windows-authored script parses like any
-/// other; a carriage return means nothing in the shell language.  Every load
-/// of source from disk or wire passes through here.
+/// other.
+///
+/// A carriage return means nothing in the shell language, and every load of
+/// source — disk, wire, stdin, argv — passes through here.
 pub fn normalize_source_text(source: String) -> String {
     if source.contains('\r') {
         source.replace("\r\n", "\n").replace('\r', "\n")
