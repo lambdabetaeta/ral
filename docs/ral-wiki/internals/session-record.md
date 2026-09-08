@@ -1,5 +1,5 @@
 ---
-verified_at_commit: c63286ad
+verified_at_commit: 1d028de7
 verified_at_date: 2026-09-08
 anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Printer::sync, replay, model::resume, Viewport::commit_fact, seed, enforce_window_caps, flush_log, rotate, clear, Context, Turn, Body, Pointer, Row, Held, Locus, Rendered, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
 ---
@@ -78,10 +78,11 @@ seam returns from `emit`.
 ### One structure, one fold, everything else a projection
 
 The log is the durable structure; `Context` is its fold in memory — the
-structure in `record/model.rs`, the automaton in `model/state.rs`, the fold in
-`model/fold.rs`, the render in `model/render.rs`, the door in `model/door.rs`,
-resume in `model/resume.rs` — and it holds **every turn the lineage has
-recorded, and where each one is**
+vocabulary in `record/model.rs`, the turns and cuts in `model/table.rs`, the
+automaton in `model/state.rs`, the fold in `model/fold.rs`, the render in
+`model/render.rs`, the transcript door in `model/transcript.rs`, resume in
+`model/resume.rs` — and it holds **every turn the lineage has recorded, and
+where each one is**
 ([[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]]):
 
 - `turns: Vec<Turn>` in id order — `{ id, exchange, kind, label, bytes, body }`
@@ -94,6 +95,13 @@ recorded, and where each one is**
 - `source`, this log's own `record.jsonl`, where a turn recorded here points
   once it leaves; the protocol's resting state; and the count of records
   folded, beside the index of the newest context edit.
+
+Those first three live in a `Table` private to `model/table.rs`, which hands
+the rest of the module a `&[Turn]` and nothing writable. A turn therefore
+changes where it is only through `Table::evict` or `Table::drop_exchanges`,
+the two functions that know which turns a cut takes — so the invariant *the
+first resident turn is a user turn* is kept by construction rather than by
+every caller remembering the survivor rule.
 
 `Turn` and `Body` are private to the module: a turn holds records, so it is
 not a value to hand out. Two projections take its place. `Turn::row` yields a

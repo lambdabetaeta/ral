@@ -218,7 +218,7 @@ const DOOR_MANIFEST: &[(&str, &str)] = &[
         "io-door:silent:model-fold-crash-scan",
     ),
     (
-        "exarch/src/record/model/door.rs",
+        "exarch/src/record/model/transcript.rs",
         "io-door:silent:model-fold-pointer-read",
     ),
     (

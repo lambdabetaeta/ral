@@ -4,7 +4,7 @@
 
 use super::state::{admissible, advance};
 use super::{
-    Body, Context, Held, Linked, Pointer, Turn, into_chat_messages, message_bytes, message_label,
+    Context, Held, Turn, into_chat_messages, message_bytes, message_label,
     not_recorded_refusal_turn, opening_line,
 };
 use crate::agent::event::{ContextOp, TurnKind};
@@ -153,7 +153,7 @@ impl Context {
                 };
                 // A cut that would take nothing is no plan: the work in hand
                 // and the user turn it belongs to already fill the budget.
-                return (!cut_departures(&self.turns, through).is_empty()).then_some(through);
+                return self.table.takes(through).then_some(through);
             }
             spent = total;
         }
@@ -177,7 +177,7 @@ impl Context {
         self.state = advance(&self.state, record.value());
         match record.value() {
             Protocol::Inherited { turns, notes } => {
-                self.install(turns, notes);
+                self.table.install(turns, notes);
                 return Ok(());
             }
             Protocol::ContextEdited { op, .. } => {
@@ -194,13 +194,7 @@ impl Context {
             return Ok(());
         };
         let bytes = message_bytes(&into_chat_messages(record.value().clone()));
-        let turn = &mut self.turns[at];
-        turn.bytes = turn.bytes.saturating_add(bytes);
-        match &mut turn.body {
-            Body::Here { records, .. } => records.push(record),
-            // `judge` refuses a record landing on a departed row.
-            Body::There { .. } => unreachable!("a judged record lands on a resident turn"),
-        }
+        self.table.absorb(at, record, bytes);
         Ok(())
     }
 
@@ -281,7 +275,8 @@ impl Context {
         let reach = self.reach();
         match protocol {
             Protocol::UserPrompt { exchange, .. } => Some(*exchange).filter(|id| {
-                Some(*id) <= reach && self.turns.last().map(|turn| turn.exchange) != Some(*id)
+                Some(*id) <= reach
+                    && self.table.turns().last().map(|turn| turn.exchange) != Some(*id)
             }),
             Protocol::AssistantMessage { turn, .. } => Some(*turn).filter(|id| Some(*id) <= reach),
             Protocol::ContextMessage { id, .. } => {
@@ -298,9 +293,9 @@ impl Context {
     fn extends(&self, protocol: &Protocol) -> Option<&Turn> {
         match protocol {
             Protocol::UserPrompt { exchange, .. } => (Some(*exchange) <= self.reach())
-                .then(|| self.turns.last())
+                .then(|| self.table.turns().last())
                 .flatten(),
-            Protocol::ToolResults { .. } => self.turns.last(),
+            Protocol::ToolResults { .. } => self.table.turns().last(),
             Protocol::ContextMessage { id, .. } => self.turn(*id),
             Protocol::AssistantMessage { .. }
             | Protocol::ContextEdited { .. }
@@ -317,131 +312,48 @@ impl Context {
     /// the link, and only a note that inherits nothing opens one of its own.
     fn place(&mut self, protocol: &Protocol) -> Option<usize> {
         let reach = self.reach();
-        let last = self.turns.len().checked_sub(1);
+        let last = self.table.turns().len().checked_sub(1);
         match protocol {
             Protocol::UserPrompt { exchange, text } => {
                 if Some(*exchange) <= reach {
                     return last;
                 }
-                Some(self.open(*exchange, *exchange, TurnKind::Exchange, opening_line(text)))
+                Some(
+                    self.table
+                        .open(*exchange, *exchange, TurnKind::Exchange, opening_line(text)),
+                )
             }
             Protocol::AssistantMessage { turn, message, .. } => {
-                let exchange = self.turns.last()?.exchange;
-                Some(self.open(*turn, exchange, TurnKind::Exchange, message_label(message)))
+                let exchange = self.table.turns().last()?.exchange;
+                Some(
+                    self.table
+                        .open(*turn, exchange, TurnKind::Exchange, message_label(message)),
+                )
             }
             Protocol::ContextMessage {
                 id,
                 exchange,
                 message,
             } => {
-                if let Some(at) = self.turns.iter().position(|turn| turn.id == *id) {
+                if let Some(at) = self.table.turns().iter().position(|turn| turn.id == *id) {
                     return Some(at);
                 }
-                (Some(*id) > reach)
-                    .then(|| self.open(*id, *exchange, TurnKind::Import, message_label(message)))
+                (Some(*id) > reach).then(|| {
+                    self.table
+                        .open(*id, *exchange, TurnKind::Import, message_label(message))
+                })
             }
             Protocol::ToolResults { .. } => last,
             Protocol::ContextEdited { .. } | Protocol::Inherited { .. } => None,
         }
     }
 
-    /// Open a fresh turn at the end of the table, and answer its index.
-    fn open(&mut self, id: u64, exchange: u64, kind: TurnKind, label: String) -> usize {
-        self.turns.push(Turn {
-            id,
-            exchange,
-            kind,
-            label,
-            bytes: 0,
-            body: Body::Here {
-                records: Vec::new(),
-                origin: None,
-            },
-        });
-        self.turns.len() - 1
-    }
-
-    /// A link's own step: the parent's rows and notes become this log's, so
-    /// the child's marker, survey and index are the same projections of the
-    /// same structure. A resident row's weight is zeroed because the seed's
-    /// records follow and the fold sums them as they land.
-    fn install(&mut self, turns: &[Linked], notes: &[Option<String>]) {
-        self.turns = turns
-            .iter()
-            .map(|Linked { row, at }| {
-                let (bytes, body) = match row.held {
-                    Held::Resident => (
-                        0,
-                        Body::Here {
-                            records: Vec::new(),
-                            origin: Some(at.clone()),
-                        },
-                    ),
-                    Held::Evicted { cut } => (
-                        row.bytes,
-                        Body::There {
-                            at: at.clone(),
-                            cut: Some(cut),
-                        },
-                    ),
-                    Held::Dropped => (
-                        row.bytes,
-                        Body::There {
-                            at: at.clone(),
-                            cut: None,
-                        },
-                    ),
-                };
-                Turn {
-                    id: row.id,
-                    exchange: row.exchange,
-                    kind: row.kind,
-                    label: row.label.clone(),
-                    bytes,
-                    body,
-                }
-            })
-            .collect();
-        self.notes = notes.to_vec();
-    }
-
-    /// Move every turn `op` takes from here to there: its address is its
-    /// `origin` where it has one, else this log's own file and the loci its
-    /// records were measured at.
+    /// An edit is the one step that moves a turn from here to there; the
+    /// table decides which turns a cut takes.
     pub(super) fn apply_context_op(&mut self, op: &ContextOp) {
-        let (leaving, cut) = match op {
-            ContextOp::Evict { through, .. } => (
-                cut_departures(&self.turns, *through),
-                Some(self.notes.len()),
-            ),
-            ContextOp::Drop { exchanges } => (
-                self.resident()
-                    .filter(|turn| exchanges.contains(&turn.exchange))
-                    .map(|turn| turn.id)
-                    .collect(),
-                None,
-            ),
-        };
-        let leaving: HashSet<u64> = leaving.into_iter().collect();
-        let source = self.source.clone();
-        for turn in &mut self.turns {
-            if !leaving.contains(&turn.id) {
-                continue;
-            }
-            let at = match &mut turn.body {
-                Body::Here { records, origin } => origin.take().unwrap_or_else(|| Pointer {
-                    source: source.clone(),
-                    loci: records
-                        .iter()
-                        .map(|recorded| recorded.locus().clone())
-                        .collect(),
-                }),
-                Body::There { .. } => continue,
-            };
-            turn.body = Body::There { at, cut };
-        }
-        if let ContextOp::Evict { note, .. } = op {
-            self.notes.push(note.clone());
+        match op {
+            ContextOp::Evict { through, note } => self.table.evict(*through, note.clone()),
+            ContextOp::Drop { exchanges } => self.table.drop_exchanges(exchanges),
         }
     }
 }
@@ -455,22 +367,4 @@ fn rewind_unknown_refusal(id: u64, last: Option<u64>) -> String {
             "exchange {id} is not present in your context — there is no last exchange to rewind"
         ),
     }
-}
-
-/// A cut at `through` takes every turn in the context at or below it, but a
-/// user turn whose exchange still has an assistant turn above the cut: that
-/// one stays with its survivors.
-fn cut_departures(turns: &[Turn], through: u64) -> Vec<u64> {
-    turns
-        .iter()
-        .filter(|turn| turn.is_resident() && turn.id <= through)
-        .filter(|turn| !(turn.is_user() && has_survivor(turns, turn.exchange, through)))
-        .map(|turn| turn.id)
-        .collect()
-}
-
-fn has_survivor(turns: &[Turn], exchange: u64, through: u64) -> bool {
-    turns
-        .iter()
-        .any(|turn| turn.is_resident() && turn.exchange == exchange && turn.id > through)
 }

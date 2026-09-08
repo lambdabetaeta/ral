@@ -290,7 +290,7 @@ impl Context {
     fn select(&self, exchanges: &[u64], turns: Option<(u64, u64)>) -> Vec<(u64, Vec<u64>)> {
         let unclosed = self.unclosed_turn();
         let mut selected: Vec<(u64, Vec<u64>)> = Vec::new();
-        let named = self.turns.iter().filter(|turn| {
+        let named = self.table.turns().iter().filter(|turn| {
             Some(turn.id) != unclosed
                 && (exchanges.contains(&turn.exchange)
                     || turns.is_some_and(|(from, to)| (from..=to).contains(&turn.id)))
@@ -413,7 +413,12 @@ impl Context {
     /// Every exchange the structure holds — how an unnarrowed `` `grep ``
     /// names the whole transcript.
     fn every_exchange(&self) -> Vec<u64> {
-        let mut exchanges: Vec<u64> = self.turns.iter().map(|turn| turn.exchange).collect();
+        let mut exchanges: Vec<u64> = self
+            .table
+            .turns()
+            .iter()
+            .map(|turn| turn.exchange)
+            .collect();
         exchanges.dedup();
         exchanges
     }

@@ -16,15 +16,16 @@
 //! context keeps the address its records were measured at, and `read_at`
 //! reads them back through it one record at a time.
 
-mod door;
 mod fold;
 mod render;
 mod resume;
 mod state;
+mod table;
+mod transcript;
 
-pub(crate) use door::TranscriptRead;
 pub use render::Rendered;
 pub use resume::resume;
+pub(crate) use transcript::TranscriptRead;
 
 use super::{Fold, Locus, Protocol, Record, Recorded, Refusal};
 use crate::agent::event::{ContextSurvey, TurnKind};
@@ -32,6 +33,7 @@ use genai::chat::{ChatMessage, ToolResponse};
 use serde::{Deserialize, Serialize};
 use state::{State, admissible_prefix};
 use std::path::PathBuf;
+use table::Table;
 
 /// Marker type implementing [`Fold`] for the model projection; carries no
 /// state of its own; [`Context`] is where the projection lives.
@@ -53,18 +55,8 @@ impl Fold for Model {
 /// The context is the [`Body::Here`] subsequence of `turns`. Invariant: the
 /// first resident turn is a user turn.
 pub struct Context {
-    /// Every turn this lineage recorded, in id order.
-    turns: Vec<Turn>,
-    /// One note slot per eviction; [`Body::There`]'s `cut` indexes it.
-    notes: Vec<Option<String>>,
+    table: Table,
     state: State,
-    /// Own `record.jsonl`: where a turn first recorded here points once it
-    /// leaves.
-    ///
-    /// Reading a completed record by byte range from the file this process is
-    /// still appending to is safe: a [`Locus`] exists only once the seam has
-    /// written the whole record under its lock.
-    source: PathBuf,
     /// Protocol records folded.
     len: usize,
     /// The index of the last context edit — a token measure taken at or
@@ -219,10 +211,8 @@ impl Context {
     #[must_use]
     pub fn new(source: PathBuf) -> Self {
         Self {
-            turns: Vec::new(),
-            notes: Vec::new(),
+            table: Table::new(source),
             state: State::default(),
-            source,
             len: 0,
             newest_edit: None,
         }
@@ -231,7 +221,7 @@ impl Context {
     /// The model's own line to its future self, one slot per eviction.
     #[must_use]
     pub fn notes(&self) -> &[Option<String>] {
-        &self.notes
+        self.table.notes()
     }
 
     /// The one way a turn leaves the structure as an address: the link a fork
@@ -242,7 +232,8 @@ impl Context {
     /// and still in the context. Every row's `kind` is `Inherited`, a linked
     /// row being inherited by construction.
     pub(crate) fn linked(&self) -> Vec<Linked> {
-        self.turns
+        self.table
+            .turns()
             .iter()
             .map(|turn| Linked {
                 row: Row {
@@ -266,7 +257,7 @@ impl Context {
     /// Where records recorded in this log's own file lie.
     fn pointer(&self, records: &[Recorded<Protocol>]) -> Pointer {
         Pointer {
-            source: self.source.clone(),
+            source: self.table.source().to_path_buf(),
             loci: records
                 .iter()
                 .map(|recorded| recorded.locus().clone())
@@ -276,23 +267,24 @@ impl Context {
 
     /// The context, in id order.
     fn resident(&self) -> impl Iterator<Item = &Turn> {
-        self.turns.iter().filter(|turn| turn.is_resident())
+        self.table.turns().iter().filter(|turn| turn.is_resident())
     }
 
     /// The highest id the structure has reached — every id-bearing record
     /// past it opens a turn. Departed rows are kept, so an empty table means
     /// the lineage never minted an id.
     fn reach(&self) -> Option<u64> {
-        self.turns.last().map(|turn| turn.id)
+        self.table.turns().last().map(|turn| turn.id)
     }
 
     fn turn(&self, id: u64) -> Option<&Turn> {
-        self.turns.iter().find(|turn| turn.id == id)
+        self.table.turns().iter().find(|turn| turn.id == id)
     }
 
     /// Which turns of `exchange` the structure holds, in id order.
     fn exchange_turns(&self, exchange: u64) -> Vec<u64> {
-        self.turns
+        self.table
+            .turns()
             .iter()
             .filter(|turn| turn.exchange == exchange)
             .map(|turn| turn.id)
@@ -300,7 +292,7 @@ impl Context {
     }
 
     pub fn current_exchange(&self) -> Option<u64> {
-        self.turns.last().map(|turn| turn.exchange)
+        self.table.turns().last().map(|turn| turn.exchange)
     }
 
     /// The id the next turn this log opens is minted above.
@@ -364,7 +356,8 @@ impl Context {
         // A marker stands exactly where some turn left by eviction.
         records
             + usize::from(
-                self.turns
+                self.table
+                    .turns()
                     .iter()
                     .any(|turn| matches!(turn.body, Body::There { cut: Some(_), .. })),
             )
@@ -378,7 +371,8 @@ impl Context {
         ContextSurvey {
             rows: self.resident().map(Turn::row).collect(),
             evicted: self
-                .turns
+                .table
+                .turns()
                 .iter()
                 .filter(|turn| matches!(turn.held(), Held::Evicted { .. }))
                 .count(),
@@ -390,7 +384,7 @@ impl Context {
     /// is still in the context. The whole lineage's, since a fork inherits
     /// the table.
     pub(crate) fn transcript_index(&self) -> Vec<Row> {
-        self.turns.iter().map(Turn::row).collect()
+        self.table.turns().iter().map(Turn::row).collect()
     }
 }
 
@@ -479,15 +473,15 @@ mod tests {
 
     fn context(turns: Vec<Turn>, notes: Vec<Option<String>>) -> Context {
         Context {
-            turns,
-            notes,
+            table: Table::seeded(PathBuf::from("record.jsonl"), turns, notes),
             ..Context::new(PathBuf::from("record.jsonl"))
         }
     }
 
     fn held(context: &Context) -> Vec<(u64, Held)> {
         context
-            .turns
+            .table
+            .turns()
             .iter()
             .map(|turn| (turn.id, turn.held()))
             .collect()

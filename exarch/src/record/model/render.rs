@@ -262,12 +262,12 @@ fn fragments(turns: &[Turn]) -> Vec<Fragment> {
 /// Voice and bracket as [`abandoned_note`]: the harness may state a fact
 /// about the conversation, never speak in the model's own voice.
 pub(super) fn render_head(context: &Context) -> Option<String> {
-    let fragments = fragments(&context.turns);
+    let fragments = fragments(context.table.turns());
     if fragments.is_empty() {
         return None;
     }
     // Grouped by cut, so each note follows the rows it belongs to.
-    let by_cut: Vec<Vec<&Fragment>> = (0..context.notes.len())
+    let by_cut: Vec<Vec<&Fragment>> = (0..context.notes().len())
         .map(|cut| {
             fragments
                 .iter()
@@ -297,11 +297,11 @@ pub(super) fn render_head(context: &Context) -> Option<String> {
             continue;
         }
         for row in &drawn[start..] {
-            lines.push(head_row(&context.turns, row));
+            lines.push(head_row(context.table.turns(), row));
         }
         // `Debug`-quoted, so no note — the model's own, or one inherited off
         // an ancestor's link — can add a line to the marker.
-        if let Some(note) = context.notes[cut].as_deref() {
+        if let Some(note) = context.notes()[cut].as_deref() {
             lines.push(format!("Your note at eviction: {note:?}"));
         }
     }
