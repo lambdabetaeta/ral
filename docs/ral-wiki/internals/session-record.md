@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 1d028de7
+verified_at_commit: e1dc876f
 verified_at_date: 2026-09-08
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Printer::sync, replay, model::resume, Viewport::commit_fact, seed, enforce_window_caps, flush_log, rotate, clear, Context, Turn, Body, Pointer, Row, Held, Locus, Rendered, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Printer::sync, replay, model::resume, Viewport::commit_fact, seed, enforce_window_caps, flush_log, rotate, clear, Context, Turn, Body, Pointer, Row, Held, Locus, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
 ---
 
 # Session record: one seam, one log
@@ -120,11 +120,11 @@ of it, computed on call and memoised nowhere: `rendered`, `history_bytes`,
 `sourced`, and the pressure reminder's `through`. `Context::step` is the one
 fold — it judges a record before applying it, so a hand-edited or foreign file
 is refused by the same function that folds a live one, and a resume has
-nothing to compare its result with. `apply_context_op` is the one place a turn
-moves from here to there.
+nothing to compare its result with. `Table::evict` and `Table::drop_exchanges`
+are the one place a turn moves from here to there.
 
-**Eviction is a change of address, not a deletion.** `apply_context_op` sets
-each departing turn's body to `There { at, cut }`, where `at` is its `origin`
+**Eviction is a change of address, not a deletion.** The table sets each
+departing turn's body to `There { at, cut }`, where `at` is its `origin`
 if it has one and otherwise this log's `source` beside the `Locus` of every
 record it held; the records leave memory and nothing durable is touched. Every
 read of a range checks the record's bytes against the digest the `Locus`
@@ -148,8 +148,8 @@ structure, then the file".
 
 ### The provider-facing context is a pure function of the structure
 
-`Context::rendered()` builds a `Rendered { messages: Vec<ChatMessage>, bytes }`
-— owned, with no render memo behind it. Assembly is one walk: the head marker
+`Context::rendered()` builds an owned `Vec<ChatMessage>`, with no render memo
+behind it. Assembly is one walk: the head marker
 where `render_head` yields one, then the exchanges holding a resident turn, in
 order. Each earlier exchange renders as its turns' messages if it is settled
 and as its one `abandoned_note` if not; the last is the exchange *in hand* and
@@ -175,11 +175,10 @@ The price is one build of the context per provider request — once per turn,
 never per loop iteration — on top of the clone per HTTP attempt at the wire
 door, which is where
 [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]] put
-it and where it stays: `manufacture` takes `&Rendered` inside
+it and where it stays: `manufacture` takes `&[ChatMessage]` inside
 `retry_with_backoff`'s per-attempt closure.
 [[map/exarch/provider|the provider map]] describes that one door,
-`provider/wire.rs`, where a `Rendered` becomes an owned
-`genai::ChatRequest`.
+`provider/wire.rs`, where those messages become an owned `genai::ChatRequest`.
 
 The other place an owned whole-history `Vec<ChatMessage>` is materialised is
 `Context::inherited_seed` — one entry per resident parent turn under the
@@ -262,5 +261,5 @@ ADR for the one wire door, and
 [[decisions/260907_the-turn-is-the-atom|the-turn-is-the-atom]] for the
 structure every view above projects — the turn as the atom of eviction, and
 the turn's own body as the one statement of where it is;
-[[map/exarch/provider|provider]] covers the one door that turns a `Rendered`
-into an owned wire request.
+[[map/exarch/provider|provider]] covers the one door that turns those messages into an owned wire
+request.

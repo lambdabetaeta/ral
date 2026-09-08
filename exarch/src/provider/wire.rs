@@ -15,7 +15,6 @@
 //! marks below guarantee. Every other adapter keeps the dedicated
 //! `system` field, untouched by any of this.
 
-use crate::record::model::Rendered;
 use genai::adapter::AdapterKind;
 use genai::chat::{CacheControl, ChatMessage, ChatRequest, MessageOptions, Tool, ToolConfig};
 
@@ -43,10 +42,10 @@ impl Sealed {
 pub(super) fn manufacture(
     adapter: AdapterKind,
     system: &str,
-    transcript: &Rendered,
+    transcript: &[ChatMessage],
     tools: &[Tool],
 ) -> Sealed {
-    let mut owned: Vec<ChatMessage> = transcript.messages().cloned().collect();
+    let mut owned: Vec<ChatMessage> = transcript.to_vec();
     let mut request = if adapter == AdapterKind::Anthropic {
         for message in owned.iter_mut().rev().take(2) {
             message.options = Some(MessageOptions::from(CacheControl::Ephemeral));
@@ -106,11 +105,11 @@ mod tests {
 
     #[test]
     fn anthropic_marks_the_system_prompt_and_the_last_two_messages() {
-        let transcript = Rendered::for_test(vec![
+        let transcript = vec![
             ChatMessage::user("one"),
             ChatMessage::user("two"),
             ChatMessage::user("three"),
-        ]);
+        ];
         let request = manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
         assert!(request.system.is_none());
         assert_eq!(request.messages[0].role, ChatRole::System);
@@ -128,7 +127,7 @@ mod tests {
 
     #[test]
     fn openai_gets_a_bare_system_prompt_and_no_breakpoints() {
-        let transcript = Rendered::for_test(vec![ChatMessage::user("hi")]);
+        let transcript = vec![ChatMessage::user("hi")];
         let request = manufacture(AdapterKind::OpenAIResp, "SYS", &transcript, &[]).into_request();
         assert_eq!(request.system.as_deref(), Some("SYS"));
         assert!(request.messages[0].options.is_none());
@@ -137,19 +136,15 @@ mod tests {
     #[test]
     fn manufacture_leaves_the_source_messages_untouched() {
         let source = vec![ChatMessage::user("one"), ChatMessage::user("two")];
-        let transcript = Rendered::for_test(source.clone());
+        let transcript = source.clone();
         let _ = manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]);
         assert!(source.iter().all(|message| message.options.is_none()));
-        assert!(
-            transcript
-                .messages()
-                .all(|message| message.options.is_none())
-        );
+        assert!(transcript.iter().all(|message| message.options.is_none()));
     }
 
     #[test]
     fn no_tools_leaves_the_request_tools_unset() {
-        let transcript = Rendered::default();
+        let transcript: Vec<ChatMessage> = Vec::new();
         let request = manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
         assert!(request.tools.is_none());
     }
@@ -158,7 +153,7 @@ mod tests {
     /// prompt and that message both marked, and no third breakpoint invented.
     #[test]
     fn a_single_message_transcript_marks_the_system_prompt_and_itself() {
-        let transcript = Rendered::for_test(vec![ChatMessage::user("one")]);
+        let transcript = vec![ChatMessage::user("one")];
         let request = manufacture(AdapterKind::Anthropic, "SYS", &transcript, &[]).into_request();
         assert_eq!(request.messages.len(), 2);
         assert!(

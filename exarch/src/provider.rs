@@ -36,10 +36,10 @@ pub use stream::{CutShort, Delta, StepOut};
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};
 
+use genai::chat::ChatMessage;
 pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
 use crate::agent::cancel;
-use crate::record::model::Rendered;
 use credential::{Credential, CredentialStore};
 use models::{LiveSource, ModelCatalog};
 use std::sync::Arc;
@@ -154,7 +154,7 @@ impl Provider {
     pub(crate) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         system: &str,
-        transcript: &Rendered,
+        transcript: &[ChatMessage],
         tool_enabled: bool,
         search: bool,
         on_delta: &mut F,

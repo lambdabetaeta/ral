@@ -681,12 +681,7 @@ impl Avatar {
     /// # Panics
     /// Panics if the log mutex is poisoned.
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
-        self.log
-            .lock()
-            .history_rendered()
-            .messages()
-            .cloned()
-            .collect()
+        self.log.lock().history_rendered()
     }
 
     /// Serialised model-view byte count — the eviction-threshold input.

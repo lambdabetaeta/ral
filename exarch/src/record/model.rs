@@ -23,7 +23,6 @@ mod state;
 mod table;
 mod transcript;
 
-pub use render::Rendered;
 pub use resume::resume;
 pub(crate) use transcript::TranscriptRead;
 
@@ -296,7 +295,7 @@ impl Context {
     }
 
     /// The id the next turn this log opens is minted above.
-    pub(crate) fn id_floor(&self) -> u64 {
+    fn id_floor(&self) -> u64 {
         self.reach().unwrap_or(0)
     }
 

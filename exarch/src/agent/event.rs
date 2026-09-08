@@ -9,7 +9,7 @@
 use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
-use crate::record::model::{Context, Linked, Rendered, Row, TranscriptRead};
+use crate::record::model::{Context, Linked, Row, TranscriptRead};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
 use regex::Regex;
@@ -653,7 +653,7 @@ impl AgentLog {
     ///
     /// # Errors
     /// The session is not awaiting an assistant reply.
-    pub fn render_messages(&self) -> Result<Rendered, String> {
+    pub fn render_messages(&self) -> Result<Vec<ChatMessage>, String> {
         if !self.context.is_awaiting_assistant() {
             return Err(format!(
                 "cannot render request while session is in state {}",
@@ -664,7 +664,7 @@ impl AgentLog {
     }
 
     /// Every committed message whatever the phase.
-    pub fn history_rendered(&self) -> Rendered {
+    pub fn history_rendered(&self) -> Vec<ChatMessage> {
         self.context.rendered()
     }
 
@@ -1262,7 +1262,7 @@ mod tests {
         assert_eq!(s.transcript_index()[0].kind, TurnKind::Import);
         assert!(
             !s.history_rendered()
-                .messages()
+                .iter()
                 .any(|message| message.content.first_text() == Some("before the first prompt"))
         );
     }
@@ -1382,7 +1382,9 @@ mod tests {
             .unwrap();
         complete_exchange(&mut s, "second prompt", "second answer");
 
-        let read = s.read_transcript(&[1], None).expect("closed exchange is readable");
+        let read = s
+            .read_transcript(&[1], None)
+            .expect("closed exchange is readable");
         let [exchange] = read.as_slice() else {
             panic!("one named exchange answers one record, got {read:?}")
         };
@@ -1416,8 +1418,7 @@ mod tests {
     /// evicted.
     fn head_marker(s: &AgentLog) -> Option<String> {
         s.history_rendered()
-            .messages()
-            .next()
+            .first()
             .and_then(|message| message.content.first_text())
             .filter(|text| text.contains("left your context"))
             .map(str::to_string)
@@ -1471,7 +1472,7 @@ mod tests {
         );
         assert!(
             s.history_rendered()
-                .messages()
+                .iter()
                 .any(|message| message.content.first_text() == Some("done"))
         );
     }
@@ -1714,7 +1715,10 @@ mod tests {
             EditAuthority::Harness,
         )
         .unwrap();
-        let after = format!("{:?}", s.read_transcript(&[1], None).expect("evicted but recorded"));
+        let after = format!(
+            "{:?}",
+            s.read_transcript(&[1], None).expect("evicted but recorded")
+        );
         assert_eq!(after, before);
         assert_eq!(
             s.read_transcript(&[9], None).unwrap_err(),
@@ -1914,7 +1918,7 @@ mod tests {
         assert_eq!(s.context_survey().evicted, 4);
         assert!(
             !s.history_rendered()
-                .messages()
+                .iter()
                 .any(|message| { message.content.first_text() == Some("one") })
         );
     }
@@ -1966,7 +1970,7 @@ mod tests {
         let rendered = s.history_rendered();
         assert_eq!(
             rendered
-                .messages()
+                .iter()
                 .filter_map(|message| message.content.first_text())
                 .collect::<Vec<_>>(),
             vec!["imported user", "normal", "answer"]
@@ -1992,13 +1996,13 @@ mod tests {
         let rendered = s.render_messages().expect("the request is owed a reply");
         assert_eq!(
             rendered
-                .messages()
+                .iter()
                 .map(|message| message.role.clone())
                 .collect::<Vec<_>>(),
             vec![ChatRole::User, ChatRole::Assistant, ChatRole::Tool]
         );
         assert!(
-            !rendered.messages().any(|message| message
+            !rendered.iter().any(|message| message
                 .content
                 .first_text()
                 .is_some_and(|text| text.starts_with("[EXARCH // An exchange here"))),
@@ -2025,7 +2029,7 @@ mod tests {
         complete_exchange(&mut s, "next", "answer");
         let rendered = s.history_rendered();
         let read: Vec<&str> = rendered
-            .messages()
+            .iter()
             .filter_map(|message| message.content.first_text())
             .collect();
         assert_eq!(
@@ -2038,10 +2042,8 @@ mod tests {
             ]
         );
         assert!(
-            rendered
-                .messages()
-                .all(|message| message.role == ChatRole::User
-                    || message.content.first_text() == Some("answer")),
+            rendered.iter().all(|message| message.role == ChatRole::User
+                || message.content.first_text() == Some("answer")),
             "the note speaks as the user, never as the assistant"
         );
         assert!(
@@ -2069,7 +2071,7 @@ mod tests {
         s.quiesce(QuiesceReason::Cancelled);
         complete_exchange(&mut s, "next", "answer");
         assert!(
-            s.history_rendered().messages().any(|message| {
+            s.history_rendered().iter().any(|message| {
                 message
                     .content
                     .first_text()
@@ -2089,7 +2091,7 @@ mod tests {
         s.quiesce(QuiesceReason::Cancelled);
         complete_exchange(&mut s, "next", "answer");
         assert!(
-            s.history_rendered().messages().any(|message| {
+            s.history_rendered().iter().any(|message| {
                 message
                     .content
                     .first_text()
@@ -2149,7 +2151,7 @@ mod tests {
         s.quiesce(QuiesceReason::Replied);
         complete_exchange(&mut s, "follow-up", "answer");
         assert!(
-            s.history_rendered().messages().any(|message| {
+            s.history_rendered().iter().any(|message| {
                 message.content.first_text()
                     == Some("[EXARCH // Exchange ended: replied to parent.]")
             }),
@@ -2266,13 +2268,13 @@ mod tests {
         )
         .unwrap();
         let expected =
-            serde_json::to_vec(&live.history_rendered().messages().collect::<Vec<_>>()).unwrap();
+            serde_json::to_vec(&live.history_rendered().iter().collect::<Vec<_>>()).unwrap();
         drop(live);
 
         let resumed = AgentLog::resume(sessions.path(), 0).expect("resume");
         assert!(resumed.is_ready());
         assert_eq!(
-            serde_json::to_vec(&resumed.history_rendered().messages().collect::<Vec<_>>()).unwrap(),
+            serde_json::to_vec(&resumed.history_rendered().iter().collect::<Vec<_>>()).unwrap(),
             expected
         );
     }
@@ -2592,14 +2594,12 @@ mod tests {
                 _ => unreachable!(),
             }
             let expected =
-                serde_json::to_vec(&live.history_rendered().messages().collect::<Vec<_>>())
-                    .unwrap();
+                serde_json::to_vec(&live.history_rendered().iter().collect::<Vec<_>>()).unwrap();
             drop(live);
             let resumed = AgentLog::resume(sessions.path(), 0).expect("resume edit sequence");
             assert!(resumed.is_ready());
             assert_eq!(
-                serde_json::to_vec(&resumed.history_rendered().messages().collect::<Vec<_>>())
-                    .unwrap(),
+                serde_json::to_vec(&resumed.history_rendered().iter().collect::<Vec<_>>()).unwrap(),
                 expected,
                 "pattern {pattern}"
             );
@@ -2701,7 +2701,7 @@ mod tests {
     }
 
     fn seed_has_a_tool_call(log: &AgentLog) -> bool {
-        log.history_rendered().messages().any(|message| {
+        log.history_rendered().iter().any(|message| {
             message
                 .content
                 .iter()
@@ -2733,7 +2733,7 @@ mod tests {
         assert!(
             child
                 .history_rendered()
-                .messages()
+                .iter()
                 .any(|message| message.content.first_text() == Some("two")),
             "the prompt behind the dangling call must still seed"
         );
@@ -2759,7 +2759,7 @@ mod tests {
         assert!(
             child
                 .history_rendered()
-                .messages()
+                .iter()
                 .any(|message| message.content.first_text() == Some("two")),
         );
     }
@@ -2906,7 +2906,9 @@ mod tests {
             0,
         )
         .unwrap();
-        parent.append_user("work on the parser".into(), None).unwrap();
+        parent
+            .append_user("work on the parser".into(), None)
+            .unwrap();
         parent
             .append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
             .unwrap();
@@ -3130,8 +3132,7 @@ mod tests {
         );
         let head = live
             .history_rendered()
-            .messages()
-            .next()
+            .first()
             .expect("an inherited context that was cut renders a head marker")
             .content
             .first_text()

@@ -1,4 +1,4 @@
-//! The provider-facing projection: the context as an owned [`Rendered`],
+//! The provider-facing projection: the context as an owned message list,
 //! what it weighs, and the head marker standing where an evicted prefix
 //! was.
 
@@ -6,52 +6,6 @@ use super::{Context, Held, OPENING_CHARS, Turn, message_bytes, resident_messages
 use crate::record::{Protocol, Recorded};
 use genai::chat::ChatMessage;
 use std::collections::HashSet;
-
-/// The context as an owned value: the messages the provider is sent, and what
-/// they weigh by the structure's own per-turn sums.
-#[derive(Clone, Default)]
-pub struct Rendered {
-    messages: Vec<ChatMessage>,
-    bytes: usize,
-}
-
-impl Rendered {
-    fn push(&mut self, messages: Vec<ChatMessage>, bytes: usize) {
-        self.bytes = self.bytes.saturating_add(bytes);
-        self.messages.extend(messages);
-    }
-
-    pub fn messages(&self) -> impl Iterator<Item = &ChatMessage> {
-        self.messages.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.messages.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.messages.is_empty()
-    }
-
-    /// Serialised size, summed from the structure's own per-turn weights.
-    pub fn byte_len(&self) -> usize {
-        self.bytes
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(messages: Vec<ChatMessage>) -> Self {
-        let bytes = message_bytes(&messages);
-        Self { messages, bytes }
-    }
-
-    /// One harness-voice message standing for something the context does not
-    /// hold: the head marker, or an abandoned exchange's note.
-    fn push_note(&mut self, text: String) {
-        let message = ChatMessage::user(text);
-        let bytes = message_bytes(std::slice::from_ref(&message));
-        self.push(vec![message], bytes);
-    }
-}
 
 impl Context {
     /// The context's exchanges, each with its resident turns, in id order.
@@ -73,10 +27,10 @@ impl Context {
     /// whatever state it rests in — its last turn may still be growing. Each
     /// earlier exchange renders as its turns' messages if it is settled, else
     /// as its one [`abandoned_note`].
-    pub fn rendered(&self) -> Rendered {
-        let mut rendered = Rendered::default();
+    pub fn rendered(&self) -> Vec<ChatMessage> {
+        let mut rendered: Vec<ChatMessage> = Vec::new();
         if let Some(text) = render_head(self) {
-            rendered.push_note(text);
+            rendered.push(ChatMessage::user(text));
         }
         let exchanges = self.resident_exchanges();
         let Some((live, closed)) = exchanges.split_last() else {
@@ -85,14 +39,14 @@ impl Context {
         for (_, turns) in closed {
             if is_settled(turns) {
                 for turn in turns {
-                    rendered.push(resident_messages(turn.records()), turn.bytes);
+                    rendered.extend(resident_messages(turn.records()));
                 }
             } else {
-                rendered.push_note(abandoned_note(turns));
+                rendered.push(ChatMessage::user(abandoned_note(turns)));
             }
         }
         for turn in &live.1 {
-            rendered.push(resident_messages(turn.records()), turn.bytes);
+            rendered.extend(resident_messages(turn.records()));
         }
         rendered
     }

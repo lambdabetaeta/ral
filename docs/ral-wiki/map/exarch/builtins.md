@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 1d028de7
+generated_at_commit: e1dc876f
 generated_at_date: 2026-09-07
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
@@ -310,8 +310,8 @@ and an exchange is the run of turns from a user turn, carrying that turn's id.
   builtin's job: it is `filter`/`take`/`view-text` over the records, the way
   `tasks-list` puts querying on the caller rather than the kit
   ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]
-  for the private `Rendered` value this reads through, a cached turn's segment
-  converted to material rather than re-rendered). `` `grep `` searches that
+  for the transcript-as-value law this reads under: a turn's own recorded
+  `Protocol` material, converted rather than re-rendered). `` `grep `` searches that
   same narrowing — `` `text ``,
   `` `program ``'s source, `` `result ``, `` `reasoning ``, a binary payload
   and a provider extension carrying no text a pattern could mean — so nothing

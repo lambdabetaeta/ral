@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c63286ad
+generated_at_commit: e1dc876f
 generated_at_date: 2026-09-07
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -83,9 +83,9 @@ time); `record/commit.rs` (the worker-side
 commit producer: one `Chopper` per lane of the model's stream, and
 `SurfaceBuffer`, moved whole from `tui/surface.rs`); `record/model.rs` and its
 `model/` children (the model fold, `Protocol` alone, with streaming
-resume/admission, and the `Rendered` persistent value + per-turn
-render cache the provider-facing projection is built from — see
-[[internals/session-record#The provider-facing context is a persistent value|the context-as-value section]]
+resume/admission, and the owned `Vec<ChatMessage>` the provider-facing
+projection is built as, on call and memoised nowhere — see
+[[internals/session-record#The provider-facing context is a pure function of the structure|the context-as-projection section]]
 and [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 `record/view.rs` (the view fold into `Blocks`; block construction is private).
 `Viewport` and `Headless` both implement `record::Printer`
@@ -107,10 +107,10 @@ stays visible until quiescence.
   drives the protocol state machine (`is_ready` gates a fresh prompt and
   `quiesce` winds any in-flight exchange back to it, so an exchange never
   strands a prompt mid-protocol; [[invariants/turn-ends-ready|exchange-ends-ready]])
-  and answers `transcript()` — the provider-facing `Transcript`, a shared,
-  `Arc`-backed persistent value rather than a fresh `Vec<ChatMessage>` per
-  call — which `provider/wire.rs` alone turns into an owned request, once per
-  HTTP attempt ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
+  and answers `render_messages()` — the provider-facing `Vec<ChatMessage>`,
+  built off the structure on call with no memo behind it — which
+  `provider/wire.rs` alone turns into an owned request, once per HTTP attempt
+  ([[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 - the record seam (`record::Emitter`) onto `sessions/<n>/record.jsonl` — the
   one durable log every fact this session authors crosses, whose protocol
   fold is the model's context, with display commits and forensic breadcrumbs

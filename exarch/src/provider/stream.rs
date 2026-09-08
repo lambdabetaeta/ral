@@ -7,7 +7,6 @@ use super::transport::{Engine, Transport};
 use super::usage::{Usage, usage_from};
 use super::wire::{manufacture, tool_defs};
 use crate::agent::cancel;
-use crate::record::model::Rendered;
 use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatStreamEvent, StopReason, StreamEnd, ToolCall};
@@ -53,7 +52,7 @@ impl Engine {
         tuning: &Tuning,
         route: Option<&str>,
         system: &str,
-        transcript: &Rendered,
+        transcript: &[ChatMessage],
         tool_enabled: bool,
         search: bool,
         on_delta: &mut F,

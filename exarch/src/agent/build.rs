@@ -953,7 +953,7 @@ mod tests {
                 .log
                 .lock()
                 .history_rendered()
-                .messages()
+                .iter()
                 .collect::<Vec<_>>(),
         )
         .unwrap();
@@ -1404,7 +1404,7 @@ mod tests {
         log.append_user("before the crash".into(), None).unwrap();
         log.append_assistant(ChatMessage::assistant("saved answer"), vec![], None)
             .unwrap();
-        let before: Vec<_> = log.history_rendered().messages().cloned().collect();
+        let before = log.history_rendered();
         drop(log);
 
         let scratch =
