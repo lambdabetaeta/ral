@@ -131,7 +131,7 @@ fn grain_cell(ratio: f32) -> char {
 
 /// A thinking block's collapsed header: the deliberation grain beside a
 /// [`size_bar`] of the reasoning's own bulk.  Both the committed block and the
-/// still-streaming `Viewport::thinking_seat` render through here, so the
+/// still-streaming trace `Viewport::live_tail` draws render through here, so the
 /// provisional header cannot drift from the one the block commits to.
 pub(super) fn thinking_header(
     think_chars: u32,

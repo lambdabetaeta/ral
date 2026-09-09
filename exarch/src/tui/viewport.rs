@@ -10,9 +10,11 @@
 //! steps the fold beside the viewport and re-syncs [`Self::blocks`] wholesale
 //! from it, and [`Printer::transient`] draws whatever is live-only —
 //! [`Self::push_chrome`], the chrome lane's door, and [`Self::push_thinking`],
-//! which carries the open line a reasoning seat draws.
+//! which carries the open line the live tail draws.
 
-use super::block::{AgentSlot, Block, ChromeKind, Reveal, append_visual_rows};
+use super::block::{
+    AgentSlot, Block, ChromeKind, Reveal, Thinking, append_visual_rows, trace_rows,
+};
 use super::gesture::Cell;
 use super::group;
 use super::line::is_blank;
@@ -76,11 +78,11 @@ pub(super) struct Viewport {
     usage: Usage,
     /// The answer's open line: assistant text past the last newline, which is
     /// past the last [`Display::Answer`](crate::record::Display::Answer)
-    /// record the worker has cut.  It seats below the block it will join
-    /// ([`Self::streaming_seat`]).
+    /// record the worker has cut.  It is drawn inside the block it will join
+    /// ([`Self::live_tail`]).
     answer: String,
-    /// The reasoning's open line — `answer`'s twin for the turn's own `∴`
-    /// seat ([`Self::thinking_seat`]), grown by [`Self::push_thinking`].
+    /// The reasoning's open line — `answer`'s twin on the `∴` lane, drawn by
+    /// [`Self::live_tail`] and grown by [`Self::push_thinking`].
     reasoning: String,
     /// The fold's own memo, stepped by every [`Self::commit_fact`] and
     /// re-synced from in the same call — the memo P5 moves to live beside the
@@ -192,6 +194,40 @@ struct Flat {
 /// response and only its head wears the `·`.
 fn opens_rail_run(prev: Option<&Block>, block: &Block) -> bool {
     !(block.markdown_src().is_some() && prev.is_some_and(|p| p.markdown_src().is_some()))
+}
+
+/// A [`Flat`] under construction: the visual rows, and the block each is
+/// charged to, at the content width its segments were rendered at.
+struct Flatten {
+    rows: Vec<Row>,
+    row_block: Vec<usize>,
+    width: u16,
+}
+
+impl Flatten {
+    fn new(width: u16) -> Self {
+        Self {
+            rows: Vec::new(),
+            row_block: Vec::new(),
+            width,
+        }
+    }
+
+    /// Append one segment, its rows all charged to `anchor`.  A segment's
+    /// leading blanks collapse against an already-blank tail, so a turn
+    /// separator before leading-blank chrome reads as one gap.
+    fn push(&mut self, anchor: usize, seg: &[Row], prompt: bool) {
+        let mut first = 0;
+        if self.rows.last().is_some_and(Row::is_blank) {
+            while first < seg.len() && seg[first].is_blank() {
+                first += 1;
+            }
+        }
+        let added = append_visual_rows(&mut self.rows, &seg[first..], self.width, prompt, None);
+        for _ in 0..added {
+            self.row_block.push(anchor);
+        }
+    }
 }
 
 /// The session's rendered transcript, `user.log`.
@@ -530,7 +566,7 @@ impl Viewport {
     }
 
     /// Stream a live reasoning delta into [`Self::reasoning`] — the open line
-    /// [`Self::thinking_seat`] draws, which the delta's own newline retires
+    /// [`Self::live_tail`] draws, which the delta's own newline retires
     /// as the worker's record of that line lands.
     pub(super) fn push_thinking(&mut self, text: &str) {
         carry(&mut self.reasoning, text);
@@ -838,22 +874,35 @@ impl Viewport {
     /// The flatten is the coalescing projection: an observation run — a call and
     /// its reads, greps and execs ([`Self::observation_run_end`]) — folds into
     /// one dialable ral block ([`super::group`]), while every genuine barrier
-    /// keeps its own.  Each visual row maps to its source block, a group's rows
-    /// to its anchor call, so dial, click and copy address whole blocks.
+    /// keeps its own, and a deliberation stretch ([`Self::deliberation_end`])
+    /// reads as one trace above one run.  Each visual row maps to its source
+    /// block — a group's rows to its anchor call, a stretch's traces to the
+    /// first of them — so dial, click and copy address whole blocks.
     fn reflow(&mut self, width: u16) {
         if !self.flat.dirty && self.flat.width == width {
             return;
         }
         let content_w = width.min(READ_W);
         let agent = self.agent;
-        let mut rows: Vec<Row> = Vec::new();
-        let mut row_block: Vec<usize> = Vec::new();
+        let mut flat = Flatten::new(content_w);
         let mut i = 0;
         while i < self.blocks.len() {
+            // The one segment that reorders: a stretch's traces are drawn
+            // above the work they ordered, which is then one unbroken run.
+            if let Some(end) = self.deliberation_end(i) {
+                let traces = self.render_traces(i, end, content_w);
+                flat.push(i, &traces, false);
+                if let Some(call) = (i..end).find(|&j| self.blocks[j].block.is_tool_call()) {
+                    let group = self.render_group(call, end, content_w);
+                    flat.push(call, &group, false);
+                }
+                i = end;
+                continue;
+            }
             // `prompt` carries the human turn's rule fence down to
             // `append_visual_rows`, the one place the content width is known.
             // A run is opened by its call and by nothing else: an effect card is
-            // buffered until its call has landed ([`super::surface`]), so one
+            // buffered until its call has landed ([`crate::record::commit`]), so one
             // reaching the projection with no call behind it belongs to no run
             // and renders alone, through the ordinary path below.
             let (anchor, seg_rows, prompt) = if self.blocks[i].block.is_tool_call() {
@@ -875,25 +924,56 @@ impl Viewport {
                 i += 1;
                 segment
             };
-            // A segment's leading blanks collapse against an already-blank tail,
-            // so a turn separator before leading-blank chrome reads as one gap.
-            let mut first = 0;
-            if rows.last().is_some_and(Row::is_blank) {
-                while first < seg_rows.len() && seg_rows[first].is_blank() {
-                    first += 1;
-                }
-            }
-            let added = append_visual_rows(&mut rows, &seg_rows[first..], content_w, prompt, None);
-            for _ in 0..added {
-                row_block.push(anchor);
-            }
+            flat.push(anchor, &seg_rows, prompt);
         }
         self.flat = Flat {
             width,
-            rows,
-            row_block,
+            rows: flat.rows,
+            row_block: flat.row_block,
             dirty: false,
         };
+    }
+
+    /// End (exclusive) of the deliberation stretch at `start` — the alternation
+    /// of reasoning and the work it ordered, bridged across turn boundaries as
+    /// an observation run is — when there is one to coalesce.  A stretch is
+    /// opened by a trace and holds more than one: a lone trace stands where it
+    /// fell, while two or more read as one deliberation, hoisted above the run
+    /// between them.  The turn then reads *thought, work, answer* rather than
+    /// in the interleaving the wire happened to deliver it.
+    ///
+    /// Prose ends a stretch, as does every barrier an observation run stops at.
+    fn deliberation_end(&self, start: usize) -> Option<usize> {
+        let member =
+            |e: &Entry| e.block.is_thinking() || e.block.observation() || e.block.is_turn();
+        let mut end = start
+            + self.blocks[start..]
+                .iter()
+                .take_while(|e| member(e))
+                .count();
+        // A trace at the window's tail is the live edge, where the open line is
+        // drawn ([`Self::live_tail`]); it must keep growing where it grows, and
+        // joins the stretch once the work it ordered lands beneath it.
+        if end == self.blocks.len() && self.blocks[end - 1].block.is_thinking() {
+            end -= 1;
+        }
+        let traces = self.blocks[start..end]
+            .iter()
+            .filter(|e| e.block.is_thinking())
+            .count();
+        (self.blocks[start].block.is_thinking() && traces > 1).then_some(end)
+    }
+
+    /// Render the stretch `start..end`'s traces as one trace block, at the
+    /// deliberation's own rung — its first trace's, as a coalesced ral block
+    /// takes its opening call's.
+    fn render_traces(&self, start: usize, end: usize, width: u16) -> Vec<Row> {
+        let traces: Vec<&Thinking> = self.blocks[start..end]
+            .iter()
+            .filter_map(|e| e.block.trace_view())
+            .collect();
+        let level = self.blocks[start].block.level();
+        trace_rows(&traces, level, width, self.agent)
     }
 
     /// End (exclusive) of the maximal [`Block::observation`] run at `start`,
@@ -986,7 +1066,7 @@ fn answer_run(rows: &[record::Block]) -> u32 {
 impl Printer for Viewport {
     /// A transient never authors scrollback: [`Transient::Token`] and
     /// [`Transient::Thinking`] only carry their lane's open line, which the
-    /// seats draw ([`Self::streaming_seat`], [`Self::push_thinking`]).  Every
+    /// live tail draws ([`Self::live_tail`], [`Self::push_thinking`]).  Every
     /// line the worker has finished arrives as a record through
     /// [`Self::sync`] instead — a printer never mints a [`record::Block`] of
     /// its own — and grows the block it belongs to.

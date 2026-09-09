@@ -3,7 +3,7 @@
 //! A contiguous run of observation-only `ral` calls (reads, greps, execs) reads
 //! as one dialable object; a diff or a write is a barrier that ends the run and
 //! renders as its own always-visible block.  A barrier only ever *follows* the
-//! effects of the call that reached it — [`super::surface`] buffers a write
+//! effects of the call that reached it — [`crate::record::commit`] buffers a write
 //! until its call's reads have landed — so a run is a contiguous span and a
 //! call's effects are never stranded past its end.  Nothing about how blocks are
 //! pushed or logged changes: [`super::viewport`] gathers the run in arrival

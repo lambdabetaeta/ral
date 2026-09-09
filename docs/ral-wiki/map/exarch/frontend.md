@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6686e770
+generated_at_commit: 44084864
 generated_at_date: 2026-09-09
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -238,7 +238,17 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    which is exactly where a `∴` block must not land. Its grain header weighs
    the run against the prose it became, which the record cannot carry (it
    precedes it) and the view therefore measures: `viewport::answer_run`
-   reads the unbroken answer run that follows each `∴` row. A thinking block has two rungs only — its
+   reads the unbroken answer run that follows each `∴` row. The flatten reads
+   a turn as *deliberation, then work*: where two or more traces alternate
+   with the observation runs they ordered (`Viewport::deliberation_end`), the
+   traces are hoisted above that work and drawn as one `∴` block over one `▸`
+   run, so the turn reads thought, work, answer rather than in the
+   interleaving the wire happened to deliver. Prose ends a stretch, as does
+   every barrier an observation run stops at, and the window's tail trace is
+   exempt — that is the live edge, where `live_tail` draws the open line, and
+   it joins the stretch once the work it ordered lands beneath it. Only the
+   flatten reorders: blocks, their record ids, the dial state keyed to them
+   and `user.log` all stay in arrival order. A thinking block has two rungs only — its
    grain header, or the whole trace — the dial hopping over `Context`
    (`Block::rung_up`/`rung_down`), which for a trace would be a dead detent.
    Traces also answer to one standing rung, `/thinking`'s datum: `Tabs::traces`

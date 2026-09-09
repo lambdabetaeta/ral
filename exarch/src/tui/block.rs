@@ -76,10 +76,61 @@ pub(super) enum CardOrigin {
 /// became, the deliberation grain's denominator, measured by the view that
 /// draws it: the run commits ahead of that prose and so cannot carry it.
 /// While the run is still streaming it has no block at all — the live edge is
-/// `Viewport::thinking_seat`, a magnitude row.
+/// `Viewport::live_tail`, which draws the open line inside the block it joins.
 pub(super) struct Thinking {
     pub(super) text: String,
     pub(super) answer_chars: u32,
+}
+
+impl Thinking {
+    /// The run's mass — the deliberation grain's numerator.
+    fn chars(&self) -> u32 {
+        u32::try_from(self.text.chars().count()).unwrap_or(u32::MAX)
+    }
+    /// The run's bulk — the header's size bar and the rail's value step.  Both
+    /// saturate: a count read as a magnitude may not wrap.
+    fn lines(&self) -> u32 {
+        u32::try_from(self.text.lines().count()).unwrap_or(u32::MAX)
+    }
+}
+
+/// One or more reasoning runs read as a single trace: the grain and bulk of the
+/// whole, and — past the header rung — each run's prose in turn.  A lone trace
+/// and a coalesced one render through here alike, so the flatten's hoist
+/// ([`super::viewport::Viewport::reflow`]) cannot drift from a block's own
+/// reading of itself.
+fn trace_body(traces: &[&Thinking], level: Reveal, width: u16) -> Vec<Line<'static>> {
+    let chars = traces.iter().map(|t| t.chars()).sum();
+    let lines = traces.iter().map(|t| t.lines()).sum();
+    let said = traces.iter().map(|t| t.answer_chars).sum();
+    let mut ls = line::thinking_header(chars, lines, said);
+    // Two rungs only: the header alone, or the whole trace.
+    if level >= Reveal::Context {
+        // One deliberation, one document: the runs are joined as paragraphs, so
+        // the seam between two of them reads as a break and not as a wrap.
+        let text = traces
+            .iter()
+            .map(|t| t.text.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        ls.push(Line::default());
+        ls.extend(md::render_reasoning(&text, width, MD_INDENT));
+    }
+    ls
+}
+
+/// The flatten's coalesced trace block: [`trace_body`] seated on the `∴` rail,
+/// its value-step the bulk of the whole run, as a lone trace's is of its own.
+pub(super) fn trace_rows(
+    traces: &[&Thinking],
+    level: Reveal,
+    width: u16,
+    agent: AgentSlot,
+) -> Vec<Row> {
+    let body = trace_body(traces, level, content_w(width));
+    let magnitude = traces.iter().map(|t| t.lines()).sum();
+    let glyph = rail::span(RailKind::Thinking, agent, Some(magnitude));
+    Row::seat(body, Some(glyph))
 }
 
 /// What a block carries — each variant a pure function of its data, the target
@@ -349,7 +400,7 @@ impl Block {
         match &self.kind {
             BlockKind::Card { card, .. } => card.magnitude(),
             BlockKind::Markdown { src, .. } => Some(src.lines().count() as u32),
-            BlockKind::Thinking(t) => Some(t.text.lines().count() as u32),
+            BlockKind::Thinking(t) => Some(t.lines()),
             _ => None,
         }
     }
@@ -425,6 +476,15 @@ impl Block {
         }
     }
 
+    /// This run's parts for the coalesced trace block — [`Self::call_view`] for
+    /// the `∴` lane.
+    pub(super) fn trace_view(&self) -> Option<&Thinking> {
+        match &self.kind {
+            BlockKind::Thinking(t) => Some(t),
+            _ => None,
+        }
+    }
+
     /// An effect's rail-less rows, to fold under its call's intent.
     pub(super) fn effect_lines(&self) -> Vec<Line<'static>> {
         match &self.kind {
@@ -447,10 +507,7 @@ impl Block {
 
     /// [`Self::markdown_src`] for the reasoning lane.
     pub(super) fn thinking_src(&self) -> Option<&str> {
-        match &self.kind {
-            BlockKind::Thinking(t) => Some(&t.text),
-            _ => None,
-        }
+        self.trace_view().map(|t| t.text.as_str())
     }
 
     /// The epistemic signal this block was built with — what a live tail
@@ -460,7 +517,7 @@ impl Block {
     }
 
     pub(super) fn is_thinking(&self) -> bool {
-        matches!(self.kind, BlockKind::Thinking(_))
+        self.trace_view().is_some()
     }
 
     /// True for a turn boundary — what the matrix's per-agent turn cells count.
@@ -628,17 +685,7 @@ impl Block {
                 }
             }
             BlockKind::Markdown { src } => md::render_md(src, width, MD_INDENT, self.fidelity),
-            BlockKind::Thinking(t) => {
-                let think_chars = u32::try_from(t.text.chars().count()).unwrap_or(u32::MAX);
-                let think_lines = u32::try_from(t.text.lines().count()).unwrap_or(u32::MAX);
-                let mut ls = line::thinking_header(think_chars, think_lines, t.answer_chars);
-                // Two rungs only: the header alone, or the whole trace.
-                if level >= Reveal::Context {
-                    ls.push(Line::default());
-                    ls.extend(md::render_reasoning(&t.text, width, MD_INDENT));
-                }
-                ls
-            }
+            BlockKind::Thinking(t) => trace_body(&[t], level, width),
             BlockKind::Subagent {
                 name,
                 error,
