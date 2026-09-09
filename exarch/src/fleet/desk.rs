@@ -1857,7 +1857,7 @@ fn survey_answer(survey: &ContextSurvey) -> FOValue {
 
 /// One turn as both `` context `survey `` and `` transcript `index `` name
 /// it, so a row and an index line can never be two opinions.
-fn turn_row(turn: &crate::record::Row) -> Vec<(String, FOValue)> {
+fn turn_row(turn: &crate::record::TurnRow) -> Vec<(String, FOValue)> {
     vec![
         (
             "id".to_string(),
@@ -1884,7 +1884,7 @@ fn turn_row(turn: &crate::record::Row) -> Vec<(String, FOValue)> {
 
 /// `` `transcript `index ``'s answer: one row per turn the transcript holds,
 /// oldest first, `held` saying which of them the model is still paying for.
-fn transcript_index_answer(turns: Vec<crate::record::Row>) -> FOValue {
+fn transcript_index_answer(turns: Vec<crate::record::TurnRow>) -> FOValue {
     FOValue::List {
         items: turns
             .into_iter()

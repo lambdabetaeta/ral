@@ -20,10 +20,10 @@ mod replay;
 mod seam;
 mod view;
 
-pub use model::{Held, Linked, Pointer, Row};
+pub use model::{Held, Linked, Pointer, TurnRow};
 pub use replay::{Refusal, replay};
 pub use seam::Emitter;
-pub use view::{Block, BlockKind, View};
+pub use view::{BLOCKS_WINDOW, Block, BlockKind, Delta, View};
 
 pub(crate) use log::FleetSink;
 
@@ -193,8 +193,7 @@ pub enum Display {
     /// `call` names the `ToolCall` commit this result belongs to — the
     /// producer already knows it, being the one that just emitted that
     /// commit — so the view fold addresses it directly rather than walking
-    /// backward to the nearest resident tail, the mechanism `set_result_size`
-    /// used and this plan retires.
+    /// backward to the nearest resident tail.
     Result {
         text: String,
         call: BlockId,
@@ -234,7 +233,7 @@ pub enum Display {
         notice: NoticeFact,
     },
     Context {
-        rows: Vec<model::Row>,
+        turns: Vec<model::TurnRow>,
         /// Turns that have left the context by eviction; drawn as one leading
         /// line when non-zero.
         evicted: usize,
@@ -551,8 +550,8 @@ pub fn widen<C: Class>(recorded: Recorded<C>) -> Recorded<Record> {
 /// A named commit in the view fold's memo — a block is named by its own
 /// commit's [`Seq`].
 ///
-/// A `result_size` patch can carry its call's `BlockId`, and the fold can
-/// tolerate a patch whose target it has already evicted.
+/// A result patch carries its call's `BlockId`, and the fold tolerates a
+/// patch whose target it has already evicted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlockId(Seq);
 
@@ -587,12 +586,18 @@ pub trait Fold {
     fn step(memo: &mut Self::Memo, record: &Recorded<Record>) -> Result<(), Refusal>;
 }
 
-/// A frontend that draws one fold's output — `tui` and `headless` alike —
-/// and is never handed a `Record`, so it cannot match on the vocabulary and
-/// a third hand-rolled projection cannot compile.
+/// A frontend that draws the log: itself a fold, stepping its own [`Blocks`]
+/// memo and acting on the [`Delta`] that step reports.
+///
+/// A printer is handed the record only to step that memo — never to render
+/// the record vocabulary from it, which it draws from [`BlockKind`] off the
+/// memo instead, so a third hand-rolled projection cannot compile.
 pub trait Printer {
     fn transient(&mut self, t: &Transient);
-    fn sync(&mut self, blocks: &Blocks);
+
+    /// Step this printer's own memo over one witnessed fact and draw what the
+    /// step changed.
+    fn fact(&mut self, rec: &Recorded<Record>);
 }
 
 /// Read `path`'s [`Record`]s back, past their `Entry` envelope, for tests

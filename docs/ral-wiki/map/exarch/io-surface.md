@@ -1,5 +1,5 @@
 ---
-generated_at_commit: e68d97f2
+generated_at_commit: 146084be
 generated_at_date: 2026-09-09
 covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
@@ -211,11 +211,11 @@ joins it but no group: its diff is a barrier, not a foldable
 observation, so it flushes as its own card, *last*, after the read/exec/grep
 groups. That last position is the point. A redirect writes at the *seam*,
 mid-call, so a write landed eagerly would sit between a call and the reads it
-had yet to make — stranding those reads behind a barrier, where the coalescing
-projection could not fold them into the run and the run's census would not count
+had yet to make — stranding those reads behind a barrier, where the printer's
+mirror could not fold them onto the call and the run's tally would not count
 them. Buffered, every effect of one call reaches
-[[map/exarch/frontend|the projection]] contiguously and the barrier merely
-*closes* the run. Each group reuses the exact
+[[map/exarch/frontend|the mirror]] contiguously and the barrier merely
+*closes* the group. Each group reuses the exact
 `observation_card` span vocabulary, so a lone surface renders identically; the
 one departure is that the exec group **drops the `→ status` tail** — a
 comma-joined run reads as the *set* of commands run, and per-command status

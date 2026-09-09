@@ -6,12 +6,12 @@ use std::path::PathBuf;
 
 use super::App;
 use super::banner::{self, SessionInfo};
-use super::block::{ChromeKind, Reveal};
+use super::block::{ChromeKind, Detail};
 use super::login;
 use super::model_picker::pick_model;
+use super::scrollback;
 use super::terminal::{YANK_CAP, osc52_copy, tail_bytes};
 use super::tui_loop::Tui;
-use super::viewport;
 use crate::bus::{Mailbox, Post};
 use prompt_editor::completion::Candidate;
 use ral_core::path::sigil::expand_path_prefix;
@@ -65,7 +65,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         arg: None,
         rewrites: false,
         any_tab: true,
-        help: "Collapse or expand every thinking trace, on screen and to come.",
+        help: "Collapse or expand thinking, on screen and to come.",
     },
     SlashCommand {
         name: "/clear",
@@ -293,13 +293,13 @@ pub(super) fn cmd_legend(app: &mut App) {
     app.push_chrome(app.tabs.root(), ChromeKind::Plain, banner::legend_panel());
 }
 
-/// Flip the disclosure of thinking traces everywhere at once: one setting, so a
-/// trace already on screen and one that arrives an hour from now read alike.
+/// Flip the disclosure of deliberation everywhere at once: one setting, so a
+/// group already on screen and one that arrives an hour from now read alike.
 pub(super) fn cmd_thinking(app: &mut App) {
     let id = app.tabs.focused();
-    let note = match app.tabs.toggle_traces() {
-        Reveal::Full => "[thinking traces expanded]",
-        _ => "[thinking traces collapsed to their headers]",
+    let note = match app.tabs.toggle_thinking() {
+        Detail::Full => "[thinking expanded]",
+        _ => "[thinking collapsed to its header]",
     };
     app.push_note(id, note);
 }
@@ -331,7 +331,7 @@ pub(super) fn cmd_copy(app: &mut App) {
 }
 
 /// Write the focused tab's rendered `user.log` to `arg`, never over an existing
-/// file.  The copy goes through [`viewport::export_log`], the I/O door.
+/// file.  The copy goes through [`scrollback::export_log`], the I/O door.
 pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
     let id = app.tabs.root();
     if arg.is_empty() {
@@ -350,7 +350,7 @@ pub(super) fn cmd_export(app: &mut App, arg: &str, info: &SessionInfo<'_>) {
             return;
         }
     };
-    match viewport::export_log(&src, &dest) {
+    match scrollback::export_log(&src, &dest) {
         Ok(_) => app.push_note(id, &format!("[exported user view to {}]", dest.display())),
         Err(e) => app.push_error(id, &format!("could not write {}: {e}", dest.display())),
     }
@@ -438,7 +438,7 @@ pub(super) fn route_submit(
             }
             "/login" => login::login(tui, ctx),
             // Cancel before blanking: tokens already in flight would otherwise
-            // paint into the cleared viewport until the worker's next poll, and
+            // paint into the cleared scrollback until the worker's next poll, and
             // what the bus still holds `App::handle`'s clear-drain drops.
             // Descendants only — a terminate-class cause on the trunk's own
             // token is permanent, and `/clear` rebuilds the trunk in place.

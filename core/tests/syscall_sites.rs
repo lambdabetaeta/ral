@@ -244,8 +244,8 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("exarch/src/tui/terminal.rs", "silent:editor-compose"),
     ("exarch/src/tui/terminal.rs", "silent:stderr-log"),
     ("exarch/src/tui/terminal.rs", "silent:stderr-log-windows"),
-    ("exarch/src/tui/viewport.rs", "silent:export"),
-    ("exarch/src/tui/viewport.rs", "silent:viewport-log"),
+    ("exarch/src/tui/scrollback.rs", "silent:export"),
+    ("exarch/src/tui/scrollback.rs", "silent:scrollback-log"),
     // ── ral / ral-sh ──────────────────────────────────────────────────────
     ("ral-sh/src/main.rs", "silent:respawn-posix-sh"),
     ("ral-sh/src/main.rs", "silent:respawn-ral"),

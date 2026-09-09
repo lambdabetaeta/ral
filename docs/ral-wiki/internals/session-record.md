@@ -1,7 +1,7 @@
 ---
-verified_at_commit: e1dc876f
-verified_at_date: 2026-09-08
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Printer::sync, replay, model::resume, Viewport::commit_fact, seed, enforce_window_caps, flush_log, rotate, clear, Context, Turn, Body, Pointer, Row, Held, Locus, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
+verified_at_commit: 146084be
+verified_at_date: 2026-09-09
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Blocks::step, Delta, Printer::fact, replay, model::resume, Scrollback::fact, Scrollback::trim, seed, flush_log, rotate, clear, Context, Turn, Body, Pointer, TurnRow, Held, Locus, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
 ---
 
 # Session record: one seam, one log
@@ -195,43 +195,52 @@ guards a read-back is the digest, at the moment of the read, where the risk
 is. A missing `record.jsonl` is a named refusal, not an invitation to start an
 empty resumed session.
 
-The view path is `record::View::step` over `Display` and `Forensic`; it skips
+The view path is `Blocks::step` over `Display` and `Forensic`; it skips
 `Protocol` explicitly. `Blocks::push` joins consecutive records of one lane
 into a block, while a different kind opens the next block. `Block` construction
 is private to the fold, and the memo keeps a bounded resident window
-(`BLOCKS_WINDOW`). A `record::Printer` receives `Blocks`, not raw records, so
-the TUI and headless printers cannot invent a third block projection.
+(`BLOCKS_WINDOW`) — the one window, for every printer.
 
-Live and replay use the same view fold. `Signal::Fact` reaches
-`Viewport::commit_fact` or headless absorption, which steps the memo and calls
-`Printer::sync`; `Signal::Transient` goes straight to the printer's live edge.
-The TUI's `App::fact` and `App::transient` are therefore the two distinct
-doors: durable rows are fold-backed, while an open answer/thinking line or
-chrome row remains provisional until a later record or boundary resolves it.
+Each step reports what it did as a `Delta`: `Opened` a block, `Grew` the lane
+the tail held, `Patched` a call with its result, or `Quiet`. A
+`record::Printer` owns its own `Blocks` memo, steps it through
+`Printer::fact(rec)`, and draws that increment — so a printer is itself a fold
+over the one log, and cannot invent a third block projection: it renders from
+`BlockKind` off its memo, never from the record vocabulary
+([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
+The TUI keeps a 1:1 mirror of its memo, one `tui::Block` per incident, with
+deliberation and the work it ordered collapsed into a group as they land;
+headless keeps one memo per source agent and prints each opened block.
+
+Live and replay use the same view fold. The TUI's `App::fact` and
+`App::transient` are the two distinct doors: durable blocks are fold-backed,
+while an open answer/thinking line or chrome row remains provisional until a
+later record or boundary resolves it.
 
 ## Resume and the user view
 
-On TUI resume, `tui_loop` replays `record.jsonl` into `Blocks` before the worker
-starts, then `Viewport::seed` performs one sync and marks the resident rows as
-already present in `user.log`. The resumed session appends after that seeded
-prefix instead of writing the replayed window twice. Cumulative usage comes
-from the replayed forensic deltas; the resumed note is the boundary between
-history and new live signals.
+On TUI resume, `tui_loop` replays `record.jsonl` into `Blocks` before the
+worker starts and hands that memo to the scrollback, which becomes its owner:
+`Scrollback::seed` builds its mirror block by block, exactly as a live commit
+does, and marks it as already present in `user.log`. The resumed session
+appends after that seeded prefix instead of writing the replayed window twice.
+Cumulative usage comes from the replayed forensic deltas; the resumed note is
+the boundary between history and new live signals.
 
-`user.log` is the rendered user view, not the source of truth. The fold memo is
-bounded independently from the viewport's presentational caps. When
-`Viewport::enforce_window_caps` evicts the oldest blocks, it renders them once
-into the retired prefix and advances the prefix's durable offset. Resident
-blocks are provisional: `Viewport::flush_log` writes them past that prefix for
+`user.log` is the rendered user view, not the source of truth. There is one
+window: after every step `Scrollback::trim` walks the mirror's head against the
+fold's own first block, renders what it drops once into the retired prefix, and
+advances the prefix's durable offset. Resident
+blocks are provisional: `Scrollback::flush_log` writes them past that prefix for
 session-end output and `/export`, while the next retirement rewinds to the
-prefix before extending it, so no block is duplicated. A tombstoned viewport
+prefix before extending it, so no block is duplicated. A tombstoned scrollback
 retires its remaining blocks before dropping its heap state; there is no
 reload-from-`user.log` fold. Crash recovery remains the responsibility of
 `record.jsonl`, which is flushed per record.
 
 ## Clear and segment rotation
 
-`/clear` cancels the in-flight exchange, resets the viewport (including its
+`/clear` cancels the in-flight exchange, resets the scrollback (including its
 `user.log` segment), and arms the frontend's drain gate so straggler signals
 from the old exchange cannot paint the new context. The `Cleared` transient, or
 the next fresh prompt when that acknowledgement is lost, closes that gate.
@@ -245,13 +254,13 @@ coupled before the clear therefore continue publishing into the new segment.
 The resulting trust boundary is small: `record.jsonl` is the durable fact
 stream, `Record` classes say which fold may project each fact, `Signal::Fact`
 delivers stamped commits live, `Transient` carries only process-lifetime edges,
-and `user.log` is the viewport's rendered stream: a retired prefix plus a
+and `user.log` is the scrollback's rendered stream: a retired prefix plus a
 provisional resident tail.
 
 See [[decisions/260814_one-seam-one-log|one-seam-one-log]] for the seam and
 fold law, [[decisions/260814_a-trace-is-a-fold|a-trace-is-a-fold]] for the
 single durable record, [[decisions/260816_the-window-is-not-the-transcript|the-window-is-not-the-transcript]]
-for retirement and incremental sync, and
+for retirement, and
 [[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]] for
 the live bus lifetime. The broader accumulator/fold distinction is in
 [[design/residency|residency]], and the visual projection discipline is in

@@ -26,12 +26,12 @@ mod prompt;
 mod rail;
 mod render;
 mod row;
+mod scrollback;
 mod select;
 mod status;
 mod tabs;
 mod terminal;
 mod tui_loop;
-mod viewport;
 
 use std::time::Duration;
 

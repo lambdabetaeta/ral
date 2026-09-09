@@ -1,7 +1,7 @@
 ---
-generated_at_commit: a6117cb1
-generated_at_date: 2026-09-02
-covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/viewport.rs, exarch/data/agent.ral]
+generated_at_commit: 146084be
+generated_at_date: 2026-09-09
+covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
 
 # Map: exarch / cards
@@ -146,25 +146,29 @@ placement, framing in its agent's hue at the register's own margin.
 
 ## Block — derived disclosure and aggregation
 
-`BlockKind::Card{card, origin}` (`tui/block.rs`) carries the render document and
-a `CardOrigin` (`Observation`/`Write`/`Surfaced`) telling the coalescing
-projection whether the card is a foldable effect or a barrier. Disclosure is
-**derived**, not named: a card holding a `diff` is dialable (`dialable()` →
-`Card::has_diff()`) and renders L1 header / L2 first-hunk / L3 full; a card of
-only `text`/`fields`/`measure`/`raw` is chrome-level (L3-only, inert). The rail
-shape is `▎` for a file mutation — a diff card or a write card alike — and
-none for a framed surfaced card; an observation card folds into its ral group
-rather than carrying its own rail. `magnitude()` is the summed diff
-magnitude, feeding the rail's value-step and the agent matrix's size readout;
-`lines_changed()` exposes the same diff total as the matrix's write footprint,
-distinct from prose volume.
+`BlockKind::Card { card, landing, at }` (`tui/block.rs`) carries the render
+document, a `Landing` (`Effect`/`Write`/`Surfaced`, shared with `bus/card`'s
+own `landing()`) telling the printer's mirror whether the card is a foldable
+effect or a barrier, and the
+`Detail` rung it is read at. Disclosure is **derived**, not named: a card
+holding a `diff` is dialable (`dialable()` → `Card::has_diff()`) and reads as
+its header alone at `Tally`, its first `DIFF_PEEK_ROWS` rows at `Summary` —
+the rung it opens at — or the complete diff at `Full`; a card of only
+`text`/`fields`/`measure`/`raw` is inert, rendered whole. The rail shape is `▎`
+for a file mutation — a diff card or a write card alike — and none for a framed
+surfaced card; an observation card folds onto the call above it in its group
+rather than carrying its own rail. `magnitude()` is the summed diff magnitude,
+feeding the rail's value-step; `lines_changed()` exposes the same diff total as
+the matrix's write footprint, distinct from prose volume.
 
 A single-`diff` card joins the patch-grouping buffer in `record/commit.rs`
 (`Card::into_single_diff` → `SurfaceBuffer::absorb_patch`): consecutive
 same-`(id, path)` diff cards merge their hunks into one `diff <path>` block, the
-way a unified diff presents one file. Every richer card is its own block, pushed
-via `Viewport::push_card` (`tui/viewport.rs`); grouped observation effects land
-via `push_observation_card`, a write card via `push_write_card`.
+way a unified diff presents one file. Every richer card is its own block: the
+scrollback decodes a `Display::Card` once, as the fold opens it, and pushes it as
+a barrier (`Scrollback::items`, `tui/scrollback.rs`); a grouped observation effect
+is instead a `Member::Effect` folded onto the call above it, and a write card a
+barrier of its own.
 
 ## Machine log
 
@@ -202,7 +206,8 @@ card (one canonical original-vs-final diff grouped into hunks by `similar`) at
 the edit, where both texts are already in hand; a committed `>` reads what
 landed against the empty side instead, an all-adds diff rather than a shape of
 its own. Both cards retain every hunk; disclosure belongs to the renderer, so
-L1 is the header, L2 the first hunk, and L3 the complete diff. The read
+`Tally` is the header, `Summary` its first twenty rows, and `Full` the
+complete diff. The read
 redirect and exec cards are likewise composed from core's I/O events. `agent.ral` now carries
 only the `-around` readers, the tasks kit, and the goal pins
 ([[map/exarch/builtins|builtins]]).

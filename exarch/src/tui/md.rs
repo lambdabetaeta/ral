@@ -4,7 +4,7 @@
 //! wherever it appears; any other language falls to syntect and the
 //! `two-face` syntax set.
 //!
-//! `super::viewport` commits only fence-safe paragraph prefixes, so every call
+//! `super::scrollback` commits only fence-safe paragraph prefixes, so every call
 //! here sees a structurally complete slice and needs no repair pass.
 
 use pulldown_cmark::{
@@ -57,18 +57,18 @@ pub(super) fn render_md(text: &str, w: u16, indent: u16, fidelity: Fidelity) -> 
     lines
 }
 
-/// Saturation drained from reasoning prose: scratch work, short of illegible.
-const REASONING_DRAIN: f32 = 0.7;
-/// Dimming applied after the drain, so reasoning drops in luminance too.
-const REASONING_DIM: f32 = 0.35;
-/// Render reasoning prose, drained and dimmed so it never borrows the answer's
+/// Saturation drained from thinking prose: scratch work, short of illegible.
+const THINKING_DRAIN: f32 = 0.7;
+/// Dimming applied after the drain, so thinking drops in luminance too.
+const THINKING_DIM: f32 = 0.35;
+/// Render thinking prose, drained and dimmed so it never borrows the answer's
 /// authority — independent of [`Fidelity`], since thinking is always provisional.
-pub(super) fn render_reasoning(text: &str, w: u16, indent: u16) -> Vec<Line<'static>> {
+pub(super) fn render_thinking(text: &str, w: u16, indent: u16) -> Vec<Line<'static>> {
     let mut lines = render_md(text, w, indent, Fidelity::default());
     for line in &mut lines {
         for span in &mut line.spans {
-            let fg = desaturate(span.style.fg.unwrap_or(BASE_FG), REASONING_DRAIN);
-            span.style.fg = Some(mix(fg, Color::Rgb(80, 80, 80), REASONING_DIM));
+            let fg = desaturate(span.style.fg.unwrap_or(BASE_FG), THINKING_DRAIN);
+            span.style.fg = Some(mix(fg, Color::Rgb(80, 80, 80), THINKING_DIM));
         }
     }
     lines

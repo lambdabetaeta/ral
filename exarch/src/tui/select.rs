@@ -1,6 +1,6 @@
 //! Drag-selection geometry, in text-area cell columns: `render::paint_selection`
 //! reverse-videos a live drag through [`highlight_range`], and
-//! `Viewport::selection_text` copies the released text through [`plain_slice`].
+//! `Scrollback::selection_text` copies the released text through [`plain_slice`].
 //!
 //! Both take screen cells and both convert once, through [`content_range`]: a
 //! [`Row`]'s margin is a field rather than a leading span, so subtracting

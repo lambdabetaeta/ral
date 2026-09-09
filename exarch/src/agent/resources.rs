@@ -111,20 +111,20 @@ pub fn resources_card(rows: &[ProbeRow]) -> Card {
     Card(vec![section_mark("resources"), rows_mark(rows)])
 }
 
-/// The probed agent's viewport window: figures beside the caps that bound
-/// them, in one struct so a figure cannot drift from its cap.
+/// The probed agent's scrollback: its figures beside the one window that bounds
+/// them all, in one struct so a figure cannot drift from its bound.
 #[derive(Clone, Copy)]
-pub struct ViewportFigures {
+pub struct ScrollbackFigures {
+    /// Scrollback blocks resident, one per reader's atom.
     pub blocks: u64,
-    /// Rendered rows in the memoised flatten, as of the last paint.
+    /// Rendered rows those blocks put on screen, as of the last paint.
     pub rows: u64,
-    /// Those rows' summed text bytes; no cap of its own, bounded indirectly
-    /// by the blocks/rows caps.
+    /// Those rows' summed text bytes.
     pub bytes: u64,
-    /// `tui::viewport::VIEWPORT_MAX_BLOCKS`.
-    pub blocks_cap: u64,
-    /// `tui::viewport::VIEWPORT_MAX_ROWS`.
-    pub rows_cap: u64,
+    /// `record::BLOCKS_WINDOW` — the view fold's resident-row window, which is
+    /// the only thing that bounds the three figures above: a block leaves the
+    /// screen when the row it was built from leaves the fold.
+    pub window: u64,
 }
 
 /// The fleet's view counts: per-agent views the frontend holds, split
@@ -157,33 +157,36 @@ pub struct BusFigures {
 ///
 /// Pure in its figures so the row shapes are unit-testable without a
 /// terminal: the TUI's `Transient::Resources` arm reads them off the
-/// tabs/viewport/bus it holds.
+/// tabs/scrollback/bus it holds.
 pub fn frontend_rows(
-    viewport: ViewportFigures,
+    scrollback: ScrollbackFigures,
     views: ViewFigures,
     bus: BusFigures,
 ) -> Vec<ProbeRow> {
     vec![
         ProbeRow::new(
-            "viewport.blocks",
-            viewport.blocks,
-            Some(viewport.blocks_cap),
-            "evict",
-            Some("oldest evicted first; already durable in record.jsonl".to_string()),
-        ),
-        ProbeRow::new(
-            "viewport.rows",
-            viewport.rows,
-            Some(viewport.rows_cap),
-            "evict",
-            Some("oldest evicted first; already durable in record.jsonl".to_string()),
-        ),
-        ProbeRow::new(
-            "viewport.bytes",
-            viewport.bytes,
+            "scrollback.blocks",
+            scrollback.blocks,
             None,
             "evict",
-            Some("no byte cap of its own; bounded indirectly by the blocks/rows caps".to_string()),
+            Some(format!(
+                "one per reader's atom; bounded by the view fold's {}-row window",
+                scrollback.window
+            )),
+        ),
+        ProbeRow::new(
+            "scrollback.rows",
+            scrollback.rows,
+            None,
+            "evict",
+            Some("what those blocks render to at the readable width".to_string()),
+        ),
+        ProbeRow::new(
+            "scrollback.bytes",
+            scrollback.bytes,
+            None,
+            "evict",
+            Some("no byte cap of its own; bounded indirectly by the fold's row window".to_string()),
         ),
         ProbeRow::new(
             "views.live",
@@ -538,7 +541,7 @@ impl Avatar {
         // never what the log carries.
         let recorder = self.recorder();
         if let Err(error) = recorder.emit(crate::record::Display::Context {
-            rows: survey.rows,
+            turns: survey.rows,
             evicted: survey.evicted,
         }) {
             recorder.report_fault(&error);
@@ -556,18 +559,17 @@ mod tests {
     use crate::agent::testkit::*;
     use crate::bus::{Emitter, Post};
 
-    /// Every frontend row wears its policy, but only the viewport window's
-    /// two enforced caps become real `cap`s; the rest stay `None` rather
-    /// than fake a ceiling.
+    /// Every frontend row wears its policy, and none of them fakes a ceiling:
+    /// the view fold's row window is what bounds the scrollback, so the rows it
+    /// bounds name it in their note rather than claim a `cap` of their own.
     #[test]
-    fn frontend_rows_state_decided_policies_and_the_viewport_window_caps() {
+    fn frontend_rows_state_decided_policies_and_name_the_one_window() {
         let rows = frontend_rows(
-            ViewportFigures {
+            ScrollbackFigures {
                 blocks: 3,
                 rows: 120,
                 bytes: 4096,
-                blocks_cap: 500,
-                rows_cap: 20_000,
+                window: 1000,
             },
             ViewFigures {
                 live: 2,
@@ -584,26 +586,25 @@ mod tests {
                 .find(|r| r.name == n)
                 .unwrap_or_else(|| panic!("row {n} must be emitted"))
         };
-        assert_eq!(by_name("viewport.blocks").current, 3);
-        assert_eq!(by_name("viewport.rows").current, 120);
-        assert_eq!(by_name("viewport.bytes").current, 4096);
+        assert_eq!(by_name("scrollback.blocks").current, 3);
+        assert_eq!(by_name("scrollback.rows").current, 120);
+        assert_eq!(by_name("scrollback.bytes").current, 4096);
         assert_eq!(by_name("views.live").current, 2);
         assert_eq!(by_name("views.dead").current, 1);
         assert_eq!(by_name("fleet.agents").current, 2);
         assert_eq!(by_name("bus.depth").current, 5);
         assert_eq!(by_name("bus.bytes").current, 777);
-        assert_eq!(
-            by_name("viewport.blocks").cap,
-            Some(500),
-            "the block-count window cap is now enforced and shown"
-        );
-        assert_eq!(
-            by_name("viewport.rows").cap,
-            Some(20_000),
-            "the row window cap is now enforced and shown"
+        assert!(
+            by_name("scrollback.blocks")
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("1000-row window")),
+            "the blocks row names the one window that bounds it"
         );
         for name in [
-            "viewport.bytes",
+            "scrollback.blocks",
+            "scrollback.rows",
+            "scrollback.bytes",
             "views.live",
             "views.dead",
             "bus.depth",
@@ -615,7 +616,7 @@ mod tests {
                 "no cap of its own is enforced for this row ({name})"
             );
         }
-        assert_eq!(by_name("viewport.blocks").policy, "evict");
+        assert_eq!(by_name("scrollback.blocks").policy, "evict");
         assert_eq!(by_name("bus.depth").policy, "coalesce");
         assert!(
             by_name("bus.bytes")
@@ -701,7 +702,7 @@ mod tests {
         let fact = crate::bus::drain_records(&rx)
             .into_iter()
             .find_map(|rec| match rec {
-                Record::Display(Display::Context { rows, .. }) => Some(rows),
+                Record::Display(Display::Context { turns, .. }) => Some(turns),
                 _ => None,
             })
             .expect("the survey records a Display::Context commit");

@@ -1,6 +1,6 @@
-//! Mouse gestures over the focused viewport, as a transition system: reads of
-//! the viewport come in as `&Viewport`, writes go out as an [`Effect`] for
-//! `App` to apply.  Nothing here touches a viewport mutably or the terminal.
+//! Mouse gestures over the focused scrollback, as a transition system: reads of
+//! the scrollback come in as `&Scrollback`, writes go out as an [`Effect`] for
+//! `App` to apply.  Nothing here touches a scrollback mutably or the terminal.
 
 use std::cmp::Ordering;
 use std::io;
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::MouseEvent;
 use ratatui::layout::{Position, Rect};
 
-use super::viewport::Viewport;
+use super::scrollback::{Hit, Scrollback};
 
 pub(super) const COPY_TOAST_TTL: Duration = Duration::from_secs(2);
 
@@ -68,12 +68,12 @@ impl FrameGeom {
     }
 }
 
-/// A viewport mutation the gesture asks for.
+/// A scrollback mutation the gesture asks for.
 pub(super) enum Effect {
     /// Scroll by this many rows, negative for up.
     Scroll(isize),
-    /// Cycle the block's disclosure between L1 and L3.
-    CycleBlock(usize),
+    /// Cycle one part of one block a rung on.
+    CycleBlock(Hit),
     /// Hand this text to the host clipboard; report back via
     /// [`GestureState::note_copy`].
     Copy(String),
@@ -87,7 +87,7 @@ enum Phase {
     /// Pressed but not yet moved; `block` is what a bare click will cycle.
     Pressed {
         anchor: Cell,
-        block: Option<usize>,
+        block: Option<Hit>,
     },
     Dragging {
         anchor: Cell,
@@ -110,8 +110,8 @@ pub(super) struct GestureState {
     frame: Option<FrameGeom>,
     phase: Phase,
     toast: Option<(Toast, Instant)>,
-    /// Dialable block under the pointer; `render` lights its rail glyph.
-    hover: Option<usize>,
+    /// Dialable part under the pointer; `render` lights its rail glyph.
+    hover: Option<Hit>,
 }
 
 impl GestureState {
@@ -128,23 +128,23 @@ impl GestureState {
         self.frame = Some(frame);
     }
 
-    /// The dialable block under the pointer.  Its whole vertical extent claims
+    /// The dialable part under the pointer.  Its whole vertical extent claims
     /// the pointer, not just the rail glyph, but each row reaches only as far
     /// right as its own text — the margin beside a short line is dead.
-    fn hover_block(&self, me: MouseEvent, vp: &Viewport) -> Option<usize> {
+    fn hover_block(&self, me: MouseEvent, sb: &Scrollback) -> Option<Hit> {
         let cell = self.frame?.cell(me)?;
-        let idx = vp.block_at(cell.row)?;
-        (vp.block_dialable(idx) && usize::from(cell.col) < vp.row_width(cell.row)?).then_some(idx)
+        let hit = sb.block_at(cell.row)?;
+        (sb.block_dialable(hit) && usize::from(cell.col) < sb.row_width(cell.row)?).then_some(hit)
     }
 
-    pub(super) fn hover(&self) -> Option<usize> {
+    pub(super) fn hover(&self) -> Option<Hit> {
         self.hover
     }
 
     /// Recompute the hover target.  `App::mouse` calls this before dispatch, so
     /// `press` and its wheel-dial sibling both read the event in hand.
-    pub(super) fn update_hover(&mut self, me: MouseEvent, vp: Option<&Viewport>) {
-        self.hover = vp.and_then(|vp| self.hover_block(me, vp));
+    pub(super) fn update_hover(&mut self, me: MouseEvent, sb: Option<&Scrollback>) {
+        self.hover = sb.and_then(|sb| self.hover_block(me, sb));
     }
 
     /// Begin a left-button gesture: drop any prior selection and anchor at the
@@ -160,7 +160,7 @@ impl GestureState {
     }
 
     /// Extend the selection to the pointer, clamped to the visible window; past
-    /// either edge the viewport scrolls one `step` as well, so a drag held
+    /// either edge the scrollback scrolls one `step` as well, so a drag held
     /// there keeps reaching further content rather than stalling at the
     /// frame's rim.
     pub(super) fn drag(&mut self, me: MouseEvent, step: isize) -> Option<Effect> {
@@ -182,12 +182,12 @@ impl GestureState {
 
     /// Finish a left-button gesture: a drag copies its selection, a bare click
     /// cycles its block.
-    pub(super) fn release(&mut self, vp: Option<&Viewport>) -> Option<Effect> {
+    pub(super) fn release(&mut self, sb: Option<&Scrollback>) -> Option<Effect> {
         match self.phase {
             Phase::Dragging { anchor, head } => {
                 self.phase = Phase::Selected { anchor, head };
                 let (lo, hi) = (anchor.min(head), anchor.max(head));
-                vp.map(|vp| Effect::Copy(vp.selection_text(lo, hi)))
+                sb.map(|sb| Effect::Copy(sb.selection_text(lo, hi)))
             }
             Phase::Pressed { block, .. } => {
                 self.phase = Phase::Idle;

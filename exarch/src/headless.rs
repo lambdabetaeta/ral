@@ -17,7 +17,7 @@ use crate::bus::card::{
 };
 use crate::bus::{AgentId, AgentOutcome, BusReceiver, FleetBus, Signal, Sink, pump};
 use crate::provider::{Provider, Usage};
-use crate::record::{self, Blocks, Fold, Printer, Transient, View};
+use crate::record::{self, Blocks, Delta, Printer, Record, Recorded, Transient};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
 use ral_core::serial::FOValue;
@@ -71,12 +71,10 @@ pub struct Headless<'a> {
     /// report as a clean, empty success.
     panicked: bool,
     ended_with_newline: bool,
-    /// The [`record::Seq`] of [`record::Blocks::rows`] this printer has
-    /// already turned into stderr progress lines, per source agent — a
-    /// fact's `Seq` is only unique within its own session log, so root's and
-    /// a child's commits each need their own cursor. A cursor by identity
-    /// rather than position, since a windowed memo makes an index wrong.
-    synced_through: HashMap<AgentId, record::Seq>,
+    /// One view-fold memo per source agent — a fact's `Seq` is only unique
+    /// within its own session log, so root's commits and a child's may not
+    /// share one fold.
+    folds: HashMap<AgentId, Blocks>,
 }
 
 impl<'a> Headless<'a> {
@@ -98,7 +96,7 @@ impl<'a> Headless<'a> {
             reply: None,
             panicked: false,
             ended_with_newline: false,
-            synced_through: HashMap::new(),
+            folds: HashMap::new(),
         }
     }
 
@@ -220,11 +218,10 @@ impl Sink for Headless<'_> {
         /// `bus::sink::DRAIN_POLL`, kept as its own constant rather than a
         /// shared one so this override stays self-contained.
         const POLL: Duration = Duration::from_millis(10);
-        let mut blocks: HashMap<AgentId, Blocks> = HashMap::new();
         loop {
             loop {
                 match rx.try_recv() {
-                    Ok(sig) => self.absorb(sig, &mut blocks),
+                    Ok(sig) => self.absorb(sig),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return Ok(()),
                 }
@@ -233,7 +230,7 @@ impl Sink for Headless<'_> {
                 return Ok(());
             }
             match rx.recv_timeout(POLL) {
-                Ok(sig) => self.absorb(sig, &mut blocks),
+                Ok(sig) => self.absorb(sig),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
@@ -243,18 +240,9 @@ impl Sink for Headless<'_> {
 
 impl Headless<'_> {
     /// One `Signal`, dispatched to whichever half carries it.
-    ///
-    /// A fact is folded into its source agent's own [`Blocks`] — each agent's
-    /// `Seq` numbers its own log, so root's and a child's commits never share
-    /// one memo — and drawn fresh from there.
-    fn absorb(&mut self, sig: Signal, blocks: &mut HashMap<AgentId, Blocks>) {
+    fn absorb(&mut self, sig: Signal) {
         match sig {
-            Signal::Fact(id, rec) => {
-                let entry = blocks.entry(id).or_default();
-                View::step(entry, &rec)
-                    .expect("the view fold never refuses a live Display/Forensic record");
-                self.sync_agent(id, entry);
-            }
+            Signal::Fact(id, rec) => self.step(id, &rec),
             Signal::Transient(id, t) => {
                 // Every printer draws a fault whatever its source, since an
                 // unwritable log is a fact about the plumbing, not one agent;
@@ -266,20 +254,20 @@ impl Headless<'_> {
         }
     }
 
-    /// Print every row `blocks` has committed since this source agent's own
-    /// cursor, then advance it.
-    fn sync_agent(&mut self, id: AgentId, blocks: &Blocks) {
-        let since = self
-            .synced_through
-            .get(&id)
-            .copied()
-            .unwrap_or_else(|| record::Seq::new(0));
-        for row in blocks.rows().iter().filter(|r| r.id().seq() > since) {
-            self.print_row(id, row.kind());
+    /// Step this source agent's own fold and print what the step opened.
+    ///
+    /// A block opened is a block to narrate; a block *grown* is prose or
+    /// reasoning, the two lanes this projection draws nothing for at all, and
+    /// a patched call's line count reaches stderr through no line either.
+    fn step(&mut self, id: AgentId, rec: &Recorded<Record>) {
+        let mut fold = self.folds.remove(&id).unwrap_or_default();
+        let delta = fold
+            .step(rec)
+            .expect("the view fold never refuses a live Display/Forensic record");
+        if let (Delta::Opened(_), Some(block)) = (delta, fold.blocks().last()) {
+            self.print_block(id, block.kind());
         }
-        if let Some(last) = blocks.rows().last() {
-            self.synced_through.insert(id, last.id().seq());
-        }
+        let _ = self.folds.insert(id, fold);
     }
 }
 
@@ -322,17 +310,17 @@ impl Printer for Headless<'_> {
         }
     }
 
-    fn sync(&mut self, blocks: &Blocks) {
+    fn fact(&mut self, rec: &Recorded<Record>) {
         let root_id = self.root_id;
-        self.sync_agent(root_id, blocks);
+        self.step(root_id, rec);
     }
 }
 
 impl Headless<'_> {
-    /// One fold commit, projected onto stderr as a rendering chosen fresh
-    /// each time from whichever record vocabulary reached this printer.
+    /// One fold block, projected onto stderr as a rendering chosen fresh
+    /// each time from the block kinds this printer's own memo holds.
     #[allow(clippy::match_same_arms)]
-    fn print_row(&mut self, id: AgentId, kind: &record::BlockKind) {
+    fn print_block(&mut self, id: AgentId, kind: &record::BlockKind) {
         use record::BlockKind as K;
         match kind {
             K::ToolCall {
@@ -416,8 +404,8 @@ impl Headless<'_> {
             K::Notice { notice } => {
                 self.print_card(&card::notice_card(&card::to_card_notice(notice)));
             }
-            K::Context { rows, evicted } => {
-                self.print_card(&card::context_rows_card(rows, *evicted));
+            K::Context { turns, evicted } => {
+                self.print_card(&card::context_rows_card(turns, *evicted));
             }
             K::Turn { id: turn } => {
                 if id == self.root_id {
@@ -840,7 +828,7 @@ mod tests {
     /// `pump` absorbs the unwind and returns normally, so `run` builds its
     /// result from `Ok(())`; only the recorded `Forensic::Error` whose text
     /// carries [`crate::bus::WORKER_PANIC_PREFIX`] betrays the panic, latched
-    /// in `print_row`'s `K::Error` arm.
+    /// in `print_block`'s `K::Error` arm.
     #[test]
     fn recovered_worker_panic_reports_error_not_success() {
         use crate::record::{Forensic, Locus, Record, Recorded, Seq};
@@ -848,7 +836,6 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-        let mut blocks = HashMap::new();
         h.absorb(
             Signal::Fact(
                 root,
@@ -859,7 +846,6 @@ mod tests {
                     }),
                 ),
             ),
-            &mut blocks,
         );
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
@@ -878,7 +864,6 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-        let mut blocks = HashMap::new();
         let mut seq = 0u64;
         let mut turn_started = |id: AgentId, turn: u64| {
             seq += 1;
@@ -891,9 +876,9 @@ mod tests {
             )
         };
         for turn in [1, 2, 3, 4, 5] {
-            h.absorb(turn_started(root, turn), &mut blocks);
+            h.absorb(turn_started(root, turn));
         }
-        h.absorb(turn_started(sub, 1), &mut blocks);
+        h.absorb(turn_started(sub, 1));
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert_eq!(v["num_turns"], serde_json::json!(5), "{out}");
@@ -908,7 +893,6 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessText, root, &mut sink_out, &mut sink_err);
-        let mut blocks = HashMap::new();
         let marks = serde_json::to_value(Card(vec![Mark::Raw {
             bytes: b"a rendered surface".to_vec(),
         }]))
@@ -921,7 +905,6 @@ mod tests {
                     Record::Display(Display::Card { marks }),
                 ),
             ),
-            &mut blocks,
         );
         let err = String::from_utf8_lossy(&sink_err);
         assert!(
@@ -939,7 +922,6 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessText, root, &mut sink_out, &mut sink_err);
-        let mut blocks = HashMap::new();
         h.absorb(
             Signal::Transient(
                 sub,
@@ -947,7 +929,6 @@ mod tests {
                     text: "disk is full".into(),
                 },
             ),
-            &mut blocks,
         );
         let err = String::from_utf8_lossy(&sink_err);
         assert!(err.contains("disk is full"), "{err:?}");

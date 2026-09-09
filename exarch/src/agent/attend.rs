@@ -475,7 +475,7 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
         // decode would — its io and diff surfaces through the same commit
         // producer, one buffer per batch.  It was stamped with and posted to
         // this same session, so the emitter's id already routes its cards to
-        // the right viewport.
+        // the right scrollback.
         Item::Surface { id, values, .. } => {
             let mut buf = crate::record::commit::SurfaceBuffer::new();
             for v in values {

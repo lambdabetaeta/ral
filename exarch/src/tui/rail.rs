@@ -23,8 +23,8 @@ pub(super) enum RailKind {
     /// A tool call, `true` once dialled open to its context.
     ToolCall(bool),
     Markdown,
-    /// A thinking trace. The answer it reached is a separate `Markdown` block,
-    /// so deliberation and conclusion stay distinct in the rail.
+    /// The thinking lane. The answer it reached is a separate `Markdown`
+    /// block, so deliberation and conclusion stay distinct in the rail.
     Thinking,
     Subagent,
     /// `spawn`, `cancel`, `message`, `reply` — an act on the fleet, landing now.

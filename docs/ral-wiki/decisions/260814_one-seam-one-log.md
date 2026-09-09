@@ -4,6 +4,8 @@ status: accepted
 
 # One seam, one log
 
+Amended by [[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]: a printer is itself a fold over this log, stepped by the record and acting on the delta that step reports — never handed another fold's memo.
+
 **Everything a session records crosses one seam, once, into one durable log —
 `sessions/<n>/record.jsonl` — and every durable artifact is a fold of that
 log.** This inverts which artifact is authoritative: the record is the

@@ -37,18 +37,18 @@ defect, the resident-shaped completion of the probe convention
 
 ## Resident vs. accumulator
 
-The line between a resident and a mere *accumulator* (a viewport, the bus,
+The line between a resident and a mere *accumulator* (a scrollback, the bus,
 an inbox) is the capability: a resident can be reached and controlled by
 id; an accumulator can only be measured and bounded. Both are probed — the
 `/resources` fold spans both kinds — but only residents are listed,
-cancelled, and leased. A viewport has no capability, and pretending it does
+cancelled, and leased. A scrollback has no capability, and pretending it does
 to buy uniformity would buy it at the price of a lie.
 
 The accumulator's contents have a second characterisation, exact in scope:
-**a viewport is always a fold's memo.** Resume seeds that memo from the session
+**a scrollback is always a fold's memo.** Resume seeds that memo from the session
 record before the worker spawns; live `Signal::Fact`s step the same fold, while
 `Signal::Transient`s touch only its provisional edge
-([[internals/session-record|session-record]]). The viewport owns presentation
+([[internals/session-record|session-record]]). The scrollback owns presentation
 state around the memo — scroll, disclosure, the open line, the bounded window —
 but no independent account of what happened. None of that grants it a
 capability; the distinction says where state comes from, never who may reach it.

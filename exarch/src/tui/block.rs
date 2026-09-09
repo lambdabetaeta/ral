@@ -1,11 +1,14 @@
-//! Collapsible scrollback blocks.
+//! The reader's atom.
 //!
-//! A viewport's scrollback is a sequence of [`Block`]s, each on a rung of the
-//! [`Reveal`] ladder.  Only a kind with a summary to collapse to is dialable —
-//! tool calls, diffs, subagent results, acts, thinking; prose is product to
-//! read rather than process to reduce, and chrome is already a line or two, so
-//! both render full.  A block memoises the lines it last produced, keyed by the
-//! width asked for, so a dial re-renders one block and a resize the buffer.
+//! A [`Block`] is what a reader takes in at once, and a session's scrollback
+//! is a `Vec<Block>` mirroring the view fold one incident at a time.  Two
+//! kinds of block carry a [`Detail`] dial: a [`Group`] — one burst of
+//! deliberation and the work it ordered — carries one per part, and an act or
+//! a diff card carries the one.  Prose is product to read rather than process
+//! to reduce, and chrome is already a line or two, so both render whole.
+//!
+//! A block memoises the visual rows it last produced, keyed by the width they
+//! were built at, so a dial re-renders one block and a resize the mirror.
 
 use super::fidelity::Fidelity;
 use super::group;
@@ -14,7 +17,8 @@ use super::md::{self, MD_INDENT};
 use super::palette::{QUEUED_PROMPT_BG, READ_W, SLATE, content_w};
 use super::rail::{self, RailKind};
 use super::row::Row;
-use crate::bus::card::{Card, ObservationKind};
+use crate::bus::card::{Card, Landing, ObservationKind};
+use crate::record::Seq;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -41,8 +45,8 @@ pub(super) enum ChromeKind {
     Spawned,
     Error,
     /// The turn the human stopped: it wears the `╳` an error does — the work
-    /// broke off either way — but stays a separate shape so [`Block::is_error`]
-    /// and the matrix cell it drives keep reporting failures only.
+    /// broke off either way — but stays a separate shape so the matrix's
+    /// failure cell keeps reporting failures only.
     Cancelled,
     /// A meta-notice — a model switch, an export, a stall: an annotation
     /// rather than a navigable block.
@@ -51,132 +55,232 @@ pub(super) enum ChromeKind {
     /// The startup wordmark and metadata card. Their content is their mark.
     Opening,
     /// The human's turn, tinted [`super::palette::PROMPT_INK`] and ruled
-    /// full-width by the flatten.  No band — background is the machine's.
+    /// full-width by [`append_visual_rows`].  No band — background is the
+    /// machine's.
     Prompt,
 }
 
-/// Where a [`BlockKind::Card`] came from — what the coalescing projection
-/// ([`super::group`]) reads to tell an *effect* it may fold into a ral block
-/// from a *barrier* that splits one.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum CardOrigin {
-    /// A read / grep / exec a call produced: foldable, carrying its `|>` kind
-    /// and how many it folds (one card may comma-join several) for the census.
-    Observation { kind: ObservationKind, count: u32 },
-    /// A write — an effect, but a barrier all the same: like a diff it ends the
-    /// current ral block, and it wears the `▎` a mutation deserves rather than
-    /// dissolving into the run's tally.
-    Write,
-    /// A diff or a deliberately `surface`d card — the model's own
-    /// communication, a barrier.
-    Surfaced,
+/// How much of a dialable part is disclosed, low to high; `Ord` compares the
+/// rungs.  A run of `ral` work and a diff reach [`Self::Tally`]; a
+/// deliberation and an act floor at [`Self::Summary`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(super) enum Detail {
+    /// The numbers alone: a run's `|>` effects counted on one line, a diff's
+    /// header with its size bar and grain.
+    Tally,
+    /// The representative slice: the run's live tip, a deliberation's header,
+    /// an act's row, a diff's first [`super::line::DIFF_PEEK_ROWS`] rows.
+    Summary,
+    /// The whole thing: every call with its source, the whole deliberation,
+    /// the whole payload, every hunk.
+    Full,
 }
 
-/// One committed reasoning run.  `answer_chars` is the mass of the prose it
-/// became, the deliberation grain's denominator, measured by the view that
-/// draws it: the run commits ahead of that prose and so cannot carry it.
-/// While the run is still streaming it has no block at all — the live edge is
-/// `Viewport::live_tail`, which draws the open line inside the block it joins.
+impl Detail {
+    /// One rung up, the ceiling wrapping to `floor`, so a dial walks every
+    /// reachable rung rather than toggling the extremes.
+    fn next(self, floor: Self) -> Self {
+        match self {
+            Self::Tally => Self::Summary,
+            Self::Summary => Self::Full,
+            Self::Full => floor,
+        }
+    }
+}
+
+/// One of a [`Group`]'s two dialable parts — the `∴` deliberation, or the `▸`
+/// run of work.  Every other block has the one dial, which answers to
+/// [`Self::Run`].
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(super) enum Part {
+    Thinking,
+    #[default]
+    Run,
+}
+
+/// A group's `∴` part: each stretch of thinking the fold committed, in
+/// arrival order; the mass of the prose they became — the deliberation
+/// grain's denominator, which the commit cannot carry, being recorded before
+/// the prose it precedes — and the rung the part is read at.
 pub(super) struct Thinking {
-    pub(super) text: String,
-    pub(super) answer_chars: u32,
+    text: Vec<String>,
+    answer_chars: u32,
+    at: Detail,
 }
 
 impl Thinking {
-    /// The run's mass — the deliberation grain's numerator.
-    fn chars(&self) -> u32 {
-        u32::try_from(self.text.chars().count()).unwrap_or(u32::MAX)
+    fn new(at: Detail) -> Self {
+        Self {
+            text: Vec::new(),
+            answer_chars: 0,
+            at,
+        }
     }
-    /// The run's bulk — the header's size bar and the rail's value step.  Both
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// The deliberation's mass — the grain's numerator.
+    fn chars(&self) -> u32 {
+        let n: usize = self.text.iter().map(|t| t.chars().count()).sum();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
+    /// Its bulk — the header's size bar and the rail's value step.  Both
     /// saturate: a count read as a magnitude may not wrap.
     fn lines(&self) -> u32 {
-        u32::try_from(self.text.lines().count()).unwrap_or(u32::MAX)
+        let n: usize = self.text.iter().map(|t| t.lines().count()).sum();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
+    /// The grain and bulk of the whole, and — past the header rung — each
+    /// stretch in turn.  `open` is the line no record covers yet, joined onto
+    /// the last stretch.
+    fn body(&self, at: Detail, width: u16, open: &str) -> Vec<Line<'static>> {
+        let mut ls = line::thinking_header(self.chars(), self.lines(), self.answer_chars);
+        if at >= Detail::Full {
+            // One deliberation, one document: the stretches are joined as
+            // paragraphs, so the seam between two of them reads as a break
+            // and not as a wrap.
+            let mut text = self
+                .text
+                .iter()
+                .map(|t| t.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !open.is_empty() {
+                // The line the last stretch is still speaking, on its own row:
+                // the newline the stretch was trimmed of is the one that
+                // separates them.
+                text.push('\n');
+                text.push_str(open);
+            }
+            ls.push(Line::default());
+            ls.extend(md::render_thinking(&text, width, MD_INDENT));
+        }
+        ls
     }
 }
 
-/// One or more reasoning runs read as a single trace: the grain and bulk of the
-/// whole, and — past the header rung — each run's prose in turn.  A lone trace
-/// and a coalesced one render through here alike, so the flatten's hoist
-/// ([`super::viewport::Viewport::reflow`]) cannot drift from a block's own
-/// reading of itself.
-fn trace_body(traces: &[&Thinking], level: Reveal, width: u16) -> Vec<Line<'static>> {
-    let chars = traces.iter().map(|t| t.chars()).sum();
-    let lines = traces.iter().map(|t| t.lines()).sum();
-    let said = traces.iter().map(|t| t.answer_chars).sum();
-    let mut ls = line::thinking_header(chars, lines, said);
-    // Two rungs only: the header alone, or the whole trace.
-    if level >= Reveal::Context {
-        // One deliberation, one document: the runs are joined as paragraphs, so
-        // the seam between two of them reads as a break and not as a wrap.
-        let text = traces
-            .iter()
-            .map(|t| t.text.trim_end())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        ls.push(Line::default());
-        ls.extend(md::render_reasoning(&text, width, MD_INDENT));
-    }
-    ls
+/// One burst of deliberation and the work it ordered, read as a single
+/// object: the thinking hoisted above the calls it led to, so a turn reads
+/// *thought, work, answer* rather than in the interleaving the wire happened
+/// to deliver.  Deliberation alone holds no calls; a lone call no thinking.
+pub(super) struct Group {
+    thinking: Thinking,
+    calls: Vec<group::Call>,
+    /// The `▸` part's own rung, dialled apart from the `∴` part's.
+    run: Detail,
+    /// Which part the last member arrived on — what an open line grows.
+    last: Part,
 }
 
-/// The flatten's coalesced trace block: [`trace_body`] seated on the `∴` rail,
-/// its value-step the bulk of the whole run, as a lone trace's is of its own.
-pub(super) fn trace_rows(
-    traces: &[&Thinking],
-    level: Reveal,
-    width: u16,
-    agent: AgentSlot,
-) -> Vec<Row> {
-    let body = trace_body(traces, level, content_w(width));
-    let magnitude = traces.iter().map(|t| t.lines()).sum();
-    let glyph = rail::span(RailKind::Thinking, agent, Some(magnitude));
-    Row::seat(body, Some(glyph))
-}
-
-/// What a block carries — each variant a pure function of its data, the target
-/// width, and the block's rung.
-pub(super) enum BlockKind {
-    /// `summary` is the collapsed label, `details` the ral source behind it.  A
-    /// summary-less call arrives as [`BlockKind::PlainTool`] instead.  `tool`
-    /// is owned, not `&'static str`: a resumed or replayed commit hands this
-    /// its tool name off the wire, with no static string to borrow.
-    DiallableTool {
-        #[allow(
-            dead_code,
-            reason = "kept for the resumed/replayed reader P6 wires up; today's live path already knows a call is `ral` before this block exists, off the record-side ToolCall, so nothing reads it back here yet"
-        )]
-        tool: String,
-        summary: String,
-        details: String,
+/// What may join a group: deliberation, work, the effects that work
+/// produced, and the turn rules between them.
+pub(super) enum Member {
+    Thinking(String),
+    Call(group::Call),
+    Effect {
+        card: Card,
+        kind: ObservationKind,
+        count: u32,
     },
-    /// A summary-less tool call, inert under the shut triangle.  `details` is
-    /// `None` for a parse failure (`INVALID_INPUT`): such a call renders
-    /// nothing, present only as the boundary a stray result stops at.
-    PlainTool { details: Option<String> },
+    /// A turn boundary interior to a burst: each call is its own provider
+    /// round-trip, so one lands between consecutive calls.  Bookkeeping,
+    /// drawn as nothing — left a barrier it would cut every burst to one call.
+    Turn,
+}
+
+impl Group {
+    /// Open a group on `member`, its deliberation born at the standing rung.
+    fn opening(member: Member, thinking: Detail) -> Self {
+        let mut group = Self {
+            thinking: Thinking::new(thinking),
+            calls: Vec::new(),
+            run: Detail::Summary,
+            last: Part::Run,
+        };
+        let _ = group.grow(member);
+        group
+    }
+
+    /// Whether `member` may join this group.  An effect belongs to the call
+    /// above it, so one reaching a group with no call belongs to none.
+    fn admits(&self, member: &Member) -> bool {
+        !matches!(member, Member::Effect { .. }) || !self.calls.is_empty()
+    }
+
+    /// Take `member` in, reporting whether the group's picture moved: a turn
+    /// rule interior to a burst is bookkeeping and changes nothing.
+    fn grow(&mut self, member: Member) -> bool {
+        match member {
+            Member::Thinking(text) => {
+                self.thinking.text.push(text);
+                self.last = Part::Thinking;
+            }
+            Member::Call(call) => {
+                self.calls.push(call);
+                self.last = Part::Run;
+            }
+            Member::Effect { card, kind, count } => {
+                let Some(call) = self.calls.last_mut() else {
+                    return false;
+                };
+                call.absorb(
+                    line::render_card_unframed(&card, Detail::Full),
+                    kind,
+                    count,
+                );
+            }
+            Member::Turn => return false,
+        }
+        true
+    }
+}
+
+/// What a block carries — each variant a pure function of its data, the
+/// target width, and its own rung.
+pub(super) enum BlockKind {
+    /// One fold Answer block.  `continues` is true when the previous
+    /// rendering block is prose too: this paragraph then keeps the margin and
+    /// drops the `·`, so one response wears one rail mark.
+    Prose {
+        src: String,
+        fidelity: Fidelity,
+        continues: bool,
+    },
+    Group(Group),
     /// A harness act — `spawn`, `cancel`, `message`, `reply`, `schedule`,
     /// `unschedule`.  It changes the world outside the turn, so it is no
-    /// observation: never coalesced into a `ral` run, and carrying no magnitude.
+    /// observation: never folded into a run, and carrying no magnitude.
     Act {
         verb: String,
         subject: Option<String>,
         payload: String,
         failed: bool,
+        at: Detail,
     },
-    /// Streamed assistant prose, re-wrapped from source at every width.
-    Markdown { src: String },
-    /// A reasoning trace, separate from the answer it produced.
-    Thinking(Thinking),
     /// An async subagent's result, landed in root's scrollback.  Its own kind
-    /// because `Markdown` cannot carry `name`/`elapsed`/`error` and a `Card`
-    /// would lose the `↘` identity.
+    /// because prose cannot carry `name`/`elapsed`/`error` and a card would
+    /// lose the `↘` identity.
     Subagent {
         name: String,
         error: Option<String>,
         elapsed: Duration,
     },
-    /// A render document a kit surfaced — a stack of [`Card`] marks re-rendered
-    /// from data at every width.  Only one holding a `diff` mark is dialable.
-    Card { card: Card, origin: CardOrigin },
+    /// A render document a kit surfaced — a stack of [`Card`] marks
+    /// re-rendered from data at every width.  Only one holding a `diff` mark
+    /// is dialable.
+    Card {
+        card: Card,
+        landing: Landing,
+        at: Detail,
+    },
+    /// A summary-less tool call, inert under the shut triangle.  `details` is
+    /// `None` for a parse failure (`INVALID_INPUT`): such a call renders
+    /// nothing, present only as the barrier a stray result stops at.
+    Tool { details: Option<String> },
     /// Pre-built chrome whose builder already wrapped to [`READ_W`].
     Chrome {
         shape: ChromeKind,
@@ -184,22 +288,18 @@ pub(super) enum BlockKind {
     },
 }
 
-/// Content lines L2 reveals past the summary, for every dialable kind.
-const N: usize = 3;
-
-/// How much of a dialable block is disclosed, low to high; `Ord` compares the
-/// rungs.  The reachable band is `[Block::floor, Full]` — only a `|>` run
-/// reaches `Census`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub(super) enum Reveal {
-    /// L0: a run's `|>` effects tallied, rendered by [`super::group`] alone.
-    Census,
-    /// L1: the live tip, or a collapsed one-line header.
-    Summary,
-    /// L2: the summary plus [`N`] lines of context.
-    Context,
-    /// L3: the full source.
-    Full,
+impl BlockKind {
+    /// A card at its opening rung: a diff arrives as its first rows, so the
+    /// change is read before it is measured; every other card is inert and
+    /// renders whole.
+    pub(super) fn card(card: Card, landing: Landing) -> Self {
+        let at = if card.has_diff() {
+            Detail::Summary
+        } else {
+            Detail::Full
+        };
+        Self::Card { card, landing, at }
+    }
 }
 
 /// Rows for what the human has typed and is still waiting on — prompts and the
@@ -217,13 +317,10 @@ pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usiz
 
     let mut out = Vec::new();
     for message in messages {
-        let mut prompt = Block::chrome(ChromeKind::Prompt, line::user_prompt(message));
-        let rows = trim_blanks(
-            prompt.lines(width, AgentSlot::default(), true),
-            Row::is_blank,
-        )
-        .to_vec();
-        append_visual_rows(&mut out, &rows, width, true, Some(QUEUED_PROMPT_BG));
+        let prompt = Block::chrome(ChromeKind::Prompt, line::user_prompt(message), None);
+        let (seated, _) = prompt.seated(width, AgentSlot::default(), None, "");
+        let rows = trim_blanks(&seated, Row::is_blank);
+        let _ = append_visual_rows(&mut out, rows, width, true, Some(QUEUED_PROMPT_BG));
     }
 
     if out.len() > max_rows {
@@ -240,9 +337,9 @@ pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usiz
     out
 }
 
-/// Wrap block-rendered logical lines into visual rows — the shared last step of
-/// the transcript flatten and the queued-prompt projection.  With `prompt` set
-/// the fence goes in above the first visible row and outside any `wash`: a
+/// Wrap block-rendered logical rows into visual rows — the shared last step of
+/// the transcript and the queued-prompt projection.  With `prompt` set the
+/// fence goes in above the first visible row and outside any `wash`: a
 /// boundary marks the plane's edge rather than lying within it, so a prompt's
 /// rule reads the same committed or queued.
 pub(super) fn append_visual_rows(
@@ -269,281 +366,102 @@ pub(super) fn append_visual_rows(
     out.len() - before
 }
 
-impl Reveal {
-    fn up(self) -> Self {
-        match self {
-            Self::Census => Self::Summary,
-            Self::Summary => Self::Context,
-            Self::Context | Self::Full => Self::Full,
-        }
+/// `rows` after a tail that is or is not blank: a block's leading blanks
+/// collapse against an already-blank tail, so a turn separator before
+/// leading-blank chrome reads as one gap.  The transcript's one seam rule,
+/// read by the screen, by a group's two parts, and by `user.log` alike.
+pub(super) fn seam(prev_blank: bool, rows: &[Row]) -> &[Row] {
+    if !prev_blank {
+        return rows;
     }
+    &rows[rows.iter().take_while(|r| r.is_blank()).count()..]
 }
 
-/// A block paired with the lines it last rendered, memoised by width.
+/// A block's rendering at one width, and where its two parts divide.
+struct Memo {
+    width: u16,
+    rows: Vec<Row>,
+    /// Visual rows the `∴` part holds; the rest are the `▸` part's.  `0` for
+    /// every block that has only the one part.
+    thinking: usize,
+}
+
+/// A block paired with the visual rows it last rendered.
 pub(super) struct Block {
     kind: BlockKind,
-    level: Reveal,
-    /// The epistemic signal — context pressure and echo, set at markdown
-    /// commit.  Sound (`0/0`) elsewhere, so only prose degrades its medium.
-    fidelity: Fidelity,
-    /// A tool call's result magnitude — the line count from its
-    /// `Display::ToolCall`'s `result_lines`, attached after the fact by
-    /// `Viewport::set_result_size`.
-    result_size: Option<u32>,
-    /// Lines for the current state at `cache_w`, `None` once stale.
-    cache: Option<Vec<Row>>,
-    cache_w: u16,
+    /// The fold block this was built from — `None` for chrome, which no
+    /// record authors.  It is this block's place in the fold's order, so the
+    /// mirror's head trim and a result patch both address it by this.
+    seq: Option<Seq>,
+    memo: Option<Memo>,
 }
 
 impl Block {
-    /// Build at the kind's default rung: tool calls, subagent results and acts
-    /// arrive collapsed to their headers, every other kind — thinking
-    /// included, so a trace streams in the open — full.
-    fn new(kind: BlockKind, fidelity: Fidelity) -> Self {
-        let level = match kind {
-            BlockKind::DiallableTool { .. } | BlockKind::Act { .. } => Reveal::Summary,
-            _ => Reveal::Full,
-        };
+    pub(super) fn new(kind: BlockKind, seq: Option<Seq>) -> Self {
         Self {
             kind,
-            level,
-            fidelity,
-            result_size: None,
-            cache: None,
-            cache_w: 0,
+            seq,
+            memo: None,
         }
     }
 
-    /// `context` is the turn's degradation floor, so the coalesced intent line
-    /// drains as committed prose does; echo cannot apply to a stated purpose.
-    pub(super) fn tool_call(
-        tool: impl Into<String>,
-        summary: String,
-        details: String,
-        context: u8,
+    pub(super) fn prose(
+        src: String,
+        fidelity: Fidelity,
+        continues: bool,
+        seq: Option<Seq>,
     ) -> Self {
         Self::new(
-            BlockKind::DiallableTool {
-                tool: tool.into(),
-                summary,
-                details,
+            BlockKind::Prose {
+                src,
+                fidelity,
+                continues,
             },
-            Fidelity { context, echo: 0 },
+            seq,
         )
-    }
-    pub(super) fn act(
-        verb: impl Into<String>,
-        subject: Option<String>,
-        payload: String,
-        failed: bool,
-    ) -> Self {
-        Self::new(
-            BlockKind::Act {
-                verb: verb.into(),
-                subject,
-                payload,
-                failed,
-            },
-            Fidelity::default(),
-        )
-    }
-    pub(super) fn markdown(src: String, fidelity: Fidelity) -> Self {
-        Self::new(BlockKind::Markdown { src }, fidelity)
-    }
-    pub(super) fn thinking(text: String, answer_chars: u32) -> Self {
-        Self::new(
-            BlockKind::Thinking(Thinking { text, answer_chars }),
-            Fidelity::default(),
-        )
-    }
-    pub(super) fn subagent(name: String, error: Option<String>, elapsed: Duration) -> Self {
-        Self::new(
-            BlockKind::Subagent {
-                name,
-                error,
-                elapsed,
-            },
-            Fidelity::default(),
-        )
-    }
-    pub(super) fn card(card: Card) -> Self {
-        Self::card_with(card, CardOrigin::Surfaced)
-    }
-    pub(super) fn observation_card(card: Card, kind: ObservationKind, count: u32) -> Self {
-        Self::card_with(card, CardOrigin::Observation { kind, count })
-    }
-    pub(super) fn write_card(card: Card) -> Self {
-        Self::card_with(card, CardOrigin::Write)
-    }
-    fn card_with(card: Card, origin: CardOrigin) -> Self {
-        Self::new(BlockKind::Card { card, origin }, Fidelity::default())
-    }
-    pub(super) fn chrome(shape: ChromeKind, lines: Vec<Line<'static>>) -> Self {
-        Self::new(BlockKind::Chrome { shape, lines }, Fidelity::default())
-    }
-    pub(super) fn plain_call(details: Option<String>) -> Self {
-        Self::new(BlockKind::PlainTool { details }, Fidelity::default())
     }
 
-    pub(super) fn level(&self) -> Reveal {
-        self.level
+    /// A group opening on `member`, its deliberation born at `thinking`.
+    pub(super) fn group(member: Member, thinking: Detail, seq: Option<Seq>) -> Self {
+        Self::new(BlockKind::Group(Group::opening(member, thinking)), seq)
     }
 
-    /// Changed lines for a patch, source lines for prose (markdown, thinking, a
-    /// subagent result).  The rail's value-step reads it, so prose volume
-    /// lightens the rail as a diff's does.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "transcript-block line count; u32 headroom far exceeds any in-memory transcript"
-    )]
-    pub(super) fn magnitude(&self) -> Option<u32> {
-        match &self.kind {
-            BlockKind::Card { card, .. } => card.magnitude(),
-            BlockKind::Markdown { src, .. } => Some(src.lines().count() as u32),
-            BlockKind::Thinking(t) => Some(t.lines()),
+    pub(super) fn chrome(shape: ChromeKind, lines: Vec<Line<'static>>, seq: Option<Seq>) -> Self {
+        Self::new(BlockKind::Chrome { shape, lines }, seq)
+    }
+
+    /// Where this block sits in the fold's order — `None` for chrome, which
+    /// inherits the expiry of the block it was drawn after.
+    pub(super) fn seq(&self) -> Option<Seq> {
+        self.seq
+    }
+
+    fn group_mut(&mut self) -> Option<&mut Group> {
+        match &mut self.kind {
+            BlockKind::Group(group) => Some(group),
             _ => None,
         }
     }
 
-    /// The session's *code* footprint — a diff card's changed lines and nothing
-    /// else.  Distinct from [`Self::magnitude`], which counts prose too: the
-    /// matrix's "lines touched" is a write footprint, not a volume.
-    pub(super) fn lines_changed(&self) -> Option<u32> {
-        match &self.kind {
-            BlockKind::Card { card, .. } => card.magnitude(),
-            _ => None,
+    /// Take `member` into this block's group, or hand it back for a block of
+    /// its own.  A group standing at the mirror's tail is open by
+    /// construction: every barrier pushes a block after it, so a group that is
+    /// still the tail is a group nothing has closed.
+    pub(super) fn admit(&mut self, member: Member) -> Option<Member> {
+        let Some(group) = self.group_mut() else {
+            return Some(member);
+        };
+        if !group.admits(&member) {
+            return Some(member);
         }
-    }
-
-    pub(super) fn dialable(&self) -> bool {
-        match &self.kind {
-            BlockKind::DiallableTool { .. } | BlockKind::Act { .. } | BlockKind::Thinking(_) => {
-                true
-            }
-            BlockKind::Card { card, .. } => card.has_diff(),
-            // A subagent line has no body to disclose.
-            BlockKind::Subagent { .. }
-            | BlockKind::Markdown { .. }
-            | BlockKind::PlainTool { .. }
-            | BlockKind::Chrome { .. } => false,
+        if group.grow(member) {
+            self.memo = None;
         }
+        None
     }
 
-    /// The one kind [`Self::set_result_size`] attaches a magnitude to.
-    pub(super) fn is_tool_call(&self) -> bool {
-        matches!(self.kind, BlockKind::DiallableTool { .. })
-    }
-
-    /// True for a block the coalescing projection folds into a ral block — a
-    /// tool call, or a read / grep / exec effect.  Everything else is a
-    /// *barrier* splitting one block from the next, save a turn boundary
-    /// interior to a run, which the viewport's run scan bridges as bookkeeping.
-    pub(super) fn observation(&self) -> bool {
-        matches!(
-            self.kind,
-            BlockKind::DiallableTool { .. }
-                | BlockKind::Card {
-                    origin: CardOrigin::Observation { .. },
-                    ..
-                }
-        )
-    }
-
-    /// This observation's census contribution — its `|>` kind and count.
-    pub(super) fn io_tally(&self) -> Option<(ObservationKind, u32)> {
-        match &self.kind {
-            BlockKind::Card {
-                origin: CardOrigin::Observation { kind, count },
-                ..
-            } => Some((*kind, *count)),
-            _ => None,
-        }
-    }
-
-    /// This call's parts for the coalesced ral block.  `None` on anything but a
-    /// tool call, so only a call opens a slot in the group.
-    pub(super) fn call_view(&self) -> Option<group::CallParts<'_>> {
-        match &self.kind {
-            BlockKind::DiallableTool {
-                summary, details, ..
-            } => Some(group::CallParts {
-                intent: summary,
-                cmd: details,
-                magnitude: self.result_size,
-                context: self.fidelity.context,
-            }),
-            _ => None,
-        }
-    }
-
-    /// This run's parts for the coalesced trace block — [`Self::call_view`] for
-    /// the `∴` lane.
-    pub(super) fn trace_view(&self) -> Option<&Thinking> {
-        match &self.kind {
-            BlockKind::Thinking(t) => Some(t),
-            _ => None,
-        }
-    }
-
-    /// An effect's rail-less rows, to fold under its call's intent.
-    pub(super) fn effect_lines(&self) -> Vec<Line<'static>> {
-        match &self.kind {
-            BlockKind::Card {
-                card,
-                origin: CardOrigin::Observation { .. },
-            } => line::render_card_unframed(card, 3),
-            _ => Vec::new(),
-        }
-    }
-
-    /// `/copy` walks the trailing run of these — each fence-safe paragraph is
-    /// its own block, so the run is the whole reply.
-    pub(super) fn markdown_src(&self) -> Option<&str> {
-        match &self.kind {
-            BlockKind::Markdown { src, .. } => Some(src),
-            _ => None,
-        }
-    }
-
-    /// [`Self::markdown_src`] for the reasoning lane.
-    pub(super) fn thinking_src(&self) -> Option<&str> {
-        self.trace_view().map(|t| t.text.as_str())
-    }
-
-    /// The epistemic signal this block was built with — what a live tail
-    /// re-renders under, so growing prose keeps the ink it commits in.
-    pub(super) fn fidelity(&self) -> Fidelity {
-        self.fidelity
-    }
-
-    pub(super) fn is_thinking(&self) -> bool {
-        self.trace_view().is_some()
-    }
-
-    /// True for a turn boundary — what the matrix's per-agent turn cells count.
-    pub(super) fn is_turn(&self) -> bool {
-        matches!(
-            self.kind,
-            BlockKind::Chrome {
-                shape: ChromeKind::Turn,
-                ..
-            }
-        )
-    }
-
-    /// Drives the matrix's `╳` cell when the session's last block is a failure.
-    pub(super) fn is_error(&self) -> bool {
-        matches!(
-            self.kind,
-            BlockKind::Chrome {
-                shape: ChromeKind::Error,
-                ..
-            }
-        )
-    }
-
-    /// The human turn's echo — the one block the flatten rules full-width.
-    pub(super) fn is_prompt(&self) -> bool {
+    /// The human turn's echo — the one block ruled full-width.
+    fn prompt(&self) -> bool {
         matches!(
             self.kind,
             BlockKind::Chrome {
@@ -553,169 +471,338 @@ impl Block {
         )
     }
 
-    /// Drops the memo, so the collapsed header re-renders with its size-bar.
-    pub(super) fn set_result_size(&mut self, n: u32) {
-        self.result_size = Some(n);
-        self.cache = None;
+    /// Whether this block puts anything on screen.  A call whose input did
+    /// not parse renders nothing, and a prose run reads across it.
+    pub(super) fn renders(&self) -> bool {
+        !matches!(self.kind, BlockKind::Tool { details: None })
     }
 
-    /// The lowest rung this block reduces to: a `|>` run, anchored on a tool
-    /// call, bottoms out at its census; every other kind floors a rung higher,
-    /// a census of a lone diff or subagent being meaningless.
-    fn floor(&self) -> Reveal {
-        match self.kind {
-            BlockKind::DiallableTool { .. } => Reveal::Census,
-            _ => Reveal::Summary,
+    pub(super) fn is_prose(&self) -> bool {
+        matches!(self.kind, BlockKind::Prose { .. })
+    }
+
+    /// The session's *code* footprint — a card's changed lines and nothing
+    /// else.  The matrix's "lines touched" is a write footprint, not a volume.
+    pub(super) fn lines_changed(&self) -> Option<u32> {
+        match &self.kind {
+            BlockKind::Card { card, .. } => card.magnitude(),
+            _ => None,
         }
     }
 
-    /// The rung above this block's, kind-aware: thinking has no `Context`
-    /// reading — a trace is one thing, shown whole or as its header — so the
-    /// dial hops straight between `Summary` and `Full`.
-    fn rung_up(&self) -> Reveal {
-        match (self.is_thinking(), self.level.up()) {
-            (true, Reveal::Context) => Reveal::Full,
-            (_, next) => next,
+    /// The epistemic signal this block was built with — what a live tail
+    /// re-renders under, so growing prose keeps the ink it commits in.  Sound
+    /// (`0/0`) off the prose lane: only prose degrades its medium.
+    pub(super) fn fidelity(&self) -> Fidelity {
+        match &self.kind {
+            BlockKind::Prose { fidelity, .. } => *fidelity,
+            _ => Fidelity::default(),
         }
     }
 
-    /// One click: a rung up, the ceiling wrapping to the floor, so clicking
-    /// walks every reachable rung rather than toggling the extremes.
-    pub(super) fn cycle(&mut self) {
-        if self.dialable() {
-            let next = if self.level == Reveal::Full {
-                self.floor()
-            } else {
-                self.rung_up()
-            };
-            self.set_level(next);
+    /// Whether an open prose line continues this block.
+    pub(super) fn open_prose(&self) -> bool {
+        self.is_prose()
+    }
+
+    /// The mass of the prose this block holds — the deliberation grain's
+    /// denominator, for the group above it.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "prose char count; u32 headroom far exceeds any one answer"
+    )]
+    pub(super) fn prose_chars(&self) -> Option<u32> {
+        match &self.kind {
+            BlockKind::Prose { src, .. } => Some(src.chars().count() as u32),
+            _ => None,
         }
     }
 
-    /// The one seam [`Self::dial`] and [`Self::cycle`] commit through.
-    fn set_level(&mut self, next: Reveal) {
-        if next != self.level {
-            self.level = next;
-            self.cache = None;
+    /// Whether an open thinking line continues this block: a group renders
+    /// its deliberation above its work, so only one whose last member was a
+    /// stretch of thinking is still speaking.
+    pub(super) fn open_thinking(&self) -> bool {
+        matches!(&self.kind, BlockKind::Group(g) if g.last == Part::Thinking)
+    }
+
+    /// Replace the text the fold just grew — the prose this block is, or its
+    /// group's last stretch of thinking — with the memo's own.
+    pub(super) fn set_text(&mut self, text: String) {
+        match &mut self.kind {
+            BlockKind::Prose { src, .. } => *src = text,
+            BlockKind::Group(g) => match g.thinking.text.last_mut() {
+                Some(last) => *last = text,
+                None => return,
+            },
+            _ => return,
+        }
+        self.memo = None;
+    }
+
+    /// Restamp a prose block's epistemic signal, which its growing text and
+    /// the turn's own pressure both move.
+    pub(super) fn set_fidelity(&mut self, ink: Fidelity) {
+        if let BlockKind::Prose { fidelity, .. } = &mut self.kind
+            && *fidelity != ink
+        {
+            *fidelity = ink;
+            self.memo = None;
         }
     }
 
-    /// Restore a rung a prior sync's side table remembered — a printer
-    /// rebuilds this block fresh from the fold's memo every sync, so its own
-    /// dial state cannot ride inside the block the way a live mutation would.
-    pub(super) fn set_reveal(&mut self, level: Reveal) {
-        self.set_level(level);
-    }
-
-    /// The block's lines at `width`, rebuilding the memo when it is cold or was
-    /// filled at another width.  `lead` says whether this block opens its
-    /// rail-run or continues a prior paragraph's; like `agent`, arrival order
-    /// fixes it, so it stays out of the width-keyed memo.
-    pub(super) fn lines(&mut self, width: u16, agent: AgentSlot, lead: bool) -> &[Row] {
-        if self.cache.is_none() || self.cache_w != width {
-            self.cache = Some(self.render(width, agent, lead));
-            self.cache_w = width;
+    /// The mass of the prose this block's deliberation became — the grain's
+    /// denominator, which the view measures because the commit precedes it.
+    pub(super) fn set_answer_chars(&mut self, chars: u32) {
+        if let BlockKind::Group(g) = &mut self.kind
+            && g.thinking.answer_chars != chars
+        {
+            g.thinking.answer_chars = chars;
+            self.memo = None;
         }
-        self.cache.as_deref().expect("just filled")
     }
 
-    /// The block as it belongs in the session log: width-independent and forced
-    /// to L3, so the script / diff / prose is on the record even while reduced
-    /// on screen.  `lead` matches the screen, so one response keeps one `·`.
-    pub(super) fn log_lines(&self, agent: AgentSlot, lead: bool) -> Vec<Row> {
-        self.rows(READ_W, true, agent, lead)
+    /// Stamp the result magnitude on the call `at` names, if this block holds
+    /// it.  Reports whether it did, so the mirror's walk stops there.
+    pub(super) fn measure(&mut self, at: Seq, n: u32) -> bool {
+        let Some(call) = self
+            .group_mut()
+            .and_then(|g| g.calls.iter_mut().find(|c| c.at() == at))
+        else {
+            return false;
+        };
+        call.measure(n);
+        self.memo = None;
+        true
     }
 
-    fn render(&self, width: u16, agent: AgentSlot, lead: bool) -> Vec<Row> {
-        self.rows(width, false, agent, lead)
+    /// The lowest rung `part` of this block reduces to — `None` where the
+    /// part has no dial.  A run and a diff have numbers to reduce to; a
+    /// deliberation and an act have only their header.
+    fn floor(&self, part: Part) -> Option<Detail> {
+        match (&self.kind, part) {
+            (BlockKind::Group(g), Part::Thinking) => {
+                (!g.thinking.is_empty()).then_some(Detail::Summary)
+            }
+            (BlockKind::Group(g), Part::Run) => (!g.calls.is_empty()).then_some(Detail::Tally),
+            (BlockKind::Act { .. }, Part::Run) => Some(Detail::Summary),
+            (BlockKind::Card { card, .. }, Part::Run) => card.has_diff().then_some(Detail::Tally),
+            _ => None,
+        }
     }
 
-    fn render_level(&self, force_full: bool) -> Reveal {
-        if force_full { Reveal::Full } else { self.level }
+    /// Whether `part` is dialable — a property of its kind, not its rung, so
+    /// a click on its glyph claims the gesture even at the ceiling.
+    pub(super) fn dialable(&self, part: Part) -> bool {
+        self.floor(part).is_some()
     }
 
-    /// Build the body in content space, then seat the rail glyph on the first
-    /// content row.
-    fn rows(&self, width: u16, force_full: bool, agent: AgentSlot, lead: bool) -> Vec<Row> {
-        let level = self.render_level(force_full);
-        let mut lines = self.body(content_w(width), level);
-        // Markdown is the one body that opens flush, so a lead answer would abut
-        // the call above it; the flatten folds this blank against any trailing
+    /// One click on `part`: a rung up, wrapping at the ceiling to its floor.
+    pub(super) fn dial(&mut self, part: Part) -> bool {
+        let Some(floor) = self.floor(part) else {
+            return false;
+        };
+        match (&mut self.kind, part) {
+            (BlockKind::Group(g), Part::Thinking) => g.thinking.at = g.thinking.at.next(floor),
+            (BlockKind::Group(g), Part::Run) => g.run = g.run.next(floor),
+            (BlockKind::Act { at, .. } | BlockKind::Card { at, .. }, _) => *at = at.next(floor),
+            _ => return false,
+        }
+        self.memo = None;
+        true
+    }
+
+    /// Move this block's deliberation to the standing `/thinking` rung.
+    pub(super) fn set_thinking(&mut self, at: Detail) {
+        if let BlockKind::Group(g) = &mut self.kind
+            && g.thinking.at != at
+        {
+            g.thinking.at = at;
+            self.memo = None;
+        }
+    }
+
+    /// Fill the render memo at `width`, so one walk of the mirror sees the
+    /// whole screen.  A block whose memo already stands renders nothing again.
+    pub(super) fn fill(&mut self, width: u16, agent: AgentSlot) {
+        if self.memo.as_ref().is_some_and(|m| m.width == width) {
+            return;
+        }
+        self.memo = Some(self.wrapped(width, agent, None, ""));
+    }
+
+    /// The rows the last [`Self::fill`] left behind — empty for a block no
+    /// render pass has reached yet.  Every row index the frontend hands
+    /// around is measured against these.
+    pub(super) fn rendered(&self) -> &[Row] {
+        self.memo.as_ref().map_or(&[], |m| m.rows.as_slice())
+    }
+
+    /// This block's rows with `open` — the lane's still-uncommitted line —
+    /// spliced onto the text it will join.  Never memoised: the line moves
+    /// with every delta, and the record that completes it must change the
+    /// text without changing the picture.
+    pub(super) fn live(&self, width: u16, agent: AgentSlot, open: &str) -> Vec<Row> {
+        self.wrapped(width, agent, None, open).rows
+    }
+
+    /// The block as it belongs in the session log: at the readable width and
+    /// forced whole, so the script, diff or prose is on the record even while
+    /// reduced on screen.
+    pub(super) fn log_rows(&self, agent: AgentSlot) -> Vec<Row> {
+        self.wrapped(READ_W, agent, Some(Detail::Full), "").rows
+    }
+
+    /// The part visual row `i` of this block belongs to — which dial a click
+    /// there moves.
+    pub(super) fn part_at(&self, i: usize) -> Part {
+        match self.memo.as_ref() {
+            Some(m) if i < m.thinking => Part::Thinking,
+            _ => Part::Run,
+        }
+    }
+
+    /// The first visual row of `part`.
+    pub(super) fn part_start(&self, part: Part) -> usize {
+        match (part, self.memo.as_ref()) {
+            (Part::Run, Some(m)) => m.thinking,
+            _ => 0,
+        }
+    }
+
+    fn wrapped(&self, width: u16, agent: AgentSlot, at: Option<Detail>, open: &str) -> Memo {
+        let (seated, split) = self.seated(width, agent, at, open);
+        let (head, tail) = seated.split_at(split);
+        let mut rows = Vec::new();
+        let thinking = append_visual_rows(&mut rows, head, width, false, None);
+        let _ = append_visual_rows(&mut rows, tail, width, self.prompt(), None);
+        Memo {
+            width,
+            rows,
+            thinking,
+        }
+    }
+
+    /// Build each part's body in content space and seat its rail glyph on the
+    /// part's first content row, returning the rows and where the `∴` part
+    /// ends.  `at` overrides every part's own rung; `open` is the lane's
+    /// still-uncommitted line.
+    fn seated(
+        &self,
+        width: u16,
+        agent: AgentSlot,
+        at: Option<Detail>,
+        open: &str,
+    ) -> (Vec<Row>, usize) {
+        let content = content_w(width);
+        if let BlockKind::Group(g) = &self.kind {
+            let mut rows = Vec::new();
+            if !g.thinking.is_empty() {
+                let body = g.thinking.body(at.unwrap_or(g.thinking.at), content, open);
+                let glyph = rail::span(RailKind::Thinking, agent, Some(g.thinking.lines()));
+                rows.extend(Row::seat(body, Some(glyph)));
+            }
+            let split = rows.len();
+            if !g.calls.is_empty() {
+                let run = at.unwrap_or(g.run);
+                let body = group::body(&g.calls, run, content.into());
+                let glyph = rail::span(
+                    RailKind::ToolCall(run >= Detail::Full),
+                    agent,
+                    group::aggregate_magnitude(&g.calls),
+                );
+                // The two parts meet under the one seam rule, so the run's
+                // leading blank never doubles the deliberation's.
+                let seated = Row::seat(body, Some(glyph));
+                let blank = rows.last().is_some_and(Row::is_blank);
+                rows.extend_from_slice(seam(blank, &seated));
+            }
+            return (rows, split);
+        }
+        let mut lines = self.body(content, at.unwrap_or(Detail::Full), open);
+        // Prose is the one body that opens flush, so a lead answer would abut
+        // the work above it; the mirror folds this blank against any trailing
         // one, so the gap never doubles.
-        if lead && self.markdown_src().is_some() && !lines.first().is_some_and(is_blank) {
+        if self.leads() && self.is_prose() && !lines.first().is_some_and(is_blank) {
             lines.insert(0, Line::default());
         }
-        // `lead` is false for a paragraph continuing a prior one: it keeps the
-        // margin but drops the glyph, so one answer wears one rail mark.
         let glyph = self
-            .rail_kind(level)
-            .filter(|_| lead)
+            .rail_kind()
+            .filter(|_| self.leads())
             .map(|kind| rail::span(kind, agent, self.magnitude()));
-        Row::seat(lines, glyph)
+        (Row::seat(lines, glyph), 0)
     }
 
-    /// The rail-less body at `width`, graded by `level`.  A run's census is
-    /// rendered by [`super::group`], never here, so a standalone call folds onto
-    /// its summary; prose and chrome ignore the level altogether.
-    fn body(&self, width: u16, level: Reveal) -> Vec<Line<'static>> {
+    /// Whether this block leads its own rail mark.  A continuing paragraph
+    /// keeps the margin and drops the glyph, so one response wears one `·`.
+    fn leads(&self) -> bool {
+        !matches!(self.kind, BlockKind::Prose { continues: true, .. })
+    }
+
+    /// Changed lines for a card, source lines for prose.  The rail's value
+    /// step reads it, so prose volume lightens the rail as a diff's does.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "transcript line count; u32 headroom far exceeds any in-memory transcript"
+    )]
+    fn magnitude(&self) -> Option<u32> {
         match &self.kind {
-            BlockKind::DiallableTool {
-                summary, details, ..
-            } => match level {
-                Reveal::Full => line::tool_call_body(summary, details, None, width),
-                Reveal::Context => line::tool_call_body(summary, details, Some(N), width),
-                Reveal::Summary | Reveal::Census => {
-                    line::tool_call_collapsed(summary, self.result_size, width)
-                }
-            },
-            // The row *is* the act, so there are only two readings: the payload
-            // cut to its column, or laid out whole. L2 is that layout capped.
+            BlockKind::Prose { src, .. } => Some(src.lines().count() as u32),
+            BlockKind::Card { card, .. } => card.magnitude(),
+            _ => None,
+        }
+    }
+
+    /// The rail-less body of a one-part block at `width`, graded by `at`.
+    fn body(&self, width: u16, at: Detail, open: &str) -> Vec<Line<'static>> {
+        match &self.kind {
+            BlockKind::Prose { src, fidelity, .. } => {
+                let text = if open.is_empty() {
+                    src.clone()
+                } else {
+                    format!("{src}{open}")
+                };
+                md::render_md(&text, width, MD_INDENT, *fidelity)
+            }
+            // The row *is* the act, so there are only two readings: the
+            // payload cut to its column, or laid out whole.
             BlockKind::Act {
                 verb,
                 subject,
                 payload,
                 failed,
-            } => {
-                let row =
-                    |full| line::act_row(verb, subject.as_deref(), payload, *failed, width, full);
-                match level {
-                    Reveal::Full => row(true),
-                    Reveal::Context => first_rows(row(true), N),
-                    Reveal::Summary | Reveal::Census => row(false),
-                }
-            }
-            BlockKind::Markdown { src } => md::render_md(src, width, MD_INDENT, self.fidelity),
-            BlockKind::Thinking(t) => trace_body(&[t], level, width),
+                ..
+            } => line::act_row(
+                verb,
+                subject.as_deref(),
+                payload,
+                *failed,
+                width,
+                at >= Detail::Full,
+            ),
             BlockKind::Subagent {
                 name,
                 error,
                 elapsed,
             } => line::subagent_header(name, error.as_deref(), *elapsed),
             // A surfaced general card is a deliberate bounded artifact. Diffs
-            // already carry the patch rail and gutters; effect cards belong in their
-            // surrounding group, so both render unframed.
-            BlockKind::Card { card, origin } => {
-                let diff_level = match level {
-                    Reveal::Context => 2,
-                    Reveal::Full => 3,
-                    Reveal::Census | Reveal::Summary => 1,
-                };
-                if !card.has_diff() && *origin == CardOrigin::Surfaced {
-                    line::render_card_framed(card, line::CARD_INDENT, width, diff_level)
+            // already carry the patch rail and gutters, and an effect card
+            // that reached the mirror with no run to join belongs to none, so
+            // both render unframed.
+            BlockKind::Card { card, landing, .. } => {
+                if !card.has_diff() && *landing == Landing::Surfaced {
+                    line::render_card_framed(card, line::CARD_INDENT, width, at)
                 } else {
-                    line::render_card_unframed(card, diff_level)
+                    line::render_card_unframed(card, at)
                 }
             }
-            // Only the log tee renders a query alone; on screen the flatten
-            // coalesces a run of these into one `tool : …` line instead.
-            BlockKind::PlainTool { details, .. } => match details {
+            BlockKind::Tool { details } => match details {
                 Some(q) => line::tool_call_static(q),
                 None => Vec::new(),
             },
             // A notice is not prose: it sits in its own gap, one blank row
             // above and below, whatever blanks its builder happened to bring.
-            // `Viewport::reflow` collapses the gap against a blank tail, so
-            // framing here reads as one row between neighbours, never two.
+            // The mirror collapses the gap against a blank tail, so framing
+            // here reads as one row between neighbours, never two.
             BlockKind::Chrome { lines, .. } => {
                 let body = trim_blanks(lines, |l| line::is_blank(l));
                 if body.is_empty() {
@@ -728,35 +815,32 @@ impl Block {
                         .collect()
                 }
             }
+            // A group renders each of its parts in `seated`; it has no
+            // one-part body of its own.
+            BlockKind::Group(_) => Vec::new(),
         }
     }
-    /// The rail shape this block wears, `None` for one that seats no rail.  A
-    /// tool call's triangle tracks the rung: open once it reveals context.
-    fn rail_kind(&self, level: Reveal) -> Option<RailKind> {
+
+    /// The rail shape a one-part block wears, `None` for one that seats no
+    /// rail.  A group's two glyphs are seated per part instead.
+    fn rail_kind(&self) -> Option<RailKind> {
         match &self.kind {
-            BlockKind::DiallableTool { .. } => Some(RailKind::ToolCall(level >= Reveal::Context)),
-            // A summary-less query is a tool call still, shut; only the log tee
-            // renders one alone and so reaches this.
-            BlockKind::PlainTool { .. } => Some(RailKind::ToolCall(false)),
+            BlockKind::Prose { .. } => Some(RailKind::Markdown),
+            // A summary-less query is a tool call still, shut.
+            BlockKind::Tool { .. } => Some(RailKind::ToolCall(false)),
             // The shape says when the act lands — `◷` on a clock, `↗` now —
             // and holds across every rung: an act is one thing disclosed.
             BlockKind::Act { verb, .. } => Some(match verb.as_str() {
                 "schedule" | "unschedule" => RailKind::TimeAct,
                 _ => RailKind::FleetAct,
             }),
-            BlockKind::Markdown { .. } => Some(RailKind::Markdown),
-            BlockKind::Thinking(_) => Some(RailKind::Thinking),
             // The `↘` holds even on error; the failure reads in the header.
             BlockKind::Subagent { .. } => Some(RailKind::Subagent),
             // A diff and a write are both file mutations, so both wear `▎` and
-            // the body says which. A framed card's frame is its own mark, and an
-            // observation folds into its group, so neither seats a glyph.
-            BlockKind::Card { card, origin } => {
-                if card.has_diff() || *origin == CardOrigin::Write {
-                    Some(RailKind::Patch)
-                } else {
-                    None
-                }
+            // the body says which. A framed card's frame is its own mark, and
+            // an unowned effect folds into nothing, so neither seats a glyph.
+            BlockKind::Card { card, landing, .. } => {
+                (card.has_diff() || *landing == Landing::Write).then_some(RailKind::Patch)
             }
             BlockKind::Chrome { shape, .. } => match shape {
                 ChromeKind::Turn => Some(RailKind::Turn),
@@ -767,50 +851,86 @@ impl Block {
                 ChromeKind::Opening => None,
                 ChromeKind::Prompt => Some(RailKind::Prompt),
             },
+            BlockKind::Group(_) => None,
         }
     }
 }
 
-/// `lines` without its leading and trailing blank rows.
+/// `items` without its leading and trailing blank rows.
 fn trim_blanks<T>(items: &[T], blank: impl Fn(&T) -> bool) -> &[T] {
     let start = items.iter().take_while(|i| blank(i)).count();
     let tail = items[start..].iter().rev().take_while(|i| blank(i)).count();
     &items[start..items.len() - tail]
 }
 
-/// The first `k` rendered rows of `lines`, always at least one so the rail has
-/// somewhere to land.  Truncating rendered rows rather than source keeps a code
-/// fence's opening intact.
-fn first_rows(mut lines: Vec<Line<'static>>, k: usize) -> Vec<Line<'static>> {
-    // Leading blanks are free, so `k` counts content rows.
-    let lead = lines.iter().take_while(|l| is_blank(l)).count();
-    lines.truncate((lead + k).max(1));
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn act(verb: &str, subject: Option<&str>, payload: &str, failed: bool) -> Block {
+        Block::new(
+            BlockKind::Act {
+                verb: verb.into(),
+                subject: subject.map(str::to_string),
+                payload: payload.into(),
+                failed,
+                at: Detail::Summary,
+            },
+            None,
+        )
+    }
+
+    fn thinking(text: &str) -> Block {
+        Block::group(Member::Thinking(text.into()), Detail::Full, None)
+    }
+
+    fn run(intent: &str) -> Block {
+        Block::group(
+            Member::Call(group::Call::open(
+                Seq::new(1),
+                intent.into(),
+                "read 'x'".into(),
+                0,
+            )),
+            Detail::Full,
+            None,
+        )
+    }
+
     /// Prose has no summary to collapse to: every rung renders the same.
     #[test]
-    fn markdown_is_inert_prose() {
-        let block = Block::markdown(
+    fn prose_is_inert() {
+        let block = Block::prose(
             "# heading\n\nA paragraph of prose that the answer is to read.".into(),
             Fidelity::default(),
+            false,
+            None,
         );
-        assert!(!block.dialable());
+        assert!(!block.dialable(Part::Run) && !block.dialable(Part::Thinking));
+        let full = block.body(READ_W, Detail::Full, "");
+        assert_eq!(block.body(READ_W, Detail::Summary, ""), full);
+        assert_eq!(block.body(READ_W, Detail::Tally, ""), full);
+    }
 
-        let full = block.body(READ_W, Reveal::Full);
-        assert_eq!(
-            block.body(READ_W, Reveal::Summary),
-            full,
-            "L1 must render full prose"
+    /// A continuing paragraph keeps the margin and drops the glyph, so one
+    /// response wears one `·`.
+    #[test]
+    fn a_continuing_paragraph_drops_the_rail_mark() {
+        let gutters = |continues| {
+            Block::prose("more of the answer".into(), Fidelity::default(), continues, None)
+                .seated(READ_W, AgentSlot(0), None, "")
+                .0
+                .iter()
+                .map(|r| r.gutter().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            gutters(false).iter().any(|g| g.trim() == "·"),
+            "the head of a run wears the mark"
         );
-        assert_eq!(
-            block.body(READ_W, Reveal::Context),
-            full,
-            "L2 must render full prose"
+        assert!(
+            gutters(true).iter().all(|g| g.trim().is_empty()),
+            "and a continuation wears the margin alone"
         );
     }
 
@@ -820,8 +940,8 @@ mod tests {
     #[test]
     fn act_columns_are_pinned_across_blocks() {
         let rendered = |verb, subject: Option<&str>, payload: &str| {
-            let block = Block::act(verb, subject.map(str::to_string), payload.into(), false);
-            let lines = block.body(READ_W, Reveal::Summary);
+            let block = act(verb, subject, payload, false);
+            let lines = block.body(READ_W, Detail::Summary, "");
             line::text(lines.last().expect("an act renders one content row"))
         };
         assert_eq!(
@@ -848,24 +968,17 @@ mod tests {
         );
     }
 
-    /// An act changes the world; it does not measure it.  So: no magnitude, no
-    /// size-bar, and no `call_view` for the projection to fold.
+    /// An act changes the world; it does not measure it.  So: no magnitude and
+    /// no size-bar.
     #[test]
     fn an_act_carries_no_magnitude_and_no_bar() {
-        let block = Block::act(
-            "message",
-            Some("hunter".into()),
-            "focus on it".into(),
-            false,
-        );
+        let block = act("message", Some("hunter"), "focus on it", false);
         assert!(block.magnitude().is_none(), "an act ranks nothing");
-        assert!(block.call_view().is_none(), "an act opens no group slot");
-        assert!(!block.is_tool_call());
-        for level in [Reveal::Summary, Reveal::Context, Reveal::Full] {
-            let text: String = block.body(READ_W, level).iter().map(line::text).collect();
+        for at in [Detail::Summary, Detail::Full] {
+            let text: String = block.body(READ_W, at, "").iter().map(line::text).collect();
             assert!(
                 !text.contains('\u{2588}') && !text.contains('\u{2591}'),
-                "no size-bar on an act row at {level:?}: {text:?}"
+                "no size-bar on an act row at {at:?}: {text:?}"
             );
         }
     }
@@ -874,13 +987,8 @@ mod tests {
     /// form is the raise, and the raise is the model's.
     #[test]
     fn a_refused_act_tiers_its_outcome_hot() {
-        let block = Block::act(
-            "cancel",
-            Some("hunter".into()),
-            "refused: not a descendant".into(),
-            true,
-        );
-        let lines = block.body(READ_W, Reveal::Summary);
+        let block = act("cancel", Some("hunter"), "refused: not a descendant", true);
+        let lines = block.body(READ_W, Detail::Summary, "");
         let row = lines.last().expect("an act renders one content row");
         assert_eq!(
             line::text(row),
@@ -891,13 +999,8 @@ mod tests {
         assert!(outcome.style.add_modifier.contains(Modifier::BOLD));
 
         // A landed act of the same verb wears the ordinary body ink.
-        let landed = Block::act(
-            "cancel",
-            Some("hunter".into()),
-            "no live agent by that name".into(),
-            false,
-        );
-        let landed = landed.body(READ_W, Reveal::Summary);
+        let landed = act("cancel", Some("hunter"), "no live agent by that name", false);
+        let landed = landed.body(READ_W, Detail::Summary, "");
         assert_eq!(
             landed
                 .last()
@@ -917,14 +1020,13 @@ mod tests {
     fn a_long_payload_truncates_reduced_and_returns_whole_on_the_dial() {
         let payload = "audit every unwrap() in exarch/src and report the ones that can \
             actually fire, with the file and line and a one-sentence argument for each";
-        let block = Block::act("spawn", Some("hunter".into()), payload.into(), false);
-        assert_eq!(block.level(), Reveal::Summary, "an act arrives reduced");
+        let block = act("spawn", Some("hunter"), payload, false);
         assert!(
-            block.dialable(),
+            block.dialable(Part::Run),
             "the dial is what keeps the rest reachable"
         );
 
-        let reduced = block.body(READ_W, Reveal::Summary);
+        let reduced = block.body(READ_W, Detail::Summary, "");
         assert_eq!(reduced.len(), 2, "reduced, an act is one row and its blank");
         let head = line::text(&reduced[1]);
         assert!(
@@ -937,7 +1039,7 @@ mod tests {
         );
 
         let full: String = block
-            .body(READ_W, Reveal::Full)
+            .body(READ_W, Detail::Full, "")
             .iter()
             .map(|l| line::text(l).trim_start().to_string())
             .collect::<Vec<_>>()
@@ -945,14 +1047,15 @@ mod tests {
         for word in ["one-sentence", "argument", "for", "each"] {
             assert!(
                 full.contains(word),
-                "L3 restores the whole payload: {full:?}"
+                "the whole payload returns on the dial: {full:?}"
             );
         }
     }
 
-    /// An act never joins a run of reads, and its shape says when it lands.
+    /// An act is a barrier wearing its own shape, and the shape says when it
+    /// lands.
     #[test]
-    fn acts_are_barriers_wearing_their_own_shapes() {
+    fn acts_wear_their_own_shapes() {
         for (verb, shape) in [
             ("spawn", RailKind::FleetAct),
             ("cancel", RailKind::FleetAct),
@@ -961,17 +1064,58 @@ mod tests {
             ("schedule", RailKind::TimeAct),
             ("unschedule", RailKind::TimeAct),
         ] {
-            let block = Block::act(verb, Some("subject".into()), "payload".into(), false);
-            assert!(!block.observation(), "`{verb}` must not coalesce");
-            for level in [Reveal::Summary, Reveal::Context, Reveal::Full] {
-                assert_eq!(block.rail_kind(level), Some(shape), "`{verb}` at {level:?}");
+            let block = act(verb, Some("subject"), "payload", false);
+            for at in [Detail::Summary, Detail::Full] {
+                assert_eq!(block.rail_kind(), Some(shape), "`{verb}` at {at:?}");
             }
         }
     }
 
     #[test]
     fn opening_chrome_has_no_rail() {
-        let block = Block::chrome(ChromeKind::Opening, vec![Line::from("EXARCH")]);
-        assert_eq!(block.rail_kind(Reveal::Full), None);
+        let block = Block::chrome(ChromeKind::Opening, vec![Line::from("EXARCH")], None);
+        assert_eq!(block.rail_kind(), None);
+    }
+
+    /// A deliberation is one thing, shown whole or as its header, so its dial
+    /// hops between two rungs; a run alone reaches the tally floor, and the
+    /// two dials on one group move apart.
+    #[test]
+    fn each_part_walks_its_own_rungs() {
+        let mut lone = thinking("weighing it");
+        assert!(lone.dialable(Part::Thinking) && !lone.dialable(Part::Run));
+        assert!(lone.dial(Part::Thinking));
+
+        let mut group = run("read it");
+        assert!(group.dialable(Part::Run) && !group.dialable(Part::Thinking));
+        let rungs = |b: &Block| match &b.kind {
+            BlockKind::Group(g) => (g.thinking.at, g.run),
+            _ => panic!("a group"),
+        };
+        assert_eq!(rungs(&group).1, Detail::Summary, "work arrives collapsed");
+        assert!(group.dial(Part::Run));
+        assert_eq!(rungs(&group).1, Detail::Full);
+        assert!(group.dial(Part::Run));
+        assert_eq!(rungs(&group).1, Detail::Tally, "a run wraps to its tally");
+    }
+
+    /// An open line reads inside the part that will absorb it, and never
+    /// touches the memo — the record that completes it changes the text and
+    /// not the picture.
+    #[test]
+    fn an_open_line_reads_inside_the_part_it_joins() {
+        let mut group = thinking("first thought\n");
+        group.fill(READ_W, AgentSlot(0));
+        let committed = group.rendered().len();
+        let live = group.live(READ_W, AgentSlot(0), "and a second");
+        assert_eq!(
+            group.rendered().len(),
+            committed,
+            "drawing the open line left the memo alone"
+        );
+        assert!(
+            live.iter().any(|r| r.plain().contains("and a second")),
+            "the open line reads where its part will hold it"
+        );
     }
 }

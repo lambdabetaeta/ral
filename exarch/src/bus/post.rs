@@ -315,12 +315,12 @@ pub(crate) enum Item {
     Command(String),
     /// A detached `spawn` worker's deferred `surface` batch.  Staleness is
     /// already settled at the pop; `agent::attend::announce` decodes `values`
-    /// into the *root* viewport exactly as a live tool run would, and
+    /// into the *root* scrollback exactly as a live tool run would, and
     /// [`Self::text`] wakes the model.
     Surface {
         /// The stamped session id.  `Avatar::heard`'s debug assertion checks
         /// it matches the draining session's, so a misrouted batch trips
-        /// there rather than rendering silently into the wrong viewport.
+        /// there rather than rendering silently into the wrong scrollback.
         id: AgentId,
         values: Vec<Value>,
     },

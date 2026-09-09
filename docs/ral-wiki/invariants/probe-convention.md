@@ -12,7 +12,7 @@ A probe is a `ProbeRow` (`exarch/src/agent/resources.rs`): `name`, `current`,
 `cap: Option<u64>`, a `policy` from the closed pressure vocabulary
 (`coalesce` / `reject` / `evict` / `reap` / `warn` / `none (unbounded)`),
 and an optional note. Multi-figure accumulators emit one row per figure
-(`viewport.blocks`, `inbox[user]`, …). The inspector deliberately precedes
+(`scrollback.blocks`, `inbox[user]`, …). The inspector deliberately precedes
 the enforcer: an accumulator whose cap lands later states its *decided*
 policy with `cap: None` and a note saying so — never a fake cap, never
 silence.
@@ -23,7 +23,7 @@ its own rows on its attend thread (the shell's worker registry and bindings,
 its inbox, model projection, record log, and disk) and emits them as one
 `Transient::Resources` —
 raw rows beside the rendered card — and the frontend appends the rows for the
-accumulators *it* owns (viewports, views, the bus) at render time. Neither
+accumulators *it* owns (scrollbacks, views, the bus) at render time. Neither
 half reaches across a thread for the other's figures, and the fold is never
 model-facing. A probe fold is an interactive diagnostic, read when it is
 run: no session keeps a pressure history, so the figures live only in the
@@ -39,7 +39,7 @@ Two laws bound what a probe may do:
   cancelled, and leased.** The line is the capability
   ([[decisions/260705_session-ledger|session-ledger]]): a resident (a
   worker, an agent, a schedule) can be reached and controlled by id; a mere
-  accumulator (a viewport, the bus, an inbox) can only be measured and
+  accumulator (a scrollback, the bus, an inbox) can only be measured and
   bounded. A probe row is the one facet the two kinds share.
 
 The hard rule for new code: a session-lived accumulator lands together with

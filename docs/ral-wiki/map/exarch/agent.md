@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4bc5006c
-generated_at_date: 2026-09-07
+generated_at_commit: 146084be
+generated_at_date: 2026-09-09
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -315,7 +315,7 @@ from.
 A probe fold is an interactive diagnostic, read when it is run: no session
 keeps a pressure history, so the figures live only in this emission, never
 in `record.jsonl`. The frontend appends the rows for the accumulators *it*
-owns (viewports, views, the bus) at render time; neither half reaches
+owns (scrollbacks, views, the bus) at render time; neither half reaches
 across a thread. Probing never mutates and never renews a lease —
 enumeration is not observation — and the fold is never model-facing.
 

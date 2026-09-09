@@ -38,7 +38,7 @@ fn write_outcome_role(outcome: WriteOutcome) -> Role {
 
 /// The census bucket a surfaced observation counts toward when a coalesced run
 /// reduces to its tally (`Tally` in `tui/group.rs`). A write has no bucket: it
-/// is a barrier that ends a run, tracked by its card origin instead.
+/// lands as its own block instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ObservationKind {
     Read,
@@ -46,37 +46,36 @@ pub(crate) enum ObservationKind {
     Grep,
 }
 
-/// Where a surfaced observation lands on the rail, or `None` for one the rail
-/// does not draw: evaluation (a `builtin` command), or a capability check that
-/// was not a denial. Core reports every observation it makes; this is where
-/// the host says which of them it wants.
+/// Where an observation the rail draws lands, or `None` for one it does not
+/// draw: evaluation (a `builtin` command), or a capability check that was not
+/// a denial. Core reports every observation it makes; this is where the host
+/// says which of them it wants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Landing {
-    /// Joins a coalesced run, tallied under this bucket.
-    Grouped(ObservationKind),
-    /// Lands alone and ends the run before it.
-    Barrier,
-    /// Lands alone, tallied under nothing.
-    Standalone,
-    /// Announced rather than bounded: a rail notice whose whole content is
-    /// its heading, the place a settled background block also takes.
+    /// Folds onto the call above it, tallied under this bucket.
+    Effect(ObservationKind),
+    /// A file mutation: its own block under the `▎` rail.
+    Write,
+    /// Its own bounded block — a denial, a surfaced kit card, a notice.
+    Surfaced,
+    /// A line on the rail rather than a card: a worker's birth.
     Announced,
 }
 
 pub(crate) fn landing(what: &Observed) -> Option<Landing> {
     Some(match what {
-        Observed::Read { .. } => Landing::Grouped(ObservationKind::Read),
-        Observed::Grep { .. } => Landing::Grouped(ObservationKind::Grep),
+        Observed::Read { .. } => Landing::Effect(ObservationKind::Read),
+        Observed::Grep { .. } => Landing::Effect(ObservationKind::Grep),
         Observed::Command {
             origin: CommandOrigin::External | CommandOrigin::Detached,
             ..
-        } => Landing::Grouped(ObservationKind::Exec),
-        Observed::Write { .. } => Landing::Barrier,
+        } => Landing::Effect(ObservationKind::Exec),
+        Observed::Write { .. } => Landing::Write,
         // A denial reads best whole, not dissolved into a tally.
         Observed::Capability {
             decision: Decision::Denied,
             ..
-        } => Landing::Standalone,
+        } => Landing::Surfaced,
         // A birth is the departure a settlement is the arrival of, and reads
         // as that mirror.
         Observed::Worker { .. } => Landing::Announced,

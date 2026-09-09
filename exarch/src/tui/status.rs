@@ -5,7 +5,7 @@
 use super::line::usage_text;
 use super::palette::{CYAN, PURPLE, SLATE};
 use super::rail;
-use super::viewport::StateSpan;
+use super::scrollback::StateSpan;
 use crate::bus::AgentState;
 use crate::provider::Usage;
 use ratatui::style::{Color, Style};

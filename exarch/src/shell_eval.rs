@@ -94,7 +94,7 @@ pub(crate) enum Outcome {
     Severed(ral_core::protocol::Severed),
 }
 
-/// One mirrored pin.  The bus and viewport carry `Forensic::Pin` and
+/// One mirrored pin.  The bus and scrollback carry `Forensic::Pin` and
 /// `Transient::Pin`; this exists only inside the agent's session mirror.
 #[derive(Clone, Debug)]
 pub struct PinDigest {
@@ -209,7 +209,7 @@ pub(crate) fn unknown_surface_note(shape: impl std::fmt::Display) -> crate::reco
 struct InboxDeferred {
     stamp: Stamp,
     /// The **root** session's id: a spawn worker registers no tab of its own,
-    /// so its cards must land in the root viewport.
+    /// so its cards must land in the root scrollback.
     root: AgentId,
 }
 

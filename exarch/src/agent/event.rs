@@ -3,13 +3,13 @@
 //! in-memory structure over it.
 //!
 //! Every query below reads `context`; nothing here keeps a second copy.
-//! `tui::viewport` folds the same log's `Display`/`Forensic` classes into the
+//! `tui::scrollback` folds the same log's `Display`/`Forensic` classes into the
 //! rendered `user.log`.
 
 use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
 use crate::provider::{ProviderError, Tuning, Usage};
-use crate::record::model::{Context, Linked, Row, TranscriptRead};
+use crate::record::model::{Context, Linked, TranscriptRead, TurnRow};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
 use regex::Regex;
@@ -224,7 +224,7 @@ impl TurnKind {
 /// context sends only its one-line note.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContextSurvey {
-    pub rows: Vec<Row>,
+    pub rows: Vec<TurnRow>,
     pub evicted: usize,
     pub total_bytes: usize,
 }
@@ -610,7 +610,7 @@ impl AgentLog {
 
     /// Every turn the transcript holds, in id order, each saying whether it
     /// is still in the context.
-    pub fn transcript_index(&self) -> Vec<Row> {
+    pub fn transcript_index(&self) -> Vec<TurnRow> {
         self.context.transcript_index()
     }
 

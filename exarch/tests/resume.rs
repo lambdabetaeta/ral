@@ -153,7 +153,7 @@ fn scripted_run_kill_resume_and_continue() {
 
 /// `render_log` is a pure rendering of whatever the fold admitted, so folding
 /// the same file twice — the regenerability law step 6 exists for — must
-/// agree byte for byte, whether or not a viewport in between ever flushed
+/// agree byte for byte, whether or not a scrollback in between ever flushed
 /// `user.log` from a resident window rather than the whole history.
 #[test]
 fn the_view_folds_render_is_a_pure_function_of_the_log() {

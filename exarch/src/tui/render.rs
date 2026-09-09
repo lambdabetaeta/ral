@@ -28,7 +28,7 @@ use super::row::Row;
 use super::select::highlight_range;
 use super::status::rule_line;
 use super::terminal::Term;
-use super::viewport::{StateSpan, Viewport};
+use super::scrollback::{Scrollback, StateSpan};
 
 const PROMPT_PAD_H: u16 = 1;
 /// The matrix is a navigable window, not a second transcript.  Eight rows
@@ -71,8 +71,8 @@ fn strips(app: &App, area: Rect, queued_h: u16, tab_h: u16) -> Strips {
     // `area.width` stands in for the content row's width.
     let has_pins = app
         .tabs
-        .viewport(app.tabs.focused())
-        .is_some_and(|vp| !vp.pins().is_empty());
+        .scrollback(app.tabs.focused())
+        .is_some_and(|sb| !sb.pins().is_empty());
     let register_w = area.width.saturating_sub(LEFT_MARGIN + READ_W);
     let show_register = has_pins && register_w >= REGISTER_MIN_W;
     // The transcript's floor is a budget `matrix_height` spends, never a
@@ -146,20 +146,20 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
         u16::try_from(queued_lines.len()).unwrap_or(u16::MAX),
         tab_h,
     );
-    // Built before the `viewport_mut` borrow that `render_window` needs.
-    let register_lines: Vec<Line<'static>> = match (app.tabs.viewport(focused), s.register) {
-        (Some(vp), Some(reg)) => {
+    // Built before the `scrollback_mut` borrow that `render_window` needs.
+    let register_lines: Vec<Line<'static>> = match (app.tabs.scrollback(focused), s.register) {
+        (Some(sb), Some(reg)) => {
             let hue = AGENT_HUES
-                .get(vp.agent().0 as usize)
+                .get(sb.agent().0 as usize)
                 .copied()
                 .unwrap_or(AGENT_HUES[0]);
-            line::render_register(vp.pins(), reg.width, hue)
+            line::render_register(sb.pins(), reg.width, hue)
         }
         _ => Vec::new(),
     };
-    let (mut rows, offset, scroll_pct) = match app.tabs.viewport_mut(focused) {
-        Some(vp) => {
-            let w = vp.render_window(s.text.width, s.text.height as usize);
+    let (mut rows, offset, scroll_pct) = match app.tabs.scrollback_mut(focused) {
+        Some(sb) => {
+            let w = sb.render_window(s.text.width, s.text.height as usize);
             (w.lines, w.offset, w.scroll_pct)
         }
         None => (Vec::new(), 0, None),
@@ -177,8 +177,8 @@ pub(super) fn draw(app: &mut App, term: &mut Term) -> io::Result<()> {
     app.prompt_state.style_prompt(focused == root);
     let state = app
         .tabs
-        .viewport(focused)
-        .map_or_else(|| StateSpan::new(AgentState::Ready), Viewport::state);
+        .scrollback(focused)
+        .map_or_else(|| StateSpan::new(AgentState::Ready), Scrollback::state);
     // Field-wise from here: the editor draws through `&mut prompt_state` while
     // the rest of the frame reads its siblings.
     let App {
@@ -364,16 +364,16 @@ fn paint_selection(app: &App, rows: &mut [Row], offset: usize) {
     }
 }
 
-/// Light the rail glyph of the hovered dialable block.  Only its first row
-/// carries a glyph, so a block scrolled past its header shows no mark.
+/// Light the rail glyph of the hovered dialable part.  Only its first row
+/// carries a glyph, so a part scrolled past its header shows no mark.
 fn paint_hover(app: &App, rows: &mut [Row], offset: usize) {
     let Some(target) = app.gesture.hover() else {
         return;
     };
-    let Some(vp) = app.tabs.focused_viewport() else {
+    let Some(sb) = app.tabs.focused_scrollback() else {
         return;
     };
-    if let Some(row) = vp
+    if let Some(row) = sb
         .block_head(target)
         .and_then(|head| head.checked_sub(offset))
         .and_then(|i| rows.get_mut(i))

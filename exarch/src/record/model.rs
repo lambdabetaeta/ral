@@ -104,7 +104,7 @@ pub struct Pointer {
 /// The one line every view draws for a turn: survey, index, TUI card.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Row {
+pub struct TurnRow {
     pub id: u64,
     pub exchange: u64,
     pub kind: TurnKind,
@@ -143,15 +143,15 @@ impl Held {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Linked {
-    pub row: Row,
+    pub row: TurnRow,
     pub at: Pointer,
 }
 
 impl Turn {
     /// The one way a turn leaves the structure as a row: `held` is projected
     /// off the body, so the two cannot disagree.
-    fn row(&self) -> Row {
-        Row {
+    fn row(&self) -> TurnRow {
+        TurnRow {
             id: self.id,
             exchange: self.exchange,
             kind: self.kind,
@@ -235,7 +235,7 @@ impl Context {
             .turns()
             .iter()
             .map(|turn| Linked {
-                row: Row {
+                row: TurnRow {
                     kind: TurnKind::Inherited,
                     ..turn.row()
                 },
@@ -382,7 +382,7 @@ impl Context {
     /// Every turn the transcript holds, in id order, each saying whether it
     /// is still in the context. The whole lineage's, since a fork inherits
     /// the table.
-    pub(crate) fn transcript_index(&self) -> Vec<Row> {
+    pub(crate) fn transcript_index(&self) -> Vec<TurnRow> {
         self.table.turns().iter().map(Turn::row).collect()
     }
 }

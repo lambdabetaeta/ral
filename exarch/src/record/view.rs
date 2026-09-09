@@ -1,14 +1,14 @@
 //! The view fold: folds [`Display`] commits and the [`Forensic`] rows a
-//! scrollback draws into [`Blocks`] — the memo `tui` and `headless` both
-//! draw from as printers, never handed a [`Record`] of their own.
+//! scrollback draws into [`Blocks`] — the memo `tui` and `headless` each keep
+//! their own of, stepped by the record and read through [`BlockKind`].
 //!
 //! [`Block`]'s constructor is private to this module: a printer draws a
-//! block, it cannot mint one.  `step` is one exhaustive match over the
-//! outer `Record`, and `Protocol` is skipped by an explicit arm — this fold
-//! carries no model-context state, so it has nothing to fold a protocol
+//! block, it cannot mint one.  [`Blocks::step`] is one exhaustive match over
+//! the outer `Record`, and `Protocol` is skipped by an explicit arm — this
+//! fold carries no model-context state, so it has nothing to fold a protocol
 //! record into.
 
-use super::{Display, Fold, Forensic, Recorded, Refusal, Row, Seq};
+use super::{BlockId, Display, Fold, Forensic, Recorded, Refusal, Seq, TurnRow};
 use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
 use ral_core::serial::FOValue;
 use std::time::Duration;
@@ -63,7 +63,7 @@ pub enum BlockKind {
         notice: NoticeFact,
     },
     Context {
-        rows: Vec<Row>,
+        turns: Vec<TurnRow>,
         evicted: usize,
     },
     Cancelled,
@@ -100,31 +100,35 @@ pub enum BlockKind {
     },
 }
 
-/// One committed row of scrollback, named by the [`Seq`] of the record that
-/// produced it.
+/// One committed block of scrollback, named by the [`Seq`] of the record that
+/// opened it.
 pub struct Block {
     seq: Seq,
     kind: BlockKind,
-    rev: u64,
 }
 
 impl Block {
-    pub fn id(&self) -> super::BlockId {
-        super::BlockId::new(self.seq)
+    pub fn id(&self) -> BlockId {
+        BlockId::new(self.seq)
     }
 
     pub fn kind(&self) -> &BlockKind {
         &self.kind
     }
+}
 
-    /// [`Blocks::rev`] as of this row's last change — its opening, the growth
-    /// of the run it holds, or a result patched onto it.  A printer that
-    /// caches a rendering keeps it exactly while this stays under the
-    /// revision it last synced at, which is what lets a sync rebuild only
-    /// what the fold has actually moved.
-    pub fn rev(&self) -> u64 {
-        self.rev
-    }
+/// What one [`Blocks::step`] did to the memo — the whole of what a printer
+/// needs in order to draw the change rather than the window around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delta {
+    /// A block was opened at the tail, and is [`Blocks::blocks`]'s last.
+    Opened(BlockId),
+    /// The named block's lane grew by this record; its text is the memo's.
+    Grew(BlockId),
+    /// A result was attached to the named call.
+    Patched(BlockId),
+    /// The record moved no block: ambient totals, or a class this fold skips.
+    Quiet,
 }
 
 /// Cumulative input/output tokens this session has billed, per the forensic
@@ -135,25 +139,22 @@ struct UsageTotal {
     output: u64,
 }
 
-/// Past this many resident rows, the oldest are dropped — the one window
-/// that bounds this fold for every printer, rather than a trim each printer
-/// repeats.  A printer that renders incrementally holds its own cursor by
-/// [`Seq`] identity, so the memo owes it no unrendered tail: it owes it only
-/// the slack this window leaves between two of its syncs.
-const BLOCKS_WINDOW: usize = 1000;
+/// Past this many resident blocks, the oldest are dropped.
+///
+/// The one window, for every printer: what leaves the fold leaves the screen,
+/// so a printer that mirrors this memo lets a block go exactly as the fold
+/// lets it go, and no printer keeps a second trim of its own.
+pub const BLOCKS_WINDOW: usize = 1000;
 
 /// The view fold's memo: the last [`BLOCKS_WINDOW`] commits and drawn
 /// breadcrumbs this session has recorded, in log order.
-///
-/// A printer's own window ([`VIEWPORT_MAX_BLOCKS`](crate::tui) and friends)
-/// stays a second, purely presentational trim on top of this one.
 #[derive(Default)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "the memo is the blocks; the field can only be called that"
+)]
 pub struct Blocks {
-    rows: Vec<Block>,
-    /// Counts every change this fold has made to a row, so that a row can say
-    /// when it last moved ([`Block::rev`]).  Monotone and never reset; `0` is
-    /// the revision of a memo nothing has landed in yet, so it stamps no row.
-    rev: u64,
+    blocks: Vec<Block>,
     usage: UsageTotal,
     /// The model in force, from the most recent [`Forensic::ModelChanged`].
     /// A session's *first* model rides [`Forensic::SessionStarted`], which
@@ -161,27 +162,22 @@ pub struct Blocks {
     /// entry here.  A printer wanting the opening model too must read it off
     /// the model fold's own memo; this fold does not duplicate it.
     model: Option<(String, String)>,
-    /// The [`Seq`] of the first row this fold ever held, remembered past
-    /// eviction — the door [`Self::rows`] no longer names once the window
-    /// has moved off the session's opening row.
+    /// The [`Seq`] of the first block this fold ever held, remembered past
+    /// eviction — the door [`Self::blocks`] no longer names once the window
+    /// has moved off the session's opening block.
     origin: Option<Seq>,
 }
 
 impl Blocks {
-    pub fn rows(&self) -> &[Block] {
-        &self.rows
+    pub fn blocks(&self) -> &[Block] {
+        &self.blocks
     }
 
-    /// This memo's current revision — the watermark a printer syncs at and
-    /// then compares each row's own [`Block::rev`] against.
-    pub fn rev(&self) -> u64 {
-        self.rev
-    }
-
-    /// The [`Seq`] of the first row this fold ever held — `None` until one
-    /// lands.  Unlike `rows().first()` it survives eviction, so a printer can
-    /// ask whether its window still reaches the session's opening row: the
-    /// question chrome drawn *before* any row, the startup banner, hangs on.
+    /// The [`Seq`] of the first block this fold ever held — `None` until one
+    /// lands.  Unlike `blocks().first()` it survives eviction, so a printer
+    /// can ask whether its window still reaches the session's opening block:
+    /// the question chrome drawn *before* any block, the startup banner,
+    /// hangs on.
     pub fn origin(&self) -> Option<Seq> {
         self.origin
     }
@@ -203,79 +199,178 @@ impl Blocks {
         self.model.as_ref().map(|(m, p)| (m.as_str(), p.as_str()))
     }
 
+    /// Fold one witnessed fact in, reporting what it moved.
+    ///
+    /// # Errors
+    /// Returns [`Refusal`] when this fold does not recognise the record —
+    /// during replay that refuses the session rather than skip it silently.
+    pub fn step(&mut self, record: &Recorded<super::Record>) -> Result<Delta, Refusal> {
+        let seq = record.locus().seq();
+        Ok(match record.value().clone() {
+            super::Record::Protocol(_) => Delta::Quiet,
+            super::Record::Display(d) => self.step_display(seq, d),
+            super::Record::Forensic(f) => self.step_forensic(seq, f),
+        })
+    }
+
     /// A rendering of every resident block, content only — never styling —
     /// the regenerable text a printer's `user.log` is a render of, never a
-    /// patch of.  Windowed, like [`Self::rows`]; a full-session render reads
+    /// patch of.  Windowed, like [`Self::blocks`]; a full-session render reads
     /// `record.jsonl` through [`super::replay`] instead.
     pub fn render_log(&self) -> String {
         let mut out = String::new();
-        for block in &self.rows {
+        for block in &self.blocks {
             render_block_text(&mut out, block.kind());
         }
         out
     }
 
-    /// Drop the oldest resident rows past [`BLOCKS_WINDOW`], as each row
+    /// Drop the oldest resident blocks past [`BLOCKS_WINDOW`], as each block
     /// lands — the fold's whole bound, and unconditional, since no cursor of
     /// another's lives here to hold the floor down.
     fn evict(&mut self) {
-        while self.rows.len() > BLOCKS_WINDOW {
-            let _ = self.rows.remove(0);
+        while self.blocks.len() > BLOCKS_WINDOW {
+            let _ = self.blocks.remove(0);
         }
     }
 
-    /// Open a row for `kind` — or, where `kind` continues the lane the last
-    /// row already holds, grow that row instead.
+    /// Open a block for `kind` — or, where `kind` continues the lane the last
+    /// block already holds, grow that block instead.
     ///
     /// The model's prose and reasoning arrive as many records, one per line,
     /// so a reader sees the text as it is spoken.  A block is the run of
     /// records that meet: any record of another kind — a tool call, a prompt
     /// — ends the run, and the next line of prose opens a fresh block.  This
-    /// is what frees the commit producer from having to cut
-    /// anywhere meaningful, and it keeps a block's `Seq` the one it opened
-    /// with, so a reveal dial set on it survives the growth.
-    fn push(&mut self, seq: Seq, kind: BlockKind) {
-        self.rev += 1;
-        let rev = self.rev;
-        if let Some(row) = self.rows.last_mut() {
-            match (&mut row.kind, &kind) {
+    /// is what frees the commit producer from having to cut anywhere
+    /// meaningful, and it keeps a block's `Seq` the one it opened with, so a
+    /// dial set on it survives the growth.
+    fn push(&mut self, seq: Seq, kind: BlockKind) -> Delta {
+        if let Some(tail) = self.blocks.last_mut() {
+            match (&mut tail.kind, &kind) {
                 (BlockKind::Answer { text }, BlockKind::Answer { text: more })
                 | (BlockKind::Thinking { text }, BlockKind::Thinking { text: more }) => {
                     text.push_str(more);
-                    row.rev = rev;
-                    return;
+                    return Delta::Grew(tail.id());
                 }
                 _ => {}
             }
         }
         let _ = self.origin.get_or_insert(seq);
-        self.rows.push(Block { seq, kind, rev });
+        self.blocks.push(Block { seq, kind });
         self.evict();
+        Delta::Opened(BlockId::new(seq))
     }
 
     /// Attach a result's line count to the call it names — a patch record
-    /// addressed by `BlockId`, replacing the tail-walk `set_result_size`
-    /// used to guess at the same correlation.  A target this fold cannot
-    /// find — evicted, or simply never resident — is a no-op rather than a
-    /// panic.
-    fn attach_result(&mut self, call: super::BlockId, text: &str) {
+    /// addressed by `BlockId`.  A target this fold cannot find — evicted, or
+    /// simply never resident — is [`Delta::Quiet`] rather than a panic.
+    fn attach_result(&mut self, call: BlockId, text: &str) -> Delta {
         let n = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
         let target = call.seq();
-        self.rev += 1;
-        let rev = self.rev;
-        if let Some(row) = self.rows.iter_mut().find(|b| b.seq == target)
-            && let BlockKind::ToolCall { result_lines, .. } = &mut row.kind
+        if let Some(block) = self.blocks.iter_mut().find(|b| b.seq == target)
+            && let BlockKind::ToolCall { result_lines, .. } = &mut block.kind
         {
             *result_lines = Some(n);
-            row.rev = rev;
+            return Delta::Patched(call);
+        }
+        Delta::Quiet
+    }
+
+    fn step_display(&mut self, seq: Seq, d: Display) -> Delta {
+        match d {
+            Display::Thinking { text } => self.push(seq, BlockKind::Thinking { text }),
+            Display::Prompt { text } => self.push(seq, BlockKind::Prompt { text }),
+            Display::Answer { text } => self.push(seq, BlockKind::Answer { text }),
+            Display::ToolCall { tool, cmd, summary } => self.push(
+                seq,
+                BlockKind::ToolCall {
+                    tool,
+                    cmd,
+                    summary,
+                    result_lines: None,
+                },
+            ),
+            Display::HarnessCall {
+                verb,
+                subject,
+                payload,
+                failed,
+            } => self.push(
+                seq,
+                BlockKind::HarnessCall {
+                    verb,
+                    subject,
+                    payload,
+                    failed,
+                },
+            ),
+            Display::Result { text, call } => self.attach_result(call, &text),
+            Display::ObservationGroup { values } => {
+                self.push(seq, BlockKind::ObservationGroup { values })
+            }
+            Display::SubagentDone {
+                name,
+                error,
+                elapsed_ms,
+            } => self.push(
+                seq,
+                BlockKind::SubagentDone {
+                    name,
+                    error,
+                    elapsed_ms,
+                },
+            ),
+            Display::Observation { value } => self.push(seq, BlockKind::Observation { value }),
+            Display::Card { marks } => self.push(seq, BlockKind::Card { marks }),
+            Display::Done { outcome } => self.push(seq, BlockKind::Done { outcome }),
+            Display::Notice { notice } => self.push(seq, BlockKind::Notice { notice }),
+            Display::Context { turns, evicted } => {
+                self.push(seq, BlockKind::Context { turns, evicted })
+            }
+            Display::Turn { id } => self.push(seq, BlockKind::Turn { id }),
+            Display::ContextEdited { op, by } => {
+                self.push(seq, BlockKind::ContextEdited { op, by })
+            }
+        }
+    }
+
+    fn step_forensic(&mut self, seq: Seq, f: Forensic) -> Delta {
+        match f {
+            Forensic::UsageDelta { usage } => {
+                self.usage.input = self.usage.input.saturating_add(usage.input);
+                self.usage.output = self.usage.output.saturating_add(usage.output);
+                Delta::Quiet
+            }
+            Forensic::Cancelled => self.push(seq, BlockKind::Cancelled),
+            Forensic::Error { text } => self.push(seq, BlockKind::Error { text }),
+            Forensic::Nudge { used, max, cause } => {
+                self.push(seq, BlockKind::Nudge { used, max, cause })
+            }
+            Forensic::ProviderError { error } => self.push(seq, BlockKind::ProviderError { error }),
+            Forensic::Stalled { error } => self.push(seq, BlockKind::Stalled { error }),
+            Forensic::SystemNote { text } => self.push(seq, BlockKind::SystemNote { text }),
+            Forensic::HarnessResult { text } => self.push(seq, BlockKind::HarnessResult { text }),
+            // The history informs a resume note; the live register follows the
+            // shell boundary and is not restored — so neither is a scrollback
+            // block this fold draws.  The session bookends and a turn's effort
+            // dial draw none either: evidence with a display twin, or with none.
+            Forensic::Pin { .. }
+            | Forensic::Unpin { .. }
+            | Forensic::SessionStarted { .. }
+            | Forensic::SessionResumed { .. }
+            | Forensic::SessionEnded
+            | Forensic::TurnStarted { .. } => Delta::Quiet,
+            Forensic::ModelChanged { model, label, .. } => {
+                self.model = Some((model, label));
+                Delta::Quiet
+            }
         }
     }
 }
 
 /// Plain-text content for one block, appended to `out` — the shared body
-/// [`Blocks::render_log`] and (once wired) a printer's own richer rendering
-/// both start from, kept here so the regenerable projection has exactly one
-/// definition.
+/// [`Blocks::render_log`] and a printer's own richer rendering both start
+/// from, kept here so the regenerable projection has exactly one definition.
 fn render_block_text(out: &mut String, kind: &BlockKind) {
     let line = match kind {
         BlockKind::Thinking { text, .. } => format!("∴ {text}"),
@@ -330,18 +425,18 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
             NoticeFact::Reap { cmd, cause } => format!("[reap: {cmd} ({cause})]"),
             NoticeFact::Prune { names, .. } => format!("[prune: {}]", names.join(", ")),
         },
-        BlockKind::Context { rows, evicted } => {
-            let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
+        BlockKind::Context { turns, evicted } => {
+            let mut lines: Vec<String> = Vec::with_capacity(turns.len() + 1);
             if *evicted > 0 {
                 lines.push(format!("[context: evicted {evicted} turns]"));
             }
-            lines.extend(rows.iter().map(|row| {
+            lines.extend(turns.iter().map(|turn| {
                 format!(
                     "[context: turn {} of exchange {} {} {}]",
-                    row.id,
-                    row.exchange,
-                    row.kind.as_str(),
-                    row.label
+                    turn.id,
+                    turn.exchange,
+                    turn.kind.as_str(),
+                    turn.label
                 )
             }));
             lines.join("\n")
@@ -380,91 +475,6 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
     out.push('\n');
 }
 
-fn step_display(memo: &mut Blocks, seq: Seq, d: Display) {
-    match d {
-        Display::Thinking { text } => memo.push(seq, BlockKind::Thinking { text }),
-        Display::Prompt { text } => memo.push(seq, BlockKind::Prompt { text }),
-        Display::Answer { text } => memo.push(seq, BlockKind::Answer { text }),
-        Display::ToolCall { tool, cmd, summary } => memo.push(
-            seq,
-            BlockKind::ToolCall {
-                tool,
-                cmd,
-                summary,
-                result_lines: None,
-            },
-        ),
-        Display::HarnessCall {
-            verb,
-            subject,
-            payload,
-            failed,
-        } => memo.push(
-            seq,
-            BlockKind::HarnessCall {
-                verb,
-                subject,
-                payload,
-                failed,
-            },
-        ),
-        Display::Result { text, call } => memo.attach_result(call, &text),
-        Display::ObservationGroup { values } => {
-            memo.push(seq, BlockKind::ObservationGroup { values });
-        }
-        Display::SubagentDone {
-            name,
-            error,
-            elapsed_ms,
-        } => memo.push(
-            seq,
-            BlockKind::SubagentDone {
-                name,
-                error,
-                elapsed_ms,
-            },
-        ),
-        Display::Observation { value } => memo.push(seq, BlockKind::Observation { value }),
-        Display::Card { marks } => memo.push(seq, BlockKind::Card { marks }),
-        Display::Done { outcome } => memo.push(seq, BlockKind::Done { outcome }),
-        Display::Notice { notice } => memo.push(seq, BlockKind::Notice { notice }),
-        Display::Context { rows, evicted } => memo.push(seq, BlockKind::Context { rows, evicted }),
-        Display::Turn { id } => memo.push(seq, BlockKind::Turn { id }),
-        Display::ContextEdited { op, by } => {
-            memo.push(seq, BlockKind::ContextEdited { op, by });
-        }
-    }
-}
-
-fn step_forensic(memo: &mut Blocks, seq: Seq, f: Forensic) {
-    match f {
-        Forensic::UsageDelta { usage } => {
-            memo.usage.input = memo.usage.input.saturating_add(usage.input);
-            memo.usage.output = memo.usage.output.saturating_add(usage.output);
-        }
-        Forensic::Cancelled => memo.push(seq, BlockKind::Cancelled),
-        Forensic::Error { text } => memo.push(seq, BlockKind::Error { text }),
-        Forensic::Nudge { used, max, cause } => {
-            memo.push(seq, BlockKind::Nudge { used, max, cause });
-        }
-        Forensic::ProviderError { error } => memo.push(seq, BlockKind::ProviderError { error }),
-        Forensic::Stalled { error } => memo.push(seq, BlockKind::Stalled { error }),
-        Forensic::SystemNote { text } => memo.push(seq, BlockKind::SystemNote { text }),
-        Forensic::HarnessResult { text } => memo.push(seq, BlockKind::HarnessResult { text }),
-        // The history informs a resume note; the live register follows the
-        // shell boundary and is not restored — so neither is a scrollback
-        // row this fold draws.  The session bookends and a turn's effort dial
-        // draw none either: evidence with a display twin, or with none.
-        Forensic::Pin { .. }
-        | Forensic::Unpin { .. }
-        | Forensic::SessionStarted { .. }
-        | Forensic::SessionResumed { .. }
-        | Forensic::SessionEnded
-        | Forensic::TurnStarted { .. } => {}
-        Forensic::ModelChanged { model, label, .. } => memo.model = Some((model, label)),
-    }
-}
-
 /// The view fold: [`Fold::step`] over [`Display`] and [`Forensic`], skipping
 /// [`super::Protocol`] by an explicit arm rather than a wildcard.
 pub struct View;
@@ -473,54 +483,55 @@ impl Fold for View {
     type Memo = Blocks;
 
     fn step(memo: &mut Blocks, record: &Recorded<super::Record>) -> Result<(), Refusal> {
-        let seq = record.locus().seq();
-        match record.value().clone() {
-            super::Record::Protocol(_) => {}
-            super::Record::Display(d) => step_display(memo, seq, d),
-            super::Record::Forensic(f) => step_forensic(memo, seq, f),
-        }
-        Ok(())
+        memo.step(record).map(drop)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::BlockId;
     use super::*;
 
-    /// A row that never joins the one before it, so a test about flushing or
-    /// eviction counts rows rather than the lanes that grow.
-    fn push(memo: &mut Blocks, seq: u64, text: &str) {
-        step_forensic(
-            memo,
-            Seq::new(seq),
-            Forensic::SystemNote { text: text.into() },
-        );
+    /// A block that never joins the one before it, so a test about the window
+    /// counts blocks rather than the lanes that grow.
+    fn push(memo: &mut Blocks, seq: u64, text: &str) -> Delta {
+        memo.step_forensic(Seq::new(seq), Forensic::SystemNote { text: text.into() })
     }
 
-    /// One lane, many records, one block: consecutive prose grows the row it
+    /// One lane, many records, one block: consecutive prose grows the block it
     /// opened, and a record of another kind ends the run.
     #[test]
     fn consecutive_records_of_one_lane_grow_a_single_block() {
         let mut memo = Blocks::default();
-        for (seq, text) in [(1, "first line\n"), (2, "second line\n")] {
-            step_display(
-                &mut memo,
-                Seq::new(seq),
-                Display::Answer { text: text.into() },
-            );
-        }
-        match memo.rows() {
-            [row] => {
-                let BlockKind::Answer { text } = row.kind() else {
+        let opened = memo.step_display(
+            Seq::new(1),
+            Display::Answer {
+                text: "first line\n".into(),
+            },
+        );
+        assert_eq!(opened, Delta::Opened(BlockId::new(Seq::new(1))));
+        let grew = memo.step_display(
+            Seq::new(2),
+            Display::Answer {
+                text: "second line\n".into(),
+            },
+        );
+        assert_eq!(
+            grew,
+            Delta::Grew(BlockId::new(Seq::new(1))),
+            "the second record grows the block the first opened"
+        );
+        match memo.blocks() {
+            [block] => {
+                let BlockKind::Answer { text } = block.kind() else {
                     panic!("expected one answer block")
                 };
                 assert_eq!(text, "first line\nsecond line\n", "the block holds the run");
             }
-            other => panic!("expected one row, got {} rows", other.len()),
+            other => panic!("expected one block, got {}", other.len()),
         }
 
-        step_display(
-            &mut memo,
+        let _ = memo.step_display(
             Seq::new(3),
             Display::ToolCall {
                 tool: "ral".into(),
@@ -528,41 +539,78 @@ mod tests {
                 summary: None,
             },
         );
-        step_display(
-            &mut memo,
+        let _ = memo.step_display(
             Seq::new(4),
             Display::Answer {
                 text: "after the call\n".into(),
             },
         );
         assert_eq!(
-            memo.rows().len(),
+            memo.blocks().len(),
             3,
             "the tool call ends the run, so the prose after it opens its own block"
         );
     }
 
+    /// A result addresses its call wherever that call sits, and a patch whose
+    /// target the window has let go moves nothing.
     #[test]
-    fn the_window_bounds_the_fold_as_rows_land() {
+    fn a_result_patches_the_call_it_names() {
+        let mut memo = Blocks::default();
+        let call = BlockId::new(Seq::new(1));
+        let _ = memo.step_display(
+            Seq::new(1),
+            Display::ToolCall {
+                tool: "ral".into(),
+                cmd: "read 'x'".into(),
+                summary: Some("look at x".into()),
+            },
+        );
+        let _ = memo.step_display(Seq::new(2), Display::Prompt { text: "on".into() });
+        assert_eq!(
+            memo.step_display(
+                Seq::new(3),
+                Display::Result {
+                    text: "a\nb\n".into(),
+                    call,
+                },
+            ),
+            Delta::Patched(call)
+        );
+        assert_eq!(
+            memo.step_display(
+                Seq::new(4),
+                Display::Result {
+                    text: "a\n".into(),
+                    call: BlockId::new(Seq::new(99)),
+                },
+            ),
+            Delta::Quiet,
+            "a patch naming no resident call moves nothing"
+        );
+    }
+
+    #[test]
+    fn the_window_bounds_the_fold_as_blocks_land() {
         let mut memo = Blocks::default();
         let total = BLOCKS_WINDOW + 50;
         for i in 1..=total {
-            push(&mut memo, i as u64, &format!("row {i}"));
+            let _ = push(&mut memo, i as u64, &format!("block {i}"));
         }
         assert_eq!(
-            memo.rows().len(),
+            memo.blocks().len(),
             BLOCKS_WINDOW,
-            "the window binds while rows land, with no flush to wait on"
+            "the window binds while blocks land, with no flush to wait on"
         );
         assert_eq!(
-            memo.rows().first().map(|b| b.seq),
+            memo.blocks().first().map(|b| b.seq),
             Some(Seq::new(51)),
-            "the oldest rows go first"
+            "the oldest blocks go first"
         );
         assert_eq!(
             memo.origin(),
             Some(Seq::new(1)),
-            "the session's opening row is remembered past its eviction"
+            "the session's opening block is remembered past its eviction"
         );
     }
 }

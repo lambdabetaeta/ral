@@ -1,9 +1,9 @@
-//! One [`App`] owns the tabs, viewports, prompt, and gesture state, and folds
+//! One [`App`] owns the tabs, scrollbacks, prompt, and gesture state, and folds
 //! the [`crate::bus::Signal`] stream — [`Signal::Fact`] through [`Self::fact`],
 //! [`Signal::Transient`] through [`Self::transient`] — into scrollback blocks.
 
 use super::banner;
-use super::block::{AgentSlot, ChromeKind};
+use super::block::{AgentSlot, ChromeKind, Detail};
 use super::gesture::{Effect, GestureState};
 use super::line;
 use super::line::bold;
@@ -13,11 +13,11 @@ use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK, READ_W};
 use super::picker::Picker;
 use super::prompt::PromptState;
 use super::render::draw;
+use super::scrollback::Scrollback;
 use super::tabs::{TabRow, Tabs};
 use super::terminal::{Term, osc52_copy};
-use super::viewport::Viewport;
 use crate::agent::Agent;
-use crate::agent::resources::{BusFigures, ViewportFigures};
+use crate::agent::resources::{BusFigures, ScrollbackFigures};
 use crate::bus::{AgentId, AgentState, BusReceiver, Inbox};
 use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
@@ -128,10 +128,9 @@ impl App {
             format!("{status_provider}/{} ({effort})", p.model())
         };
         self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
-        // Feeds `Viewport::sync`'s own fidelity recomputation once the live
-        // seam drives it as a `record::Printer`; harmless to set today.
-        for vp in self.tabs.views_mut() {
-            vp.set_context_window(self.context_window);
+        // The denominator of the fidelity each scrollback stamps its prose with.
+        for sb in self.tabs.views_mut() {
+            sb.set_context_window(self.context_window);
         }
     }
 
@@ -221,8 +220,8 @@ impl App {
     /// cannot — the exit, where the loop is over and nothing more will arrive.
     pub fn mark_ready(&mut self) {
         let focused = self.tabs.focused();
-        if let Some(vp) = self.tabs.viewport_mut(focused) {
-            vp.set_state(AgentState::Ready);
+        if let Some(sb) = self.tabs.scrollback_mut(focused) {
+            sb.set_state(AgentState::Ready);
         }
     }
 
@@ -232,14 +231,14 @@ impl App {
     pub(super) fn animating(&self, margin: Duration) -> bool {
         let pending = self
             .tabs
-            .focused_viewport()
-            .is_some_and(|vp| vp.state().state.pending());
+            .focused_scrollback()
+            .is_some_and(|sb| sb.state().state.pending());
         pending || self.gesture.toast_live(margin) || !self.focused_waiting()
     }
 
     /// Age out sub-session tabs, reset root scrollback, zero cost, redraw the
     /// banner. The workers `/clear` cancels fade out through the usual
-    /// `dying`/`LINGER` path, so their viewports still reach `flush_logs`.
+    /// `dying`/`LINGER` path, so their scrollbacks still reach `flush_logs`.
     pub fn clear(&mut self, info: &banner::SessionInfo<'_>, term: &mut Term) -> io::Result<()> {
         let root = self.tabs.root();
         // A tab already dying keeps its earlier death instant, so a child that
@@ -249,8 +248,8 @@ impl App {
         // still holds whatever the worker emitted before the streaming select
         // noticed the flag — one `wait_for_cancel` poll, ~50 ms.
         self.root_clear_drain = true;
-        if let Some(vp) = self.tabs.viewport_mut(root) {
-            vp.reset();
+        if let Some(sb) = self.tabs.scrollback_mut(root) {
+            sb.reset();
         }
         self.total_usage = Usage::default();
         self.last_input = 0;
@@ -287,11 +286,12 @@ impl App {
     }
 
     /// Fold one witnessed record fact into the screen — the sole way a
-    /// `Display`/`Forensic` commit reaches it.  Steps the recording
-    /// viewport's own fold-memo and re-syncs from it
-    /// ([`Viewport::commit_fact`]); [`Display::SubagentDone`] always lands in
-    /// root's scrollback, whatever nesting depth drained the result, since
-    /// the trunk is the permanent record of delegated work.
+    /// `Display`/`Forensic` commit reaches it.  The recording scrollback steps
+    /// its own fold-memo and draws what the step reports
+    /// ([`Scrollback::fact`](crate::record::Printer::fact));
+    /// [`Display::SubagentDone`] always lands in root's scrollback, whatever
+    /// nesting depth drained the result, since the trunk is the permanent
+    /// record of delegated work.
     pub fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
         if !self.admits(
             id,
@@ -300,7 +300,7 @@ impl App {
             return;
         }
         // Bookkeeping the view fold does not itself keep: the richer
-        // `Usage` (dollars, cache) `App`/`Viewport` track for the status
+        // `Usage` (dollars, cache) `App`/`Scrollback` track for the status
         // line and the matrix, where `Blocks` only sums plain token counts.
         if let Record::Forensic(Forensic::UsageDelta { usage }) = rec.value() {
             let u = Usage::from(usage);
@@ -308,25 +308,25 @@ impl App {
                 self.last_input = u.input;
             }
             self.total_usage += u;
-            if let Some(vp) = self.tabs.viewport_mut(id) {
-                vp.add_usage(u);
+            if let Some(sb) = self.tabs.scrollback_mut(id) {
+                sb.add_usage(u);
             }
         }
         let target = match rec.value() {
             Record::Display(Display::SubagentDone { .. }) => self.tabs.root(),
             _ => id,
         };
-        self.with_viewport(target, |vp| vp.commit_fact(rec));
+        self.with_scrollback(target, |sb| sb.fact(rec));
     }
 
     /// Draw one live-only transient directly, with no log-backed fold: the
     /// mirror of [`Self::fact`] for [`crate::bus::Signal::Transient`].
     /// [`Transient::Born`]/[`Died`]/[`Resources`] need the tabs a bare
-    /// `Viewport` cannot see, so they are answered here; everything else
-    /// forwards to [`record::Printer::transient`] on the recording viewport.
+    /// `Scrollback` cannot see, so they are answered here; everything else
+    /// forwards to [`record::Printer::transient`] on the recording scrollback.
     pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {
         // A `Cleared` answering *our* `/clear` is the gate's key and nothing
-        // more: [`Self::clear`] already blanked the viewport and redrew the
+        // more: [`Self::clear`] already blanked the scrollback and redrew the
         // banner at the keystroke, and the drain kept the interval empty, so
         // wiping again here would only cost the banner.  A `Cleared` this
         // frontend did not author finds no armed gate and blanks as ever.
@@ -353,13 +353,13 @@ impl App {
             // Root never enters the linger window; it outlives the session.
             Transient::Died => self.tabs.died(id),
             Transient::Resources { card, .. } => self.frontend_resources(id, card, bus),
-            other => self.with_viewport(id, |vp| vp.transient(&other)),
+            other => self.with_scrollback(id, |sb| sb.transient(&other)),
         }
     }
 
     /// The agent's `/resources` card arrives with its own rows; the frontend
     /// appends the accumulators it owns.  Here, at the render seam, because
-    /// only this thread may read the tabs and viewports.  Chrome, never
+    /// only this thread may read the tabs and scrollbacks.  Chrome, never
     /// recorded — no `Display` twin exists to draw it instead.
     fn frontend_resources(
         &mut self,
@@ -369,15 +369,14 @@ impl App {
     ) {
         let (blocks, rows, bytes) = self
             .tabs
-            .viewport(id)
-            .map_or((0, 0, 0), super::viewport::Viewport::probe_figures);
+            .scrollback(id)
+            .map_or((0, 0, 0), super::scrollback::Scrollback::probe_figures);
         let frontend = crate::agent::resources::frontend_rows(
-            ViewportFigures {
+            ScrollbackFigures {
                 blocks,
                 rows,
                 bytes,
-                blocks_cap: super::viewport::VIEWPORT_MAX_BLOCKS as u64,
-                rows_cap: super::viewport::VIEWPORT_MAX_ROWS as u64,
+                window: crate::record::BLOCKS_WINDOW as u64,
             },
             self.tabs.census(),
             BusFigures {
@@ -391,18 +390,18 @@ impl App {
         self.push_chrome(
             id,
             ChromeKind::Plain,
-            line::render_card_framed(&card, line::CARD_INDENT, READ_W, 3),
+            line::render_card_framed(&card, line::CARD_INDENT, READ_W, Detail::Full),
         );
     }
 
-    /// Hand the session's viewport to `f`.
-    fn with_viewport(&mut self, id: AgentId, f: impl FnOnce(&mut Viewport)) {
-        match self.tabs.viewport_mut(id) {
-            Some(vp) => f(vp),
+    /// Hand the session's scrollback to `f`.
+    fn with_scrollback(&mut self, id: AgentId, f: impl FnOnce(&mut Scrollback)) {
+        match self.tabs.scrollback_mut(id) {
+            Some(sb) => f(sb),
             None => {
                 ral_core::dbg_trace!(
                     "tui",
-                    "viewport event DROPPED — no viewport for id={id}; known={:?}",
+                    "scrollback event DROPPED — no scrollback for id={id}; known={:?}",
                     self.tabs.ids()
                 );
             }
@@ -415,7 +414,7 @@ impl App {
         shape: ChromeKind,
         lines: Vec<Line<'static>>,
     ) {
-        self.with_viewport(id, |vp| vp.push_chrome(shape, lines));
+        self.with_scrollback(id, |sb| sb.push_chrome(shape, lines));
     }
 
     /// A dim view-local note — a slash legend, a clipboard ack. Drawn, not
@@ -512,7 +511,7 @@ impl App {
         self.prompt_state.clear_cx_pending();
         // Motion and press alike, so the dial glyph brightens the instant the
         // pointer crosses a dialable block.
-        self.gesture.update_hover(me, self.tabs.focused_viewport());
+        self.gesture.update_hover(me, self.tabs.focused_scrollback());
         let effect = match me.kind {
             MouseEventKind::ScrollUp => Some(Effect::Scroll(-SCROLL_STEP)),
             MouseEventKind::ScrollDown => Some(Effect::Scroll(SCROLL_STEP)),
@@ -524,7 +523,7 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => self.gesture.drag(me, SCROLL_STEP),
             MouseEventKind::Up(MouseButton::Left) => {
-                self.gesture.release(self.tabs.focused_viewport())
+                self.gesture.release(self.tabs.focused_scrollback())
             }
             _ => None,
         };
@@ -533,18 +532,18 @@ impl App {
         }
     }
 
-    /// Run a gesture's requested mutation against the focused viewport.
+    /// Run a gesture's requested mutation against the focused scrollback.
     fn apply(&mut self, effect: Effect) {
         let f = self.tabs.focused();
         match effect {
             Effect::Scroll(delta) => {
-                if let Some(vp) = self.tabs.viewport_mut(f) {
-                    vp.scroll_by(delta);
+                if let Some(sb) = self.tabs.scrollback_mut(f) {
+                    sb.scroll_by(delta);
                 }
             }
-            Effect::CycleBlock(idx) => {
-                if let Some(vp) = self.tabs.viewport_mut(f) {
-                    vp.cycle_block(idx);
+            Effect::CycleBlock(hit) => {
+                if let Some(sb) = self.tabs.scrollback_mut(f) {
+                    let _ = sb.cycle_block(hit);
                 }
             }
             Effect::Copy(text) => {
@@ -554,33 +553,33 @@ impl App {
         }
     }
 
-    /// Flush every viewport — live, dying, or aged-out — to its session's
+    /// Flush every scrollback — live, dying, or aged-out — to its session's
     /// `user.log`. Returns the paths root first, then subagents in dispatch
     /// order, stable across runs.
     pub fn flush_logs(&mut self) -> io::Result<Vec<PathBuf>> {
         self.tabs
             .views_mut()
-            .map(|vp| Ok(vp.flush_log()?.to_path_buf()))
+            .map(|sb| Ok(sb.flush_log()?.to_path_buf()))
             .collect()
     }
 
     /// The focused tab's latest reply as raw markdown, for `/copy`. Empty when
-    /// the tab has no viewport or its last block is not prose.
+    /// the tab has no scrollback or its last block is not prose.
     pub(in crate::tui) fn latest_reply(&self) -> String {
         self.tabs
-            .focused_viewport()
-            .map(Viewport::latest_reply_md)
+            .focused_scrollback()
+            .map(Scrollback::latest_reply_md)
             .unwrap_or_default()
     }
 
     /// Flush the focused tab's `user.log` and return its path for `/export`.
     pub(in crate::tui) fn flush_focused_log(&mut self) -> io::Result<PathBuf> {
         let focused = self.tabs.focused();
-        let vp = self
+        let sb = self
             .tabs
-            .viewport_mut(focused)
-            .expect("focused tab always has a viewport");
-        Ok(vp.flush_log()?.to_path_buf())
+            .scrollback_mut(focused)
+            .expect("focused tab always has a scrollback");
+        Ok(sb.flush_log()?.to_path_buf())
     }
 
     pub fn banner(&mut self, term: &mut Term, s: &banner::SessionInfo<'_>) -> io::Result<()> {
@@ -604,15 +603,15 @@ impl App {
             .min(usize::from(READ_W));
         let opening_width = u16::try_from(opening_width).expect("READ_W fits u16");
 
-        if let Some(vp) = self.tabs.viewport_mut(self.tabs.root()) {
-            vp.push_chrome(ChromeKind::Opening, splash);
-            vp.push_chrome(
+        if let Some(sb) = self.tabs.scrollback_mut(self.tabs.root()) {
+            sb.push_chrome(ChromeKind::Opening, splash);
+            sb.push_chrome(
                 ChromeKind::Opening,
                 line::render_filled_card(
                     &banner::session_card(s),
                     banner::OPENING_INDENT,
                     opening_width,
-                    3,
+                    Detail::Full,
                 ),
             );
         }
@@ -642,8 +641,8 @@ mod tests {
     fn text(app: &mut App, id: AgentId) -> String {
         let w = app
             .tabs
-            .viewport_mut(id)
-            .expect("the tab under test has a viewport")
+            .scrollback_mut(id)
+            .expect("the tab under test has a scrollback")
             .render_window(READ_W, 40);
         w.lines
             .iter()
@@ -743,16 +742,16 @@ mod tests {
         );
     }
 
-    /// A pin is ambient register state, and the coalescing that used to be
-    /// The grouping window is `SurfaceBuffer`'s, entirely worker-side: a pin
-    /// never reaches that buffer at all, so it cannot split a run it is never
-    /// offered to.  This drives the real production pipeline — `SurfaceBuffer`
-    /// grouping into a `Display::ObservationGroup` commit, folded by
-    /// `record::View`, drawn by `Viewport::sync`.
+    /// A pin is ambient register state: the grouping window is
+    /// `SurfaceBuffer`'s, entirely worker-side, and a pin never reaches that
+    /// buffer at all, so it cannot split a run it is never offered to.  This
+    /// drives the real production pipeline — `SurfaceBuffer` grouping into a
+    /// `Display::ObservationGroup` commit, stepped through the scrollback's own
+    /// fold by `Printer::fact`.
     #[test]
     fn a_pin_never_splits_a_coalesced_observation_run() {
         use crate::record::commit::SurfaceBuffer;
-        use crate::record::{Blocks, Emitter as RecordEmitter, FleetSink, Fold, Printer, View};
+        use crate::record::{Emitter as RecordEmitter, FleetSink, Printer};
 
         let (mut app, _rx, root) = app();
         let path = std::env::temp_dir().join(format!(
@@ -785,12 +784,12 @@ mod tests {
         let mut buf = SurfaceBuffer::new();
         buf.absorb_observation(&recorder, root.id, read_at("a.rs"))
             .unwrap();
-        // The pin lands directly in the viewport's own register — it is
+        // The pin lands directly in the scrollback's own register — it is
         // ambient state like usage, never routed through the buffer that
         // groups reads — so it cannot stand between the two below.
         app.tabs
-            .viewport_mut(root.id)
-            .expect("root has a viewport")
+            .scrollback_mut(root.id)
+            .expect("root has a scrollback")
             .set_pin(
                 "tasks".into(),
                 Card(vec![Mark::Raw {
@@ -801,23 +800,21 @@ mod tests {
             .unwrap();
         buf.flush_surfaces(&recorder).unwrap();
 
-        let mut blocks = Blocks::default();
+        let sb = app.tabs.scrollback_mut(root.id).expect("root has a scrollback");
         while let Ok(sig) = brx.try_recv() {
             if let crate::bus::Signal::Fact(_, rec) = sig {
-                View::step(&mut blocks, &rec).expect("every commit here is a Display record");
+                sb.fact(&rec);
             }
         }
-        let vp = app.tabs.viewport_mut(root.id).expect("root has a viewport");
-        vp.sync(&blocks);
 
-        let vp = app.tabs.viewport(root.id).expect("root has a viewport");
+        let sb = app.tabs.scrollback(root.id).expect("root has a scrollback");
         assert_eq!(
-            vp.probe_figures().0,
-            2,
-            "the call, then the two reads as one coalesced block"
+            sb.probe_figures().0,
+            1,
+            "the call and the two reads it produced are one block"
         );
         assert_eq!(
-            vp.pins()
+            sb.pins()
                 .iter()
                 .map(|(k, _)| k.as_str())
                 .collect::<Vec<_>>(),
@@ -862,8 +859,8 @@ mod tests {
         app.transient(helper, Transient::Died, &rx);
         let blocks = app
             .tabs
-            .viewport(helper)
-            .expect("the child keeps its viewport through the linger window")
+            .scrollback(helper)
+            .expect("the child keeps its scrollback through the linger window")
             .probe_figures()
             .0;
 
@@ -886,8 +883,8 @@ mod tests {
         );
         assert_eq!(
             app.tabs
-                .viewport(helper)
-                .expect("viewport")
+                .scrollback(helper)
+                .expect("scrollback")
                 .probe_figures()
                 .0,
             blocks,

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 44084864
+generated_at_commit: 146084be
 generated_at_date: 2026-09-09
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -88,11 +88,15 @@ projection is built as, on call and memoised nowhere — see
 [[internals/session-record#The provider-facing context is a pure function of the structure|the context-as-projection section]]
 and [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 `record/view.rs` (the view fold into `Blocks`; block construction is private).
-`Viewport` and `Headless` both implement `record::Printer`
-(`transient`/`sync`): a live `Signal::Fact` steps the view fold beside the
-printer and re-syncs it (`Viewport::commit_fact`, `Headless::absorb`),
-the same fold resume seeds with one `Printer::sync` call from a `record.jsonl`
-replay — so the live path and resume draw through the identical fold.
+`Scrollback` and `Headless` both implement `record::Printer`
+(`transient`/`fact`): each is itself a fold over the one log, owning its own
+`Blocks` memo, stepping it per record and acting on the `Delta` that step
+reports — `Opened`, `Grew`, `Patched`, `Quiet`
+([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
+A printer is handed the record only to step that memo, and renders from
+`record::BlockKind` off it. Resume hands the scrollback a replayed memo
+(`Scrollback::seed`) and builds its mirror block by block the way a live commit
+does — so the live path and resume are one construction.
 
 The TUI mints one **session-lived** bus, so a detached async agent clones its
 sender and streams a live tab through the same id-routed draw path a sync child
@@ -122,8 +126,8 @@ stays visible until quiescence.
   into the fresh file.
 
 The TUI renders a sibling `user.log` — the "user view" — as a stream the
-viewport is a window over: a block is written once, when eviction drops it
-(`Viewport::enforce_window_caps`), into a retired prefix that only ever grows,
+scrollback is a window over: a block is written once, when the mirror's head
+trim drops it (`Scrollback::trim`), into a retired prefix that only ever grows,
 and the blocks still resident are written past that prefix provisionally at
 flush points (session end, `/export`), which the next retirement rewinds over
 rather than repeating
@@ -133,32 +137,32 @@ keeps only what fits; crash durability still lives in `record.jsonl`, which is
 flushed per record. Both files live under the durable per-run log directory
 (`bootstrap::log_run_dir`,
 `$XDG_STATE_HOME/exarch/<project>/<run>/sessions/<id>/`). Every touch of that
-file lives in one place: `tui/viewport.rs` keeps both the writer (`Log`) and
+file lives in one place: `tui/scrollback.rs` keeps both the writer (`Log`) and
 the `/export` copy (`export_log`) beside each other, the single `user.log` I/O
 door, so the `/export` handler (`tui/commands.rs`, `resolve_export_path`)
 resolves and guards the destination but never reaches the filesystem itself.
 
-On resume, a viewport is a fold's memo: `tui_loop::run` replays
-`record.jsonl` into `record::Blocks` before the worker spawns, seeds the
-root viewport with one `Viewport::seed` call, and restores cumulative usage
-from the replayed deltas — the "resumed" note is the boundary between
-replayed history and the live session. `seed` is `sync` plus the fact that
-the seeded window is already in `user.log`, written by the run that recorded
-it, so the resumed transcript continues rather than repeats. For the running session the viewport
-stays its own live accumulator, fed one `Signal` at a time: `tui_loop::dispatch`
-routes a `Signal::Fact` to `App::fact` (which steps the view fold and re-syncs)
-and a `Signal::Transient` to `App::transient` (drawn directly, with no fold
-behind it) — the same two entry points a resume's `sync` call primes.
+On resume, a scrollback takes over the fold's memo: `tui_loop::run` replays
+`record.jsonl` into `record::Blocks` before the worker spawns, hands it to the
+root scrollback (`Scrollback::seed`), and restores cumulative usage from the
+replayed deltas — the "resumed" note is the boundary between replayed history
+and the live session. `seed` walks that memo treating each block as `Opened`,
+and marks the mirror it builds as already in `user.log`, written by the run
+that recorded it, so the resumed transcript continues rather than repeats. For
+the running session the scrollback is fed one `Signal` at a time:
+`tui_loop::dispatch` routes a `Signal::Fact` to `App::fact` (which steps the
+scrollback's own fold and draws the delta) and a `Signal::Transient` to
+`App::transient` (drawn directly, with no fold behind it).
 
 Two presentation surfaces, both folding the one `Signal` vocabulary through
 `fact`/`transient`:
 
- `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,rail,render,select,status,tabs,terminal,tui_loop,viewport}.rs`) — the full-screen
+ `tui.rs` (+ `tui/{app,banner,block,commands,fidelity,gesture,group,highlight,line,login,matrix,md,model_picker,palette,picker,prompt,rail,render,scrollback,select,status,tabs,terminal,tui_loop}.rs`) — the full-screen
  TUI. It owns the alternate screen and its own scrollback: each session is a
- `Vec<Block>` (`tui/block.rs`), and the whole frame is redrawn each tick from
- a memoised flatten of those blocks into wrapped visual rows. A tool call is
- the one collapsible block — its summary shows shut, the full ral script when
- a click opens it; the wheel scrolls, click-drag selects and copies the
+ `Vec<Block>` (`tui/block.rs`) mirroring the view fold one incident at a time,
+ and the whole frame is redrawn each tick from each block's own memoised visual
+ rows. A burst of `ral` work is the collapsible object — its tip call's intent
+ shows shut, every call with its ral source when a click opens it; the wheel scrolls, click-drag selects and copies the
  rail-stripped text via OSC-52, and Shift-drag falls through to the terminal's
  own selection. `tui/md.rs` is the streaming markdown renderer — a ral code
  block in the model's prose (tagged `ral`, or untagged, which is what the
@@ -172,10 +176,11 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  the sentence; a taller one owns its rows, so it renders only for display
  math, inset from the prose. A grid too wide for the wrap budget, or a formula
  the parser refuses, falls back to the LaTeX the model wrote, inked as the
- literal it is. `tui/group.rs` is the
- coalescing projection that folds an observation run into one dialable
- object; `tui/viewport.rs` the per-session block buffer, scroll position, and
- `user.log` writer; `tui/rail.rs` the data-encoding marginal rail, and
+ literal it is. `tui/group.rs` renders the `▸`
+ part of a group — one burst of `ral` work as a single dialable object, its
+ body at one of three `Detail` rungs (`Tally`, `Summary`, `Full`);
+ `tui/scrollback.rs` the per-session mirror of the view fold, scroll position,
+ and `user.log` writer; `tui/rail.rs` the data-encoding marginal rail, and
  `tui/row.rs` the `Row { gutter, content }` that *represents* the margin so
  copy and selection can never reach it. The
  transcript is laid out as a graphic on two orthogonal planes
@@ -209,7 +214,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  - **the marginal rail: one cell, three variables.** Shape → block *kind*, hue
    → the *producing agent*, value → *magnitude*. Hue is a per-*view* tint, not
    a per-block one: every block in a tab shares that tab's agent slot
-   (`Viewport::agent`, threaded into `Block::lines` at render time), so the
+   (`Scrollback::agent`, threaded into `Block::lines` at render time), so the
    whole rail glows one hue, read on a tab-switch as "whose transcript is
    this". The human's prompt fence is the lone exception — a `❖` in neutral
    `PROMPT_INK` so it never reads as just another agent's mark.
@@ -219,44 +224,39 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    in scrollback as it is spoken, a line at a time, in one block per run.
    Where a cut falls therefore carries no meaning, which is what frees the
    producer from ever having to find a safe place to break. What no record
-   covers is exactly the text past the last newline, and `Viewport::live_tail`
+   covers is exactly the text past the last newline, and `Scrollback::live_tail`
    renders that open line *inside the block that will absorb it*: the trailing
    block's own source plus the open line plus the newline it is about to gain,
    in that block's own `Fidelity`, drawn through the one path a committed
-   block draws by — so the record that completes the line changes the text and
-   not the picture, and the markdown context the line sits in (an open fence,
-   a list) is the block's own. The absorbed block's rows come off the
-   flattened tail and are redrawn whole; what is on screen is the authority,
+   block draws by — `Block::seated` takes the open line as a parameter and the
+   result is never memoised — so the record that completes the line changes
+   the text and not the picture, and the markdown context the line sits in (an
+   open fence, a list) is the block's own. What is on screen is the authority,
    which agrees with the fold because both are "the run of records of one
-   lane". At most one lane is ever open: prose ends the reasoning run on the
+   lane". At most one lane is ever open: prose ends the thinking run on the
    printer's side exactly as it does on the worker's, so `Transient::Token`
-   clears the trace's open line as `Stream::push` flushes the trace lane, and
+   clears the thinking lane's open line as `Stream::push` flushes it, and
    `Transient::Boundary` clears whatever is left when no record will cover it.
-   Reasoning therefore streams as reasoning — dimmed through
-   `md::render_reasoning`, on the `∴` rail — rather than as a magnitude, and
+   Thinking therefore streams as thinking — dimmed through
+   `md::render_thinking`, on the `∴` rail — rather than as a magnitude, and
    its tail records where the prose after it resumes, never at the step's end,
-   which is exactly where a `∴` block must not land. Its grain header weighs
-   the run against the prose it became, which the record cannot carry (it
-   precedes it) and the view therefore measures: `viewport::answer_run`
-   reads the unbroken answer run that follows each `∴` row. The flatten reads
-   a turn as *deliberation, then work*: where two or more traces alternate
-   with the observation runs they ordered (`Viewport::deliberation_end`), the
-   traces are hoisted above that work and drawn as one `∴` block over one `▸`
-   run, so the turn reads thought, work, answer rather than in the
-   interleaving the wire happened to deliver. Prose ends a stretch, as does
-   every barrier an observation run stops at, and the window's tail trace is
-   exempt — that is the live edge, where `live_tail` draws the open line, and
-   it joins the stretch once the work it ordered lands beneath it. Only the
-   flatten reorders: blocks, their record ids, the dial state keyed to them
-   and `user.log` all stay in arrival order. A thinking block has two rungs only — its
-   grain header, or the whole trace — the dial hopping over `Context`
-   (`Block::rung_up`/`rung_down`), which for a trace would be a dead detent.
-   Traces also answer to one standing rung, `/thinking`'s datum: `Tabs::traces`
-   holds it because it outlives any one view, `Viewport::set_traces_level`
-   moves the traces on screen through the same seam a click cycles (so the rung
-   is remembered against a resync), and every later `sync` and live seat is
-   born there. A per-block dial still wins — `Viewport::reveal` is consulted
-   after the standing rung.
+   which is exactly where a `∴` must not land. Its grain header weighs the
+   deliberation against the prose it became, which the record cannot carry (it
+   precedes it) and the view therefore measures: `Scrollback::grain` stamps the
+   group above a prose block with that block's own mass as it opens and grows.
+   A turn reads *deliberation, then work* because that is how the mirror
+   *builds* it, not how a projection reorders it: `Thinking`, a `ToolCall`
+   with a stated intent, an observation-origin card and a turn rule all join
+   the `Block::Group` standing at the tail, which renders its `∴` part above
+   its `▸` part; every other kind is a barrier that pushes its own block and
+   ends the group. Blocks, their record ids and `user.log` are all in arrival
+   order, and so is the group — only its two parts are read in a fixed order.
+   Each part carries its own `Detail`, so one group answers two dials and
+   `Scrollback::block_at` reports which part a row belongs to; the deliberation's
+   two rungs are its grain header or the whole thing. The `∴` part also
+   answers to one standing rung, `/thinking`'s datum: `Tabs::thinking` holds it
+   because it outlives any one view, and `Scrollback::set_thinking_level` moves
+   every group on screen while every group still to arrive is born there.
  - **a surfaced general card as a bounded object.** A diff-less
    `CardOrigin::Surfaced` card — the model's deliberate "look at this" —
    renders through `line::render_card_framed` as a box indented `CARD_INDENT`
@@ -265,15 +265,16 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    so its left edge aligns with the rest of the transcript. A file mutation — a diff card or a write card — wears the
    patch-shape change-bar `▎`; an observation card folds into its ral group.
    A cancelled turn is `ChromeKind::Cancelled`: it wears the error rail `╳`
-   while remaining distinct from `ChromeKind::Error`, so `Block::is_error` and
-   the matrix failure cell report actual failures only.
+   while remaining distinct from `ChromeKind::Error`, so
+   `Scrollback::last_is_error` — read off the fold, the failure being a fact of
+   the record — and the matrix failure cell report actual failures only.
 
  The frame's terminal writes are bracketed in a synchronized update
  (`BeginSynchronizedUpdate` / `EndSynchronizedUpdate`) so the emulator swaps
  the whole diff atomically — without it a tail-following redraw tears while a
  full page streams tool calls. The same steadiness is held in the scroll
- arithmetic: `Viewport::render_window` computes `offset` (first visible row,
- topping at `total - height`) over a memoised whole-buffer flatten, and
+ arithmetic: `Scrollback::render_window` computes `offset` (first visible row,
+ topping at `total - height`) over one walk of the mirror's memoised rows, and
  reports scroll position as a fixed-position magnitude on the rule line
  (`RenderWindow::scroll_pct`, rendered `⇣ 72%` / `⇣ end`) rather than an
  animated right-margin scrollbar.
@@ -296,7 +297,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  clock: the track is the scale the filled cells are read against and stays put
  between turns, while the readout goes blank, nothing being timed. The width is
  the same either way, so no field shifts. The `StateSpan` (state, entry instant,
- characters streamed since) lives on `Viewport`, not `App`, so each tab times
+ characters streamed since) lives on `Scrollback`, not `App`, so each tab times
  its own.
  A tab is a `Weak<Agent>` for reach, the birth facts off its `Born` notice
  (name, parent, log path) for the record, and a linger clock — one `Tab` per
@@ -335,29 +336,23 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  live sub-tab through the same linger window
  ([[decisions/260621_session-lifetime-event-bus|session-lifetime-event-bus]]).
  Once `LINGER` elapses, `Tabs::tick` evicts the dead view into a `Tombstone`
- (`Viewport::evict_to_tombstone`) — exactly agent id, final status, and log
- path, everything else (blocks, the flatten, streaming buffers, pins)
+ (`Scrollback::evict_to_tombstone`) — exactly agent id, final status, and log
+ path, everything else (blocks, their render memos, streaming buffers, pins)
  dropped — but retired to `user.log` first, since the tombstone promises that
  log is readable; no reload-from-`user.log` machinery is built. Every live
- viewport also caps its own retained window — `VIEWPORT_MAX_BLOCKS` blocks and
- `VIEWPORT_MAX_ROWS` rendered rows, oldest evicted first — since older
- blocks are durable in the session's `record.jsonl` and in `user.log` by the
- time they go. That cap is presentational, on top of the one bound the view
- fold itself keeps: `BLOCKS_WINDOW` resident rows (`record/view.rs`), oldest
- dropped as new ones land, so the memo every printer syncs from is bounded
- once rather than trimmed per printer. A printer that draws incrementally
- instead of wholesale holds its own cursor by `Seq` identity
- (`Headless::sync_agent`) — the memo keeps no cursor of anyone else's, since a
- windowed memo makes an index wrong and a flush-gated floor makes the window
- never move. `Viewport::sync` draws wholesale but rebuilds incrementally: the
- fold stamps every row with the revision it last moved at (`Block::rev`), and
- the printer rebuilds from the first row past the revision it last synced
- (`Viewport::rebuild_floor`), carrying every block below over whole. Rows this
- viewport's own window has already evicted (`Viewport::evicted_through`) are
- never built again to be dropped again.
+ scrollback is bounded by exactly one window, the view fold's own:
+ `BLOCKS_WINDOW` resident blocks (`record/view.rs`), oldest dropped as new ones
+ land. After every step `Scrollback::trim` walks the mirror's head against the
+ fold's first block — one comparison — and what it drops is retired to
+ `user.log` on the way out, so a block is durable by the time it leaves heap.
+ Chrome, which no record authors, inherits the expiry of the block it was drawn
+ after; the banner, drawn before any block, lives while the fold still holds
+ the session's opening block (`Blocks::origin`). Nothing is rebuilt: a record
+ moves one block, and the mirror moves that block
+ ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
  `/clear` also cancels the in-flight exchange: `route_submit` raises
  `cancel::raise_interrupt` and cascades `agents.cancel_descendants(root)` *before* blanking
- the viewport, so the streaming `select!` in `provider::complete` unwinds within
+ the scrollback, so the streaming `select!` in `provider::complete` unwinds within
  one `wait_for_cancel` poll (~50 ms) rather than running to its natural end.
  Straggler tokens the worker already emitted into the bus before the
  cancel noticed are dropped by `App`'s `root_clear_drain` guard, which arms in
@@ -482,11 +477,11 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/app.rs` — the `App` orchestrator: event routing, the `root_clear_drain` guard, per-kind push methods
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
-        - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Viewport`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management and the parent climb, `tick`'s tombstone eviction past `LINGER`
-        - `tui/viewport.rs` — per-session scrollback: `Viewport`, block push/flatten/render, incremental `Printer::sync` (`rebuild_floor`, `evicted_through`), the `VIEWPORT_MAX_BLOCKS`/`VIEWPORT_MAX_ROWS` window caps (oldest evicted first, retired to `user.log` on the way out), the `Log` transcript writer, `Tombstone`
+        - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Scrollback`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management and the parent climb, `tick`'s tombstone eviction past `LINGER`
+        - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Printer::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
         - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
-        - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Viewport`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a viewport or touches the terminal
+        - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal
         - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten
         - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `seat`/`wrap`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
         - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version, omitting the disposable scratch path), `legend_panel`, ART/EAGLE constants; the wordmark and width-matched card use rail-free `ChromeKind::Opening`

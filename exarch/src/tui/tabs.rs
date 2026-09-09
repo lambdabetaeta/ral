@@ -9,8 +9,8 @@ use crate::agent::Agent;
 use crate::agent::resources::ViewFigures;
 use crate::bus::AgentId;
 
-use super::block::{AgentSlot, Reveal};
-use super::viewport::Viewport;
+use super::block::{AgentSlot, Detail};
+use super::scrollback::Scrollback;
 use super::{DEMOTE_IDLE, LINGER};
 
 /// One session's view, and the frontend's whole handle on the agent behind it.
@@ -30,17 +30,17 @@ pub(super) struct Tab {
     parent: Option<AgentId>,
     /// Retained past death and past bar expiry — tombstoned, not dropped — so
     /// `App::flush_logs` can still write this session's `user.log`.
-    viewport: Viewport,
+    scrollback: Scrollback,
     /// The linger clock: the stream position of `Died`, or the `/clear`
     /// keystroke.  In the bar while `None` or younger than [`LINGER`].
     retired: Option<Instant>,
 }
 
 impl Tab {
-    /// Whether the bar still shows this row: read off the viewport, which
+    /// Whether the bar still shows this row: read off the scrollback, which
     /// [`Tabs::tick`] tombstones at the very moment the row goes.
     fn in_bar(&self) -> bool {
-        !self.viewport.tombstoned()
+        !self.scrollback.tombstoned()
     }
 
     /// Frozen: still drawing its final frame, but no further event belongs in
@@ -71,7 +71,7 @@ pub(super) struct TabRow<'a> {
     pub id: AgentId,
     pub name: &'a str,
     pub parent: Option<AgentId>,
-    pub vp: &'a Viewport,
+    pub sb: &'a Scrollback,
     pub lingering: bool,
     pub demoted: Option<Duration>,
 }
@@ -87,32 +87,32 @@ pub(super) struct Tabs {
     /// Root is `tabs[0]` and is never retired.
     tabs: Vec<Tab>,
     focus: AgentId,
-    /// The rung thinking traces read at across every view — `/thinking`'s
-    /// datum, kept here because it outlives any one viewport: a tab born after
-    /// the command was typed inherits it.
-    traces: Reveal,
+    /// The rung a group's deliberation reads at across every view —
+    /// `/thinking`'s datum, kept here because it outlives any one scrollback: a
+    /// tab born after the command was typed inherits it.
+    thinking: Detail,
     title_frame: u64,
 }
 
 impl Tabs {
     pub fn new(root: &Arc<Agent>, append: bool) -> Self {
-        let traces = Reveal::Full;
+        let thinking = Detail::Full;
         Self {
             tabs: vec![Tab {
                 id: root.id,
                 agent: Arc::downgrade(root),
                 name: root.name().to_string(),
                 parent: None,
-                viewport: Viewport::new(
+                scrollback: Scrollback::new(
                     root.log_dir().join("user.log"),
                     AgentSlot::default(),
                     append,
-                    traces,
+                    thinking,
                 ),
                 retired: None,
             }],
             focus: root.id,
-            traces,
+            thinking,
             title_frame: 0,
         }
     }
@@ -196,7 +196,7 @@ impl Tabs {
         let changed = !expired.is_empty();
         for id in expired {
             if let Some(tab) = self.tab_mut(id) {
-                tab.viewport.evict_to_tombstone();
+                tab.scrollback.evict_to_tombstone();
             }
             if self.focus == id {
                 self.focus = self.parent_focus(id);
@@ -226,23 +226,23 @@ impl Tabs {
             agent,
             name,
             parent,
-            viewport: Viewport::new(log_dir.join("user.log"), slot, false, self.traces),
+            scrollback: Scrollback::new(log_dir.join("user.log"), slot, false, self.thinking),
             retired: None,
         });
     }
 
-    /// Flip the standing rung for thinking traces and apply it to every view at
-    /// once — every trace on screen and every one still to arrive.  Reports the
-    /// rung now in force, which `/thinking` names back to the user.
-    pub(super) fn toggle_traces(&mut self) -> Reveal {
-        self.traces = match self.traces {
-            Reveal::Full => Reveal::Summary,
-            _ => Reveal::Full,
+    /// Flip the standing rung for deliberation and apply it to every view at
+    /// once — every group on screen and every one still to arrive.  Reports
+    /// the rung now in force, which `/thinking` names back to the user.
+    pub(super) fn toggle_thinking(&mut self) -> Detail {
+        self.thinking = match self.thinking {
+            Detail::Full => Detail::Summary,
+            _ => Detail::Full,
         };
         for tab in &mut self.tabs {
-            tab.viewport.set_traces_level(self.traces);
+            tab.scrollback.set_thinking_level(self.thinking);
         }
-        self.traces
+        self.thinking
     }
 
     /// Start the linger clock at this `Died`'s position in the stream.  Root
@@ -292,22 +292,22 @@ impl Tabs {
         self.tab(id).is_some_and(Tab::lingering)
     }
 
-    pub(super) fn viewport(&self, id: AgentId) -> Option<&Viewport> {
-        self.tab(id).map(|t| &t.viewport)
+    pub(super) fn scrollback(&self, id: AgentId) -> Option<&Scrollback> {
+        self.tab(id).map(|t| &t.scrollback)
     }
 
-    pub(super) fn viewport_mut(&mut self, id: AgentId) -> Option<&mut Viewport> {
-        self.tab_mut(id).map(|t| &mut t.viewport)
+    pub(super) fn scrollback_mut(&mut self, id: AgentId) -> Option<&mut Scrollback> {
+        self.tab_mut(id).map(|t| &mut t.scrollback)
     }
 
-    pub(super) fn focused_viewport(&self) -> Option<&Viewport> {
-        self.viewport(self.focused())
+    pub(super) fn focused_scrollback(&self) -> Option<&Scrollback> {
+        self.scrollback(self.focused())
     }
 
     /// Every view, tombstones included, in birth order — `App::flush_logs`'s
     /// stable log-path order.
-    pub(super) fn views_mut(&mut self) -> impl Iterator<Item = &mut Viewport> {
-        self.tabs.iter_mut().map(|t| &mut t.viewport)
+    pub(super) fn views_mut(&mut self) -> impl Iterator<Item = &mut Scrollback> {
+        self.tabs.iter_mut().map(|t| &mut t.scrollback)
     }
 
     /// Rows in the bar — not the tab count, which outlives them.
@@ -325,7 +325,7 @@ impl Tabs {
                 id: t.id,
                 name: &t.name,
                 parent: t.parent,
-                vp: &t.viewport,
+                sb: &t.scrollback,
                 lingering: t.lingering(),
                 demoted: t.demotion(focused, root),
             })
@@ -345,7 +345,7 @@ impl Tabs {
         }
     }
 
-    /// The ids a viewport event can legitimately name — read only by the trace
+    /// The ids a scrollback event can legitimately name — read only by the trace
     /// that reports a dropped one.
     #[cfg(debug_assertions)]
     pub(super) fn ids(&self) -> Vec<AgentId> {
@@ -418,8 +418,8 @@ mod tests {
         let child = root.id + 1;
         born(&mut tabs, child, "child", Some(root.id));
         for (id, text) in [(child, "child says hi"), (root.id, "root says hi")] {
-            tabs.viewport_mut(id)
-                .expect("both tabs have a viewport")
+            tabs.scrollback_mut(id)
+                .expect("both tabs have a scrollback")
                 .push_chrome(ChromeKind::Plain, vec![Line::from(text)]);
         }
         tabs.died(child);
@@ -430,12 +430,12 @@ mod tests {
         assert!(tabs.tick(), "the expiry is a repaint cue");
 
         assert_eq!(
-            tabs.viewport(child).unwrap().probe_figures().0,
+            tabs.scrollback(child).unwrap().probe_figures().0,
             0,
             "the dead child is tombstoned once past LINGER, its scrollback gone"
         );
         assert_eq!(
-            tabs.viewport(root.id).unwrap().probe_figures().0,
+            tabs.scrollback(root.id).unwrap().probe_figures().0,
             1,
             "the live root's own block survives the sibling's tombstoning untouched"
         );

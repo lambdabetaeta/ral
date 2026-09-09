@@ -57,7 +57,7 @@ appends nothing to a bound list either.
 
 ## How it flows
 
-One decoder, one new arm, one viewport field, and one enquiry class over the
+One decoder, one new arm, one scrollback field, and one enquiry class over the
 same mirror — no new concurrency invariant, because a pin is still emitted
 **in-run** through the live foreground sink, the exact place a card is
 already safe:
@@ -67,12 +67,12 @@ already safe:
   — `io` is a `Map`, the rest distinct `Variant` labels. It resolves to
   `Surface::Pin { key, card }` or `Surface::Unpin { key }`; the applier records
   a forensic breadcrumb and publishes the corresponding live `Transient`.
-- **Register.** The slots live on the [[map/exarch/frontend|`Viewport`]] as an
+- **Register.** The slots live on the [[map/exarch/frontend|`Scrollback`]] as an
   *ordered* `key → Card` map; a pin is `set_pin` (overwrite or insert, first-seen
-  order), an unpin is `drop_pin` — the in-place analogue of `push_card`, touching
-  neither the flatten nor the log. `reset` clears it on `/clear`, so pins are
+  order), an unpin is `drop_pin` — the in-place analogue of a scrollback block,
+  touching neither the screen nor the log. `reset` clears it on `/clear`, so pins are
   generation-bounded exactly as scrollback is.
-- **Mirror.** The session keeps its own copy alongside the viewport's, per
+- **Mirror.** The session keeps its own copy alongside the scrollback's, per
   agent: a `key → PinDigest` map (`PinDigests`, [[map/exarch/shell-eval|shell-eval]])
   holding the full decoded `Card`, written on every accepted pin/unpin. It was
   born to let the nudge name what is pinned without parsing rendered text; the
@@ -201,7 +201,7 @@ this is the model-authored dual of, and the encode-don't-stream doctrine),
 [[map/exarch/cards|cards]] (the render document the body decodes through, and
 the encoder that inverts it), [[map/exarch/builtins|builtins]] (the
 `pin-set`/`pin-clear`/`pin-read`/`pin-list` family and the tasks kit built over
-it), [[map/exarch/frontend|frontend]] (the viewport register and the draw
+it), [[map/exarch/frontend|frontend]] (the scrollback register and the draw
 layout), [[map/exarch/shell-eval|shell-eval]] (the host sink, the pin-first
 decode, and the mirror `pin-read` answers from), [[map/exarch/agent|agent]]
 (the nudge that reminds the model of its pins, from the same mirror

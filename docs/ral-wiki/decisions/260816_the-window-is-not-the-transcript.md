@@ -4,6 +4,8 @@ status: accepted
 
 # The window is not the transcript
 
+Amended by [[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]: the growing durable prefix stands, but the printer now mirrors the fold rather than re-deriving it, so the `Block::rev` revision, the rebuild floor and the printer's own window all go — and with them the "deliberately left" paragraph below.
+
 **A block is written to `user.log` once, when it leaves the viewport's window,
 and a sync rebuilds only the rows the fold has moved.** The two halves are one
 correction: a bounded window may not double as the source of an unbounded

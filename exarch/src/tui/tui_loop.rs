@@ -187,12 +187,11 @@ pub fn run(
     // records through the same seam the worker's own commits use.
     let recorder = session.recorder();
     if let Some((exchanges, bytes)) = session.resume_summary() {
-        // Fold the record log into the fold's memo *before* the note below,
-        // so the note is the boundary the plan names: everything ahead of it
-        // is replayed history, everything after is the live session — the
-        // one call `Viewport::sync` makes with a producer other than the
-        // live `push_*` half, seeding a fresh viewport that no `push_*` has
-        // touched yet (`dev/docs/plans/260814_one_seam_one_log.md`, step 7).
+        // Fold the record log into a memo *before* the note below, so the
+        // note is the boundary: everything ahead of it is replayed history,
+        // everything after is the live session.  The memo becomes the
+        // scrollback's own, and its mirror is built the way a live commit
+        // builds one.
         let record_path = session.log_dir().join("record.jsonl");
         let blocks = crate::record::replay::<crate::record::View>(
             &record_path,
@@ -206,8 +205,8 @@ pub fn run(
         // fresh session's opening frame.
         tui.app.total_usage.input = blocks.input_tokens();
         tui.app.total_usage.output = blocks.output_tokens();
-        if let Some(vp) = tui.app.tabs.viewport_mut(session.agent.id) {
-            vp.seed(&blocks);
+        if let Some(sb) = tui.app.tabs.scrollback_mut(session.agent.id) {
+            sb.seed(blocks);
         }
         // The boundary itself is chrome, never recorded: a second resume must
         // not replay a prior resume's note as if it were history.

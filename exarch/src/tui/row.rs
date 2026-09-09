@@ -5,9 +5,9 @@
 //! copy, drag-selection, hover, the log — reads `content` or `gutter` by name,
 //! so no amount of span coalescing or restyling can smuggle chrome into a
 //! clipboard.  Rows are born in the two places that seat rails — `Block::rows`
-//! and `Viewport::render_group`, both through [`Row::seat`] — multiplied in
+//! and `Scrollback::render_group`, both through [`Row::seat`] — multiplied in
 //! [`Row::wrap`], and flattened by [`Row::into_line`] at exactly two seams: the
-//! screen in [`super::render`] and `user.log` in `super::viewport`.
+//! screen in [`super::render`] and `user.log` in `super::scrollback`.
 
 use super::line::{self, is_blank, wrap_line};
 use super::palette::{RAIL_W, content_w};

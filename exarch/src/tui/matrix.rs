@@ -1,13 +1,13 @@
 //! The multi-agent status strip: one row per live session, drawn above the
 //! transcript by [`super::render`].  The rows are a pure projection of
-//! [`super::tabs`] and [`super::viewport`]; [`Matrix`] is the one retained
+//! [`super::tabs`] and [`super::scrollback`]; [`Matrix`] is the one retained
 //! value, and it holds an agent identity, never a row number.
 
 use super::line;
 use super::palette::{AGENT_HUES, PROMPT_INK, SLATE};
 use super::rail;
+use super::scrollback::Scrollback;
 use super::tabs::TabRow;
-use super::viewport::Viewport;
 use crate::bus::AgentId;
 use crate::provider;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -142,7 +142,7 @@ pub(super) fn strip(
 }
 
 fn token_spend(row: &TabRow<'_>) -> u64 {
-    let u = row.vp.usage();
+    let u = row.sb.usage();
     u.input + u.output
 }
 
@@ -355,9 +355,9 @@ impl MatrixRow {
         prefix: &str,
         cursor: bool,
     ) -> Self {
-        let (id, vp) = (row.id, row.vp);
+        let (id, sb) = (row.id, row.sb);
         let hue = AGENT_HUES
-            .get(vp.agent().0 as usize)
+            .get(sb.agent().0 as usize)
             .copied()
             .unwrap_or(AGENT_HUES[0]);
         let dim = row.lingering;
@@ -392,7 +392,7 @@ impl MatrixRow {
             } else if let Some(idle) = idle {
                 idle_age_mark(idle)
             } else {
-                turn_cells(vp, dim)
+                turn_cells(sb, dim)
             },
             tokens: if id == root {
                 String::new()
@@ -402,7 +402,7 @@ impl MatrixRow {
             bar: if id == root {
                 String::new()
             } else {
-                line::size_bar_text(vp.lines_touched())
+                line::size_bar_text(sb.lines_touched())
             },
             label_style,
             hue,
@@ -461,12 +461,12 @@ fn idle_age_mark(idle: Duration) -> String {
 /// The row's turn glyphs, most recent [`MATRIX_TURNS_W`] kept: `●` a turn that
 /// made a tool call, `○` one that did not.  A `dying` row — one in its linger
 /// window — leads with `√`, or `╳` if it ended on an error.
-fn turn_cells(vp: &Viewport, dying: bool) -> String {
-    let turns = vp.turns();
+fn turn_cells(sb: &Scrollback, dying: bool) -> String {
+    let turns = sb.turns();
     let tail = turns.len().saturating_sub(MATRIX_TURNS_W);
     let mut s = String::new();
     if dying {
-        s.push(if vp.last_is_error() { '╳' } else { '√' });
+        s.push(if sb.last_is_error() { '╳' } else { '√' });
     }
     let room = MATRIX_TURNS_W.saturating_sub(s.chars().count());
     for &had_call in turns[tail..].iter().rev().take(room).rev() {
