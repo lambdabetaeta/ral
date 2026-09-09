@@ -95,7 +95,7 @@ core spells a `spawn`'s `cmd` `<block>` and `prelude.ral`'s `defer` is a
 `spawn`.
 
 A settlement is *announced*, not bounded, so it is no card at all. Exarch's
-transcript seats those spans as a chrome line on the rail — `ChromeKind::Settled`
+transcript seats those spans as a chrome line on the rail — `Chrome::Settled`
 lifts to the `↘` of `RailKind::Subagent`, since background work landing in
 root's scrollback turns after the run that spawned it is the same event as an
 agent's answer arriving, whatever produced it — and synod's fold drops
@@ -139,9 +139,9 @@ mark, see [[map/exarch/frontend|frontend]]).
 sits is a property of the placement that asks for it: `CARD_INDENT` (4) for the
 transcript, `banner::OPENING_INDENT` for the session card, which shares the
 constant with the wordmark so the two align by construction rather than by a pad
-baked into `data/banner.txt`. The opening uses `render_filled_card` at the
-wordmark-and-eagle's measured width, so its two edges form one block; both
-opening pieces use rail-free `ChromeKind::Opening`. `render_pin` is the third
+baked into `data/banner.txt`. The opening's `Chrome::Session` fills the
+wordmark-and-eagle's measured width (`banner::opening_width`), so its two edges
+form one block; it and `Chrome::Splash` are the rail-free pair. `render_pin` is the third
 placement, framing in its agent's hue at the register's own margin.
 
 ## Block — derived disclosure and aggregation

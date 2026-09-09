@@ -3,13 +3,11 @@
 //! [`Signal::Transient`] through [`Self::transient`] — into scrollback blocks.
 
 use super::banner;
-use super::block::{AgentSlot, ChromeKind, Detail};
+use super::block::{AgentSlot, Chrome};
 use super::gesture::{Effect, GestureState};
-use super::line;
-use super::line::bold;
 use super::login::LoginOverlay;
 use super::matrix::{self, Matrix, MatrixSort, Nav};
-use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK, READ_W};
+use super::palette::AGENT_HUES;
 use super::picker::Picker;
 use super::prompt::PromptState;
 use super::render::draw;
@@ -23,11 +21,8 @@ use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
 use crate::record::{Display, Forensic, Record, Recorded, Transient};
 
-use ratatui::{
-    crossterm::event::{
-        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    },
-    text::{Line, Span},
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use std::{
     io::{self},
@@ -380,11 +375,7 @@ impl App {
         card.0
             .push(crate::agent::resources::section_mark("frontend"));
         card.0.push(crate::agent::resources::rows_mark(&frontend));
-        self.push_chrome(
-            id,
-            ChromeKind::Plain,
-            line::render_card_framed(&card, line::CARD_INDENT, READ_W, Detail::Full),
-        );
+        self.push_chrome(id, Chrome::Framed(card));
     }
 
     /// Hand the session's scrollback to `f`.
@@ -401,25 +392,20 @@ impl App {
         }
     }
 
-    pub(super) fn push_chrome(
-        &mut self,
-        id: AgentId,
-        shape: ChromeKind,
-        lines: Vec<Line<'static>>,
-    ) {
-        self.with_scrollback(id, |sb| sb.push_chrome(shape, lines));
+    pub(super) fn push_chrome(&mut self, id: AgentId, chrome: Chrome) {
+        self.with_scrollback(id, |sb| sb.push_chrome(chrome));
     }
 
     /// A dim view-local note — a slash legend, a clipboard ack. Drawn, not
     /// recorded: unlike `Forensic::SystemNote` it never becomes a fact.
     pub(super) fn push_note(&mut self, id: AgentId, text: &str) {
-        self.push_chrome(id, ChromeKind::Plain, line::note(text));
+        self.push_chrome(id, Chrome::Note(text.to_owned()));
     }
 
     /// The UI-thread twin of `Avatar::note_error`, for view commands that
     /// surface their own failures. Drawn, not recorded.
     pub(super) fn push_error(&mut self, id: AgentId, message: &str) {
-        self.push_chrome(id, ChromeKind::Error, line::error(message));
+        self.push_chrome(id, Chrome::Error(message.to_owned()));
     }
     pub fn key(&mut self, k: KeyEvent) {
         if k.kind != KeyEventKind::Press {
@@ -576,37 +562,9 @@ impl App {
     }
 
     pub fn banner(&mut self, term: &mut Term, s: &banner::SessionInfo<'_>) -> io::Result<()> {
-        // The wordmark and eagle sit outside Bertin's data variables, so this
-        // alone keeps the saturated palette and carries no rail.
-        let inset = " ".repeat(banner::OPENING_INDENT);
-        let mut splash: Vec<Line<'static>> = vec![Line::default()];
-        for (a, e) in banner::ART.lines().zip(banner::EAGLE.lines()) {
-            splash.push(Line::from(vec![
-                Span::raw(inset.clone()),
-                bold(a.to_string(), BANNER_PINK),
-                Span::raw("  "),
-                bold(e.to_string(), BANNER_GOLD),
-            ]));
-        }
-        let opening_width = splash
-            .iter()
-            .map(Line::width)
-            .max()
-            .unwrap_or_default()
-            .min(usize::from(READ_W));
-        let opening_width = u16::try_from(opening_width).expect("READ_W fits u16");
-
         if let Some(sb) = self.tabs.scrollback_mut(self.tabs.root()) {
-            sb.push_chrome(ChromeKind::Opening, splash);
-            sb.push_chrome(
-                ChromeKind::Opening,
-                line::render_filled_card(
-                    &banner::session_card(s),
-                    banner::OPENING_INDENT,
-                    opening_width,
-                    Detail::Full,
-                ),
-            );
+            sb.push_chrome(Chrome::Splash);
+            sb.push_chrome(Chrome::Session(banner::session_card(s)));
         }
         draw(self, term)
     }
@@ -618,6 +576,7 @@ mod tests {
     use crate::agent::testkit::{TestAgentSpec, test_agent};
     use crate::bus::card::{Card, Mark};
     use crate::fleet::Fleet;
+    use crate::tui::palette::READ_W;
     use crate::tui::row::Row;
     use ral_core::types::{CallSite, Observation, Observed};
 

@@ -10,6 +10,7 @@
 //! A block memoises the visual rows it last produced, keyed by the width they
 //! were built at, so a dial re-renders one block and a resize the mirror.
 
+use super::banner;
 use super::fidelity::Fidelity;
 use super::group;
 use super::line::{self, is_blank};
@@ -17,7 +18,8 @@ use super::md::{self, MD_INDENT};
 use super::palette::{QUEUED_PROMPT_BG, READ_W, SLATE, content_w};
 use super::rail::{self, RailKind};
 use super::row::Row;
-use crate::bus::card::{Card, Landing, Mark};
+use crate::agent::event::ProviderErrorRecord;
+use crate::bus::card::{Card, Landing, Mark, Span as CardSpan};
 use crate::record::Seq;
 use ral_core::types::Observed;
 use ratatui::style::{Color, Modifier, Style};
@@ -30,35 +32,95 @@ use std::time::Duration;
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(super) struct AgentSlot(pub u8);
 
-/// Coarse chrome sub-kind, carried so the rail need not re-parse built lines.
-/// Every other kind derives its shape from its [`BlockKind`] variant.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub(super) enum ChromeKind {
+/// Chrome as data: every builder renders itself fresh at the width its block
+/// is shown at, rather than laying out once against a fixed budget the mirror
+/// then wraps a second time.
+pub(super) enum Chrome {
     Turn,
-    /// A detached block that settled — the `` `done `` a deferred worker flushes
-    /// at completion. It wears the `↘` of [`RailKind::Subagent`]: background
-    /// work landing in root's scrollback turns after the run that spawned it is
-    /// the same event as an agent's answer arriving, whatever produced it.
-    Settled,
-    /// A detached worker's birth. It wears the `↗` of [`RailKind::FleetAct`],
-    /// the act that made it: work leaving the run, to which [`Self::Settled`]
-    /// is the `↘` of its return.
-    Spawned,
-    Error,
+    /// The human's turn, tinted [`super::palette::PROMPT_INK`] and ruled
+    /// full-width by [`seat_rows`].  No band — background is the machine's.
+    Prompt(String),
+    /// A meta-notice — a model switch, an export, a stall: an annotation
+    /// rather than a navigable block.
+    Note(String),
+    StopReason(String),
+    Error(String),
+    ProviderError(ProviderErrorRecord),
+    Stalled(ProviderErrorRecord),
     /// The turn the human stopped: it wears the `╳` an error does — the work
     /// broke off either way — but stays a separate shape so the matrix's
     /// failure cell keeps reporting failures only.
     Cancelled,
-    /// A meta-notice — a model switch, an export, a stall: an annotation
-    /// rather than a navigable block.
-    #[default]
-    Plain,
-    /// The startup wordmark and metadata card. Their content is their mark.
-    Opening,
-    /// The human's turn, tinted [`super::palette::PROMPT_INK`] and ruled
-    /// full-width by [`append_visual_rows`].  No band — background is the
-    /// machine's.
-    Prompt,
+    /// A detached block that settled — the `` `done `` a deferred worker flushes
+    /// at completion. It wears the `↘` of [`RailKind::Subagent`]: background
+    /// work landing in root's scrollback turns after the run that spawned it is
+    /// the same event as an agent's answer arriving, whatever produced it.
+    Settled(Vec<CardSpan>),
+    /// A detached worker's birth. It wears the `↗` of [`RailKind::FleetAct`],
+    /// the act that made it: work leaving the run, to which [`Self::Settled`]
+    /// is the `↘` of its return.
+    Spawned(Vec<CardSpan>),
+    /// The startup wordmark: fixed art, so it alone is not laid out at width.
+    Splash,
+    /// The startup metadata card, filling the splash's width so the opening's
+    /// two edges form one block.
+    Session(Card),
+    Legend,
+    /// A general surfaced card framed at the block's own width — the
+    /// `/resources` readout.
+    Framed(Card),
+}
+
+impl Chrome {
+    /// Lay this chrome out at `width`, the content measure of its block.  Free
+    /// text wraps here; the field-row and card builders take the width
+    /// themselves.
+    fn render(&self, width: u16) -> Vec<Line<'static>> {
+        let text = |lines: Vec<Line<'static>>| -> Vec<Line<'static>> {
+            lines
+                .iter()
+                .flat_map(|l| line::wrap_line(l, width.into()))
+                .collect()
+        };
+        match self {
+            Self::Turn => line::turn(),
+            Self::Prompt(s) => text(line::user_prompt(s)),
+            Self::Note(s) => text(line::note(s)),
+            Self::StopReason(raw) => text(line::stop_reason(raw)),
+            Self::Error(msg) => text(line::error(msg)),
+            Self::ProviderError(e) => line::provider_error(e, width),
+            Self::Stalled(e) => line::stalled(e, width),
+            Self::Cancelled => line::note("cancelled"),
+            Self::Settled(spans) | Self::Spawned(spans) => text(line::render_text(spans)),
+            Self::Splash => banner::splash(),
+            Self::Session(card) => line::render_filled_card(
+                card,
+                banner::OPENING_INDENT,
+                banner::opening_width().min(width),
+                Detail::Full,
+            ),
+            Self::Legend => banner::legend_panel(),
+            Self::Framed(card) => {
+                line::render_card_framed(card, line::CARD_INDENT, width, Detail::Full)
+            }
+        }
+    }
+
+    fn rail(&self) -> Option<RailKind> {
+        match self {
+            Self::Turn => Some(RailKind::Turn),
+            Self::Settled(_) => Some(RailKind::Subagent),
+            Self::Spawned(_) => Some(RailKind::FleetAct),
+            Self::Error(_) | Self::ProviderError(_) | Self::Stalled(_) | Self::Cancelled => {
+                Some(RailKind::Error)
+            }
+            Self::Note(_) | Self::StopReason(_) | Self::Legend | Self::Framed(_) => {
+                Some(RailKind::Note)
+            }
+            Self::Splash | Self::Session(_) => None,
+            Self::Prompt(_) => Some(RailKind::Prompt),
+        }
+    }
 }
 
 /// How much of a dialable part is disclosed, low to high; `Ord` compares the
@@ -276,11 +338,8 @@ pub(super) enum BlockKind {
     /// `None` for a parse failure (`INVALID_INPUT`): such a call renders
     /// nothing, present only as the barrier a stray result stops at.
     Tool { details: Option<String> },
-    /// Pre-built chrome whose builder already wrapped to [`READ_W`].
-    Chrome {
-        shape: ChromeKind,
-        lines: Vec<Line<'static>>,
-    },
+    /// Meta content the mirror draws itself, not authored by a fold block.
+    Chrome(Chrome),
 }
 
 impl BlockKind {
@@ -312,10 +371,10 @@ pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usiz
 
     let mut out = Vec::new();
     for message in messages {
-        let prompt = Block::chrome(ChromeKind::Prompt, line::user_prompt(message), None);
+        let prompt = Block::chrome(Chrome::Prompt(message.clone()), None);
         let (seated, _) = prompt.seated(width, AgentSlot::default(), None, "");
         let rows = trim_blanks(&seated, Row::is_blank);
-        let _ = append_visual_rows(&mut out, rows, width, true, Some(QUEUED_PROMPT_BG));
+        let _ = seat_rows(&mut out, rows, width, true, Some(QUEUED_PROMPT_BG));
     }
 
     if out.len() > max_rows {
@@ -332,12 +391,13 @@ pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usiz
     out
 }
 
-/// Wrap block-rendered logical rows into visual rows — the shared last step of
-/// the transcript and the queued-prompt projection.  With `prompt` set the
-/// fence goes in above the first visible row and outside any `wash`: a
-/// boundary marks the plane's edge rather than lying within it, so a prompt's
-/// rule reads the same committed or queued.
-pub(super) fn append_visual_rows(
+/// Seat block-rendered rows onto the screen — the shared last step of the
+/// transcript and the queued-prompt projection.  Every body already rendered
+/// at `width`, so this only fences and washes; it no longer wraps.  With
+/// `prompt` set the fence goes in above the first visible row and outside any
+/// `wash`: a boundary marks the plane's edge rather than lying within it, so a
+/// prompt's rule reads the same committed or queued.
+pub(super) fn seat_rows(
     out: &mut Vec<Row>,
     rows: &[Row],
     width: u16,
@@ -347,16 +407,14 @@ pub(super) fn append_visual_rows(
     let before = out.len();
     let mut fenced = false;
     for row in rows {
-        for vrow in row.wrap(width as usize) {
-            if prompt && !fenced && !vrow.is_blank() {
-                out.push(line::prompt_fence(width));
-                fenced = true;
-            }
-            out.push(match wash {
-                Some(bg) => vrow.wash(bg, width),
-                None => vrow,
-            });
+        if prompt && !fenced && !row.is_blank() {
+            out.push(line::prompt_fence(width));
+            fenced = true;
         }
+        out.push(match wash {
+            Some(bg) => row.clone().wash(bg, width),
+            None => row.clone(),
+        });
     }
     out.len() - before
 }
@@ -421,8 +479,8 @@ impl Block {
         Self::new(BlockKind::Group(Group::opening(member, thinking)), seq)
     }
 
-    pub(super) fn chrome(shape: ChromeKind, lines: Vec<Line<'static>>, seq: Option<Seq>) -> Self {
-        Self::new(BlockKind::Chrome { shape, lines }, seq)
+    pub(super) fn chrome(chrome: Chrome, seq: Option<Seq>) -> Self {
+        Self::new(BlockKind::Chrome(chrome), seq)
     }
 
     /// Where this block sits in the fold's order — `None` for chrome, which
@@ -485,13 +543,7 @@ impl Block {
 
     /// The human turn's echo — the one block ruled full-width.
     fn prompt(&self) -> bool {
-        matches!(
-            self.kind,
-            BlockKind::Chrome {
-                shape: ChromeKind::Prompt,
-                ..
-            }
-        )
+        matches!(self.kind, BlockKind::Chrome(Chrome::Prompt(_)))
     }
 
     /// Whether this block puts anything on screen.  A call whose input did
@@ -696,8 +748,8 @@ impl Block {
         let (seated, split) = self.seated(width, agent, at, open);
         let (head, tail) = seated.split_at(split);
         let mut rows = Vec::new();
-        let thinking = append_visual_rows(&mut rows, head, width, false, None);
-        let _ = append_visual_rows(&mut rows, tail, width, self.prompt(), None);
+        let thinking = seat_rows(&mut rows, head, width, false, None);
+        let _ = seat_rows(&mut rows, tail, width, self.prompt(), None);
         Memo {
             width,
             rows,
@@ -826,8 +878,9 @@ impl Block {
             // above and below, whatever blanks its builder happened to bring.
             // The mirror collapses the gap against a blank tail, so framing
             // here reads as one row between neighbours, never two.
-            BlockKind::Chrome { lines, .. } => {
-                let body = trim_blanks(lines, |l| line::is_blank(l));
+            BlockKind::Chrome(chrome) => {
+                let lines = chrome.render(width);
+                let body = trim_blanks(&lines, |l| line::is_blank(l));
                 if body.is_empty() {
                     // The turn rule *is* a gap; there is nothing to frame.
                     vec![Line::default()]
@@ -865,15 +918,7 @@ impl Block {
             BlockKind::Card { card, landing, .. } => {
                 (card.has_diff() || *landing == Landing::Write).then_some(RailKind::Patch)
             }
-            BlockKind::Chrome { shape, .. } => match shape {
-                ChromeKind::Turn => Some(RailKind::Turn),
-                ChromeKind::Settled => Some(RailKind::Subagent),
-                ChromeKind::Spawned => Some(RailKind::FleetAct),
-                ChromeKind::Error | ChromeKind::Cancelled => Some(RailKind::Error),
-                ChromeKind::Plain => Some(RailKind::Note),
-                ChromeKind::Opening => None,
-                ChromeKind::Prompt => Some(RailKind::Prompt),
-            },
+            BlockKind::Chrome(chrome) => chrome.rail(),
             BlockKind::Group(_) => None,
         }
     }
@@ -1096,7 +1141,7 @@ mod tests {
 
     #[test]
     fn opening_chrome_has_no_rail() {
-        let block = Block::chrome(ChromeKind::Opening, vec![Line::from("EXARCH")], None);
+        let block = Block::chrome(Chrome::Splash, None);
         assert_eq!(block.rail_kind(), None);
     }
 

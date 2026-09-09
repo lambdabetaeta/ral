@@ -14,7 +14,7 @@
 //! draws whatever is live-only — [`Self::push_chrome`], the chrome door, and
 //! [`Self::push_thinking`], which carries the open line the live tail draws.
 
-use super::block::{AgentSlot, Block, BlockKind, ChromeKind, Detail, Member, Part, seam};
+use super::block::{AgentSlot, Block, BlockKind, Chrome, Detail, Member, Part, seam};
 use super::fidelity::Fidelity;
 use super::gesture::Cell;
 use super::group;
@@ -27,7 +27,6 @@ use crate::bus::card::{self, Card, Landing, landing, observation_card, observati
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
 use ral_core::types::Observed;
-use ratatui::text::Line;
 use std::fs;
 use std::io;
 use std::io::{Seek, Write};
@@ -463,11 +462,10 @@ impl Scrollback {
         &self.pins
     }
 
-    /// Append pre-rendered chrome at the tail; `shape` lets the rail dispatch
-    /// on the sub-kind.  A chrome block is a barrier like any other, so it
-    /// ends whatever group the tail held.
-    pub(super) fn push_chrome(&mut self, shape: ChromeKind, lines: Vec<Line<'static>>) {
-        self.blocks.push(Block::chrome(shape, lines, None));
+    /// Append chrome at the tail.  A chrome block is a barrier like any
+    /// other, so it ends whatever group the tail held.
+    pub(super) fn push_chrome(&mut self, chrome: Chrome) {
+        self.blocks.push(Block::chrome(chrome, None));
     }
 
     /// Stream a live thinking delta into [`Self::thinking_line`] — the open
@@ -631,7 +629,7 @@ impl Scrollback {
                 let place = landing(&what).expect("an effect member has an effect landing");
                 Block::new(BlockKind::card(observation_card(&what), place), Some(seq))
             }
-            Member::Turn => Block::chrome(ChromeKind::Turn, super::line::turn(), Some(seq)),
+            Member::Turn => Block::chrome(Chrome::Turn, Some(seq)),
         };
         self.blocks.push(block);
     }
@@ -979,11 +977,11 @@ impl Scrollback {
     /// nothing.
     fn items(&self, kind: &record::BlockKind, seq: Seq) -> Vec<Item> {
         use record::BlockKind as K;
-        let chrome = |shape, lines| vec![Item::Barrier(BlockKind::Chrome { shape, lines })];
-        let note = |text: &str| chrome(ChromeKind::Plain, super::line::note(text));
+        let chrome = |c: Chrome| vec![Item::Barrier(BlockKind::Chrome(c))];
+        let note = |text: &str| chrome(Chrome::Note(text.to_owned()));
         match kind {
             K::Thinking { text } => vec![Item::Member(Member::Thinking(text.clone()))],
-            K::Prompt { text } => chrome(ChromeKind::Prompt, super::line::user_prompt(text)),
+            K::Prompt { text } => chrome(Chrome::Prompt(text.clone())),
             K::Answer { text } => vec![Item::Barrier(BlockKind::Prose {
                 src: text.clone(),
                 fidelity: self.fidelity(text),
@@ -1036,23 +1034,20 @@ impl Scrollback {
             // holds however it settled: `╳` is the turn's own failure (a
             // provider error, a stall), never a nonzero exit, which reads as a
             // red status in the row here just as it does on an exec.
-            K::Done { outcome } => chrome(
-                ChromeKind::Settled,
-                super::line::render_text(&card::settled_spans(&card::to_card_done(outcome))),
-            ),
+            K::Done { outcome } => chrome(Chrome::Settled(card::settled_spans(
+                &card::to_card_done(outcome),
+            ))),
             K::Notice { notice } => {
                 vec![surfaced(card::notice_card(&card::to_card_notice(notice)))]
             }
             K::Context { turns, evicted } => {
                 vec![surfaced(card::context_rows_card(turns, *evicted))]
             }
-            K::Cancelled => chrome(ChromeKind::Cancelled, super::line::note("cancelled")),
-            K::Error { text } => chrome(ChromeKind::Error, super::line::error(text)),
+            K::Cancelled => chrome(Chrome::Cancelled),
+            K::Error { text } => chrome(Chrome::Error(text.clone())),
             K::Nudge { .. } | K::HarnessResult { .. } => Vec::new(),
-            K::ProviderError { error } => {
-                chrome(ChromeKind::Error, super::line::provider_error(error))
-            }
-            K::Stalled { error } => chrome(ChromeKind::Error, super::line::stalled(error)),
+            K::ProviderError { error } => chrome(Chrome::ProviderError(error.clone())),
+            K::Stalled { error } => chrome(Chrome::Stalled(error.clone())),
             K::SystemNote { text } => note(text),
             K::ModelChanged { model, provider } => {
                 note(&format!("model changed: {provider}/{model}"))
@@ -1108,10 +1103,9 @@ fn observed_items(what: &Observed) -> Vec<Item> {
             Landing::Write,
         ))],
         Landing::Surfaced => vec![surfaced(observation_card(what))],
-        Landing::Announced => vec![Item::Barrier(BlockKind::Chrome {
-            shape: ChromeKind::Spawned,
-            lines: super::line::render_text(&card::observation_spans(what)),
-        })],
+        Landing::Announced => vec![Item::Barrier(BlockKind::Chrome(Chrome::Spawned(
+            card::observation_spans(what),
+        )))],
     }
 }
 
@@ -1146,12 +1140,12 @@ impl Scrollback {
             Transient::State(state) => self.set_state(*state),
             Transient::Cleared => self.reset(),
             Transient::StopReason(raw) => {
-                self.push_chrome(ChromeKind::Plain, super::line::stop_reason(raw));
+                self.push_chrome(Chrome::StopReason(raw.clone()));
             }
             Transient::Pin { key, card } => self.set_pin(key.clone(), card.clone()),
             Transient::Unpin { key } => self.drop_pin(key),
             Transient::Fault { text } => {
-                self.push_chrome(ChromeKind::Error, super::line::error(text));
+                self.push_chrome(Chrome::Error(text.clone()));
             }
             // The turn's stream is sealed: the worker has recorded every
             // line it means to, tails included, so an open line still
@@ -1356,14 +1350,9 @@ mod tests {
     fn scroll_down_while_sticky_clamps_to_max_off() {
         let mut sb = scrollback();
         for i in 0..10 {
-            sb.push_chrome(
-                ChromeKind::Plain,
-                vec![
-                    Line::from(format!("block {i} line a")),
-                    Line::from(format!("block {i} line b")),
-                    Line::from(format!("block {i} line c")),
-                ],
-            );
+            sb.push_chrome(Chrome::Prompt(format!(
+                "block {i} line a\nblock {i} line b\nblock {i} line c"
+            )));
         }
         let height = 10;
         let w0 = sb.render_window(READ_W, height);
@@ -1389,15 +1378,11 @@ mod tests {
     fn committed_thinking_stays_visible_in_sticky_scrollback() {
         let mut sb = scrollback();
         let mut log = Stream::new();
-        sb.push_chrome(ChromeKind::Prompt, vec![Line::from("hello cutie")]);
+        sb.push_chrome(Chrome::Prompt("hello cutie".into()));
         for i in 0..8 {
-            sb.push_chrome(
-                ChromeKind::Plain,
-                vec![
-                    Line::from(format!("block {i} line a")),
-                    Line::from(format!("block {i} line b")),
-                ],
-            );
+            sb.push_chrome(Chrome::Prompt(format!(
+                "block {i} line a\nblock {i} line b"
+            )));
         }
         sb.transient(&Transient::Thinking("considering the shape".into()));
         let live = sb.render_window(READ_W, 8);
@@ -1426,7 +1411,7 @@ mod tests {
     #[test]
     fn evict_to_tombstone_drops_scrollback_and_register() {
         let mut sb = scrollback();
-        sb.push_chrome(ChromeKind::Plain, vec![Line::from("hello")]);
+        sb.push_chrome(Chrome::Note("hello".into()));
         sb.set_pin("k".into(), Card(Vec::new()));
         assert!(!sb.blocks.is_empty());
 
@@ -1442,7 +1427,7 @@ mod tests {
     #[test]
     fn evict_to_tombstone_is_idempotent() {
         let mut sb = scrollback();
-        sb.push_chrome(ChromeKind::Error, vec![Line::from("boom")]);
+        sb.push_chrome(Chrome::Error("boom".into()));
         sb.evict_to_tombstone();
         assert!(sb.blocks.is_empty());
         sb.evict_to_tombstone();
@@ -1640,7 +1625,7 @@ mod tests {
             &mut sb,
             Record::Display(Display::Prompt { text: "one".into() }),
         );
-        sb.push_chrome(ChromeKind::Plain, vec![Line::from("between")]);
+        sb.push_chrome(Chrome::Note("between".into()));
         let _ = log.land(
             &mut sb,
             Record::Display(Display::Prompt { text: "two".into() }),
@@ -1718,7 +1703,7 @@ mod tests {
     fn a_second_flush_rewinds_the_provisional_tail() {
         let mut sb = scrollback();
         for i in 0..3 {
-            sb.push_chrome(ChromeKind::Plain, vec![Line::from(format!("marker {i}"))]);
+            sb.push_chrome(Chrome::Note(format!("marker {i}")));
         }
         let path = sb
             .flush_log()
@@ -1726,7 +1711,7 @@ mod tests {
             .to_path_buf();
         let once = fs::read_to_string(&path).expect("the transcript reads back");
 
-        sb.push_chrome(ChromeKind::Plain, vec![Line::from("marker 3")]);
+        sb.push_chrome(Chrome::Note("marker 3".into()));
         sb.flush_log().expect("the transcript flushes");
         let twice = fs::read_to_string(&path).expect("the transcript reads back");
 

@@ -360,11 +360,10 @@ impl Tabs {
 
 #[cfg(test)]
 mod tests {
-    use super::super::block::ChromeKind;
+    use super::super::block::Chrome;
     use super::*;
     use crate::agent::testkit::{TestAgentSpec, test_agent};
     use crate::fleet::Fleet;
-    use ratatui::text::Line;
 
     /// A trunk whose `Weak` upgrades for as long as the returned `Arc` lives,
     /// which is the whole of each test.
@@ -420,7 +419,7 @@ mod tests {
         for (id, text) in [(child, "child says hi"), (root.id, "root says hi")] {
             tabs.scrollback_mut(id)
                 .expect("both tabs have a scrollback")
-                .push_chrome(ChromeKind::Plain, vec![Line::from(text)]);
+                .push_chrome(Chrome::Note(text.into()));
         }
         tabs.died(child);
         // Backdate rather than wait LINGER out in a test.

@@ -266,8 +266,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    frame is its mark) — though it still wears the blank margin every row wears,
    so its left edge aligns with the rest of the transcript. A file mutation — a diff card or a write card — wears the
    patch-shape change-bar `▎`; an observation card folds into its ral group.
-   A cancelled turn is `ChromeKind::Cancelled`: it wears the error rail `╳`
-   while remaining distinct from `ChromeKind::Error`, so
+   A cancelled turn is `Chrome::Cancelled`: it wears the error rail `╳`
+   while remaining distinct from `Chrome::Error`, so
    `Scrollback::last_is_error` — read off the fold, the failure being a fact of
    the record — and the matrix failure cell report actual failures only.
 
@@ -367,8 +367,8 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  is posted to the `Inbox`; `run_batch` drains non-slash steering at
  the next safe tool boundary, and the rest lands at the exchange
  boundary — a coalesced human run, or a wakeup / settled agent as its own
- marked item. A committed human prompt echoes on the `ChromeKind::Prompt` band;
- a wakeup stays dim as note chrome (`ChromeKind::Plain`).
+ marked item. A committed human prompt echoes on the `Chrome::Prompt` band;
+ a wakeup stays dim as note chrome (`Chrome::Note`).
  Slash-prefixed prompts
  stay on the REPL command path (`tui/commands.rs`, parsed uniformly on every
  tab). View commands (`/help`, `/legend`, `/copy`,
@@ -483,8 +483,8 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
         - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal
         - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten
-        - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `seat`/`wrap`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
-        - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version, omitting the disposable scratch path), `legend_panel`, ART/EAGLE constants; the wordmark and width-matched card use rail-free `ChromeKind::Opening`
+        - `tui/row.rs` — the transcript row: `Row { gutter, content }`, `seat`/`wash`/`hover`/`plain`/`into_line`, the `RAIL_W` gutter-width invariant
+        - `tui/banner.rs` — startup metadata: `SessionInfo`, `session_card` (including the compile-time package version, omitting the disposable scratch path), `legend_panel`, ART/EAGLE constants; the wordmark and width-matched card are the rail-free `Chrome::Splash`/`Chrome::Session`
         - `tui/commands.rs` — slash command registry: `SlashCommand`, `lookup_command`, `command_candidates`, `route_submit`, handler functions
         - `tui/status.rs` — status line: `rule_line`, `ctx_ramp`, `wait_bar`, `wait_step`
         - `tui/matrix.rs` — bounded agent-tree matrix: `Matrix` (the one retained value, an agent identity), `Nav`/`nav` reading a key as a gesture, `MatrixSort`, `forest`/`TreeRow` and their connectors, the closed-form `window` and its boundary lines, `neighbour`, `strip`'s justified row projection, `step_cells`

@@ -5,11 +5,11 @@
 //! copy, drag-selection, hover, the log — reads `content` or `gutter` by name,
 //! so no amount of span coalescing or restyling can smuggle chrome into a
 //! clipboard.  Rows are born in the two places that seat rails — `Block::rows`
-//! and `Scrollback::render_group`, both through [`Row::seat`] — multiplied in
-//! [`Row::wrap`], and flattened by [`Row::into_line`] at exactly two seams: the
-//! screen in [`super::render`] and `user.log` in `super::scrollback`.
+//! and `Scrollback::render_group`, both through [`Row::seat`] — and flattened
+//! by [`Row::into_line`] at exactly two seams: the screen in
+//! [`super::render`] and `user.log` in `super::scrollback`.
 
-use super::line::{self, is_blank, wrap_line};
+use super::line::{self, is_blank};
 use super::palette::{RAIL_W, content_w};
 use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
@@ -123,17 +123,6 @@ impl Row {
         )
     }
 
-    /// Fold into visual rows no wider than `width`, margin included.  Row 0
-    /// keeps this row's gutter and every continuation gets a blank, so a
-    /// wrapped block seats its glyph once.
-    pub(super) fn wrap(&self, width: usize) -> Vec<Self> {
-        let mut rows = wrap_line(&self.content, width.saturating_sub(RAIL_W)).into_iter();
-        let head = rows.next().unwrap_or_default();
-        std::iter::once(Self::new(self.gutter.clone(), head))
-            .chain(rows.map(Self::bare))
-            .collect()
-    }
-
     /// Margin then content: the one flatten, for the screen and for `user.log`.
     /// A row with nothing in either flattens to nothing rather than to a margin
     /// of trailing spaces — invisible on screen, and `user.log` stays clean.
@@ -162,58 +151,6 @@ mod tests {
     fn every_rail_shape_is_a_legal_gutter() {
         for &(kind, _) in RAIL_SHAPES {
             let _ = Row::new(rail_span(kind, AgentSlot(0), None), Line::default());
-        }
-    }
-
-    /// The regression the `Row` split exists to make impossible: a gutter whose
-    /// ink matches its content's used to be coalesced into the first body span
-    /// by `wrap_line`, after which copy could no longer tell chrome from text.
-    /// The prompt fence is exactly this collision — both are `PROMPT_INK`.
-    #[test]
-    fn wrapping_never_leaks_the_glyph_into_content() {
-        let ink = Style::default().fg(PROMPT_INK);
-        let row = Row::new(
-            Span::styled("❖ ", ink),
-            Line::from(Span::styled(
-                "alpha beta gamma delta epsilon zeta eta theta iota",
-                ink,
-            )),
-        );
-        let rows = row.wrap(20);
-        assert!(rows.len() > 1, "the fixture must actually wrap");
-        for r in &rows {
-            assert!(
-                !r.plain().contains('❖'),
-                "copy leaked the glyph: {:?}",
-                r.plain()
-            );
-        }
-    }
-
-    /// Continuations hang at the content's own column zero, the glyph riding
-    /// row 0 alone.
-    #[test]
-    fn wrap_seats_the_gutter_once() {
-        let row = Row::new(
-            Span::styled("▸ ", Style::default()),
-            Line::from(Span::raw("alpha beta gamma delta epsilon zeta eta theta")),
-        );
-        let rows = row.wrap(20);
-        assert_eq!(rows[0].gutter.content.as_ref(), "▸ ");
-        for r in &rows[1..] {
-            assert_eq!(r.gutter.content.as_ref(), BLANK);
-            assert!(!r.plain().starts_with(' '), "continuation gained an indent");
-        }
-    }
-
-    /// Wrapping respects the margin: no visual row exceeds the given width.
-    #[test]
-    fn wrap_reserves_the_margin() {
-        let row = Row::bare(Line::from(Span::raw(
-            "one two three four five six seven eight nine ten",
-        )));
-        for r in row.wrap(16) {
-            assert!(r.width() <= 16, "row overflowed: {}", r.width());
         }
     }
 

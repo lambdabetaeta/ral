@@ -12,18 +12,41 @@ use super::block::AgentSlot;
 use super::fidelity::Fidelity;
 use super::line;
 use super::md;
-use super::palette::{AGENT_HUES, CODE_BG, READ_W, SLATE};
+use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK, CODE_BG, READ_W, SLATE};
 use super::rail::{self, RailKind};
 use super::status::{ctx_ramp, wait_bar};
 
-pub(super) const ART: &str = include_str!("../../data/banner.txt");
-pub(super) const EAGLE: &str = include_str!("../../data/eagle.txt");
+const ART: &str = include_str!("../../data/banner.txt");
+const EAGLE: &str = include_str!("../../data/eagle.txt");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Left inset of the opening block, in columns — the wordmark and the session
 /// card share it, so the card's frame lands on the `E`'s own left edge.  The art
 /// files carry no pad of their own; this is the only thing that positions them.
 pub(super) const OPENING_INDENT: usize = 1;
+
+/// The wordmark and eagle, side by side.  They sit outside Bertin's data
+/// variables, so this alone keeps the saturated palette and carries no rail.
+pub(super) fn splash() -> Vec<Line<'static>> {
+    let inset = " ".repeat(OPENING_INDENT);
+    let mut lines = vec![Line::default()];
+    lines.extend(ART.lines().zip(EAGLE.lines()).map(|(a, e)| {
+        Line::from(vec![
+            Span::raw(inset.clone()),
+            line::bold(a.to_string(), BANNER_PINK),
+            Span::raw("  "),
+            line::bold(e.to_string(), BANNER_GOLD),
+        ])
+    }));
+    lines
+}
+
+/// The splash's own width, capped at the reading measure: the session card
+/// fills it so the two edges of the opening form one block.
+pub(super) fn opening_width() -> u16 {
+    let widest = splash().iter().map(Line::width).max().unwrap_or_default();
+    u16::try_from(widest.min(usize::from(READ_W))).expect("READ_W fits u16")
+}
 
 /// Metadata shown in the startup banner.
 pub struct SessionInfo<'a> {

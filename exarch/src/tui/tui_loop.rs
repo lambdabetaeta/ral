@@ -25,9 +25,8 @@ use crate::{
 use std::sync::mpsc::TryRecvError;
 
 use super::banner::SessionInfo;
-use super::block::ChromeKind;
 use super::{
-    App, banner, commands, line,
+    App, banner, commands,
     render::draw,
     terminal::{self, TerminalGuard},
 };
@@ -208,13 +207,9 @@ pub fn run(
         }
         // The boundary itself is chrome, never recorded: a second resume must
         // not replay a prior resume's note as if it were history.
-        tui.app.push_chrome(
+        tui.app.push_note(
             session.agent.id,
-            ChromeKind::Plain,
-            line::note(&format!(
-                "resumed: {exchanges} exchanges, {} KB",
-                bytes.div_ceil(1024)
-            )),
+            &format!("resumed: {exchanges} exchanges, {} KB", bytes.div_ceil(1024)),
         );
     }
     // Without a way to wake the parked worker with a `/quit`, the `join` below

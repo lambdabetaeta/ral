@@ -1,7 +1,7 @@
 ---
 verified_at_commit: 99226d37
 verified_at_date: 2026-09-05
-anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, ChromeKind, Block::is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, process::check, RunningChild::wait, watch_cancel, escalation_pending]
+anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, process::check, RunningChild::wait, watch_cancel, escalation_pending]
 ---
 
 # Cancellation
@@ -306,9 +306,10 @@ exarch layers a *per-agent* cancellation `Token` over ral's machinery
   foreground cause. `deliver_interrupt` re-creates the SIGINT the kernel would
   have sent a foreground *external* child via `interrupt_foreground_child`
   (Windows re-injects `CTRL_C_EVENT`).
-- A cancelled turn is a distinct TUI `ChromeKind::Cancelled`: the rail maps it
-  to the error `╳` so the broken-off work is visible, while `Block::is_error`
-  still matches only `ChromeKind::Error`, keeping the matrix's failure cell for
+- A cancelled turn is a distinct TUI `Chrome::Cancelled`: the rail maps it
+  to the error `╳` so the broken-off work is visible, while
+  `Scrollback::last_is_error` matches only the fold's `Error`,
+  `ProviderError` and `Stalled` blocks, keeping the matrix's failure cell for
   actual failures.
 
 ## Why interactive Ctrl-C cannot force-exit

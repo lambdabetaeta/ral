@@ -5,8 +5,8 @@ use std::io;
 use std::path::PathBuf;
 
 use super::App;
-use super::banner::{self, SessionInfo};
-use super::block::{ChromeKind, Detail};
+use super::banner::SessionInfo;
+use super::block::{Chrome, Detail};
 use super::login;
 use super::model_picker::pick_model;
 use super::scrollback;
@@ -290,7 +290,7 @@ pub(super) fn cmd_help(app: &mut App) {
 }
 
 pub(super) fn cmd_legend(app: &mut App) {
-    app.push_chrome(app.tabs.root(), ChromeKind::Plain, banner::legend_panel());
+    app.push_chrome(app.tabs.root(), Chrome::Legend);
 }
 
 /// Flip the disclosure of deliberation everywhere at once: one setting, so a

@@ -1079,7 +1079,7 @@ const RETRY_SECS_KEYS: &[&str] = &["resets_in_seconds", "retry_after_seconds", "
 /// ordered field list in one shared column.  A parsed `body` supplies the
 /// fields ([`body_fields`]); without one the free-text `cause`/`message` is
 /// shown honestly rather than dressed as structure.
-pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
+pub(super) fn provider_error(e: &ProviderErrorRecord, width: u16) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![Line::default()];
     // Cancellation folds its site into the headline and carries no body.
     if let ProviderErrorRecord::Cancelled { where_ } = e {
@@ -1087,7 +1087,7 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
         return ls;
     }
     ls.push(headline(error_kind(e)));
-    ls.extend(render_field_rows(&error_fields(e), READ_CONTENT_W.into()));
+    ls.extend(render_field_rows(&error_fields(e), width.into()));
     ls
 }
 
@@ -1095,14 +1095,14 @@ pub(super) fn provider_error(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
 /// gets, under a headline that says the exchange survived it.  The `continuing`
 /// field is the whole distinction — without it the block would read as the end
 /// of the run, which is precisely what a stall is not.
-pub(super) fn stalled(e: &ProviderErrorRecord) -> Vec<Line<'static>> {
+pub(super) fn stalled(e: &ProviderErrorRecord, width: u16) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![Line::default(), headline("stream stalled")];
     let mut fields = error_fields(e);
     fields.push(text_field(
         "continuing",
         "the partial reply above is kept; the turn resumes from it",
     ));
-    ls.extend(render_field_rows(&fields, READ_CONTENT_W.into()));
+    ls.extend(render_field_rows(&fields, width.into()));
     ls
 }
 
