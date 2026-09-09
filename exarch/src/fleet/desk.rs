@@ -2198,14 +2198,13 @@ pub(crate) fn absorb_surface(
         Surface::Card(card) => match card.clone().into_single_diff() {
             Ok((path, hunks)) => buf.absorb_patch(recorder, id, path, hunks),
             // A richer card is the kit's own communication: the mark tree is
-            // the fact, so it records whole and opaquely.  The buffers flush
-            // first, keeping the record in the order the user saw — a card
-            // never joins a group, so nothing coalesced is torn by the flush.
+            // the fact, so it records whole, as the typed card.  The buffers
+            // flush first, keeping the record in the order the user saw — a
+            // card never joins a group, so nothing coalesced is torn by the
+            // flush.
             Err(card) => {
                 buf.flush_surfaces(recorder)?;
-                let marks =
-                    serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
-                let _recorded = recorder.emit(crate::record::Display::Card { marks })?;
+                let _recorded = recorder.emit(crate::record::Display::Card { card })?;
                 Ok(())
             }
         },

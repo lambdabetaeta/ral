@@ -243,8 +243,7 @@ impl SurfaceBuffer {
             path: buf.path,
             hunks: buf.hunks,
         }]);
-        let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
-        let _recorded = emitter.emit(Display::Card { marks })?;
+        let _recorded = emitter.emit(Display::Card { card })?;
         Ok(())
     }
 

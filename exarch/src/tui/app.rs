@@ -295,18 +295,15 @@ impl App {
         ) {
             return;
         }
-        // Bookkeeping the view fold does not itself keep: the richer
-        // `Usage` (dollars, cache) `App`/`Scrollback` track for the status
-        // line and the matrix, where `Blocks` only sums plain token counts.
+        // The fleet-wide running sum is a different quantity from a session's
+        // own — it must survive a tab's retirement, where `Scrollback::usage`
+        // reads off the view fold it is stepped alongside below.
         if let Record::Forensic(Forensic::UsageDelta { usage }) = rec.value() {
             let u = Usage::from(usage);
             if id == self.tabs.root() {
                 self.last_input = u.input;
             }
             self.total_usage += u;
-            if let Some(sb) = self.tabs.scrollback_mut(id) {
-                sb.add_usage(u);
-            }
         }
         let target = match rec.value() {
             Record::Display(Display::SubagentDone { .. }) => self.tabs.root(),

@@ -366,20 +366,25 @@ pub fn observation_display_card(value: &FOValue) -> Option<Card> {
     Some(observation_card(&observation.what))
 }
 
-/// A producer-grouped run of reads, execs, or greps.
+/// A producer-grouped run of reads, execs, or greps, decoded once.
 ///
-/// `Display::ObservationGroup`'s payload, rendered as the one card its
-/// shared kind draws. The group is homogeneous by construction (the
-/// commit-time buffer never mixes kinds in one run), so the first value
-/// alone names which card fits; an empty or unrecognised group draws
-/// nothing rather than guessing. `pub` for synod, alongside
-/// [`observation_display_card`].
-pub fn observation_group_card(values: &[FOValue]) -> Option<Card> {
+/// [`Display::ObservationGroup`](crate::record::Display::ObservationGroup)'s
+/// payload is homogeneous by construction (the commit-time buffer never mixes
+/// kinds in one run), so the first value alone names which card fits, and the
+/// group's own kind and member count ride along for a caller that draws the
+/// card as one effect row. An empty or unrecognised group draws nothing
+/// rather than guessing.
+pub(crate) fn observation_group(values: &[FOValue]) -> Option<(Card, ObservationKind, u32)> {
     let observations: Vec<ral_core::types::Observed> = values
         .iter()
         .filter_map(|v| observation_from_wire(v.clone()))
         .map(|o| o.what)
         .collect();
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "one flush's observation count; u32 headroom far exceeds any real burst"
+    )]
+    let count = observations.len() as u32;
     match observations.first()? {
         ral_core::types::Observed::Read { .. } => {
             let paths: Vec<String> = observations
@@ -389,15 +394,25 @@ pub fn observation_group_card(values: &[FOValue]) -> Option<Card> {
                     _ => None,
                 })
                 .collect();
-            reads_card(&paths)
+            reads_card(&paths).map(|card| (card, ObservationKind::Read, count))
         }
-        ral_core::types::Observed::Command { .. } => execs_card(&observations),
-        ral_core::types::Observed::Grep { .. } => greps_card(&observations),
+        ral_core::types::Observed::Command { .. } => {
+            execs_card(&observations).map(|card| (card, ObservationKind::Exec, count))
+        }
+        ral_core::types::Observed::Grep { .. } => {
+            greps_card(&observations).map(|card| (card, ObservationKind::Grep, count))
+        }
         ral_core::types::Observed::Write { .. }
         | ral_core::types::Observed::Capability { .. }
         | ral_core::types::Observed::Worker { .. }
         | ral_core::types::Observed::Act { .. } => None,
     }
+}
+
+/// [`observation_group`], stripped to the card alone — synod's own fold draws
+/// no per-effect count.
+pub fn observation_group_card(values: &[FOValue]) -> Option<Card> {
+    observation_group(values).map(|(card, ..)| card)
 }
 
 /// A [`Card`] as one line — the digest the periodic nudge shows the model of

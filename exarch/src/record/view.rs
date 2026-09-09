@@ -10,8 +10,9 @@
 
 use super::{BlockId, Display, Fold, Forensic, Recorded, Refusal, Seq, TurnRow};
 use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
+use crate::bus::card::Card;
+use crate::provider::Usage;
 use ral_core::serial::FOValue;
-use std::time::Duration;
 
 pub use super::{DoneOutcome, NoticeFact};
 
@@ -20,6 +21,7 @@ pub use super::{DoneOutcome, NoticeFact};
 ///
 /// Field shapes mirror [`Display`] and [`Forensic`] exactly; this fold
 /// invents no data, only a home for it.
+#[derive(Debug)]
 pub enum BlockKind {
     Thinking {
         text: String,
@@ -54,7 +56,7 @@ pub enum BlockKind {
         value: FOValue,
     },
     Card {
-        marks: serde_json::Value,
+        card: Card,
     },
     Done {
         outcome: DoneOutcome,
@@ -102,6 +104,7 @@ pub enum BlockKind {
 
 /// One committed block of scrollback, named by the [`Seq`] of the record that
 /// opened it.
+#[derive(Debug)]
 pub struct Block {
     seq: Seq,
     kind: BlockKind,
@@ -131,14 +134,6 @@ pub enum Delta {
     Quiet,
 }
 
-/// Cumulative input/output tokens this session has billed, per the forensic
-/// usage trail — one of the fidelity inputs this fold admits Forensic for.
-#[derive(Default, Clone, Copy)]
-struct UsageTotal {
-    input: u64,
-    output: u64,
-}
-
 /// Past this many resident blocks, the oldest are dropped.
 ///
 /// The one window, for every printer: what leaves the fold leaves the screen,
@@ -155,7 +150,9 @@ pub const BLOCKS_WINDOW: usize = 1000;
 )]
 pub struct Blocks {
     blocks: Vec<Block>,
-    usage: UsageTotal,
+    /// Cumulative usage this session has billed, per the forensic usage trail
+    /// — one of the fidelity inputs this fold admits Forensic for.
+    usage: Usage,
     /// The model in force: the one the session opened under, and then each
     /// [`Forensic::ModelChanged`]'s.
     model: Option<(String, String)>,
@@ -183,14 +180,10 @@ impl Blocks {
         self.origin
     }
 
-    /// Cumulative input tokens billed so far, per the forensic usage trail —
-    /// the context-floor numerator a printer grades committed prose against.
-    pub fn input_tokens(&self) -> u64 {
-        self.usage.input
-    }
-
-    pub fn output_tokens(&self) -> u64 {
-        self.usage.output
+    /// Cumulative usage billed so far, per the forensic usage trail — the
+    /// context-floor numerator a printer grades committed prose against.
+    pub fn usage(&self) -> Usage {
+        self.usage
     }
 
     /// `(model, provider)` in force — total from the session's first record,
@@ -217,18 +210,6 @@ impl Blocks {
             super::Record::Display(d) => self.step_display(seq, d),
             super::Record::Forensic(f) => self.step_forensic(seq, f),
         })
-    }
-
-    /// A rendering of every resident block, content only — never styling —
-    /// the regenerable text a printer's `user.log` is a render of, never a
-    /// patch of.  Windowed, like [`Self::blocks`]; a full-session render reads
-    /// `record.jsonl` through [`super::replay`] instead.
-    pub fn render_log(&self) -> String {
-        let mut out = String::new();
-        for block in &self.blocks {
-            render_block_text(&mut out, block.kind());
-        }
-        out
     }
 
     /// Drop the oldest resident blocks past [`BLOCKS_WINDOW`], as each block
@@ -327,7 +308,7 @@ impl Blocks {
                 },
             ),
             Display::Observation { value } => self.push(seq, BlockKind::Observation { value }),
-            Display::Card { marks } => self.push(seq, BlockKind::Card { marks }),
+            Display::Card { card } => self.push(seq, BlockKind::Card { card }),
             Display::Done { outcome } => self.push(seq, BlockKind::Done { outcome }),
             Display::Notice { notice } => self.push(seq, BlockKind::Notice { notice }),
             Display::Context { turns, evicted } => {
@@ -343,8 +324,7 @@ impl Blocks {
     fn step_forensic(&mut self, seq: Seq, f: Forensic) -> Delta {
         match f {
             Forensic::UsageDelta { usage } => {
-                self.usage.input = self.usage.input.saturating_add(usage.input);
-                self.usage.output = self.usage.output.saturating_add(usage.output);
+                self.usage += Usage::from(&usage);
                 Delta::Quiet
             }
             Forensic::Cancelled => self.push(seq, BlockKind::Cancelled),
@@ -375,113 +355,6 @@ impl Blocks {
             }
         }
     }
-}
-
-/// Plain-text content for one block, appended to `out` — the shared body
-/// [`Blocks::render_log`] and a printer's own richer rendering both start
-/// from, kept here so the regenerable projection has exactly one definition.
-fn render_block_text(out: &mut String, kind: &BlockKind) {
-    let line = match kind {
-        BlockKind::Thinking { text, .. } => format!("∴ {text}"),
-        BlockKind::Prompt { text } => format!("> {text}"),
-        BlockKind::Answer { text }
-        | BlockKind::SystemNote { text }
-        | BlockKind::HarnessResult { text } => text.clone(),
-        BlockKind::ToolCall {
-            tool,
-            cmd,
-            summary,
-            result_lines,
-        } => {
-            let label = summary.as_deref().unwrap_or(cmd);
-            match result_lines {
-                Some(n) => format!("▸ {tool}: {label} ({n} lines)"),
-                None => format!("▸ {tool}: {label}"),
-            }
-        }
-        BlockKind::HarnessCall {
-            verb,
-            subject,
-            payload,
-            failed,
-        } => {
-            let subject = subject.as_deref().unwrap_or_default();
-            let mark = if *failed { " (failed)" } else { "" };
-            format!("↗ {verb} {subject} {payload}{mark}")
-        }
-        BlockKind::SubagentDone {
-            name,
-            error,
-            elapsed_ms,
-        } => {
-            let took = crate::bus::elapsed_phrase(Duration::from_millis(*elapsed_ms));
-            match error {
-                Some(e) => format!("↘ agent {name} failed [{took}] — {e}"),
-                None => format!("↘ agent {name} finished [{took}]"),
-            }
-        }
-        BlockKind::Observation { value } => format!("· {value:?}"),
-        BlockKind::ObservationGroup { values } => format!("· {} items", values.len()),
-        BlockKind::Card { marks } => format!("· {marks}"),
-        BlockKind::Done { outcome } => match outcome {
-            DoneOutcome::Ok => "[done: ok]".to_string(),
-            DoneOutcome::Err { message, status } => {
-                format!("[done: error {status} — {message}]")
-            }
-            DoneOutcome::Panic { message } => format!("[done: panic — {message}]"),
-        },
-        BlockKind::Notice { notice } => match notice {
-            NoticeFact::Reap { cmd, cause } => format!("[reap: {cmd} ({cause})]"),
-            NoticeFact::Prune { names, .. } => format!("[prune: {}]", names.join(", ")),
-        },
-        BlockKind::Context { turns, evicted } => {
-            let mut lines: Vec<String> = Vec::with_capacity(turns.len() + 1);
-            if *evicted > 0 {
-                lines.push(format!("[context: evicted {evicted} turns]"));
-            }
-            lines.extend(turns.iter().map(|turn| {
-                format!(
-                    "[context: turn {} of exchange {} {} {}]",
-                    turn.id,
-                    turn.exchange,
-                    turn.kind.as_str(),
-                    turn.label
-                )
-            }));
-            lines.join("\n")
-        }
-        BlockKind::Cancelled => "[cancelled]".to_string(),
-        BlockKind::Error { text } => format!("error: {text}"),
-        BlockKind::Nudge { used, max, cause } => format!("[nudge {used}/{max}: {cause}]"),
-        BlockKind::ProviderError { error } => format!("provider error: {error:?}"),
-        BlockKind::Stalled { error } => format!("stream stalled, turn resumes: {error:?}"),
-        BlockKind::ModelChanged { model, provider } => {
-            format!("[model changed: {provider}/{model}]")
-        }
-        BlockKind::Turn { id } => format!("[turn {id}]"),
-        BlockKind::ContextEdited { op, by } => {
-            let authority = match by {
-                EditAuthority::Model => "model",
-                EditAuthority::User => "user",
-                EditAuthority::Harness => "harness",
-            };
-            match op {
-                ContextOp::Evict { through, .. } => {
-                    format!("[context evicted through turn {through} ({authority})]")
-                }
-                ContextOp::Drop { exchanges } => {
-                    let list = exchanges
-                        .iter()
-                        .map(u64::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("[context dropped exchange(s) {list} ({authority})]")
-                }
-            }
-        }
-    };
-    out.push_str(&line);
-    out.push('\n');
 }
 
 /// The view fold: [`Fold::step`] over [`Display`] and [`Forensic`], skipping

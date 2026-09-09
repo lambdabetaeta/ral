@@ -200,9 +200,9 @@ pub enum Display {
     },
     /// One read/exec/grep run the producer grouped into a single visual
     /// card — the same dedup and grouping `SurfaceBuffer` already does at
-    /// record time, carried as its members' wire forms so the view fold can
-    /// rebuild exactly the one card the user saw via `reads_card` /
-    /// `execs_card` / `greps_card`, never a mark tree recorded up front.
+    /// record time, carried as its members' wire forms so a printer can
+    /// rebuild exactly the one card the user saw via
+    /// `bus::card::observation_group`, never a mark tree recorded up front.
     ObservationGroup {
         values: Vec<FOValue>,
     },
@@ -221,10 +221,9 @@ pub enum Display {
     },
     /// A render document a ral kit composed for the `surface` builtin: the
     /// mark tree *is* the fact here, so unlike the other three commits in
-    /// this list it is what gets recorded, opaquely, for the view fold to
-    /// decode.
+    /// this list it is what gets recorded, as the typed card itself.
     Card {
-        marks: serde_json::Value,
+        card: Card,
     },
     Done {
         outcome: DoneOutcome,

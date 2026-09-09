@@ -28,6 +28,27 @@ fn envelope_line(record: &record::Record) -> String {
     serde_json::json!({ "at_unix_ms": 0, "record": record }).to_string()
 }
 
+/// The fold's blocks, each as its own `{:?}` — the debug vocabulary these
+/// tests compare against, rather than a rendered string.
+fn debug_kinds(blocks: &Blocks) -> Vec<String> {
+    blocks
+        .blocks()
+        .iter()
+        .map(|b| format!("{:?}", b.kind()))
+        .collect()
+}
+
+/// Whether any resident block carries `needle` in its own text — matched on
+/// the fold's kinds directly (`Prompt`/`Answer`), not a rendered string.
+fn kind_contains(blocks: &Blocks, needle: &str) -> bool {
+    blocks.blocks().iter().any(|b| match b.kind() {
+        record::BlockKind::Prompt { text } | record::BlockKind::Answer { text } => {
+            text.contains(needle)
+        }
+        _ => false,
+    })
+}
+
 fn drive(session: &mut Avatar, provider: &Arc<Provider>, prompt: &str) {
     let (tx, _rx) = channel();
     let emit = Emitter::new(tx, session.id());
@@ -114,7 +135,7 @@ fn scripted_run_kill_resume_and_continue() {
     let blocks = record::replay::<View>(&record_path, Blocks::default())
         .expect("the resumed session's record log replays cleanly");
     assert!(
-        blocks.render_log().contains("before kill"),
+        kind_contains(&blocks, "before kill"),
         "the view fold must carry the pre-kill exchange across the crash and resume too"
     );
 
@@ -140,21 +161,20 @@ fn scripted_run_kill_resume_and_continue() {
 
     let blocks = record::replay::<View>(&record_path, Blocks::default())
         .expect("the record log still replays cleanly after driving the resumed session");
-    let rendered = blocks.render_log();
     assert!(
-        rendered.contains("continued"),
-        "the resumed session's own turn joins the view fold: {rendered:?}"
+        kind_contains(&blocks, "continued"),
+        "the resumed session's own turn joins the view fold"
     );
     assert!(
-        rendered.contains("before kill"),
-        "and driving the resumed session further does not disturb the pre-kill turn: {rendered:?}"
+        kind_contains(&blocks, "before kill"),
+        "and driving the resumed session further does not disturb the pre-kill turn"
     );
 }
 
-/// `render_log` is a pure rendering of whatever the fold admitted, so folding
-/// the same file twice — the regenerability law step 6 exists for — must
-/// agree byte for byte, whether or not a scrollback in between ever flushed
-/// `user.log` from a resident window rather than the whole history.
+/// The fold's blocks are a pure function of whatever the log admitted, so
+/// folding the same file twice — the regenerability law step 6 exists for —
+/// must agree block for block, whether or not a scrollback in between ever
+/// flushed `user.log` from a resident window rather than the whole history.
 #[test]
 fn the_view_folds_render_is_a_pure_function_of_the_log() {
     let root = tempfile::tempdir().expect("scratch dir");
@@ -176,17 +196,22 @@ fn the_view_folds_render_is_a_pure_function_of_the_log() {
         })
         .expect("a forensic record records");
 
-    let first = record::replay::<View>(&path, Blocks::default())
-        .expect("a fresh log replays cleanly")
-        .render_log();
-    let second = record::replay::<View>(&path, Blocks::default())
-        .expect("replaying the same log twice must agree")
-        .render_log();
+    let first = debug_kinds(
+        &record::replay::<View>(&path, Blocks::default()).expect("a fresh log replays cleanly"),
+    );
+    let second = debug_kinds(
+        &record::replay::<View>(&path, Blocks::default())
+            .expect("replaying the same log twice must agree"),
+    );
     assert_eq!(
         first, second,
-        "the render is a pure function of the log, never an accumulator with its own state"
+        "the fold's blocks are a pure function of the log, never an accumulator with its own state"
     );
-    assert!(first.contains("hello") && first.contains("hi back") && first.contains("a note"));
+    assert!(
+        first.iter().any(|k| k.contains("hello"))
+            && first.iter().any(|k| k.contains("hi back"))
+            && first.iter().any(|k| k.contains("a note"))
+    );
 }
 
 /// A record the fold does not recognise refuses the whole session rather

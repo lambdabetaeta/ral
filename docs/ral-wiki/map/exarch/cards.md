@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 146084be
+generated_at_commit: ed466ea2
 generated_at_date: 2026-09-09
 covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
@@ -165,17 +165,18 @@ A single-`diff` card joins the patch-grouping buffer in `record/commit.rs`
 (`Card::into_single_diff` → `SurfaceBuffer::absorb_patch`): consecutive
 same-`(id, path)` diff cards merge their hunks into one `diff <path>` block, the
 way a unified diff presents one file. Every richer card is its own block: the
-scrollback decodes a `Display::Card` once, as the fold opens it, and pushes it as
-a barrier (`Scrollback::items`, `tui/scrollback.rs`); a grouped observation effect
-is instead a `Member::Effect` folded onto the call above it, and a write card a
-barrier of its own.
+scrollback reads a `Display::Card`'s card once, as the fold opens it, and pushes
+it as a barrier (`Scrollback::items`, `tui/scrollback.rs`); a grouped observation
+effect is instead a `Member::Effect` folded onto the call above it, and a write
+card a barrier of its own.
 
 ## Machine log
 
 There is no independent operational trace any more: `record.jsonl`, written
-through `record::Emitter` at the seam, is the one durable log, and its
-`Display`/`Forensic` commits carry the structured facts a card renders from
-— never the rendered card itself, which the view fold rebuilds on resume. The
+through `record::Emitter` at the seam, is the one durable log. A deliberate
+`Display::Card` records the rendered card itself — the mark tree *is* the fact
+here — while every other `Display`/`Forensic` commit carries only the
+structured fact a card renders from, rebuilt fresh by whoever draws it. The
 headless stderr condenser (`card_stderr`, `headless.rs`) walks marks
 generically off the live bus.
 

@@ -1876,8 +1876,8 @@ return !{{length $hits}}"
         records
             .iter()
             .filter_map(|r| match r {
-                crate::record::Record::Display(crate::record::Display::Card { marks }) => {
-                    serde_json::from_value(marks.clone()).ok()
+                crate::record::Record::Display(crate::record::Display::Card { card }) => {
+                    Some(card.clone())
                 }
                 _ => None,
             })

@@ -23,13 +23,10 @@ use super::palette::READ_W;
 use super::row::Row;
 use super::select::plain_slice;
 use crate::agent::event::{ContextOp, EditAuthority};
-use crate::bus::card::{
-    self, Card, Landing, ObservationKind, execs_card, greps_card, landing, observation_card,
-    observation_from_wire, reads_card,
-};
+use crate::bus::card::{self, Card, Landing, landing, observation_card, observation_from_wire};
 use crate::provider::Usage;
 use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
-use ral_core::types::{Observation, Observed};
+use ral_core::types::Observed;
 use ratatui::text::Line;
 use std::fs;
 use std::io;
@@ -69,9 +66,6 @@ pub(super) struct Scrollback {
     tombstoned: bool,
     /// Palette slot stamped onto every rail glyph; root is `0`.
     agent: AgentSlot,
-    /// This session's spend — the matrix's per-agent readout, where
-    /// `App::total_usage` is the rule line's sum over all of them.
-    usage: Usage,
     /// The answer's open line: assistant text past the last newline, which is
     /// past the last [`Display::Answer`](crate::record::Display::Answer)
     /// record the worker has cut.  It is drawn inside the block it will join
@@ -297,7 +291,6 @@ impl Scrollback {
             blocks: Vec::new(),
             tombstoned: false,
             agent,
-            usage: Usage::default(),
             answer: String::new(),
             thinking_line: String::new(),
             fold: Blocks::default(),
@@ -329,13 +322,10 @@ impl Scrollback {
         self.agent
     }
 
-    /// Fold one turn's spend in; the same event also feeds `App::total_usage`.
-    pub(super) fn add_usage(&mut self, u: Usage) {
-        self.usage += u;
-    }
-
+    /// This session's spend — the matrix's per-agent readout, where
+    /// `App::total_usage` is the rule line's sum over all of them.
     pub(super) fn usage(&self) -> Usage {
-        self.usage
+        self.fold.usage()
     }
 
     /// Per-turn "had a tool call" flags, oldest first — one bool per turn
@@ -664,7 +654,7 @@ impl Scrollback {
             .fold
             .model()
             .and_then(|(model, _)| crate::provider::pricing::context_window(model));
-        super::fidelity::context_floor(self.fold.input_tokens(), window)
+        super::fidelity::context_floor(self.fold.usage().input, window)
     }
 
     // ── interaction ──────────────────────────────────────────────────────
@@ -1002,11 +992,11 @@ impl Scrollback {
                 elapsed: Duration::from_millis(*elapsed_ms),
             })],
             K::Observation { value } => observation_items(value.clone()),
-            K::ObservationGroup { values } => observation_group_items(values),
-            K::Card { marks } => match serde_json::from_value::<Card>(marks.clone()) {
-                Ok(card) => vec![surfaced(card)],
-                Err(_) => Vec::new(),
-            },
+            K::ObservationGroup { values } => card::observation_group(values)
+                .map(|(card, kind, count)| Item::Member(Member::Effect { card, kind, count }))
+                .into_iter()
+                .collect(),
+            K::Card { card } => vec![surfaced(card.clone())],
             // Not a card: a settled block is announced, not bounded — a line
             // on the rail, exactly as a subagent's answer arrives.  The shape
             // holds however it settled: `╳` is the turn's own failure (a
@@ -1093,55 +1083,6 @@ fn observed_items(what: &Observed) -> Vec<Item> {
             lines: super::line::render_text(&card::observation_spans(what)),
         })],
     }
-}
-
-/// Decode a [`Display::ObservationGroup`](crate::record::Display::ObservationGroup)'s
-/// members, re-bucketed exactly as `record/commit.rs`'s buffer grouped them at
-/// record time — reads, execs, and greps comma-joined under
-/// [`reads_card`]/[`execs_card`]/[`greps_card`], each write its own barrier.
-fn observation_group_items(values: &[ral_core::serial::FOValue]) -> Vec<Item> {
-    let mut reads: Vec<String> = Vec::new();
-    let mut execs: Vec<Observed> = Vec::new();
-    let mut greps: Vec<Observed> = Vec::new();
-    let mut out: Vec<Item> = Vec::new();
-    for value in values {
-        let Some(Observation { what, .. }) = observation_from_wire(value.clone()) else {
-            continue;
-        };
-        match what {
-            Observed::Read { path } => reads.push(path),
-            Observed::Command {
-                origin:
-                    ral_core::types::CommandOrigin::External | ral_core::types::CommandOrigin::Detached,
-                ..
-            } => execs.push(what),
-            Observed::Grep { .. } => greps.push(what),
-            other => out.extend(observed_items(&other)),
-        }
-    }
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "one flush's observation count; u32 headroom far exceeds any real burst"
-    )]
-    {
-        for (card, kind, count) in [
-            (greps_card(&greps), ObservationKind::Grep, greps.len()),
-            (execs_card(&execs), ObservationKind::Exec, execs.len()),
-            (reads_card(&reads), ObservationKind::Read, reads.len()),
-        ] {
-            if let Some(card) = card {
-                out.insert(
-                    0,
-                    Item::Member(Member::Effect {
-                        card,
-                        kind,
-                        count: count as u32,
-                    }),
-                );
-            }
-        }
-    }
-    out
 }
 
 // ── the sole live producer ──────────────────────────────────────────────────

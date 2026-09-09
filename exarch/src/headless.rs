@@ -11,17 +11,14 @@
 
 use crate::agent::Avatar;
 use crate::agent::event::{ContextOp, EditAuthority};
-use crate::bus::card::{
-    self, Card, Mark, Row, execs_card, greps_card, landing, observation_card,
-    observation_from_wire, reads_card,
-};
+use crate::bus::card::{self, Card, Mark, Row, landing, observation_card, observation_from_wire};
 use crate::bus::{AgentId, AgentOutcome, FleetBus, Sink, pump};
 use crate::provider::{Provider, Usage};
 use crate::record::{self, Blocks, Delta, Record, Recorded, Transient};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
 use ral_core::serial::FOValue;
-use ral_core::types::{CommandOrigin, Observation, Observed};
+use ral_core::types::Observed;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::time::Instant;
@@ -343,12 +340,12 @@ impl Headless<'_> {
                 let _ = writeln!(self.err, "stream stalled, turn resumes: {error:?}");
             }
             K::Observation { value } => self.print_observation(value.clone()),
-            K::ObservationGroup { values } => self.print_observation_group(values),
-            K::Card { marks } => {
-                if let Ok(card) = serde_json::from_value::<Card>(marks.clone()) {
+            K::ObservationGroup { values } => {
+                if let Some((card, ..)) = card::observation_group(values) {
                     self.print_card(&card);
                 }
             }
+            K::Card { card } => self.print_card(card),
             K::Done { outcome } => {
                 let _ = writeln!(
                     self.err,
@@ -426,38 +423,6 @@ impl Headless<'_> {
         }
         let card = observation_card(what);
         self.print_card(&card);
-    }
-
-    /// Decode and re-bucket exactly as `record/commit.rs`'s buffer grouped
-    /// these at record time: reads, execs, and greps comma-joined, a write or
-    /// a standalone denial printed on its own.
-    fn print_observation_group(&mut self, values: &[FOValue]) {
-        let mut reads: Vec<String> = Vec::new();
-        let mut execs: Vec<Observed> = Vec::new();
-        let mut greps: Vec<Observed> = Vec::new();
-        for value in values {
-            let Some(Observation { what, .. }) = observation_from_wire(value.clone()) else {
-                continue;
-            };
-            match what {
-                Observed::Read { path } => reads.push(path),
-                Observed::Command {
-                    origin: CommandOrigin::External | CommandOrigin::Detached,
-                    ..
-                } => execs.push(what),
-                Observed::Grep { .. } => greps.push(what),
-                other => self.print_observed(&other),
-            }
-        }
-        if let Some(card) = reads_card(&reads) {
-            self.print_card(&card);
-        }
-        if let Some(card) = execs_card(&execs) {
-            self.print_card(&card);
-        }
-        if let Some(card) = greps_card(&greps) {
-            self.print_card(&card);
-        }
     }
 }
 
@@ -848,16 +813,15 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessText, root, &mut sink_out, &mut sink_err);
-        let marks = serde_json::to_value(Card(vec![Mark::Raw {
+        let card = Card(vec![Mark::Raw {
             bytes: b"a rendered surface".to_vec(),
-        }]))
-        .expect("a Card always serialises");
+        }]);
         h.accept(
             Signal::Fact(
                 root,
                 Recorded::new(
                     Locus::placeholder(Seq::new(1)),
-                    Record::Display(Display::Card { marks }),
+                    Record::Display(Display::Card { card }),
                 ),
             ),
         );

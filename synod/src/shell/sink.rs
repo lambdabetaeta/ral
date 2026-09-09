@@ -99,13 +99,6 @@ fn process_card(card: Option<Card>) -> Option<SynodEvent> {
     })
 }
 
-/// Decode a recorded `Display::Card`'s opaque wire form back into a [`Card`]
-/// — the mark tree a deliberate `surface` act recorded whole, since it is
-/// its own fact rather than a rendering of one.
-fn decode_card(marks: &serde_json::Value) -> Option<Card> {
-    serde_json::from_value(marks.clone()).ok()
-}
-
 /// A provider-error note's severity, as the two CSS classes the dial's note
 /// row accepts — computed once here, at the seam, so the frontend never
 /// re-derives it from the record it no longer sees.
@@ -301,13 +294,12 @@ fn project_protocol(protocol: &Protocol) -> Option<SynodEvent> {
 /// The trunk's own fold over [`Display`] — the view fold's commits.
 ///
 /// The card-carrying arms split by intent: [`Display::Card`] is a deliberate
-/// user-facing act and
-/// projects to [`SynodEvent::Card`], which the window stands in the
-/// transcript; the grouped and single observations, a done, a notice, and a
-/// context survey are raw-fact pairings whose card is a presentation of
-/// process, so they collapse to [`SynodEvent::ProcessCard`] and stay inside
-/// the dial. The card itself is built here, at fold time — `Display` keeps
-/// only the fact, never a mark tree it would otherwise throw away.
+/// user-facing act, carrying its card verbatim, and projects to
+/// [`SynodEvent::Card`], which the window stands in the transcript; the
+/// grouped and single observations, a done, a notice, and a context survey
+/// are raw-fact pairings whose card is a presentation of process, built here
+/// at fold time, so they collapse to [`SynodEvent::ProcessCard`] and stay
+/// inside the dial.
 #[allow(clippy::match_same_arms)]
 fn project_display(display: &Display) -> Option<SynodEvent> {
     match display {
@@ -329,8 +321,8 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
         }),
         Display::ObservationGroup { values } => process_card(observation_group_card(values)),
         Display::Observation { value } => process_card(observation_display_card(value)),
-        Display::Card { marks } => decode_card(marks).map(|card| SynodEvent::Card {
-            marks: marks_dto(card),
+        Display::Card { card } => Some(SynodEvent::Card {
+            marks: marks_dto(card.clone()),
         }),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
         Display::Context { turns, evicted } => process_card(Some(context_rows_card(turns, *evicted))),
@@ -362,7 +354,7 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
     match display {
         Display::ObservationGroup { values } => process_card(observation_group_card(values)),
         Display::Observation { value } => process_card(observation_display_card(value)),
-        Display::Card { marks } => process_card(decode_card(marks)),
+        Display::Card { card } => process_card(Some(card.clone())),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
         Display::Context { turns, evicted } => process_card(Some(context_rows_card(turns, *evicted))),
         Display::Done { .. }
@@ -689,8 +681,7 @@ mod tests {
                 rows: vec![Row::Del(vec![Seg::plain("x")])],
             }],
         }]);
-        let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
-        let record = Record::Display(Display::Card { marks });
+        let record = Record::Display(Display::Card { card });
         let event = project(&record).expect("card projects");
         let value = serde_json::to_value(&event).expect("card serialises");
         assert_eq!(
@@ -715,8 +706,7 @@ mod tests {
     #[test]
     fn a_helpers_own_card_collapses_to_process_card() {
         let card = Card(vec![]);
-        let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
-        let record = Record::Display(Display::Card { marks });
+        let record = Record::Display(Display::Card { card });
         let Some(SynodEvent::ProcessCard { marks }) = project_helper(&record) else {
             panic!("a helper's own deliberate card still stays inside the dial");
         };
@@ -728,8 +718,7 @@ mod tests {
         let bytes = vec![0xff, 0xfe];
         let expected = String::from_utf8_lossy(&bytes).into_owned();
         let card = Card(vec![Mark::Raw { bytes }]);
-        let marks = serde_json::to_value(&card).expect("Card's derived Serialize cannot fail");
-        let Some(SynodEvent::Card { marks }) = project(&Record::Display(Display::Card { marks }))
+        let Some(SynodEvent::Card { marks }) = project(&Record::Display(Display::Card { card }))
         else {
             panic!("expected a Card event");
         };
