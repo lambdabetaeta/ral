@@ -189,6 +189,7 @@ pub(super) fn step(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod tests {
     use super::*;
     use crate::repl::plugin::HookHealth;

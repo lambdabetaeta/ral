@@ -229,6 +229,10 @@ struct Snapshot {
     caps: HashMap<String, ModelCaps>,
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:pricing-client] a client for the one-shot fetch of the public model catalogue: prices and context windows, no session data either way. Startup bookkeeping, not turn-time model I/O."
+)]
 async fn fetch() -> Result<Snapshot, reqwest::Error> {
     let client = reqwest::Client::builder()
         .use_preconfigured_tls(crate::provider::tls::config())

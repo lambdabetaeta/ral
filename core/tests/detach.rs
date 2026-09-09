@@ -28,10 +28,11 @@ mod common;
 
 use ral_core::protocol::{Program, Run};
 use ral_core::serial::FOValue;
+use ral_core::sync::LockExt as _;
 use ral_core::types::{GrantStack, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value, builtins};
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// The marker the hidden birth flag's survivor writes to its trace file and
@@ -215,7 +216,7 @@ impl Drop for Survivor {
 /// nothing else, and nothing to look up.
 #[test]
 fn a_birth_hands_back_a_pid_and_a_desc_and_leaves_nothing_else() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = armed();
     let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
     let survivor = Survivor::of(&receipt);
@@ -240,7 +241,7 @@ fn a_birth_hands_back_a_pid_and_a_desc_and_leaves_nothing_else() {
 /// what it can observe there.
 #[test]
 fn a_survivor_is_alive_and_is_no_longer_a_child_of_this_process() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = armed();
     let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
     let survivor = Survivor::of(&receipt);
@@ -283,7 +284,7 @@ fn a_survivor_is_alive_and_is_no_longer_a_child_of_this_process() {
 /// process ends the birth with no children at all.
 #[test]
 fn a_birth_leaves_no_zombie_because_the_intermediate_is_reaped_inside_it() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = armed();
     let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
     let survivor = Survivor::of(&receipt);
@@ -308,7 +309,7 @@ fn a_birth_leaves_no_zombie_because_the_intermediate_is_reaped_inside_it() {
 /// handle, and `await`/`poll`/`race`/`cancel` do not apply.
 #[test]
 fn a_detached_process_is_in_no_worker_registry_and_no_workers_listing() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = armed();
     let receipt = birth(&mut shell, "detach #'a long sleep'# /bin/sleep 300");
     let survivor = Survivor::of(&receipt);
@@ -343,7 +344,7 @@ fn a_detached_process_is_in_no_worker_registry_and_no_workers_listing() {
 /// unrecoverable.
 #[test]
 fn a_frame_that_withholds_detach_refuses_the_call_and_spends_no_birth() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = armed();
     // One birth in the whole session, so the surviving process itself is the
     // evidence: had the refusal counted, this budget would be gone and the
@@ -372,7 +373,7 @@ fn a_frame_that_withholds_detach_refuses_the_call_and_spends_no_birth() {
 /// births; a failed launch birthed nothing, so it spends nothing.
 #[test]
 fn a_launch_that_fails_after_admission_gives_the_slot_back() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = armed();
     // One birth in the whole session: had the failed launch counted, the
     // real birth below would be refused for exhaustion instead.
@@ -400,7 +401,7 @@ fn a_launch_that_fails_after_admission_gives_the_slot_back() {
 /// born under that frame's projection and keeps it for life.
 #[test]
 fn a_grant_that_attenuates_something_else_still_permits_a_birth() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = armed();
     let receipt = birth(
         &mut shell,
@@ -425,7 +426,7 @@ fn a_grant_that_attenuates_something_else_still_permits_a_birth() {
 /// it.
 #[test]
 fn the_survivor_writes_to_dev_null_because_std_dup2s_stdio_before_pre_exec_runs() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let dir = tempfile::tempdir().unwrap();
     let (trace, host_out, host_err) = (
         dir.path().join("trace"),
@@ -452,7 +453,7 @@ fn the_survivor_writes_to_dev_null_because_std_dup2s_stdio_before_pre_exec_runs(
 /// instead of recursing.
 #[test]
 fn stacked_detach_handler_forwards_to_base_frame_under_self_masking() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = armed();
     let receipt = birth(
         &mut shell,
@@ -471,7 +472,7 @@ fn stacked_detach_handler_forwards_to_base_frame_under_self_masking() {
 /// `unalias detach` refuses as for any name with no alias installed.
 #[test]
 fn unalias_detach_refuses_because_no_run_frame_holds_it() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let mut shell = armed();
     let message = refusal(&mut shell, "unalias detach");
     assert!(
@@ -485,7 +486,7 @@ fn unalias_detach_refuses_because_no_run_frame_holds_it() {
 /// its survivor is not only alive but still working.
 #[test]
 fn a_detached_process_outlives_the_full_exit_of_the_host_that_birthed_it() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = ONE_AT_A_TIME.lock_ignore_poison();
     let dir = tempfile::tempdir().unwrap();
     let (trace, host_out, host_err) = (
         dir.path().join("trace"),

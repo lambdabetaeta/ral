@@ -26,6 +26,10 @@ pub(crate) fn refuse_setuid() {
     #[cfg(unix)]
     if rustix::process::geteuid() != rustix::process::getuid() {
         eprintln!("ral: refusing to run setuid");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "`main`'s first statement, asked before any re-exec child is served: nothing is booted yet, so nothing is held"
+        )]
         std::process::exit(1);
     }
 }

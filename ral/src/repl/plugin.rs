@@ -38,6 +38,7 @@ pub(super) use self::router::{KeyChord, KeyName, KeyRouter, Resolution};
 pub(super) use self::router::parse_key_notation;
 
 use ral_core::protocol::{Program, Run};
+use ral_core::sync::LockExt as _;
 use ral_core::types::{Break, GrantStack, Mooring, Settled};
 use ral_core::{
     HookName, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Shell,
@@ -59,7 +60,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 // ── Lock helper ─────────────────────────────────────────────────────────
 
 pub(super) fn lock(m: &Arc<Mutex<PluginRuntime>>) -> MutexGuard<'_, PluginRuntime> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    m.lock_ignore_poison()
 }
 
 /// A plugin-load failure.  The message carries no surface tag: the display

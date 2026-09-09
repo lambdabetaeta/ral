@@ -397,6 +397,7 @@ impl Default for Shell {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod tests {
     use super::super::value::Value;
     use super::*;

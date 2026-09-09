@@ -14,6 +14,7 @@ use crate::evaluator::machine;
 use crate::evaluator::scope::{error_record, error_record_of};
 use crate::io::{Sink, new_buffer, peek_buffer, take_buffer};
 use crate::serial::FOValue;
+use crate::sync::LockExt as _;
 use crate::types::{
     Break, CapReached, Closure, CompletedHandle, DeferredSink, Env, Error, Escape, EventSink,
     HandleInner, HandleState, LeaseClass, Mooring, Observed, ReapCause, Settled, Shell,
@@ -48,7 +49,7 @@ struct DeferredSurface {
 
 impl EventSink for DeferredSurface {
     fn emit(&self, ev: &FOValue) {
-        let mut buf = self.buf.lock().unwrap();
+        let mut buf = self.buf.lock_ignore_poison();
         if buf.len() < DEFERRED_SURFACE_CAP {
             buf.push(ev.clone());
         } else if buf.len() == DEFERRED_SURFACE_CAP {
@@ -87,11 +88,11 @@ impl DeferredSurface {
         let Some(deferred) = self.deferred.as_ref() else {
             return;
         };
-        let already = std::mem::replace(&mut *joined.lock().unwrap(), true);
+        let already = std::mem::replace(&mut *joined.lock_ignore_poison(), true);
         if already {
             return;
         }
-        let mut batch = self.buf.lock().unwrap().clone();
+        let mut batch = self.buf.lock_ignore_poison().clone();
         batch.push(done_event(cmd, outcome));
         deferred.deliver(batch);
     }
@@ -242,7 +243,7 @@ where
                 // Strictly *after* the send, so `Completed` always implies an
                 // outcome already in the channel.  Guarded: an eliminator may have
                 // won the transition, and a `cancel`'s `Cancelled` must not be undone.
-                let mut settled_state = worker_state.lock().unwrap();
+                let mut settled_state = worker_state.lock_ignore_poison();
                 if *settled_state == HandleState::Running {
                     *settled_state = HandleState::Completed;
                 }
@@ -322,11 +323,11 @@ struct LeaseChain {
 /// the handle attached: the body settles as an error, so a later `poll`/`await`
 /// still observes the partial output and the failure.
 fn lease_fire(chain: &LeaseChain) {
-    if *chain.state.lock().unwrap() != HandleState::Running {
+    if *chain.state.lock_ignore_poison() != HandleState::Running {
         return;
     }
     let age = chain.started.elapsed();
-    let idle = chain.last_observed.lock().unwrap().elapsed();
+    let idle = chain.last_observed.lock_ignore_poison().elapsed();
     if age >= chain.lease.backstop {
         chain.registry.reap(chain.id, ReapCause::Backstop);
         chain.scope.cancel(crate::process::CancelCause::Deadline);
@@ -517,7 +518,7 @@ pub(super) fn builtin_detach(
 /// already-completed handle keeps its cached outcome, so a finished worker's
 /// value is never destroyed by a losing `race` or a `cancel` that lost the toss.
 fn stop_handle(handle: &HandleInner) {
-    if *handle.state.lock().unwrap() != HandleState::Completed {
+    if *handle.state.lock_ignore_poison() != HandleState::Completed {
         handle.cancel.cancel(crate::process::CancelCause::Explicit);
         detach_handle(handle);
     }
@@ -534,7 +535,7 @@ pub(super) fn builtin_cancel(args: &[Value], shell: &Shell) -> Settled<Value> {
 /// The pre-check `await` and `poll` share: a cancelled handle has no result to
 /// wait for or sample, so observing one is an error.
 fn ensure_live(handle: &HandleInner) -> Settled<()> {
-    if *handle.state.lock().unwrap() == HandleState::Cancelled {
+    if *handle.state.lock_ignore_poison() == HandleState::Cancelled {
         return Err(Break::Error(
             Error::new("handle is cancelled", 1)
                 .with_hint("use try around await to handle cancellation"),
@@ -553,15 +554,15 @@ fn ensure_live(handle: &HandleInner) -> Settled<()> {
     reason = "the result guard must span the cached re-check, try_recv, and cache write; releasing early lets a second awaiter observe a bare Disconnected"
 )]
 fn try_settle(handle: &HandleInner) -> Option<CompletedHandle> {
-    let cached = handle.cached.lock().unwrap().clone();
+    let cached = handle.cached.lock_ignore_poison().clone();
     if let Some(completed) = cached {
         return Some(completed);
     }
     // Settling is once-only: hold `result` across the re-check, the receive,
     // and the cache write, so a second awaiter either sees the first's cached
     // outcome or blocks — never a bare `Disconnected` left by someone's `recv`.
-    let mut rx_guard = handle.result.lock().unwrap();
-    let cached = handle.cached.lock().unwrap().clone();
+    let mut rx_guard = handle.result.lock_ignore_poison();
+    let cached = handle.cached.lock_ignore_poison().clone();
     if let Some(completed) = cached {
         return Some(completed);
     }
@@ -581,7 +582,7 @@ fn try_settle(handle: &HandleInner) -> Option<CompletedHandle> {
 /// duplicate.
 fn replay_deferred_surface(handle: &HandleInner, completed: &CompletedHandle, mooring: &Mooring) {
     {
-        let mut joined = handle.joined.lock().unwrap();
+        let mut joined = handle.joined.lock_ignore_poison();
         if *joined {
             return;
         }
@@ -618,8 +619,8 @@ fn wait_first_settled<'a>(
         for &handle in handles {
             // A blocked wait is continuous observation: each sweep renews
             // every named handle's idle lease, so none is reaped mid-wait.
-            *handle.last_observed.lock().unwrap() = std::time::Instant::now();
-            let state = *handle.state.lock().unwrap();
+            *handle.last_observed.lock_ignore_poison() = std::time::Instant::now();
+            let state = *handle.state.lock_ignore_poison();
             match state {
                 HandleState::Cancelled => continue,
                 HandleState::Running => saw_running = true,
@@ -675,7 +676,7 @@ pub(super) fn builtin_poll(args: &[Value], shell: &Shell) -> Settled<Value> {
     ensure_live(handle)?;
     // Both arms are observations, so the touch lands once at entry, before the
     // settle attempt decides which arm it is.
-    *handle.last_observed.lock().unwrap() = std::time::Instant::now();
+    *handle.last_observed.lock_ignore_poison() = std::time::Instant::now();
     let variant = |label: &str, payload| Value::Variant {
         label: label.into(),
         payload,
@@ -759,7 +760,7 @@ fn break_record(e: &Break, shell: &Shell) -> Value {
 /// captures a failed block's bytes; the cache serves every repeat.
 fn complete_handle(handle: &HandleInner, result: Settled<Value>) -> CompletedHandle {
     {
-        let mut state = handle.state.lock().unwrap();
+        let mut state = handle.state.lock_ignore_poison();
         if *state == HandleState::Running {
             *state = HandleState::Completed;
         }
@@ -767,23 +768,24 @@ fn complete_handle(handle: &HandleInner, result: Settled<Value>) -> CompletedHan
     let completed = CompletedHandle {
         stdout: take_buffer(&handle.stdout_buf),
         stderr: take_buffer(&handle.stderr_buf),
-        surface: std::mem::take(&mut *handle.surface_buf.lock().unwrap()),
+        surface: std::mem::take(&mut *handle.surface_buf.lock_ignore_poison()),
         outcome: result,
     };
-    *handle.cached.lock().unwrap() = Some(completed.clone());
+    *handle.cached.lock_ignore_poison() = Some(completed.clone());
     completed
 }
 
 /// Release a handle's receiver and clear its cached result.
 fn detach_handle(handle: &HandleInner) {
-    *handle.state.lock().unwrap() = HandleState::Cancelled;
-    let mut rx_guard = handle.result.lock().unwrap();
+    *handle.state.lock_ignore_poison() = HandleState::Cancelled;
+    let mut rx_guard = handle.result.lock_ignore_poison();
     let _ = rx_guard.take();
     drop(rx_guard);
-    *handle.cached.lock().unwrap() = None;
+    *handle.cached.lock_ignore_poison() = None;
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod tests {
     use super::*;
     use crate::types::{GrantStack, Map};

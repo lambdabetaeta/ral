@@ -53,9 +53,7 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 fn main() {
-    if let Some(code) = exarch::dispatch_pre_main() {
-        std::process::exit(i32::from(code));
-    }
+    exarch::exit_if_re_exec_child();
     // Before any conversation can open its own store: collect whatever a
     // crashed run left behind.
     synod::workspace::history::sweep_stale();
@@ -66,6 +64,12 @@ fn main() {
         )));
         (Arc::new(Mutex::new(store)), catalog)
     }));
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "whatever this expands to is Tauri's codegen, not ral's to annotate: the macro bakes the app config and the embedded frontend assets into a Context here"
+    )]
+    let context = tauri::generate_context!();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -110,6 +114,6 @@ fn main() {
                 });
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("synod's window could not start");
 }

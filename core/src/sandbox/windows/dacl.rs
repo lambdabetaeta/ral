@@ -405,7 +405,7 @@ impl DaclManager {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:dacl-state-dir] Ensures the ledger's own directory exists before write, since the cached path may predate a later XDG_STATE_HOME change. Sandbox crash-safety infrastructure, not model data I/O."
+        reason = "[silent:dacl-state-dir-recheck] Ensures the ledger's own directory exists before write, since the cached path may predate a later XDG_STATE_HOME change. Sandbox crash-safety infrastructure, not model data I/O."
     )]
     fn persist_ledger(&self) -> Result<(), DaclError> {
         let ledger = Ledger {

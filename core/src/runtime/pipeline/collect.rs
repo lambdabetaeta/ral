@@ -4,14 +4,14 @@
 
 use super::super::command;
 use super::stage::StageHandle;
-use crate::evaluator::audit::observe_stamped;
+use crate::evaluator::audit::{command_fact, observe_stamped};
 use crate::ir::PipeYield;
 use crate::process::{
     CancelCause, CancelWatch, CommandFailure, Pgid, WaitOutcome, Watch, watch_cancel,
 };
 use crate::types::{
-    AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Observed, Settled,
-    Shell, Value, epoch_us,
+    AuditFragment, AuditIo, Break, CommandOrigin, Error, Mooring, Observation, Settled, Shell,
+    Value, epoch_us,
 };
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Instant;
@@ -27,26 +27,29 @@ fn augment_stage_failure(err: Error, shell: &Shell, started: Instant) -> Error {
     crate::sandbox::augment_failure(err, shell, &pids, started)
 }
 
-/// The fragment is empty when audit is inactive at the parent.
-fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) -> AuditFragment {
-    if !shell.local.audit.active() {
-        return AuditFragment::empty();
-    }
-    let site = shell.call_site();
-    let principal = shell.context.principal();
+/// Built whether or not anyone is listening: this phase performs no effects,
+/// and `fold` hands the fragment to the one emission door, which is where the
+/// interest is judged.
+fn synth_external_stage_audit(
+    shell: &Shell,
+    name: &str,
+    args: Vec<String>,
+    err: Option<&Error>,
+) -> AuditFragment {
     let now = epoch_us();
     let obs = Observation::spanning(
-        site,
+        shell.call_site(),
         now,
         now,
-        principal,
-        Observed::Command {
-            argv: vec![name.to_string()],
-            status: err.map_or(0, Error::exit_code),
-            origin: CommandOrigin::External,
-            io: AuditIo::default(),
-            error: err.map(|e| e.message.clone()),
-        },
+        shell.context.principal(),
+        command_fact(
+            name,
+            args,
+            err.map_or(0, Error::exit_code),
+            CommandOrigin::External,
+            AuditIo::default(),
+            err.map(|e| e.message.clone()),
+        ),
     );
     AuditFragment::from_observations(vec![obs])
 }
@@ -55,6 +58,7 @@ fn synth_external_stage_audit(shell: &Shell, name: &str, err: Option<&Error>) ->
 /// `&Shell`, could not give an external's raw outcome.
 fn finish_external_settlement(
     name: &str,
+    args: Vec<String>,
     outcome: WaitOutcome,
     sent: Option<CancelCause>,
     enveloped: bool,
@@ -63,7 +67,7 @@ fn finish_external_settlement(
 ) -> StageObservation {
     let err = CommandFailure::from_outcome(outcome, sent, enveloped)
         .map(|f| Error::from_command_failure(name, f, shell));
-    let audit = synth_external_stage_audit(shell, name, err.as_ref());
+    let audit = synth_external_stage_audit(shell, name, args, err.as_ref());
     let settled = match err {
         Some(err) => Err(Break::Error(augment_stage_failure(err, shell, started))),
         None => Ok(Value::Unit),
@@ -76,6 +80,7 @@ pub(super) enum StageEnd {
     Thread(StageObservation),
     External {
         name: String,
+        args: Vec<String>,
         outcome: WaitOutcome,
         jail: Option<crate::process::jail::JailCgroup>,
         pumps: command::Pumps,
@@ -94,6 +99,7 @@ impl StageEnd {
             Self::Thread(obs) => obs,
             Self::External {
                 name,
+                args,
                 outcome,
                 jail,
                 pumps,
@@ -104,7 +110,7 @@ impl StageEnd {
                     jail.finish();
                 }
                 pumps.settle(sent == Some(CancelCause::ReaderGone));
-                finish_external_settlement(&name, outcome, sent, enveloped, shell, started)
+                finish_external_settlement(&name, args, outcome, sent, enveloped, shell, started)
             }
         }
     }

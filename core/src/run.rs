@@ -707,6 +707,7 @@ pub(crate) fn run_framed<'a>(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 pub(crate) mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};

@@ -36,6 +36,12 @@ pub(crate) struct FleetSink {
     pub(crate) meter: UsageMeter,
 }
 
+/// `inner` is outside the workspace's poison door ([`ral_core::sync::LockExt`])
+/// on purpose: `seq` and `pos` are the file's own position, restated in memory,
+/// and [`Self::append`] advances them only after the bytes are written. A panic
+/// between the write and the restatement leaves every later `Locus` naming a
+/// byte range that is not the record it claims, and replay reads the wrong
+/// bytes. A poisoned log must stay poisoned.
 pub(crate) struct Log {
     inner: Mutex<Inner>,
 }
@@ -58,7 +64,7 @@ impl Log {
     /// Returns `Err` if the file cannot be created.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:record-file] creates the session's record.jsonl; output infra, not turn-time data I/O"
+        reason = "[silent:record-file-create] creates the session's record.jsonl; output infra, not turn-time data I/O"
     )]
     pub(crate) fn create(path: &Path) -> io::Result<Self> {
         let file = File::create(path)?;
@@ -77,7 +83,7 @@ impl Log {
     /// Returns `Err` if the file cannot be read or reopened.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:record-file] reopens the session's record.jsonl for append on resume; output infra, not turn-time data I/O"
+        reason = "[silent:record-file-append] reopens the session's record.jsonl for append on resume; output infra, not turn-time data I/O"
     )]
     pub(crate) fn append_to(path: &Path) -> io::Result<Self> {
         let (mut seq, mut pos) = (0u64, 0u64);
@@ -135,8 +141,9 @@ impl Log {
     /// poisoned; on either the old segment stays live.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:record-file] opens the session's next record.jsonl segment; output infra, not turn-time data I/O"
+        reason = "[silent:record-file-rotate] opens the session's next record.jsonl segment; output infra, not turn-time data I/O"
     )]
+    #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]
     pub(super) fn rotate(&self, path: Option<&Path>) -> io::Result<()> {
         let writer = path.map(File::create).transpose()?.map(BufWriter::new);
         let mut inner = self
@@ -154,6 +161,7 @@ impl Log {
     /// session's seam meets a run's bus (attend, deliberate, a direct
     /// `run_shell`); re-attaching over a dead per-exchange channel is the
     /// ordinary way a headless session's next exchange comes back on air.
+    #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]
     pub(super) fn attach(&self, sink: FleetSink) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
@@ -166,6 +174,7 @@ impl Log {
     /// than beside it.  Flushed per record (never `fsync`): process-crash
     /// durable, which is what lets a killed session resume, but not
     /// power-loss durable.
+    #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]
     pub(super) fn append(&self, record: Record) -> io::Result<Locus> {
         let mut inner = self
             .inner
@@ -209,6 +218,7 @@ impl Log {
 
     /// Publish a transient that never touches the file, through the same
     /// mutex as [`Self::append`] so it interleaves with facts in one order.
+    #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]
     pub(super) fn publish_transient(&self, t: Transient) {
         let Ok(inner) = self.inner.lock() else {
             return;
@@ -232,7 +242,7 @@ impl Log {
     /// arrives as an `Err` item, leaving the fold to refuse the session.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:record-file] streams the session's record.jsonl for replay; output infra, not turn-time data I/O"
+        reason = "[silent:record-file-read] streams the session's record.jsonl for replay; output infra, not turn-time data I/O"
     )]
     pub(super) fn read(
         path: &Path,

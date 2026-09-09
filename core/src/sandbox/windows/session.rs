@@ -34,6 +34,7 @@ use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 use crate::process::Launch;
 use crate::process::cancel::CancelScope;
+use crate::sync::LockExt as _;
 use crate::types::{Break, Error, SandboxProjection, Settled};
 
 use super::appcontainer::{AppContainerProfile, CapabilitySids, OwnedCapabilitySid};
@@ -208,9 +209,7 @@ pub(crate) fn confine(
     // confining the same session — and `sandbox`/`proj` borrow out of the
     // guard until `security_capabilities`, so an early `drop` would not
     // compile.
-    let mut guard = cell()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = cell().lock_ignore_poison();
     if guard.is_none() {
         *guard = Some(SessionSandbox::create()?);
     }
@@ -401,11 +400,7 @@ pub(crate) fn boot_recover() {
 /// `Drop` is not guaranteed at exit; a session that never reaches here leaves
 /// its ledger for the next boot's sweep.
 pub(crate) fn teardown() {
-    let Some(sandbox) = cell()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-    else {
+    let Some(sandbox) = cell().lock_ignore_poison().take() else {
         return;
     };
     // Traced separately from `confine`: one profile delete per projection, and

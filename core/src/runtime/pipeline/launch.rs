@@ -209,6 +209,7 @@ fn launch_external_stage_direct(
     Ok(ExternalStage {
         watch: slot.watch(child),
         name: rc.shown,
+        args: rc.args,
         jail,
         pumps,
         envelope,

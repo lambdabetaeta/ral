@@ -289,20 +289,14 @@ impl ProviderHandle {
     }
 
     /// The provider in force for the next item.
-    ///
-    /// # Panics
-    /// Panics if the provider-handle mutex is poisoned.
     pub fn current(&self) -> Arc<Provider> {
-        self.0.lock().expect("provider handle poisoned").clone()
+        self.0.lock_ignore_poison().clone()
     }
 
     /// Replace the active provider (a `/model` switch).  An in-flight
     /// deliberation finishes on the provider it started with.
-    ///
-    /// # Panics
-    /// Panics if the provider-handle mutex is poisoned.
     pub fn swap(&self, provider: Arc<Provider>) {
-        *self.0.lock().expect("provider handle poisoned") = provider;
+        *self.0.lock_ignore_poison() = provider;
     }
 }
 
@@ -671,7 +665,7 @@ impl Avatar {
     /// Every deliberation must hand the session back at a ready boundary.
     ///
     /// # Panics
-    /// Panics if the log mutex is poisoned.
+    /// Panics if the log cell is contended — see [`LogCell::lock`].
     pub fn is_ready(&self) -> bool {
         self.log.lock().is_ready()
     }
@@ -679,7 +673,7 @@ impl Avatar {
     /// The model-view messages the next request would carry.
     ///
     /// # Panics
-    /// Panics if the log mutex is poisoned.
+    /// Panics if the log cell is contended — see [`LogCell::lock`].
     pub fn rendered_messages(&self) -> Vec<genai::chat::ChatMessage> {
         self.log.lock().history_rendered()
     }
@@ -687,7 +681,7 @@ impl Avatar {
     /// Serialised model-view byte count — the eviction-threshold input.
     ///
     /// # Panics
-    /// Panics if the log mutex is poisoned.
+    /// Panics if the log cell is contended — see [`LogCell::lock`].
     pub fn history_bytes(&self) -> usize {
         self.log.lock().history_bytes()
     }

@@ -24,7 +24,7 @@ use crate::types::{DeferredSink, EnquiryDesk, Error, Fork, Shell, SurfaceSink};
 use crate::wire::WireChannel;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 /// One compiled-in boot recipe the engine can be told, at `Attach`, to become.
 ///
@@ -53,10 +53,14 @@ pub struct EngineInstaller {
 /// stalled write becomes exactly the same fatal, non-blocking event a severed
 /// pipe already is.
 ///
-/// `writer`'s poison is never recovered, unlike [`WireDesk::slots`] below: a
+/// `writer`'s poison is never recovered, unlike [`WireDesk::parked`] below: a
 /// panic between `write_frame` and `shutdown` can leave a partial frame
 /// already on the socket with `fault` unset, and resuming writes into that
 /// torn stream is worse than the panic propagating.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the engine-side wire writer: a partial frame already on the socket with fault unset is what a recovered guard would append the next frame onto"
+)]
 fn engine_write(writer: &Mutex<WireChannel>, fault: &AtomicBool, frame: &Frame) -> io::Result<()> {
     let outcome = {
         let mut guard = writer.lock().unwrap();
@@ -142,37 +146,38 @@ impl Default for Patience {
 }
 
 /// Bounds the settle against a run that ignores cancellation, so a dead peer
-/// can never wedge the exit.
+/// can never wedge the exit. The bound is paid for in cleanup: the exit runs no
+/// destructor on the worker's thread, so an atomic write still in flight at the
+/// bound leaves its staged `.ral-write.tmp` sibling behind.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const SETTLE_POLL: Duration = Duration::from_millis(50);
 
 /// The wire engine's enquiry desk. `enquire` mints an [`EnquiryId`], writes
-/// `Event::Enquiry` inside the in-flight dispatch, and parks on a slot keyed by
-/// that id until the front-end's `Frame::Answer` fills it — or the run's own
-/// cancel scope fires, polled at the condvar's timeout.
+/// `Event::Enquiry` inside the in-flight dispatch, and parks on a oneshot
+/// registered under that id until the front-end's `Frame::Answer` sends down
+/// it — or the run's own cancel scope fires, polled at the receive timeout.
 struct WireDesk {
     writer: Arc<Mutex<WireChannel>>,
     fault: Arc<AtomicBool>,
     /// Stamped by the worker, so an enquiry names the run that raised it.
     current_dispatch: Arc<AtomicU64>,
     next_eid: AtomicU64,
-    /// `None` = parked awaiting an answer, `Some` = answered and awaiting
-    /// collection. Absence means the park died; an answer for it is dropped.
-    /// Every mutation is a whole-entry insert/remove/overwrite, so poison
-    /// here is recovered ([`LockExt`]) rather than propagated.
-    slots: Mutex<HashMap<EnquiryId, Option<Result<FOValue, EnquiryError>>>>,
-    answered: Condvar,
+    /// The answering half of every live park; the parked `enquire` owns the
+    /// receiving half, so an id absent here has no park left to serve.
+    /// Every mutation is a whole-entry insert or remove, so poison here is
+    /// recovered ([`LockExt`]) rather than propagated.
+    parked: Mutex<HashMap<EnquiryId, mpsc::SyncSender<Result<FOValue, EnquiryError>>>>,
 }
 
 impl WireDesk {
-    /// Called from the reader loop. An answer arriving after its park gave up
-    /// finds no slot and is dropped.
+    /// Called from the reader loop. An answer whose park has gone finds no
+    /// sender, or races its receiver's drop and fails to send; either way it
+    /// is dropped.
     fn fill(&self, eid: EnquiryId, answer: Result<FOValue, EnquiryError>) {
-        let mut slots = self.slots.lock_ignore_poison();
-        if let Some(slot) = slots.get_mut(&eid) {
-            *slot = Some(answer);
-            self.answered.notify_all();
+        let park = self.parked.lock_ignore_poison().remove(&eid);
+        if let Some(tx) = park {
+            let _ = tx.send(answer);
         }
     }
 }
@@ -185,7 +190,10 @@ impl EnquiryDesk for WireDesk {
     ) -> Result<FOValue, Error> {
         let id = DispatchId(self.current_dispatch.load(Ordering::Relaxed));
         let eid = EnquiryId(self.next_eid.fetch_add(1, Ordering::Relaxed));
-        self.slots.lock_ignore_poison().insert(eid, None);
+        // Registered before the write: the answer may be back before this
+        // thread reaches the park below.
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.parked.lock_ignore_poison().insert(eid, tx);
 
         if engine_write(
             &self.writer,
@@ -194,27 +202,37 @@ impl EnquiryDesk for WireDesk {
         )
         .is_err()
         {
-            self.slots.lock_ignore_poison().remove(&eid);
+            self.parked.lock_ignore_poison().remove(&eid);
             return Err(Error::new("enquiry lost: the host connection is down", 1));
         }
 
-        // The park mints its error through `Error::cancelled`, as every
-        // poll point does.
-        let mut slots = self.slots.lock_ignore_poison();
+        // The sender leaves `parked` only into `fill`'s send or this park's own
+        // exit, so a disconnect can only trail an answer already returned.
+        const ORPHANED: &str = "an enquiry's sender outlives its park";
+
+        // Answer, then cancel, then park — in that order, so an answer already
+        // in hand outranks a cancel pending beside it, and an enquiry raised
+        // under an already-cancelled scope returns without parking at all. The
+        // park mints its error through `Error::cancelled`, as every poll point
+        // does.
+        let deliver = |answer: Result<FOValue, EnquiryError>| {
+            answer.map_err(|e| Error::new(e.message, e.status))
+        };
         loop {
-            if let Some(Some(_)) = slots.get(&eid) {
-                let answer = slots.remove(&eid).flatten().expect("slot just seen filled");
-                return answer.map_err(|e| Error::new(e.message, e.status));
+            match rx.try_recv() {
+                Ok(answer) => return deliver(answer),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => unreachable!("{ORPHANED}"),
             }
             if let Some(cause) = cancel.cause() {
-                slots.remove(&eid);
+                self.parked.lock_ignore_poison().remove(&eid);
                 return Err(Error::cancelled(cause));
             }
-            slots = self
-                .answered
-                .wait_timeout(slots, ENQUIRY_CANCEL_POLL)
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
+            match rx.recv_timeout(ENQUIRY_CANCEL_POLL) {
+                Ok(answer) => return deliver(answer),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => unreachable!("{ORPHANED}"),
+            }
         }
     }
 }
@@ -308,9 +326,17 @@ pub fn run_engine(installers: &[EngineInstaller]) -> ! {
     // the engine owns it: no external command a run spawns may inherit the wire.
     if let Err(e) = rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::CLOEXEC) {
         eprintln!("engine: failed to set CLOEXEC on the wire fd: {e}");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the process has adopted fd 3 and nothing else: no shell is booted, so there is no lease, no watched child and no staged write to unwind"
+        )]
         std::process::exit(1);
     }
     let reader_ch = WireChannel::from_stream(stream);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "`engine_session`'s teardown settle is the shutdown: it cancels the foreground, cancels the durable root, tears the hatched children down and waits the worker out before returning here. An engine's stdio is /dev/null, so its session mints no TerminalLease and no ForegroundGuard can exist to strand."
+    )]
     std::process::exit(engine_session(reader_ch, installers, Patience::default()));
 }
 
@@ -486,8 +512,7 @@ fn engine_session(
         fault: wire_fault.clone(),
         current_dispatch: current_dispatch.clone(),
         next_eid: AtomicU64::new(1),
-        slots: Mutex::new(HashMap::new()),
-        answered: Condvar::new(),
+        parked: Mutex::new(HashMap::new()),
     });
     let surface = Arc::new(ChannelSurfaceSink {
         current_dispatch: current_dispatch.clone(),
@@ -722,6 +747,7 @@ fn engine_session(
 // `WireTransport::new` re-execs the current binary with `--engine`, a flag only
 // the host binaries handle, so a core test binary would re-run the harness.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod wire_desk_tests {
     use super::*;
     use crate::process::{CancelCause, CancelScope};
@@ -736,8 +762,7 @@ mod wire_desk_tests {
             fault: Arc::new(AtomicBool::new(false)),
             current_dispatch: Arc::new(AtomicU64::new(7)),
             next_eid: AtomicU64::new(1),
-            slots: Mutex::new(HashMap::new()),
-            answered: Condvar::new(),
+            parked: Mutex::new(HashMap::new()),
         });
 
         let filler = desk.clone();
@@ -755,8 +780,8 @@ mod wire_desk_tests {
         front_end.join().expect("front-end thread");
         assert_eq!(answer.expect("answered"), FOValue::Int { value: 42 });
         assert!(
-            desk.slots.lock().unwrap().is_empty(),
-            "the answered slot is removed"
+            desk.parked.lock().unwrap().is_empty(),
+            "an answered park is deregistered"
         );
     }
 
@@ -770,8 +795,7 @@ mod wire_desk_tests {
             fault: Arc::new(AtomicBool::new(false)),
             current_dispatch: Arc::new(AtomicU64::new(1)),
             next_eid: AtomicU64::new(1),
-            slots: Mutex::new(HashMap::new()),
-            answered: Condvar::new(),
+            parked: Mutex::new(HashMap::new()),
         });
 
         let filler = desk.clone();
@@ -794,50 +818,87 @@ mod wire_desk_tests {
         );
     }
 
-    /// A cancelled park unwinds at its next poll tick and takes its slot with
-    /// it, so the answer that never came has nowhere to land.
-    #[test]
-    fn cancel_wakes_a_parked_enquiry() {
-        let (ours, _peer) = WireChannel::pair().expect("socketpair");
+    fn lone_desk() -> (WireDesk, WireChannel) {
+        let (ours, peer) = WireChannel::pair().expect("socketpair");
         let desk = WireDesk {
             writer: Arc::new(Mutex::new(ours)),
             fault: Arc::new(AtomicBool::new(false)),
             current_dispatch: Arc::new(AtomicU64::new(1)),
             next_eid: AtomicU64::new(1),
-            slots: Mutex::new(HashMap::new()),
-            answered: Condvar::new(),
+            parked: Mutex::new(HashMap::new()),
+        };
+        (desk, peer)
+    }
+
+    /// A cancel raised *while* the enquiry is parked wakes it at the next poll
+    /// tick and deregisters it, so the answer that never came has nowhere to
+    /// land.
+    #[test]
+    fn cancel_wakes_a_parked_enquiry() {
+        let (desk, _peer) = lone_desk();
+        let scope = CancelScope::default();
+
+        // Long enough that `enquire` is provably parked before the cancel
+        // lands, so this test cannot pass by the pre-park check alone.
+        let lead = ENQUIRY_CANCEL_POLL * 2;
+        let canceller = {
+            let scope = scope.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(lead);
+                scope.cancel(CancelCause::Explicit);
+            })
         };
 
-        let scope = CancelScope::default();
-        scope.cancel(CancelCause::Explicit);
-
+        let started = std::time::Instant::now();
         let err = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
+        let waited = started.elapsed();
+        canceller.join().expect("canceller thread");
+
         assert_eq!(err.message, "cancelled");
         assert!(
-            desk.slots.lock().unwrap().is_empty(),
-            "a cancelled park removes its slot"
+            waited >= lead,
+            "the enquiry parked until the cancel: {waited:?}"
+        );
+        assert!(
+            desk.parked.lock().unwrap().is_empty(),
+            "a cancelled park deregisters itself"
         );
 
         // `EnquiryId(1)` is the one this park minted and abandoned.
         desk.fill(EnquiryId(1), Ok(FOValue::Unit));
-        assert!(desk.slots.lock().unwrap().is_empty());
+        assert!(desk.parked.lock().unwrap().is_empty());
+    }
+
+    /// An enquiry raised under an already-cancelled scope answers at once: it
+    /// checks the cancel before it parks, so it never waits out a poll tick.
+    #[test]
+    fn cancel_before_the_enquiry_never_parks() {
+        let (desk, _peer) = lone_desk();
+        let scope = CancelScope::default();
+        scope.cancel(CancelCause::Explicit);
+
+        let started = std::time::Instant::now();
+        let err = desk.enquire(FOValue::Unit, &scope).expect_err("cancelled");
+        let waited = started.elapsed();
+
+        assert_eq!(err.message, "cancelled");
+        assert!(
+            waited < ENQUIRY_CANCEL_POLL,
+            "returned without parking for a tick: {waited:?}"
+        );
+        assert!(
+            desk.parked.lock().unwrap().is_empty(),
+            "a cancelled park deregisters itself"
+        );
     }
 
     #[test]
     fn late_answer_for_a_dead_id_is_dropped() {
-        let (ours, _peer) = WireChannel::pair().expect("socketpair");
-        let desk = WireDesk {
-            writer: Arc::new(Mutex::new(ours)),
-            fault: Arc::new(AtomicBool::new(false)),
-            current_dispatch: Arc::new(AtomicU64::new(1)),
-            next_eid: AtomicU64::new(1),
-            slots: Mutex::new(HashMap::new()),
-            answered: Condvar::new(),
-        };
+        let (desk, _peer) = lone_desk();
         desk.fill(EnquiryId(99), Ok(FOValue::Unit));
         assert!(
-            desk.slots.lock().unwrap().is_empty(),
-            "an unknown id must not mint a slot"
+            desk.parked.lock().unwrap().is_empty(),
+            "an unknown id must not mint a park"
         );
     }
 }

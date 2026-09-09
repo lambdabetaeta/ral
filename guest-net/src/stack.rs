@@ -21,6 +21,7 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpListenEndpoint};
 
 use exarch::egress::{Egress, Record};
+use ral_core::sync::{CondvarExt as _, LockExt as _};
 
 use crate::connect::{self, Refusal};
 use crate::device::{self, TunDevice, Wire};
@@ -91,18 +92,14 @@ impl Doorbell {
     }
 
     fn ring(&self) {
-        *self.dirty.lock().expect("doorbell poisoned") = true;
+        *self.dirty.lock_ignore_poison() = true;
         self.cvar.notify_one();
     }
 
     fn wait(&self, timeout: Duration) {
-        let mut dirty = self.dirty.lock().expect("doorbell poisoned");
+        let mut dirty = self.dirty.lock_ignore_poison();
         if !*dirty {
-            dirty = self
-                .cvar
-                .wait_timeout(dirty, timeout)
-                .expect("doorbell poisoned")
-                .0;
+            dirty = self.cvar.wait_timeout_ignore_poison(dirty, timeout).0;
         }
         *dirty = false;
     }
@@ -125,7 +122,7 @@ impl Connection {
     fn wake_for_stop(&self) {
         self.core.abandon();
         self.core.guest_closed();
-        if let Some(origin) = self.origin.lock().expect("origin poisoned").as_ref() {
+        if let Some(origin) = self.origin.lock_ignore_poison().as_ref() {
             let _ = origin.shutdown(Shutdown::Both);
         }
     }
@@ -147,12 +144,7 @@ impl<W: Wire> Session<W> {
     /// If the connections lock is poisoned.
     pub fn stop(&self) {
         self.stop.stop();
-        for conn in self
-            .connections
-            .lock()
-            .expect("connections poisoned")
-            .iter()
-        {
+        for conn in self.connections.lock_ignore_poison().iter() {
             conn.wake_for_stop();
         }
     }
@@ -173,24 +165,18 @@ impl<W: Wire> Session<W> {
     /// guest-triggerable condition.
     pub fn join(self) -> Result<(), String> {
         self.core.join().expect("guest-net core thread panicked");
-        for conn in self
-            .connections
-            .lock()
-            .expect("connections poisoned")
-            .drain(..)
-        {
+        for conn in self.connections.lock_ignore_poison().drain(..) {
             // A connection accepted in the core's last poll never saw
             // `stop`'s wake, so every survivor gets one.
             conn.wake_for_stop();
             if conn.worker.join().is_err() {
                 self.failures
-                    .lock()
-                    .expect("failures poisoned")
+                    .lock_ignore_poison()
                     .push("a guest-net worker panicked");
             }
         }
         self.stop.join();
-        let failures = self.failures.lock().expect("failures poisoned");
+        let failures = self.failures.lock_ignore_poison();
         if failures.is_empty() {
             Ok(())
         } else {
@@ -345,7 +331,7 @@ impl<W: Wire> Core<W> {
     fn accept(&mut self, handle: SocketHandle) {
         // Two separate lock holds are safe: only this thread ever adds a
         // connection, so the capacity check cannot be raced past.
-        let occupied = self.connections.lock().expect("connections poisoned").len();
+        let occupied = self.connections.lock_ignore_poison().len();
         if occupied >= TUNNEL_CAP {
             self.sockets.get_mut::<tcp::Socket>(handle).abort();
             self.pending_removal.push(handle);
@@ -361,16 +347,13 @@ impl<W: Wire> Core<W> {
             .name("guest-net-worker".to_string())
             .spawn(move || worker(worker_pipe, &egress, &*dialer, &worker_origin))
         {
-            self.connections
-                .lock()
-                .expect("connections poisoned")
-                .push(Connection {
-                    handle,
-                    core: core_side,
-                    origin,
-                    worker,
-                    closing: None,
-                });
+            self.connections.lock_ignore_poison().push(Connection {
+                handle,
+                core: core_side,
+                origin,
+                worker,
+                closing: None,
+            });
         } else {
             self.sockets.get_mut::<tcp::Socket>(handle).abort();
             self.pending_removal.push(handle);
@@ -380,7 +363,7 @@ impl<W: Wire> Core<W> {
     fn pump_connections(&mut self) {
         let mut buf = [0u8; 4096];
         let mut reaped = Vec::new();
-        let mut connections = self.connections.lock().expect("connections poisoned");
+        let mut connections = self.connections.lock_ignore_poison();
         let mut i = 0;
         while i < connections.len() {
             let handle = connections[i].handle;
@@ -435,8 +418,7 @@ impl<W: Wire> Core<W> {
         for conn in reaped {
             if conn.worker.join().is_err() {
                 self.failures
-                    .lock()
-                    .expect("failures poisoned")
+                    .lock_ignore_poison()
                     .push("a guest-net worker panicked");
             }
         }
@@ -533,7 +515,7 @@ fn worker(
     let Ok(watch) = origin.try_clone() else {
         return;
     };
-    *origin_slot.lock().expect("origin slot poisoned") = Some(watch);
+    *origin_slot.lock_ignore_poison() = Some(watch);
 
     if egress
         .audit

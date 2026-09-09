@@ -22,13 +22,14 @@ use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, OnceLock};
 
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal as NixSignal, sigaction};
 use rustix::process::{Pid as RawPid, WaitId, WaitIdOptions, WaitIdStatus};
 
 use crate::process::cloexec_pipe;
 use crate::process::outcome::{Signal, WaitOutcome};
+use crate::sync::LockExt as _;
 
 struct Entry {
     /// `None` once the exit has been posted — the `Option` *is* the
@@ -125,7 +126,7 @@ fn reaper_loop(reader: &mut os_pipe::PipeReader) -> ! {
 }
 
 fn scan_all() {
-    let mut table = subs().lock().unwrap_or_else(PoisonError::into_inner);
+    let mut table = subs().lock_ignore_poison();
     for (&pid, entry) in table.iter_mut() {
         scan_one(pid, entry);
     }
@@ -201,7 +202,7 @@ pub fn watch<E: Send + 'static>(
     let poster: Box<dyn FnOnce(WaitOutcome) + Send> = Box::new(move |outcome| {
         let _ = tx.send(f(outcome));
     });
-    let mut table = subs().lock().unwrap_or_else(PoisonError::into_inner);
+    let mut table = subs().lock_ignore_poison();
     let entry = table.entry(pid).or_insert(Entry {
         poster: Some(poster),
     });
@@ -252,10 +253,7 @@ impl Drop for Watch {
 }
 
 fn finish(pid: u32) -> io::Result<()> {
-    subs()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .remove(&pid);
+    subs().lock_ignore_poison().remove(&pid);
     blocking_reap(pid)
 }
 

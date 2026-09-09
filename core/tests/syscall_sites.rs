@@ -27,8 +27,11 @@
 //!      fs/process syscall sites.)
 //!   2. **The site set equals the reviewed manifest.**  The set of
 //!      `(crate-relative file, tag)` pairs for `surface`/`silent` sites must
-//!      equal [`SYSCALL_SITES`].  A new site (or a removed/renamed one) fails
-//!      until a human updates the manifest — the review gate.
+//!      equal [`SYSCALL_SITES`], and each pair must occur *exactly once*.  A
+//!      new site (or a removed/renamed one) fails until a human updates the
+//!      manifest — the review gate.  Uniqueness is what keeps that gate shut:
+//!      the manifest is keyed by pair, so a site reusing a slug its file
+//!      already carries would land with no manifest diff at all.
 //!   3. **A file that calls a banned constructor declares a site.**  If a
 //!      production file invokes any banned fs/process constructor token but
 //!      carries no tagged allow at all, it fails.  This is the closure: a new
@@ -41,7 +44,9 @@
 //!
 //! 1. Add the call site and its `#[allow(clippy::disallowed_methods, reason =
 //!    "[surface:<slug>] …")]` (or `[silent:<slug>]`), with a `<slug>` unique
-//!    within its file.
+//!    within its file — enforced, not merely asked for.  Twins split by
+//!    platform take the base slug and a suffix (`…-windows`, `…-linux`), so
+//!    the `cfg` a site lives under is legible in the manifest.
 //! 2. Add the `(file, "<kind>:<slug>")` pair to [`SYSCALL_SITES`] below, in
 //!    the right crate block.
 //! 3. This is the review gate: the diff to `SYSCALL_SITES` is where a reviewer
@@ -52,13 +57,14 @@
 //! manifest entries — test fs/process use is blanket-allowed — but they must
 //! still carry the tag so fact (1) holds uniformly.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The reviewed set: `(crate-relative path, tag)` for every `surface` and
-/// `silent` syscall site in production source.  Tags are stable across line
-/// shifts — keyed by file + slug, never line number — so editing a site's file
-/// does not flake the test; only adding/removing/renaming a site does.
+/// `silent` syscall site in production source, one entry per site.  Tags are
+/// stable across line shifts — keyed by file + slug, never line number — so
+/// editing a site's file does not flake the test; only adding/removing/renaming
+/// a site does.
 ///
 /// Keep this sorted by path for review-friendly diffs.
 const SYSCALL_SITES: &[(&str, &str)] = &[
@@ -89,6 +95,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/path/walk.rs", "surface:locate-staged-write"),
     ("core/src/path/which.rs", "silent:which-readdir"),
     ("core/src/path/which.rs", "silent:which-stat"),
+    ("core/src/path/which.rs", "silent:which-stat-absent"),
     ("core/src/process/jail/linux.rs", "silent:jail-cgroup-procs"),
     ("core/src/process/jail/linux.rs", "silent:jail-cgroup-write"),
     ("core/src/process/jail/linux.rs", "silent:jail-seq-file"),
@@ -138,11 +145,19 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ),
     ("core/src/sandbox/windows/dacl.rs", "silent:dacl-stamp-read"),
     ("core/src/sandbox/windows/dacl.rs", "silent:dacl-state-dir"),
+    (
+        "core/src/sandbox/windows/dacl.rs",
+        "silent:dacl-state-dir-recheck",
+    ),
     ("core/src/subprocess_codec.rs", "silent:frame-dump"),
     ("core/src/subprocess_codec.rs", "silent:frame-dump-nonunix"),
     ("core/src/protocol.rs", "silent:engine-spawn"),
     ("core/src/types/shell/cwd.rs", "silent:cwd-stat"),
     ("core/src/uutils.rs", "silent:diff-read"),
+    ("core/src/wire.rs", "silent:wire-pair-windows"),
+    // ── guest-net ─────────────────────────────────────────────────────────
+    ("guest-net/src/vet.rs", "silent:vet-dial"),
+    ("guest-net/src/vet.rs", "silent:vet-resolve"),
     // ── exarch ────────────────────────────────────────────────────────────
     ("exarch/src/shell_eval/builtins.rs", "surface:grep-walk"),
     (
@@ -151,12 +166,18 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ),
     ("exarch/src/bootstrap.rs", "silent:log-run-dir"),
     ("exarch/src/bootstrap.rs", "silent:scratch-bootstrap"),
+    ("exarch/src/bootstrap.rs", "silent:scratch-reap"),
     ("exarch/src/cli.rs", "silent:seed-file"),
     ("exarch/src/config.rs", "silent:config-load"),
-    ("exarch/src/egress.rs", "silent:net-audit"),
+    ("exarch/src/egress.rs", "silent:net-audit-open"),
+    ("exarch/src/egress.rs", "silent:net-audit-rotate"),
+    ("exarch/src/egress.rs", "silent:net-audit-size"),
     ("exarch/src/agent/event.rs", "silent:record-file"),
     ("exarch/src/agent/event.rs", "silent:session-dir"),
-    ("exarch/src/record/log.rs", "silent:record-file"),
+    ("exarch/src/record/log.rs", "silent:record-file-append"),
+    ("exarch/src/record/log.rs", "silent:record-file-create"),
+    ("exarch/src/record/log.rs", "silent:record-file-read"),
+    ("exarch/src/record/log.rs", "silent:record-file-rotate"),
     (
         "exarch/src/record/model/resume.rs",
         "silent:model-fold-crash-quarantine",
@@ -171,6 +192,8 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ),
     ("exarch/src/provider/models.rs", "silent:models-cache-read"),
     ("exarch/src/provider/models.rs", "silent:models-cache-write"),
+    ("exarch/src/provider/pricing.rs", "silent:pricing-client"),
+    ("exarch/src/provider/tls.rs", "silent:provider-client"),
     (
         "exarch/src/provider/oauth/browser.rs",
         "silent:browser-launch",
@@ -179,6 +202,11 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
         "exarch/src/provider/oauth/browser.rs",
         "silent:browser-launch-linux",
     ),
+    (
+        "exarch/src/provider/oauth/browser.rs",
+        "silent:callback-listener",
+    ),
+    ("exarch/src/provider/oauth/mod.rs", "silent:oauth-client"),
     ("exarch/src/provider/oauth/mod.rs", "silent:token-dir"),
     ("exarch/src/provider/oauth/mod.rs", "silent:token-read"),
     ("exarch/src/provider/oauth/mod.rs", "silent:token-remove"),
@@ -197,7 +225,10 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     // Provider declarations written back to the app's own config directory by
     // synod's accounts screen; addresses and protocols, never keys.
     ("exarch/src/config.rs", "silent:config-write"),
+    ("core/src/path/git.rs", "silent:git-dir-backpointer"),
+    ("core/src/path/git.rs", "silent:git-dir-config-worktree"),
     ("core/src/path/git.rs", "silent:git-dir-discovery"),
+    ("core/src/path/git.rs", "silent:git-dir-pointer"),
     ("core/src/path/lex.rs", "silent:mount-shape"),
     ("exarch/src/prompt.rs", "silent:system-prompt-files"),
     ("exarch/src/shell_eval/skill.rs", "silent:skill-list-dir"),
@@ -212,6 +243,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ),
     ("exarch/src/tui/terminal.rs", "silent:editor-compose"),
     ("exarch/src/tui/terminal.rs", "silent:stderr-log"),
+    ("exarch/src/tui/terminal.rs", "silent:stderr-log-windows"),
     ("exarch/src/tui/viewport.rs", "silent:export"),
     ("exarch/src/tui/viewport.rs", "silent:viewport-log"),
     // ── ral / ral-sh ──────────────────────────────────────────────────────
@@ -233,14 +265,23 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
 /// Production source roots, crate-relative to the workspace root.  The
 /// vendored `ral-ripgrep-core` opts out of the workspace clippy lints (it
 /// stays upstream-diffable) so it is *not* governed by this discipline and is
-/// excluded here.
-const SRC_ROOTS: &[&str] = &["core/src", "exarch/src", "ral/src", "ral-sh/src"];
+/// excluded here.  `guest-net` is here because the CONNECT proxy is on the
+/// model's own egress path; the host-side crates (`synod`, `vm-manager`) are
+/// not yet.
+const SRC_ROOTS: &[&str] = &[
+    "core/src",
+    "exarch/src",
+    "guest-net/src",
+    "ral/src",
+    "ral-sh/src",
+];
 
 /// Build scripts are production code too, and `ral/build.rs` spawns `git`.
 const BUILD_SCRIPTS: &[&str] = &["core/build.rs", "ral/build.rs", "exarch/build.rs"];
 
-/// Banned fs/process constructor tokens (substring match).  Coarse on purpose:
-/// fact (3) only needs "this file makes such a call", not clippy's resolution.
+/// Banned fs/process/network constructor tokens (substring match).  Coarse on
+/// purpose: fact (3) only needs "this file makes such a call", not clippy's
+/// resolution.
 const BANNED_TOKENS: &[&str] = &[
     "fs::File::open",
     "fs::File::create",
@@ -264,6 +305,17 @@ const BANNED_TOKENS: &[&str] = &[
     // import is the token that betrays them.
     "cap_primitives::fs::",
     "cap_fs_ext::",
+    // The network family: a host:port is an outside name and the socket it
+    // returns is the capability, the same shape as an open.  `reqwest` is
+    // spelled in full because `Client::builder` bare is genai's client, which
+    // threads this crate's own preconfigured reqwest client rather than
+    // acquiring anything.
+    "TcpStream::connect",
+    "TcpListener::bind",
+    "UdpSocket::bind",
+    "to_socket_addrs",
+    "reqwest::Client::builder",
+    "reqwest::Client::new",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -383,7 +435,10 @@ fn reason_of(attr: &str) -> Option<String> {
 fn every_production_disallowed_allow_is_a_tagged_site() {
     let root = workspace_root();
     let mut failures = Vec::new();
-    let mut found: BTreeSet<(String, String)> = BTreeSet::new();
+    // Counted, not just collected: a set would swallow a slug reused inside one
+    // file, and that reuse is exactly the way a new site lands with no manifest
+    // diff to review.
+    let mut found: BTreeMap<(String, String), usize> = BTreeMap::new();
 
     for rel in production_files(&root) {
         let rel_str = rel.to_string_lossy().to_string();
@@ -413,7 +468,7 @@ fn every_production_disallowed_allow_is_a_tagged_site() {
                 ));
             }
             if tag.kind == "surface" || tag.kind == "silent" {
-                found.insert((rel_str.clone(), tag.full));
+                *found.entry((rel_str.clone(), tag.full)).or_default() += 1;
             }
         }
 
@@ -436,7 +491,18 @@ fn every_production_disallowed_allow_is_a_tagged_site() {
         }
     }
 
-    // Fact (2): the surface/silent site set equals the reviewed manifest.
+    // Fact (2): the surface/silent site set equals the reviewed manifest, one
+    // entry per site.  Uniqueness first: without it a reused slug is a site the
+    // manifest already names, and the diff a reviewer reads stays empty.
+    for ((f, t), n) in &found {
+        if *n > 1 {
+            failures.push(format!(
+                "{f}: {n} sites share the tag [{t}]\n    → a manifest entry names one site, so give each its own slug (platform twins take a -windows / -linux suffix)."
+            ));
+        }
+    }
+
+    let found: BTreeSet<(String, String)> = found.into_keys().collect();
     let manifest: BTreeSet<(String, String)> = SYSCALL_SITES
         .iter()
         .map(|(f, t)| (f.to_string(), t.to_string()))

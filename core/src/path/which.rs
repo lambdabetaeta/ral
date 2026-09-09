@@ -354,7 +354,7 @@ pub(crate) enum PathSearch {
 /// gives the better diagnosis at spawn.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:which-stat] `which`/PATH probe: stats a candidate to tell an unexecutable file from an absent one; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:which-stat-absent] `which`/PATH probe: stats a candidate to tell an unexecutable file from an absent one; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
 )]
 pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -> PathSearch {
     if name_has_separator(name) {
@@ -449,7 +449,8 @@ fn with_appended_suffix(base: &Path, ext: &str) -> PathBuf {
 )]
 mod memo_tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, PoisonError};
+    use crate::sync::LockExt as _;
+    use std::sync::{Mutex, MutexGuard};
 
     /// [`GENERATION`] is process-global, so a concurrent sibling's
     /// [`forget_located_commands`] would clear the memo a test is asserting
@@ -458,9 +459,7 @@ mod memo_tests {
 
     /// Take the lock and start from a known generation.
     pub(super) fn cache_guard() -> MutexGuard<'static, ()> {
-        let guard = CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let guard = CACHE_TEST_LOCK.lock_ignore_poison();
         forget_located_commands();
         guard
     }

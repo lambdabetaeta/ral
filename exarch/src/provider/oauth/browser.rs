@@ -48,6 +48,10 @@ pub(super) async fn run(
     super::exchange_code(client, &redirect_uri, &code, &verifier).await
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:callback-listener] binds the loopback port the authorize page redirects back to, one of the two the issuer has registered. Sign-in machinery the user started, on this machine only, and no turn is running to card it — the browser handoff beside it is silent on the same ground."
+)]
 fn bind_listener() -> Result<TcpListener, String> {
     TcpListener::bind("127.0.0.1:1455")
         .or_else(|_| TcpListener::bind("127.0.0.1:1457"))

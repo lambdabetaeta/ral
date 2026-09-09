@@ -21,7 +21,10 @@ pub(super) struct StageHandle {
 /// [`Watch`] holds the wait and posts the outcome.
 pub(super) struct ExternalStage {
     pub(super) watch: Watch,
+    /// The shown name, and its arguments as vetted for exec: the stage's
+    /// observation spells the same argv a standalone dispatch would.
     pub(super) name: String,
+    pub(super) args: Vec<String>,
     /// Transient guest-jail cgroup, `None` outside a real Linux guest.
     pub(super) jail: Option<crate::process::jail::JailCgroup>,
     pub(super) pumps: command::Pumps,
@@ -101,6 +104,7 @@ impl StageHandle {
         drop(held);
         StageEnd::External {
             name: e.name,
+            args: e.args,
             outcome,
             jail: e.jail,
             pumps: e.pumps,
@@ -128,6 +132,7 @@ impl StageHandle {
             StageKind::External(ExternalStage {
                 watch: slot.watch(child),
                 name: "test".to_string(),
+                args: Vec::new(),
                 jail: None,
                 pumps: command::Pumps::default(),
                 envelope: None,
@@ -157,6 +162,7 @@ impl StageHandle {
             StageKind::External(ExternalStage {
                 watch,
                 name: "fake".to_string(),
+                args: Vec::new(),
                 jail: None,
                 pumps: command::Pumps::default(),
                 envelope: None,

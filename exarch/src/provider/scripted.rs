@@ -2,6 +2,7 @@
 
 use super::{CutShort, Delta, ProviderError, StepOut, Usage};
 use genai::chat::{ChatMessage, StopReason, ToolCall};
+use ral_core::sync::LockExt;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
@@ -154,11 +155,8 @@ impl Script {
     }
 
     /// Append one completion reply.
-    ///
-    /// # Panics
-    /// Panics if the script mutex is poisoned.
     pub fn then(self, reply: Reply) -> Self {
-        self.completes.lock().unwrap().push_back(reply);
+        self.completes.lock_ignore_poison().push_back(reply);
         self
     }
 
@@ -174,8 +172,7 @@ impl Script {
     ) -> Result<StepOut, ProviderError> {
         let reply = self
             .completes
-            .lock()
-            .unwrap()
+            .lock_ignore_poison()
             .pop_front()
             .expect("scripted provider ran out of `complete` replies");
         assert!(!reply.panics, "scripted host panic");

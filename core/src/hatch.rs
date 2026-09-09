@@ -30,6 +30,7 @@ use crate::engine_seed::{EngineSeed, pack_seed};
 use crate::process::ChildHandle;
 use crate::serial::WireDecoder;
 use crate::subprocess::install_wire_shell;
+use crate::sync::LockExt as _;
 use crate::types::{Capabilities, Shell};
 
 /// The engine's protocol socket lands on this descriptor, exactly as
@@ -75,9 +76,7 @@ fn table() -> &'static Mutex<Vec<ChildHandle>> {
 /// `waitpid` can tell them apart: a child closes its seed channel when it
 /// hydrates, not when it dies.
 fn sweep_hatched() {
-    let mut table = table()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut table = table().lock_ignore_poison();
     // A stopped child reads as still running: `try_reap` never sees the stop.
     table.retain_mut(|child| !matches!(child.try_reap(), Ok(Some(_))));
 }
@@ -344,10 +343,7 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed, recipe: Recipe) -> Result<
 
     // Recorded before the ack is reported on, so a child that started is
     // reaped even when the host never heard of it.
-    table()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(child);
+    table().lock_ignore_poison().push(child);
     ack?;
     Ok(pid)
 }
@@ -633,8 +629,7 @@ mod tests {
     /// each looks for its own child rather than counting.
     fn recorded(pid: u32) -> bool {
         table()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lock_ignore_poison()
             .iter()
             .any(|child| child.id() == pid)
     }

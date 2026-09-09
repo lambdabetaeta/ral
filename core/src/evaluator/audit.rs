@@ -95,6 +95,25 @@ pub(crate) fn listening(shell: &Shell, mooring: &Mooring) -> bool {
     shell.local.audit.active() || mooring.has_surface()
 }
 
+/// The one place an [`Observed::Command`] is built, so every door that mints
+/// one spells its argv the same way: the shown name, then its arguments.
+pub(crate) fn command_fact(
+    shown: &str,
+    args: impl IntoIterator<Item = String>,
+    status: i32,
+    origin: CommandOrigin,
+    io: AuditIo,
+    error: Option<String>,
+) -> Observed {
+    Observed::Command {
+        argv: std::iter::once(shown.to_string()).chain(args).collect(),
+        status,
+        origin,
+        io,
+        error,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_command(
     shell: &mut Shell,
@@ -121,21 +140,19 @@ fn finish_command(
         Err(Break::Error(e)) => (e.exit_code(), Some(e.message.clone())),
         Err(_) => return,
     };
-    let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push(cmd.to_string());
-    argv.extend(Value::render_argv(args));
     let obs = Observation::spanning(
         start.site,
         start.time,
         epoch_us(),
         shell.context.principal(),
-        Observed::Command {
-            argv,
+        command_fact(
+            cmd,
+            Value::render_argv(args),
             status,
             origin,
-            io: AuditIo { stdout, stderr },
+            AuditIo { stdout, stderr },
             error,
-        },
+        ),
     );
     observe_stamped(shell, mooring, obs);
 }

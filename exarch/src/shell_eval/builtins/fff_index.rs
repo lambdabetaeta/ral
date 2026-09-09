@@ -10,6 +10,7 @@ use fff_search::{
     FFFMode, FilePickerOptions, FrecencyTracker, FuzzySearchOptions, PaginationArgs, QueryParser,
     SharedFilePicker, SharedFrecency,
 };
+use ral_core::sync::LockExt;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -40,7 +41,7 @@ pub(super) fn index_for(base: &Path) -> Result<&'static Index, String> {
     let canonical = resolve_base(base)
         .canonicalise_strict()
         .map_err(|e| format!("could not canonicalise {}: {e}", base.display()))?;
-    let mut guard = registry().lock().expect("fff registry mutex poisoned");
+    let mut guard = registry().lock_ignore_poison();
     if let Some(idx) = guard.get(&canonical) {
         return Ok(idx);
     }

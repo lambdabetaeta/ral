@@ -423,7 +423,7 @@ mod tests {
     #[test]
     #[allow(
         clippy::disallowed_methods,
-        reason = "a test-only replay of the crate's own checked-in fuzz corpus, not turn-time model I/O"
+        reason = "[test] a test-only replay of the crate's own checked-in fuzz corpus, not turn-time model I/O"
     )]
     fn the_fuzz_corpus_never_panics_the_parser() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/connect");

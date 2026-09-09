@@ -36,6 +36,10 @@ pub fn start() {
         println!("boot media: {:?}", vm_manager::broker::service::media());
         if let Err(cause) = vm_manager::broker::service::serve() {
             eprintln!("synod machine broker: stopped listening: {cause}");
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "the console listener has already returned; a broker links no ral-core and holds no ral session state"
+            )]
             std::process::exit(1);
         }
         return;
@@ -62,6 +66,10 @@ pub fn start() {
             "synod machine broker: this program is a Windows service. Windows starts it; to run \
              it by hand — which is how you watch a guest boot — pass --console."
         );
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the dispatcher refused the program before it served anything; a broker links no ral-core and holds no ral session state"
+        )]
         std::process::exit(1);
     }
 }
@@ -111,6 +119,10 @@ unsafe extern "system" fn control(code: u32) {
     if !handle.is_null() {
         report(handle, SERVICE_STOPPED, 0);
     }
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "process exit *is* this service's teardown, as the doc above says: every machine is held by the thread serving its client, and there is no ral session here to unwind"
+    )]
     std::process::exit(0);
 }
 

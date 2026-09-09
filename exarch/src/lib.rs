@@ -64,17 +64,32 @@ pub fn dispatch_pre_main() -> Option<u8> {
     install_child_hooks_and_serve_helpers().or_else(ral_core::sandbox::serve_sandbox_early_init)
 }
 
-/// Emit the `#[ctor]` running [`dispatch_pre_main`], which exits a re-exec child
-/// before libtest sees flags it would reject.  Once per binary; gate with
-/// `#[cfg(test)]` where only the test build wants it.
+/// [`dispatch_pre_main`], and the exit its answer calls for — one expression,
+/// so the two `main`s over this crate and every [`pre_main_ctor!`] cannot drift
+/// on what makes exiting here safe.
+///
+/// Returns only when this process is no such child, so a `main` calls it as its
+/// first real statement and a `#[ctor]` calls it as its whole body.
+pub fn exit_if_re_exec_child() {
+    if let Some(code) = dispatch_pre_main() {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "a re-exec child, served before any CLI: the anchor drains a pipe, the pgid probe writes a line, the sandbox stage has already exec'd or refused. None boots a shell, so none holds a lease, a watched child or a staged write — and in the `#[ctor]` form nothing at all is booted yet"
+        )]
+        std::process::exit(i32::from(code));
+    }
+}
+
+/// Emit the `#[ctor]` running [`exit_if_re_exec_child`].
+///
+/// A re-exec child is then gone before libtest sees flags it would reject.
+/// Once per binary; gate with `#[cfg(test)]` where only the test build wants it.
 #[macro_export]
 macro_rules! pre_main_ctor {
     () => {
         #[ctor::ctor(unsafe)]
         fn init_pre_main() {
-            if let Some(code) = $crate::dispatch_pre_main() {
-                ::std::process::exit(i32::from(code));
-            }
+            $crate::exit_if_re_exec_child();
         }
     };
 }

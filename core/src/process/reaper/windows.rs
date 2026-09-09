@@ -24,6 +24,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::process::outcome::{STAGE_KILL_EXIT_CODE, WaitOutcome};
+use crate::sync::LockExt as _;
 
 struct CallbackCtx<E: Send + 'static> {
     handle: HANDLE,
@@ -141,12 +142,7 @@ fn block_until_exit(handle: HANDLE) -> io::Result<()> {
 impl Drop for Watch {
     fn drop(&mut self) {
         let _ = block_until_exit(self.handle);
-        if let Some(wh) = self
-            .wait_handle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
+        if let Some(wh) = self.wait_handle.lock_ignore_poison().take() {
             // `INVALID_HANDLE_VALUE` is the sentinel that makes this call
             // block until any in-flight callback finishes, rather than
             // taking a completion-event HANDLE. The wait having already

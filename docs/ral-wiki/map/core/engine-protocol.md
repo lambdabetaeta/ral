@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cd4b16e4
-generated_at_date: 2026-09-02
+generated_at_commit: e68d97f2
+generated_at_date: 2026-09-09
 covers_paths: [core/src/protocol.rs, core/src/engine.rs, core/src/wire.rs, core/src/hatch.rs]
 ---
 
@@ -100,9 +100,11 @@ is a wire-seat child's spawn machinery.** The why is
   `Attached`/`Refused`, then the reader loop; returns the process exit code.
 - `resolve_installer` — the version check plus the installer-table lookup, a
   `Result` so the refusal path is testable without exiting.
-- `WireDesk` — the wire engine's `EnquiryDesk`: writes `Event::Enquiry`,
-  parks a `slots` map keyed by `EnquiryId` until `Frame::Answer` fills it or
-  the run's own cancel scope fires.
+- `WireDesk` — the wire engine's `EnquiryDesk`: writes `Event::Enquiry`, then
+  parks on a oneshot registered under its `EnquiryId` until `Frame::Answer`
+  sends down it or the run's own cancel scope fires. A park that gave up has
+  deregistered its sender, so a late answer finds nothing to send to and is
+  dropped.
 - `Dispatch` — the engine's one-run-or-probe rendezvous; claiming it is the
   only way to mint one, so "engine busy" (written back to a second dispatch)
   can never be raised without a run genuinely in flight; its `Drop` lowers

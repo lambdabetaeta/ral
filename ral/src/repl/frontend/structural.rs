@@ -23,6 +23,7 @@
 
 use ral_core::Shell;
 use ral_core::ir::{Comp, CompKind, Phrase, Toplevel};
+use ral_core::sync::LockExt as _;
 use ral_core::typecheck::{Scheme, fmt_scheme, fmt_ty};
 use ral_core::types::HandleState;
 use ral_core::{CompileOutcome, Value};
@@ -877,11 +878,7 @@ fn matrix_rows(user: &[(String, Value)]) -> Vec<MxRow> {
         .filter_map(|(name, value)| match value {
             Value::Handle(h) => Some(MxRow {
                 name: name.clone(),
-                state: (*h
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner))
-                .into(),
+                state: (*h.state.lock_ignore_poison()).into(),
                 cmd: h.cmd.clone(),
             }),
             _ => None,

@@ -3,6 +3,7 @@
 //! Regression: an unseeded [`Shell::cwd`] reads the process cwd, and a
 //! failed `getcwd(3)` answers `"."`, which fails closed downstream.
 
+use ral_core::sync::LockExt as _;
 use ral_core::types::Shell;
 use std::sync::Mutex;
 
@@ -10,9 +11,7 @@ static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn unseeded_shell_falls_back_to_the_process_cwd() {
-    let _guard = CWD_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = CWD_LOCK.lock_ignore_poison();
     let shell = Shell::default();
     assert_eq!(shell.cwd(), std::env::current_dir().unwrap());
 }
@@ -20,9 +19,7 @@ fn unseeded_shell_falls_back_to_the_process_cwd() {
 #[cfg(unix)]
 #[test]
 fn deleted_process_cwd_falls_back_to_dot() {
-    let _guard = CWD_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = CWD_LOCK.lock_ignore_poison();
     let orig = std::env::current_dir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();

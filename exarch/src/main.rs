@@ -6,9 +6,7 @@ fn main() -> std::process::ExitCode {
     ral_core::uutils::init_signal_dispositions();
     // A helper or sandbox re-exec child is served and exits here, never
     // reaching the CLI; `ral`'s `main` opens the same way.
-    if let Some(code) = exarch::dispatch_pre_main() {
-        std::process::exit(i32::from(code));
-    }
+    exarch::exit_if_re_exec_child();
     let code = match exarch::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {

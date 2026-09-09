@@ -40,6 +40,11 @@
 //!
 //! Usage: `boot-run <kernel> <initramfs> <rootfs> <folder>`
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
+)]
+
 use exarch::agent::{RecordedAccount, RootConfig, SPAWN_FUEL};
 use exarch::bus::{AgentId, Sink};
 use exarch::egress::Egress;

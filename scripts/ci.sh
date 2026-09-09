@@ -98,6 +98,10 @@ if [ "$MODE" = linux-box ]; then
         ral-linux-box chown dev:dev /workspace/.target-linux
 fi
 
+# First because it compiles nothing: a whole-workspace answer in seconds, and
+# formatting is the one drift every later step is happy to build straight past.
+step fmt-check
+
 # Clippy's I/O-door denylist (clippy.toml) needs no `-D` flag: the
 # `[workspace.lints.clippy] disallowed_methods = "deny"` table already makes a
 # stray fs/process constructor a build break.

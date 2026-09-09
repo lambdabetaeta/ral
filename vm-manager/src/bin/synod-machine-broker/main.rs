@@ -30,5 +30,9 @@ fn main() {
         "synod machine broker: a Windows service, and this is not Windows. Here synod starts its \
          own machine through Virtualization.framework, so no broker holds the privilege for it."
     );
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "`main` of a program that links no ral-core: a broker holds machines, never a ral session's lease, children or staged writes"
+    )]
     std::process::exit(1);
 }

@@ -101,11 +101,19 @@ pub trait Dialer: Send + Sync {
 pub struct System;
 
 impl Dialer for System {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:vet-resolve] turns the CONNECT target's name into the addresses `open` then judges; a resolution step, not the tunnel itself, and the verdict it feeds is what `exarch::egress`'s durable append-only ledger records. Raises no card: the model reaches the network through `exec` (curl and kin), which surfaces as that exec."
+    )]
     fn resolve(&self, host: &exarch::net_policy::Host) -> io::Result<Vec<SocketAddr>> {
         use std::net::ToSocketAddrs;
         Ok((host.as_str(), 443u16).to_socket_addrs()?.collect())
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:vet-dial] dials one address `is_public` already admitted — the proxy's post-vet connect. Its accounting is `exarch::egress`, a durable append-only ledger carrying every CONNECT verdict and the bytes it carried, so the tunnel is recorded without a card: the model reaches the network through `exec`, which surfaces as that exec."
+    )]
     fn dial(&self, addr: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         TcpStream::connect_timeout(&addr, timeout)
     }
@@ -155,6 +163,10 @@ pub fn open(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[test] test net scaffolding: a loopback fixture listener the fake dialer connects to"
+)]
 mod tests {
     use super::*;
     use std::net::TcpListener;

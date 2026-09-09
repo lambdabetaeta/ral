@@ -14,6 +14,7 @@ use crate::bus::{AgentId, Emitter, Inbox};
 use crate::fleet::{Fleet, Unborn};
 use crate::prompt::Grants;
 use crate::provider::Provider;
+use ral_core::sync::LockExt;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -519,11 +520,7 @@ impl Avatar {
         }
         // The frontend wipes its pin register on `/clear`, so the session's
         // mirror must follow.
-        self.agent
-            .pins
-            .lock()
-            .expect("pin register poisoned")
-            .clear();
+        self.agent.pins.lock_ignore_poison().clear();
         error.map_or(Ok(()), Err)
     }
 

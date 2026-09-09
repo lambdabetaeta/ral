@@ -2939,6 +2939,7 @@ dependencies = [
  "exarch",
  "http",
  "httparse",
+ "ral-core",
  "ral-daemon",
  "serde_json",
  "serial_test",

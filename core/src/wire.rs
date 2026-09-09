@@ -46,6 +46,10 @@ impl WireChannel {
     /// # Errors
     /// Returns the socket error if the loopback pair cannot be established.
     #[cfg(windows)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "[silent:wire-pair-windows] the Windows twin of `process::cloexec_socketpair` ([silent:cloexec-socketpair]): the same one-connection-for-a-process-tree, spelled as a loopback bind-connect-accept because Windows has no socketpair(2). No outside name is reached — the port is ephemeral and the peer is this process — so it is silent for the same reason its Unix hemisphere is."
+    )]
     pub fn pair() -> io::Result<(Self, Self)> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let a = std::net::TcpStream::connect(listener.local_addr()?)?;

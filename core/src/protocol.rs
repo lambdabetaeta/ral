@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use crate::process::ChildHandle;
 use crate::serial::FOValue;
-use crate::sync::LockExt;
+use crate::sync::{CondvarExt as _, LockExt};
 use crate::types::CapturePolicy;
 use crate::types::DeferredSink;
 use crate::types::SurfaceSink;
@@ -719,10 +719,6 @@ fn mint_dispatch_id() -> DispatchId {
 /// # Errors
 /// Returns `Err` if `req` is not a variant, if the `` `env-var `` class lacks
 /// a string payload, or if the reading class is unrecognised (naming it).
-///
-/// # Panics
-/// Panics if a worker handle's `state` or `last_observed` mutex is poisoned,
-/// reachable only through the `` `workers `` class.
 pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FOValue, String> {
     let FOValue::Variant { label, payload } = req else {
         return Err(format!("probe request must be a variant, got {req:?}"));
@@ -807,13 +803,12 @@ pub fn answer_probe(shell: &mut crate::types::Shell, req: &FOValue) -> Result<FO
                 .workers()
                 .into_iter()
                 .map(|entry| {
-                    let running = *entry.handle.state.lock().unwrap() == HandleState::Running;
+                    let running = *entry.handle.state.lock_ignore_poison() == HandleState::Running;
                     let up_secs = entry.started.elapsed().unwrap_or_default().as_secs();
                     let idle_secs = entry
                         .handle
                         .last_observed
-                        .lock()
-                        .unwrap()
+                        .lock_ignore_poison()
                         .elapsed()
                         .as_secs();
                     FOValue::Map {
@@ -1023,6 +1018,7 @@ impl EventReceiver {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod event_receiver_tests {
     use super::*;
 
@@ -1092,12 +1088,8 @@ impl SessionLock {
     fn lock(&self) -> std::sync::MutexGuard<'_, EngineInner> {
         self.0.lock_ignore_poison()
     }
-    /// Recovers poison the same way `lock` does: an unwound run must not wedge
-    /// the move-out either.
     fn into_inner(self) -> EngineInner {
-        self.0
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0.into_inner_ignore_poison()
     }
 }
 
@@ -1542,6 +1534,10 @@ mod identity_cancel_tests {
 /// socket, severed by neither `severance` nor a shutdown call. Recovering the
 /// poison would let the next writer resume into that torn frame stream, which
 /// is worse than the panic propagating; a poisoned `ch` must stay poisoned.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the wire writer: a panic between write_frame and shutdown leaves a partial frame on the socket that neither severance nor shutdown has sealed off, so a recovered guard would append the next frame onto a torn one"
+)]
 fn write_through(
     ch: &Mutex<crate::wire::WireChannel>,
     severance: &OnceLock<Severed>,
@@ -1977,8 +1973,7 @@ impl WireTransport {
             guard = self
                 .attached
                 .1
-                .wait_timeout(guard, Duration::from_millis(100))
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .wait_timeout_ignore_poison(guard, Duration::from_millis(100))
                 .0;
         }
     }
@@ -2140,6 +2135,7 @@ impl Transport for WireTransport {
 // `RunLifecycle` handed `&mut Shell` mid-run instead — the same shape a real
 // enquiring builtin runs under.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod enquiry_tests {
     use super::*;
     use crate::run::{

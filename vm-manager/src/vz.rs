@@ -1001,6 +1001,10 @@ define_class!(
 
     unsafe impl VZVirtioSocketListenerDelegate for SocketReadiness {
         #[unsafe(method(listener:shouldAcceptNewConnection:fromSocketDevice:))]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "a poisoned announce refuses this connection, which is the same benign path a failed dup takes: the announce stays unspent and the guest daemon redials"
+        )]
         fn should_accept(
             &self,
             _listener: &VZVirtioSocketListener,

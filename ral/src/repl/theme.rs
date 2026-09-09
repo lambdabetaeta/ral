@@ -13,8 +13,14 @@
 //! (`repl::exec::print_result`).  Stored behind a `RwLock` so the RC
 //! file can replace it once during startup without imposing locking on
 //! the read path beyond a snapshot clone.
+//!
+//! The swap is whole, so poison goes through the workspace's door
+//! ([`ral_core::sync::RwLockExt`]): silently dropping the write and reading
+//! back the *default* would revert the user's configured prompt with no
+//! diagnostic anywhere, which is the one outcome a theme must not have.
 
 use ral_core::ansi::{YELLOW, named_color};
+use ral_core::sync::RwLockExt as _;
 use ral_core::{Map, Value};
 use std::sync::{LazyLock, RwLock};
 
@@ -90,14 +96,12 @@ static OUTPUT_THEME: LazyLock<RwLock<OutputTheme>> =
 
 /// Replace the active output theme.  Called once after the RC file is loaded.
 pub(crate) fn set_output_theme(theme: OutputTheme) {
-    if let Ok(mut g) = OUTPUT_THEME.write() {
-        *g = theme;
-    }
+    *OUTPUT_THEME.write_ignore_poison() = theme;
 }
 
 /// Return a snapshot of the current output theme.
 pub(crate) fn output_theme() -> OutputTheme {
-    OUTPUT_THEME.read().map(|g| g.clone()).unwrap_or_default()
+    OUTPUT_THEME.read_ignore_poison().clone()
 }
 
 #[cfg(test)]

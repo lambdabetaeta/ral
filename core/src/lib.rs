@@ -157,6 +157,10 @@ pub fn compile_and_typecheck(
 #[ctor::ctor(unsafe)]
 fn init_lib_test_binary() {
     if let Some(code) = test_helper::run_pre_main_reexec_stages() {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "a re-exec stage has finished and dropped whatever shell it booted; the detach-birth fixture's survivor is meant to outlive this exit, which is what it is testing"
+        )]
         std::process::exit(i32::from(code));
     }
 }

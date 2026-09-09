@@ -6,6 +6,7 @@ use super::shell::Shell;
 use super::shell::workers::WorkerLease;
 use super::value::Value;
 use crate::process::{DurableRoot, ForegroundScope};
+use crate::sync::LockExt as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -97,12 +98,9 @@ pub struct Nursery(Arc<Mutex<NurseryState>>);
 
 impl Nursery {
     /// Park `shell` under a freshly minted id.
-    ///
-    /// # Panics
-    /// Panics if the lock is poisoned.
     pub fn park(&self, shell: Shell) -> NurseryId {
         let id = {
-            let mut state = self.0.lock().unwrap();
+            let mut state = self.0.lock_ignore_poison();
             let id = state.next;
             state.next += 1;
             state.parked.insert(id, shell);
@@ -112,19 +110,13 @@ impl Nursery {
     }
 
     /// Remove and return the shell parked under `id`, if one is still there.
-    ///
-    /// # Panics
-    /// Panics if the lock is poisoned.
     pub fn adopt(&self, id: NurseryId) -> Option<Shell> {
-        self.0.lock().unwrap().parked.remove(&id.0)
+        self.0.lock_ignore_poison().parked.remove(&id.0)
     }
 
     /// Drop every still-parked shell.
-    ///
-    /// # Panics
-    /// Panics if the lock is poisoned.
     pub fn clear(&self) {
-        self.0.lock().unwrap().parked.clear();
+        self.0.lock_ignore_poison().parked.clear();
     }
 }
 
@@ -339,6 +331,7 @@ impl Drop for NurseryGuard {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod tests {
     use super::*;
     use crate::serial::{FOValue, OPAQUE_TAG};

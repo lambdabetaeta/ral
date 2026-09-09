@@ -21,6 +21,7 @@ use std::sync::atomic::Ordering;
 
 use super::{ESCALATION, Pgid, PgidPolicy};
 use crate::process::cancel::{CancelCause, request_foreground_cancel};
+use crate::sync::LockExt as _;
 use windows_sys::Win32::Foundation::HANDLE;
 
 // ── Signal handler installation ────────────────────────────────────────────
@@ -71,6 +72,7 @@ pub fn reset_child_signals() {}
 
 mod win_groups {
     use crate::process::ChildHandle;
+    use crate::sync::LockExt as _;
     use std::sync::Mutex;
     use windows_sys::Win32::Foundation::{
         CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, FALSE, HANDLE, WAIT_OBJECT_0,
@@ -239,7 +241,7 @@ mod win_groups {
                 let leader = group.as_raw();
                 // `state.job` is the registry's, not ours: the lock is all that
                 // keeps `release` from closing it before the `DuplicateHandle`.
-                let groups = GROUPS.lock().unwrap();
+                let groups = GROUPS.lock_ignore_poison();
                 let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) else {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::NotFound,
@@ -320,7 +322,7 @@ mod win_groups {
             } => {
                 let leader_pid = child_pid.cast_signed();
                 let leader_handle = duplicate_process_handle(child_handle);
-                GROUPS.lock().unwrap().push((
+                GROUPS.lock_ignore_poison().push((
                     leader_pid,
                     GroupState {
                         job,
@@ -338,7 +340,7 @@ mod win_groups {
                 // Lock held across the `CloseHandle` below: this duplicate may be
                 // the handle whose close trips `KILL_ON_JOB_CLOSE`, which must not
                 // interleave with a concurrent `release` of the same job.
-                let mut groups = GROUPS.lock().unwrap();
+                let mut groups = GROUPS.lock_ignore_poison();
                 if let Some((_, state)) = groups.iter_mut().find(|(p, _)| *p == leader) {
                     let dup = duplicate_process_handle(child_handle);
                     if !dup.is_null() {
@@ -355,7 +357,7 @@ mod win_groups {
     }
 
     pub(super) fn break_all() {
-        let groups = GROUPS.lock().unwrap();
+        let groups = GROUPS.lock_ignore_poison();
         for (_, state) in groups.iter() {
             for &pid in &state.members {
                 unsafe {
@@ -368,7 +370,7 @@ mod win_groups {
     /// [`break_all`] minus detached workers' groups, so an exchange-cancel
     /// ([`super::relay_interrupt`]) can never reach one.
     pub(super) fn break_foreground() {
-        let groups = GROUPS.lock().unwrap();
+        let groups = GROUPS.lock_ignore_poison();
         for (_, state) in groups.iter().filter(|(_, s)| !s.detached) {
             for &pid in &state.members {
                 unsafe {
@@ -379,7 +381,7 @@ mod win_groups {
     }
 
     pub(super) fn terminate_all() {
-        let groups = GROUPS.lock().unwrap();
+        let groups = GROUPS.lock_ignore_poison();
         for (_, state) in groups.iter() {
             if !state.job.is_null() {
                 unsafe {
@@ -399,7 +401,7 @@ mod win_groups {
     pub(super) fn release(leader: i32) {
         // Removal and teardown are one step under the lock: no thread may see the
         // group gone while the job that still owns its members is alive.
-        let mut groups = GROUPS.lock().unwrap();
+        let mut groups = GROUPS.lock_ignore_poison();
         if let Some(idx) = groups.iter().position(|(p, _)| *p == leader) {
             let (_, state) = groups.swap_remove(idx);
             unsafe {
@@ -426,7 +428,7 @@ mod win_groups {
     /// freezes on the handle after exit.
     pub(crate) fn wait_job(leader: i32, timeout_ms: u32) -> ReapStatus {
         let (port, leader_handle, all_done) = {
-            let groups = GROUPS.lock().unwrap();
+            let groups = GROUPS.lock_ignore_poison();
             match groups.iter().find(|(p, _)| *p == leader) {
                 Some((_, state)) => (state.completion_port, state.leader_handle, state.all_done),
                 None => return ReapStatus::Unknown,
@@ -449,7 +451,7 @@ mod win_groups {
     /// job is done, and latches `all_done` so later calls short-circuit.
     fn drain_completion_port(port: HANDLE, leader: i32, timeout_ms: u32) -> bool {
         fn latch_all_done(leader: i32) {
-            let mut groups = GROUPS.lock().unwrap();
+            let mut groups = GROUPS.lock_ignore_poison();
             if let Some((_, state)) = groups.iter_mut().find(|(p, _)| *p == leader) {
                 state.all_done = true;
             }
@@ -526,7 +528,7 @@ mod win_groups {
     /// [`break_all`] narrowed to one leader, for a caller tearing down just that
     /// job.  No-op when the group is already gone.
     pub(super) fn break_group(leader: i32) {
-        let groups = GROUPS.lock().unwrap();
+        let groups = GROUPS.lock_ignore_poison();
         if let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) {
             for &pid in &state.members {
                 unsafe {
@@ -539,7 +541,7 @@ mod win_groups {
     /// `TerminateJobObject`: every member dies at once with exit code 1, there
     /// being no signal number to pass through.  No-op when the group is gone.
     pub(crate) fn kill_group(leader: i32) {
-        let groups = GROUPS.lock().unwrap();
+        let groups = GROUPS.lock_ignore_poison();
         if let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader)
             && !state.job.is_null()
         {
@@ -560,7 +562,7 @@ mod win_groups {
     pub(crate) fn apply_active_process_limit(leader: i32, limit: u32) -> bool {
         // Held across `SetInformationJobObject`: the job belongs to the registry,
         // so dropping the lock first would let `release` close what we configure.
-        let groups = GROUPS.lock().unwrap();
+        let groups = GROUPS.lock_ignore_poison();
         let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader) else {
             return false;
         };
@@ -604,7 +606,7 @@ mod win_groups {
     /// Forget the group and let the orphaned members run on.  Idempotent.
     pub(crate) fn disown(leader: i32) {
         {
-            let groups = GROUPS.lock().unwrap();
+            let groups = GROUPS.lock_ignore_poison();
             if let Some((_, state)) = groups.iter().find(|(p, _)| *p == leader)
                 && !state.job.is_null()
             {
@@ -692,13 +694,8 @@ pub fn set_active_process_limit(job: windows_sys::Win32::Foundation::HANDLE, lim
 /// True when `leader` names a live group.
 /// `sandbox::apply_child_limits_in_pipeline` asks before choosing between a fresh
 /// per-child job and constraining this one.
-///
-/// # Panics
-///
-/// On a poisoned registry mutex.  Nothing under that lock can panic, so a
-/// poisoned one means this file's invariants are already gone.
 pub fn is_known_group(leader: i32) -> bool {
-    let groups = win_groups::GROUPS.lock().unwrap();
+    let groups = win_groups::GROUPS.lock_ignore_poison();
     groups.iter().any(|(p, _)| *p == leader)
 }
 

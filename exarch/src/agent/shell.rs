@@ -15,6 +15,7 @@ use crate::fleet::desk;
 use crate::shell_eval;
 use ral_core::protocol::Severed;
 use ral_core::serial::FOValue;
+use ral_core::sync::LockExt;
 use std::sync::{Arc, Mutex};
 
 /// One `ral` call's reply slot, minted fresh per call so a reply staged and
@@ -241,8 +242,7 @@ impl Avatar {
         let lines: Vec<String> = self
             .agent
             .pins
-            .lock()
-            .expect("pin register poisoned")
+            .lock_ignore_poison()
             .values()
             .map(|pin| crate::bus::card::summary_line(&pin.card))
             .collect();

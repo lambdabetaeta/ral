@@ -23,6 +23,7 @@ mod reexec;
 mod windows;
 
 use crate::types::{SandboxProjection, Shell};
+#[cfg(unix)]
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -437,9 +438,6 @@ pub(crate) fn apply_resource_limits(cmd: &mut Command) {
         });
     }
 }
-
-#[cfg(not(unix))]
-pub(crate) fn apply_resource_limits(_cmd: &mut Command) {}
 
 #[cfg(test)]
 mod tests {

@@ -5,6 +5,7 @@
 //! with no handler argv packing.
 
 use ral_core::diagnostic;
+use ral_core::sync::LockExt as _;
 use ral_core::typecheck::builtins::scheme;
 use ral_core::types::{
     Break, BuiltinBody, BuiltinEntry, HandleState, Mooring, Resident, WorkerEntry,
@@ -42,7 +43,7 @@ fn plugin_name_arg(args: &[Value]) -> Option<String> {
 pub(crate) fn teardown_notice(workers: &[WorkerEntry]) -> Option<String> {
     let running: Vec<String> = workers
         .iter()
-        .filter(|entry| *entry.handle.state.lock().unwrap() == HandleState::Running)
+        .filter(|entry| *entry.handle.state.lock_ignore_poison() == HandleState::Running)
         .map(|entry| format!("[{}] {}", entry.designator(), entry.cmd))
         .collect();
     if running.is_empty() {

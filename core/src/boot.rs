@@ -253,10 +253,18 @@ pub fn bake_prelude_to_out_dir() {
     }
 
     let src = include_str!("prelude.ral");
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "build script: a host running cargo, not a ral session — it boots no shell, so there is nothing for an unwind to return"
+    )]
     let ast = crate::parse(src).unwrap_or_else(|e| {
         eprintln!("build: prelude parse error: {e}");
         std::process::exit(1);
     });
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "build script: a host running cargo, not a ral session — it boots no shell, so there is nothing for an unwind to return"
+    )]
     let top =
         crate::elaborate(&ast, std::collections::HashSet::default(), "").unwrap_or_else(|e| {
             eprintln!("build: prelude elaborate error: {e}");

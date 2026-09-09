@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 6686e770
+generated_at_commit: e68d97f2
 generated_at_date: 2026-09-09
-covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
+covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -96,6 +96,11 @@ dispatch, builtins included.
   is the second site, and the one that surfaces at the spawn rather than the
   wait: a surrendered process is never waited for, so its observation carries
   `origin: detached` and status `0` meaning *exec'd*, not *succeeded*. A
+  direct external *pipeline stage* is the third: the collector never enters
+  `finish_command`, so its settlement mints the fact itself
+  (`runtime/pipeline/collect.rs`). All three assemble their argv through the
+  one constructor, `evaluator::audit::command_fact` — the rule that index 0
+  is the shown name lives there and nowhere else. A
   **builtin** command is recorded into an open trail like any other, and
   reported on the sink like any other; `origin: builtin` is what the host
   drops at `decode_surface` — the rail reports the syscalls that reach the
@@ -109,15 +114,19 @@ check is the exception: it is the highest-signal line in a provenance record,
 so a head admission reaches the rail whether or not a trail is open — see
 [[design/audit|audit]].
 
-A pipeline-stage helper's own sites reach the rail too, not only its trail —
-but only when the parent already holds an open audit trail: the stage ships
-`active_policy()`, `None` unless the parent is collecting, so with no
-`audit { }` in force the child opens no trail and its fragment comes back
-empty. When it does collect, the parent reports each merged observation
-rather than folding it straight into the trail, so a stage's writes and
-commands reach the host exactly as anything run locally does. They arrive at
-stage settle, not at their original instant, but each observation's own
-`start`/`end` still carry its true timestamp.
+A pipeline stage's own sites reach the rail too, not only its trail. A
+ral-written stage runs in a thread that ships `active_policy()`, `None`
+unless the parent is collecting, so with no `audit { }` in force it opens no
+trail and its fragment comes back empty. A direct external stage has no trail
+of its own: the collector builds its one command fact unconditionally, the
+collect phase being pure over its events — deciding emission there would
+judge an interest it cannot see, having no `Mooring`. Either
+way the parent reports each merged observation rather than folding it
+straight into the trail, so a stage's writes and commands reach the host
+exactly as anything run locally does, and the fold's one door asks the sink
+and the trail each on its own terms. They arrive at stage settle, not at
+their original instant, but each observation's own `start`/`end` still carry
+its true timestamp.
 
 ## The observation — a Value, not a card
 

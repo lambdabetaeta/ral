@@ -71,7 +71,7 @@ impl Drop for RotationGuard {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:net-audit] opens the per-installation network audit ledger under XDG state, appended to once per tunnel; infra bookkeeping, not turn-time model data I/O."
+    reason = "[silent:net-audit-open] opens the per-installation network audit ledger under XDG state, appended to once per tunnel; infra bookkeeping, not turn-time model data I/O."
 )]
 fn open_audit_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
@@ -85,7 +85,7 @@ fn open_audit_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:net-audit] rotates the network audit ledger once it exceeds its size cap."
+    reason = "[silent:net-audit-rotate] rotates the network audit ledger once it exceeds its size cap."
 )]
 fn rotate(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let rotated = path.with_extension("jsonl.1");
@@ -154,7 +154,11 @@ impl AuditLog {
     /// Returns `Err` on a poisoned lock, a failed rotation, or a failed write.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[silent:net-audit] checks the ledger's on-disk size before deciding whether to rotate it."
+        reason = "[silent:net-audit-size] checks the ledger's on-disk size before deciding whether to rotate it."
+    )]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "outside the poison door on purpose: the guard spans the rotation that swaps `file` and the append that follows it, so a panic between them leaves the ledger handle and the bytes on disk disagreeing — and an unauditable proxy must stop proxying rather than resume writing into a ledger nobody can vouch for"
     )]
     pub fn record(&self, r: Record<'_>) -> std::io::Result<()> {
         let mut line = match r {

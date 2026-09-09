@@ -17,6 +17,7 @@
 //! registers into the owning shell's directory; `fork_session` / `child_from`
 //! / `child_of` / `inherit_from` do not, and a sub-agent fork starts empty.
 
+use crate::sync::LockExt as _;
 use crate::types::{HandleInner, HandleState, Resident};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -145,7 +146,7 @@ impl Resident for WorkerEntry {
     }
 
     fn state_label(&self) -> String {
-        let running = *self.handle.state.lock().unwrap() == HandleState::Running;
+        let running = *self.handle.state.lock_ignore_poison() == HandleState::Running;
         if running {
             "running (worker)".to_string()
         } else {
@@ -209,7 +210,7 @@ pub(crate) struct Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         if self.armed {
-            let mut inner = self.registry.0.lock().unwrap();
+            let mut inner = self.registry.0.lock_ignore_poison();
             inner.reserved = inner.reserved.saturating_sub(1);
         }
     }
@@ -222,12 +223,12 @@ impl WorkerRegistry {
     /// running entries (each `state` briefly locked under the registry lock,
     /// the order [`Self::sweep_retention`] documents) plus seats reserved.
     pub(crate) fn reserve(&self, cap: Option<usize>) -> Result<Reservation, CapReached> {
-        let mut inner = self.0.lock().unwrap();
+        let mut inner = self.0.lock_ignore_poison();
         if let Some(cap) = cap {
             let running = inner
                 .entries
                 .iter()
-                .filter(|entry| *entry.handle.state.lock().unwrap() == HandleState::Running)
+                .filter(|entry| *entry.handle.state.lock_ignore_poison() == HandleState::Running)
                 .count();
             if running + inner.reserved >= cap {
                 return Err(CapReached(cap));
@@ -246,7 +247,7 @@ impl WorkerRegistry {
     /// counted reserved, or a reservation whose entry has already appeared.
     pub(crate) fn register(&self, mut reservation: Reservation, entry: WorkerEntry) {
         reservation.armed = false;
-        let mut inner = self.0.lock().unwrap();
+        let mut inner = self.0.lock_ignore_poison();
         inner.reserved = inner.reserved.saturating_sub(1);
         inner.entries.push(entry);
     }
@@ -256,8 +257,7 @@ impl WorkerRegistry {
     /// handle was registered in a different shell's registry.
     pub(crate) fn remove(&self, handle: &HandleInner) {
         self.0
-            .lock()
-            .unwrap()
+            .lock_ignore_poison()
             .entries
             .retain(|entry| entry.handle != *handle);
     }
@@ -267,7 +267,7 @@ impl WorkerRegistry {
     /// is benign: an entry an eliminator observed away first is simply absent,
     /// and the reap is silent rather than a notice for a claimed result.
     pub(crate) fn reap(&self, id: WorkerId, cause: ReapCause) {
-        let mut inner = self.0.lock().unwrap();
+        let mut inner = self.0.lock_ignore_poison();
         let Some(at) = inner.entries.iter().position(|entry| entry.id == id) else {
             return;
         };
@@ -283,13 +283,13 @@ impl WorkerRegistry {
     /// Arm the settled-entry retention bound, in ral calls. Idempotent by
     /// replacement: already-stamped entries are measured against the new one.
     pub(crate) fn arm_retention(&self, retention: u64) {
-        self.0.lock().unwrap().retention = Some(retention);
+        self.0.lock_ignore_poison().retention = Some(retention);
     }
 
     /// Ticked at the run door's Source arm, beside the binding ledger's tick,
     /// so the two ledgers read one logical clock.
     pub(crate) fn tick_epoch(&self) {
-        self.0.lock().unwrap().epoch += 1;
+        self.0.lock_ignore_poison().epoch += 1;
     }
 
     /// Expire settled entries against the armed retention; a no-op unarmed. An
@@ -303,14 +303,15 @@ impl WorkerRegistry {
     /// `state` lock outside this module drops its guard before any registry
     /// call.
     pub(crate) fn sweep_retention(&self) {
-        let mut inner = self.0.lock().unwrap();
+        let mut inner = self.0.lock_ignore_poison();
         let Some(retention) = inner.retention else {
             return;
         };
         let epoch = inner.epoch;
         let mut i = 0;
         while i < inner.entries.len() {
-            let running = *inner.entries[i].handle.state.lock().unwrap() == HandleState::Running;
+            let running =
+                *inner.entries[i].handle.state.lock_ignore_poison() == HandleState::Running;
             match (running, inner.entries[i].settled_epoch) {
                 (false, None) => {
                     inner.entries[i].settled_epoch = Some(epoch);
@@ -332,21 +333,20 @@ impl WorkerRegistry {
     }
 
     pub(crate) fn take_reap_notices(&self) -> Vec<ReapNotice> {
-        std::mem::take(&mut self.0.lock().unwrap().reap_notices)
+        std::mem::take(&mut self.0.lock_ignore_poison().reap_notices)
     }
 
     /// Clone out every entry for listing. Enumeration is not observation: it
     /// renews no lease.
     pub(crate) fn snapshot(&self) -> Vec<WorkerEntry> {
-        self.0.lock().unwrap().entries.clone()
+        self.0.lock_ignore_poison().entries.clone()
     }
 
     /// Clone out the entry named by `id`. A pure read like [`Self::snapshot`]:
     /// renews no lease.
     pub(crate) fn lookup(&self, id: WorkerId) -> Option<WorkerEntry> {
         self.0
-            .lock()
-            .unwrap()
+            .lock_ignore_poison()
             .entries
             .iter()
             .find(|entry| entry.id == id)
@@ -354,14 +354,14 @@ impl WorkerRegistry {
     }
 
     pub(crate) fn count(&self) -> usize {
-        self.0.lock().unwrap().entries.len()
+        self.0.lock_ignore_poison().entries.len()
     }
 
     /// A live-thread ticket, held by the worker thread's own frame for as long
     /// as it runs. [`Shell::spawn_thread`](super::Shell::spawn_thread) takes one
     /// per worker, so no spawn site can forget to.
     pub(crate) fn live_ticket(&self) -> Arc<()> {
-        self.0.lock().unwrap().live.clone()
+        self.0.lock_ignore_poison().live.clone()
     }
 
     /// Wait, up to [`WORKER_DRAIN_GRACE`], for every live worker thread to end.
@@ -370,7 +370,7 @@ impl WorkerRegistry {
     fn drain(&self) {
         let deadline = std::time::Instant::now() + WORKER_DRAIN_GRACE;
         while std::time::Instant::now() < deadline {
-            if Arc::strong_count(&self.0.lock().unwrap().live) == 1 {
+            if Arc::strong_count(&self.0.lock_ignore_poison().live) == 1 {
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -387,7 +387,7 @@ impl WorkerRegistry {
     /// roster when it was signalled, not when its child died.
     pub(crate) fn cancel_all(&self) -> usize {
         let (entries, _notices) = {
-            let mut inner = self.0.lock().unwrap();
+            let mut inner = self.0.lock_ignore_poison();
             // The armed retention and the epoch clock are configuration, not
             // roster, and survive the wipe.
             (

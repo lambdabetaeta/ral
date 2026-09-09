@@ -13,7 +13,9 @@
 //! born after a Ctrl-C is deaf to it by construction.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::sync::LockExt as _;
 
 /// Why a [`CancelScope`] was cancelled.
 ///
@@ -291,7 +293,7 @@ pub fn watch_cancel(
     super::reaper::ensure_installed();
 
     let armed = Arc::new(AtomicBool::new(true));
-    let mut table = watches().lock().unwrap_or_else(PoisonError::into_inner);
+    let mut table = watches().lock_ignore_poison();
     table.push(WatchEntry {
         scope,
         on_cancel: Box::new(on_cancel),
@@ -319,7 +321,7 @@ pub fn watch_cancel(
 pub(crate) fn scan_cancels() {
     let mut fired: Vec<(OnCancel, CancelCause)> = Vec::new();
     {
-        let mut table = watches().lock().unwrap_or_else(PoisonError::into_inner);
+        let mut table = watches().lock_ignore_poison();
         let mut i = 0;
         while i < table.len() {
             if !table[i].armed.load(Ordering::Acquire) {
@@ -463,6 +465,7 @@ impl ForegroundScope {
 pub(crate) struct Serial(std::sync::Mutex<()>);
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 impl Serial {
     pub(crate) const fn new() -> Self {
         Self(std::sync::Mutex::new(()))
@@ -482,6 +485,7 @@ impl Serial {
 pub(crate) static REQUEST_SERIAL: Serial = Serial::new();
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, reason = "test scaffolding")]
 mod tests {
     use super::*;
 
@@ -713,12 +717,9 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let recorded = seen.clone();
         let _watch = watch_cancel(scope, move |cause| {
-            *recorded.lock().unwrap_or_else(PoisonError::into_inner) = Some(cause);
+            *recorded.lock_ignore_poison() = Some(cause);
         });
-        assert_eq!(
-            *seen.lock().unwrap_or_else(PoisonError::into_inner),
-            Some(CancelCause::Explicit)
-        );
+        assert_eq!(*seen.lock_ignore_poison(), Some(CancelCause::Explicit));
     }
 
     /// A watch registered before the cause fires when `cancel` scans.
@@ -728,14 +729,11 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let recorded = seen.clone();
         let _watch = watch_cancel(scope.clone(), move |cause| {
-            *recorded.lock().unwrap_or_else(PoisonError::into_inner) = Some(cause);
+            *recorded.lock_ignore_poison() = Some(cause);
         });
-        assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), None);
+        assert_eq!(*seen.lock_ignore_poison(), None);
         scope.cancel(CancelCause::Deadline);
-        assert_eq!(
-            *seen.lock().unwrap_or_else(PoisonError::into_inner),
-            Some(CancelCause::Deadline)
-        );
+        assert_eq!(*seen.lock_ignore_poison(), Some(CancelCause::Deadline));
     }
 
     /// Dropping the guard disarms the registration: a later cancel never

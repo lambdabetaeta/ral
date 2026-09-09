@@ -37,9 +37,7 @@ impl MachineDial {
     /// Hand the machine back, ending the dialler.
     #[must_use]
     pub fn into_machine(self) -> Box<dyn Machine> {
-        self.machine
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.machine.into_inner_ignore_poison()
     }
 }
 

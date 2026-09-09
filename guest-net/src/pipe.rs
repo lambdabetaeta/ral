@@ -13,6 +13,8 @@ use std::io::{self, Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
+use ral_core::sync::{CondvarExt as _, LockExt as _};
+
 /// Each ring's capacity: a healthy TCP window's worth, small enough that a
 /// wedged connection cannot hoard more than a moment's data.
 const RING_CAP: usize = 64 * 1024;
@@ -52,7 +54,7 @@ impl Ring {
     /// Non-blocking: take up to `out.len()` queued bytes. `0` means empty
     /// right now — EOF is [`Self::is_write_closed_and_drained`]'s to tell.
     fn try_read(&self, out: &mut [u8]) -> usize {
-        let mut s = self.state.lock().expect("ring poisoned");
+        let mut s = self.state.lock_ignore_poison();
         let n = s.buf.len().min(out.len());
         for slot in &mut out[..n] {
             *slot = s.buf.pop_front().expect("n bounded by buf.len()");
@@ -67,7 +69,7 @@ impl Ring {
     /// Non-blocking: push as many of `data`'s bytes as currently fit; the
     /// caller keeps the rest — partial acceptance *is* the backpressure.
     fn try_write(&self, data: &[u8]) -> usize {
-        let mut s = self.state.lock().expect("ring poisoned");
+        let mut s = self.state.lock_ignore_poison();
         if s.write_closed || s.read_closed {
             return 0;
         }
@@ -82,21 +84,21 @@ impl Ring {
     }
 
     fn close_write(&self) {
-        let mut s = self.state.lock().expect("ring poisoned");
+        let mut s = self.state.lock_ignore_poison();
         s.write_closed = true;
         drop(s);
         self.readable.notify_all();
     }
 
     fn close_read(&self) {
-        let mut s = self.state.lock().expect("ring poisoned");
+        let mut s = self.state.lock_ignore_poison();
         s.read_closed = true;
         drop(s);
         self.writable.notify_all();
     }
 
     fn is_write_closed_and_drained(&self) -> bool {
-        let s = self.state.lock().expect("ring poisoned");
+        let s = self.state.lock_ignore_poison();
         s.write_closed && s.buf.is_empty()
     }
 
@@ -104,7 +106,7 @@ impl Ring {
     /// is `None` for an unbounded wait, `Some(deadline)` to time out with
     /// [`io::ErrorKind::TimedOut`].
     fn blocking_read(&self, out: &mut [u8], until: Option<Instant>) -> io::Result<usize> {
-        let mut s = self.state.lock().expect("ring poisoned");
+        let mut s = self.state.lock_ignore_poison();
         loop {
             if !s.buf.is_empty() {
                 let n = s.buf.len().min(out.len());
@@ -119,7 +121,7 @@ impl Ring {
                 return Ok(0);
             }
             s = match until {
-                None => self.readable.wait(s).expect("ring poisoned"),
+                None => self.readable.wait_ignore_poison(s),
                 Some(deadline) => {
                     let now = Instant::now();
                     if now >= deadline {
@@ -129,8 +131,7 @@ impl Ring {
                         ));
                     }
                     self.readable
-                        .wait_timeout(s, deadline - now)
-                        .expect("ring poisoned")
+                        .wait_timeout_ignore_poison(s, deadline - now)
                         .0
                 }
             };
@@ -140,7 +141,7 @@ impl Ring {
     /// Blocking write: waits for room, or reports
     /// [`io::ErrorKind::BrokenPipe`] once the reader is gone for good.
     fn blocking_write(&self, data: &[u8], wake: Option<&Wake>) -> io::Result<usize> {
-        let mut s = self.state.lock().expect("ring poisoned");
+        let mut s = self.state.lock_ignore_poison();
         loop {
             if s.read_closed {
                 return Err(io::Error::new(
@@ -159,7 +160,7 @@ impl Ring {
                 }
                 return Ok(n);
             }
-            s = self.writable.wait(s).expect("ring poisoned");
+            s = self.writable.wait_ignore_poison(s);
         }
     }
 }

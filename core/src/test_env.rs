@@ -8,14 +8,14 @@
 use std::ffi::OsString;
 use std::sync::{Mutex, MutexGuard};
 
+use crate::sync::LockExt as _;
+
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Hold the guard across any `set_var` / `remove_var` *and* the reads that
 /// depend on it.
 pub(crate) fn env_guard() -> MutexGuard<'static, ()> {
-    ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    ENV_LOCK.lock_ignore_poison()
 }
 
 /// Runs `f` under [`env_guard`] with `key` set to `val` (`None` removes it),

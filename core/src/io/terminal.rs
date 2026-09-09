@@ -84,7 +84,10 @@ impl TerminalState {
     /// Probe in the mode `RAL_INTERACTIVE_MODE` names.  The env var is read
     /// here, beside the type defining the modes, rather than respelled in each
     /// frontend.
-    #[allow(clippy::disallowed_methods)] // mode selector, not a basedir
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "RAL_INTERACTIVE_MODE selects a mode; it names no directory, so the XDG rule `crate::path::basedir::resolve_xdg` enforces has nothing to say about it"
+    )]
     pub fn probe_from_env() -> (InteractiveMode, Self, Option<String>) {
         let raw = std::env::var("RAL_INTERACTIVE_MODE").ok();
         let (mode, warn) = InteractiveMode::parse(raw.as_deref());
@@ -93,8 +96,10 @@ impl TerminalState {
 
     /// Query the OS and environment.  Callers seed `crate::ansi::set_terminal`
     /// with the result so process-wide color gating agrees with this snapshot.
-    // TMUX / ASCIINEMA_REC are presence probes, not basedirs.
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "TMUX and ASCIINEMA_REC are read for presence alone — the value is never a path, so there is no relative override for the XDG rule to ignore"
+    )]
     pub fn probe_with_mode(mode: InteractiveMode) -> Self {
         let (startup_stdin_tty, startup_stdout_tty, startup_stderr_tty) = probe_isatty();
         let startup_foreground = probe_foreground(startup_stdin_tty);
@@ -288,8 +293,10 @@ struct TerminalEnv {
 }
 
 impl TerminalEnv {
-    // KITTY_WINDOW_ID / WT_SESSION are presence probes, not basedirs.
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "KITTY_WINDOW_ID and WT_SESSION are read for presence alone, on the same ground as `probe_with_mode`'s pair above"
+    )]
     fn from_process() -> Self {
         Self {
             term: std::env::var("TERM").ok(),

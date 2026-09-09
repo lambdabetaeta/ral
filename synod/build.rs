@@ -8,6 +8,11 @@
 //! must speak the same boot contract as the host being built around it.  See
 //! [`boot_contract`].
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "build script: its `main` owns the process and holds no ral session state"
+)]
+
 use std::path::PathBuf;
 
 fn main() {

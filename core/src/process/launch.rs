@@ -654,6 +654,7 @@ mod windows_args {
 mod windows {
     use super::{EnvEdit, Launch, StdioSpec, windows_args};
     use crate::process::{ChildHandle, Pgid, PgidPolicy};
+    use crate::sync::LockExt as _;
     use std::ffi::{OsStr, OsString};
     use std::io;
     use std::os::windows::ffi::OsStrExt;
@@ -783,7 +784,7 @@ mod windows {
             flags |= CREATE_SUSPENDED;
         }
 
-        let _guard = LAUNCH_LOCK.lock().unwrap();
+        let _guard = LAUNCH_LOCK.lock_ignore_poison();
         let inheritable = InheritableHandles::set(&inherited)?;
         let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         let ok = unsafe {

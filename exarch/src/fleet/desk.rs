@@ -1566,12 +1566,7 @@ impl ExarchDesk {
     fn pin_read(&self, payload: Option<Box<FOValue>>) -> Result<FOValue, Error> {
         let [key] = payload_list(payload, "pin-read", "[key]")?;
         let key = payload_string(key, "pin-read", "key")?;
-        let m = self
-            .services
-            .agent
-            .pins
-            .lock()
-            .expect("pin register poisoned");
+        let m = self.services.agent.pins.lock_ignore_poison();
         match m.get(&key) {
             // A card value is always first-order, so this conversion never fails.
             Some(digest) => FOValue::try_from(&crate::bus::card::encode_card(&digest.card)),
@@ -1587,8 +1582,7 @@ impl ExarchDesk {
                 .services
                 .agent
                 .pins
-                .lock()
-                .expect("pin register poisoned")
+                .lock_ignore_poison()
                 .keys()
                 .map(|key| FOValue::String { value: key.clone() })
                 .collect(),
@@ -2120,7 +2114,7 @@ impl SurfaceApplier {
         if let Some(pins) = &self.pins {
             // Fatal, never skipped: dropping a disposition here would
             // desync the mirror from the stream with no signal at all.
-            let mut m = pins.lock().expect("pin register poisoned");
+            let mut m = pins.lock_ignore_poison();
             match &surface {
                 Surface::Pin { key, card } => {
                     m.insert(key.clone(), shell_eval::PinDigest::new(card.clone()));

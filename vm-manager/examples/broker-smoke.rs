@@ -25,6 +25,11 @@
 //!
 //! Usage: `broker-smoke <folder>`
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
+)]
+
 use vm_manager::MachineSpec;
 
 fn main() {

@@ -2,6 +2,7 @@
 //! highlights, and history.  The real editor for interactive sessions
 //! on TTYs that support raw mode and ANSI.
 
+use ral_core::sync::LockExt as _;
 use ral_core::{Shell, diagnostic};
 use rustyline::config::{BellStyle, Builder, CompletionType, EditMode};
 use rustyline::error::ReadlineError;
@@ -81,11 +82,10 @@ impl RustylineFrontend {
         {
             fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
                 let s = String::from_utf8_lossy(bytes).into_owned();
-                if let Ok(mut p) = self.0.lock() {
-                    p.print(s)
-                        .map_err(|e| std::io::Error::other(e.to_string()))?;
-                }
-                Ok(())
+                self.0
+                    .lock_ignore_poison()
+                    .print(s)
+                    .map_err(|e| std::io::Error::other(e.to_string()))
             }
         }
         shell.set_stdout(ral_core::io::Sink::External(Arc::new(RustylineSink(

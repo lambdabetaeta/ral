@@ -17,6 +17,7 @@ use exarch::provider::identity::{
     Account, AccountId, Auth, Billing, Service, ServiceName, built_in_services, chatgpt_service,
 };
 use exarch::provider::oauth::{self, OAuthToken};
+use ral_core::sync::LockExt as _;
 
 // Mirror the binary's pre-`main` re-exec dispatch — helper re-exec dispatch,
 // then the OS-sandbox stage — before libtest sees the flags either would
@@ -62,9 +63,7 @@ fn with_env(values: &[(&str, Option<&str>)], body: impl FnOnce()) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SERIAL: Mutex<()> = Mutex::new(());
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL.lock_ignore_poison();
     // A fresh empty state dir per call, so `oauth::accounts` finds no
     // tokens unless the scenario sets one up under its own XDG_STATE_HOME.
     let state_dir = std::env::temp_dir().join(format!(

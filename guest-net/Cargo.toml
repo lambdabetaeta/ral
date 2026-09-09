@@ -15,6 +15,10 @@ exarch = { path = "../exarch", default-features = false }
 # The frame codec is the guest's own file, linked here rather than
 # reimplemented, so the two ends of the net wire cannot drift apart.
 ral-daemon = { path = "../ral-daemon" }
+# The workspace's poison policy is `ral_core::sync`, not a second copy: a
+# guest-net worker's panic is already absorbed by `Session::join`, so it must
+# not poison the rings its surviving peers are still using.
+ral-core = { path = "../core" }
 
 # A sans-io TCP/IP stack: this process *is* the guest's peer, so it has to
 # speak IP itself. `medium-ip` because a tun carries bare IP with no ethernet

@@ -604,6 +604,10 @@ fn token_endpoint() -> String {
     format!("{ISSUER}/oauth/token")
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:oauth-client] the client every login flow and token refresh talks to the issuer's token endpoint with. Sign-in machinery the user started, carrying credentials and no session data; raises no card for the same reason the loopback receiver does not."
+)]
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .use_preconfigured_tls(crate::provider::tls::config())

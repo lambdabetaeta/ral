@@ -3,6 +3,7 @@
 
 use super::value::Value;
 use crate::io::ByteBuffer;
+use crate::sync::LockExt as _;
 use std::sync::{Arc, Mutex};
 
 /// Whether `v` structurally reaches a running handle — the binding-lease
@@ -12,7 +13,7 @@ use std::sync::{Arc, Mutex};
 /// regardless, so nothing is stranded either way.
 pub(crate) fn pins_running_work(v: &Value) -> bool {
     match v {
-        Value::Handle(h) => *h.state.lock().unwrap() == HandleState::Running,
+        Value::Handle(h) => *h.state.lock_ignore_poison() == HandleState::Running,
         Value::List(items) => items.iter().any(pins_running_work),
         Value::Map(pairs) => pairs.iter().any(|(_, v)| pins_running_work(v)),
         Value::Variant { payload, .. } => payload.as_deref().is_some_and(pins_running_work),

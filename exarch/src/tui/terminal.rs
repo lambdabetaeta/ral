@@ -299,7 +299,7 @@ unsafe impl Send for WindowsStderrBackup {}
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:stderr-log] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
+    reason = "[silent:stderr-log-windows] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
 )]
 pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBackup> {
     use std::fs::OpenOptions;

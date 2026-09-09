@@ -195,11 +195,13 @@ impl Clone for BusSender {
 impl Drop for BusSender {
     fn drop(&mut self) {
         if self.0.senders.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // Wake a parked receiver so it sees the disconnect rather than
-            // waiting out its timeout. Taking the lock first, with nothing left
-            // to push, is what closes the gap between a receiver reading
-            // `senders` and parking on the condvar — otherwise this wake can
-            // land unheard in between.
+            // The lock enqueues nothing; taking it *is* the handshake. A
+            // receiver holds it from its `senders == 0` test until `wait`
+            // atomically releases it on parking, so acquiring it here orders
+            // this drop wholly before that test — where the receiver reads the
+            // zero itself — or wholly after the park, where `notify_all` is
+            // heard. Notifying without it may land in the gap between the two,
+            // and `recv` has no timeout to recover a wake lost there.
             drop(self.0.lock());
             self.0.signal.notify_all();
         }

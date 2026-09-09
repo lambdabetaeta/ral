@@ -11,13 +11,11 @@
 //! Its standard descriptors are `/dev/null`: our end of an inherited pipe
 //! closes when we exit, and the survivor's next write would take a `SIGPIPE`.
 
-use crate::evaluator::audit::observe;
+use crate::evaluator::audit::{command_fact, observe};
 use crate::ir::CommandName;
 use crate::path::tilde::TildePath;
 use crate::process::StdioSpec;
-use crate::types::{
-    AuditIo, CommandOrigin, HandlerLookup, Mooring, Observed, Settled, Shell, Value, sig,
-};
+use crate::types::{AuditIo, CommandOrigin, HandlerLookup, Mooring, Settled, Shell, Value, sig};
 
 use super::identity::CommandIdentity;
 use super::process::build_command;
@@ -120,19 +118,17 @@ pub(crate) fn detach(
         .map_err(|e| sig(format!("detach: cannot launch '{}': {e}", plan.shown)))?;
     reservation.commit();
 
-    let shown_argv = std::iter::once(plan.shown.clone())
-        .chain(plan.args.iter().cloned())
-        .collect();
     observe(
         shell,
         mooring,
-        Observed::Command {
-            argv: shown_argv,
-            status: 0,
-            origin: CommandOrigin::Detached,
-            io: AuditIo::default(),
-            error: None,
-        },
+        command_fact(
+            &plan.shown,
+            plan.args,
+            0,
+            CommandOrigin::Detached,
+            AuditIo::default(),
+            None,
+        ),
     );
     Ok(Value::map(vec![
         ("pid".into(), Value::Int(i64::from(pid))),

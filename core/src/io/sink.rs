@@ -6,6 +6,7 @@
 //! the [`ByteBuffer`] idiom for captured bytes.
 
 use super::edge::{DeadEdge, Edge};
+use crate::sync::LockExt as _;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -323,14 +324,9 @@ pub(crate) fn new_buffer() -> (Sink, ByteBuffer) {
     (Sink::Buffer(buf.clone()), buf)
 }
 
-/// Drain a [`ByteBuffer`].  Empty on a poisoned lock: the writers have already
-/// joined, so there is nothing to recover, and no capture is worth a panic torn
-/// through `await` result construction.
+/// Drain a [`ByteBuffer`].
 pub(crate) fn take_buffer(buf: &ByteBuffer) -> Vec<u8> {
-    buf.bytes
-        .lock()
-        .map(|mut g| std::mem::take(&mut *g))
-        .unwrap_or_default()
+    std::mem::take(&mut *buf.bytes.lock_ignore_poison())
 }
 
 /// Whether [`SINK_BUFFER_CAP`] truncated what [`take_buffer`] hands back — so
@@ -344,9 +340,9 @@ pub(crate) fn buffer_overflowed(buf: &ByteBuffer) -> bool {
 /// Copy a [`ByteBuffer`] without draining it, so `poll` can sample a worker
 /// still running and the eventual [`take_buffer`] still sees the whole output.
 /// The price is that successive peeks overlap: each is a snapshot of everything
-/// so far, not a delta.  Empty on a poisoned lock, as [`take_buffer`] is.
+/// so far, not a delta.
 pub(crate) fn peek_buffer(buf: &ByteBuffer) -> Vec<u8> {
-    buf.bytes.lock().map(|g| g.clone()).unwrap_or_default()
+    buf.bytes.lock_ignore_poison().clone()
 }
 
 /// Drop one trailing line terminator, as POSIX `$()` does, so `let x = echo hi`
@@ -375,16 +371,16 @@ pub(crate) fn str_strip_one_terminator(s: &str) -> &str {
 /// boundary and raising `overflowed` with it.  Sole enforcement point, so shell
 /// writes and pump-thread appends cannot disagree about the cap.
 fn write_capped(buf: &CapturedBytes, bytes: &[u8]) {
-    if let Ok(mut g) = buf.bytes.lock() {
-        let cur = g.len();
-        if cur < SINK_BUFFER_CAP + SINK_BUFFER_TRUNC_MARKER.len() {
-            if cur + bytes.len() <= SINK_BUFFER_CAP {
-                g.extend_from_slice(bytes);
-            } else {
-                g.extend_from_slice(&bytes[..SINK_BUFFER_CAP.saturating_sub(cur)]);
-                g.extend_from_slice(SINK_BUFFER_TRUNC_MARKER);
-                buf.overflowed.store(true, Ordering::Relaxed);
-            }
+    let mut g = buf.bytes.lock_ignore_poison();
+    let cur = g.len();
+    if cur < SINK_BUFFER_CAP + SINK_BUFFER_TRUNC_MARKER.len() {
+        if cur + bytes.len() <= SINK_BUFFER_CAP {
+            g.extend_from_slice(bytes);
+        } else {
+            g.extend_from_slice(&bytes[..SINK_BUFFER_CAP.saturating_sub(cur)]);
+            g.extend_from_slice(SINK_BUFFER_TRUNC_MARKER);
+            drop(g);
+            buf.overflowed.store(true, Ordering::Relaxed);
         }
     }
 }

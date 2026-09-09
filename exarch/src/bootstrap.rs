@@ -304,7 +304,7 @@ impl Scratch {
 /// nuisance, never a reason to refuse the session it was made for.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
+    reason = "[silent:scratch-reap] sweeps the scratch dirs no live process still holds a lock on; not turn-time data I/O"
 )]
 fn reap_unheld(temp: &Path, prefix: &str, mine: &Path) {
     let Ok(entries) = fs::read_dir(temp) else {

@@ -21,6 +21,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::{CancelCause, CancelScope};
+use crate::sync::{CondvarExt as _, LockExt as _};
 
 enum Action {
     Cancel(CancelScope),
@@ -101,15 +102,11 @@ fn arm(action: Action, after: Duration) -> Deadline {
     let daemon = DAEMON.get_or_init(start_daemon);
     let when = Instant::now() + after;
     let armed = Arc::new(AtomicBool::new(true));
-    daemon
-        .heap
-        .lock()
-        .expect("daemon heap poisoned")
-        .push(Scheduled {
-            when,
-            action,
-            armed: armed.clone(),
-        });
+    daemon.heap.lock_ignore_poison().push(Scheduled {
+        when,
+        action,
+        armed: armed.clone(),
+    });
     // This entry may beat the deadline the daemon is sleeping toward.
     daemon.wake.notify_one();
     Deadline { armed, keep: false }
@@ -161,11 +158,11 @@ fn start_daemon() -> Arc<Daemon> {
 /// Every wake re-peeks, which is what makes a spurious one free.  Runs for the
 /// process lifetime — there is no shutdown path.
 fn daemon_loop(daemon: &Daemon) {
-    let mut heap = daemon.heap.lock().expect("daemon heap poisoned");
+    let mut heap = daemon.heap.lock_ignore_poison();
     loop {
         match heap.peek() {
             None => {
-                heap = daemon.wake.wait(heap).expect("daemon heap poisoned");
+                heap = daemon.wake.wait_ignore_poison(heap);
             }
             Some(next) => {
                 let now = Instant::now();
@@ -177,15 +174,11 @@ fn daemon_loop(daemon: &Daemon) {
                     if due.armed.load(Ordering::Acquire) {
                         due.action.fire();
                     }
-                    heap = daemon.heap.lock().expect("daemon heap poisoned");
+                    heap = daemon.heap.lock_ignore_poison();
                 } else {
                     // Saturating: `now` may have overtaken `when` since the peek.
                     let remaining = next.when.saturating_duration_since(now);
-                    let (g, _) = daemon
-                        .wake
-                        .wait_timeout(heap, remaining)
-                        .expect("daemon heap poisoned");
-                    heap = g;
+                    heap = daemon.wake.wait_timeout_ignore_poison(heap, remaining).0;
                 }
             }
         }

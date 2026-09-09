@@ -40,6 +40,10 @@ fn main() {
     unsafe {
         if libc::geteuid() != libc::getuid() {
             eprintln!("ral-sh: refusing to run setuid");
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "`main`'s first statement in a binary that links no ral-core: there is no lease, no reaper and no staged write in this process to begin with"
+            )]
             std::process::exit(1);
         }
     }
@@ -95,11 +99,10 @@ fn short_flag_cluster(arg: &OsStr) -> Option<&str> {
 /// Read the invocation context and exec the chosen binary.
 fn dispatch() -> ! {
     let argv0 = std::env::args_os().next().unwrap_or_default();
-    // ral-sh has no dependency on ral-core (it's the minimal outer
-    // dispatcher binary, intentionally standalone), so it can't reach for
-    // `ral_core::path::basename` as `ral/src/cli.rs` does.  Same
-    // basename-from-argv0 idiom, inlined.
-    #[allow(clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "ral-sh is the minimal outer dispatcher and deliberately links no ral-core, so `ral_core::path::basename` — which `ral/src/cli.rs` uses for exactly this — is out of reach. The same basename-from-argv0 idiom, inlined"
+    )]
     let is_login = std::path::Path::new(&argv0)
         .file_name()
         .and_then(|s| s.to_str())
@@ -151,6 +154,10 @@ fn exec_ral(is_login: bool, args: &[OsString]) -> ! {
     cmd.args(args);
     let err = cmd.exec();
     eprintln!("ral-sh: exec {}: {err}", ral.display());
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the exec that was to replace this image failed; the dispatcher links no ral-core, so there is nothing an unwind would return"
+    )]
     std::process::exit(127)
 }
 
@@ -158,6 +165,10 @@ fn exec_ral(is_login: bool, args: &[OsString]) -> ! {
 fn exec_ral(_is_login: bool, _args: &[OsString]) -> ! {
     // Non-Unix has no `exec`; ral-sh is a Unix login-shell bridge.
     eprintln!("ral-sh: ral dispatch is only supported on Unix");
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a refusal off Unix, before any dispatch; the dispatcher links no ral-core and holds nothing"
+    )]
     std::process::exit(127)
 }
 
@@ -178,14 +189,26 @@ fn exec_posix_sh(is_login: bool, args: &[OsString]) -> ! {
     {
         let err = cmd.exec();
         eprintln!("ral-sh: exec /bin/sh: {err}");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the exec that was to replace this image failed; the dispatcher links no ral-core, so there is nothing an unwind would return"
+        )]
         std::process::exit(127)
     }
     #[cfg(not(unix))]
     {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "/bin/sh could not be started; the dispatcher links no ral-core and holds nothing"
+        )]
         let status = cmd.status().unwrap_or_else(|e| {
             eprintln!("ral-sh: exec /bin/sh: {e}");
             std::process::exit(127)
         });
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the dispatched /bin/sh has been waited out; ral-sh's whole remaining job is to wear its status"
+        )]
         std::process::exit(status.code().unwrap_or(1))
     }
 }

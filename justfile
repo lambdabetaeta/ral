@@ -31,6 +31,14 @@ _build $RUSTFLAGS=deny:
 test $RUSTFLAGS=deny: _build
     cargo test --workspace {{gui}} --features ral-core/test-util,exarch/test-util
 
+# Compiles nothing, so it is the cheapest step CI has and the one worth failing
+# first. `--all` reaches vendored ral-ripgrep-core too — unlike the clippy
+# opt-out, upstream is already rustfmt-clean, so nothing there is reformatted.
+
+# Check the whole workspace is rustfmt-clean.
+fmt-check:
+    cargo fmt --all --check
+
 # No `-- -D warnings`: it'd override vendored ral-ripgrep-core's `all = "allow"`
 # opt-out. Pedantry (pedantic + nursery, I/O-door denylist) lives in RUSTFLAGS
 # and `[workspace.lints.clippy]` instead.

@@ -14,6 +14,12 @@
 //! Never hold the exclusive side across anything but the `spawn()` call
 //! itself — it is process-wide and every stage thread may want the shared
 //! side at once.
+//!
+//! The lock guards an `RwLock<()>`: poison carries no information, since there
+//! is no state to tear, so it goes through the workspace's poison door.
+
+#[cfg(target_vendor = "apple")]
+use crate::sync::RwLockExt as _;
 
 #[cfg(target_vendor = "apple")]
 static LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
@@ -29,9 +35,7 @@ static LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 )]
 pub fn cloexec_pipe() -> std::io::Result<(os_pipe::PipeReader, os_pipe::PipeWriter)> {
     #[cfg(target_vendor = "apple")]
-    let _guard = LOCK
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = LOCK.read_ignore_poison();
     os_pipe::pipe()
 }
 
@@ -50,9 +54,7 @@ pub fn cloexec_socketpair() -> std::io::Result<(
     std::os::unix::net::UnixStream,
 )> {
     #[cfg(target_vendor = "apple")]
-    let _guard = LOCK
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = LOCK.read_ignore_poison();
     std::os::unix::net::UnixStream::pair()
 }
 
@@ -69,9 +71,7 @@ pub fn cloexec_socketpair() -> std::io::Result<(
 )]
 pub fn spawn(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     #[cfg(target_vendor = "apple")]
-    let _guard = LOCK
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = LOCK.write_ignore_poison();
     cmd.spawn()
 }
 

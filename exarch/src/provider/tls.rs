@@ -48,6 +48,10 @@ const TCP_KEEP_ALIVE: Duration = Duration::from_secs(30);
 /// the model listing so neither builds its own against the host trust store.
 /// It sets no *total* request timeout: [`STREAM_IDLE_TIMEOUT`] and the
 /// keep-alives are what bound a hung request, so a slow one is never cut off.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:provider-client] the one HTTPS client the genai transport and the model listing share. Per-turn machinery carrying the conversation to the provider, which the transcript already is; a card here would card the transcript's own delivery."
+)]
 pub(crate) fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .use_preconfigured_tls(config())

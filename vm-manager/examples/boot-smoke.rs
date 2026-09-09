@@ -20,6 +20,11 @@
 //!
 //! Usage: `boot-smoke <kernel> <initramfs> <rootfs> <folder>`
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "example binary: its `main` owns the process, so an `exit` unwinds nothing another owner needs"
+)]
+
 use std::io::{Read as _, Write as _};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
