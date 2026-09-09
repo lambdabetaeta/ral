@@ -383,7 +383,10 @@ pub(super) fn subagent_header(
     let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
     let mut spans = vec![
         Span::styled("agent ", dim),
-        bold(name.to_string(), if error.is_some() { ORANGE } else { LIME }),
+        bold(
+            name.to_string(),
+            if error.is_some() { ORANGE } else { LIME },
+        ),
         Span::styled(
             format!(" {verb}  [{}]", crate::bus::elapsed_phrase(elapsed)),
             dim,
