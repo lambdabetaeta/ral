@@ -1,6 +1,6 @@
 #![allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 
 //! A peer that stops reading must never be able to wedge the front-end

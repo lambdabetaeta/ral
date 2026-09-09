@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 4b075384
-generated_at_date: 2026-09-07
-covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/io_door_set.rs]
+generated_at_commit: 6686e770
+generated_at_date: 2026-09-09
+covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
 
 # Map: exarch / io surface
@@ -10,8 +10,9 @@ Every redirect read (`<`), every redirect write (`>` family), every external
 or bundled exec image the model launches, and every denied head admission
 surfaces on the rail — **one structural observation per logical operation**,
 the rail then coalescing a burst into one card per kind. Coverage is a
-property of the **runtime**, not of kit discipline: the hooks sit at the doors
-where the operation actually happens, so a read/write/exec surfaces no matter
+property of the **runtime**, not of kit discipline: the hooks sit at the
+syscall sites where the operation actually happens, so a read/write/exec
+surfaces no matter
 which helper — or no helper — issued it. Core emits a structural
 **`Observation`** (`core/src/types/observation.rs`) — the one vocabulary
 shared with the [[design/audit|audit trail]], `--audit`'s JSON, and the wire;
@@ -26,9 +27,9 @@ governing invariant: **a ral redirect means the model's own I/O and nothing
 else**, held not by a flag but by *where code lives* (below). See the decision,
 [[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]].
 
-## The doors — core emits its own activity
+## The syscall sites — core emits its own activity
 
-Three operation classes, each hooked at the doors that realise it. Every door
+Three operation classes, each hooked at the sites that realise it. Every site
 builds one `Observation` (`types/observation.rs`) and hands it to `observe`
 (`evaluator/audit.rs`), the single fan-out point. It judges nothing: the
 observation goes to the run's `Mooring::surface` (`types/mooring.rs`) and onto
@@ -45,11 +46,11 @@ semantics, not presentation ([[design/audit|audit]]). And only a head admission
 (`command_call.rs`) surfaces a *structured* denial — the `fs` and full-argv
 checks in
 `capability/enforce.rs` are entered from `types/shell/checks.rs`, whose
-callers in `builtins/` and exarch's own doors carry no `Mooring`, so their
+callers in `builtins/` and exarch's own sites carry no `Mooring`, so their
 denials reach the trail alone. A refused *external* command still surfaces
 either way, as a failed command observation carrying the denial message.
 
-With nobody listening — no sink installed and no trail open — a door builds no
+With nobody listening — no sink installed and no trail open — a site builds no
 observation at all, so it pays for neither the `epoch_us()` syscall nor the
 `script` and `principal` clones. With a host attached it pays them per
 dispatch, builtins included.
@@ -62,7 +63,7 @@ dispatch, builtins included.
   - *A ral body* — builtin, closure, or a `> file` scope — runs inside the frame
     combinators (`evaluator/redirect.rs`): the open records a `WriteIntent` on
     the `RedirectFrame` and `settle_writes` emits when the **frame settles**,
-    with the outcome the door alone can know — `committed` (body ok, an atomic
+    with the outcome the site alone can know — `committed` (body ok, an atomic
     `>` only once its commit succeeds), `aborted` (the body did not reach the
     commit), or `failed` (open or commit failed).
   - *An external command* fuses its redirects into the spawn instead
@@ -80,24 +81,25 @@ dispatch, builtins included.
   in memory otherwise. `new_bytes` is what the card opens; `old_bytes` reaches
   the [[design/audit|audit trail]] and no card, a redirect saying what now
   stands in the file rather than what it replaced.
-- **Commands** are hooked *after* resolution, at the completion doors, never
+- **Commands** are hooked *after* resolution, at the completion sites, never
   at the call site (where the head may still resolve to a closure or
   builtin). Every command — builtin, external, or detached — is one
   `Observed::Command { argv, status, origin, .. }`: `argv` is the shown name
   first, then its arguments; `origin` is `builtin`, `external`, or `detached`.
-  The external / bundled path — one door for both, since a bundled tool is a
+  The external / bundled path — one site for both, since a bundled tool is a
   `ral --ral-bundled-tool` child like any host executable
   ([[decisions/260731_bundled-tools-always-reexec|bundled-tools-always-reexec]])
   — emits from `finish_command` (`evaluator/audit.rs`), which wraps the whole
   dispatch and so covers a spawn failure too, since that never reaches
   `wait()` (the card derives ok/bad from the status directly; a spawn failure
   carries the synthesized 127/126/… code). `detach` (`runtime/command/detach.rs`)
-  is the second door, and the one that surfaces at the spawn rather than the
+  is the second site, and the one that surfaces at the spawn rather than the
   wait: a surrendered process is never waited for, so its observation carries
   `origin: detached` and status `0` meaning *exec'd*, not *succeeded*. A
   **builtin** command is recorded into an open trail like any other, and
   reported on the sink like any other; `origin: builtin` is what the host
-  drops at `decode_surface` — the rail reports doors to the world, not
+  drops at `decode_surface` — the rail reports the syscalls that reach the
+  world, not
   evaluation.
 
 Capability checks are different again. An *allowed* check stays off the rail:
@@ -107,7 +109,7 @@ check is the exception: it is the highest-signal line in a provenance record,
 so a head admission reaches the rail whether or not a trail is open — see
 [[design/audit|audit]].
 
-A pipeline-stage helper's own doors reach the rail too, not only its trail —
+A pipeline-stage helper's own sites reach the rail too, not only its trail —
 but only when the parent already holds an open audit trail: the stage ships
 `active_policy()`, `None` unless the parent is collecting, so with no
 `audit { }` in force the child opens no trail and its fragment comes back
@@ -169,7 +171,7 @@ observation): `committed` uses the `ok` role, `aborted` uses `warn`, and
 — and a *committed* write previews its content below the heading
 (`write_preview`): a complete `diff` mark of what landed, read against the
 empty side so every row is an addition. The card retains every hunk and the
-TUI's disclosure ladder decides how much to show. No mark at all when the door
+TUI's disclosure ladder decides how much to show. No mark at all when the site
 could not read the staged side whole or it is not text, leaving the heading to report a write
 it cannot open; a command keeps the conventional `$` prompt, the program as
 `path`, each arg as plain ink, and a `→ status` tail roled `ok`/`bad` off the
@@ -234,8 +236,8 @@ frame:
 - **`edit-hash`** / **`edit-replace`**
   ([[design/hash-addressed-editing|hash-addressed editing]]) read, resolve,
   atomically rebuild, and write entirely in Rust through core's atomic write
-  door (`Shell::atomic_write`) — the read is silent (a sub-step of one logical
-  operation) and the door observes nothing, so the editor owns its whole
+  site (`Shell::atomic_write`) — the read is silent (a sub-step of one logical
+  operation) and the site observes nothing, so the editor owns its whole
   surface and speaks it as one `` `card [`diff …] ``. It diffs its own two
   texts, both already resident, so unlike a committed `>` it is under no
   pre-image cap and reads as a diff whatever the file's size; an edit that
@@ -264,7 +266,7 @@ judges the *object* it lands on. The `Located` it returns performs every open,
 stat, listing, staging, rename and unlink relative to that directory's handle
 with `FollowSymlinks::No`, so what was judged is what gets opened.
 
-That is why the door set is short enough to read: `redirect.rs` drives the
+That is why the site set is short enough to read: `redirect.rs` drives the
 recipe but contains no open, and `builtins/fs.rs`, `builtins/modules.rs` and
 exarch's readers, editors and grep all reach the filesystem through a
 `Located` rather than by re-walking a string the gate already judged. The one
@@ -281,7 +283,7 @@ callers genuinely need different answers:
 | `locate_existing` | `Ok(None)` | `Err` |
 | `locate_if_admitted` | `None` | `None` |
 
-`locate` is the door proper. `locate_existing` is what `exists`/`is-file` and
+`locate` is the syscall site proper. `locate_existing` is what `exists`/`is-file` and
 their siblings need: an absent path is `false`, a denied one still raises —
 and where the walk found nothing to judge, the refusal falls back to the name,
 so a denied path that does not exist cannot leak the difference by reading as
@@ -289,31 +291,32 @@ merely absent. `locate_if_admitted` is for scans — `grep-files`, `list-dir`'s
 per-entry filter — where one off-limits entry must skip rather than blank the
 whole listing.
 
-## Enforcement — every door is accounted for
+## Enforcement — every syscall site is accounted for
 
 That "all I/O surfaces" holds is the conjunction of two mechanically-checked
 facts, in the `clippy.toml` style already set for canonicalisation, cwd, and
 child-wait.
 
-- **All I/O goes through a known door (clippy).** `disallowed-methods` bans the
+- **All I/O goes through a reviewed syscall site (clippy).** `disallowed-methods` bans the
   fs/process *constructors* — `File::{open,create,create_new}`,
   `OpenOptions::open`, the one-shot `fs::{read,read_to_string,write,read_dir,
   metadata,symlink_metadata,read_link,remove_file,remove_dir_all,create_dir_all,
   rename,copy,set_permissions}`, `Command::new`, `CommandExt::exec`, and
   `ignore::WalkBuilder::build` (directory walks root at the one cancellable
-  grep door). The whole `cap_primitives::fs` surface is banned alongside it,
+  grep site). The whole `cap_primitives::fs` surface is banned alongside it,
   not just the entries `path/walk.rs` uses today: a ban naming only the
-  current callers is exactly what let the fs door move out from under this
+  current callers is exactly what let the fs site move out from under this
   list once already, when the opens migrated from `runtime/command/redirect.rs`
   to the handle-relative walk and every tag went with them. Enforcement rides the pre-existing
   `[workspace.lints.clippy] disallowed_methods = "deny"` table, which all ten
   crates opt into via `[lints] workspace = true`; plain `cargo clippy --workspace
-  --all-targets` is the command CI runs. A call site is then a door or a lint
+  --all-targets` is the command CI runs. A call site is then a reviewed
+  syscall site or a lint
   failure *in the crates that do not switch the lint off again at their own
   root*: `exarch/src/lib.rs`, `ral-daemon/src/lib.rs` and
   `ral-initramfs/src/lib.rs` each carry a crate-level
   `#![allow(clippy::disallowed_methods, …)]` on the grounds of being an
-  application rather than the ral shell, so inside them the door set rests on
+  application rather than the ral shell, so inside them the site set rests on
   the meta-test's per-file check and on review, never on the compiler — 165
   constructor calls, the crate that owns the model's own turn-time I/O among
   them. synod carried two such allows, in both its crate roots, and now carries
@@ -322,22 +325,23 @@ child-wait.
   clippy::disallowed_methods` is *not* used: a command-line `-D` escalates the
   lint onto the vendored `ral-ripgrep-core`, which deliberately opts out, and
   would break the build on vendored code.
-- **Each door is accounted for, surfacing or silent (reasoned allow).** Each
+- **Each site is accounted for, surfacing or silent (reasoned allow).** Each
   allowlisted site carries an `#[allow(clippy::disallowed_methods, reason = …)]`
-  whose reason opens with a stable tag — `[io-door:surface:<slug>]` (the open
+  whose reason opens with a stable tag — `[surface:<slug>]` (the open
   and the atomic-write steps in `path/walk.rs`, plus the exec and grep-walk
-  doors, that fuse a surface into the operation),
-  `[io-door:silent:<slug>]` (fs work that is not the model's data I/O —
+  sites, that fuse a surface into the operation),
+  `[silent:<slug>]` (fs work that is not the model's data I/O —
   canonicalisation, `which` probes, module loading, stat predicates, capability
-  load, sandbox respawn/exec, prelude bake, exarch/ral infra), or `[io-door:test]`
-  (test scaffolding, blanket-allowed and not a door). The slug is unique within
-  its file, so the tag is stable across line shifts. So silence is a written
-  decision, not an omission.
+  load, sandbox respawn/exec, prelude bake, exarch/ral infra), or `[test]`
+  (test scaffolding, blanket-allowed and not a syscall site). The slug is
+  unique within its file, so the tag is stable across line shifts, and
+  `reason = "[` is the one grep that finds the whole discipline. So silence is
+  a written decision, not an omission.
 
-A meta-test pins it: `core/tests/io_door_set.rs` walks the production `src/`,
-checks every door allow is well-formed, and asserts the surface/silent door set
+A meta-test pins it: `core/tests/syscall_sites.rs` walks the production `src/`,
+checks every tagged allow is well-formed, and asserts the surface/silent site set
 equals a checked-in manifest keyed by `(file, tag)` — stable across line shifts,
-so only adding or removing a door perturbs it, and a new constructor call added
+so only adding or removing a site perturbs it, and a new constructor call added
 with a bare or missing allow fails CI
 ([[decisions/260614_structural-bug-prevention|structural bug prevention]]). What
 the lint cannot reach — the syscalls inside `ignore`/`tempfile`/bundled `uutils`,
@@ -357,7 +361,7 @@ vocabulary this surface shares with the trail, `--audit`, and the wire),
 [[map/exarch/shell-eval|shell-eval]] (the `decode_surface` seam),
 [[map/exarch/builtins|builtins]] (the witness/search/edit atoms the bulk helpers
 became), [[map/core/runtime|runtime]] (the redirect frame and exec completion
-doors), [[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
+sites), [[decisions/260616_bundled-tools-as-exec-images|bundled-tools-as-exec-images]],
 [[decisions/260614_structural-bug-prevention|structural-bug-prevention]] and
 [[decisions/260601_reduced-authority-witness|reduced-authority-witness]] (the
 lint- and witness-discipline Enforcement extends),

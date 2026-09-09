@@ -404,7 +404,7 @@ pub(crate) fn user_json(v: &FOValue) -> serde_json::Value {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     //! Documented-semantics tests for exarch's tool-call evaluator.
@@ -1841,7 +1841,7 @@ return !{{length $hits}}"
     /// One tool call through `run_shell`, over a real record-seam channel,
     /// returning the result and every [`crate::record::Record`] the run
     /// witnessed — the whole `core surface → decode_surface → Surface →
-    /// Display` path the io-door tests assert on.
+    /// Display` path the surface tests assert on.
     fn run_capturing(shell: &mut Shell, cmd: &str) -> (ToolResult, Vec<crate::record::Record>) {
         let (tx, rx) = channel();
         let recorder = crate::record::Emitter::none();

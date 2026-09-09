@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 2cfeb108
-generated_at_date: 2026-09-06
+generated_at_commit: 6686e770
+generated_at_date: 2026-09-09
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -230,7 +230,7 @@ device for `net` to govern; the in-process gates apply unchanged
   this host cannot establish, whether `projection_enforceable` saw it coming,
   there was no bwrap on `PATH` to pin at boot (`linux::envelope`, asked at the
   first launch that needs it), or the pinned envelope failed to spawn.
-- `make_command` — wraps an external command in the active policy.
+- `Launch::new` (`process/launch.rs`) — builds the unsandboxed external exec image; `build_command` (`runtime/command/process.rs`) reaches it directly when no projection is active.
 - `launch.rs` (`sandboxed_command`) — the per-command launcher. `build_command`
   (`runtime/command/process.rs`) routes an external or bundled child through here
   whenever a projection is active and the process is not already confined,
@@ -398,13 +398,13 @@ That single binary carrying both ral and its coreutils is part of why ral
 is a [[invariants/single-binary|single-binary]]. `docs/SPEC.md` gives the
 formal capability calculus.
 
-Every `fs`/process constructor in this layer is a closed *I/O door*: the
+Every `fs`/process constructor in this layer is a reviewed *syscall site*: the
 workspace bans the raw constructors via clippy `disallowed_methods`, so each call
-site carries an `#[allow(… reason = "[io-door:…]")]` classifying it as a surfaced
-exec image (`make_command`), silent infrastructure (the self re-exec, the
+site carries an `#[allow(… reason = "[…]")]` classifying it as a surfaced
+exec image (`Launch::new`, `make_command_with_policy`), silent infrastructure (the self re-exec, the
 `ps` denial sampler, the boot-time binary pin, the stamp-store and profile-ledger
 lifecycle), or
-test scaffolding. The door
+test scaffolding. The site
 shapes and their rail rendering live in [[map/exarch/io-surface|io-surface]]; here
-the doors are only declared and accounted, with `core/tests/io_door_set.rs`
+the sites are only declared and accounted, with `core/tests/syscall_sites.rs`
 failing CI on any unaccounted constructor.

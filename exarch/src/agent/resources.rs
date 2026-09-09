@@ -254,7 +254,7 @@ pub fn terse_duration(d: Duration) -> String {
 /// file would probe as 0.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:resources-disk-probe] the /resources disk figure: a read-only metadata walk of the session's own log/scratch dirs, priced at invocation; operator diagnostics, not turn-time model I/O"
+    reason = "[silent:resources-disk-probe] the /resources disk figure: a read-only metadata walk of the session's own log/scratch dirs, priced at invocation; operator diagnostics, not turn-time model I/O"
 )]
 pub fn dir_size(root: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -549,7 +549,7 @@ impl Avatar {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

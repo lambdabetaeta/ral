@@ -100,7 +100,7 @@ fn path_in(dir: &Path) -> PathBuf {
 /// a corrupt file reads as no selection rather than bricking startup.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:state-read] reads the persisted picker selection; recoverable session state, not turn-time data I/O"
+    reason = "[silent:state-read] reads the persisted picker selection; recoverable session state, not turn-time data I/O"
 )]
 pub fn load(dir: &Path) -> Option<State> {
     let bytes = std::fs::read(path_in(dir)).ok()?;
@@ -115,7 +115,7 @@ pub fn load(dir: &Path) -> Option<State> {
 /// Returns `Err` if creating `dir`, serialising, or writing fails.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:state-write] persists the picker selection; recoverable session state, not turn-time data I/O"
+    reason = "[silent:state-write] persists the picker selection; recoverable session state, not turn-time data I/O"
 )]
 pub fn save(dir: &Path, state: &State) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -128,7 +128,7 @@ pub fn save(dir: &Path, state: &State) -> Result<(), String> {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

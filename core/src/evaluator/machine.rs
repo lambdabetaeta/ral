@@ -1326,7 +1326,7 @@ pub(crate) fn force(v: Value, env: &Env, mooring: &Mooring, shell: &mut Shell) -
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs scaffolding for the sourced-file-halt test"
+    reason = "[test] test fs scaffolding for the sourced-file-halt test"
 )]
 mod tests {
     use super::*;

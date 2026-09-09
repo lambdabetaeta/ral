@@ -53,7 +53,7 @@ pub(super) fn index_for(base: &Path) -> Result<&'static Index, String> {
 /// The db path carries the pid, so concurrent exarchs never share a frecency store.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:fff-db-dir] creates the fff index's temp db dir; cache infra, not turn-time data I/O"
+    reason = "[silent:fff-db-dir] creates the fff index's temp db dir; cache infra, not turn-time data I/O"
 )]
 fn build_index(base: &Path) -> Result<Index, String> {
     let db_root = std::env::temp_dir().join(format!(

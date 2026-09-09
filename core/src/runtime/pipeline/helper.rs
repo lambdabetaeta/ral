@@ -62,7 +62,7 @@ pub(crate) fn self_reexec(flag: &str) -> std::io::Result<crate::process::Launch>
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:self-reexec-windows] Builds the ral-re-exec Command for Windows pipeline-anchor / bundled-tool multicall subprocesses. Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
+    reason = "[silent:self-reexec-windows] Builds the ral-re-exec Command for Windows pipeline-anchor / bundled-tool multicall subprocesses. Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
 )]
 pub(crate) fn self_reexec(flag: &str) -> std::io::Result<crate::process::Launch> {
     let exe = std::env::current_exe()?;

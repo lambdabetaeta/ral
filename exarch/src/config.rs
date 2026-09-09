@@ -97,7 +97,7 @@ pub fn load_declared(path: &std::path::Path, label: &str) -> Result<Vec<Service>
 /// be created.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:config-write] writes the provider declarations back to the app's own config directory; configuration, not turn-time model data I/O"
+    reason = "[silent:config-write] writes the provider declarations back to the app's own config directory; configuration, not turn-time model data I/O"
 )]
 pub fn save_declared(
     path: &std::path::Path,
@@ -175,7 +175,7 @@ fn quoted(text: &str, field: &str, label: &str) -> Result<String, String> {
 /// Shared with [`crate::net_policy::load`].
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:config-load] reads a trusted configuration or policy file (the unusual-provider config, or the IT-owned network policy) from a fixed path to set up transport/egress rules; configuration loading at setup, not turn-time model data I/O."
+    reason = "[silent:config-load] reads a trusted configuration or policy file (the unusual-provider config, or the IT-owned network policy) from a fixed path to set up transport/egress rules; configuration loading at setup, not turn-time model data I/O."
 )]
 pub(crate) fn read_optional_file(
     path: &std::path::Path,

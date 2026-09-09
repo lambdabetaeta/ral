@@ -918,7 +918,7 @@ impl AgentLog {
     /// and the failure is reported, not shrugged.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:record-file] rotates the session's record.jsonl on /clear; output infra, not turn-time data I/O"
+        reason = "[silent:record-file] rotates the session's record.jsonl on /clear; output infra, not turn-time data I/O"
     )]
     fn rotate_record(&self, path: &Path, rotation: u64) -> Option<io::Error> {
         let rotated = rotation_path(path, rotation);
@@ -1003,7 +1003,7 @@ impl AgentLog {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:session-dir] (re)creates the session log dir; event-log infra, not turn-time data I/O"
+        reason = "[silent:session-dir] (re)creates the session log dir; event-log infra, not turn-time data I/O"
     )]
     fn open_fresh(
         sessions_root: PathBuf,
@@ -1183,7 +1183,7 @@ pub(crate) fn validate_result_ids(
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

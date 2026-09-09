@@ -361,7 +361,7 @@ fn hatch_over(connection: OwnedFd, seed: &EngineSeed, recipe: Recipe) -> Result<
 /// of failing it.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:hatch-spawn] re-execs the current engine binary as a hatched child over the connection a peer just dialled — infrastructure handoff exactly like WireTransport::new's engine-spawn door, not model turn-time I/O"
+    reason = "[silent:hatch-spawn] re-execs the current engine binary as a hatched child over the connection a peer just dialled — infrastructure handoff exactly like WireTransport::new's engine-spawn site, not model turn-time I/O"
 )]
 fn spawn_engine(
     recipe: Recipe,
@@ -507,7 +507,7 @@ pub(crate) fn apply_seed(
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

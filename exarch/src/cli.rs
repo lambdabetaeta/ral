@@ -210,7 +210,7 @@ pub enum Command {
 /// Returns `Err` if the `--file` seed prompt cannot be read.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:seed-file] reads the --file seed prompt at CLI parse time; not a turn-time door"
+    reason = "[silent:seed-file] reads the --file seed prompt at CLI parse time; not turn-time I/O"
 )]
 pub fn load_seed(
     prompt: Option<String>,

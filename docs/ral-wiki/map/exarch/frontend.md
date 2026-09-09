@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e1dc876f
-generated_at_date: 2026-09-07
+generated_at_commit: 6686e770
+generated_at_date: 2026-09-09
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
 
@@ -76,7 +76,7 @@ one inbound inbox**, mapped by `bus.rs`'s module doc across its submodules:
 `Record { Protocol, Display, Forensic }` vocabulary and the disjoint
 `Transient`; `record/seam.rs` (`Emitter::emit`, the only publisher —
 append-then-publish under the log's own mutex, so channel order is log
-order); `record/log.rs` (the `record.jsonl` io-door, with the attachable
+order); `record/log.rs` (the `record.jsonl` syscall site, with the attachable
 `FleetSink` inside the writer's mutex); `record/replay.rs` (the generic
 `fold == memo` driver and `Refusal`, with `Log::read` streaming one entry at a
 time); `record/commit.rs` (the worker-side

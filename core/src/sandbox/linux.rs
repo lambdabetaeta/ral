@@ -105,7 +105,7 @@ pub(crate) struct Payload<'a> {
 /// write end the caller must keep until it has spawned — see [`InfoFd`].
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
+    reason = "[surface:bwrap-launch] Builds the bwrap-wrapped external exec image the model launches under a Linux sandbox projection. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
 )]
 pub(crate) fn make_command_with_policy(
     envelope: &Pinned,
@@ -297,7 +297,7 @@ fn render_cgroup(c: &mut Command, host: HostEnvelope) {
 /// hybrid host, whose lines are many and name no single tree.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:own-cgroup] reads ral's own /proc/self/cgroup to re-root the envelope's cgroup tree; envelope construction, not the model's data I/O"
+    reason = "[silent:own-cgroup] reads ral's own /proc/self/cgroup to re-root the envelope's cgroup tree; envelope construction, not the model's data I/O"
 )]
 fn own_cgroup() -> Option<String> {
     let table = std::fs::read_to_string("/proc/self/cgroup").ok()?;
@@ -564,7 +564,7 @@ fn default_ro_binds() -> Vec<String> {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::{HostEnvelope, Payload, Pinned, make_command_with_policy};

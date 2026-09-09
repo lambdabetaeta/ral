@@ -100,7 +100,7 @@ pub(super) fn builtin_warn(args: &[Value], shell: &mut Shell) -> Settled<Value> 
 // prompt still reaches the user under redirection.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:ask-tty] `ask` builtin opens the controlling terminal device (/dev/tty or CON) to prompt and read one line direct from the user, bypassing redirection; a terminal-device interaction, not turn-time model data I/O."
+    reason = "[silent:ask-tty] `ask` builtin opens the controlling terminal device (/dev/tty or CON) to prompt and read one line direct from the user, bypassing redirection; a terminal-device interaction, not turn-time model data I/O."
 )]
 pub(super) fn builtin_ask(args: &[Value]) -> Result<Value, Error> {
     let prompt = args

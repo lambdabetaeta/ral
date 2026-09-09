@@ -15,7 +15,7 @@ use crate::platform::{apply_session_capabilities, exit_byte, load_exit_hints, pr
 /// Run the script at `path`.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:script-read] startup read of the script file path; not turn-time model I/O"
+    reason = "[silent:script-read] startup read of the script file path; not turn-time model I/O"
 )]
 pub(crate) fn run_file(path: &str, script_args: Vec<String>, opts: BatchOpts) -> ExitCode {
     match std::fs::read_to_string(path) {

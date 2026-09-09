@@ -292,7 +292,7 @@ fn check_source(
 /// (`abs_path`, the path as the caller resolved it); `who` names the verb.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:module-load] `source`/`use` module loading reads program text from disk, gated by `locate`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
+    reason = "[silent:module-load] `source`/`use` module loading reads program text from disk, gated by `locate`. The documented reasoned-silent residual: code-loading is visible as its own statement, not turn-time model data I/O, so it raises no surface card."
 )]
 fn read_and_normalize(abs_path: &str, who: &str, shell: &mut Shell) -> Settled<String> {
     let rp = shell.resolve(abs_path);
@@ -408,7 +408,7 @@ fn resolve_relative_to_current_script(path: &str, shell: &Shell) -> std::path::P
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

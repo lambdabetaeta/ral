@@ -23,7 +23,7 @@ const CRASH_SCAN_WINDOW: u64 = 8 * 1024;
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:model-fold-crash-scan] scans record.jsonl's tail for a torn trailing write before resume folds it; output infra, not turn-time data I/O"
+    reason = "[silent:model-fold-crash-scan] scans record.jsonl's tail for a torn trailing write before resume folds it; output infra, not turn-time data I/O"
 )]
 fn find_crash_tail(path: &Path) -> io::Result<Option<CrashTail>> {
     let mut file = File::open(path)?;
@@ -58,7 +58,7 @@ fn find_crash_tail(path: &Path) -> io::Result<Option<CrashTail>> {
 /// quarantine.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:model-fold-crash-quarantine] sidecars and trims a torn record.jsonl tail before resume folds it; output infra, not turn-time data I/O"
+    reason = "[silent:model-fold-crash-quarantine] sidecars and trims a torn record.jsonl tail before resume folds it; output infra, not turn-time data I/O"
 )]
 fn quarantine_tail(path: &Path, tail: &CrashTail) -> io::Result<()> {
     let mut sidecar_name = path.file_name().unwrap_or_default().to_os_string();

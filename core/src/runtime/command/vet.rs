@@ -125,7 +125,7 @@ fn reject_exec_arg(id: &CommandIdentity, arg: &Value, shell: &Shell) -> Option<B
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

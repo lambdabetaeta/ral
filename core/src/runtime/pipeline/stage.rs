@@ -141,10 +141,7 @@ impl StageHandle {
     /// they synthesize the events, so all this owes them is `cut`'s dispatch
     /// and an already-dead pid to reap.
     #[cfg(test)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "[io-door:test] test process scaffolding"
-    )]
+    #[allow(clippy::disallowed_methods, reason = "[test] test process scaffolding")]
     pub(super) fn fake_external_for_step_test(slot: Slot) -> Self {
         let mut child = std::process::Command::new("sleep")
             .arg("30")

@@ -557,7 +557,7 @@ mod tests {
     #[test]
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:test] e2e sandbox spawn scaffolding"
+        reason = "[test] e2e sandbox spawn scaffolding"
     )]
     fn confined_child_writes_inside_the_grant_and_not_outside() {
         let _env = crate::test_env::env_guard();

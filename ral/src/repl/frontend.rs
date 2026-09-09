@@ -137,7 +137,7 @@ impl History {
     /// Load persisted history from the configured history file.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:history-read] loads persisted repl history at construction; not turn-time model I/O"
+        reason = "[silent:history-read] loads persisted repl history at construction; not turn-time model I/O"
     )]
     pub(super) fn load() -> Self {
         let path = dirs_history();
@@ -170,7 +170,7 @@ impl History {
     /// Append this session's new entries to the history file.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:history-append] appends this session's repl history to its log file; not turn-time model I/O"
+        reason = "[silent:history-append] appends this session's repl history to its log file; not turn-time model I/O"
     )]
     pub(super) fn save(&mut self) {
         let Some(path) = &self.path else {

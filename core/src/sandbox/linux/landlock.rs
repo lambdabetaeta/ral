@@ -394,10 +394,7 @@ pub(crate) fn dump(policy: &SandboxProjection, landlock: Landlock) {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:test] test fs scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod tests {
     use super::*;
     use std::io::Write;

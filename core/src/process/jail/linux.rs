@@ -27,7 +27,7 @@ fn mkdir_if_missing(path: &Path) -> io::Result<()> {
 /// file's open, lock, read, or write.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:jail-seq-file] guest-boot/exec-time jail setup: the guest-global uid/cgroup sequence counter, not model turn-time I/O."
+    reason = "[silent:jail-seq-file] guest-boot/exec-time jail setup: the guest-global uid/cgroup sequence counter, not model turn-time I/O."
 )]
 pub(crate) fn next_guest_seq(path: &Path) -> io::Result<u64> {
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -53,7 +53,7 @@ pub(crate) fn next_guest_seq(path: &Path) -> io::Result<u64> {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:jail-cgroup-write] Cgroup control-file writes are guest-boot/exec-time jail setup, not model turn-time I/O: the limits are policy the host sets, never data the model reads or writes."
+    reason = "[silent:jail-cgroup-write] Cgroup control-file writes are guest-boot/exec-time jail setup, not model turn-time I/O: the limits are policy the host sets, never data the model reads or writes."
 )]
 fn write_control(cgroup: &Path, file: &str, value: &str) -> io::Result<()> {
     std::fs::write(cgroup.join(file), value)
@@ -127,7 +127,7 @@ pub(crate) fn prepare(plan: &JailPlan) -> io::Result<(JailCgroup, OwnedFd)> {
     write_cpu_max(&plan.cgroup, plan.limits.cpu_quota_pct)?;
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:jail-cgroup-procs] Opens cgroup.procs to keep across the fork so the pre-exec closure can place the child without a second open post-uid-drop; guest-boot/exec-time jail setup, not model I/O."
+        reason = "[silent:jail-cgroup-procs] Opens cgroup.procs to keep across the fork so the pre-exec closure can place the child without a second open post-uid-drop; guest-boot/exec-time jail setup, not model I/O."
     )]
     let procs = std::fs::OpenOptions::new()
         .write(true)

@@ -131,7 +131,7 @@ fn main() {
     let run_dir = std::env::temp_dir().join(format!("boot-run-{}", std::process::id()));
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:boot-run-run-dir] Scratch setup before the trunk exists, in an example that is its own only caller — not model I/O."
+        reason = "[silent:boot-run-run-dir] Scratch setup before the trunk exists, in an example that is its own only caller — not model I/O."
     )]
     std::fs::create_dir_all(&run_dir).expect("make the run directory");
     let config = RootConfig {

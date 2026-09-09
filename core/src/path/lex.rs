@@ -349,7 +349,7 @@ pub enum PathShape {
 /// unstatable path reports [`PathShape::Absent`].
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:mount-shape] sandbox mount probe: one `lstat` picking a mount kind for a denied path; a shape predicate, not model data I/O, raises no surface card."
+    reason = "[silent:mount-shape] sandbox mount probe: one `lstat` picking a mount kind for a denied path; a shape predicate, not model data I/O, raises no surface card."
 )]
 pub fn shape(path: &str) -> PathShape {
     match std::fs::symlink_metadata(path) {

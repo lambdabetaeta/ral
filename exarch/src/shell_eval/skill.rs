@@ -57,7 +57,7 @@ pub fn discover_all(cwd: &Path, config_dir: &Path) -> Vec<(String, PathBuf)> {
 /// construction.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by GrantStack::admits_fs"
+    reason = "[silent:skill-metadata] reads SKILL.md frontmatter at prompt assembly to build the Skills section; pre-run, gated by GrantStack::admits_fs"
 )]
 pub fn discover_metadata(
     cwd: &Path,
@@ -101,7 +101,7 @@ fn skill_from_frontmatter(raw: &str, dir_name: &str) -> Option<Skill> {
 /// cleared `check_fs_read`.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:skill-list] reads a SKILL.md's frontmatter for the `skill-list` builtin; the surface card justifies the read"
+    reason = "[surface:skill-list] reads a SKILL.md's frontmatter for the `skill-list` builtin; the surface card justifies the read"
 )]
 pub(crate) fn parse_skill(dir: &Path, dir_name: &str) -> Option<Skill> {
     let raw = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
@@ -112,7 +112,7 @@ pub(crate) fn parse_skill(dir: &Path, dir_name: &str) -> Option<Skill> {
 /// has already cleared `check_fs_read`.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:skill-body] reads the SKILL.md body for `skill`; the surface card justifies the read"
+    reason = "[surface:skill-body] reads the SKILL.md body for `skill`; the surface card justifies the read"
 )]
 pub(crate) fn read_skill_body(dir: &Path) -> Result<String, String> {
     let path = dir.join("SKILL.md");
@@ -126,7 +126,7 @@ pub(crate) fn read_skill_body(dir: &Path) -> Result<String, String> {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:skill-list-dir] lists skill directory names; no file contents read — frontmatter/body reads are gated by check_fs_read"
+    reason = "[silent:skill-list-dir] lists skill directory names; no file contents read — frontmatter/body reads are gated by check_fs_read"
 )]
 fn scan_dir(root: &Path) -> Vec<(String, PathBuf)> {
     let mut skills = Vec::new();

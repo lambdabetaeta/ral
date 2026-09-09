@@ -29,8 +29,8 @@ dominates:
   sections, and is loaded *regardless of* `--system` — orthogonal to the
   persona and to interactive surfacing.
 - **Existence is the only gate**, checked through `ral_core::path::exists`; the
-  reads reuse `read_files`'s `[io-door:silent:system-prompt-files]` door — no new
-  I/O door is opened for `AGENTS.md`.
+  reads reuse `read_files`'s `[silent:system-prompt-files]` site — no new
+  syscall site is opened for `AGENTS.md`.
 
 ## The authority distinction
 

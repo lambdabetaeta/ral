@@ -41,8 +41,8 @@ Adopt the alternative 260616 rejected: **always self-reexec**.
   vet, build, confine, spawn under the canonical pgid, reap — and one exec door
   at the wait, shared with host externals.
 - The admission gate, the inline runner, its mutex, and the cwd-agreement
-  predicate are deleted; the io-door allow set shrinks by the two inline cwd
-  doors.
+  predicate are deleted; the syscall-site allow set shrinks by the two inline
+  cwd sites.
 - uucore's process-global exit-code cell is read only inside the single-job
   child (`try_run_bundled_tool`), where the process is the job, so no
   cross-thread serialisation exists anywhere.

@@ -109,7 +109,7 @@ impl fmt::Display for HostEnvelope {
 /// to the user.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:bwrap-host-probe] setup-time host capability probe against /bin/true, not a model exec image"
+    reason = "[silent:bwrap-host-probe] setup-time host capability probe against /bin/true, not a model exec image"
 )]
 fn bwrap_builds(envelope: &Pinned, pieces: &[&str]) -> bool {
     envelope

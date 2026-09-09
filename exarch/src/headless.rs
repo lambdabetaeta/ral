@@ -754,7 +754,7 @@ pub fn converse_settled<S: Sink>(
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs scaffolding for a throwaway run dir"
+    reason = "[test] test fs scaffolding for a throwaway run dir"
 )]
 mod tests {
     use super::*;

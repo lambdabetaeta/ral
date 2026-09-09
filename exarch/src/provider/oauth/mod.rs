@@ -369,7 +369,7 @@ impl From<StoredToken> for OAuthToken {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:token-read] reads the persisted OAuth tokens; credential store infra, not turn-time data I/O"
+    reason = "[silent:token-read] reads the persisted OAuth tokens; credential store infra, not turn-time data I/O"
 )]
 fn load_all_at(path: &std::path::Path) -> Vec<OAuthToken> {
     let Some(bytes) = std::fs::read(path).ok() else {
@@ -457,7 +457,7 @@ fn remove_at(path: &std::path::Path, account: &str) -> Result<Option<String>, St
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:token-dir] creates the OAuth token store dir; credential store infra, not turn-time data I/O"
+    reason = "[silent:token-dir] creates the OAuth token store dir; credential store infra, not turn-time data I/O"
 )]
 fn write_all_at(path: &std::path::Path, all: &[OAuthToken]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -480,7 +480,7 @@ fn write_all_at(path: &std::path::Path, all: &[OAuthToken]) -> Result<(), String
 /// Delete the store; an absent one is not an error.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:token-remove] deletes the stored OAuth tokens; credential store infra, not turn-time data I/O"
+    reason = "[silent:token-remove] deletes the stored OAuth tokens; credential store infra, not turn-time data I/O"
 )]
 fn clear_at(path: &std::path::Path) -> Result<(), String> {
     match std::fs::remove_file(path) {

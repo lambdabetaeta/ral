@@ -314,7 +314,7 @@ mod tests {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod chokepoint_tests {
     use crate::boot::BakedPrelude;

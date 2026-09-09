@@ -10,7 +10,7 @@ use std::time::Duration;
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:log-show] macOS sandbox diagnostics: shells out to `/usr/bin/log show` to read Seatbelt denial records from the unified log; a diagnostic probe, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:log-show] macOS sandbox diagnostics: shells out to `/usr/bin/log show` to read Seatbelt denial records from the unified log; a diagnostic probe, not turn-time model data I/O, raises no surface card."
 )]
 pub(super) fn read_window(elapsed: Duration) -> Option<String> {
     // `--last` rounds to whole seconds, so pad by one or a sub-second call

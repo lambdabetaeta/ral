@@ -134,7 +134,7 @@ pub(super) fn editor_command() -> (String, Vec<String>) {
 /// original draft; only failure to re-enter the modes propagates.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:editor-compose] writes the prompt draft to a scratch file, spawns the user's $EDITOR on it, and reads it back for the C-x C-e hatch; a UI action on a temp file, not turn-time model I/O"
+    reason = "[silent:editor-compose] writes the prompt draft to a scratch file, spawns the user's $EDITOR on it, and reads it back for the C-x C-e hatch; a UI action on a temp file, not turn-time model I/O"
 )]
 pub(super) fn edit_text_in_editor(draft: &str) -> io::Result<Option<String>> {
     let path = std::env::temp_dir().join(format!("exarch-prompt-{}.md", std::process::id()));
@@ -239,7 +239,7 @@ impl Drop for TerminalGuard {
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:stderr-log] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
+    reason = "[silent:stderr-log] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
 )]
 pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<std::os::fd::OwnedFd> {
     use std::fs::OpenOptions;
@@ -299,7 +299,7 @@ unsafe impl Send for WindowsStderrBackup {}
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:stderr-log] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
+    reason = "[silent:stderr-log] opens the TUI debug log for fd-2 redirect; trace infra, not turn-time data I/O"
 )]
 pub(super) fn redirect_stderr_to_file(path: &Path) -> io::Result<WindowsStderrBackup> {
     use std::fs::OpenOptions;

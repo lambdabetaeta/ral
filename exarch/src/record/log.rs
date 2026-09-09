@@ -1,4 +1,4 @@
-//! The io-door for `sessions/<n>/record.jsonl`: the only file handle in the
+//! The syscall site for `sessions/<n>/record.jsonl`: the only file handle in the
 //! tree for this log.  `append` is reachable only from [`super::seam`], and
 //! `read` only from [`super::replay`] — Rust cannot restrict a `pub` item to
 //! one specific sibling module, so both are `pub(super)`, visible across
@@ -58,7 +58,7 @@ impl Log {
     /// Returns `Err` if the file cannot be created.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:record-file] creates the session's record.jsonl; output infra, not turn-time data I/O"
+        reason = "[silent:record-file] creates the session's record.jsonl; output infra, not turn-time data I/O"
     )]
     pub(crate) fn create(path: &Path) -> io::Result<Self> {
         let file = File::create(path)?;
@@ -77,7 +77,7 @@ impl Log {
     /// Returns `Err` if the file cannot be read or reopened.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:record-file] reopens the session's record.jsonl for append on resume; output infra, not turn-time data I/O"
+        reason = "[silent:record-file] reopens the session's record.jsonl for append on resume; output infra, not turn-time data I/O"
     )]
     pub(crate) fn append_to(path: &Path) -> io::Result<Self> {
         let (mut seq, mut pos) = (0u64, 0u64);
@@ -135,7 +135,7 @@ impl Log {
     /// poisoned; on either the old segment stays live.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:record-file] opens the session's next record.jsonl segment; output infra, not turn-time data I/O"
+        reason = "[silent:record-file] opens the session's next record.jsonl segment; output infra, not turn-time data I/O"
     )]
     pub(super) fn rotate(&self, path: Option<&Path>) -> io::Result<()> {
         let writer = path.map(File::create).transpose()?.map(BufWriter::new);
@@ -232,7 +232,7 @@ impl Log {
     /// arrives as an `Err` item, leaving the fold to refuse the session.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:record-file] streams the session's record.jsonl for replay; output infra, not turn-time data I/O"
+        reason = "[silent:record-file] streams the session's record.jsonl for replay; output infra, not turn-time data I/O"
     )]
     pub(super) fn read(
         path: &Path,

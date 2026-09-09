@@ -3,7 +3,7 @@
 
 #![allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 
 use crate::agent::cancel::EvalReach;

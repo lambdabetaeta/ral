@@ -195,7 +195,7 @@ fn crash_log_dir() -> std::path::PathBuf {
 /// panic.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:crashlog-write] panic hook creates the state dir and writes a crash log; not turn-time model I/O"
+    reason = "[silent:crashlog-write] panic hook creates the state dir and writes a crash log; not turn-time model I/O"
 )]
 fn write_crash_log(dir: &std::path::Path, info: &std::panic::PanicHookInfo<'_>) {
     use std::io::Write as _;
@@ -444,7 +444,7 @@ fn run_startup(path: &str, block: Value, shell: &mut Shell) -> Result<(), String
 /// `exit` escaped the file — sourcing stops with no value to check.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:config-read] reads an rc/profile file during session boot; not turn-time model I/O"
+    reason = "[silent:config-read] reads an rc/profile file during session boot; not turn-time model I/O"
 )]
 fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
@@ -492,10 +492,7 @@ fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>,
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:test] test fs scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod tests {
     use super::*;
 

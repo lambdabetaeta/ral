@@ -52,7 +52,7 @@ impl Pinned {
     #[cfg(unix)]
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:pinned-exec] Builds the Command for a boot-pinned sandbox binary (the ral re-exec for helpers and bundled tools, the bwrap envelope). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
+        reason = "[silent:pinned-exec] Builds the Command for a boot-pinned sandbox binary (the ral re-exec for helpers and bundled tools, the bwrap envelope). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
     )]
     pub(super) fn command(&self) -> std::process::Command {
         use std::os::unix::process::CommandExt;
@@ -73,7 +73,7 @@ impl Pinned {
     #[cfg(target_os = "linux")]
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:pin-locate] Reads the `/proc/self/fd/<N>` magic link of a boot-pinned sandbox binary to find the inode's current path for the envelope's own read-only bind. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
+        reason = "[silent:pin-locate] Reads the `/proc/self/fd/<N>` magic link of a boot-pinned sandbox binary to find the inode's current path for the envelope's own read-only bind. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
     )]
     pub(super) fn current_path(&self) -> std::io::Result<PathBuf> {
         std::fs::read_link(&self.exec_path)
@@ -186,7 +186,7 @@ pub(super) fn register_sandbox_self() {
 #[cfg(target_os = "linux")]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:pin-open] Opens a boot-time sandbox binary (ral itself, the bwrap envelope) to pin it by fd, immune to on-disk swaps. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
+    reason = "[silent:pin-open] Opens a boot-time sandbox binary (ral itself, the bwrap envelope) to pin it by fd, immune to on-disk swaps. Sandbox exe-pinning infrastructure, not the model's data I/O — raises no card."
 )]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     use std::os::fd::{AsRawFd, OwnedFd};
@@ -210,7 +210,7 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
 #[cfg(all(unix, not(target_os = "linux")))]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:pin-stat] sandbox respawn exe-pinning: stats the running executable to capture (dev, ino) so a mid-session binary swap is detectable; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:pin-stat] sandbox respawn exe-pinning: stats the running executable to capture (dev, ino) so a mid-session binary swap is detectable; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
 )]
 fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
     use std::os::unix::fs::MetadataExt;
@@ -245,7 +245,7 @@ fn build_pin(arg0: &std::path::Path) -> Option<(Pin, PathBuf)> {
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:verify-stat] sandbox respawn guard: re-stats the pinned executable and compares (dev, ino) to catch a mid-session binary swap before re-exec; a self-path stat at respawn setup, not turn-time model data I/O, raises no surface card."
 )]
 pub(super) fn verify_unswapped(s: &Pinned) -> Result<(), Error> {
     let meta = std::fs::metadata(&s.arg0).map_err(|e| {

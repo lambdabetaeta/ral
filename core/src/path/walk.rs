@@ -11,8 +11,8 @@
 //! canonical by construction, and every operation a [`Located`] offers is
 //! relative to the handle of its directory with `FollowSymlinks::No`.
 //!
-//! This is the one file that opens a model-named object, so the reviewed door
-//! set (`core/tests/io_door_set.rs`) can be read off it: [`open_discard`] is
+//! This is the one file that opens a model-named object, so the reviewed
+//! syscall sites (`core/tests/syscall_sites.rs`) can be read off it: [`open_discard`] is
 //! the sole exception, a device with no object to locate.
 
 use cap_fs_ext::OpenOptionsFollowExt;
@@ -160,7 +160,7 @@ const LOOP_MESSAGE: &str = "too many levels of symbolic links";
 /// that itself crosses links is handled by the same rule.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:walk-descend] Opens the root and then each directory component with FollowSymlinks::No, to reach the object a grant will judge. Path resolution, not the model's data I/O — the card belongs to the door that then opens the leaf."
+    reason = "[silent:walk-descend] Opens the root and then each directory component with FollowSymlinks::No, to reach the object a grant will judge. Path resolution, not the model's data I/O — the card belongs to the site that then opens the leaf."
 )]
 fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
     let mut comps = path.components().peekable();
@@ -206,7 +206,7 @@ fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
 /// and a missing directory is reported by the open that just failed on it.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:walk-link-probe] Stats one component to tell a symlink from an object, so the walk splices the link itself rather than letting the kernel follow it. A shape predicate, not turn-time model data I/O."
+    reason = "[silent:walk-link-probe] Stats one component to tell a symlink from an object, so the walk splices the link itself rather than letting the kernel follow it. A shape predicate, not turn-time model data I/O."
 )]
 fn is_symlink(dir: &File, name: &OsStr) -> bool {
     stat(dir, name.as_ref(), FollowSymlinks::No).is_ok_and(|m| m.is_symlink())
@@ -218,7 +218,7 @@ fn is_symlink(dir: &File, name: &OsStr) -> bool {
 /// physical parent.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:walk-link-read] Reads a symlink's target to splice into the remaining name. Path resolution, not the model's data I/O."
+    reason = "[silent:walk-link-read] Reads a symlink's target to splice into the remaining name. Path resolution, not the model's data I/O."
 )]
 fn splice(dir: &File, real: &Path, link: &OsStr, rest: &[&OsStr]) -> io::Result<PathBuf> {
     let target = read_link_contents(dir, link.as_ref())?;
@@ -243,7 +243,7 @@ impl Located {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:surface:locate-open] The one open of a located object. Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate — read recorded eagerly by install_stdin_redirect so it precedes what it feeds, write fired when the frame settles — while exarch's readers speak their own card and its editors emit a write event over a silent read. The atomic write's before-image and grep's per-file read ride the card of the operation that asked for them."
+        reason = "[surface:locate-open] The one open of a located object. Every caller surfaces it, each in its own way: a redirect's card is fused on by the frame that wrapped the locate — read recorded eagerly by install_stdin_redirect so it precedes what it feeds, write fired when the frame settles — while exarch's readers speak their own card and its editors emit a write event over a silent read. The atomic write's before-image and grep's per-file read ride the card of the operation that asked for them."
     )]
     fn open_leaf(&self, opts: &mut OpenOptions) -> io::Result<File> {
         open(&self.dir, self.leaf.as_ref(), nofollow(opts))
@@ -282,7 +282,7 @@ impl Located {
     /// Any `stat` failure other than absence.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:locate-stat] Stats the located object: for the write door, to choose atomic against streaming semantics, to carry the mode onto the staged file and to size the before-image; for `exists`/`is-file`/`file-info`, as the predicate they are. A metadata read, never the model's turn-time data I/O — the write door's own card is its surface, and a predicate raises none."
+        reason = "[silent:locate-stat] Stats the located object: for the write site, to choose atomic against streaming semantics, to carry the mode onto the staged file and to size the before-image; for `exists`/`is-file`/`file-info`, as the predicate they are. A metadata read, never the model's turn-time data I/O — the write site's own card is its surface, and a predicate raises none."
     )]
     pub fn stat(&self) -> io::Result<Option<Stat>> {
         match stat(&self.dir, self.leaf.as_ref(), FollowSymlinks::No) {
@@ -302,7 +302,7 @@ impl Located {
     /// The directory open's, including `NotADirectory`.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:locate-read-dir] `list-dir`'s enumeration of the located directory, relative to its own handle. A listing predicate, not turn-time model data I/O — the caller still judges each entry against the live grant, and raises no card."
+        reason = "[silent:locate-read-dir] `list-dir`'s enumeration of the located directory, relative to its own handle. A listing predicate, not turn-time model data I/O — the caller still judges each entry against the live grant, and raises no card."
     )]
     pub fn read_dir(&self) -> io::Result<Vec<Entry>> {
         let dir = open_dir_nofollow(&self.dir, self.leaf.as_ref())?;
@@ -325,7 +325,7 @@ impl Located {
     /// The readlink's, including `InvalidInput` when it is not a link.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:locate-read-link] `file-info`'s symlink target: reads the link's own contents as a metadata predicate. Not turn-time model data I/O, raises no surface card."
+        reason = "[silent:locate-read-link] `file-info`'s symlink target: reads the link's own contents as a metadata predicate. Not turn-time model data I/O, raises no surface card."
     )]
     pub fn read_link(&self) -> io::Result<PathBuf> {
         read_link_contents(&self.dir, self.leaf.as_ref())
@@ -336,7 +336,7 @@ impl Located {
     /// writable.  Follows, as `test -w` does.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:locate-access] The `is-writable` predicate's access(2) against the real uid/gid. A permission predicate, not turn-time model data I/O, raises no surface card."
+        reason = "[silent:locate-access] The `is-writable` predicate's access(2) against the real uid/gid. A permission predicate, not turn-time model data I/O, raises no surface card."
     )]
     pub fn is_writable(&self) -> bool {
         access(
@@ -360,7 +360,7 @@ impl Located {
     /// The create's, other than `AlreadyExists`.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:surface:locate-stage] The atomic `>` door's staging create: a fresh exclusive sibling in the target's own directory, holding the write until the rename commits it. A sub-step of the write door; the write card is the operation's surface."
+        reason = "[surface:locate-stage] The atomic `>` staging create: a fresh exclusive sibling in the target's own directory, holding the write until the rename commits it. A sub-step of the write site; the write card is the operation's surface."
     )]
     pub fn create_sibling_tmp(&self) -> io::Result<(File, OsString)> {
         loop {
@@ -384,7 +384,7 @@ impl Located {
     /// The open's.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:surface:locate-staged-read] Reads the staged temp back to seed the write card's new side, before the rename commits it. A sub-step of the write door, not a separate model read."
+        reason = "[surface:locate-staged-read] Reads the staged temp back to seed the write card's new side, before the rename commits it. A sub-step of the write site, not a separate model read."
     )]
     pub fn sibling_read(&self, name: &OsStr) -> io::Result<File> {
         open(
@@ -398,7 +398,7 @@ impl Located {
     /// The open's.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:surface:locate-staged-write] Re-opens the staged temp for writing so its bytes can be flushed durable before the rename. A sub-step of the write door's commit; these opens carry written bytes to disk, they are not separate model reads."
+        reason = "[surface:locate-staged-write] Re-opens the staged temp for writing so its bytes can be flushed durable before the rename. A sub-step of the write site's commit; these opens carry written bytes to disk, they are not separate model reads."
     )]
     pub fn sibling_write(&self, name: &OsStr) -> io::Result<File> {
         open(
@@ -415,7 +415,7 @@ impl Located {
     /// The rename's.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:surface:locate-commit] The atomic `>` door's commit step: rename the staged sibling onto the target within the one directory handle. The write surface fires when the write settles, committed once this returns Ok."
+        reason = "[surface:locate-commit] The atomic `>` commit step: rename the staged sibling onto the target within the one directory handle. The write surface fires when the write settles, committed once this returns Ok."
     )]
     pub fn rename_sibling_over(&self, name: &OsStr) -> io::Result<()> {
         rename(&self.dir, name.as_ref(), &self.dir, self.leaf.as_ref())
@@ -425,7 +425,7 @@ impl Located {
     /// The unlink's.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:locate-abandon] Reasoned-silent rollback of the atomic `>` door: unlink the staged temp for a write that will not land. The aborted write card is the surface; this removal raises none of its own."
+        reason = "[silent:locate-abandon] Reasoned-silent rollback of the atomic `>`: unlink the staged temp for a write that will not land. The aborted write card is the surface; this removal raises none of its own."
     )]
     pub fn remove_sibling(&self, name: &OsStr) -> io::Result<()> {
         remove_file(&self.dir, name.as_ref())
@@ -452,7 +452,7 @@ impl Located {
 /// The open's.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:discard-device] `/dev/null` / `NUL` opened by name: no bytes reach or leave the model, and no grant region can contain a device that is not a file."
+    reason = "[silent:discard-device] `/dev/null` / `NUL` opened by name: no bytes reach or leave the model, and no grant region can contain a device that is not a file."
 )]
 pub fn open_discard(rp: &ResolvedPath) -> io::Result<File> {
     std::fs::OpenOptions::new()
@@ -464,7 +464,7 @@ pub fn open_discard(rp: &ResolvedPath) -> io::Result<File> {
 #[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] fixtures build the tree the walk is asked about"
+    reason = "[test] fixtures build the tree the walk is asked about"
 )]
 mod tests {
     use super::*;

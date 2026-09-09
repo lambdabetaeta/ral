@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e1dc876f
-generated_at_date: 2026-09-07
+generated_at_commit: 6686e770
+generated_at_date: 2026-09-09
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -46,7 +46,7 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
 - `view-hash <path> <start> <end>` → `[{line, hash, text}]`. The same range with
   each row's witness, the handle `edit-hash` checks. Reads *and hashes* the whole
   file, since the witness depends on file-wide uniqueness; both readers share one
-  range door and differ only in the column.
+  range reader and differ only in the column.
 - `grep-files <pattern>` → `[{ file, line, text }]`. An ignore-aware Rust
   regex walk of the cwd (`search_tree`, binary detection quits at NUL, each file
   gated by `check_fs_read`, the walk polling the cancel check per entry via the
@@ -59,7 +59,7 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   two records on one line all fail before any write), splice every named line in
   a single pass over the original rows (a real newline in the replacement splits
   the line, an empty string deletes it), and write back through core's atomic
-  write door (`Shell::atomic_write`). Resolving against one snapshot makes the
+  write site (`Shell::atomic_write`). Resolving against one snapshot makes the
   batch atomic and non-interfering. The Rust read raises no read card and the
   atomic write observes nothing; the builtin surfaces one whole-file diff card
   of the original against the final text ([[map/exarch/cards|cards]]), and
@@ -84,7 +84,7 @@ logical operation with one surface ([[map/exarch/io-surface|io-surface]]).
   cached process-globally, so forked children sharing the cwd reuse it.
 
 Reads resolve through `checked_read_path` / `check_fs_read`; the edit writes go
-through core's atomic door under the run's pushed [[design/grant|grant]]
+through core's atomic write site under the run's pushed [[design/grant|grant]]
 frame ([[decisions/260619_surface-reads-writes-execs|surface-reads-writes-execs]]).
 
 ## Legibility by lease class — `service`, `service-handle`

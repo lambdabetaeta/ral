@@ -370,7 +370,7 @@ impl AsRef<str> for Entry {
 /// empty list when the directory cannot be read.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:complete-readdir] directory listing for tab-completion candidates; not turn-time model I/O"
+    reason = "[silent:complete-readdir] directory listing for tab-completion candidates; not turn-time model I/O"
 )]
 fn dir_entries(dir: &Path, needle: &str) -> Vec<Entry> {
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -485,10 +485,7 @@ fn ranked_entries(
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:test] test fs scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "[test] test fs scaffolding")]
 mod tests {
     use super::*;
 

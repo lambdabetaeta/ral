@@ -195,7 +195,7 @@ fn build_hint(denials: &[&str]) -> String {
 /// our subprocess tree from a system service that ran in the same wall second.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:ps-sample] sandbox diagnostics: shells out to `/bin/ps` to sample the live process tree for denial attribution; a diagnostic probe, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:ps-sample] sandbox diagnostics: shells out to `/bin/ps` to sample the live process tree for denial attribution; a diagnostic probe, not turn-time model data I/O, raises no surface card."
 )]
 pub(crate) fn sample_descendants(root: u32) -> HashSet<u32> {
     let mut cmd = std::process::Command::new("/bin/ps");

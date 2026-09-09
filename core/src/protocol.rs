@@ -1785,7 +1785,7 @@ impl WireTransport {
     #[cfg(unix)]
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:engine-spawn] spawns the engine child process for the wire transport; an infrastructure handoff, not turn-time data I/O"
+        reason = "[silent:engine-spawn] spawns the engine child process for the wire transport; an infrastructure handoff, not turn-time data I/O"
     )]
     pub fn new() -> io::Result<Self> {
         let (frontend, engine) = crate::wire::WireChannel::pair()?;
@@ -2723,7 +2723,7 @@ mod static_diagnostic_seam_tests {
 #[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod wire_liveness_tests {
     use super::*;

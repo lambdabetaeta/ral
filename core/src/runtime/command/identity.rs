@@ -223,7 +223,7 @@ fn absolutize(s: &str, ctx: &Context) -> Option<String> {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

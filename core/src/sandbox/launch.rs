@@ -280,13 +280,13 @@ pub fn serve_sandbox_exec(args: &[String]) -> Option<u8> {
     };
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:respawn-spawn] sandbox respawn handoff: builds the Command for the confined re-exec; the surface card fired before this handoff, so the exec itself raises no card."
+        reason = "[silent:respawn-spawn] sandbox respawn handoff: builds the Command for the confined re-exec; the surface card fired before this handoff, so the exec itself raises no card."
     )]
     let mut cmd = Command::new(program);
     cmd.args(prog_args);
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:respawn-exec] sandbox respawn handoff: `exec` replaces this process image with the confined target; the surface card fired before this handoff, so the exec itself raises no card."
+        reason = "[silent:respawn-exec] sandbox respawn handoff: `exec` replaces this process image with the confined target; the surface card fired before this handoff, so the exec itself raises no card."
     )]
     let err = cmd.exec();
     crate::diagnostic::cmd_error("ral", &format!("{program}: {err}"));
@@ -303,7 +303,7 @@ pub fn serve_sandbox_exec(_args: &[String]) -> Option<u8> {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

@@ -154,7 +154,7 @@ fn decode_body<T: DeserializeOwned>(body: &[u8]) -> io::Result<T> {
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:frame-dump] subprocess codec: writes a post-mortem frame dump for debugging a frame IPC channel; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:frame-dump] subprocess codec: writes a post-mortem frame dump for debugging a frame IPC channel; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
 )]
 fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -170,7 +170,7 @@ fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
 #[cfg(not(unix))]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:frame-dump-nonunix] subprocess codec: writes a post-mortem frame dump for debugging a frame IPC channel; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:frame-dump-nonunix] subprocess codec: writes a post-mortem frame dump for debugging a frame IPC channel; an IPC diagnostic artifact, not turn-time model data I/O, raises no surface card."
 )]
 fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
     std::fs::write(path, body)
@@ -179,7 +179,7 @@ fn dump_frame(path: &std::path::Path, body: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

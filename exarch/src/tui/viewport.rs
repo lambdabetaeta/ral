@@ -226,7 +226,7 @@ impl Log {
     /// starts empty, since a fresh session shares none of its history.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:viewport-log] opens the viewport's rendered-text log; render dump infra, not turn-time data I/O"
+        reason = "[silent:viewport-log] opens the viewport's rendered-text log; render dump infra, not turn-time data I/O"
     )]
     fn open(path: &Path, append: bool) -> Self {
         if let Some(parent) = path.parent() {
@@ -317,7 +317,7 @@ impl Log {
 /// `user.log` I/O lives in one place.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:export] copies a flushed user.log to the user-chosen export path; output infra, not turn-time data I/O"
+    reason = "[silent:export] copies a flushed user.log to the user-chosen export path; output infra, not turn-time data I/O"
 )]
 pub(super) fn export_log(src: &Path, dest: &Path) -> io::Result<u64> {
     fs::copy(src, dest)

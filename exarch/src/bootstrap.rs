@@ -185,7 +185,7 @@ impl Scratch {
     /// Returns `Err` if the lock file or the directory cannot be created.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
+        reason = "[silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
     )]
     pub fn new(app: App) -> io::Result<Self> {
         let temp = std::env::temp_dir();
@@ -304,7 +304,7 @@ impl Scratch {
 /// nuisance, never a reason to refuse the session it was made for.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
+    reason = "[silent:scratch-bootstrap] disposable scratch-dir setup; not turn-time data I/O"
 )]
 fn reap_unheld(temp: &Path, prefix: &str, mine: &Path) {
     let Ok(entries) = fs::read_dir(temp) else {
@@ -409,7 +409,7 @@ impl App {
     /// Returns `Err` if creating the directory fails.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:log-run-dir] per-run log dir under XDG state; infra, not turn-time data I/O"
+        reason = "[silent:log-run-dir] per-run log dir under XDG state; infra, not turn-time data I/O"
     )]
     pub fn log_run_dir(self, cwd: &str) -> io::Result<PathBuf> {
         let stamp = format!("{}-{}", stamp_from_secs(now_secs()), std::process::id());

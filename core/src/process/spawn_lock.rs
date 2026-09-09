@@ -25,7 +25,7 @@ static LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 /// Returns the pipe's own creation error.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:cloexec-pipe] the one door to a pipe; wraps os_pipe::pipe() under the spawn lock's shared side"
+    reason = "[silent:cloexec-pipe] the one door to a pipe; wraps os_pipe::pipe() under the spawn lock's shared side"
 )]
 pub fn cloexec_pipe() -> std::io::Result<(os_pipe::PipeReader, os_pipe::PipeWriter)> {
     #[cfg(target_vendor = "apple")]
@@ -43,7 +43,7 @@ pub fn cloexec_pipe() -> std::io::Result<(os_pipe::PipeReader, os_pipe::PipeWrit
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:cloexec-socketpair] the one door to a socketpair; wraps UnixStream::pair() under the spawn lock's shared side"
+    reason = "[silent:cloexec-socketpair] the one door to a socketpair; wraps UnixStream::pair() under the spawn lock's shared side"
 )]
 pub fn cloexec_socketpair() -> std::io::Result<(
     std::os::unix::net::UnixStream,
@@ -65,7 +65,7 @@ pub fn cloexec_socketpair() -> std::io::Result<(
 /// Returns `Command::spawn`'s own error.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:spawn-door] the one fork door; every other production fork goes through this or the output/status helpers below"
+    reason = "[silent:spawn-door] the one fork door; every other production fork goes through this or the output/status helpers below"
 )]
 pub fn spawn(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     #[cfg(target_vendor = "apple")]

@@ -975,12 +975,12 @@ mod engine_session_tests {
             },
             #[allow(
                 clippy::disallowed_methods,
-                reason = "[io-door:test] attach with the test process's own cwd/HOME so the engine's restore is a no-op"
+                reason = "[test] attach with the test process's own cwd/HOME so the engine's restore is a no-op"
             )]
             cwd: std::env::current_dir().expect("test cwd"),
             #[allow(
                 clippy::disallowed_methods,
-                reason = "[io-door:test] see cwd above"
+                reason = "[test] see cwd above"
             )]
             home: std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from),
             rc_path: None,

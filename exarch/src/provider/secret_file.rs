@@ -13,7 +13,7 @@
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:secret-write] opens a credential file 0600 for write; credential store infra, not turn-time data I/O"
+    reason = "[silent:secret-write] opens a credential file 0600 for write; credential store infra, not turn-time data I/O"
 )]
 pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
@@ -33,7 +33,7 @@ pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Re
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:secret-write-windows] creates a credential file with an owner-only DACL already in force and writes it; credential store infra, not turn-time data I/O"
+    reason = "[silent:secret-write-windows] creates a credential file with an owner-only DACL already in force and writes it; credential store infra, not turn-time data I/O"
 )]
 pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;

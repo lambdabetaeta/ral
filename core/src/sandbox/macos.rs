@@ -891,7 +891,7 @@ mod tests {
     #[test]
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:test] test fs scaffolding: a tempdir tree and a symlink for the alias pin"
+        reason = "[test] test fs scaffolding: a tempdir tree and a symlink for the alias pin"
     )]
     fn mac_profile_pins_the_resolved_ancestor_reached_through_an_alias() {
         let dir = tempfile::tempdir().expect("a temp dir");

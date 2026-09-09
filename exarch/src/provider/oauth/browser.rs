@@ -75,7 +75,7 @@ fn authorize_url(redirect_uri: &str, challenge: &str, state: &str) -> Result<Str
 #[cfg(target_os = "macos")]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:browser-launch] opens the OAuth authorize URL in the platform browser; not turn-time data I/O"
+    reason = "[silent:browser-launch] opens the OAuth authorize URL in the platform browser; not turn-time data I/O"
 )]
 fn launch_browser(url: &str) -> Result<(), String> {
     let mut cmd = std::process::Command::new("open");
@@ -88,7 +88,7 @@ fn launch_browser(url: &str) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:browser-launch-linux] opens the OAuth authorize URL via xdg-open; not turn-time data I/O"
+    reason = "[silent:browser-launch-linux] opens the OAuth authorize URL via xdg-open; not turn-time data I/O"
 )]
 fn launch_browser(url: &str) -> Result<(), String> {
     let mut cmd = std::process::Command::new("xdg-open");

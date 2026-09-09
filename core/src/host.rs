@@ -36,7 +36,7 @@ pub struct GitStatus {
 /// repository; `None` on any failure, "not a repository" included.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:git-launch] shells out to git(1) to probe the working tree; best-effort host info, not turn-time data I/O"
+    reason = "[silent:git-launch] shells out to git(1) to probe the working tree; best-effort host info, not turn-time data I/O"
 )]
 pub fn git() -> Option<GitStatus> {
     let mut head_cmd = without_a_console_window(Command::new("git"));
@@ -77,7 +77,7 @@ pub fn family() -> &'static str {
 /// One formatted string does not earn a dependency on `chrono` or `time`.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:date-launch] shells out to date(1) for the host info line; not turn-time data I/O"
+    reason = "[silent:date-launch] shells out to date(1) for the host info line; not turn-time data I/O"
 )]
 pub fn now() -> Option<String> {
     let mut cmd = without_a_console_window(Command::new("date"));

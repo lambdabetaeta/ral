@@ -18,11 +18,11 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-/// One handle on a record log, carrying the model fold's io-door allow.
+/// One handle on a record log, carrying the model fold's syscall-site allow.
 fn open_log(path: &Path) -> io::Result<File> {
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:model-fold-pointer-read] reads record.jsonl back by Locus for a departed turn and the model's `transcript` door alike; surfaced as a Display::HarnessCall, not the model's own data I/O"
+        reason = "[silent:model-fold-pointer-read] reads record.jsonl back by Locus for a departed turn and the model's `transcript` verb alike; surfaced as a Display::HarnessCall, not the model's own data I/O"
     )]
     File::open(path)
 }

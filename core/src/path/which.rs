@@ -274,7 +274,7 @@ fn path_dirs(path_value: &str, cwd: SearchCwd<'_>) -> Vec<PathBuf> {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:which-stat] `which`/PATH probe: stats a candidate to read its executable bit; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:which-stat] `which`/PATH probe: stats a candidate to read its executable bit; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
 )]
 fn is_executable_file(p: &Path) -> bool {
     if !p.is_file() {
@@ -298,7 +298,7 @@ fn is_executable_file(p: &Path) -> bool {
 /// sorts and dedupes its own.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:which-readdir] `which`/completion probe: enumerates each PATH directory to list executable names; an executable-probe scan, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:which-readdir] `which`/completion probe: enumerates each PATH directory to list executable names; an executable-probe scan, not turn-time model data I/O, raises no surface card."
 )]
 pub fn commands_on_path(path_value: &str, cwd: SearchCwd<'_>) -> Vec<String> {
     let mut out = Vec::new();
@@ -354,7 +354,7 @@ pub(crate) enum PathSearch {
 /// gives the better diagnosis at spawn.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:which-stat] `which`/PATH probe: stats a candidate to tell an unexecutable file from an absent one; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:which-stat] `which`/PATH probe: stats a candidate to tell an unexecutable file from an absent one; an executable-probe predicate, not turn-time model data I/O, raises no surface card."
 )]
 pub(crate) fn search(name: &str, path_value: Option<&str>, cwd: SearchCwd<'_>) -> PathSearch {
     if name_has_separator(name) {
@@ -445,7 +445,7 @@ fn with_appended_suffix(base: &Path, ext: &str) -> PathBuf {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod memo_tests {
     use super::*;
@@ -704,7 +704,7 @@ mod memo_tests {
 #[cfg(windows)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod windows_tests {
     use super::*;
@@ -750,7 +750,7 @@ mod windows_tests {
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

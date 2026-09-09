@@ -252,7 +252,7 @@ fn discover_agents(cwd: &Path, config_dir: &Path) -> Vec<PathBuf> {
 /// fixes the order.  Serves both `--system FILE...` and [`discover_agents`].
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:system-prompt-files] reads the --system prompt files and the discovered AGENTS.md chain (the repo/cwd ones untrusted, from the agent's own tree) into the system prompt at load time; not a turn-time door"
+    reason = "[silent:system-prompt-files] reads the --system prompt files and the discovered AGENTS.md chain (the repo/cwd ones untrusted, from the agent's own tree) into the system prompt at load time; not turn-time I/O"
 )]
 fn read_files(files: &[PathBuf]) -> Result<String, String> {
     let mut buf = String::new();

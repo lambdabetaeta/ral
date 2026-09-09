@@ -323,7 +323,7 @@ fn emit_capability_denial(
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs scaffolding: tempdir trees and symlinks for containment pins"
+    reason = "[test] test fs scaffolding: tempdir trees and symlinks for containment pins"
 )]
 mod tests {
     use super::FsOp;

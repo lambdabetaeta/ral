@@ -2315,7 +2315,7 @@ impl Host for RunHost {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;
@@ -4584,7 +4584,7 @@ mod tests {
 #[cfg(all(test, unix))]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod wire_tests {
     use super::tests::{message_req, roster_names, start_req_forked};

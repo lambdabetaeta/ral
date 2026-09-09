@@ -104,7 +104,7 @@ pub(crate) fn projection_enforceable(projection: &SandboxProjection) -> Result<(
 /// child, and this is the same fact for the in-process half).
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:pin-identity] stats a write's resolved target to compare its inode against the boot pins; a predicate stat for the fs gate's own verdict, not the model's data I/O"
+    reason = "[silent:pin-identity] stats a write's resolved target to compare its inode against the boot pins; a predicate stat for the fs gate's own verdict, not the model's data I/O"
 )]
 pub(crate) fn pinned_binary(path: &std::path::Path) -> Option<&'static str> {
     let meta = std::fs::metadata(path).ok()?;
@@ -232,7 +232,7 @@ pub fn apply_child_limits(child: &crate::process::ChildHandle) {
 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:restricted-envelope-probe] host capability probe for tests, not a grant spawn"
+    reason = "[silent:restricted-envelope-probe] host capability probe for tests, not a grant spawn"
 )]
 pub fn restricted_envelope_launches() -> bool {
     use crate::types::{FsProjection, FsRules};
@@ -307,7 +307,7 @@ pub(crate) fn register_self_for_helpers() {
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline anchor, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
+    reason = "[silent:self-reexec] Builds the ral-re-exec Command for sandbox helper subprocesses (pipeline anchor, bundled-tool multicall). Infrastructure spawn, not a model exec image — the model's exec surfaces at command::run, not here."
 )]
 pub(crate) fn self_command() -> std::io::Result<Command> {
     if let Some(s) = reexec::SANDBOX_SELF.get() {
@@ -440,20 +440,6 @@ pub(crate) fn apply_resource_limits(cmd: &mut Command) {
 
 #[cfg(not(unix))]
 pub(crate) fn apply_resource_limits(_cmd: &mut Command) {}
-
-/// Build a [`Command`] for an external program.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:surface:make-command] Builds the external exec image (ExecImage::Host) the model launches. `finish_command` builds the exec observation for this image, wrapping the whole dispatch, with the resolved argv and exit status when the spawn/wait completes."
-)]
-pub fn make_command(name: &str, args: &[String], shell: &Shell) -> Command {
-    let mut c = Command::new(name);
-    c.args(args);
-    if shell.has_active_capabilities() {
-        apply_resource_limits(&mut c);
-    }
-    c
-}
 
 #[cfg(test)]
 mod tests {

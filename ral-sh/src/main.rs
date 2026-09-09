@@ -129,7 +129,7 @@ fn dispatch() -> ! {
 #[cfg(unix)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:respawn-ral] login-shell bridge re-execs into the ral binary; infra wrapper, not a model exec image"
+    reason = "[silent:respawn-ral] login-shell bridge re-execs into the ral binary; infra wrapper, not a model exec image"
 )]
 fn exec_ral(is_login: bool, args: &[OsString]) -> ! {
     // Prefer the sibling ral next to ral-sh, but only if it's actually
@@ -163,7 +163,7 @@ fn exec_ral(_is_login: bool, _args: &[OsString]) -> ! {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:respawn-posix-sh] login-shell bridge re-execs into /bin/sh; infra wrapper, not a model exec image"
+    reason = "[silent:respawn-posix-sh] login-shell bridge re-execs into /bin/sh; infra wrapper, not a model exec image"
 )]
 fn exec_posix_sh(is_login: bool, args: &[OsString]) -> ! {
     let mut cmd = std::process::Command::new("/bin/sh");

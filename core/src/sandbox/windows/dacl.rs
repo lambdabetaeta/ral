@@ -405,7 +405,7 @@ impl DaclManager {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:dacl-state-dir] Ensures the ledger's own directory exists before write, since the cached path may predate a later XDG_STATE_HOME change. Sandbox crash-safety infrastructure, not model data I/O."
+        reason = "[silent:dacl-state-dir] Ensures the ledger's own directory exists before write, since the cached path may predate a later XDG_STATE_HOME change. Sandbox crash-safety infrastructure, not model data I/O."
     )]
     fn persist_ledger(&self) -> Result<(), DaclError> {
         let ledger = Ledger {
@@ -469,7 +469,7 @@ pub(crate) fn fs_capability_name(canonical: &Path, kind: GrantKind) -> String {
 /// projection.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the capability ACE. Sandbox grant-application infrastructure, not model data I/O — raises no surface card."
+    reason = "[silent:dacl-apply] Stats the grant target to choose OI|CI inheritance before stamping the capability ACE. Sandbox grant-application infrastructure, not model data I/O — raises no surface card."
 )]
 pub(crate) fn ensure_fs_grant(
     canonical: &Path,
@@ -578,7 +578,7 @@ fn stamp_store_path() -> PathBuf {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:dacl-stamp-read] Reads the persistent stamp-store witness deciding whether a grant's propagation already ran. Sandbox infrastructure, not model data I/O."
+    reason = "[silent:dacl-stamp-read] Reads the persistent stamp-store witness deciding whether a grant's propagation already ran. Sandbox infrastructure, not model data I/O."
 )]
 fn read_stamp_store_bytes(path: &Path) -> io::Result<Vec<u8>> {
     fs::read(path)
@@ -619,7 +619,7 @@ fn record_stamp(key: &str) -> Result<(), DaclError> {
 /// runs this once at session start, before any grant is applied.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:dacl-ledger-sweep] Startup orphan sweep: lists the ledger directory, quarantines unparseable ledgers by rename, and removes fully-recovered ones. Sandbox crash-recovery infrastructure, not model data I/O."
+    reason = "[silent:dacl-ledger-sweep] Startup orphan sweep: lists the ledger directory, quarantines unparseable ledgers by rename, and removes fully-recovered ones. Sandbox crash-recovery infrastructure, not model data I/O."
 )]
 pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
     let mut report = RecoveryReport::default();
@@ -748,7 +748,7 @@ fn ledger_dir() -> PathBuf {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:dacl-state-dir] Ensures the per-user DACL ledger directory exists before the first ledger write. Sandbox crash-safety infrastructure, not model data I/O."
+    reason = "[silent:dacl-state-dir] Ensures the per-user DACL ledger directory exists before the first ledger write. Sandbox crash-safety infrastructure, not model data I/O."
 )]
 fn ensure_ledger_dir() -> Result<PathBuf, DaclError> {
     let dir = ledger_dir();
@@ -767,7 +767,7 @@ fn write_ledger(path: &Path, ledger: &Ledger) -> Result<(), DaclError> {
 /// either the previous complete file or this one, never a half-written one.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:dacl-ledger-write] Atomic write for the DACL crash-safety state (ledgers, stamp store): stage to <path>.tmp, fsync, rename over the destination. Sandbox infrastructure, not model data I/O."
+    reason = "[silent:dacl-ledger-write] Atomic write for the DACL crash-safety state (ledgers, stamp store): stage to <path>.tmp, fsync, rename over the destination. Sandbox infrastructure, not model data I/O."
 )]
 fn write_bytes_atomic(path: &Path, json: &[u8]) -> Result<(), DaclError> {
     let tmp = tmp_path_for(path);
@@ -809,7 +809,7 @@ fn remove_ledger_best_effort(path: &Path) {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:dacl-ledger-remove] Removes a fully-restored ledger file once every grant it recorded has been undone. Sandbox infrastructure, not model data I/O."
+    reason = "[silent:dacl-ledger-remove] Removes a fully-restored ledger file once every grant it recorded has been undone. Sandbox infrastructure, not model data I/O."
 )]
 fn remove_ledger(path: &Path) -> io::Result<()> {
     fs::remove_file(path)
@@ -820,7 +820,7 @@ fn remove_ledger(path: &Path) -> io::Result<()> {
 /// moment, and without the retry a good ledger gets quarantined as corrupt.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:dacl-ledger-read] Reads back a persisted ledger for orphan recovery / crash-safety bookkeeping. Sandbox infrastructure, not model data I/O."
+    reason = "[silent:dacl-ledger-read] Reads back a persisted ledger for orphan recovery / crash-safety bookkeeping. Sandbox infrastructure, not model data I/O."
 )]
 fn read_ledger(path: &Path) -> Result<Ledger, DaclError> {
     const ERROR_SHARING_VIOLATION: i32 = 32;
@@ -1996,7 +1996,7 @@ fn process_creation_filetime() -> Result<u64, DaclError> {
 #[cfg(test)]
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/process scaffolding"
+    reason = "[test] test fs/process scaffolding"
 )]
 mod tests {
     use super::*;

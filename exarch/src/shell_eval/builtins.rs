@@ -317,7 +317,7 @@ fn builtin_view_hash(args: &[Value], mooring: &Mooring, shell: &mut Shell) -> Se
 /// timeout or Esc as a status-130 `Break` before the next entry.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:surface:grep-walk] The one sanctioned WalkBuilder::build site, rooting the grep door's directory walk; the search emits one `grep` surface for the whole walk and polls check() per entry for cancel."
+    reason = "[surface:grep-walk] The one sanctioned WalkBuilder::build site, rooting the grep site's directory walk; the search emits one `grep` surface for the whole walk and polls check() per entry for cancel."
 )]
 fn cancellable(builder: &WalkBuilder) -> ignore::Walk {
     builder.build()

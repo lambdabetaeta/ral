@@ -60,7 +60,7 @@ impl Shell {
     /// If the resolved target cannot be stat'd, or is not a directory.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:cwd-stat] `cd`: stats the resolved target to confirm it is a directory before updating the logical cwd; a directory-existence check, not turn-time model data I/O, raises no surface card."
+        reason = "[silent:cwd-stat] `cd`: stats the resolved target to confirm it is a directory before updating the logical cwd; a directory-existence check, not turn-time model data I/O, raises no surface card."
     )]
     pub fn apply_chdir(&mut self, target: &str) -> Result<(String, String), Error> {
         let old = self.cwd();

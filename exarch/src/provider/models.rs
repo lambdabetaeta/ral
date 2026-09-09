@@ -428,7 +428,7 @@ impl<S: ModelSource> ModelCatalog<S> {
     /// memo still serves the session.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:models-cache-write] persists the model catalog cache; registry infra, not turn-time data I/O"
+        reason = "[silent:models-cache-write] persists the model catalog cache; registry infra, not turn-time data I/O"
     )]
     fn write_disk(&self, account: &AccountId, models: &[String]) {
         let Some(path) = self.cache_path.as_ref() else {
@@ -467,7 +467,7 @@ fn cache_path(app: crate::bootstrap::App) -> Option<PathBuf> {
 
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:models-cache-read] reads the model catalog cache; registry infra, not turn-time data I/O"
+    reason = "[silent:models-cache-read] reads the model catalog cache; registry infra, not turn-time data I/O"
 )]
 fn read_cache(path: &PathBuf) -> Option<CacheFile> {
     let bytes = std::fs::read(path).ok()?;

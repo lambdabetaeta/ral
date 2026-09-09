@@ -237,7 +237,7 @@ pub fn boot_shell(terminal: TerminalState, prelude: &BakedPrelude, surface: &Hos
 /// exits instead, reporting the error to the build log.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:prelude-bake] build-script prelude bake: writes the postcard IR/scheme blobs to OUT_DIR during host setup; build-time artifact emission, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:prelude-bake] build-script prelude bake: writes the postcard IR/scheme blobs to OUT_DIR during host setup; build-time artifact emission, not turn-time model data I/O, raises no surface card."
 )]
 pub fn bake_prelude_to_out_dir() {
     let core = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));

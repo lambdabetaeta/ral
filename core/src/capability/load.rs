@@ -40,7 +40,7 @@ pub fn load_capabilities_from_str(
 /// The file cannot be read, or any failure of [`load_capabilities_from_str`].
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:cap-load] reads a capability-policy file from disk to configure the sandbox; policy/configuration loading at setup, not turn-time model data I/O, raises no surface card."
+    reason = "[silent:cap-load] reads a capability-policy file from disk to configure the sandbox; policy/configuration loading at setup, not turn-time model data I/O, raises no surface card."
 )]
 pub fn load_capabilities_from_path(
     mooring: &Mooring,

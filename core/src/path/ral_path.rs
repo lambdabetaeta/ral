@@ -40,10 +40,7 @@ pub fn find_file(name: &str, env_overrides: &EnvVars) -> Option<PathBuf> {
 
 #[cfg(test)]
 #[cfg(unix)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "[io-door:test] test fs/env scaffolding"
-)]
+#[allow(clippy::disallowed_methods, reason = "[test] test fs/env scaffolding")]
 mod tests {
     use super::*;
 

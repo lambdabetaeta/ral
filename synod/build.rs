@@ -38,7 +38,7 @@ fn main() {
 /// error, and Tauri raises it there already, naming the missing resource.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[io-door:silent:boot-contract-build] Build-time read of the guest media's own boot-manifest.txt, to compare the contract it records against this host's. Build scaffolding, not turn-time model data I/O — raises no surface card."
+    reason = "[silent:boot-contract-build] Build-time read of the guest media's own boot-manifest.txt, to compare the contract it records against this host's. Build scaffolding, not turn-time model data I/O — raises no surface card."
 )]
 fn boot_contract() {
     // Walked up to the workspace and down again, component by component,

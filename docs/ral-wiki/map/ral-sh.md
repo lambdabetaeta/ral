@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 19d53bb
-generated_at_date: 2026-07-28
+generated_at_commit: 6686e770
+generated_at_date: 2026-09-09
 covers_paths: [ral-sh/]
 ---
 
@@ -29,10 +29,10 @@ exec so the target sources its own profile. argv is read with `args_os`
 throughout, forwarding non-UTF-8 arguments faithfully rather than panicking. On
 Unix it refuses to run setuid as a safety check.
 
-Both exec sites are **silent io-doors**: `exec_ral` and `exec_posix_sh` carry
-`#[allow(clippy::disallowed_methods, reason = "[io-door:silent:respawn-…]")]`,
+Both exec sites are **silent syscall sites**: `exec_ral` and `exec_posix_sh`
+carry `#[allow(clippy::disallowed_methods, reason = "[silent:respawn-…]")]`,
 classifying the re-exec as infra plumbing — not a surfaced model exec image — so
-the workspace door discipline accounts for them (see
+the workspace syscall-site discipline accounts for them (see
 [[map/exarch/io-surface|io-surface]]).
 
 It is a registration shim, not a division of the runtime — see

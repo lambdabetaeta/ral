@@ -154,7 +154,7 @@ impl Keychain {
     /// unable to enter one at all.
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:key-read] reads the owner-only fallback key file; credential store infra, not turn-time data I/O"
+        reason = "[silent:key-read] reads the owner-only fallback key file; credential store infra, not turn-time data I/O"
     )]
     fn read_fallback(self) -> BTreeMap<String, String> {
         std::fs::read(self.fallback_path())
@@ -165,7 +165,7 @@ impl Keychain {
 
     #[allow(
         clippy::disallowed_methods,
-        reason = "[io-door:silent:key-write] creates the app's config directory for the owner-only fallback key file; credential store infra, not turn-time data I/O"
+        reason = "[silent:key-write] creates the app's config directory for the owner-only fallback key file; credential store infra, not turn-time data I/O"
     )]
     fn write_fallback(self, keys: &BTreeMap<String, String>) -> Result<(), String> {
         let path = self.fallback_path();
