@@ -895,7 +895,6 @@ mod tests {
         let done = |error: Option<String>| {
             Record::Display(Display::SubagentDone {
                 name: "letters".to_string(),
-                text: String::new(),
                 error,
                 elapsed_ms: 2_000,
             })

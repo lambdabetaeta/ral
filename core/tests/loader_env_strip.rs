@@ -85,7 +85,7 @@ fn confined_child_env(src: &str) -> String {
         .into_result()
         .expect("a confined bundled printenv must succeed")
     {
-        Value::String(s) => s.to_string(),
+        Value::String(s) => s,
         other => panic!("expected printenv's bytes as a string, got {other:?}"),
     }
 }
