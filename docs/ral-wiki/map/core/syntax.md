@@ -1,6 +1,6 @@
 ---
-generated_at_commit: dfe6e55c
-generated_at_date: 2026-09-09
+generated_at_commit: 703628d7
+generated_at_date: 2026-09-10
 covers_paths: [core/src/syntax/]
 ---
 
@@ -17,8 +17,9 @@ sees raw bytes and bare words.
   redirect and refused punctuation. `&` outside `$[…]` is refused at the
   lexer naming `spawn { … }`, `&&` naming `;`; a bare `$` is refused naming
   the three things it can open. A splice inside `"…"` (`scan_splice`) is the
-  token stream the same text has outside the string, `[key]` groups
-  included, so `"!$d"` and `!$d` are one form. An unterminated string names
+  token stream the same text has outside the string, so `"!$d"` and `!$d` are
+  one form; it ends at its own closing delimiter, and only the undelimited
+  `$name` and `!$name` continue into `[key]`. An unterminated string names
   the exact closer it still wants, `StringForm::closing()` — a bumped literal
   wants its `#` run back after the `'`, so the bare reflex never closes it.
   Folding fd 1 onto fd 2 (`1>&2`, and `>&2`, which is the same redirect

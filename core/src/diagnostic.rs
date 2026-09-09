@@ -187,7 +187,7 @@ fn describe_inner(source: &str, kind: &LexErrorKind) -> String {
             inner,
             ..
         } => {
-            let head = format!("nested {form} opened at {}", pos(*opened));
+            let head = format!("{form} opened at {}", pos(*opened));
             match inner {
                 Some(i) => format!(
                     "{head}, which itself contains {}",

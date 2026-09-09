@@ -62,6 +62,15 @@ must reach over a dereference's keys (`!$p[tail]` forces the field) while a
 forced block is indexed after (`!{cmd}[k]`), and that rule now lives in
 `parse_bang` as grammar rather than in the token shape.
 
+**Amended.** "The token stream the same text has outside the string" was read
+too far: the pass also let *every* splice swallow a following `[key]`, and
+inside a string `[` is otherwise text, so `"$(red)[$host]"` indexed a colour
+and no escape could stop it — `\[` is not an escape, and `"$(x)[oops"` lost
+its closing quote to the bracket group. A splice now ends where its own
+closing delimiter does; only the undelimited `$name` and `!$name` continue
+into `[key]`, and `"$[!{f}[k]]"` says the rest explicitly. `$(name)` is again
+what `docs/TUTORIAL.md` always called it: the mark for the end of a name.
+
 ## Rejected
 
 - *Keep the redirect reinterpretation and add diagnostics.* It was already

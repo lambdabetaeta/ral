@@ -628,8 +628,11 @@ module.exports = grammar({
     // $name inside a string
     interp_deref: $ => token.immediate(seq('$', IDENT)),
 
-    // !$name inside a string; `!` before anything else is text
-    interp_force_plain: $ => token.immediate(seq('!', '$', IDENT)),
+    // !$name[k] inside a string; `!` before anything else is text
+    interp_force_plain: $ => seq(
+      token.immediate(seq('!', '$', IDENT)),
+      repeat(seq('[', optional(/[^\]\n]*/), ']')),
+    ),
 
     // ── Primitives ───────────────────────────────────────────────────────────
 

@@ -86,8 +86,9 @@ fn is_operator_char(ch: char) -> bool {
 pub enum StringPart {
     Literal(String),
     /// A `$…` or `!…` splice, as the very tokens it lexes to outside a
-    /// string — `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name`, each with any
-    /// adjacent `[key]` groups — so the parser reads it as one atom.
+    /// string — `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name`, the two
+    /// undelimited forms with their `[key]` groups (see [`Lexer::scan_splice`])
+    /// — so the parser reads it as one atom.
     Splice(Vec<(Token, Span)>),
 }
 
@@ -1094,16 +1095,21 @@ impl Lexer {
     }
 
     /// A splice inside `"…"`, at its `$` or `!`: the tokens of `$name`,
-    /// `$(name)`, `$[…]`, `!{…}` or `!$name`, followed by any adjacent
-    /// `[key]` groups — exactly what the same text lexes to outside the
-    /// string.  `None` when the sigil opens nothing and is text.
+    /// `$(name)`, `$[…]`, `!{…}` or `!$name`.  `None` when the sigil opens
+    /// nothing and is text.
+    ///
+    /// A splice ends at its own closing delimiter, so the `[` after one is
+    /// string text; only the undelimited `$name` and `!$name` continue into
+    /// `[key]` groups.
     fn scan_splice(&mut self) -> Result<Option<Vec<(Token, Span)>>, LexError> {
         let start = self.span();
         let mut tokens = Vec::new();
+        let undelimited;
         if self.peek() == Some('!') {
             self.bump();
             match self.peek() {
                 Some('{') => {
+                    undelimited = false;
                     tokens.push((Token::Bang, self.finish(start)));
                     let open = self.span();
                     self.bump();
@@ -1116,6 +1122,8 @@ impl Lexer {
                     tokens.push((Token::Bang, self.finish(start)));
                     let dollar = self.span();
                     self.bump();
+                    // From the source char: `$(name)` lexes to `Variable` too.
+                    undelimited = self.peek().is_some_and(is_ident_start);
                     let Some(tok) = self.scan_dollar()? else {
                         // Hand the `$` back: the next iteration reads it.
                         self.pos -= 1;
@@ -1127,12 +1135,13 @@ impl Lexer {
             }
         } else {
             self.bump();
+            undelimited = self.peek().is_some_and(is_ident_start);
             match self.scan_dollar()? {
                 Some(tok) => tokens.push((tok, self.finish(start))),
                 None => return Ok(None),
             }
         }
-        while self.peek() == Some('[') {
+        while undelimited && self.peek() == Some('[') {
             let open = self.span();
             self.bump();
             let (body, close) = self.scan_token_group(open, DelimKind::Bracket)?;
@@ -1554,8 +1563,8 @@ mod tests {
         assert_eq!(toks, vec![plain("echo"), variable("x"), Token::Eof]);
     }
 
-    /// `$x[0]` is two tokens and a bracket group; the parser reads the
-    /// adjacency, as it does for `$(x)[0]` and `!{f}[0]`.
+    /// Outside a string `$x[0]` is two tokens and a bracket group; the
+    /// parser reads the adjacency, as it does for `$(x)[0]` and `!{f}[0]`.
     #[test]
     fn indexed_variable_is_not_fused() {
         let toks = tok_types("$xs[0]");

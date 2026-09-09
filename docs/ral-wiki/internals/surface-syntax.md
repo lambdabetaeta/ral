@@ -1,6 +1,6 @@
 ---
-verified_at_commit: dfe6e55c
-verified_at_date: 2026-09-09
+verified_at_commit: 703628d7
+verified_at_date: 2026-09-10
 anchors: [lex, parse, Head, DelimKind, scan_token_group, scan_splice, WordLiteral::classify, is_bare_word]
 ---
 
@@ -30,13 +30,22 @@ into two derefs around a literal `-`; `$(name)` is the explicit interpolation
 boundary and keeps such a dash.
 
 **A splice in `"…"` is the tokens it would be outside the string.**
-`scan_splice` lexes `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name` and any
-adjacent `[key]` groups in place and stores the stream in
-`StringPart::Splice`; the parser reads it with the ordinary `parse_atom`. So
-`"!$d"` is the same `Force(Variable)` as `!$d`, and `"$(h)[file]"` indexes as
-`$(h)[file]` does. Outside a string nothing is fused: `$xs[0]` is a variable
-followed by a bracket group, and `parse_atom` reads the adjacency, as it does
-for `!{f}[k]`.
+`scan_splice` lexes `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name` in place and
+stores the stream in `StringPart::Splice`; the parser reads it with the
+ordinary `parse_atom`. So `"!$d"` is the same `Force(Variable)` as `!$d`.
+Outside a string nothing is fused: `$xs[0]` is a variable followed by a
+bracket group, and `parse_atom` reads the adjacency, as it does for `!{f}[k]`.
+
+**A splice ends where its delimiter does.** Inside a string `[` is otherwise
+text, so what a splice may swallow is decided by how it closes: `$(name)`,
+`$[…]` and `!{…}` end at their own `)`, `]`, `}`, and the `[` after one is
+text — `"$(red)[$host]"` is a colour and a bracketed host. Only the
+undelimited `$name` and `!$name` have nothing to end them, so `scan_splice`
+lets those two continue into adjacent `[key]` groups; `"$[!{f}[k]]"` indexes
+a delimited form explicitly. This is why the string and the bare text
+disagree for `"$(h)[file]"` alone: outside a string brackets are structure,
+inside one they are prose, and only a form that closes itself can tell them
+apart.
 
 **A word's *literal* shape is lexical too.** `WordLiteral::classify` (`ast.rs`)
 reads a bare word and nothing else — no expected type, no scope, no head — so a

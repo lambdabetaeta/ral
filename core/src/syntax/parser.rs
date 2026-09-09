@@ -960,23 +960,9 @@ impl Parser {
         if new_keys.is_empty() {
             return Ok(node);
         }
-        // `$name[k]` is fused by the lexer and reaches us already an
-        // `Ast::Index`, so extend that node rather than wrapping it.
-        Ok(match node {
-            Ast::Index {
-                target,
-                keys: mut existing,
-            } => {
-                existing.extend(new_keys);
-                Ast::Index {
-                    target,
-                    keys: existing,
-                }
-            }
-            other => Ast::Index {
-                target: Spanned::boxed(node_span, other),
-                keys: new_keys,
-            },
+        Ok(Ast::Index {
+            target: Spanned::boxed(node_span, node),
+            keys: new_keys,
         })
     }
 
@@ -2265,7 +2251,8 @@ mod tests {
 
     /// `!` reaches over a dereference's keys but not over a block's: the
     /// prelude's `!$p[tail]` forces the field, while `!{cmd}[k]` indexes the
-    /// forced result.  The same two shapes hold inside a string.
+    /// forced result.  Inside a string only the bare name still carries its
+    /// keys; the block's `}` closes its splice, so that `[k]` is text.
     #[test]
     fn force_reaches_over_a_dereference_but_not_a_block() {
         let field = Ast::Force(Spanned::synthetic_boxed(Ast::Index {
@@ -2282,28 +2269,50 @@ mod tests {
             unwrap_stmts(parse("!$p[tail]").unwrap()),
             vec![field.clone()]
         );
-        assert_eq!(
-            unwrap_stmts(parse("!{cmd}[k]").unwrap()),
-            vec![result.clone()]
-        );
+        assert_eq!(unwrap_stmts(parse("!{cmd}[k]").unwrap()), vec![result]);
+        let forced_block = Ast::Force(Spanned::synthetic_boxed(Ast::Block(body(vec![plain(
+            "cmd",
+        )]))));
         assert_eq!(
             unwrap_stmts(parse("\"!$p[tail]!{cmd}[k]\"").unwrap()),
-            vec![Ast::Interpolation(vec![sp(field), sp(result)])]
+            vec![Ast::Interpolation(vec![
+                sp(field),
+                sp(forced_block),
+                sp(Ast::Literal("[k]".into())),
+            ])]
         );
     }
 
-    /// A splice absorbs adjacent `[key]` groups, whatever it began with.
+    /// A splice ends where its delimiter does, so only the undelimited
+    /// `$name` — and the `!$name` that is one — continues into `[key]`.
     #[test]
-    fn interpolated_splices_take_postfix_keys() {
-        for src in ["\"$(h)[file]\"", "\"!{f}[file]\"", "\"$h[file]\""] {
+    fn only_a_bare_name_splice_takes_postfix_keys() {
+        for src in ["\"$h[file]\"", "\"!$h[file]\""] {
             let ast = unwrap_stmts(parse(src).unwrap());
             let Ast::Interpolation(parts) = &ast[0] else {
                 panic!("{src:?}: expected an interpolation, got {ast:?}");
             };
+            assert_eq!(parts.len(), 1, "{src:?}: expected one part, got {parts:?}");
+            // `!` reaches over the keys, so the force is outside the index.
+            let indexed = match &parts[0].item {
+                Ast::Force(inner) => &inner.item,
+                other => other,
+            };
             assert!(
-                matches!(&parts[0].item, Ast::Index { keys, .. } if keys.len() == 1),
+                matches!(indexed, Ast::Index { keys, .. } if keys.len() == 1),
                 "{src:?}: expected one index, got {:?}",
                 parts[0].item
+            );
+        }
+        for src in ["\"$(h)[file]\"", "\"!{h}[file]\"", "\"$[h][file]\""] {
+            let ast = unwrap_stmts(parse(src).unwrap());
+            let Ast::Interpolation(parts) = &ast[0] else {
+                panic!("{src:?}: expected an interpolation, got {ast:?}");
+            };
+            assert_eq!(
+                parts[1].item,
+                Ast::Literal("[file]".into()),
+                "{src:?}: expected the keys to be text"
             );
         }
     }

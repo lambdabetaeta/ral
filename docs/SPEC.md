@@ -586,9 +586,16 @@ return "sum: $[2 + 3]"
 ```
 
 `$(name)` marks the exact end of a name when the following text could be part
-of it. A splice is exactly the atom the same text denotes outside the string:
-`$name`, `$(name)`, `$[...]`, `!{...}`, or `!$name`, followed by any `[key]`
-written immediately after it. A `$` or `!` that opens none of these is text.
+of it. A splice is `$name`, `$(name)`, `$[...]`, `!{...}`, or `!$name`, and
+means what the same text means outside the string. A `$` or `!` that opens
+none of these is text.
+
+A splice ends where its own closing delimiter does, so a `[` written after
+`$(name)`, `$[...]`, or `!{...}` is text: `"$(red)[$host]"` is a colour
+followed by a bracketed host. Only `$name` and `!$name`, which have no
+closing delimiter, continue into the `[key]` groups written immediately
+after them. To index a delimited form, wrap it: `"$[!{cmd}[k]]"`.
+
 The supported escapes are `\n`, `\r`, `\t`, `\\`, `\0`, `\e`, `\"`,
 `\$`, `\!`, `\xNN`, `\u{X..}`, and backslash followed by a line ending.
 `\xNN` accepts one ASCII byte from `00` to `7F`. `\u{X..}` accepts one valid
