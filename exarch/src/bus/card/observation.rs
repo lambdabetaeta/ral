@@ -36,24 +36,14 @@ fn write_outcome_role(outcome: WriteOutcome) -> Role {
     }
 }
 
-/// The census bucket a surfaced observation counts toward when a coalesced run
-/// reduces to its tally (`Tally` in `tui/group.rs`). A write has no bucket: it
-/// lands as its own block instead.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ObservationKind {
-    Read,
-    Exec,
-    Grep,
-}
-
 /// Where an observation the rail draws lands, or `None` for one it does not
 /// draw: evaluation (a `builtin` command), or a capability check that was not
 /// a denial. Core reports every observation it makes; this is where the host
 /// says which of them it wants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Landing {
-    /// Folds onto the call above it, tallied under this bucket.
-    Effect(ObservationKind),
+    /// Folds onto the call above it, which buckets the fact itself.
+    Effect,
     /// A file mutation: its own block under the `▎` rail.
     Write,
     /// Its own bounded block — a denial, a surfaced kit card, a notice.
@@ -64,12 +54,12 @@ pub(crate) enum Landing {
 
 pub(crate) fn landing(what: &Observed) -> Option<Landing> {
     Some(match what {
-        Observed::Read { .. } => Landing::Effect(ObservationKind::Read),
-        Observed::Grep { .. } => Landing::Effect(ObservationKind::Grep),
-        Observed::Command {
+        Observed::Read { .. }
+        | Observed::Grep { .. }
+        | Observed::Command {
             origin: CommandOrigin::External | CommandOrigin::Detached,
             ..
-        } => Landing::Effect(ObservationKind::Exec),
+        } => Landing::Effect,
         Observed::Write { .. } => Landing::Write,
         // A denial reads best whole, not dissolved into a tally.
         Observed::Capability {

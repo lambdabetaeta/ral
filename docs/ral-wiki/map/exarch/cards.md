@@ -147,9 +147,9 @@ placement, framing in its agent's hue at the register's own margin.
 ## Block — derived disclosure and aggregation
 
 `BlockKind::Card { card, landing, at }` (`tui/block.rs`) carries the render
-document, a `Landing` (`Effect`/`Write`/`Surfaced`, shared with `bus/card`'s
-own `landing()`) telling the printer's mirror whether the card is a foldable
-effect or a barrier, and the
+document, a `Landing` (`Effect`/`Write`/`Surfaced`/`Announced`, shared with
+`bus/card`'s own `landing()`) telling the mirror whether the card is a
+foldable effect or a barrier, and the
 `Detail` rung it is read at. Disclosure is **derived**, not named: a card
 holding a `diff` is dialable (`dialable()` → `Card::has_diff()`) and reads as
 its header alone at `Tally`, its first `DIFF_PEEK_ROWS` rows at `Summary` —

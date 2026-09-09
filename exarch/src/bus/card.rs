@@ -39,7 +39,7 @@ pub(crate) use done::value_to_done;
 pub(crate) use encode::encode_card;
 pub(crate) use notice::value_to_notice;
 pub(crate) use observation::observation_wire;
-pub(crate) use observation::{Landing, ObservationKind, landing};
+pub(crate) use observation::{Landing, landing};
 /// The comma-joined bucket cards a run's effects render as; `pub(crate)`
 /// because only the mirror groups, and it groups at render time.
 pub(crate) use observation::{execs_card, greps_card, reads_card};

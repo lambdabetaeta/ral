@@ -1097,7 +1097,7 @@ fn observed_items(what: &Observed) -> Vec<Item> {
         return Vec::new();
     };
     match place {
-        Landing::Effect(_) => vec![Item::Member(Member::Effect(what.clone()))],
+        Landing::Effect => vec![Item::Member(Member::Effect(what.clone()))],
         Landing::Write => vec![Item::Barrier(BlockKind::card(
             observation_card(what),
             Landing::Write,

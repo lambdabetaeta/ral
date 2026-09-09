@@ -23,43 +23,31 @@ use super::highlight::highlight_ral;
 use super::line::{self, push_wrapped, wash, wrap_line};
 use super::md;
 use super::palette::{CODE_BG, SLATE};
-use crate::bus::card::{Landing, ObservationKind, execs_card, greps_card, landing, reads_card};
+use crate::bus::card::{execs_card, greps_card, reads_card};
 use crate::record::Seq;
 use ral_core::types::Observed;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-/// The run's `|>` effects by tally bucket.  A write is a barrier, never a run
-/// member, so it has no bucket; the script count is the call count, not a field.
+/// The run's `|>` effects by tally bucket, summed over its calls.  A write is a
+/// barrier, never a run member, so it has no bucket; the script count is the
+/// call count, not a field.
 #[derive(Clone, Copy, Default)]
-pub(super) struct Tally {
-    binaries: u32,
-    files: u32,
-    searches: u32,
+struct Tally {
+    binaries: usize,
+    files: usize,
+    searches: usize,
 }
 
-impl Tally {
-    /// The buckets `effects` fall in, one apiece — the facts are deduped
-    /// already, so the count is their length and never a carried counter.
-    fn of(effects: &[Observed]) -> Self {
-        let mut total = Self::default();
-        for what in effects {
-            match landing(what) {
-                Some(Landing::Effect(ObservationKind::Exec)) => total.binaries += 1,
-                Some(Landing::Effect(ObservationKind::Read)) => total.files += 1,
-                Some(Landing::Effect(ObservationKind::Grep)) => total.searches += 1,
-                _ => {}
-            }
-        }
-        total
-    }
-
-    fn merge(&mut self, other: Self) {
-        self.binaries += other.binaries;
-        self.files += other.files;
-        self.searches += other.searches;
-    }
+/// One call's effects sorted by verb, the one partition both the tally and the
+/// rendered rows read.  The facts are deduped on arrival, so a bucket's length
+/// *is* its count and never a carried counter.
+#[derive(Default)]
+struct Buckets<'a> {
+    reads: Vec<&'a str>,
+    execs: Vec<&'a Observed>,
+    greps: Vec<&'a Observed>,
 }
 
 /// One observation call as rendered: the magnitude drives its sparkline bar,
@@ -105,6 +93,19 @@ impl Call {
         self.magnitude = Some(n);
     }
 
+    fn buckets(&self) -> Buckets<'_> {
+        let mut b = Buckets::default();
+        for what in &self.effects {
+            match what {
+                Observed::Read { path } => b.reads.push(path),
+                Observed::Command { .. } => b.execs.push(what),
+                Observed::Grep { .. } => b.greps.push(what),
+                _ => {}
+            }
+        }
+        b
+    }
+
     pub(super) fn at(&self) -> Seq {
         self.at
     }
@@ -134,18 +135,12 @@ fn same_effect(a: &Observed, b: &Observed) -> bool {
 /// greps, each bucket one comma-joined card.  The order is fixed rather than
 /// the arrival order — the user does not care in what order a burst
 /// interleaved, only what the call touched.
-fn effect_rows(effects: &[Observed]) -> Vec<Line<'static>> {
-    let mut reads: Vec<&str> = Vec::new();
-    let mut execs: Vec<&Observed> = Vec::new();
-    let mut greps: Vec<&Observed> = Vec::new();
-    for what in effects {
-        match what {
-            Observed::Read { path } => reads.push(path),
-            Observed::Command { .. } => execs.push(what),
-            Observed::Grep { .. } => greps.push(what),
-            _ => {}
-        }
-    }
+fn effect_rows(call: &Call) -> Vec<Line<'static>> {
+    let Buckets {
+        reads,
+        execs,
+        greps,
+    } = call.buckets();
     [reads_card(&reads), execs_card(&execs), greps_card(&greps)]
         .into_iter()
         .flatten()
@@ -212,7 +207,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     ));
     // The effects open in the intent's own column, so each reads as belonging
     // to the call above it.
-    ls.extend(indent_rows(&effect_rows(&tip.effects), "", width));
+    ls.extend(indent_rows(&effect_rows(tip), "", width));
     ls
 }
 
@@ -221,10 +216,12 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
 fn tally(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     let mut total = Tally::default();
     for call in calls {
-        total.merge(Tally::of(&call.effects));
+        let b = call.buckets();
+        total.binaries += b.execs.len();
+        total.files += b.reads.len();
+        total.searches += b.greps.len();
     }
-    #[allow(clippy::cast_possible_truncation, reason = "coalesced-run call count")]
-    let text = tally_line(calls.len() as u32, total);
+    let text = tally_line(calls.len(), total);
     let mut ls = vec![Line::default()];
     push_wrapped(&mut ls, &text, width, |chunk, _| {
         Line::from(Span::styled(chunk, Style::default().fg(SLATE)))
@@ -234,7 +231,7 @@ fn tally(calls: &[Call], width: usize) -> Vec<Line<'static>> {
 
 /// "Ran N scripts" always, then the non-empty buckets in fixed order — binaries
 /// share the "Ran"; reads and searches bring their own verb.
-fn tally_line(scripts: u32, tally: Tally) -> String {
+fn tally_line(scripts: usize, tally: Tally) -> String {
     let mut s = format!("Ran {}", count(scripts, "script", "scripts"));
     if tally.binaries > 0 {
         let _ = write!(s, ", {}", count(tally.binaries, "binary", "binaries"));
@@ -249,7 +246,7 @@ fn tally_line(scripts: u32, tally: Tally) -> String {
     s
 }
 
-fn count(n: u32, singular: &str, plural: &str) -> String {
+fn count(n: usize, singular: &str, plural: &str) -> String {
     format!("{n} {}", if n == 1 { singular } else { plural })
 }
 
@@ -263,7 +260,7 @@ fn full_list(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         }
         ls.extend(intent_row(call, i == 0, width));
         ls.extend(source_rows(call, width));
-        ls.extend(indent_rows(&effect_rows(&call.effects), BODY_INDENT, width));
+        ls.extend(indent_rows(&effect_rows(call), BODY_INDENT, width));
     }
     ls
 }
