@@ -12,7 +12,7 @@ use super::block::{AgentSlot, Detail};
 use super::fidelity::Fidelity;
 use super::line;
 use super::md;
-use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK, CODE_BG, READ_W, SLATE};
+use super::palette::{AGENT_HUES, BANNER_GOLD, BANNER_PINK, CODE_BG, SLATE};
 use super::rail::{self, RailKind};
 use super::status::{ctx_ramp, wait_bar};
 
@@ -125,7 +125,7 @@ pub(super) fn join_paths(paths: &[PathBuf]) -> String {
 /// The `/legend` panel: every rail shape, agent hue, value step, stratum, bar
 /// and fidelity grade, drawn by the real builders rather than redescribed, so a
 /// palette or shape change shows up here with no edit.
-pub(super) fn legend_panel() -> Vec<Line<'static>> {
+pub(super) fn legend_panel(width: u16) -> Vec<Line<'static>> {
     let head = |s: &str| {
         Line::from(Span::styled(
             s.to_string(),
@@ -146,6 +146,7 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
             .iter()
             .map(|(kind, name)| (*name, vec![rail::span(*kind, AgentSlot(0), None)]))
             .collect(),
+        width,
     ));
     ls.push(Line::default());
     ls.push(head("rail · hue = which agent (constant down a tab)"));
@@ -168,18 +169,22 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
                 )
             })
             .collect(),
+        width,
     ));
     ls.push(Line::default());
     ls.push(head("rail · value = magnitude (brighter is bigger)"));
     // One magnitude per `rail::value_step` bucket, so the row is the ramp
     // itself; these numbers must keep tracking that function's thresholds.
-    ls.extend(line::legend_rows(vec![(
-        "small → large",
-        [Some(4), Some(20), Some(80), Some(200)]
-            .into_iter()
-            .map(|mag| rail::span(RailKind::Patch, AgentSlot(0), mag))
-            .collect(),
-    )]));
+    ls.extend(line::legend_rows(
+        vec![(
+            "small → large",
+            [Some(4), Some(20), Some(80), Some(200)]
+                .into_iter()
+                .map(|mag| rail::span(RailKind::Patch, AgentSlot(0), mag))
+                .collect(),
+        )],
+        width,
+    ));
 
     ls.push(Line::default());
     ls.push(head("strata · background = machine region"));
@@ -190,60 +195,69 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
         Some(bg) => line::wash(Line::from(Span::raw(text.to_string())), bg, None).spans,
         None => vec![note(text)],
     };
-    ls.extend(line::legend_rows(vec![
-        (
-            "code",
-            swatch("scripts and shell output — a recessed panel", Some(CODE_BG)),
-        ),
-        (
-            "prose",
-            swatch("model narration and replies — the base", None),
-        ),
-    ]));
+    ls.extend(line::legend_rows(
+        vec![
+            (
+                "code",
+                swatch("scripts and shell output — a recessed panel", Some(CODE_BG)),
+            ),
+            (
+                "prose",
+                swatch("model narration and replies — the base", None),
+            ),
+        ],
+        width,
+    ));
 
     ls.push(Line::default());
     ls.push(head("bars · length and texture, beside a collapsed header"));
-    ls.extend(line::legend_rows(vec![
-        (
-            "size",
-            vec![line::size_bar(120), note("  log-scaled magnitude")],
-        ),
-        (
-            "grain",
-            vec![
-                line::grain_run(9, 1),
-                note("  diff density: ⣿ all adds → ⣀ all deletes"),
-            ],
-        ),
-        (
-            "sparkline",
-            vec![
-                Span::styled(
-                    [None, Some(2), Some(40), Some(8), Some(300)]
-                        .into_iter()
-                        .map(line::spark_glyph)
-                        .collect::<String>(),
-                    Style::default().fg(SLATE),
-                ),
-                note("  one bar per call in a coalesced ral block"),
-            ],
-        ),
-    ]));
+    ls.extend(line::legend_rows(
+        vec![
+            (
+                "size",
+                vec![line::size_bar(120), note("  log-scaled magnitude")],
+            ),
+            (
+                "grain",
+                vec![
+                    line::grain_run(9, 1),
+                    note("  diff density: ⣿ all adds → ⣀ all deletes"),
+                ],
+            ),
+            (
+                "sparkline",
+                vec![
+                    Span::styled(
+                        [None, Some(2), Some(40), Some(8), Some(300)]
+                            .into_iter()
+                            .map(line::spark_glyph)
+                            .collect::<String>(),
+                        Style::default().fg(SLATE),
+                    ),
+                    note("  one bar per call in a coalesced ral block"),
+                ],
+            ),
+        ],
+        width,
+    ));
 
     ls.push(Line::default());
     ls.push(head("status line · the two bars under the transcript"));
-    ls.extend(line::legend_rows(vec![
-        ("window", {
-            let mut v = ctx_ramp(72);
-            v.push(note("fills and brightens toward a full context window"));
-            v
-        }),
-        ("elapsed", {
-            let mut v = wait_bar(Duration::from_secs(18));
-            v.push(note("grows with the time spent in the current state"));
-            v
-        }),
-    ]));
+    ls.extend(line::legend_rows(
+        vec![
+            ("window", {
+                let mut v = ctx_ramp(72);
+                v.push(note("fills and brightens toward a full context window"));
+                v
+            }),
+            ("elapsed", {
+                let mut v = wait_bar(Duration::from_secs(18));
+                v.push(note("grows with the time spent in the current state"));
+                v
+            }),
+        ],
+        width,
+    ));
 
     ls.push(Line::default());
     ls.push(head(
@@ -251,29 +265,32 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
     ));
     let prose = "An answer the model committed to the transcript.";
     let sample = |f: Fidelity| {
-        md::render_md(prose, READ_W, 0, f)
+        md::render_md(prose, width, 0, f)
             .into_iter()
             .next()
             .map(|line| line.spans)
             .unwrap_or_default()
     };
-    ls.extend(line::legend_rows(vec![
-        ("sound", sample(Fidelity::default())),
-        (
-            "drained",
-            sample(Fidelity {
-                context: 2,
-                echo: 0,
-            }),
-        ),
-        (
-            "echoed",
-            sample(Fidelity {
-                context: 0,
-                echo: 2,
-            }),
-        ),
-    ]));
+    ls.extend(line::legend_rows(
+        vec![
+            ("sound", sample(Fidelity::default())),
+            (
+                "drained",
+                sample(Fidelity {
+                    context: 2,
+                    echo: 0,
+                }),
+            ),
+            (
+                "echoed",
+                sample(Fidelity {
+                    context: 0,
+                    echo: 2,
+                }),
+            ),
+        ],
+        width,
+    ));
     ls.push(Line::from(note(
         "  context pressure drains the ink; echoing its own script washes the field behind it",
     )));
@@ -291,6 +308,7 @@ pub(super) fn legend_panel() -> Vec<Line<'static>> {
 mod tests {
     use super::{SessionInfo, legend_panel, session_card};
     use crate::bus::card::{FieldVal, Mark, Role};
+    use crate::tui::palette::{READ_W, content_w};
     use crate::tui::{line, rail};
     use std::path::PathBuf;
 
@@ -387,7 +405,7 @@ mod tests {
     /// Guards the derivation: a shape cannot reach the rail unnamed here.
     #[test]
     fn legend_names_every_rail_shape() {
-        let text: String = legend_panel()
+        let text: String = legend_panel(content_w(READ_W))
             .iter()
             .map(line::text)
             .collect::<Vec<_>>()

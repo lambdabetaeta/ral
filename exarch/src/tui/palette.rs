@@ -84,6 +84,3 @@ pub(super) const RAIL_W: usize = 2;
 pub(super) const fn content_w(width: u16) -> u16 {
     width.saturating_sub(RAIL_W as u16)
 }
-
-/// Content columns at the readable width — the width builders wrap to.
-pub(super) const READ_CONTENT_W: u16 = content_w(READ_W);

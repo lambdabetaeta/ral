@@ -131,11 +131,11 @@ fn same_effect(a: &Observed, b: &Observed) -> bool {
     }
 }
 
-/// One call's effects as rail-less rows: its reads, then its execs, then its
-/// greps, each bucket one comma-joined card.  The order is fixed rather than
-/// the arrival order — the user does not care in what order a burst
+/// One call's effects as rail-less rows at `width`: its reads, then its execs,
+/// then its greps, each bucket one comma-joined card.  The order is fixed
+/// rather than the arrival order — the user does not care in what order a burst
 /// interleaved, only what the call touched.
-fn effect_rows(call: &Call) -> Vec<Line<'static>> {
+fn effect_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
     let Buckets {
         reads,
         execs,
@@ -144,7 +144,7 @@ fn effect_rows(call: &Call) -> Vec<Line<'static>> {
     [reads_card(&reads), execs_card(&execs), greps_card(&greps)]
         .into_iter()
         .flatten()
-        .flat_map(|card| line::render_card_unframed(&card, Detail::Full))
+        .flat_map(|card| line::render_card_unframed(&card, width, Detail::Full))
         .collect()
 }
 
@@ -207,7 +207,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     ));
     // The effects open in the intent's own column, so each reads as belonging
     // to the call above it.
-    ls.extend(indent_rows(&effect_rows(tip), "", width));
+    ls.extend(indent_rows(effect_rows(tip, width), "", width));
     ls
 }
 
@@ -253,6 +253,7 @@ fn count(n: usize, singular: &str, plural: &str) -> String {
 /// `Full`: every call as its own intent and right-aligned bar, its ral `cmd`
 /// below that, and its effects below that.
 fn full_list(calls: &[Call], width: usize) -> Vec<Line<'static>> {
+    let body_w = inset_w(BODY_INDENT, width);
     let mut ls = vec![Line::default()];
     for (i, call) in calls.iter().enumerate() {
         if i > 0 {
@@ -260,7 +261,7 @@ fn full_list(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         }
         ls.extend(intent_row(call, i == 0, width));
         ls.extend(source_rows(call, width));
-        ls.extend(indent_rows(&effect_rows(call), BODY_INDENT, width));
+        ls.extend(indent_rows(effect_rows(call, body_w), BODY_INDENT, body_w));
     }
     ls
 }
@@ -326,12 +327,16 @@ fn pinned_intent(
     out
 }
 
-/// A call's ral `cmd` at the `Full` rung, syntax-highlighted and washed into the
-/// recessed [`CODE_BG`] panel inset under [`BODY_INDENT`].
+/// A call's ral `cmd` at the `Full` rung, syntax-highlighted, folded to the
+/// panel's own columns and washed into the recessed [`CODE_BG`] panel inset
+/// under [`BODY_INDENT`].
 fn source_rows(call: &Call, width: usize) -> Vec<Line<'static>> {
+    let body_w = inset_w(BODY_INDENT, width);
     let mut ls = Vec::new();
     for line in highlight_ral(&call.cmd) {
-        wash_inset(&mut ls, &line, BODY_INDENT, width);
+        for vrow in wrap_line(&line, body_w) {
+            wash_inset(&mut ls, vrow, BODY_INDENT, body_w);
+        }
     }
     ls
 }
@@ -355,30 +360,33 @@ fn bar(magnitude: Option<u32>) -> Span<'static> {
     )
 }
 
+/// The columns a row has left once `indent` is paid — the one subtraction
+/// between a body's width and the width its content was laid out at.
+fn inset_w(indent: &str, width: usize) -> usize {
+    width.saturating_sub(UnicodeWidthStr::width(indent)).max(1)
+}
+
 /// Re-indent a call's effect rows — dropping the leading blank
-/// [`line::render_card`] opens with — and wash each into the [`CODE_BG`] panel at
-/// `indent`; the list passes the script's own margin, so the two read as one
-/// rectangle.
-fn indent_rows(rows: &[Line<'static>], indent: &str, width: usize) -> Vec<Line<'static>> {
+/// [`line::render_card_unframed`] opens with — and wash each into the
+/// [`CODE_BG`] panel at `indent`; the list passes the script's own margin, so
+/// the two read as one rectangle.  `body_w` is the width the rows were built
+/// at, so each is already one visual row.
+fn indent_rows(rows: Vec<Line<'static>>, indent: &str, body_w: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    for l in rows.iter().filter(|l| !line::is_blank(l)) {
-        wash_inset(&mut out, l, indent, width);
+    for l in rows.into_iter().filter(|l| !line::is_blank(l)) {
+        wash_inset(&mut out, l, indent, body_w);
     }
     out
 }
 
 /// Inset `body` under `indent` and wash its content into the recessed
-/// [`CODE_BG`] panel.  The indent stays unwashed so the panel's left edge aligns
-/// with the content, but the wash runs to `width` so the region reads as a
-/// stratum, not a swatch.
-fn wash_inset(out: &mut Vec<Line<'static>>, body: &Line<'static>, indent: &str, width: usize) {
-    let indent_w = UnicodeWidthStr::width(indent);
-    let body_w = width.saturating_sub(indent_w).max(1);
-    for vrow in wrap_line(body, body_w) {
-        let mut spans = vec![Span::raw(indent.to_string())];
-        spans.extend(wash(vrow, CODE_BG, Some(body_w)).spans);
-        out.push(Line::from(spans));
-    }
+/// [`CODE_BG`] panel: one row in, one row out.  The indent stays unwashed so
+/// the panel's left edge aligns with the content, but the wash runs the whole
+/// `body_w` so the region reads as a stratum, not a swatch.
+fn wash_inset(out: &mut Vec<Line<'static>>, body: Line<'static>, indent: &str, body_w: usize) {
+    let mut spans = vec![Span::raw(indent.to_string())];
+    spans.extend(wash(body, CODE_BG, Some(body_w)).spans);
+    out.push(Line::from(spans));
 }
 
 #[cfg(test)]

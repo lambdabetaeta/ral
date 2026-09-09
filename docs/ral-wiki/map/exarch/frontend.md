@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 109eb9be
+generated_at_commit: f003a8e9
 generated_at_date: 2026-09-09
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -184,7 +184,17 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
  `tui/scrollback.rs` the per-session mirror of the view fold, scroll position,
  and `user.log` writer; `tui/rail.rs` the data-encoding marginal rail, and
  `tui/row.rs` the `Row { gutter, content }` that *represents* the margin so
- copy and selection can never reach it. The
+ copy and selection can never reach it.
+
+ Nothing is laid out before its width is known. `Scrollback::render_window`
+ caps the pane at `READ_W` — the reading measure, applied in that one place —
+ `Block::seated` takes the content columns off it, and every builder below is
+ handed that width: chrome renders at it, a card's marks are dispatched at it
+ by `render_mark`, and a call's effects and its ral source are laid out at
+ what remains after their indent. There is no fixed budget to lay out against
+ and then wrap a second time; each row is folded exactly once.
+
+ The
  transcript is laid out as a graphic on two orthogonal planes
  ([[decisions/260618_tui-transcript-as-graphic|tui-transcript-as-graphic]],
  Phases 0–7 landed):

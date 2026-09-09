@@ -7,8 +7,7 @@
 
 use super::block::Detail;
 use super::palette::{
-    CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, READ_CONTENT_W, READ_W, RED, RED_HOT, SLATE,
-    content_w,
+    CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, RED, RED_HOT, SLATE, content_w,
 };
 use super::row::Row;
 use crate::agent::event::ProviderErrorRecord;
@@ -237,18 +236,19 @@ pub(super) fn wash(row: Line<'static>, bg: Color, fill_to: Option<usize>) -> Lin
 /// A summary-less tool call: a call that stated no intent, so the script it
 /// ran is all there is to show.  `cmd`'s first line is the label, any
 /// remainder follows indented.
-pub(super) fn tool_call_static(cmd: &str) -> Vec<Line<'static>> {
+pub(super) fn tool_call_static(cmd: &str, width: u16) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     ls.extend(tool_call_header(
         cmd.lines().next().unwrap_or(""),
         None,
-        READ_W,
+        width,
     ));
     for l in cmd.lines().skip(1) {
-        ls.push(Line::from(vec![
+        let row = Line::from(vec![
             Span::raw("  "),
             Span::styled(l.to_string(), Style::default().fg(SLATE)),
-        ]));
+        ]);
+        ls.extend(wrap_line(&row, width.into()));
     }
     ls
 }
@@ -379,16 +379,16 @@ pub(super) fn error(msg: &str) -> Vec<Line<'static>> {
 /// not enough to bury the transcript under it.
 pub(super) const DIFF_PEEK_ROWS: usize = 20;
 
-/// A [`Mark::Diff`]'s body, graded by disclosure: `Tally` the header alone,
-/// `Summary` its first [`DIFF_PEEK_ROWS`] rows, `Full` every hunk.  No leading
-/// blank — the unframed card renderer owns the one blank that opens the block.
-/// The densest object on screen: size in the header bar, grain in the addition
-/// ratio, value in the rail's lightness, shape in its `▎` glyph.
-fn diff_body(path: &str, hunks: &[Hunk], at: Detail) -> Vec<Line<'static>> {
+/// A [`Mark::Diff`]'s body at `width`, graded by disclosure: `Tally` the header
+/// alone, `Summary` its first [`DIFF_PEEK_ROWS`] rows, `Full` every hunk.  No
+/// leading blank — the unframed card renderer owns the one blank that opens the
+/// block.  The densest object on screen: size in the header bar, grain in the
+/// addition ratio, value in the rail's lightness, shape in its `▎` glyph.
+fn diff_body(path: &str, hunks: &[Hunk], width: usize, at: Detail) -> Vec<Line<'static>> {
     match at {
         Detail::Tally => vec![patch_header(path, hunks)],
-        Detail::Summary => diff_capped(path, hunks, Some(DIFF_PEEK_ROWS)),
-        Detail::Full => diff_capped(path, hunks, None),
+        Detail::Summary => diff_capped(path, hunks, width, Some(DIFF_PEEK_ROWS)),
+        Detail::Full => diff_capped(path, hunks, width, None),
     }
 }
 
@@ -420,34 +420,57 @@ fn patch_header(path: &str, hunks: &[Hunk]) -> Line<'static> {
     ])
 }
 
+/// A diff block's columns, measured once for the whole block so every row's
+/// text starts in the same one: the line-number gutter, and what `width` leaves
+/// a row's own text once the gutter, its space and the `<sign> ` are paid.
+#[derive(Clone, Copy)]
+struct DiffCols {
+    gutter: usize,
+    body_w: usize,
+}
+
+impl DiffCols {
+    /// Floored, so a pathological width still wraps rather than dividing by a
+    /// column that is not there.
+    fn new(gutter: usize, width: usize) -> Self {
+        Self {
+            gutter,
+            body_w: width.saturating_sub(gutter + 1 + 2).max(8),
+        }
+    }
+}
+
 /// The header, then the first `cap` diff rows (all when `None`), the hunks
 /// elision-separated and numbered against one gutter sized for the whole
 /// block, so every row's text starts in the same column.  A diff cut short
 /// ends in the same elision a break between hunks wears.
-fn diff_capped(path: &str, hunks: &[Hunk], cap: Option<usize>) -> Vec<Line<'static>> {
+fn diff_capped(path: &str, hunks: &[Hunk], width: usize, cap: Option<usize>) -> Vec<Line<'static>> {
     let mut ls: Vec<Line<'static>> = vec![patch_header(path, hunks)];
     let total: usize = hunks.iter().map(|h| h.rows.len()).sum();
     let mut left = cap.unwrap_or(total).min(total);
     let cut = left < total;
-    let gutter = hunks
-        .iter()
-        .map(hunk_max_lineno)
-        .max()
-        .unwrap_or(0)
-        .to_string()
-        .len()
-        .max(3);
+    let cols = DiffCols::new(
+        hunks
+            .iter()
+            .map(hunk_max_lineno)
+            .max()
+            .unwrap_or(0)
+            .to_string()
+            .len()
+            .max(3),
+        width,
+    );
     for (i, h) in hunks.iter().enumerate() {
         if left == 0 {
             break;
         }
         if i > 0 {
-            ls.push(elision_row(gutter));
+            ls.push(elision_row(cols.gutter));
         }
-        left -= push_hunk(&mut ls, h, gutter, left);
+        left -= push_hunk(&mut ls, h, cols, left);
     }
     if cut {
-        ls.push(elision_row(gutter));
+        ls.push(elision_row(cols.gutter));
     }
     ls
 }
@@ -490,21 +513,21 @@ fn hunk_max_lineno(h: &Hunk) -> u32 {
 /// Render up to `cap` of `h`'s unified rows, walking an old- and a new-side
 /// counter from `h.start`: a deletion keeps its pre-edit number, an insertion
 /// and a context row take their post-edit one.  Returns how many rows it drew.
-fn push_hunk(ls: &mut Vec<Line<'static>>, h: &Hunk, gutter: usize, cap: usize) -> usize {
+fn push_hunk(ls: &mut Vec<Line<'static>>, h: &Hunk, cols: DiffCols, cap: usize) -> usize {
     let (mut old, mut new) = (h.start, h.start);
     for row in h.rows.iter().take(cap) {
         match row {
             DiffRow::Context(segs) => {
-                push_gutter_row(ls, gutter, new, ' ', segs, SLATE, None);
+                push_gutter_row(ls, cols, new, ' ', segs, SLATE, None);
                 old += 1;
                 new += 1;
             }
             DiffRow::Del(segs) => {
-                push_gutter_row(ls, gutter, old, '-', segs, RED_HOT, Some(RED_HOT));
+                push_gutter_row(ls, cols, old, '-', segs, RED_HOT, Some(RED_HOT));
                 old += 1;
             }
             DiffRow::Add(segs) => {
-                push_gutter_row(ls, gutter, new, '+', segs, LIME_HOT, Some(LIME_HOT));
+                push_gutter_row(ls, cols, new, '+', segs, LIME_HOT, Some(LIME_HOT));
                 new += 1;
             }
         }
@@ -512,25 +535,21 @@ fn push_hunk(ls: &mut Vec<Line<'static>>, h: &Hunk, gutter: usize, cap: usize) -
     h.rows.len().min(cap)
 }
 
-/// Append one diff row, its body wrapped to [`READ_W`] with the number and sign
+/// Append one diff row, its body wrapped into `cols` with the number and sign
 /// on the first row only.  An empty body still emits a bare marker row, so the
 /// diff stays faithful to its input.  `hot` is the inline-emphasis colour for a
 /// del/add (`None` on context): the segments `similar` flagged as actually
 /// changed go bold in `hot`, the rest dim in `base`.
 fn push_gutter_row(
     ls: &mut Vec<Line<'static>>,
-    gutter: usize,
+    cols: DiffCols,
     lineno: u32,
     sign: char,
     segs: &[Seg],
     base: Color,
     hot: Option<Color>,
 ) {
-    // The readable content width less the line-number gutter and its space and
-    // "<sign> ", floored so a pathological width still wraps.
-    let body_w = usize::from(READ_CONTENT_W)
-        .saturating_sub(gutter + 1 + 2)
-        .max(8);
+    let DiffCols { gutter, body_w } = cols;
     let body: Vec<Span<'static>> = segs
         .iter()
         .filter(|s| !s.text.is_empty())
@@ -584,24 +603,30 @@ fn span_style(role: Option<Role>) -> Style {
 
 /// The one dispatch every [`Mark`] variant routes through, shared by
 /// [`render_card_unframed`] and [`render_framed`], so a new variant cannot be
-/// wired into one interpreter and forgotten in the other.
-fn render_mark(mark: &Mark, at: Detail) -> Vec<Line<'static>> {
+/// wired into one interpreter and forgotten in the other.  Every arm lays out
+/// at `width`, so a mark's rows are already the rows it is shown as.
+fn render_mark(mark: &Mark, width: usize, at: Detail) -> Vec<Line<'static>> {
     match mark {
-        Mark::Text { spans } => render_text(spans),
+        Mark::Text { spans } => render_text(spans)
+            .iter()
+            .flat_map(|l| wrap_line(l, width))
+            .collect(),
         Mark::Measure(m) => vec![render_measure(m)],
-        Mark::Fields { rows } => render_fields(rows),
-        Mark::Diff { path, hunks } => diff_body(path, hunks, at),
+        Mark::Fields { rows } => render_fields(rows, width),
+        Mark::Diff { path, hunks } => diff_body(path, hunks, width, at),
+        // Bytes are an image, not an encoding: folding them would be a lie
+        // about the payload, so a long row runs past the measure.
         Mark::Raw { bytes } => render_raw(bytes),
     }
 }
 
-/// Render a card's marks without a box. Diff cards already carry the patch rail
-/// and line gutters; observation cards fold under their call's intent, where a
-/// nested frame would be redundant.
-pub(super) fn render_card_unframed(card: &Card, at: Detail) -> Vec<Line<'static>> {
+/// Render a card's marks at `width` without a box. Diff cards already carry the
+/// patch rail and line gutters; observation cards fold under their call's
+/// intent, where a nested frame would be redundant.
+pub(super) fn render_card_unframed(card: &Card, width: usize, at: Detail) -> Vec<Line<'static>> {
     let mut ls = vec![Line::default()];
     for mark in card.marks() {
-        ls.extend(render_mark(mark, at));
+        ls.extend(render_mark(mark, width, at));
     }
     ls
 }
@@ -611,7 +636,7 @@ pub(super) fn render_card_unframed(card: &Card, at: Detail) -> Vec<Line<'static>
 /// cards render unframed and do not pay this inset.
 pub(super) const CARD_INDENT: usize = 2;
 
-/// A deliberately bounded card at `indent_w`. General surfaced cards and
+/// A card boxed to its natural width at `indent_w`. General surfaced cards and
 /// fixed placements use this path; transcript diffs use [`render_card_unframed`].
 pub(super) fn render_card_framed(
     card: &Card,
@@ -619,14 +644,7 @@ pub(super) fn render_card_framed(
     width: u16,
     at: Detail,
 ) -> Vec<Line<'static>> {
-    render_framed(
-        card,
-        indent_w,
-        Style::default().fg(SLATE),
-        width.min(READ_CONTENT_W),
-        false,
-        at,
-    )
+    render_framed(card, indent_w, Style::default().fg(SLATE), width, false, at)
 }
 
 /// A card whose frame fills its placement's width.
@@ -636,14 +654,7 @@ pub(super) fn render_filled_card(
     width: u16,
     at: Detail,
 ) -> Vec<Line<'static>> {
-    render_framed(
-        card,
-        indent_w,
-        Style::default().fg(SLATE),
-        width.min(READ_CONTENT_W),
-        true,
-        at,
-    )
+    render_framed(card, indent_w, Style::default().fg(SLATE), width, true, at)
 }
 
 const REGISTER_CARD_MARGIN: usize = 2;
@@ -669,9 +680,9 @@ pub(super) fn render_pin(card: &Card, width: u16, hue: Color) -> Vec<Line<'stati
 }
 
 /// The framed-card renderer behind [`render_card_framed`] and [`render_pin`]: a
-/// box `indent_w` columns in, drawn in `border`, content wrapped to a budget
-/// from `width` — which the caller has already capped. `at` reaches only a
-/// `diff` mark; every other mark ignores it.
+/// box `indent_w` columns in, drawn in `border`, its marks laid out at the
+/// budget `width` leaves inside the frame. `at` reaches only a `diff` mark;
+/// every other mark ignores it.
 fn render_framed(
     card: &Card,
     indent_w: usize,
@@ -705,7 +716,7 @@ fn render_framed(
 
     let mut body: Vec<Line<'static>> = Vec::new();
     for mark in body_marks {
-        body.extend(render_mark(mark, at));
+        body.extend(render_mark(mark, max_inner, at));
     }
     let wrapped: Vec<Line<'static>> = body.iter().flat_map(|l| wrap_line(l, max_inner)).collect();
 
@@ -902,10 +913,10 @@ fn progress_bar(done: u32, total: u32) -> Vec<Span<'static>> {
     ]
 }
 
-/// A `fields` mark — selective alignment: every value lands in one shared
-/// column.  A single-span text value wraps under it; a multi-span value or a
-/// [`Measure`] renders inline on one row.
-fn render_fields(rows: &[CardField]) -> Vec<Line<'static>> {
+/// A `fields` mark at `width` — selective alignment: every value lands in one
+/// shared column.  A single-span text value wraps under it; a multi-span value
+/// or a [`Measure`] renders inline on one row.
+fn render_fields(rows: &[CardField], width: usize) -> Vec<Line<'static>> {
     let field_rows: Vec<FieldRow> = rows
         .iter()
         .map(|f| FieldRow {
@@ -926,7 +937,7 @@ fn render_fields(rows: &[CardField]) -> Vec<Line<'static>> {
             },
         })
         .collect();
-    render_field_rows(&field_rows, READ_CONTENT_W.into())
+    render_field_rows(&field_rows, width)
 }
 
 /// A `raw` mark — bytes appended verbatim as lossy UTF-8, unstyled: it is an
@@ -1058,7 +1069,7 @@ fn render_field_rows(rows: &[FieldRow], width: usize) -> Vec<Line<'static>> {
 /// are the literal output of the rail / bar / grain builders, not data a
 /// [`Role`] could name, so they arrive styled: the one place the TUI shows
 /// appearance, because appearance *is* the subject.
-pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>) -> Vec<Line<'static>> {
+pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>, width: u16) -> Vec<Line<'static>> {
     let rows: Vec<FieldRow> = rows
         .into_iter()
         .map(|(label, spans)| FieldRow {
@@ -1066,7 +1077,7 @@ pub(super) fn legend_rows(rows: Vec<(&str, Vec<Span<'static>>)>) -> Vec<Line<'st
             value: FieldValue::Inline(spans),
         })
         .collect();
-    render_field_rows(&rows, READ_CONTENT_W.into())
+    render_field_rows(&rows, width.into())
 }
 
 // ── Provider-error rendering ────────────────────────────────────────────────
@@ -1325,8 +1336,7 @@ fn prettify_embedded_json(s: &str) -> Cow<'_, str> {
 }
 
 /// Fold one logical line into visual rows no wider than `width`, word-aware and
-/// style-preserving.  The builders already lay out within [`READ_W`], so a
-/// terminal at least that wide gets the line straight back.
+/// style-preserving.  A line that already fits comes straight back.
 ///
 /// Continuations re-indent to the line's own leading whitespace, so a wrapped
 /// prompt echo or code row folds under its content rather than sliding to

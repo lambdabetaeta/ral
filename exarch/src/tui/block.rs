@@ -90,7 +90,7 @@ impl Chrome {
             Self::Cancelled => line::note("cancelled"),
             Self::Settled(spans) | Self::Spawned(spans) => text(line::render_text(spans)),
             Self::Opening(card) => banner::opening(card, width),
-            Self::Legend => banner::legend_panel(),
+            Self::Legend => text(banner::legend_panel(width)),
             Self::Framed(card) => {
                 line::render_card_framed(card, line::CARD_INDENT, width, Detail::Full)
             }
@@ -858,11 +858,11 @@ impl Block {
                 if !card.has_diff() && *landing == Landing::Surfaced {
                     line::render_card_framed(card, line::CARD_INDENT, width, at)
                 } else {
-                    line::render_card_unframed(card, at)
+                    line::render_card_unframed(card, width.into(), at)
                 }
             }
             BlockKind::Tool { details } => match details {
-                Some(q) => line::tool_call_static(q),
+                Some(q) => line::tool_call_static(q, width),
                 None => Vec::new(),
             },
             // A notice is not prose: it sits in its own gap, one blank row

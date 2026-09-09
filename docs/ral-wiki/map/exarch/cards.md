@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 109eb9be
+generated_at_commit: f003a8e9
 generated_at_date: 2026-09-09
 covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
@@ -119,7 +119,12 @@ recorded ([[map/exarch/agent|agent]]).
 
 ## Render — one interpreter, one binding table
 
-`render_card_unframed(&Card, level)` (`tui/line.rs`) walks the marks; `role_style(Role)`
+`render_card_unframed(&Card, width, level)` (`tui/line.rs`) walks the marks at
+the width the block is shown at: `render_mark` hands that width to every arm, so
+a `text` folds to it, a `fields` mark aligns its column within it, and a `diff`
+measures its line-number gutter against it and wraps each body into what is
+left. A card is never laid out at a fixed budget and wrapped a second time.
+`role_style(Role)`
 (over the palette constants in `tui/palette.rs`) is the **single place hue
 lives** for kit content, so the kit can name a role but never a colour, and
 magnitude can never land on hue — the encoding is correct by construction. The quantitative encoders are reused, not duplicated: `measure`
@@ -135,7 +140,9 @@ first content row. A diff-less card the model *surfaced* deliberately renders as
 a box with its heading lifted into the top rule, no rail glyph (the frame is its
 mark, see [[map/exarch/frontend|frontend]]).
 
-`render_card_framed` takes the box's left indent rather than owning one, so where a card
+`render_card_framed` boxes the width it is given — the reading measure is the
+pane's, capped once by `Scrollback::render_window`, never re-applied per
+builder. It takes the box's left indent rather than owning one, so where a card
 sits is a property of the placement that asks for it: `CARD_INDENT` (2, prose's
 column, so the text inside lands level with a call's effect rows) for the
 transcript, `banner::OPENING_INDENT` for the session card, which shares the
