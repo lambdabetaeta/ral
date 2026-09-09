@@ -72,7 +72,7 @@ impl Shell {
     /// # Errors
     /// `Err` if the active grant denies the command, or admits only a
     /// subcommand set that `args`'s first element misses.
-    pub fn check_exec_call(
+    pub(crate) fn check_exec_call(
         &mut self,
         display_name: &str,
         deny_names: &[&str],
@@ -149,7 +149,7 @@ impl Shell {
     ///
     /// # Errors
     /// The grant's refusal, on the object or on the name.
-    pub fn locate_existing(
+    pub(crate) fn locate_existing(
         &mut self,
         path: &crate::path::ResolvedPath,
         op: &FsOp,
@@ -198,13 +198,14 @@ impl Shell {
 
     /// Whether the live stack permits birthing a process this session stops
     /// owning.  Read at the `detach` call, so an enclosing `grant` frame binds.
-    pub fn permits_detach(&self) -> bool {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn permits_detach(&self) -> bool {
         self.context.grants.permits_detach()
     }
 
     /// The guest process jail installed on this session — `None` anywhere but
     /// a real Linux guest.
-    pub fn guest_jail(&self) -> Option<std::sync::Arc<crate::process::jail::GuestJail>> {
+    pub(crate) fn guest_jail(&self) -> Option<std::sync::Arc<crate::process::jail::GuestJail>> {
         self.session.guest_jail.clone()
     }
 }

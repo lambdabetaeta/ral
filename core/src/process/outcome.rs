@@ -34,7 +34,8 @@ impl Signal {
         Self { number }
     }
 
-    pub const fn number(self) -> i32 {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) const fn number(self) -> i32 {
         self.number
     }
 
@@ -83,14 +84,14 @@ impl Signal {
     }
 
     /// Format the signal as `N (SIGNAME)` when known.
-    pub fn display(self) -> String {
+    pub(crate) fn display(self) -> String {
         match self.name() {
             Some(name) => format!("{} ({name})", self.number),
             None => self.number.to_string(),
         }
     }
 
-    pub fn is_sigkill(self) -> bool {
+    pub(crate) fn is_sigkill(self) -> bool {
         #[cfg(unix)]
         {
             self.number == libc::SIGKILL
@@ -103,7 +104,7 @@ impl Signal {
 
     /// A signal on ral's own [`TEARDOWN_LADDER`] — the only ones a cancelled
     /// wait may claim as its doing.
-    pub fn is_teardown(self) -> bool {
+    pub(crate) fn is_teardown(self) -> bool {
         #[cfg(unix)]
         {
             TEARDOWN_LADDER.contains(&self.number)
@@ -114,7 +115,7 @@ impl Signal {
         }
     }
 
-    pub fn is_sigsegv(self) -> bool {
+    pub(crate) fn is_sigsegv(self) -> bool {
         #[cfg(unix)]
         {
             self.number == libc::SIGSEGV
@@ -126,7 +127,7 @@ impl Signal {
     }
 
     /// The shell convention for a signal death, 128 + N.
-    pub fn user_exit_code(self) -> i32 {
+    pub(crate) fn user_exit_code(self) -> i32 {
         128 + self.number
     }
 }
@@ -135,9 +136,10 @@ impl Signal {
 /// answers every stop itself, with `SIGCONT`, and posts nothing for it, so
 /// no terminal reader is ever handed one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WaitOutcome {
+pub(crate) enum WaitOutcome {
     Exited(i32),
     /// A signal death nobody in ral asked for.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Signaled(Signal),
     /// A signal death ral itself caused: a scope carried `cause`, and the
     /// teardown in `RunningChild::wait` sent `signal`.  Its own variant so that
@@ -152,7 +154,7 @@ pub enum WaitOutcome {
 
 impl WaitOutcome {
     /// Classify a platform `ExitStatus` without collapsing signal death into a code.
-    pub fn from_exit_status(status: std::process::ExitStatus) -> Self {
+    pub(crate) fn from_exit_status(status: std::process::ExitStatus) -> Self {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
@@ -196,14 +198,15 @@ impl WaitOutcome {
         }
     }
 
-    pub fn to_user_exit_code(self) -> i32 {
+    #[cfg_attr(not(all(unix, test)), allow(dead_code))]
+    pub(crate) fn to_user_exit_code(self) -> i32 {
         match self {
             Self::Exited(code) | Self::NativeCode(code) => code,
             Self::Signaled(sig) | Self::Cancelled { signal: sig, .. } => sig.user_exit_code(),
         }
     }
 
-    pub fn is_success(self) -> bool {
+    pub(crate) fn is_success(self) -> bool {
         matches!(self, Self::Exited(0) | Self::NativeCode(0))
     }
 
@@ -211,7 +214,7 @@ impl WaitOutcome {
     /// form counts: which *reason* the kill had is `sent`'s to say, not this
     /// predicate's — a cancellation in force outranks forgiveness, since
     /// `Option<CancelCause>` orders a stronger cause above `ReaderGone`.
-    pub fn is_stage_kill(self) -> bool {
+    pub(crate) fn is_stage_kill(self) -> bool {
         #[cfg(unix)]
         {
             matches!(
@@ -262,7 +265,7 @@ impl CommandFailure {
     /// too: a death by a signal on ral's own ladder, with a cause in `sent`,
     /// is ral's doing whichever teardown sent it — and, for an `enveloped`
     /// child, so is bwrap's `128 + n` exit for the payload's death by `n`.
-    pub fn from_outcome(
+    pub(crate) fn from_outcome(
         outcome: WaitOutcome,
         sent: Option<CancelCause>,
         enveloped: bool,
@@ -294,7 +297,7 @@ impl CommandFailure {
 
     /// The follow-up line under the message.  `None` for a plain exit code, where
     /// `Error::from_command_failure` falls back to the user's exit-hints table.
-    pub fn default_hint(&self, cmd: &str) -> Option<String> {
+    pub(crate) fn default_hint(&self, cmd: &str) -> Option<String> {
         match self {
             Self::ExitCode(_) | Self::Spawn(_) => None,
             Self::Signal(sig) if sig.is_sigkill() => Some(
@@ -315,7 +318,7 @@ impl CommandFailure {
     }
 
     /// The conventional numeric code — POSIX's 127 for not found, 126 for cannot-run.
-    pub fn to_user_exit_code(&self) -> i32 {
+    pub(crate) fn to_user_exit_code(&self) -> i32 {
         match self {
             Self::ExitCode(code) => *code,
             Self::Signal(sig) | Self::Cancelled { signal: sig, .. } => sig.user_exit_code(),

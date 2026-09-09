@@ -2,9 +2,9 @@
 //! verbs (`run_phrases`) that thread a session, a `source`, or a `use` over
 //! it.
 
-pub mod audit;
+pub(crate) mod audit;
 pub(crate) mod capture;
-pub mod expr;
+pub(crate) mod expr;
 pub(crate) mod machine;
 pub(crate) mod observe;
 pub(crate) mod pattern;
@@ -14,7 +14,7 @@ pub(crate) mod val;
 
 use crate::ir::{Comp, Phrase};
 use crate::source::Spanned;
-use crate::types::{Break, Env, Mooring, Settled, Shell, Value};
+use crate::types::{Break, Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
 pub(crate) use capture::with_audit_capture;
@@ -29,8 +29,8 @@ pub(crate) struct Ran {
     /// `Mode::Session`.
     pub env: Env,
     /// Every name a `Define` bound, in order — what `use` collects.
-    pub defined: Vec<String>,
-    pub outcome: Settled<Value>,
+    pub(crate) defined: Vec<String>,
+    pub(crate) outcome: Settled<Value>,
 }
 
 /// Whose phrases these are.  Leases and the PATH-shadow check belong to
@@ -222,13 +222,12 @@ fn run_phrase_source(
     };
     let path_val = machine::evaluate(closure, mooring, shell)?;
     let Value::String(p) = path_val else {
-        return Err(shell
-            .err_hint(
-                format!("source: expected String, got {}", path_val.type_name()),
-                "the path to `source` must be a computation of type F String",
-                1,
-            )
-            .into());
+        return Err(Error::new(
+            format!("source: expected String, got {}", path_val.type_name()),
+            1,
+        )
+        .with_hint("the path to `source` must be a computation of type F String")
+        .into());
     };
     let ran = crate::builtins::modules::source(&p, env.clone(), mode, span, mooring, shell)?;
     *env = ran.env;

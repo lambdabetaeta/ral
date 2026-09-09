@@ -45,9 +45,11 @@ diffutils = ["dep:diffutils", "dep:same-file"]
 grep      = ["dep:grep", "dep:walkdir"]
 ripgrep   = ["dep:ral-ripgrep-core"]
 
-# Opt-in gate for the heavier sandbox integration tests (the macOS
-# Seatbelt end-to-end fail-closed target).  Off by default so a plain
-# `cargo test` skips them on hosts that cannot run the OS sandbox.
+# Everything core's own test binaries need and no host may: the heavier
+# sandbox integration targets, and `test_access`'s doors onto internals the
+# tests assert on.  Off for a host build — that is the point, since an item
+# only a test reaches is then `pub(crate)` and `dead_code` can see it — and
+# on for every dev target of this package, via the self-dev-dependency below.
 test-util = []
 
 [dependencies]
@@ -124,6 +126,11 @@ uu_whoami    = { version = "0.10", optional = true }
 
 [dev-dependencies]
 ctor = "1"
+# cargo's idiom for "this feature is on whenever my own tests build": the
+# tests are targets of this package, so they cannot select it through a
+# dependency line of their own.  Without it a bare `cargo test -p ral-core`
+# would compile test files that name `test_access` and fail.
+ral-core = { path = ".", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

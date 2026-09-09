@@ -38,7 +38,11 @@ impl Shell {
     /// [`with_capabilities`](Self::with_capabilities) for a whole ceiling: every
     /// layer of `stack` is pushed for `f`'s dynamic extent and popped after —
     /// never folded into one frame, since the stack is the meet.
-    pub fn with_layers<R>(&mut self, stack: GrantStack, f: impl FnOnce(&mut Self) -> R) -> R {
+    pub(crate) fn with_layers<R>(
+        &mut self,
+        stack: GrantStack,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
         let depth = stack.len();
         for layer in stack {
             self.context.grants.push(layer);
@@ -89,22 +93,8 @@ impl Shell {
     }
 
     /// True when a non-root capabilities layer is active.
-    pub fn has_active_capabilities(&self) -> bool {
+    pub(crate) fn has_active_capabilities(&self) -> bool {
         self.context.grants.is_restrictive()
-    }
-
-    /// Run `f` with `overrides` merged into the ambient environment — the
-    /// `within [env: …]` pair.
-    pub fn with_env<R>(
-        &mut self,
-        overrides: std::collections::HashMap<String, String>,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let saved = self.context.env_overrides.clone();
-        self.context.extend_env(overrides);
-        let result = f(self);
-        self.context.env_overrides = saved;
-        result
     }
 
     /// Run `f` with `cwd` as the ambient working directory — the
@@ -130,21 +120,6 @@ impl Shell {
     /// Restore a `within [dir: …]` override saved by [`Self::swap_cwd_override`].
     pub(crate) fn restore_cwd_override(&mut self, saved: Option<std::path::PathBuf>) {
         self.context.dir = saved;
-    }
-
-    /// Run `f` with a handler frame pushed for its dynamic extent — the
-    /// `within [handlers: …, handler: …]` pair.  The frame's handle is minted
-    /// and spent here, so callers never track one.
-    pub fn with_handlers<R>(
-        &mut self,
-        entries: Vec<HandlerEntry>,
-        catch_all: Option<Value>,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let handle = self.context.handlers.push(entries, catch_all);
-        let result = f(self);
-        self.context.handlers.remove_by_handle(handle);
-        result
     }
 
     /// Install `thunk` as the alias for `name`, replacing any existing one.
@@ -238,7 +213,7 @@ impl Shell {
     /// `` `largest-binding-bytes `` probe's reading, taken by reference: a
     /// probe that cloned the scope to size it would be its own cautionary
     /// tale.
-    pub fn largest_binding_shallow_size(&self) -> usize {
+    pub(crate) fn largest_binding_shallow_size(&self) -> usize {
         self.env.largest_shallow_size()
     }
 
@@ -294,7 +269,7 @@ impl Shell {
     /// The winning handler for `name` — a run frame (with its depth) or a
     /// base frame.  A named run-frame entry at any depth outranks every
     /// catch-all, and a base frame outranks a catch-all too.
-    pub fn lookup_handler(&self, name: &str) -> Option<crate::types::HandlerLookup> {
+    pub(crate) fn lookup_handler(&self, name: &str) -> Option<crate::types::HandlerLookup> {
         self.context.handlers.lookup(name)
     }
 }

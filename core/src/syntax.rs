@@ -6,7 +6,7 @@ mod free_refs;
 pub(crate) mod group;
 pub mod lexer;
 pub mod parser;
-pub mod quote;
+pub(crate) mod quote;
 pub mod tag;
 
 pub use quote::{is_bare_word, quote_word, quote_word_if_needed};

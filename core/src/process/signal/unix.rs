@@ -368,7 +368,7 @@ impl ForegroundGuard {
     /// termios for the restore.  `None` when the pgid handoff itself fails, so
     /// there is then nothing to restore; a failed termios snapshot is not fatal
     /// and leaves only the pgid half to put back on drop.
-    pub fn try_acquire(target: i32, _lease: &crate::process::TerminalLease) -> Option<Self> {
+    pub(crate) fn try_acquire(target: i32, _lease: &crate::process::TerminalLease) -> Option<Self> {
         if target <= 0 {
             return None;
         }

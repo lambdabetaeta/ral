@@ -19,7 +19,7 @@ pub struct Binding {
     pub value: Value,
     /// Shared, not owned: a scheme dwarfs the value it describes, and every
     /// `bind` into a shared environment copies a whole node of these.
-    pub scheme: Option<Arc<Scheme>>,
+    pub(crate) scheme: Option<Arc<Scheme>>,
 }
 
 /// Every key hashed below is a program identifier, never attacker-controlled
@@ -111,43 +111,37 @@ impl Env {
     /// The whole [`Binding`] for `name`: `bindings`, then `prelude`.  Natives
     /// carry no [`Binding`] — no scheme, no source location — so a native-only
     /// hit answers [`None`] here even though [`Self::get`] resolves it.
-    pub fn get_binding(&self, name: &str) -> Option<&Binding> {
+    pub(crate) fn get_binding(&self, name: &str) -> Option<&Binding> {
         self.bindings.get(name).or_else(|| self.prelude.get(name))
-    }
-
-    /// Every native's name — a host's tab completion or listing surface, the
-    /// native-scope counterpart of [`crate::types::BuiltinTable::names`].
-    pub fn native_names(&self) -> impl Iterator<Item = &str> {
-        self.natives.keys().map(String::as_str)
     }
 
     /// The prelude [`Binding`] for `name`; it carries the checker's harvested
     /// scheme, so a prelude function's type needs no separate registry.
-    pub fn prelude_binding(&self, name: &str) -> Option<&Binding> {
+    pub(crate) fn prelude_binding(&self, name: &str) -> Option<&Binding> {
         self.prelude.get(name)
     }
 
     /// The session [`Binding`] for `name` — everything bound since the
     /// prelude, skipping it.  What `help`'s local-site lookups want.
-    pub fn session_binding(&self, name: &str) -> Option<&Binding> {
+    pub(crate) fn session_binding(&self, name: &str) -> Option<&Binding> {
         self.bindings.get(name)
     }
 
     /// Every name bound since the prelude — what the binding lease adopts.
-    pub fn session_names(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn session_names(&self) -> impl Iterator<Item = &str> {
         self.bindings.keys().map(String::as_str)
     }
 
     /// Bind `name` in the session tier, replacing any existing binding —
     /// persistent, so an environment a closure already captured is
     /// unaffected.
-    pub fn bind(&mut self, name: String, binding: Binding) {
+    pub(crate) fn bind(&mut self, name: String, binding: Binding) {
         self.bindings.insert(name, binding);
     }
 
     /// Remove `name` from the session tier, returning its value; a prelude
     /// name of the same spelling reappears beneath.
-    pub fn unset(&mut self, name: &str) -> Option<Value> {
+    pub(crate) fn unset(&mut self, name: &str) -> Option<Value> {
         self.bindings
             .remove(name)
             .map(|mut b| std::mem::replace(&mut b.value, Value::Unit))
@@ -204,7 +198,7 @@ impl Env {
     }
 
     /// Largest binding's shallow byte estimate, session wins, no value cloned.
-    pub fn largest_shallow_size(&self) -> usize {
+    pub(crate) fn largest_shallow_size(&self) -> usize {
         self.fold_union(|b| b.value.shallow_size())
             .into_iter()
             .map(|(_, size)| size)
@@ -213,13 +207,13 @@ impl Env {
     }
 
     /// Every binding across prelude and session, session wins.
-    pub fn all_bindings(&self) -> Vec<(String, Value)> {
+    pub(crate) fn all_bindings(&self) -> Vec<(String, Value)> {
         self.fold_union(|b| b.value.clone())
     }
 
     /// Distinct bound names across prelude and session, a shadowed name
     /// counted once.
-    pub fn distinct_name_count(&self) -> usize {
+    pub(crate) fn distinct_name_count(&self) -> usize {
         let mut seen = std::collections::HashSet::new();
         seen.extend(self.bindings.keys().map(String::as_str));
         seen.extend(self.prelude.keys().map(String::as_str));
@@ -336,16 +330,16 @@ impl EnvVars {
 
     /// Look up `key`, this override map first, then the host process env.  The
     /// one home of that fallback: no caller should spell it out again.
-    pub fn get_or_host(&self, key: &str) -> Option<String> {
+    pub(crate) fn get_or_host(&self, key: &str) -> Option<String> {
         self.get(key).cloned().or_else(|| std::env::var(key).ok())
     }
 
-    pub fn insert(&mut self, key: String, value: String) -> Option<String> {
+    pub(crate) fn insert(&mut self, key: String, value: String) -> Option<String> {
         self.0.insert(key, value)
     }
 
     /// Insert only if `key` is unbound, without leaking imbl's `Entry` type.
-    pub fn insert_or_keep(&mut self, key: String, value: String) {
+    pub(crate) fn insert_or_keep(&mut self, key: String, value: String) {
         self.0.entry(key).or_insert_with(|| value);
     }
 

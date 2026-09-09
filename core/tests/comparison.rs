@@ -9,16 +9,11 @@
 
 mod common;
 
+use common::fresh_shell;
+
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{Break, GrantStack, Settled, Shell, Value};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
-
-fn fresh_shell() -> Shell {
-    let mut shell = Shell::default();
-    shell.seed_default_env_vars();
-    builtins::register(&mut shell, common::prelude_comp());
-    shell
-}
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
 /// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source

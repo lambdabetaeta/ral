@@ -23,7 +23,7 @@ use crate::types::BuiltinTable;
 ///
 /// A base frame names one directly, the same as any value builtin — an argv
 /// is one argument of one type, not a list of slots to diagnose one by one.
-pub type BuiltinTypeRule = fn(&mut Unifier) -> Scheme;
+pub(crate) type BuiltinTypeRule = fn(&mut Unifier) -> Scheme;
 
 /// The `Fun`-nesting depth of a scheme factory's curried body — instantiated
 /// fresh, since a factory needs a live [`Unifier`] to run.  A builtin's
@@ -47,7 +47,7 @@ pub(crate) fn scheme_curry_depth(factory: BuiltinTypeRule) -> usize {
 /// Extra non-typing behaviour a builtin's [`crate::types::BuiltinEntry`]
 /// carries: which diagnostic an over-application or a literal misuse earns.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinDiagnostic {
+pub(crate) enum BuiltinDiagnostic {
     None,
     FailStatusNonzero,
     /// A `from-*` decoder: an argument is not an arity slip but a misreading
@@ -86,7 +86,7 @@ pub fn pure(ty: Ty) -> CompTy {
 }
 /// An encoder's or terminal write's result: the byte channel itself is the
 /// payload, so WF-2 pins the value to `Unit`.
-pub fn ret_bytes() -> CompTy {
+pub(crate) fn ret_bytes() -> CompTy {
     CompTy::Return(PayloadRoute::Bytes, Box::new(Ty::Unit))
 }
 
@@ -98,6 +98,13 @@ pub fn ret_bytes() -> CompTy {
 //
 // It expands only inside `mod scheme` below, whose imports are what the
 // expansion resolves against.
+//
+// The arms expand to `pub fn`, deliberately: this one family sits outside the
+// `pub(crate)`-by-default discipline
+// (`docs/ral-wiki/decisions/260909_pub-crate-by-default.md`).  Per-arm
+// visibility would mean threading a `$vis` through every call site to narrow
+// members that a base frame's row already names — and a row is a caller, so no
+// member of this family can be stranded silently the way a loose function can.
 
 macro_rules! scheme {
     // scheme!(temp_path: pure Ty::String);
@@ -353,7 +360,7 @@ fn poll_variant(value_ty: Ty) -> Ty {
 }
 
 /// The record type returned by `list-dir` for each directory entry.
-pub fn fs_list_entry_ty() -> Ty {
+pub(crate) fn fs_list_entry_ty() -> Ty {
     closed_record(&[
         ("name", Ty::String),
         ("type", Ty::String),
@@ -365,7 +372,7 @@ pub fn fs_list_entry_ty() -> Ty {
 /// The record type returned by `file-info`: [`fs_list_entry_ty`]'s fields plus
 /// access and birth times, the readonly bit, and the symlink `target` (the
 /// empty string for non-symlinks).
-pub fn fs_file_info_ty() -> Ty {
+pub(crate) fn fs_file_info_ty() -> Ty {
     closed_record(&[
         ("name", Ty::String),
         ("type", Ty::String),
@@ -394,7 +401,7 @@ pub mod scheme {
 
     /// `surface :: ∀ρ. Variant ρ → F ()` — forward a tagged event to the host's
     /// event sink.  The row stays open: the host decides which tags it knows.
-    pub fn surface_op(u: &mut Unifier) -> Scheme {
+    pub(crate) fn surface_op(u: &mut Unifier) -> Scheme {
         let row = u.fresh_row_var();
         mk_scheme(
             &[],
@@ -419,7 +426,7 @@ pub mod scheme {
     }
 
     /// `has :: ∀α. Map<α> → Str → F Bool`
-    pub fn has(u: &mut Unifier) -> Scheme {
+    pub(crate) fn has(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         mk_scheme(
             &[av],
@@ -443,7 +450,7 @@ pub mod scheme {
     }
 
     /// `map :: ∀α β ρ. U(α → F[ρ] β) → [α] → F [β]`
-    pub fn map_op(u: &mut Unifier) -> Scheme {
+    pub(crate) fn map_op(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
         let (rv, cb_result) = callback_result(u, b.clone());
@@ -459,7 +466,7 @@ pub mod scheme {
     }
 
     /// `filter :: ∀α ρ. U(α → F[ρ] Bool) → [α] → F [α]`
-    pub fn filter_op(u: &mut Unifier) -> Scheme {
+    pub(crate) fn filter_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         let (rv, cb_result) = callback_result(u, Ty::Bool);
@@ -475,7 +482,7 @@ pub mod scheme {
     }
 
     /// `each :: ∀α β ρ. U(α → F[ρ] β) → [α] → F Unit`
-    pub fn each_op(u: &mut Unifier) -> Scheme {
+    pub(crate) fn each_op(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
         let (rv, cb_result) = callback_result(u, b);
@@ -491,7 +498,7 @@ pub mod scheme {
     }
 
     /// `fold :: ∀α β ρ. U(β → α → F[ρ] β) → β → [α] → F β`
-    pub fn fold_op(u: &mut Unifier) -> Scheme {
+    pub(crate) fn fold_op(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
         let (rv, cb_result) = callback_result(u, b.clone());
@@ -507,7 +514,7 @@ pub mod scheme {
     }
 
     /// `sort-list :: ∀α. [α] → F [α]`
-    pub fn sort_list(u: &mut Unifier) -> Scheme {
+    pub(crate) fn sort_list(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         mk_scheme(
@@ -522,7 +529,7 @@ pub mod scheme {
     }
 
     /// `sort-list-by :: ∀α β ρ. U(α → F[ρ] β) → [α] → F [α]`
-    pub fn sort_list_by(u: &mut Unifier) -> Scheme {
+    pub(crate) fn sort_list_by(u: &mut Unifier) -> Scheme {
         let (av, bv) = (u.fresh_tyvar(), u.fresh_tyvar());
         let (a, b) = (Ty::Var(av), Ty::Var(bv));
         let (rv, cb_result) = callback_result(u, b);
@@ -554,7 +561,7 @@ pub mod scheme {
     scheme!(slice: [Ty::String, Ty::Int, Ty::Int] -> Ty::String);
 
     /// `intercalate :: ∀α. Str → [α] → F Str`
-    pub fn intercalate(u: &mut Unifier) -> Scheme {
+    pub(crate) fn intercalate(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         mk_scheme(
             &[av],
@@ -570,7 +577,7 @@ pub mod scheme {
     // ── File system & paths ──────────────────────────────────────────────
 
     /// `list-dir :: Str → F [{name, type, size, mtime}]`
-    pub fn list_dir(_u: &mut Unifier) -> Scheme {
+    pub(crate) fn list_dir(_u: &mut Unifier) -> Scheme {
         mk_scheme(
             &[],
             &[],
@@ -583,7 +590,7 @@ pub mod scheme {
     }
 
     /// `file-info :: Str → F {…full stat…}`
-    pub fn file_info(_u: &mut Unifier) -> Scheme {
+    pub(crate) fn file_info(_u: &mut Unifier) -> Scheme {
         mk_scheme(
             &[],
             &[],
@@ -609,7 +616,7 @@ pub mod scheme {
     /// accumulator comes home as a value.  WF-2 survives the forwarding: at
     /// `ρ = Bytes` the callback's own value is `Unit`, and `α` is what the
     /// reducer returns.
-    pub fn fold_lines(u: &mut Unifier) -> Scheme {
+    pub(crate) fn fold_lines(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         let rv = u.fresh_routevar();
@@ -645,7 +652,7 @@ pub mod scheme {
     }
 
     /// `watch :: ∀α ρ. String → U(F[ρ] α) → F (Handle α)`
-    pub fn watch(u: &mut Unifier) -> Scheme {
+    pub(crate) fn watch(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         let rv = u.fresh_routevar();
@@ -665,7 +672,7 @@ pub mod scheme {
     /// scheme, the leading `String` being the mandatory birth description.
     ///
     /// The durable lease class is a runtime fact, invisible to the types.
-    pub fn service(u: &mut Unifier) -> Scheme {
+    pub(crate) fn service(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         let rv = u.fresh_routevar();
@@ -682,7 +689,7 @@ pub mod scheme {
     }
 
     /// `await :: ∀α. Handle α → F {value, stdout, stderr}`
-    pub fn await_op(u: &mut Unifier) -> Scheme {
+    pub(crate) fn await_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         mk_scheme(
@@ -694,7 +701,7 @@ pub mod scheme {
     }
 
     /// `poll :: ∀α. Handle α → F <pending: {stdout, stderr} | settled: {stdout, stderr, outcome: <ok: α | err: ErrRecord>}>`
-    pub fn poll(u: &mut Unifier) -> Scheme {
+    pub(crate) fn poll(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         mk_scheme(
@@ -706,7 +713,7 @@ pub mod scheme {
     }
 
     /// `race :: ∀α. [Handle α] → F {value, stdout, stderr}`
-    pub fn race(u: &mut Unifier) -> Scheme {
+    pub(crate) fn race(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let a = Ty::Var(av);
         mk_scheme(
@@ -721,7 +728,7 @@ pub mod scheme {
     }
 
     /// `cancel :: ∀α. Handle α → F Unit`
-    pub fn cancel_op(u: &mut Unifier) -> Scheme {
+    pub(crate) fn cancel_op(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         mk_scheme(
             &[av],
@@ -743,7 +750,7 @@ pub mod scheme {
     /// `echo :: [Str] → F[Bytes] ()` — join the argv with single spaces and
     /// write it with a trailing newline.  Byte-routed, so pipeline typing
     /// reads it as the write it is.
-    pub fn echo(_u: &mut Unifier) -> Scheme {
+    pub(crate) fn echo(_u: &mut Unifier) -> Scheme {
         base_frame(&[], CompTy::bytes())
     }
 
@@ -804,7 +811,7 @@ pub mod scheme {
     /// quantify (its `comp_ty_bindings` is always empty), so this goes
     /// through [`generalize`] instead, exactly as the templates it replaces
     /// did.
-    pub fn from_lines(u: &mut Unifier) -> Scheme {
+    pub(crate) fn from_lines(u: &mut Unifier) -> Scheme {
         let step = lines_step_ty(u);
         generalize(u, &TyEnv::new(), &thunk(pure(step)))
     }
@@ -829,7 +836,7 @@ pub mod scheme {
     /// arity is checked elsewhere), so the comp var it mints must be
     /// quantified through [`generalize`], not [`mk_scheme`], for the same
     /// reason as [`from_lines`].
-    pub fn alias(u: &mut Unifier) -> Scheme {
+    pub(crate) fn alias(u: &mut Unifier) -> Scheme {
         let block = u.fresh_comp_ty();
         let body = fun(Ty::String, fun(thunk(block), pure(Ty::Unit)));
         generalize(u, &TyEnv::new(), &thunk(body))
@@ -849,7 +856,7 @@ pub mod scheme {
     /// fields `try` gave it.  Divergent, so its route and value join whatever
     /// the context needs rather than forcing `Unit` on the other arm of an
     /// `if`.
-    pub fn fail(u: &mut Unifier) -> Scheme {
+    pub(crate) fn fail(u: &mut Unifier) -> Scheme {
         let row = u.fresh_row_var();
         let av = u.fresh_tyvar();
         let rv = u.fresh_routevar();
@@ -866,7 +873,7 @@ pub mod scheme {
 
     /// `exit`/`quit` :: ∀α ρ. Int → F[ρ] α — a status, and no return.
     /// Divergent like [`fail`]; the elaborator sugars bare `exit` to `exit 0`.
-    pub fn exit(u: &mut Unifier) -> Scheme {
+    pub(crate) fn exit(u: &mut Unifier) -> Scheme {
         let av = u.fresh_tyvar();
         let rv = u.fresh_routevar();
         mk_scheme(
@@ -889,7 +896,7 @@ pub mod scheme {
 ///
 /// Resolution runs against `table`, the checked session's own surface, so a
 /// name means what that session evaluates.
-pub fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
+pub(crate) fn builtin_scheme(table: &BuiltinTable, name: &str, u: &mut Unifier) -> Option<Scheme> {
     Some((table.value(name)?.type_rule)(u))
 }
 
@@ -940,10 +947,10 @@ pub(in crate::typecheck) fn lines_step_ty(u: &mut Unifier) -> Ty {
 /// A per-key type schema, driving `check_map_entry_fields` in `super::infer`.
 /// `None` for a key leaves that entry runtime-dispatched: still inferred for its
 /// side-effects, but unified against nothing.
-pub type FieldSchema = fn(&str, &mut Unifier) -> Option<Ty>;
+pub(crate) type FieldSchema = fn(&str, &mut Unifier) -> Option<Ty>;
 
 /// Schema for rc plugin entries `[plugin: Str, options: Map]`.
-pub fn plugin_entry_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
+pub(crate) fn plugin_entry_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
     match key {
         "plugin" => Some(Ty::String),
         "options" => Some(Ty::Map(Box::new(u.fresh_ty()))),
@@ -956,7 +963,7 @@ pub fn plugin_entry_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
 /// typecheck time.
 ///
 /// Computed statuses and spreads still defer to the runtime.
-pub fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
+pub(crate) fn fail_status_is_zero_literal(args: &crate::ir::Args) -> bool {
     let Some(positional) = crate::ir::args::positional(args) else {
         return false;
     };

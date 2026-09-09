@@ -22,14 +22,14 @@
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{Watch, watch};
+pub(crate) use unix::{Watch, watch};
 #[cfg(unix)]
 pub(crate) use unix::{ensure_installed, kick};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{Watch, watch};
+pub(crate) use windows::{Watch, watch};
 
 /// No self-pipe on Windows: the console handler already runs on an ordinary
 /// thread, so a kick simply scans the cancel table itself.

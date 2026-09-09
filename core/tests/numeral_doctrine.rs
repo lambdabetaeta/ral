@@ -17,22 +17,16 @@
 
 mod common;
 
+use common::fresh_shell;
+
 use ral_core::builtins::{REPL_PRINT_PARAMS, pretty_print};
 use ral_core::ir::Val;
 use ral_core::protocol::{Program, Run};
-use ral_core::types::{GrantStack, Shell, Value, fmt_float};
+use ral_core::types::{GrantStack, Value, fmt_float};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.
-fn fresh_shell() -> Shell {
-    ral_core::boot::boot_shell(
-        ral_core::io::TerminalState::default(),
-        common::prelude(),
-        &ral_core::boot::HostSurface::default(),
-    )
-}
-
 /// What `src` writes to stdout, the run having succeeded.
 fn printed(src: &str) -> String {
     match fresh_shell().run(RunRequest {
@@ -272,7 +266,7 @@ fn a_canonical_spelling_is_a_fixed_point() {
 fn printing_a_float_then_classifying_returns_the_same_float() {
     for f in FLOAT_PROBES {
         let spelling = Value::Float(f).to_string();
-        match Val::from_word(&spelling) {
+        match ral_core::test_access::val_from_word(&spelling) {
             Val::Float(g) => assert_eq!(
                 g.to_bits(),
                 f.to_bits(),
@@ -291,7 +285,10 @@ fn printing_a_float_then_classifying_returns_the_same_float() {
 #[test]
 fn unit_is_an_ordinary_word_and_the_literal_is_punctuation() {
     assert_eq!(printed("echo unit"), "unit\n");
-    assert_eq!(Val::from_word("unit"), Val::String("unit".into()));
+    assert_eq!(
+        ral_core::test_access::val_from_word("unit"),
+        Val::String("unit".into())
+    );
     assert_eq!(
         pretty_print(&Value::Unit, 0, &REPL_PRINT_PARAMS),
         "()",

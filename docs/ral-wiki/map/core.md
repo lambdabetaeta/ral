@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 68f1964e
-generated_at_date: 2026-08-26
+generated_at_commit: 5b17290a
+generated_at_date: 2026-09-09
 covers_paths: [core/src/lib.rs]
 ---
 
@@ -13,14 +13,21 @@ evaluation.** It is the bulk of the codebase (~100k lines of Rust); both
 binaries, `ral` and [[map/exarch|exarch]], embed it.
 
 `core/src/lib.rs` is the front door. The compilation ladder is *source → tokens →
-flat AST → CBPV IR → typed IR*, bundled as two functions: `compile` (parse →
-elaborate) and `compile_and_typecheck` (parse → elaborate → typecheck →
-`CompileOutcome`), both returning a `Toplevel` — a sequence of phrases
+flat AST → CBPV IR → typed IR*, bundled as `compile_and_typecheck` (parse →
+elaborate → typecheck → `CompileOutcome`) and, crate-privately, `compile`
+(the same ladder without the checker), both returning a `Toplevel` — a sequence of phrases
 (`Define`/`Source`/`Run`) run by `evaluator::run_phrases`, which replaced the
 flat `Comp`-rooted top level. Evaluation is not on the crate root — `parse`,
 `elaborate`, and `Toplevel` are crate-private, reached by the owning module path
 when a host deliberately steps past the seam
 ([[decisions/260618_after-turn-api-simplifications|after-turn-api-simplifications]]).
+
+Reach is enforced rather than intended: an item is `pub` because something
+outside the crate names it, `pub(crate)` otherwise, so `dead_code` can name an
+internal whose last caller went away
+([[decisions/260909_pub-crate-by-default|pub-crate-by-default]]). Core's own
+integration tests link `ral-core` as an external crate and reach internals
+through one gated door, `core::test_access`.
 
 ## The evaluation seam
 

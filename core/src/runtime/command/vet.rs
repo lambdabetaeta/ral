@@ -35,7 +35,7 @@ pub(crate) struct SpawnPlan {
 /// `policy_names` may walk `PATH`.
 pub(crate) fn vet(id: &CommandIdentity, args: &[Value], shell: &mut Shell) -> Settled<SpawnPlan> {
     check_existence(id)?;
-    let arg_strs = validate_argv(id, args, shell)?;
+    let arg_strs = validate_argv(id, args)?;
     let policy_names = id.policy_names(&shell.context);
     let policy_refs: Vec<&str> = policy_names.iter().map(String::as_str).collect();
     let deny_names = id.deny_names_from(policy_names.clone());
@@ -90,9 +90,9 @@ fn check_existence(id: &CommandIdentity) -> Settled<()> {
 }
 
 /// Stringify `args`, refusing any shape the syscall boundary cannot carry.
-fn validate_argv(id: &CommandIdentity, args: &[Value], shell: &Shell) -> Settled<Vec<String>> {
+fn validate_argv(id: &CommandIdentity, args: &[Value]) -> Settled<Vec<String>> {
     for arg in args {
-        if let Some(sig) = reject_exec_arg(id, arg, shell) {
+        if let Some(sig) = reject_exec_arg(id, arg) {
             return Err(sig);
         }
     }
@@ -105,20 +105,19 @@ fn validate_argv(id: &CommandIdentity, args: &[Value], shell: &Shell) -> Settled
 /// The refused set is shared with the checker, which raises the same refusal as
 /// a static error wherever an argument's type is concrete.  This is the backstop
 /// for what polymorphism hid from it — a `$x` whose shape only the run knows.
-fn reject_exec_arg(id: &CommandIdentity, arg: &Value, shell: &Shell) -> Option<Break> {
+fn reject_exec_arg(id: &CommandIdentity, arg: &Value) -> Option<Break> {
     let cmd = id.shown.as_str();
     let refusal = RefusedArg::of_value(arg)?;
     Some(
-        shell
-            .err_hint(
-                format!(
-                    "cannot pass {} to external command '{cmd}'",
-                    arg.type_name()
-                ),
-                refusal.remedy(cmd),
-                1,
-            )
-            .into(),
+        Error::new(
+            format!(
+                "cannot pass {} to external command '{cmd}'",
+                arg.type_name()
+            ),
+            1,
+        )
+        .with_hint(refusal.remedy(cmd))
+        .into(),
     )
 }
 

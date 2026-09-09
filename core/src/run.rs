@@ -237,7 +237,7 @@ impl Shell {
     /// door a host takes when it must be able to cancel this run from another
     /// thread, including before the run has begun.  [`Shell::run`] is this door
     /// with the anchor.
-    pub fn run_under(&mut self, under: &ForegroundScope, req: RunRequest<'_>) -> RunReport {
+    pub(crate) fn run_under(&mut self, under: &ForegroundScope, req: RunRequest<'_>) -> RunReport {
         // A run is the extent of ral's picture of `PATH`: whatever happened to
         // the filesystem between runs is admitted here, and within a run a
         // walk is paid once per name.  Here and not in `enter` or `dispatch`,
@@ -253,7 +253,8 @@ impl Shell {
     /// enclosing run's mooring. Nesting is what makes the cancel tree the runs'
     /// LIFO extent: the nested run observes the interrupt its outer run already
     /// carries, and the outer run's wall reaches into the nest.
-    pub fn run_nested(&mut self, parent: &Mooring, req: RunRequest<'_>) -> RunReport {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn run_nested(&mut self, parent: &Mooring, req: RunRequest<'_>) -> RunReport {
         self.enter(&parent.cancel, req)
     }
 

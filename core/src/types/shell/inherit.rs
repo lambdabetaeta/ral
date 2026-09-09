@@ -29,7 +29,7 @@ impl Shell {
     /// along so the child resolves, renders, and describes as the parent does;
     /// the detach budget too, so a child that resolves `detach` spends the
     /// parent's births rather than a fresh allowance.
-    pub fn child_from(captured: &Env, parent: &Self) -> Self {
+    pub(crate) fn child_from(captured: &Env, parent: &Self) -> Self {
         let mut child = Self::from_captured(captured);
         child.context = parent.context.clone();
         child.local.audit.call_site = parent.local.audit.call_site;
@@ -93,7 +93,7 @@ impl Shell {
     ///
     /// # Errors
     /// Returns `Err` if the OS refuses to start the thread.
-    pub fn spawn_thread<F, R>(
+    pub(crate) fn spawn_thread<F, R>(
         &self,
         mooring: Mooring,
         name: &str,

@@ -23,8 +23,8 @@ use std::collections::HashSet;
 /// out, letting a sibling `τ → Int` root re-resolve to `Int`.
 #[derive(Default)]
 pub(super) struct Visited {
-    pub tys: HashSet<u32>,
-    pub comps: HashSet<u32>,
+    pub(crate) tys: HashSet<u32>,
+    pub(crate) comps: HashSet<u32>,
     cyclic_tys: HashSet<u32>,
     cyclic_comps: HashSet<u32>,
 }
@@ -278,7 +278,7 @@ impl Unifier {
     pub fn fresh_tyvar(&mut self) -> TyVar {
         TyVar(self.tys.fresh())
     }
-    pub fn fresh_ty(&mut self) -> Ty {
+    pub(crate) fn fresh_ty(&mut self) -> Ty {
         Ty::Var(self.fresh_tyvar())
     }
 
@@ -287,49 +287,49 @@ impl Unifier {
     }
     /// The unconstrained `F[μ] _`, for a head whose route is not yet known —
     /// a signature nobody declared, so it must constrain nothing.
-    pub fn fresh_route(&mut self) -> PayloadRoute {
+    pub(crate) fn fresh_route(&mut self) -> PayloadRoute {
         PayloadRoute::Var(self.fresh_routevar())
     }
 
-    pub fn fresh_comp_ty(&mut self) -> CompTy {
+    pub(crate) fn fresh_comp_ty(&mut self) -> CompTy {
         CompTy::Var(CompTyVar(self.ctys.fresh()))
     }
     pub fn fresh_row_var(&mut self) -> RowVar {
         RowVar(self.rows.fresh())
     }
-    pub fn fresh_row(&mut self) -> Row {
+    pub(crate) fn fresh_row(&mut self) -> Row {
         Row::Var(self.fresh_row_var())
     }
 
     /// Canonical comp-var root under union-find, for the cycle-aware traversals
     /// in `generalize.rs`.
-    pub fn comp_root(&mut self, i: u32) -> u32 {
+    pub(crate) fn comp_root(&mut self, i: u32) -> u32 {
         self.ctys.find(i)
     }
 
     /// Canonical ty-var root under union-find.  Mirror of `comp_root`.
-    pub fn ty_root(&mut self, i: u32) -> u32 {
+    pub(crate) fn ty_root(&mut self, i: u32) -> u32 {
         self.tys.find(i)
     }
 
     /// A fresh comp-var slot, as a root id.  Instantiation mints one per cyclic
     /// comp-var so each use of a recursive scheme gets independent slots.
-    pub fn fresh_comp_root(&mut self) -> u32 {
+    pub(crate) fn fresh_comp_root(&mut self) -> u32 {
         self.ctys.fresh()
     }
 
     /// Mirror of `fresh_comp_root` for cyclic ty bindings.
-    pub fn fresh_ty_root(&mut self) -> u32 {
+    pub(crate) fn fresh_ty_root(&mut self) -> u32 {
         self.tys.fresh()
     }
 
     /// Pairs with `fresh_comp_root`: the scheme's snapshot, substituted.
-    pub fn bind_comp_root(&mut self, root: u32, value: CompTy) {
+    pub(crate) fn bind_comp_root(&mut self, root: u32, value: CompTy) {
         self.ctys.bind(root, value);
     }
 
     /// Mirror of `bind_comp_root` for cyclic ty bindings.
-    pub fn bind_ty_root(&mut self, root: u32, value: Ty) {
+    pub(crate) fn bind_ty_root(&mut self, root: u32, value: Ty) {
         self.tys.bind(root, value);
     }
 
@@ -338,7 +338,7 @@ impl Unifier {
     /// the root*, never the stored body: one level below the anchor unrolls the
     /// cycle before the back-edge fires, so the snapshot comes out off by a
     /// level and leaks the original union-find slot there.
-    pub fn resolved_comp_root_binding(&mut self, root: u32) -> Option<CompTy> {
+    pub(crate) fn resolved_comp_root_binding(&mut self, root: u32) -> Option<CompTy> {
         match self.ctys.get(root) {
             Some(CompTy::Var(_)) | None => None,
             Some(_) => Some(self.apply_comp_ty(&CompTy::Var(CompTyVar(root)))),
@@ -346,7 +346,7 @@ impl Unifier {
     }
 
     /// Mirror of `resolved_comp_root_binding`; the same anchor-quoting applies.
-    pub fn resolved_ty_root_binding(&mut self, root: u32) -> Option<Ty> {
+    pub(crate) fn resolved_ty_root_binding(&mut self, root: u32) -> Option<Ty> {
         match self.tys.get(root) {
             Some(Ty::Var(_)) | None => None,
             Some(_) => Some(self.apply_ty(&Ty::Var(TyVar(root)))),
@@ -367,20 +367,20 @@ impl Unifier {
         (comps, tys)
     }
 
-    pub fn resolve_ty(&mut self, ty: &Ty) -> Ty {
+    pub(crate) fn resolve_ty(&mut self, ty: &Ty) -> Ty {
         self.tys.resolve(ty)
     }
 
-    pub fn resolve_comp_ty(&mut self, cty: &CompTy) -> CompTy {
+    pub(crate) fn resolve_comp_ty(&mut self, cty: &CompTy) -> CompTy {
         self.ctys.resolve(cty)
     }
 
-    pub fn resolve_route(&mut self, route: &PayloadRoute) -> PayloadRoute {
-        self.routes.resolve(route)
+    pub(crate) fn resolve_route(&mut self, route: PayloadRoute) -> PayloadRoute {
+        self.routes.resolve(&route)
     }
 
     /// Canonicalize the head; variables nested in the result stay unresolved.
-    pub fn resolve_row(&mut self, row: &Row) -> Row {
+    pub(crate) fn resolve_row(&mut self, row: &Row) -> Row {
         self.rows.resolve(row)
     }
 
@@ -402,17 +402,17 @@ impl Unifier {
         }
     }
 
-    pub fn apply_ty(&mut self, ty: &Ty) -> Ty {
+    pub(crate) fn apply_ty(&mut self, ty: &Ty) -> Ty {
         let mut visited = Visited::default();
         self.apply_ty_inner(ty, &mut visited)
     }
 
-    pub fn apply_comp_ty(&mut self, cty: &CompTy) -> CompTy {
+    pub(crate) fn apply_comp_ty(&mut self, cty: &CompTy) -> CompTy {
         let mut visited = Visited::default();
         self.apply_comp_ty_inner(cty, &mut visited)
     }
 
-    pub fn apply_row(&mut self, row: &Row) -> Row {
+    pub(crate) fn apply_row(&mut self, row: &Row) -> Row {
         let mut visited = Visited::default();
         self.apply_row_inner(row, &mut visited)
     }
@@ -503,7 +503,7 @@ impl Unifier {
         }
         let out = match resolved {
             CompTy::Return(route, a) => CompTy::Return(
-                self.resolve_route(&route),
+                self.resolve_route(route),
                 Box::new(self.apply_ty_inner(&a, visited)),
             ),
             CompTy::Fun(a, b) => CompTy::Fun(
@@ -640,7 +640,7 @@ impl Unifier {
     fn comp_key(&mut self, cty: &CompTy, depth: u32) -> Result<CompTyKey, TypeErrorKind> {
         Ok(match cty {
             CompTy::Return(route, t) => CompTyKey::Return(
-                self.resolve_route(route),
+                self.resolve_route(*route),
                 Box::new(self.ty_key(t, deeper(depth)?)?),
             ),
             CompTy::Fun(a, b) => CompTyKey::Fun(
@@ -669,7 +669,7 @@ impl Unifier {
     /// [`TypeErrorKind::TyMismatch`] on mismatched structure,
     /// [`TypeErrorKind::RecursiveRow`] from an embedded row, or
     /// [`TypeErrorKind::TypeTooDeep`].
-    pub fn unify_ty(&mut self, a: &Ty, b: &Ty) -> Result<(), TypeErrorKind> {
+    pub(crate) fn unify_ty(&mut self, a: &Ty, b: &Ty) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
         self.unify_ty_inner(a, b, &mut pairs, 0)
     }
@@ -771,7 +771,7 @@ impl Unifier {
     /// or carries a label, [`TypeErrorKind::TyMismatch`] on a clashing shared
     /// label or mixed alphabets, [`TypeErrorKind::RecursiveRow`] when there is
     /// no solution, or [`TypeErrorKind::TypeTooDeep`].
-    pub fn unify_row(&mut self, a: &Row, b: &Row) -> Result<(), TypeErrorKind> {
+    pub(crate) fn unify_row(&mut self, a: &Row, b: &Row) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
         let r = self.unify_row_inner(a, b, &mut pairs, 0);
         self.name_alternatives(a, b, r)
@@ -911,7 +911,7 @@ impl Unifier {
     /// # Errors
     /// [`TypeErrorKind::CompTyMismatch`] on mismatched structure or disagreeing
     /// modes or return types, [`TypeErrorKind::TypeTooDeep`] past the budget.
-    pub fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy) -> Result<(), TypeErrorKind> {
+    pub(crate) fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy) -> Result<(), TypeErrorKind> {
         let mut pairs = Pairs::default();
         self.unify_comp_ty_inner(a, b, &mut pairs, 0)
     }
@@ -962,10 +962,10 @@ impl Unifier {
         match (a, b) {
             (CompTy::Return(ra, ta), CompTy::Return(rb, tb)) => {
                 let mut diffs: Vec<CompDiff> = Vec::new();
-                if self.unify_route(&ra, &rb).is_err() {
+                if self.unify_route(ra, rb).is_err() {
                     diffs.push(CompDiff::Route {
-                        expected: self.resolve_route(&ra),
-                        actual: self.resolve_route(&rb),
+                        expected: self.resolve_route(ra),
+                        actual: self.resolve_route(rb),
                     });
                 }
                 // A return-type disagreement folds into the rich `Return` diff,
@@ -1005,7 +1005,7 @@ impl Unifier {
 
     /// Rebuild a `CompTy::Return` post-substitution, for mismatch diagnostics.
     fn apply_return(&mut self, route: PayloadRoute, ty: &Ty) -> CompTy {
-        CompTy::Return(self.resolve_route(&route), Box::new(self.apply_ty(ty)))
+        CompTy::Return(self.resolve_route(route), Box::new(self.apply_ty(ty)))
     }
 
     /// Unify two payload routes by *equality*: two variables unite, a
@@ -1023,7 +1023,11 @@ impl Unifier {
     /// # Errors
     /// [`RouteMismatch`] for distinct ground routes, which each caller maps
     /// onto its own diagnostic.
-    pub fn unify_route(&mut self, a: &PayloadRoute, b: &PayloadRoute) -> Result<(), RouteMismatch> {
+    pub(crate) fn unify_route(
+        &mut self,
+        a: PayloadRoute,
+        b: PayloadRoute,
+    ) -> Result<(), RouteMismatch> {
         let a = self.resolve_route(a);
         let b = self.resolve_route(b);
         match (a, b) {

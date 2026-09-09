@@ -7,16 +7,11 @@
 
 mod common;
 
+use common::fresh_shell;
+
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{GrantStack, Shell, Value};
-use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, builtins};
-
-fn fresh_shell() -> Shell {
-    let mut shell = Shell::default();
-    shell.seed_default_env_vars();
-    builtins::register(&mut shell, common::prelude_comp());
-    shell
-}
+use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
 
 fn top_level(shell: &mut Shell, source: &str) -> String {
     let report = shell.run(RunRequest {

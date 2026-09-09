@@ -62,7 +62,7 @@ impl Shell {
         clippy::disallowed_methods,
         reason = "[silent:cwd-stat] `cd`: stats the resolved target to confirm it is a directory before updating the logical cwd; a directory-existence check, not turn-time model data I/O, raises no surface card."
     )]
-    pub fn apply_chdir(&mut self, target: &str) -> Result<(String, String), Error> {
+    pub(crate) fn apply_chdir(&mut self, target: &str) -> Result<(String, String), Error> {
         let old = self.cwd();
 
         let home = self.context.home();
@@ -109,7 +109,7 @@ impl Shell {
     /// A filesystem question only — admission is `capability::admits_head`
     /// (head alone) and [`Self::check_exec_args`] (full call).  `which` and the
     /// dispatch error path pair the two to tell denied-but-installed from absent.
-    pub fn locate_command(&self, name: &str) -> Option<PathBuf> {
+    pub(crate) fn locate_command(&self, name: &str) -> Option<PathBuf> {
         let env_path = self.context.env_overrides.get_or_host("PATH");
         let cwd = self.cwd();
         crate::path::locate(

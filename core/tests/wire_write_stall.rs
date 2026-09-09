@@ -22,7 +22,6 @@ use ral_core::protocol::{
     Control, DispatchId, Host, Liveness, Program, Run, Transport, WireTransport,
 };
 use ral_core::types::GrantStack;
-use ral_core::wire::WireChannel;
 use ral_core::{RequestedTerminalAccess, RunIo, RunStdin};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -144,14 +143,16 @@ fn liveness_refresh_cannot_mask_a_write_stall() {
     let (host_end, peer_end) = UnixStream::pair().expect("socketpair");
     let transport = Arc::new(WireTransport::adopt(host_end, brisk_liveness()).expect("adopt"));
 
-    let mut peer_ch = WireChannel::from_stream(peer_end);
+    let mut peer_ch = ral_core::test_access::wire_from_stream(peer_end);
     std::thread::spawn(move || {
         let mut seq: u64 = 0;
         loop {
             seq += 1;
-            if peer_ch
-                .write_frame(&ral_core::protocol::Frame::Pong(seq))
-                .is_err()
+            if ral_core::test_access::wire_write_frame(
+                &mut peer_ch,
+                &ral_core::protocol::Frame::Pong(seq),
+            )
+            .is_err()
             {
                 break;
             }
@@ -200,9 +201,9 @@ fn no_well_formed_frame_follows_a_severed_write() {
 
     // Only now does the peer resume reading: whatever crossed before the
     // sever, and nothing legitimate after it.
-    let mut peer_ch = WireChannel::from_stream(peer_end);
+    let mut peer_ch = ral_core::test_access::wire_from_stream(peer_end);
     let mut well_formed = 0;
-    while let Ok(Some(_)) = peer_ch.read_frame() {
+    while let Ok(Some(_)) = ral_core::test_access::wire_read_frame(&mut peer_ch) {
         well_formed += 1;
     }
     assert_eq!(

@@ -72,19 +72,19 @@ pub struct Context {
     /// scope exit — distinct from [`Cwd::current`], the `cd`-mutated one.
     dir: Option<PathBuf>,
     /// Capability restrictions, innermost last.
-    pub grants: GrantStack,
+    pub(crate) grants: GrantStack,
     /// `within [handlers: …, handler: …]` effect-handler stack, innermost last.
-    pub handlers: HandlerStack,
+    pub(crate) handlers: HandlerStack,
 
     /// Session-lived named run entry points (rc-declared prompt, startup block,
     /// plugin hooks) — a namespace apart from both lexical scope and the
     /// handler stack, since hooks are run roots, never commands or variables.
-    pub hooks: std::collections::HashMap<hooks::HookName, hooks::Hook>,
+    pub(crate) hooks: std::collections::HashMap<hooks::HookName, hooks::Hook>,
 
     // ── dynamic context, not attenuable ─────────────────────────────────
     /// Invocation positionals (`$ARGS`, `$1`, …), from the command line or `source`.
-    pub args: Vec<String>,
-    pub modules: Modules,
+    pub(crate) args: Vec<String>,
+    pub(crate) modules: Modules,
     /// Snapshotted, so a spawned thread sees the logical cwd as of its spawn
     /// point; flowed back on same-thread thunk return, so a `cd` inside a
     /// thunk persists.
@@ -225,18 +225,6 @@ pub struct Shell {
 }
 
 impl Shell {
-    /// Construct an unspanned [`Error`]: the break path stamps the span of the
-    /// innermost node it unwinds through.  A caller already holding a better
-    /// span attaches it with [`Error::at_span`].
-    pub fn err(&self, msg: impl Into<String>, status: i32) -> Error {
-        Error::new(msg, status)
-    }
-
-    /// Like [`Self::err`], with an additional hint.
-    pub fn err_hint(&self, msg: impl Into<String>, hint: impl Into<String>, status: i32) -> Error {
-        Error::new(msg, status).with_hint(hint)
-    }
-
     /// Resolve `span` to the value-typed [`CallSite`] observations and
     /// capability checks carry.  [`CallSite::default`] when there is no span,
     /// or its source is not registered in this session.
@@ -275,11 +263,10 @@ impl Shell {
     ) -> Result<crate::serial::FOValue, crate::types::Error> {
         match mooring.desk.as_ref() {
             Some(desk) => desk.enquire(req, mooring.cancel.as_scope()),
-            None => Err(self.err_hint(
-                crate::types::NO_DESK,
-                crate::types::NO_DESK_HINT,
-                crate::types::NO_DESK_STATUS,
-            )),
+            None => Err(
+                Error::new(crate::types::NO_DESK, crate::types::NO_DESK_STATUS)
+                    .with_hint(crate::types::NO_DESK_HINT),
+            ),
         }
     }
 
@@ -305,13 +292,14 @@ impl Shell {
     pub fn fork_into_nursery(&self, mooring: &Mooring) -> crate::types::Settled<NurseryId> {
         match mooring.fork.as_ref() {
             Some(Fork::Park(nursery)) => Ok(nursery.park(self.fork_scrubbed())),
-            Some(Fork::Listen) => Err(crate::types::Break::Error(self.err(
+            Some(Fork::Listen) => Err(crate::types::Break::Error(Error::new(
                 "this host's forked sessions leave over a wire, so there is no pen to park one in",
                 1,
             ))),
-            None => Err(crate::types::Break::Error(
-                self.err("this host adopts no forked sessions", 1),
-            )),
+            None => Err(crate::types::Break::Error(Error::new(
+                "this host adopts no forked sessions",
+                1,
+            ))),
         }
     }
 
@@ -331,7 +319,7 @@ impl Shell {
 
     /// Register `text` under display `name`, returning the [`FileId`] the
     /// compiled program's spans must carry to resolve back to it.
-    pub fn install_script_context(&mut self, name: &str, text: &str) -> FileId {
+    pub(crate) fn install_script_context(&mut self, name: &str, text: &str) -> FileId {
         self.session.sources.register(Source::from_text(name, text))
     }
 
@@ -339,7 +327,7 @@ impl Shell {
     /// at it.  [`crate::run::run_framed`] alone calls this; a module load takes
     /// [`Self::install_script_context`], which appends without disturbing
     /// `root_file`, so the run's own root keeps its name.
-    pub fn install_root_context(&mut self, name: &str, text: &str) -> FileId {
+    pub(crate) fn install_root_context(&mut self, name: &str, text: &str) -> FileId {
         let file = self.install_script_context(name, text);
         self.session.root_file = file;
         file
@@ -349,7 +337,7 @@ impl Shell {
     ///
     /// # Errors
     /// See [`Self::write_sink`].
-    pub fn write_stdout(&mut self, bytes: &[u8]) -> Settled<()> {
+    pub(crate) fn write_stdout(&mut self, bytes: &[u8]) -> Settled<()> {
         Self::write_sink(&mut self.io.stdout, bytes, "stdout")
     }
 
@@ -359,7 +347,7 @@ impl Shell {
     ///
     /// # Errors
     /// See [`Self::write_sink`].
-    pub fn write_ambient(&mut self, bytes: &[u8]) -> Settled<()> {
+    pub(crate) fn write_ambient(&mut self, bytes: &[u8]) -> Settled<()> {
         Self::write_sink(&mut self.io.ambient, bytes, "the surrounding stream")
     }
 
@@ -368,7 +356,7 @@ impl Shell {
     ///
     /// # Errors
     /// See [`Self::write_sink`].
-    pub fn write_stderr(&mut self, bytes: &[u8]) -> Settled<()> {
+    pub(crate) fn write_stderr(&mut self, bytes: &[u8]) -> Settled<()> {
         Self::write_sink(&mut self.io.stderr, bytes, "stderr")
     }
 

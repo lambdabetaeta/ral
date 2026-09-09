@@ -10,5 +10,5 @@
 /// evaluations, so a cycle crossing a subprocess is still caught.
 #[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Modules {
-    pub stack: Vec<String>,
+    pub(crate) stack: Vec<String>,
 }

@@ -96,8 +96,8 @@ pub(crate) struct RunningChild {
 /// [`RunningChild::wait`] is the only constructor, so atomic-redirect commit and
 /// status interpretation carry a borrow-check proof that the child has exited.
 pub(crate) struct WaitedChild {
-    pub outcome: crate::process::WaitOutcome,
-    pub sent: Option<CancelCause>,
+    pub(crate) outcome: crate::process::WaitOutcome,
+    pub(crate) sent: Option<CancelCause>,
     pumps: Pumps,
     /// Trace context carried from the `RunningChild` so `settle`'s pump-join
     /// timings attribute to the same command instance.
@@ -112,8 +112,8 @@ pub(crate) struct WaitedChild {
 /// Where to pump a child's stdout / stderr.  Either field is `None` when that
 /// fd was inherited or wired straight to an OS pipe (the next stage's stdin).
 pub(crate) struct ExternalPlumbing {
-    pub stdout_pump: Option<Sink>,
-    pub stderr_pump: Option<Sink>,
+    pub(crate) stdout_pump: Option<Sink>,
+    pub(crate) stderr_pump: Option<Sink>,
 }
 
 impl RunningChild {
@@ -220,7 +220,7 @@ impl RunningChild {
     /// One `recv`, no poll and no sleep: the reaper posts the exit and a
     /// cancel arrives the same way.  A stop never reaches here — the reaper
     /// answers it with `SIGCONT` itself, the one rule in one place.
-    pub fn wait(mut self) -> WaitedChild {
+    pub(crate) fn wait(mut self) -> WaitedChild {
         // Taking the watch disarms `Drop` for the success path.
         let watch = self.watch.take().expect("RunningChild has no watch");
         let pid = self.pid;
@@ -291,7 +291,7 @@ impl RunningChild {
 impl WaitedChild {
     /// Join the drainer threads — or, for a child ral killed because its
     /// reader was gone, detach them; see [`Pumps::settle`].
-    pub fn settle(self) {
+    pub(crate) fn settle(self) {
         let detach = self.sent == Some(CancelCause::ReaderGone);
         crate::dbg_trace!(
             "wait",

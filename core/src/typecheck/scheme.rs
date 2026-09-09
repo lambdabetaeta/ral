@@ -10,12 +10,13 @@ use std::collections::BTreeSet;
 /// environment.  `env_free_vars` reads these rather than re-walking the type;
 /// every set is empty for a fully-generalised scheme.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::struct_field_names)] // one set per variable sort; the sort is the prefix.
 pub struct CachedFreeVars {
-    pub ty_fv: BTreeSet<TyVar>,
+    pub(crate) ty_fv: BTreeSet<TyVar>,
     #[serde(default)]
-    pub comp_fv: BTreeSet<CompTyVar>,
-    pub route_fv: BTreeSet<PayloadVar>,
-    pub row_fv: BTreeSet<RowVar>,
+    pub(crate) comp_fv: BTreeSet<CompTyVar>,
+    pub(crate) route_fv: BTreeSet<PayloadVar>,
+    pub(crate) row_fv: BTreeSet<RowVar>,
 }
 
 /// A polymorphic type scheme: `forall alpha_1 ... alpha_n, gamma_1 ... gamma_l, rho_1 ... rho_k, mu_1 ... mu_m. A`.
@@ -27,25 +28,25 @@ pub struct CachedFreeVars {
 /// it, so two instantiations never share the cycle's union-find slot.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scheme {
-    pub ty_vars: Vec<TyVar>,
+    pub(crate) ty_vars: Vec<TyVar>,
     #[serde(default)]
-    pub comp_ty_vars: Vec<CompTyVar>,
-    pub route_vars: Vec<PayloadVar>,
-    pub row_vars: Vec<RowVar>,
-    pub ty: Ty,
+    pub(crate) comp_ty_vars: Vec<CompTyVar>,
+    pub(crate) route_vars: Vec<PayloadVar>,
+    pub(crate) row_vars: Vec<RowVar>,
+    pub(crate) ty: Ty,
     #[serde(default)]
-    pub comp_ty_bindings: Vec<(u32, CompTy)>,
+    pub(crate) comp_ty_bindings: Vec<(u32, CompTy)>,
     #[serde(default)]
-    pub ty_bindings: Vec<(u32, Ty)>,
+    pub(crate) ty_bindings: Vec<(u32, Ty)>,
     /// `None` while the residuals can still move: a monomorphic scheme's free
     /// variables shift as unification proceeds, so only `generalize` and the
     /// closed builtin schemes may fill this in.
-    pub cached_fv: Option<CachedFreeVars>,
+    pub(crate) cached_fv: Option<CachedFreeVars>,
 }
 
 impl Scheme {
     /// A scheme with nothing quantified.
-    pub fn mono(ty: Ty) -> Self {
+    pub(crate) fn mono(ty: Ty) -> Self {
         Self {
             ty_vars: vec![],
             comp_ty_vars: vec![],
@@ -59,7 +60,7 @@ impl Scheme {
     }
     /// True when instantiation has work to do.  Cyclic bindings count: a
     /// scheme with no quantifiers but a captured cycle still needs fresh roots.
-    pub fn is_poly(&self) -> bool {
+    pub(crate) fn is_poly(&self) -> bool {
         !self.ty_vars.is_empty()
             || !self.comp_ty_vars.is_empty()
             || !self.route_vars.is_empty()

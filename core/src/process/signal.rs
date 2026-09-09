@@ -37,14 +37,14 @@ pub use unix::{
 mod windows;
 #[cfg(windows)]
 pub use windows::{
-    ForegroundGuard, ReapStatus, apply_group_active_process_limit, break_pipeline_group,
-    disown_pipeline_group, install_handlers, is_known_group, kill_pipeline_group, relay_interrupt,
-    release_win_group, reset_child_signals, set_active_process_limit, try_reap_leader,
-    wait_leader_blocking,
+    ForegroundGuard, ReapStatus, break_pipeline_group, disown_pipeline_group, install_handlers,
+    relay_interrupt, reset_child_signals, try_reap_leader,
 };
 #[cfg(windows)]
 pub(crate) use windows::{
-    PreparedGroup, close_prepared_group, prepare_group, prepared_job, register_prepared_group,
+    PreparedGroup, apply_group_active_process_limit, close_prepared_group, is_known_group,
+    prepare_group, prepared_job, register_prepared_group, release_win_group,
+    set_active_process_limit, wait_leader_blocking,
 };
 
 // ── Child handle ───────────────────────────────────────────────────────────
@@ -62,13 +62,15 @@ pub(crate) use windows::{
 pub struct ChildHandle(ChildRepr);
 
 enum ChildRepr {
+    #[cfg_attr(not(unix), allow(dead_code))]
     Std(std::process::Child),
     #[cfg(windows)]
     RawWindows(crate::process::launch::RawChild),
 }
 
 impl ChildHandle {
-    pub fn from_std(child: std::process::Child) -> Self {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn from_std(child: std::process::Child) -> Self {
         Self(ChildRepr::Std(child))
     }
 
@@ -88,7 +90,7 @@ impl ChildHandle {
     /// # Errors
     /// Returns `Err` if the platform kill — SIGKILL on Unix,
     /// `TerminateProcess` on Windows — fails.
-    pub fn kill(&mut self) -> std::io::Result<()> {
+    pub(crate) fn kill(&mut self) -> std::io::Result<()> {
         match &mut self.0 {
             ChildRepr::Std(child) => child.kill(),
             #[cfg(windows)]
@@ -96,7 +98,7 @@ impl ChildHandle {
         }
     }
 
-    pub fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+    pub(crate) fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         match &mut self.0 {
             ChildRepr::Std(child) => child
                 .stdout
@@ -107,7 +109,7 @@ impl ChildHandle {
         }
     }
 
-    pub fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+    pub(crate) fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         match &mut self.0 {
             ChildRepr::Std(child) => child
                 .stderr
@@ -152,7 +154,7 @@ impl ChildHandle {
     /// # Errors
     /// Returns `Err` if the wait fails.
     #[allow(clippy::disallowed_methods)]
-    pub fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    pub(crate) fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
         match &mut self.0 {
             ChildRepr::Std(child) => child.wait(),
             #[cfg(windows)]
@@ -163,7 +165,7 @@ impl ChildHandle {
     /// The one door from a spawned child to a [`Watch`]: consumes the
     /// handle, so no later `wait` on this pid is writable behind the
     /// reaper's back.  The stdio ends must already be taken.
-    pub fn into_watch<E: Send + 'static>(
+    pub(crate) fn into_watch<E: Send + 'static>(
         self,
         tx: std::sync::mpsc::Sender<E>,
         f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
@@ -245,13 +247,14 @@ pub fn escalation_pending() -> bool {
 pub struct Pgid(NonZeroI32);
 
 impl Pgid {
-    pub fn from_raw(raw: i32) -> Option<Self> {
+    #[cfg_attr(not(any(target_os = "linux", windows, test)), allow(dead_code))]
+    pub(crate) fn from_raw(raw: i32) -> Option<Self> {
         NonZeroI32::new(raw)
             .filter(|raw| raw.is_positive())
             .map(Self)
     }
 
-    pub const fn as_raw(self) -> i32 {
+    pub(crate) const fn as_raw(self) -> i32 {
         self.0.get()
     }
 
@@ -261,14 +264,14 @@ impl Pgid {
     }
 
     #[cfg(unix)]
-    pub const fn as_pid(self) -> rustix::process::Pid {
+    pub(crate) const fn as_pid(self) -> rustix::process::Pid {
         // SAFETY: every `Pgid` constructor admits only positive integers.
         unsafe { rustix::process::Pid::from_raw_unchecked(self.as_raw()) }
     }
 
     /// `SIGKILL` every member — the Job Object's kill on Windows.  Idempotent,
     /// and harmless on a group that has already left.
-    pub fn kill(self) {
+    pub(crate) fn kill(self) {
         #[cfg(unix)]
         self.signal_group(Signal::new(libc::SIGKILL));
         #[cfg(windows)]
@@ -289,7 +292,7 @@ impl Pgid {
     /// Async-signal-safe: one libc call, no allocation, no locking.  Failure is
     /// ignored — the pipeline-abort and Ctrl-Z callers have no recovery, and
     /// `ESRCH` on an already-empty group is the outcome they wanted anyway.
-    pub fn signal_group(self, signal: Signal) {
+    pub(crate) fn signal_group(self, signal: Signal) {
         unsafe {
             libc::kill(-self.as_raw(), signal.number());
         }

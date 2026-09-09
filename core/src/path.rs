@@ -12,19 +12,19 @@
 //! path and a grant-side prefix compare like-for-like.
 
 pub mod basedir;
-pub mod canon;
+pub(crate) mod canon;
 pub mod config;
 pub mod git;
 pub mod lex;
-pub mod prefix_set;
+pub(crate) mod prefix_set;
 pub mod ral_path;
-pub mod render;
-pub mod resolved;
-pub mod resolver;
+pub(crate) mod render;
+pub(crate) mod resolved;
+pub(crate) mod resolver;
 pub mod sigil;
 pub mod tilde;
-pub mod walk;
-pub mod which;
+pub(crate) mod walk;
+pub(crate) mod which;
 
 pub use tilde::{abbreviate_home, home, user_name};
 
@@ -37,11 +37,11 @@ pub use lex::{
 // containment question is `GrantStack::admits_fs`, so no caller can re-derive
 // a matcher over surface forms as exarch's skill gate once did.
 pub(crate) use lex::path_within_str;
-pub use prefix_set::{PrefixSet, covers, meet_prefixes};
+pub(crate) use prefix_set::{PrefixSet, covers, meet_prefixes};
 #[cfg(target_os = "macos")]
 pub(crate) use render::rendered_ancestors;
 pub(crate) use render::rendered_pins;
-pub use render::{Rendered, render_paths};
+pub(crate) use render::{Rendered, render_paths};
 pub use resolved::{Namespace, NormalizedPrefix, ResolvedPath};
 pub use resolver::Resolver;
 pub use walk::Located;
@@ -58,7 +58,7 @@ pub fn process_cwd() -> Option<std::path::PathBuf> {
 /// `/proc/self/fd/<raw>` as a `PathBuf`.  `sandbox::reexec` uses it to pin
 /// the running ral binary across the `execve` into the sandboxed child.
 #[cfg(target_os = "linux")]
-pub fn proc_fd_path(raw: std::os::fd::RawFd) -> std::path::PathBuf {
+pub(crate) fn proc_fd_path(raw: std::os::fd::RawFd) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/proc/self/fd/{raw}"))
 }
 

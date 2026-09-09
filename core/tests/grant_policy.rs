@@ -225,10 +225,7 @@ fn sandbox_projection_intersects_path_components() {
         shell.with_capabilities(inner, |shell| shell.sandbox_projection().unwrap())
     });
     assert!(
-        projection
-            .fs
-            .rules()
-            .is_some_and(|r| r.read_prefixes.is_empty())
+        ral_core::test_access::fs_rules(&projection.fs).is_some_and(|r| r.read_prefixes.is_empty())
     );
 }
 
@@ -267,7 +264,9 @@ fn sandbox_projection_does_not_leak_outer_raw_prefix() {
     let projection = shell.with_capabilities(outer, |shell| {
         shell.with_capabilities(inner, |shell| shell.sandbox_projection().unwrap())
     });
-    let read = &projection.fs.rules().expect("fs restricted").read_prefixes;
+    let read = &ral_core::test_access::fs_rules(&projection.fs)
+        .expect("fs restricted")
+        .read_prefixes;
     assert!(!read.contains(&link.to_string_lossy().into_owned()));
     assert!(read.contains(&inner_dir.to_string_lossy().into_owned()));
 }
@@ -293,7 +292,13 @@ fn broad_deny_set_vetoes_path_invoked_denied_basename() {
     // (narrow): the resolved path only — exactly what a Path head's
     // deny_names / policy_names produce for `/bin/bash`.
     let result = shell.with_capabilities(grant, |sh| {
-        sh.check_exec_call("/bin/bash", &["/bin/bash", "bash"], &["/bin/bash"], &[])
+        ral_core::test_access::check_exec_call(
+            sh,
+            "/bin/bash",
+            &["/bin/bash", "bash"],
+            &["/bin/bash"],
+            &[],
+        )
     });
     assert!(
         result.is_err(),
@@ -318,7 +323,8 @@ fn broad_deny_set_does_not_admit_planted_path_invoked_basename() {
         ..Capabilities::root()
     };
     let result = shell.with_capabilities(grant, |sh| {
-        sh.check_exec_call(
+        ral_core::test_access::check_exec_call(
+            sh,
             "/tmp/evil/rg",
             &["/tmp/evil/rg", "rg"],
             &["/tmp/evil/rg"],
@@ -346,7 +352,8 @@ fn literal_deny_on_resolved_absolute_still_vetoes() {
         ..Capabilities::root()
     };
     let result = shell.with_capabilities(grant, |sh| {
-        sh.check_exec_call(
+        ral_core::test_access::check_exec_call(
+            sh,
             "git",
             &["git", "/usr/bin/git"],
             &["git", "/usr/bin/git"],
@@ -376,7 +383,8 @@ fn bare_admit_and_subcommand_gating_unregressed() {
     };
     shell
         .with_capabilities(allow, |sh| {
-            sh.check_exec_call(
+            ral_core::test_access::check_exec_call(
+                sh,
                 "git",
                 &["git", "/usr/bin/git"],
                 &["git", "/usr/bin/git"],
@@ -400,7 +408,8 @@ fn bare_admit_and_subcommand_gating_unregressed() {
     };
     shell
         .with_capabilities(gated.clone(), |sh| {
-            sh.check_exec_call(
+            ral_core::test_access::check_exec_call(
+                sh,
                 "git",
                 &["git", "/usr/bin/git"],
                 &["git", "/usr/bin/git"],
@@ -409,7 +418,8 @@ fn bare_admit_and_subcommand_gating_unregressed() {
         })
         .expect("git status must be admitted under Subcommands([status])");
     let denied = shell.with_capabilities(gated, |sh| {
-        sh.check_exec_call(
+        ral_core::test_access::check_exec_call(
+            sh,
             "git",
             &["git", "/usr/bin/git"],
             &["git", "/usr/bin/git"],
@@ -512,7 +522,8 @@ fn sandbox_projection_admits_literal_covered_by_sibling_dir() {
     shell
         .with_capabilities(outer, |sh| {
             sh.with_capabilities(inner, |sh| {
-                sh.check_exec_call(
+                ral_core::test_access::check_exec_call(
+                    sh,
                     "/usr/bin/git",
                     &["/usr/bin/git", "git"],
                     &["/usr/bin/git"],
@@ -616,7 +627,13 @@ fn exec_projection_never_out_permits_live_gate() {
             let gate_ok = shell
                 .with_capabilities(outer.clone(), |sh| {
                     sh.with_capabilities(inner.clone(), |sh| {
-                        sh.check_exec_call(resolved, &[resolved, base], &[resolved], &[])
+                        ral_core::test_access::check_exec_call(
+                            sh,
+                            resolved,
+                            &[resolved, base],
+                            &[resolved],
+                            &[],
+                        )
                     })
                 })
                 .is_ok();

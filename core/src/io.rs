@@ -9,7 +9,7 @@ mod sink;
 mod source;
 mod terminal;
 
-pub use edge::{DeadEdge, Edge};
+pub(crate) use edge::{DeadEdge, Edge};
 pub use sink::{ByteBuffer, CapturedBytes, ChildStdioPlan, ExternalWrite, Sink};
 pub(crate) use sink::{
     SINK_BUFFER_CAP, buffer_overflowed, new_buffer, peek_buffer, str_strip_one_terminator,
@@ -34,7 +34,7 @@ pub use terminal::{
 /// of the foreground gate in `runtime/command/foreground.rs`; holding the
 /// session's [`TerminalLease`](crate::process::TerminalLease) is another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum LaunchRole {
+pub(crate) enum LaunchRole {
     /// A top-level eval or single-command exec.
     #[default]
     TopLevel,
@@ -43,11 +43,11 @@ pub enum LaunchRole {
 }
 
 impl LaunchRole {
-    pub fn is_top_level(self) -> bool {
+    pub(crate) fn is_top_level(self) -> bool {
         matches!(self, Self::TopLevel)
     }
 
-    pub fn stage_group(self) -> Option<crate::process::Pgid> {
+    pub(crate) fn stage_group(self) -> Option<crate::process::Pgid> {
         match self {
             Self::TopLevel => None,
             Self::PipelineStage(g) => Some(g),
@@ -56,22 +56,22 @@ impl LaunchRole {
 }
 
 /// All pipeline-stage IO state for a single Shell.
-pub struct Io {
+pub(crate) struct Io {
     pub stdin: Source,
     /// Where the running computation's own payload goes.
     pub stdout: Sink,
     /// The nearest enclosing *visible* stream: where a discarded statement
     /// writes.  Never a capture buffer, so however deep the brackets nest
     /// there is no rule about which one wins.
-    pub ambient: Sink,
+    pub(crate) ambient: Sink,
     /// `spawn` installs a buffer sink here, so a worker's errors are held in
     /// its handle and drained on `await`, never interleaved with the parent's.
     pub stderr: Sink,
     /// Running as an interactive REPL — not merely attached to a tty.
-    pub interactive: bool,
+    pub(crate) interactive: bool,
     /// Probed once at startup; nothing re-queries the OS mid-session.
     pub terminal: TerminalState,
-    pub launch_role: LaunchRole,
+    pub(crate) launch_role: LaunchRole,
 }
 
 impl Io {

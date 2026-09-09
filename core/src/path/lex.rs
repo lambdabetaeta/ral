@@ -275,7 +275,7 @@ pub(crate) fn identity_depth(dir: &str, windows: bool) -> usize {
 ///
 /// The one rule [`resolve_relative_to_script`] and the elaborator's
 /// `$SCRIPT` bake share, rather than two enumerations free to drift.
-pub fn has_script_identity(script: &str) -> bool {
+pub(crate) fn has_script_identity(script: &str) -> bool {
     !script.is_empty() && !script.starts_with('<') && script != "-c"
 }
 

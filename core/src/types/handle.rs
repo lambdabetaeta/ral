@@ -50,7 +50,7 @@ pub struct CompletedHandle {
     /// Drained once from [`HandleInner::surface_buf`], and replayed through
     /// the awaiting run's surface by `await`/`race` — never by `poll`.
     pub surface: Vec<crate::serial::FOValue>,
-    pub outcome: super::flow::Settled<Value>,
+    pub(crate) outcome: super::flow::Settled<Value>,
 }
 
 /// Bounded buffer of the structured events a *detached* worker defers rather

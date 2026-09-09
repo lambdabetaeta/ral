@@ -42,14 +42,11 @@ impl AuditFragment {
     pub fn empty() -> Self {
         Self::default()
     }
-    pub fn from_observations(observations: Vec<Observation>) -> Self {
+    pub(crate) fn from_observations(observations: Vec<Observation>) -> Self {
         Self { observations }
     }
     pub fn into_observations(self) -> Vec<Observation> {
         self.observations
-    }
-    pub fn is_empty(&self) -> bool {
-        self.observations.is_empty()
     }
 }
 
@@ -78,24 +75,24 @@ pub struct Audit {
 
 impl Audit {
     /// True when a scope is collecting.
-    pub fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         self.trail.is_some()
     }
 
     /// True when the tee should record each command's bytes.
-    pub fn captures_bytes(&self) -> bool {
+    pub(crate) fn captures_bytes(&self) -> bool {
         matches!(self.capture, CapturePolicy::Bytes)
     }
 
     /// Overwrite the capture policy.  A scope wants `delimited` in
     /// [`crate::evaluator::audit`], whose merge is monotonic: an inner `try`
     /// must not silence an outer `audit`.
-    pub fn set_capture(&mut self, policy: CapturePolicy) {
+    pub(crate) fn set_capture(&mut self, policy: CapturePolicy) {
         self.capture = policy;
     }
 
     /// The current capture policy.
-    pub fn capture_policy(&self) -> CapturePolicy {
+    pub(crate) fn capture_policy(&self) -> CapturePolicy {
         self.capture
     }
 
@@ -103,14 +100,14 @@ impl Audit {
     /// collecting — a stage thread learns in one answer whether to open a
     /// trail and which policy to install.  An instruction to the child, not
     /// snapshot state.
-    pub fn active_policy(&self) -> Option<CapturePolicy> {
+    pub(crate) fn active_policy(&self) -> Option<CapturePolicy> {
         self.active().then_some(self.capture)
     }
 
     /// Inverse of [`Self::active_policy`]: open a trail and set the policy on
     /// `Some`, stay inactive on `None`.  An already-open trail keeps its
     /// observations.
-    pub fn install_active_policy(&mut self, policy: Option<CapturePolicy>) {
+    pub(crate) fn install_active_policy(&mut self, policy: Option<CapturePolicy>) {
         if let Some(policy) = policy {
             self.trail.get_or_insert_default();
             self.capture = policy;
@@ -129,7 +126,7 @@ impl Audit {
     /// mark the open one's current length. `opened` records which happened,
     /// so the matching [`Self::close`] knows whether it owns the trail or is
     /// only reading a suffix of an outer scope's.
-    pub fn open(&mut self) -> TrailScope {
+    pub(crate) fn open(&mut self) -> TrailScope {
         let opened = self.trail.is_none();
         let mark = self.trail.get_or_insert_default().len();
         TrailScope { opened, mark }
@@ -143,7 +140,7 @@ impl Audit {
         clippy::needless_pass_by_value,
         reason = "a scope is a claim, spent exactly once: taking it by value is the discipline"
     )]
-    pub fn close(&mut self, scope: TrailScope) -> Vec<Observation> {
+    pub(crate) fn close(&mut self, scope: TrailScope) -> Vec<Observation> {
         let TrailScope { opened, mark } = scope;
         if opened {
             self.trail.take().unwrap_or_default()
@@ -156,7 +153,7 @@ impl Audit {
 
     /// Drain the trail, leaving it open but empty — how a sandbox or pipeline
     /// child ships its audit home.  Empty fragment when inactive.
-    pub fn take_fragment(&mut self) -> AuditFragment {
+    pub(crate) fn take_fragment(&mut self) -> AuditFragment {
         match self.trail.as_mut() {
             Some(trail) => AuditFragment::from_observations(std::mem::take(trail)),
             None => AuditFragment::empty(),

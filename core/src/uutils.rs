@@ -119,7 +119,7 @@ pub fn init_signal_dispositions() {
 /// Clear uucore's process-global `EXIT_CODE`, which each `uumain` must be
 /// entered with: the previous call may have left a non-zero code behind.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
-pub fn reset_exit_code() {
+pub(crate) fn reset_exit_code() {
     #[cfg(feature = "coreutils")]
     uucore::error::set_exit_code(0);
 }
@@ -127,7 +127,7 @@ pub fn reset_exit_code() {
 /// Read uucore's process-global `EXIT_CODE`: a utility's error machinery
 /// reports through this cell, not through `uumain`'s return value.
 #[cfg(any(feature = "coreutils", feature = "diffutils", feature = "ripgrep"))]
-pub fn get_exit_code() -> i32 {
+pub(crate) fn get_exit_code() -> i32 {
     #[cfg(feature = "coreutils")]
     {
         uucore::error::get_exit_code()

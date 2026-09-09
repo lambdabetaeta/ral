@@ -131,7 +131,7 @@ const SANDBOX_EXEC_FLAG: &str = "--ral-sandbox-exec";
 
 /// Debug switch: set to any value to make [`dump_profile_if_requested`] print
 /// the OS-sandbox profile that would be installed.
-pub const SANDBOX_DUMP_PROFILE_ENV: &str = "RAL_DUMP_SANDBOX_PROFILE";
+pub(crate) const SANDBOX_DUMP_PROFILE_ENV: &str = "RAL_DUMP_SANDBOX_PROFILE";
 
 /// Print the OS-sandbox profile for `policy` to stderr when
 /// [`SANDBOX_DUMP_PROFILE_ENV`] is set.
@@ -217,7 +217,7 @@ pub(crate) const ACTIVE_PROCESS_CAP: u32 = 512;
         reason = "the child is read only by the Windows Job Object arm; elsewhere the limits are already in place from pre-exec, and this is a no-op"
     )
 )]
-pub fn apply_child_limits(child: &crate::process::ChildHandle) {
+pub(crate) fn apply_child_limits(child: &crate::process::ChildHandle) {
     #[cfg(windows)]
     windows::apply_job_limits(child);
 }
@@ -277,7 +277,7 @@ pub fn restricted_envelope_launches() -> bool {
         reason = "child and leader are read only by the Windows Job Object arm; elsewhere this is a no-op"
     )
 )]
-pub fn apply_child_limits_in_pipeline(
+pub(crate) fn apply_child_limits_in_pipeline(
     child: &crate::process::ChildHandle,
     leader: crate::process::Pgid,
 ) {

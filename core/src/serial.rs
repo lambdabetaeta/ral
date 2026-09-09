@@ -81,17 +81,17 @@ pub enum NoExt {}
 /// One wire shape for the one runtime thunk value (S10): `Comp::arrow`
 /// on the decoded `comp` tells `Lambda` from `Block` back apart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SerialClosure {
+pub(crate) enum SerialClosure {
     Thunk(SerialThunk),
     Native(SerialNative),
 }
 
 /// [`FOValue`] with closures, for the re-exec'd child IPC.  A `Handle` has no
 /// wire form; encoding one is an error.
-pub type SerialValue = FOValue<SerialClosure>;
+pub(crate) type SerialValue = FOValue<SerialClosure>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SerialThunk {
+pub(crate) struct SerialThunk {
     pub comp: Arc<Comp>,
     pub env: SerialEnvSnapshot,
 }
@@ -100,9 +100,9 @@ pub struct SerialThunk {
 /// cannot cross, so hydration re-links the name against the receiving
 /// shell's manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SerialNative {
+pub(crate) struct SerialNative {
     pub name: std::string::String,
-    pub applied: Vec<SerialValue>,
+    pub(crate) applied: Vec<SerialValue>,
 }
 
 /// An [`Env`] in wire form: the [`ScopeTable`] row holding its session
@@ -112,21 +112,21 @@ pub struct SerialNative {
 /// The natives and prelude tiers never ride the wire, so they need no row
 /// of their own.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SerialEnvSnapshot {
-    pub bindings: u32,
+pub(crate) struct SerialEnvSnapshot {
+    pub(crate) bindings: u32,
 }
 
 /// Wire mirror of a [`Binding`]: the value converted, the scheme as itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SerialBinding {
+pub(crate) struct SerialBinding {
     pub value: SerialValue,
-    pub scheme: Option<crate::typecheck::Scheme>,
+    pub(crate) scheme: Option<crate::typecheck::Scheme>,
 }
 
 /// One row per interned environment, in discovery order;
 /// [`WireDecoder::for_shell`] rebuilds it into session-tier maps on the
 /// receiving side.
-pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
+pub(crate) type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 
 // ── Interning context ─────────────────────────────────────────────────────
 //
@@ -135,7 +135,7 @@ pub type ScopeTable = Vec<Vec<(String, SerialBinding)>>;
 // `WireDecoder::for_shell` therefore sorts by dependency rather than trusting
 // id order.
 
-pub struct InternCtx {
+pub(crate) struct InternCtx {
     scope_table: ScopeTable,
     /// Every root interned in this message so far, scanned linearly by
     /// [`imbl::GenericHashMap::ptr_eq`] — a message holds a handful, so the scan
@@ -183,7 +183,7 @@ impl InternCtx {
     /// # Errors
     /// Encoding one of a binding's value fails; handle-bearing bindings are
     /// dropped rather than raised.
-    pub fn finish(mut self) -> Result<ScopeTable, Error> {
+    pub(crate) fn finish(mut self) -> Result<ScopeTable, Error> {
         while let Some((id, bindings)) = self.pending.pop() {
             let mut entries = Vec::with_capacity(bindings.len());
             for (k, b) in &bindings {
@@ -252,7 +252,7 @@ type EnvRows = Vec<Option<crate::types::BindingMap>>;
 /// Constructible only from the [`Shell`] that will run the decoded values,
 /// so no call site can pick a manifest — or a prelude — of its own.
 #[derive(Debug)]
-pub struct WireDecoder {
+pub(crate) struct WireDecoder {
     rows: EnvRows,
     manifest: BuiltinTable,
     natives: Arc<crate::types::NativeMap>,
@@ -422,7 +422,7 @@ impl FOValue<SerialClosure> {
     ///
     /// # Errors
     /// `value` is or reaches a `Value::Handle`, which has no wire form.
-    pub fn from_runtime(value: &Value, ctx: &mut InternCtx) -> Result<Self, Error> {
+    pub(crate) fn from_runtime(value: &Value, ctx: &mut InternCtx) -> Result<Self, Error> {
         Ok(match value {
             Value::Unit => Self::Unit,
             Value::Bool(v) => Self::Bool { value: *v },
@@ -478,7 +478,7 @@ impl FOValue<SerialClosure> {
     /// A nested value fails to decode, a captured environment names a scope id
     /// out of range or unresolved, or a native's name is unknown to the
     /// manifest.
-    pub fn into_runtime(self, dec: &WireDecoder) -> Result<Value, Error> {
+    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Value, Error> {
         Ok(match self {
             Self::Unit => Value::Unit,
             Self::Bool { value } => Value::Bool(value),
@@ -574,10 +574,10 @@ impl TryFrom<&Value> for FOValue {
 
 /// The label a placeholder carries — a `Variant`, never a bare string, so no
 /// genuine string can impersonate one.
-pub const OPAQUE_TAG: &str = "opaque";
+pub(crate) const OPAQUE_TAG: &str = "opaque";
 
 /// The leaves [`FOValue::try_from`] rejects.
-pub fn no_wire_form(v: &Value) -> bool {
+pub(crate) fn no_wire_form(v: &Value) -> bool {
     matches!(v, Value::Handle(_) | Value::Thunk(_) | Value::Native { .. })
 }
 
@@ -593,7 +593,7 @@ pub(crate) fn is_handle(v: &Value) -> bool {
 /// Every other leaf crosses untouched.  The seams differ only in `p`: a flat
 /// wire scrubs closures as well as handles, the fragment wire keeps them,
 /// since they intern against its scope table and decode back live.
-pub fn scrub(v: &Value, p: &impl Fn(&Value) -> bool) -> Value {
+pub(crate) fn scrub(v: &Value, p: &impl Fn(&Value) -> bool) -> Value {
     if p(v) {
         return Value::Variant {
             label: OPAQUE_TAG.to_string(),
@@ -650,7 +650,7 @@ impl SerialEnvSnapshot {
     /// Intern `env`'s session tier into `ctx`, recording its row id.
     /// Infallible: interning reserves the id, and any encoding failure
     /// surfaces at [`InternCtx::finish`].
-    pub fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Self {
+    pub(crate) fn from_runtime(env: &Env, ctx: &mut InternCtx) -> Self {
         Self {
             bindings: ctx.intern_env(env.bindings_root()),
         }
@@ -662,7 +662,7 @@ impl SerialEnvSnapshot {
     ///
     /// # Errors
     /// The recorded row id is out of range or unresolved.
-    pub fn into_runtime(self, dec: &WireDecoder) -> Result<Env, Error> {
+    pub(crate) fn into_runtime(self, dec: &WireDecoder) -> Result<Env, Error> {
         let bindings = dec
             .rows
             .get(self.bindings as usize)

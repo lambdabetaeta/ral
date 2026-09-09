@@ -181,9 +181,9 @@ fn compile_toplevel(source_text: &str, virtual_path: &str, shell: &mut Shell) ->
 /// propagates `Ran::outcome`.
 #[derive(Clone, Copy)]
 pub(crate) struct ModuleLoad<'a> {
-    pub top: &'a Toplevel,
-    pub virtual_path: &'a str,
-    pub source_text: &'a str,
+    pub(crate) top: &'a Toplevel,
+    pub(crate) virtual_path: &'a str,
+    pub(crate) source_text: &'a str,
     pub span: Option<Span>,
 }
 

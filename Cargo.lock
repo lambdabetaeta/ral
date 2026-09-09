@@ -5791,6 +5791,7 @@ dependencies = [
  "nucleo-matcher",
  "os_pipe",
  "postcard",
+ "ral-core",
  "ral-ripgrep-core",
  "regex",
  "rustc-hash",

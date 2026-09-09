@@ -73,7 +73,7 @@ impl TildePath {
     /// Reconstruct the spelling this parsed from — the fallback at call sites
     /// that cannot fail, where an unexpanded `~user` dies downstream as an
     /// ordinary missing-command error rather than matching a fabricated path.
-    pub fn to_literal(&self) -> String {
+    pub(crate) fn to_literal(&self) -> String {
         let user = self.user.as_deref().unwrap_or_default();
         let suffix = self.suffix.as_deref().unwrap_or_default();
         format!("~{user}{suffix}")
@@ -84,7 +84,11 @@ impl TildePath {
 /// conventional `/home/<name>` when the lookup misses or the name contains a
 /// NUL byte.
 #[cfg(unix)]
-pub fn get_user_home(username: &str) -> Option<String> {
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "one signature for both platforms: the cfg(not(unix)) sibling has no lookup to fall back from"
+)]
+pub(crate) fn get_user_home(username: &str) -> Option<String> {
     match nix::unistd::User::from_name(username) {
         Ok(Some(user)) => Some(user.dir.to_string_lossy().into_owned()),
         _ => Some(format!("/home/{username}")),
@@ -99,7 +103,7 @@ pub fn get_user_home(username: &str) -> Option<String> {
     clippy::too_long_first_doc_paragraph,
     reason = "the summary is one sentence with no interior stop: its only seam is an em dash, so a paragraph break there would leave rustdoc's item list an unterminated clause and open the next paragraph with a dangling dash"
 )]
-pub fn get_user_home(_username: &str) -> Option<String> {
+pub(crate) fn get_user_home(_username: &str) -> Option<String> {
     None
 }
 
@@ -117,7 +121,7 @@ pub enum Unexpandable {
 impl Unexpandable {
     /// The cause as a clause, the advice left to the caller — what to suggest
     /// depends on whether a shell user typed the tilde or a policy declared it.
-    pub fn why(self) -> &'static str {
+    pub(crate) fn why(self) -> &'static str {
         match self {
             Self::HomeUnknown => "HOME is unset, so `~` names no directory",
             Self::ForeignUser => {

@@ -13,9 +13,9 @@ use std::collections::HashMap;
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub struct HandlerBinding {
-    pub scheme: Scheme,
-    pub removable_by_unalias: bool,
+pub(crate) struct HandlerBinding {
+    pub(crate) scheme: Scheme,
+    pub(crate) removable_by_unalias: bool,
 }
 
 #[derive(Clone, Default)]
@@ -29,7 +29,7 @@ pub struct TyEnv {
     scopes: Vec<NameScope>,
     /// The run's builtin table, seeded once by `seed_env`.  A name resolves
     /// here after a lexical binding and before a handler.
-    pub builtins: crate::types::BuiltinTable,
+    pub(crate) builtins: crate::types::BuiltinTable,
 }
 
 impl Default for TyEnv {
@@ -46,14 +46,14 @@ impl TyEnv {
         }
     }
 
-    pub fn lookup_binding(&self, name: &str) -> Option<&Scheme> {
+    pub(crate) fn lookup_binding(&self, name: &str) -> Option<&Scheme> {
         self.scopes
             .iter()
             .rev()
             .find_map(|scope| scope.bindings.get(name))
     }
 
-    pub fn lookup_handler(&self, name: &str) -> Option<&HandlerBinding> {
+    pub(crate) fn lookup_handler(&self, name: &str) -> Option<&HandlerBinding> {
         self.scopes
             .iter()
             .rev()
@@ -63,13 +63,13 @@ impl TyEnv {
     pub fn push(&mut self) {
         self.scopes.push(NameScope::default());
     }
-    pub fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.scopes.pop();
     }
 
     /// # Panics
     /// Panics if the scope stack is empty (more `pop`s than `push`es).
-    pub fn bind(&mut self, name: String, scheme: Scheme) {
+    pub(crate) fn bind(&mut self, name: String, scheme: Scheme) {
         self.scopes
             .last_mut()
             .unwrap()
@@ -79,7 +79,12 @@ impl TyEnv {
 
     /// # Panics
     /// Panics if the scope stack is empty (more `pop`s than `push`es).
-    pub fn bind_handler(&mut self, name: String, scheme: Scheme, removable_by_unalias: bool) {
+    pub(crate) fn bind_handler(
+        &mut self,
+        name: String,
+        scheme: Scheme,
+        removable_by_unalias: bool,
+    ) {
         self.scopes.last_mut().unwrap().handlers.insert(
             name,
             HandlerBinding {
@@ -93,7 +98,7 @@ impl TyEnv {
     /// inference drops its mono self-bindings before generalising: left in
     /// place, their free vars read as environment residuals and block
     /// quantification.
-    pub fn unbind(&mut self, name: &str) {
+    pub(crate) fn unbind(&mut self, name: &str) {
         for scope in self.scopes.iter_mut().rev() {
             if scope.bindings.remove(name).is_some() {
                 return;
@@ -101,7 +106,7 @@ impl TyEnv {
         }
     }
 
-    pub fn unbind_removable_handler(&mut self, name: &str) -> bool {
+    pub(crate) fn unbind_removable_handler(&mut self, name: &str) -> bool {
         for scope in self.scopes.iter_mut().rev() {
             if matches!(
                 scope.handlers.get(name),
@@ -114,7 +119,7 @@ impl TyEnv {
         false
     }
 
-    pub fn all_schemes(&self) -> impl Iterator<Item = &Scheme> {
+    pub(crate) fn all_schemes(&self) -> impl Iterator<Item = &Scheme> {
         self.scopes.iter().flat_map(|s| {
             s.bindings
                 .values()
@@ -131,8 +136,8 @@ impl TyEnv {
 /// keyed by node address, so both passes must walk the very same live tree; a
 /// clone between them silently misses.
 pub struct InferCtx {
-    pub unifier: Unifier,
-    pub errors: Vec<TypeError>,
+    pub(crate) unifier: Unifier,
+    pub(crate) errors: Vec<TypeError>,
     /// Source position for newly emitted [`TypeError`]s, narrowed by `with_span`.
     pub pos: Option<Span>,
     /// Why a command head that is not a function is the *surrounding form*'s
@@ -140,30 +145,30 @@ pub struct InferCtx {
     /// `None` — the ordinary case — leaves the head to speak for itself.
     pub(super) command_head_reason: Option<Reason>,
     /// Pre-generalisation type bound by each `Name`-pattern `Bind`.
-    pub bind_tys: HashMap<usize, Ty>,
+    pub(crate) bind_tys: HashMap<usize, Ty>,
     /// Each pipeline's final stage's payload route, keyed by the *pipeline*
     /// node's address; still a variable until `annotate` grounds it.
-    pub pipeline_routes: HashMap<usize, PayloadRoute>,
+    pub(crate) pipeline_routes: HashMap<usize, PayloadRoute>,
     /// The value flowing out of each pipeline stage.  Feeds the structural REPL's
     /// typed spine; the evaluator never reads it.
-    pub stage_types: HashMap<usize, Ty>,
+    pub(crate) stage_types: HashMap<usize, Ty>,
     /// A `Comp` node's own payload route, recorded for `annotate`'s demand
     /// walk; absent = no `Return` shape at record time.
-    pub results: HashMap<usize, PayloadRoute>,
+    pub(crate) results: HashMap<usize, PayloadRoute>,
     /// A scope arm's (`Val`-keyed) own route, the `Val`-level analogue of
     /// [`Self::results`] — scope arms have no `Comp` node of their own.
-    pub val_results: HashMap<usize, PayloadRoute>,
+    pub(crate) val_results: HashMap<usize, PayloadRoute>,
     /// Arm-result merges not yet determined, awaiting
     /// [`Self::solve_and_finalize`](super::route_solver).
     pub(super) route_constraints: Vec<ArmResults>,
     /// A `Rec` group's member types, inferred once per `Arc` within a run
     /// and keyed by its identity — every projection of the same group reads
     /// the same betas rather than re-inferring the group (§3.5).
-    pub rec_groups: HashMap<*const (), Vec<CompTy>>,
+    pub(crate) rec_groups: HashMap<*const (), Vec<CompTy>>,
     /// A `Bind`/`Define`/tail-`Run` RHS's curried arity, recorded whenever
     /// its inferred type resolved to `Fun` — keyed by the RHS node's own
     /// address, read back by `annotate`'s η-expansion (S3).
-    pub rhs_arrow_arity: HashMap<usize, usize>,
+    pub(crate) rhs_arrow_arity: HashMap<usize, usize>,
     /// Fresh-name counter for compiler-synthesized binders (η-expansion's
     /// parameters, the decode coercion's bind).
     synth_counter: usize,
@@ -197,21 +202,21 @@ impl InferCtx {
     /// A fresh, distinctive name for a compiler-synthesized binder, tagged
     /// with `purpose` (`"eta"`, `"decode"`) — never written by any surface
     /// program, so no collision guard is needed beyond the counter itself.
-    pub fn fresh_name(&mut self, purpose: &str) -> String {
+    pub(crate) fn fresh_name(&mut self, purpose: &str) -> String {
         self.synth_counter += 1;
         format!("__{purpose}{}", self.synth_counter)
     }
 
     /// Ground a route; a still-unresolved variable defaults to `Value`.
     pub(in crate::typecheck) fn ground(&mut self, route: PayloadRoute) -> GroundRoute {
-        match self.unifier.resolve_route(&route) {
+        match self.unifier.resolve_route(route) {
             PayloadRoute::Bytes => GroundRoute::Bytes,
             PayloadRoute::Value | PayloadRoute::Var(_) => GroundRoute::Value,
         }
     }
 
     /// Push a diagnosis that is its own story, with no constraint provenance.
-    pub fn diagnose(&mut self, kind: TypeErrorKind) {
+    pub(crate) fn diagnose(&mut self, kind: TypeErrorKind) {
         self.errors.push(TypeError {
             pos: self.pos,
             kind,
@@ -220,7 +225,7 @@ impl InferCtx {
     }
 
     /// Push a constraint failure with its provenance.
-    pub fn report(&mut self, kind: TypeErrorKind, why: Reason) {
+    pub(crate) fn report(&mut self, kind: TypeErrorKind, why: Reason) {
         self.errors.push(TypeError {
             pos: self.pos,
             kind,
@@ -229,21 +234,21 @@ impl InferCtx {
     }
 
     /// Unify two value types, reporting a mismatch under `why`.
-    pub fn unify_ty(&mut self, a: &Ty, b: &Ty, why: Reason) {
+    pub(crate) fn unify_ty(&mut self, a: &Ty, b: &Ty, why: Reason) {
         if let Err(kind) = self.unifier.unify_ty(a, b) {
             self.report(kind, why);
         }
     }
 
     /// Unify two computation types, reporting a mismatch under `why`.
-    pub fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy, why: Reason) {
+    pub(crate) fn unify_comp_ty(&mut self, a: &CompTy, b: &CompTy, why: Reason) {
         if let Err(kind) = self.unifier.unify_comp_ty(a, b) {
             self.report(kind, why);
         }
     }
 
     /// Unify two payload routes, reporting a `RouteMismatch` under `why`.
-    pub fn unify_route(&mut self, a: &PayloadRoute, b: &PayloadRoute, why: Reason) {
+    pub(crate) fn unify_route(&mut self, a: PayloadRoute, b: PayloadRoute, why: Reason) {
         if let Err(m) = self.unifier.unify_route(a, b) {
             self.report(
                 TypeErrorKind::RouteMismatch {

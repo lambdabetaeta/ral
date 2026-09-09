@@ -25,7 +25,7 @@ pub fn entries(env_overrides: &EnvVars) -> Vec<PathBuf> {
 ///
 /// A directory of that name is not a module, so it does not end the walk —
 /// otherwise it would shadow a real file further down the list.
-pub fn find_file(name: &str, env_overrides: &EnvVars) -> Option<PathBuf> {
+pub(crate) fn find_file(name: &str, env_overrides: &EnvVars) -> Option<PathBuf> {
     entries(env_overrides)
         .into_iter()
         .map(|dir| dir.join(name))

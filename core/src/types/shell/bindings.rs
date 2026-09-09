@@ -48,7 +48,7 @@ pub struct BindingPruneNotice {
 #[derive(Clone, Debug)]
 pub struct LargeBindingNotice {
     pub name: String,
-    pub bytes: u64,
+    pub(crate) bytes: u64,
 }
 
 /// The armed half of a [`BindingLedger`]: present only once a host has

@@ -195,7 +195,7 @@ impl StringForm {
     /// The exact delimiter that closes this form — what the user must type.
     /// A bumped string wants its `#` run back after the `'`, so the reflex
     /// of a bare `'` leaves it open however often it is tried.
-    pub fn closing(&self) -> String {
+    pub(crate) fn closing(&self) -> String {
         match self {
             Self::SingleQuoted => "'".into(),
             Self::DoubleQuoted => "\"".into(),
@@ -249,7 +249,7 @@ impl LexErrorKind {
     /// True for the arms that mean "the user is still typing" — the REPL
     /// prompts for more input, and an inner one is re-anchored into its
     /// enclosing string.
-    pub fn is_incomplete(&self) -> bool {
+    pub(crate) fn is_incomplete(&self) -> bool {
         matches!(
             self,
             Self::UnterminatedString { .. }
@@ -315,7 +315,7 @@ pub fn lex(source: &str) -> Result<Vec<(Token, Span)>, LexError> {
 /// # Errors
 /// An unterminated string, delimiter, or `$(…)`, or a lexical fault such as
 /// an invalid escape or an unexpected character.
-pub fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>, LexError> {
+pub(crate) fn lex_with(source: &str, file: FileId) -> Result<Vec<(Token, Span)>, LexError> {
     let mut lexer = Lexer::new(source, file);
     let mut tokens = Vec::new();
     loop {

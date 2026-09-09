@@ -17,7 +17,7 @@ pub struct Closure {
 
 impl Closure {
     /// Both halves, leaving `self.env` empty so `Drop` below has nothing to dismantle.
-    pub fn into_parts(mut self) -> (Arc<Comp>, Env) {
+    pub(crate) fn into_parts(mut self) -> (Arc<Comp>, Env) {
         let comp = Arc::clone(&self.comp);
         let env = std::mem::take(&mut self.env);
         (comp, env)

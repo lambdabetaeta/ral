@@ -8,15 +8,15 @@
 use crate::syntax::tag::tag_row_label;
 
 /// A non-empty Stream node.
-pub const MORE_LABEL: &str = "more";
+pub(crate) const MORE_LABEL: &str = "more";
 /// The terminal Stream node.
-pub const DONE_LABEL: &str = "done";
-pub fn more_tag() -> String {
+pub(crate) const DONE_LABEL: &str = "done";
+pub(crate) fn more_tag() -> String {
     tag_row_label(MORE_LABEL)
 }
-pub fn done_tag() -> String {
+pub(crate) fn done_tag() -> String {
     tag_row_label(DONE_LABEL)
 }
-pub const HEAD_FIELD: &str = "head";
+pub(crate) const HEAD_FIELD: &str = "head";
 /// The rest of the stream, thunked rather than forced.
-pub const TAIL_FIELD: &str = "tail";
+pub(crate) const TAIL_FIELD: &str = "tail";

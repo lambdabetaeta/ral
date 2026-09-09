@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ccb05833
-generated_at_date: 2026-09-05
+generated_at_commit: 5b17290a
+generated_at_date: 2026-09-09
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 
@@ -92,7 +92,8 @@ rendering belong to [[map/exarch/io-surface|io-surface]].
 - `wake.rs` — `Wake`, what ends a stage thread's blocked stdin read or
   stdout write from another thread: a self-pipe polled beside the stage's own
   fd on Unix, a flag plus `CancelSynchronousIo` on the stage's thread handle
-  on Windows. `fire`/`is_fired` are the reader-visible surface; a fired wake
+  on Windows. `fire` is the reader-visible surface, `is_fired` its
+  `cfg(windows)` half; a fired wake
   is read as EOF by a `SourceReader` carrying it and written as success by a
   `Sink::Pipe` carrying it, never as an interrupted I/O error.
 - `spawn_lock.rs` (`target_vendor = "apple"`) — the process-wide `RwLock`

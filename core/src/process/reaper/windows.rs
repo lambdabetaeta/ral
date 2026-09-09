@@ -48,7 +48,7 @@ unsafe extern "system" fn wait_callback<E: Send + 'static>(
 }
 
 /// Deliver `pid`'s exit to `tx`, shaped by `f`, exactly once.
-pub fn watch<E: Send + 'static>(
+pub(crate) fn watch<E: Send + 'static>(
     pid: u32,
     tx: Sender<E>,
     f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
@@ -97,7 +97,7 @@ pub fn watch<E: Send + 'static>(
 /// exit and unregisters the callback, same as [`Self::reap`] with its
 /// outcome discarded.
 #[must_use]
-pub struct Watch {
+pub(crate) struct Watch {
     handle: HANDLE,
     wait_handle: Mutex<Option<HANDLE>>,
 }
@@ -111,7 +111,7 @@ impl Watch {
     /// No job control exists here, so the only sanctioned act is
     /// termination, with ral's own stage-kill exit code — Unix has signals,
     /// Windows has this.
-    pub fn kill(&self) {
+    pub(crate) fn kill(&self) {
         unsafe { TerminateProcess(self.handle, STAGE_KILL_EXIT_CODE as u32) };
     }
 
@@ -121,7 +121,7 @@ impl Watch {
     ///
     /// # Errors
     /// Returns `Err` if the wait fails.
-    pub fn reap(self) -> io::Result<()> {
+    pub(crate) fn reap(self) -> io::Result<()> {
         block_until_exit(self.handle)
         // `self` drops here: unregistering is then a formality, the
         // callback having already fired on the same signalled handle.

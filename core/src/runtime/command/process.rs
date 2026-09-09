@@ -145,7 +145,7 @@ pub(super) fn pipe_err(e: &std::io::Error) -> Break {
 /// child; strip dynamic-loader overrides under an active grant.  `current_dir`
 /// is set unconditionally because `cd` moves shell state and leaves the process
 /// cwd alone, so an inherited `getcwd(3)` would be the wrong directory.
-pub fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
+pub(crate) fn apply_env(cmd: &mut crate::process::Launch, shell: &Shell) {
     for (k, v) in shell.context.env_overrides() {
         cmd.env(k, v);
     }

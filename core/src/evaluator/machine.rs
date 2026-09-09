@@ -394,11 +394,13 @@ impl Machine {
                 }
             }
             native @ Value::Native { .. } => Focus::Return(Terminal::Value(native)),
-            other => Focus::Halt(Break::Error(shell.err_hint(
-                format!("cannot force {}: ! requires a Block", other.type_name()),
-                "wrap in a block: !{ expr }",
-                1,
-            ))),
+            other => Focus::Halt(Break::Error(
+                Error::new(
+                    format!("cannot force {}: ! requires a Block", other.type_name()),
+                    1,
+                )
+                .with_hint("wrap in a block: !{ expr }"),
+            )),
         }
     }
 
@@ -547,7 +549,7 @@ impl Machine {
                         env,
                     })
                 }
-                Ok(other) => Focus::Halt(Break::Error(shell.err(
+                Ok(other) => Focus::Halt(Break::Error(Error::new(
                     format!("if: expected Bool, got {} '{}'", other.type_name(), other),
                     1,
                 ))),
@@ -804,7 +806,7 @@ impl Machine {
         let (label, payload) = match close(&scrutinee.item, env) {
             Ok(Value::Variant { label, payload }) => (label, payload),
             Ok(other) => {
-                return Focus::Halt(Break::Error(shell.err(
+                return Focus::Halt(Break::Error(Error::new(
                     format!(
                         "case: scrutinee must be a variant, got {} {}",
                         other.type_name(),
@@ -820,7 +822,7 @@ impl Machine {
                 .iter()
                 .map(|a| crate::syntax::tag::tag_row_label(&a.tag.item))
                 .collect();
-            return Focus::Halt(Break::Error(shell.err(
+            return Focus::Halt(Break::Error(Error::new(
                 format!(
                     "case: no arm for variant `{label}`; this case matches: {}",
                     handled.join(", ")
@@ -987,11 +989,15 @@ impl Machine {
                 };
                 let Value::String(p) = v else {
                     return Focus::Halt(stamp(
-                        Break::Error(shell.err_hint(
-                            format!("source: expected String, got {}", v.type_name()),
-                            "the path to `source` must be a computation of type F String",
-                            1,
-                        )),
+                        Break::Error(
+                            Error::new(
+                                format!("source: expected String, got {}", v.type_name()),
+                                1,
+                            )
+                            .with_hint(
+                                "the path to `source` must be a computation of type F String",
+                            ),
+                        ),
                         span,
                     ));
                 };

@@ -11,20 +11,14 @@
 
 mod common;
 
+use common::fresh_shell;
+
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{GrantStack, Settled, Shell, Value};
 use ral_core::{
     EventSink, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, SurfaceSink,
-    builtins,
 };
 use std::sync::{Arc, Mutex};
-
-fn fresh_shell() -> Shell {
-    let mut shell = Shell::default();
-    shell.seed_default_env_vars();
-    builtins::register(&mut shell, common::prelude_comp());
-    shell
-}
 
 /// A sink that records every surfaced value, decoded back to `Value` — every
 /// surfaced observation is first-order data, so the door's `FOValue` encoding

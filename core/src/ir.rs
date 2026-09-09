@@ -14,7 +14,7 @@ use crate::syntax::ast::{BinaryOp, Pattern, RedirectMode};
 /// A [`crate::syntax::ast::Pattern`] whose map-pattern defaults are already
 /// elaborated to computations: no parser syntax survives elaboration.
 pub type IrPattern = Pattern<Arc<Comp>>;
-pub type Param = IrPattern;
+pub(crate) type Param = IrPattern;
 
 // ── Values ──────────────────────────────────────────────────────────────
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 /// The head word of a command, in the shape the source wrote it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CommandName {
+pub(crate) enum CommandName {
     Bare(String),
     /// Slash-bearing literal path: skips the lookup chain, exec'd as written.
     Path(String),
@@ -31,7 +31,7 @@ pub enum CommandName {
 }
 
 impl CommandName {
-    pub fn bare(&self) -> Option<&str> {
+    pub(crate) fn bare(&self) -> Option<&str> {
         match self {
             Self::Bare(name) => Some(name),
             Self::Path(_) | Self::TildePath(_) => None,
@@ -41,7 +41,7 @@ impl CommandName {
     /// The head as the source wrote it — what a diagnostic raised before the
     /// run can name it.  A `~` stays a `~`: expanding it wants a live `HOME`,
     /// which is command resolution's business rather than the checker's.
-    pub fn written(&self) -> std::borrow::Cow<'_, str> {
+    pub(crate) fn written(&self) -> std::borrow::Cow<'_, str> {
         match self {
             Self::Bare(name) | Self::Path(name) => std::borrow::Cow::Borrowed(name),
             Self::TildePath(path) => std::borrow::Cow::Owned(path.to_literal()),
@@ -79,7 +79,7 @@ impl Val {
     /// Eager and type-blind: a numeric-looking word meant as argv data is
     /// read as a number, and stringifies back unchanged only where its
     /// source was already canonical (`007` ⇒ `7`, `1.50` ⇒ `1.5`).
-    pub fn from_word(s: &str) -> Self {
+    pub(crate) fn from_word(s: &str) -> Self {
         use crate::syntax::ast::WordLiteral;
         match WordLiteral::classify(s) {
             Some(WordLiteral::Bool(b)) => Self::Bool(b),
@@ -99,7 +99,7 @@ pub enum ValListElem {
 
 impl ValListElem {
     /// The slot's value, whichever form the slot takes.
-    pub fn slot(&self) -> &Spanned<Val> {
+    pub(crate) fn slot(&self) -> &Spanned<Val> {
         match self {
             Self::Single(v) | Self::Spread(v) => v,
         }
@@ -113,26 +113,17 @@ pub enum ValMapEntry {
     Spread(Spanned<Val>),
 }
 
-impl ValMapEntry {
-    /// The entry's value.  A key carries no span: the surface spells none.
-    pub fn value(&self) -> &Spanned<Val> {
-        match self {
-            Self::Entry(_, v) | Self::Spread(v) => v,
-        }
-    }
-}
-
 /// Positional arguments to a call — the same slots a list literal has.
-pub type Args = Vec<ValListElem>;
+pub(crate) type Args = Vec<ValListElem>;
 
 /// Readers of an [`Args`].  Free functions, not methods — [`Args`] is a
 /// type alias.
-pub mod args {
+pub(crate) mod args {
     use super::{Args, Val, ValListElem};
 
     /// The args as a literal positional list, or `None` if any element is a
     /// `Spread` — dynamic arity, so callers fall back to weaker checks.
-    pub fn positional(args: &Args) -> Option<Vec<&Val>> {
+    pub(crate) fn positional(args: &Args) -> Option<Vec<&Val>> {
         let mut out = Vec::with_capacity(args.len());
         for e in args {
             match e {
@@ -145,7 +136,7 @@ pub mod args {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ValRedirectTarget {
+pub(crate) enum ValRedirectTarget {
     File(Val),
     Fd(u32),
 }
@@ -154,9 +145,9 @@ pub enum ValRedirectTarget {
 /// [`CompKind::Redirect`] — never a wrapper of its own.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedirectV {
-    pub fd: u32,
-    pub mode: RedirectMode,
-    pub target: ValRedirectTarget,
+    pub(crate) fd: u32,
+    pub(crate) mode: RedirectMode,
+    pub(crate) target: ValRedirectTarget,
 }
 
 // ── Phrases ─────────────────────────────────────────────────────────────
@@ -190,7 +181,7 @@ pub enum Phrase {
 impl Toplevel {
     /// Every name any phrase can reference — the phrase-level analogue of
     /// [`referenced_names`], for the same lease ledger.
-    pub fn referenced_names(&self) -> Vec<&str> {
+    pub(crate) fn referenced_names(&self) -> Vec<&str> {
         let mut out = Vec::new();
         for phrase in &self.phrases {
             walk_phrase(&phrase.item, &mut out);
@@ -241,7 +232,7 @@ impl Comp {
 /// its hoisted temporaries and the checker's byte-to-value coercion — the
 /// tail `Run`'s value is reported now, so a byte-routed external gets
 /// wrapped in `Bind(Capture(_), x, Decode(x))`.
-pub fn is_single_command(top: &Toplevel) -> bool {
+pub(crate) fn is_single_command(top: &Toplevel) -> bool {
     let [phrase] = top.phrases.as_slice() else {
         return false;
     };
@@ -595,8 +586,8 @@ pub enum CompKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CaseArm {
     pub tag: Spanned<String>,
-    pub pattern: IrPattern,
-    pub body: ArmBody,
+    pub(crate) pattern: IrPattern,
+    pub(crate) body: ArmBody,
 }
 
 /// An arm's computation, and which way the surface reached it.
@@ -606,7 +597,7 @@ pub struct CaseArm {
 /// apart because a handler that turns out not to be a function is a fault of
 /// the *arm*, and only this distinction lets the diagnostic say so.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ArmBody {
+pub(crate) enum ArmBody {
     /// The branch written at the arm: `` `tag: { |p| … } ``.
     Inline(Arc<Comp>),
     /// A handler named at the arm, applied to the payload the arm binds.
@@ -622,7 +613,7 @@ impl ArmBody {
 
     /// The same spelling around a rebuilt computation — what the annotator
     /// needs, since it reconstructs every node it walks.
-    pub fn with_comp(&self, comp: Arc<Comp>) -> Self {
+    pub(crate) fn with_comp(&self, comp: Arc<Comp>) -> Self {
         match self {
             Self::Inline(_) => Self::Inline(comp),
             Self::Applied(_) => Self::Applied(comp),
@@ -633,18 +624,18 @@ impl ArmBody {
 /// Body of a [`CompKind::Exec`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Exec {
-    pub head: CommandWord,
+    pub(crate) head: CommandWord,
     /// An argv: each element crosses rendered, whichever boundary it reaches —
     /// a handler arm, a base frame, or the syscall itself.
-    pub args: Args,
-    pub redirects: Vec<RedirectV>,
+    pub(crate) args: Args,
+    pub(crate) redirects: Vec<RedirectV>,
 }
 
 /// Dispatch shape of an [`Exec`] head — a variant rather than a flag on
 /// `Name`, so the IR shape carries the decision instead of burying it in a
 /// boolean.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CommandWord {
+pub(crate) enum CommandWord {
     /// Resolved at evaluation time: env, then handlers, then PATH.
     Name(CommandName),
     /// `^name` — skips the env, and so skips every native, but still

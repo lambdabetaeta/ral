@@ -29,12 +29,13 @@ fn pick(letters: &[&str], idx: usize) -> String {
 /// A variable absent from the map prints as a placeholder (`_`, or `...` for
 /// a row tail) — right for `:type` on a single type, wrong for a diagnostic
 /// naming two, which must go through [`FmtCtx::for_value_types`].
+#[allow(clippy::struct_field_names)] // one map per variable sort; the sort is the prefix.
 #[derive(Default)]
 pub struct FmtCtx {
-    pub ty_names: HashMap<TyVar, String>,
-    pub comp_names: HashMap<CompTyVar, String>,
-    pub route_names: HashMap<PayloadVar, String>,
-    pub row_names: HashMap<RowVar, String>,
+    pub(crate) ty_names: HashMap<TyVar, String>,
+    pub(crate) comp_names: HashMap<CompTyVar, String>,
+    pub(crate) route_names: HashMap<PayloadVar, String>,
+    pub(crate) row_names: HashMap<RowVar, String>,
 }
 
 impl FmtCtx {
@@ -57,7 +58,7 @@ impl FmtCtx {
     /// Name every unification variable in `types`, in first-appearance order.
     /// Pass every type that will be rendered side by side, so a variable they
     /// share gets one name.
-    pub fn for_value_types(types: &[&Ty]) -> Self {
+    pub(crate) fn for_value_types(types: &[&Ty]) -> Self {
         let mut ctx = Self::default();
         for t in types {
             ctx.absorb_ty(t);
@@ -149,11 +150,11 @@ pub fn fmt_ty_ctx(ty: &Ty, ctx: &FmtCtx) -> String {
 
 /// Variant rows use `|` between arms and a backtick on every tag, including an
 /// open tail. Records and variants both render inside `[…]`.
-pub fn fmt_variant_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
+pub(crate) fn fmt_variant_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
     fmt_row_with_sep(row, ctx, " | ", "`")
 }
 
-pub fn fmt_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
+pub(crate) fn fmt_row_ctx(row: &Row, ctx: &FmtCtx) -> String {
     fmt_row_with_sep(row, ctx, ", ", "")
 }
 

@@ -31,7 +31,7 @@ impl WireChannel {
     /// # Errors
     /// Returns the socket error if the pair cannot be made.
     #[cfg(unix)]
-    pub fn pair() -> io::Result<(Self, Self)> {
+    pub(crate) fn pair() -> io::Result<(Self, Self)> {
         let (a, b) = crate::process::cloexec_socketpair()?;
         Ok((Self { stream: a }, Self { stream: b }))
     }
@@ -50,7 +50,8 @@ impl WireChannel {
         clippy::disallowed_methods,
         reason = "[silent:wire-pair-windows] the Windows twin of `process::cloexec_socketpair` ([silent:cloexec-socketpair]): the same one-connection-for-a-process-tree, spelled as a loopback bind-connect-accept because Windows has no socketpair(2). No outside name is reached — the port is ephemeral and the peer is this process — so it is silent for the same reason its Unix hemisphere is."
     )]
-    pub fn pair() -> io::Result<(Self, Self)> {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn pair() -> io::Result<(Self, Self)> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let a = std::net::TcpStream::connect(listener.local_addr()?)?;
         let (b, _peer) = listener.accept()?;
@@ -62,7 +63,7 @@ impl WireChannel {
     /// Frame over an already-connected stream: one end of a [`Self::pair`], or
     /// the virtual-socket connection into a guest VM — a backend's own
     /// `OwnedFd` or `OwnedSocket` converts straight in.
-    pub fn from_stream(stream: impl Into<WireStream>) -> Self {
+    pub(crate) fn from_stream(stream: impl Into<WireStream>) -> Self {
         Self {
             stream: stream.into(),
         }
@@ -73,7 +74,7 @@ impl WireChannel {
     /// # Errors
     /// Returns the read or decode error.  `Ok(None)` is a clean EOF: the peer
     /// closed between frames.
-    pub fn read_frame(&mut self) -> io::Result<Option<Frame>> {
+    pub(crate) fn read_frame(&mut self) -> io::Result<Option<Frame>> {
         crate::subprocess_codec::read_frame(&mut self.stream)
     }
 
@@ -81,7 +82,7 @@ impl WireChannel {
     ///
     /// # Errors
     /// Returns the encode or write error.
-    pub fn write_frame(&mut self, frame: &Frame) -> io::Result<()> {
+    pub(crate) fn write_frame(&mut self, frame: &Frame) -> io::Result<()> {
         crate::subprocess_codec::write_frame(&mut self.stream, frame)
     }
 
@@ -91,7 +92,7 @@ impl WireChannel {
     ///
     /// # Errors
     /// Returns the duplication error.
-    pub fn try_clone(&self) -> io::Result<Self> {
+    pub(crate) fn try_clone(&self) -> io::Result<Self> {
         Ok(Self {
             stream: self.stream.try_clone()?,
         })
@@ -101,7 +102,7 @@ impl WireChannel {
     /// ([`WireTransport::new`](crate::protocol::WireTransport::new)).  Unix
     /// only: a Windows engine is a guest, adopted through [`Self::from_stream`].
     #[cfg(unix)]
-    pub fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+    pub(crate) fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
         use std::os::unix::io::AsRawFd;
         self.stream.as_raw_fd()
     }
@@ -116,7 +117,7 @@ impl WireChannel {
     /// Returns the `poll(2)` error, with `EINTR` retried against the
     /// caller's own timeout.
     #[cfg(unix)]
-    pub fn poll_readable(&self, timeout: Option<std::time::Duration>) -> io::Result<bool> {
+    pub(crate) fn poll_readable(&self, timeout: Option<std::time::Duration>) -> io::Result<bool> {
         use std::os::unix::io::AsRawFd;
         let deadline = timeout.map(|t| std::time::Instant::now() + t);
         loop {
@@ -158,7 +159,11 @@ impl WireChannel {
     /// Never: Winsock's `SOCKET` *is* a pointer-sized value, and `RawSocket` is
     /// the widest integer that could hold one on any Windows.
     #[cfg(windows)]
-    pub fn poll_readable(&self, timeout: Option<std::time::Duration>) -> io::Result<bool> {
+    #[allow(
+        dead_code,
+        reason = "shape, not use: the only caller is `engine`, `cfg(unix)` today"
+    )]
+    pub(crate) fn poll_readable(&self, timeout: Option<std::time::Duration>) -> io::Result<bool> {
         use std::os::windows::io::AsRawSocket;
         use windows_sys::Win32::Networking::WinSock::{
             POLLRDNORM, SOCKET_ERROR, WSAPOLLFD, WSAPoll,
@@ -186,7 +191,7 @@ impl WireChannel {
     /// Shut the socket down both ways, waking any thread parked in
     /// `read_frame` or [`Self::poll_readable`] — clones included, since they
     /// share the one underlying connection.
-    pub fn shutdown(&self) {
+    pub(crate) fn shutdown(&self) {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 
@@ -203,7 +208,7 @@ impl WireChannel {
     ///
     /// # Errors
     /// Returns the socket error if the timeout cannot be set.
-    pub fn set_write_deadline(&self, d: std::time::Duration) -> io::Result<()> {
+    pub(crate) fn set_write_deadline(&self, d: std::time::Duration) -> io::Result<()> {
         self.stream.set_write_timeout(Some(d))
     }
 }

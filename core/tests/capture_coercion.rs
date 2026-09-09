@@ -14,20 +14,14 @@
 
 mod common;
 
+use common::fresh_shell;
+
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{GrantStack, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
 
 /// A session as every front end builds one: prelude registered, env seeded,
 /// capabilities at root.
-fn fresh_shell() -> Shell {
-    ral_core::boot::boot_shell(
-        ral_core::io::TerminalState::default(),
-        common::prelude(),
-        &ral_core::boot::HostSurface::default(),
-    )
-}
-
 /// One top-level run through the public door, with the bytes it wrote where
 /// they could be seen. A static diagnostic and a runtime failure both come
 /// back as `Err(message)`, so a test can insist on *an error the session

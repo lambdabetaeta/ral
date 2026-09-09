@@ -149,7 +149,7 @@ fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
 /// schemes, parallel to `top.phrases` and empty for every other phrase —
 /// `annotate::annotate_toplevel` writes it straight onto the rebuilt
 /// `Phrase::Define`.
-pub fn infer_toplevel(
+pub(crate) fn infer_toplevel(
     ctx: &mut InferCtx,
     env: &mut TyEnv,
     top: &Toplevel,
@@ -295,9 +295,9 @@ impl Inferencer<'_> {
             Ty::Thunk(Box::new(inner_ty))
         } else {
             let (ty, route) = self.extract_return(&inner_ty);
-            if matches!(self.ctx.unifier.resolve_route(&route), PayloadRoute::Var(_)) {
+            if matches!(self.ctx.unifier.resolve_route(route), PayloadRoute::Var(_)) {
                 self.ctx
-                    .unify_route(&route, &PayloadRoute::Value, Reason::RoutePin);
+                    .unify_route(route, PayloadRoute::Value, Reason::RoutePin);
             }
             if self.ctx.ground(route) == GroundRoute::Bytes {
                 Ty::String
@@ -814,9 +814,9 @@ impl Inferencer<'_> {
         let head = self.head_pipe_route(name);
         self.ctx
             .unifier
-            .unify_route(&route, &head)
+            .unify_route(route, head)
             .map_err(PinFailure::Route)?;
-        if matches!(self.ctx.unifier.resolve_route(&route), PayloadRoute::Bytes)
+        if matches!(self.ctx.unifier.resolve_route(route), PayloadRoute::Bytes)
             && self.ctx.unifier.unify_ty(&value, &Ty::Unit).is_err()
         {
             return Err(PinFailure::ByteHeadReturnsValue(

@@ -157,7 +157,7 @@ impl InferCtx {
     }
 
     fn env_owned(&mut self, route: PayloadRoute, env_routes: &HashSet<PayloadVar>) -> bool {
-        match self.unifier.resolve_route(&route) {
+        match self.unifier.resolve_route(route) {
             PayloadRoute::Var(v) => env_routes.contains(&v),
             PayloadRoute::Value | PayloadRoute::Bytes => true,
         }
@@ -176,14 +176,14 @@ impl InferCtx {
     ) -> Option<(PayloadRoute, Ty)> {
         let any_bytes = arms
             .iter()
-            .any(|(route, _)| matches!(self.unifier.resolve_route(route), PayloadRoute::Bytes));
+            .any(|(route, _)| matches!(self.unifier.resolve_route(*route), PayloadRoute::Bytes));
         if any_bytes {
             return Some(self.conclude_byte_side(arms, why));
         }
 
         let any_open = arms
             .iter()
-            .any(|(route, _)| matches!(self.unifier.resolve_route(route), PayloadRoute::Var(_)));
+            .any(|(route, _)| matches!(self.unifier.resolve_route(*route), PayloadRoute::Var(_)));
         if any_open {
             return None;
         }
@@ -209,7 +209,7 @@ impl InferCtx {
         why: &Reason,
     ) -> (PayloadRoute, Ty) {
         for (route, ty) in arms {
-            if matches!(self.unifier.resolve_route(route), PayloadRoute::Value)
+            if matches!(self.unifier.resolve_route(*route), PayloadRoute::Value)
                 && self.unifier.unify_ty(ty, &Ty::Unit).is_ok()
             {
                 continue;
@@ -233,8 +233,8 @@ impl InferCtx {
         why: &Reason,
     ) -> (PayloadRoute, Ty) {
         for (route, _) in arms {
-            if matches!(self.unifier.resolve_route(route), PayloadRoute::Var(_)) {
-                self.unify_route(route, &PayloadRoute::Value, Reason::RoutePin);
+            if matches!(self.unifier.resolve_route(*route), PayloadRoute::Var(_)) {
+                self.unify_route(*route, PayloadRoute::Value, Reason::RoutePin);
             }
         }
         let values_agree = value_side(why);
@@ -333,12 +333,12 @@ impl InferCtx {
             why,
             ..
         } = c;
-        let concluded = match self.unifier.resolve_route(&result) {
+        let concluded = match self.unifier.resolve_route(result) {
             PayloadRoute::Bytes => Some(self.conclude_byte_side(&arms, &why)),
             PayloadRoute::Value => Some(self.conclude_value_side(&arms, &why)),
             PayloadRoute::Var(_)
                 if arms.iter().any(|(route, ty)| {
-                    matches!(self.unifier.resolve_route(route), PayloadRoute::Value)
+                    matches!(self.unifier.resolve_route(*route), PayloadRoute::Value)
                         && !matches!(self.unifier.resolve_ty(ty), Ty::Unit | Ty::Var(_))
                 }) =>
             {
@@ -348,14 +348,14 @@ impl InferCtx {
                 let open: Vec<PayloadRoute> = arms
                     .iter()
                     .map(|(route, _)| *route)
-                    .filter(|r| matches!(self.unifier.resolve_route(r), PayloadRoute::Var(_)))
+                    .filter(|r| matches!(self.unifier.resolve_route(*r), PayloadRoute::Var(_)))
                     .collect();
                 let mut open = open.into_iter();
                 if let Some(first) = open.next() {
                     for other in open {
-                        self.unify_route(&first, &other, why.clone());
+                        self.unify_route(first, other, why.clone());
                     }
-                    self.unify_route(&result, &first, why.clone());
+                    self.unify_route(result, first, why.clone());
                 }
                 for (_, ty) in &arms {
                     self.unify_ty(ty, &value, why.clone());
@@ -401,7 +401,7 @@ mod tests {
         let (result, value) = ctx.join_arm_results(arms, Reason::CaseArms);
         assert_eq!(result, PayloadRoute::Bytes);
         assert_eq!(value, Ty::Unit);
-        assert_eq!(ctx.unifier.resolve_route(&open_route), PayloadRoute::Bytes);
+        assert_eq!(ctx.unifier.resolve_route(open_route), PayloadRoute::Bytes);
         assert_eq!(ctx.unifier.resolve_ty(&open_value), Ty::Unit);
         assert!(ctx.route_constraints.is_empty());
         assert!(ctx.errors.is_empty());
@@ -439,13 +439,13 @@ mod tests {
         ];
         let (result, value) = ctx.join_arm_results(arms, Reason::CaseArms);
         assert_eq!(ctx.route_constraints.len(), 1, "the open arm must defer");
-        assert!(is_open(ctx.unifier.resolve_route(&result)));
+        assert!(is_open(ctx.unifier.resolve_route(result)));
 
         ctx.solve_and_finalize();
 
-        assert_eq!(ctx.unifier.resolve_route(&result), PayloadRoute::Value);
+        assert_eq!(ctx.unifier.resolve_route(result), PayloadRoute::Value);
         assert_eq!(ctx.unifier.resolve_ty(&value), Ty::Int);
-        assert_eq!(ctx.unifier.resolve_route(&open_route), PayloadRoute::Value);
+        assert_eq!(ctx.unifier.resolve_route(open_route), PayloadRoute::Value);
         assert_eq!(ctx.unifier.resolve_ty(&open_value), Ty::Int);
         assert!(ctx.errors.is_empty());
     }
@@ -462,11 +462,11 @@ mod tests {
         let (result, value) = ctx.join_arm_results(arms, Reason::CaseArms);
         assert_eq!(ctx.route_constraints.len(), 1, "the open arm must defer");
 
-        ctx.unify_route(&open_route, &PayloadRoute::Bytes, Reason::RoutePin);
+        ctx.unify_route(open_route, PayloadRoute::Bytes, Reason::RoutePin);
         assert!(ctx.errors.is_empty(), "the grounding site stays blameless");
         ctx.solve_and_finalize();
 
-        assert_eq!(ctx.unifier.resolve_route(&result), PayloadRoute::Bytes);
+        assert_eq!(ctx.unifier.resolve_route(result), PayloadRoute::Bytes);
         assert_eq!(ctx.unifier.resolve_ty(&value), Ty::Unit);
         assert_eq!(ctx.errors.len(), 1, "one conduit mismatch, at the join");
         assert!(matches!(ctx.errors[0].reason, Some(Reason::CaseArms)));
@@ -482,7 +482,7 @@ mod tests {
         let arms = vec![(r1, v1.clone()), (r2, v2.clone())];
         let (result, value) = ctx.join_arm_results(arms, Reason::CaseArms);
         assert_eq!(ctx.route_constraints.len(), 1);
-        assert!(is_open(ctx.unifier.resolve_route(&result)));
+        assert!(is_open(ctx.unifier.resolve_route(result)));
         assert!(matches!(ctx.unifier.resolve_ty(&value), Ty::Var(_)));
 
         // The two arm values must still be independent: pinning one to a
@@ -505,12 +505,12 @@ mod tests {
             ctx.join_arm_results(vec![(r1, v1.clone()), (r2, v2.clone())], Reason::CaseArms);
         assert_eq!(ctx.route_constraints.len(), 1, "two open arms must defer");
 
-        ctx.unify_route(&r1, &PayloadRoute::Bytes, Reason::RoutePin);
+        ctx.unify_route(r1, PayloadRoute::Bytes, Reason::RoutePin);
         ctx.solve_and_finalize();
 
-        assert_eq!(ctx.unifier.resolve_route(&result), PayloadRoute::Bytes);
+        assert_eq!(ctx.unifier.resolve_route(result), PayloadRoute::Bytes);
         assert_eq!(ctx.unifier.resolve_ty(&value), Ty::Unit);
-        assert_eq!(ctx.unifier.resolve_route(&r2), PayloadRoute::Bytes);
+        assert_eq!(ctx.unifier.resolve_route(r2), PayloadRoute::Bytes);
         // WF-2 closed: v2's arm was still open when r1 grounded, and its
         // value is tied to Unit all the same.
         assert_eq!(ctx.unifier.resolve_ty(&v1), Ty::Unit);
@@ -536,11 +536,8 @@ mod tests {
 
         ctx.solve_and_finalize();
 
-        assert!(is_open(ctx.unifier.resolve_route(&result)));
-        assert_eq!(
-            ctx.unifier.resolve_route(&r1),
-            ctx.unifier.resolve_route(&r2)
-        );
+        assert!(is_open(ctx.unifier.resolve_route(result)));
+        assert_eq!(ctx.unifier.resolve_route(r1), ctx.unifier.resolve_route(r2));
         assert_eq!(ctx.unifier.resolve_ty(&value), Ty::Unit);
     }
 
@@ -568,15 +565,15 @@ mod tests {
                     result_target = Some(result);
                     value_target = Some(value);
                 }
-                1 => ctx.unify_route(&r1, &PayloadRoute::Bytes, Reason::RoutePin),
-                2 => ctx.unify_route(&r2, &PayloadRoute::Bytes, Reason::RoutePin),
+                1 => ctx.unify_route(r1, PayloadRoute::Bytes, Reason::RoutePin),
+                2 => ctx.unify_route(r2, PayloadRoute::Bytes, Reason::RoutePin),
                 _ => unreachable!(),
             }
         }
         ctx.solve_and_finalize();
         (
             ctx.unifier
-                .resolve_route(&result_target.expect("emitted above")),
+                .resolve_route(result_target.expect("emitted above")),
             ctx.unifier
                 .resolve_ty(&value_target.expect("emitted above")),
             ctx.unifier.resolve_ty(&v1),
@@ -638,20 +635,20 @@ mod tests {
         ctx.solve_at_boundary(&env);
 
         assert_eq!(ctx.route_constraints.len(), 1, "the constraint is kept");
-        assert!(is_open(ctx.unifier.resolve_route(&r1)));
-        assert!(is_open(ctx.unifier.resolve_route(&r2)));
+        assert!(is_open(ctx.unifier.resolve_route(r1)));
+        assert!(is_open(ctx.unifier.resolve_route(r2)));
         assert_ne!(
-            ctx.unifier.resolve_route(&r1),
-            ctx.unifier.resolve_route(&r2),
+            ctx.unifier.resolve_route(r1),
+            ctx.unifier.resolve_route(r2),
             "sibling arms stay independent past a boundary that does not own them"
         );
 
         // The arms ground apart only afterwards; the owning drain still
         // applies the byte side with the Value-Unit subsumption intact.
-        ctx.unify_route(&r1, &PayloadRoute::Bytes, Reason::RoutePin);
+        ctx.unify_route(r1, PayloadRoute::Bytes, Reason::RoutePin);
         ctx.solve_and_finalize();
-        assert_eq!(ctx.unifier.resolve_route(&result), PayloadRoute::Bytes);
-        assert_eq!(ctx.unifier.resolve_route(&r2), PayloadRoute::Bytes);
+        assert_eq!(ctx.unifier.resolve_route(result), PayloadRoute::Bytes);
+        assert_eq!(ctx.unifier.resolve_route(r2), PayloadRoute::Bytes);
         assert!(ctx.errors.is_empty());
     }
 
@@ -670,11 +667,11 @@ mod tests {
         let (result, value) =
             ctx.join_arm_results(vec![(r1, v1.clone()), (r2, v2.clone())], Reason::CaseArms);
 
-        ctx.unify_route(&result, &PayloadRoute::Bytes, Reason::RoutePin);
+        ctx.unify_route(result, PayloadRoute::Bytes, Reason::RoutePin);
         ctx.solve_and_finalize();
 
-        assert_eq!(ctx.unifier.resolve_route(&r1), PayloadRoute::Bytes);
-        assert_eq!(ctx.unifier.resolve_route(&r2), PayloadRoute::Bytes);
+        assert_eq!(ctx.unifier.resolve_route(r1), PayloadRoute::Bytes);
+        assert_eq!(ctx.unifier.resolve_route(r2), PayloadRoute::Bytes);
         assert_eq!(ctx.unifier.resolve_ty(&v1), Ty::Unit);
         assert_eq!(ctx.unifier.resolve_ty(&v2), Ty::Unit);
         assert_eq!(ctx.unifier.resolve_ty(&value), Ty::Unit);

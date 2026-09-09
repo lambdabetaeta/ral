@@ -38,7 +38,7 @@ impl Resolver<'_> {
     /// asks for the anchor here rather than reaching past the resolver for a
     /// cwd of its own.
     #[must_use]
-    pub fn search_cwd(&self) -> SearchCwd<'_> {
+    pub(crate) fn search_cwd(&self) -> SearchCwd<'_> {
         self.cwd.map_or_else(SearchCwd::nowhere, SearchCwd::of)
     }
 

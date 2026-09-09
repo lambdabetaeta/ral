@@ -15,12 +15,12 @@ use serde::{Deserialize, Serialize};
 /// shipping a seed at all: a fork and a seed must mean the same thing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EngineSeed {
-    pub scope_table: ScopeTable,
+    pub(crate) scope_table: ScopeTable,
     pub shell: WireShell,
     pub captured: SerialEnvSnapshot,
     /// The spawn's validated base tag, meet-narrowed against the receiving
     /// engine's own ceiling once hydrated.
-    pub grant: String,
+    pub(crate) grant: String,
 }
 
 /// Reify a forked shell into a wire-ready [`EngineSeed`] — `hatch`'s only

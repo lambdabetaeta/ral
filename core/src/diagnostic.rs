@@ -273,7 +273,7 @@ fn lex_error_report(source: &str, kind: &LexErrorKind) -> Option<LexErrorReport>
 
 /// Render one type error, falling back to the spanless form when it carries
 /// no position.
-pub fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> String {
+pub(crate) fn format_type_error_ariadne(file: &str, source: &str, err: &TypeError) -> String {
     let message = err.kind.render_message();
     let code = err.kind.code();
     let hint = err.hint();
@@ -331,7 +331,7 @@ pub fn format_static_diagnostics(diagnostics: &StaticDiagnostics) -> (String, i3
 /// Draw the caret into the source `span` names, resolved through `db`.  A span
 /// `db` cannot resolve falls back to spanless: no caret beats one in the wrong
 /// file.
-pub fn format_runtime_error_ariadne(
+pub(crate) fn format_runtime_error_ariadne(
     db: &SourceDb,
     span: Option<Span>,
     message: &str,
@@ -399,7 +399,7 @@ pub fn cmd_error(cmd: &str, msg: &str) {
 
 /// The one-liner for a single-command input, where a caret would only point
 /// back at the line the user just typed.
-pub fn format_runtime_error_compact(err: &crate::types::Error) -> String {
+pub(crate) fn format_runtime_error_compact(err: &crate::types::Error) -> String {
     let (red, cyan, reset) = error_palette();
     let mut out = format!("{red}error{reset}: {}", err.message);
     if let Some(code) = err.status_code_for_display() {

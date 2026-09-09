@@ -24,10 +24,12 @@
 
 mod common;
 
+use common::fresh_shell;
+
+use ral_core::Break;
 use ral_core::builtins::CORE_BUILTINS;
 use ral_core::typecheck::{CompTy, Ty, Unifier};
-use ral_core::types::{Map, Mooring, Shell, Value};
-use ral_core::{Break, builtins};
+use ral_core::types::{Map, Mooring, Value};
 
 /// Builtins whose reducer reaches a resource a bare in-test call cannot
 /// satisfy, so the registry sweep cannot run them.  Each is exercised by
@@ -58,13 +60,6 @@ const RESOURCE_BACKED: &[(&str, &str)] = &[
     ("exit", "raises a process-exit escape"),
     ("quit", "raises a process-exit escape"),
 ];
-
-fn fresh_shell() -> Shell {
-    let mut shell = Shell::default();
-    shell.seed_default_env_vars();
-    builtins::register(&mut shell, common::prelude_comp());
-    shell
-}
 
 /// A representative inhabitant of a concrete first-order type, or `None`
 /// for a type the generator does not synthesise (the whole builtin is then
@@ -126,10 +121,12 @@ fn arg_and_return_types(u: &mut Unifier, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
     loop {
         match cur {
             CompTy::Fun(param, body) => {
-                args.push(u.resolve_ty(param));
+                args.push(ral_core::test_access::resolve_ty(u, param));
                 cur = body;
             }
-            CompTy::Return(_, ret) => return Some((args, u.resolve_ty(ret))),
+            CompTy::Return(_, ret) => {
+                return Some((args, ral_core::test_access::resolve_ty(u, ret)));
+            }
             CompTy::Var(_) => return None,
         }
     }
@@ -148,8 +145,10 @@ fn every_scheme_reducer_inhabits_its_return_type() {
         // unified, so a quantified `Ty::Var` stays unbound and is treated as
         // a polymorphic (any-value) position.
         let mut u = Unifier::new();
-        let scheme = (entry.type_rule)(&mut u);
-        let Some((arg_tys, ret_ty)) = arg_and_return_types(&mut u, &scheme.ty) else {
+        let scheme = ral_core::test_access::builtin_scheme(entry, &mut u);
+        let Some((arg_tys, ret_ty)) =
+            arg_and_return_types(&mut u, ral_core::test_access::scheme_ty(&scheme))
+        else {
             continue;
         };
         let Some(args) = arg_tys.iter().map(inhabitant).collect::<Option<Vec<_>>>() else {

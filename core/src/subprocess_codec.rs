@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 /// Checked before the body is allocated, so no peer names a huge buffer.
 const MAX_FRAME_LEN: u32 = 256 * 1024 * 1024;
 
-pub fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io::Result<()> {
+pub(crate) fn write_frame<W: Write + ?Sized, T: Serialize>(w: &mut W, value: &T) -> io::Result<()> {
     let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     let len = u32::try_from(bytes.len())
         .map_err(|_| io::Error::other("subprocess: frame exceeds 4 GiB"))?;
@@ -86,7 +86,9 @@ mod sigpipe {
     }
 }
 
-pub fn read_frame<R: Read + ?Sized, T: DeserializeOwned>(r: &mut R) -> io::Result<Option<T>> {
+pub(crate) fn read_frame<R: Read + ?Sized, T: DeserializeOwned>(
+    r: &mut R,
+) -> io::Result<Option<T>> {
     let Some(body) = read_body(r)? else {
         return Ok(None);
     };

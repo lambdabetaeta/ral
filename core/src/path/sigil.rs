@@ -25,14 +25,14 @@ use std::path::{Path, PathBuf};
 
 /// Shaped like an `xdg:` token, known name or not — so a load-time validator
 /// can tell an unknown token from an ordinary path.
-pub fn looks_like_xdg(s: &str) -> bool {
+pub(crate) fn looks_like_xdg(s: &str) -> bool {
     s.starts_with("xdg:")
 }
 
 /// A path separator, or one of the five sigil heads [`freeze_one`] knows.
 /// `capability::decode`'s exec map uses it to let bare command names (`git`)
 /// through freeze unresolved.
-pub fn looks_like_path_or_sigil(s: &str) -> bool {
+pub(crate) fn looks_like_path_or_sigil(s: &str) -> bool {
     s.contains('/')
         || s.starts_with('~')
         || s.starts_with("xdg:")
@@ -42,7 +42,7 @@ pub fn looks_like_path_or_sigil(s: &str) -> bool {
 }
 
 /// Parse `xdg:NAME[/sub]`; `None` for a non-`xdg:` input or an unknown name.
-pub fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
+pub(crate) fn parse_xdg_token(input: &str) -> Option<(XdgKind, Option<&str>)> {
     let body = input.strip_prefix("xdg:")?;
     let (name, sub) = match body.split_once('/') {
         Some((n, s)) => (n, Some(s)),
@@ -295,7 +295,8 @@ pub fn system_tool_roots() -> Vec<String> {
 /// That is `/opt/homebrew` as `sandbox::macos` admits for `Exec` and
 /// `/home/linuxbrew/.linuxbrew` as `sandbox::linux` lists, mirrored here for
 /// the capability layer's separate exec-admission concern.
-pub fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
+#[cfg_attr(not(any(unix, test)), allow(dead_code))]
+pub(crate) fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
     let mut roots = vec!["/usr/bin".to_string(), "/bin".to_string()];
     for brew in ["/opt/homebrew", "/home/linuxbrew/.linuxbrew"] {
         if exists(brew) {
@@ -310,7 +311,8 @@ pub fn unix_tool_roots(exists: impl Fn(&str) -> bool) -> Vec<String> {
 ///
 /// A Git-for-Windows `usr\bin` joins them, under whichever
 /// `program_files_dirs` entry `exists` reports.
-pub fn windows_tool_roots(
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) fn windows_tool_roots(
     system_root: &str,
     program_files_dirs: &[&str],
     exists: impl Fn(&str) -> bool,

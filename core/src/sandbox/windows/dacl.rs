@@ -213,7 +213,7 @@ const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 0x11;
 
 /// Errors returned by [`DaclManager`] and [`recover_orphaned_state`].
 #[derive(Debug)]
-pub enum DaclError {
+pub(crate) enum DaclError {
     NetworkPathRejected(PathBuf),
     PathNotFound(PathBuf),
     WriteDacDenied {
@@ -335,14 +335,14 @@ struct Ledger {
 
 /// Aggregated outcome of [`recover_orphaned_state`].
 #[derive(Debug, Default)]
-pub struct RecoveryReport {
-    pub files_processed: usize,
-    pub aces_restored: usize,
-    pub profiles_deleted: usize,
+pub(crate) struct RecoveryReport {
+    pub(crate) files_processed: usize,
+    pub(crate) aces_restored: usize,
+    pub(crate) profiles_deleted: usize,
     /// ACEs dropped because their target no longer exists: nothing to restore
     /// on a deleted file, so retrying it every boot would be forever.
-    pub aces_pruned_missing: usize,
-    pub errors: Vec<String>,
+    pub(crate) aces_pruned_missing: usize,
+    pub(crate) errors: Vec<String>,
 }
 
 /// Crash-safe ledger of what a session registers with the OS and must give
@@ -351,7 +351,7 @@ pub struct RecoveryReport {
 /// [`ensure_fs_grant`] is a free function — but the `applied` list survives
 /// in [`Ledger`] so the boot sweep can still undo a pre-capability session's.
 #[derive(Debug)]
-pub struct DaclManager {
+pub(crate) struct DaclManager {
     run_id: String,
     ledger_path: PathBuf,
     profiles: Vec<String>,
@@ -378,7 +378,7 @@ impl DaclManager {
     /// the OS — the same ledger-before-mutation ordering ACEs get. A crash in
     /// between leaves recovery trying to delete a profile that never existed,
     /// which is the harmless direction to fail in.
-    pub fn record_profile(&mut self, name: &str) -> Result<(), DaclError> {
+    pub(crate) fn record_profile(&mut self, name: &str) -> Result<(), DaclError> {
         self.profiles.push(name.to_string());
         if let Err(e) = self.persist_ledger() {
             self.profiles.pop();
@@ -389,7 +389,7 @@ impl DaclManager {
 
     /// Call once the OS-level profile is gone. The ledger file disappears
     /// outright when nothing — no ACE, no profile — is left recorded.
-    pub fn forget_profile(&mut self, name: &str) -> Result<(), DaclError> {
+    pub(crate) fn forget_profile(&mut self, name: &str) -> Result<(), DaclError> {
         self.profiles.retain(|p| p != name);
         self.checkpoint()
     }
@@ -621,7 +621,7 @@ fn record_stamp(key: &str) -> Result<(), DaclError> {
     clippy::disallowed_methods,
     reason = "[silent:dacl-ledger-sweep] Startup orphan sweep: lists the ledger directory, quarantines unparseable ledgers by rename, and removes fully-recovered ones. Sandbox crash-recovery infrastructure, not model data I/O."
 )]
-pub fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
+pub(crate) fn recover_orphaned_state() -> Result<RecoveryReport, DaclError> {
     let mut report = RecoveryReport::default();
     let dir = ledger_dir();
     let entries = match fs::read_dir(&dir) {

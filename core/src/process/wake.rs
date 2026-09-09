@@ -50,7 +50,7 @@ impl Wake {
 
     /// Idempotent: only the first call touches the pipe, so a wake fired
     /// twice never blocks on a full one-byte buffer.
-    pub fn fire(&self) {
+    pub(crate) fn fire(&self) {
         if self.fired.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -63,7 +63,8 @@ impl Wake {
         }
     }
 
-    pub fn is_fired(&self) -> bool {
+    #[cfg(windows)]
+    pub(crate) fn is_fired(&self) -> bool {
         self.fired.load(Ordering::SeqCst)
     }
 

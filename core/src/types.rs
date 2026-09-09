@@ -4,7 +4,7 @@
 //! through this path, so the rest of the tree never tracks which one owns what.
 
 mod env;
-pub use env::{Binding, Env, EnvVars, EnvVarsIter};
+pub use env::{Binding, Env, EnvVars};
 pub(crate) use env::{BindingMap, NativeMap, PreludeMap};
 
 pub use shell::repl::ReplScratch;
@@ -29,7 +29,7 @@ mod exec_arg;
 pub(crate) use exec_arg::RefusedArg;
 
 mod handler;
-pub use handler::{
+pub(crate) use handler::{
     FrameHandle, HandlerArity, HandlerEntry, HandlerFrame, HandlerLookup, HandlerRole,
     HandlerStack, validate_handler_arity,
 };
@@ -94,8 +94,6 @@ pub use shell::{Context, DEFAULT_STACK_LIMIT, LocalState, SessionState, Shell};
 
 pub(crate) use shell::workers::{CapReached, WorkerRegistry};
 pub use shell::workers::{LeaseClass, ReapCause, ReapNotice, WorkerEntry, WorkerId, WorkerLease};
-
-pub use shell::detached::{DetachPolicy, Reservation};
 
 pub use shell::bindings::{BindingLease, BindingPruneNotice, LargeBindingNotice};
 

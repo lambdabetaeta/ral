@@ -61,7 +61,7 @@ const ENGINE: Recipe = &["--engine"];
 /// an installer is chosen at `Attach`, before [`apply_seed`] runs, so the
 /// policy can be demanded of every host that dresses an engine instead of
 /// left in a slot one of them might forget to fill.
-pub type GrantNarrower = fn(&str, &str) -> Result<Capabilities, String>;
+pub(crate) type GrantNarrower = fn(&str, &str) -> Result<Capabilities, String>;
 
 /// The process-global hatch table. No thread, no signal handler: a hatch
 /// sweeps it on entry, and `teardown` sweeps it once more as the engine

@@ -126,7 +126,7 @@ pub enum StdinFeed {
 
 impl StdinFeed {
     /// How the user spelled it.
-    pub fn spelling(self) -> &'static str {
+    pub(crate) fn spelling(self) -> &'static str {
         match self {
             Self::File => "<",
             Self::HereString => "<<",
@@ -297,7 +297,7 @@ impl TypeErrorKind {
 pub struct TypeError {
     pub pos: Option<Span>,
     pub kind: TypeErrorKind,
-    pub reason: Option<Reason>,
+    pub(crate) reason: Option<Reason>,
 }
 
 impl TypeError {

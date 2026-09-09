@@ -50,7 +50,7 @@ impl Shell {
     /// arrives before the run's own frame exists: the frame is born a descendant
     /// and reads the flag on its first poll.  Hung under the session anchor like
     /// every other top-level frame, so session teardown reaches it.
-    pub fn run_cancel_handle(&self) -> ForegroundScope {
+    pub(crate) fn run_cancel_handle(&self) -> ForegroundScope {
         self.session.anchor.child()
     }
 
@@ -114,12 +114,6 @@ impl Shell {
     /// Every installed builtin's name, for tab completion.
     pub fn builtin_names(&self) -> impl Iterator<Item = &str> {
         self.session.builtins.names()
-    }
-
-    /// Every native's name — what a `$name` reference can reach, unlike
-    /// [`Self::builtin_names`], which also lists the base-frame names.
-    pub fn native_names(&self) -> impl Iterator<Item = &str> {
-        self.env.native_names()
     }
 
     /// The test-dressing door, with [`Self::install_captured_builtins`]; a
@@ -208,13 +202,13 @@ impl Shell {
     /// Distinct lexical names visible in scope, a shadowed one counted once —
     /// what `crate::protocol::answer_probe` serves exarch's `/resources` fold.
     /// Names only, never the values, and renewing nothing.
-    pub fn binding_count(&self) -> usize {
+    pub(crate) fn binding_count(&self) -> usize {
         self.env.distinct_name_count()
     }
 
     /// Names the binding-lease ledger tracks — non-baseline only, so a
     /// narrower read than [`Self::binding_count`], and `0` when unarmed.
-    pub fn leased_binding_count(&self) -> usize {
+    pub(crate) fn leased_binding_count(&self) -> usize {
         self.local.bindings.leased_count()
     }
 
@@ -382,7 +376,7 @@ impl Shell {
     /// (exarch's tool runs) cannot construct one at all — it has no
     /// `&TerminalLease` to hand
     /// [`ForegroundGuard::try_acquire`](crate::process::ForegroundGuard::try_acquire).
-    pub fn terminal_lease(&self, mooring: &Mooring) -> Option<&TerminalLease> {
+    pub(crate) fn terminal_lease(&self, mooring: &Mooring) -> Option<&TerminalLease> {
         match mooring.terminal_access {
             TerminalAccess::Denied => None,
             TerminalAccess::Leased | TerminalAccess::ExplicitLoan => {
@@ -421,16 +415,6 @@ impl Shell {
         self.context.set_env_var(k, v);
     }
 
-    /// [`Self::set_env_var`] in bulk, for a host seeding a batch at boot.
-    pub fn extend_env<I, K, V>(&mut self, items: I)
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<String>,
-        V: Into<String>,
-    {
-        self.context.extend_env(items);
-    }
-
     /// Read an env var through the dynamic overlay, falling back to the host
     /// process environment — the overlay-on-process rule `within [env: …]`
     /// obeys.  A host driving command completion reads `PATH` here.
@@ -448,7 +432,7 @@ impl Shell {
     /// `grant` / `within` attenuation — with which a host asserts stack balance
     /// across a run boundary.  [`Shell::has_active_capabilities`] asks
     /// qualitatively.
-    pub fn grant_depth(&self) -> usize {
+    pub(crate) fn grant_depth(&self) -> usize {
         self.context.grants.len()
     }
 }

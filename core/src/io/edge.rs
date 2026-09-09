@@ -19,11 +19,11 @@ impl Edge {
         })
     }
 
-    pub fn is_dead(&self) -> bool {
+    pub(crate) fn is_dead(&self) -> bool {
         self.dead.load(Ordering::SeqCst)
     }
 
-    pub fn mark_dead(&self) {
+    pub(crate) fn mark_dead(&self) {
         self.dead.store(true, Ordering::SeqCst);
     }
 }
@@ -31,7 +31,7 @@ impl Edge {
 /// The io error a write to a dead edge returns; `Shell::write_sink` reads it
 /// back as `Error::cancelled(ReaderGone)`.
 #[derive(Debug)]
-pub struct DeadEdge;
+pub(crate) struct DeadEdge;
 
 impl std::fmt::Display for DeadEdge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

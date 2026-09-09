@@ -19,7 +19,7 @@ use crate::syntax::ast::{Ast, Stmt};
 use std::collections::{HashMap, HashSet};
 
 /// A statement group produced by the pre-pass.
-pub enum StmtGroup {
+pub(crate) enum StmtGroup {
     /// Every non-recursive `let`, and every non-binding statement.
     Single(Stmt),
     /// A recursive knot, emitted as `CompKind::LetRec`.  Each member carries
@@ -29,7 +29,7 @@ pub enum StmtGroup {
 
 /// Partition `stmts` into [`StmtGroup`]s, dependencies before their dependents
 /// regardless of source order.
-pub fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
+pub(crate) fn group_stmts(stmts: &[Stmt]) -> Vec<StmtGroup> {
     // def_list[i] = (stmt_idx, name, rhs, rhs_span); defs[name] = the def_list
     // indices defining it, in stmt_idx order.
     let mut def_list: Vec<(usize, &str, &Ast, Option<Span>)> = Vec::new();

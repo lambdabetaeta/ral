@@ -48,7 +48,7 @@ pub struct Located {
 /// What the object is.  One of these and no other, so an enum rather than a
 /// row of bools that can contradict one another.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind {
+pub(crate) enum Kind {
     File,
     Dir,
     Symlink,
@@ -73,15 +73,15 @@ impl Kind {
 /// has already followed the link, so what it stats is the target.  A
 /// timestamp the filesystem does not record is `None`, not an epoch: the two
 /// are different answers, and only the caller knows how to say so.
-pub struct Stat {
+pub(crate) struct Stat {
     pub kind: Kind,
-    pub len: u64,
-    pub readonly: bool,
-    pub mtime: Option<SystemTime>,
-    pub atime: Option<SystemTime>,
-    pub btime: Option<SystemTime>,
+    pub(crate) len: u64,
+    pub(crate) readonly: bool,
+    pub(crate) mtime: Option<SystemTime>,
+    pub(crate) atime: Option<SystemTime>,
+    pub(crate) btime: Option<SystemTime>,
     #[cfg(unix)]
-    pub mode: u32,
+    pub(crate) mode: u32,
 }
 
 impl From<&Metadata> for Stat {
@@ -113,9 +113,9 @@ impl From<&Metadata> for Stat {
 
 /// One entry of [`Located::read_dir`]: its name in the directory, and what
 /// stating it without following found.
-pub struct Entry {
+pub(crate) struct Entry {
     pub name: OsString,
-    pub stat: Stat,
+    pub(crate) stat: Stat,
 }
 
 enum Step {
@@ -126,7 +126,7 @@ enum Step {
 /// What the walk does with a symlink at the *final* component.  Directory
 /// components are always resolved; only the leaf is in question.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Leaf {
+pub(crate) enum Leaf {
     /// Follow it to what it points at.  What an open wants: `> link` writes
     /// through to the target, and the grant judges the target, so a link is
     /// never a way to smuggle a write past a deny.
@@ -141,7 +141,7 @@ pub enum Leaf {
 /// # Errors
 /// A missing or untraversable intermediate directory, a link cycle past
 /// [`MAX_HOPS`], or the root itself, which is nobody's leaf.
-pub fn walk(rp: &ResolvedPath, leaf: Leaf) -> io::Result<Located> {
+pub(crate) fn walk(rp: &ResolvedPath, leaf: Leaf) -> io::Result<Located> {
     let mut path = rp.as_path().to_path_buf();
     for _ in 0..MAX_HOPS {
         match descend(&path, leaf)? {
@@ -237,7 +237,7 @@ fn nofollow(opts: &mut OpenOptions) -> &mut OpenOptions {
 
 impl Located {
     /// The symlink-free path of the object: what a gate judges and a card names.
-    pub fn real(&self) -> &Path {
+    pub(crate) fn real(&self) -> &Path {
         &self.real
     }
 
@@ -259,7 +259,7 @@ impl Located {
     ///
     /// # Errors
     /// The open's.
-    pub fn append(&self) -> io::Result<File> {
+    pub(crate) fn append(&self) -> io::Result<File> {
         self.open_leaf(OpenOptions::new().create(true).append(true))
     }
 
@@ -267,7 +267,7 @@ impl Located {
     ///
     /// # Errors
     /// The open's.
-    pub fn truncate(&self) -> io::Result<File> {
+    pub(crate) fn truncate(&self) -> io::Result<File> {
         self.open_leaf(OpenOptions::new().create(true).write(true).truncate(true))
     }
 
@@ -284,7 +284,7 @@ impl Located {
         clippy::disallowed_methods,
         reason = "[silent:locate-stat] Stats the located object: for the write site, to choose atomic against streaming semantics, to carry the mode onto the staged file and to size the before-image; for `exists`/`is-file`/`file-info`, as the predicate they are. A metadata read, never the model's turn-time data I/O — the write site's own card is its surface, and a predicate raises none."
     )]
-    pub fn stat(&self) -> io::Result<Option<Stat>> {
+    pub(crate) fn stat(&self) -> io::Result<Option<Stat>> {
         match stat(&self.dir, self.leaf.as_ref(), FollowSymlinks::No) {
             Ok(m) => Ok(Some(Stat::from(&m))),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -304,7 +304,7 @@ impl Located {
         clippy::disallowed_methods,
         reason = "[silent:locate-read-dir] `list-dir`'s enumeration of the located directory, relative to its own handle. A listing predicate, not turn-time model data I/O — the caller still judges each entry against the live grant, and raises no card."
     )]
-    pub fn read_dir(&self) -> io::Result<Vec<Entry>> {
+    pub(crate) fn read_dir(&self) -> io::Result<Vec<Entry>> {
         let dir = open_dir_nofollow(&self.dir, self.leaf.as_ref())?;
         let mut entries: Vec<Entry> = read_base_dir(&dir)?
             .filter_map(|e| {
@@ -327,7 +327,7 @@ impl Located {
         clippy::disallowed_methods,
         reason = "[silent:locate-read-link] `file-info`'s symlink target: reads the link's own contents as a metadata predicate. Not turn-time model data I/O, raises no surface card."
     )]
-    pub fn read_link(&self) -> io::Result<PathBuf> {
+    pub(crate) fn read_link(&self) -> io::Result<PathBuf> {
         read_link_contents(&self.dir, self.leaf.as_ref())
     }
 
@@ -338,7 +338,7 @@ impl Located {
         clippy::disallowed_methods,
         reason = "[silent:locate-access] The `is-writable` predicate's access(2) against the real uid/gid. A permission predicate, not turn-time model data I/O, raises no surface card."
     )]
-    pub fn is_writable(&self) -> bool {
+    pub(crate) fn is_writable(&self) -> bool {
         access(
             &self.dir,
             self.leaf.as_ref(),
@@ -362,7 +362,7 @@ impl Located {
         clippy::disallowed_methods,
         reason = "[surface:locate-stage] The atomic `>` staging create: a fresh exclusive sibling in the target's own directory, holding the write until the rename commits it. A sub-step of the write site; the write card is the operation's surface."
     )]
-    pub fn create_sibling_tmp(&self) -> io::Result<(File, OsString)> {
+    pub(crate) fn create_sibling_tmp(&self) -> io::Result<(File, OsString)> {
         loop {
             let mut name = String::from(".");
             name.extend((0..16).map(|_| fastrand::alphanumeric()));
@@ -386,7 +386,7 @@ impl Located {
         clippy::disallowed_methods,
         reason = "[surface:locate-staged-read] Reads the staged temp back to seed the write card's new side, before the rename commits it. A sub-step of the write site, not a separate model read."
     )]
-    pub fn sibling_read(&self, name: &OsStr) -> io::Result<File> {
+    pub(crate) fn sibling_read(&self, name: &OsStr) -> io::Result<File> {
         open(
             &self.dir,
             name.as_ref(),
@@ -400,7 +400,7 @@ impl Located {
         clippy::disallowed_methods,
         reason = "[surface:locate-staged-write] Re-opens the staged temp for writing so its bytes can be flushed durable before the rename. A sub-step of the write site's commit; these opens carry written bytes to disk, they are not separate model reads."
     )]
-    pub fn sibling_write(&self, name: &OsStr) -> io::Result<File> {
+    pub(crate) fn sibling_write(&self, name: &OsStr) -> io::Result<File> {
         open(
             &self.dir,
             name.as_ref(),
@@ -417,7 +417,7 @@ impl Located {
         clippy::disallowed_methods,
         reason = "[surface:locate-commit] The atomic `>` commit step: rename the staged sibling onto the target within the one directory handle. The write surface fires when the write settles, committed once this returns Ok."
     )]
-    pub fn rename_sibling_over(&self, name: &OsStr) -> io::Result<()> {
+    pub(crate) fn rename_sibling_over(&self, name: &OsStr) -> io::Result<()> {
         rename(&self.dir, name.as_ref(), &self.dir, self.leaf.as_ref())
     }
 
@@ -427,7 +427,7 @@ impl Located {
         clippy::disallowed_methods,
         reason = "[silent:locate-abandon] Reasoned-silent rollback of the atomic `>`: unlink the staged temp for a write that will not land. The aborted write card is the surface; this removal raises none of its own."
     )]
-    pub fn remove_sibling(&self, name: &OsStr) -> io::Result<()> {
+    pub(crate) fn remove_sibling(&self, name: &OsStr) -> io::Result<()> {
         remove_file(&self.dir, name.as_ref())
     }
 
@@ -436,7 +436,7 @@ impl Located {
     ///
     /// # Errors
     /// The fsync's; Windows has no directory flush and errors here.
-    pub fn sync_dir(&self) -> io::Result<()> {
+    pub(crate) fn sync_dir(&self) -> io::Result<()> {
         self.dir.sync_all()
     }
 }
@@ -454,7 +454,7 @@ impl Located {
     clippy::disallowed_methods,
     reason = "[silent:discard-device] `/dev/null` / `NUL` opened by name: no bytes reach or leave the model, and no grant region can contain a device that is not a file."
 )]
-pub fn open_discard(rp: &ResolvedPath) -> io::Result<File> {
+pub(crate) fn open_discard(rp: &ResolvedPath) -> io::Result<File> {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)

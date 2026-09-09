@@ -94,7 +94,7 @@ impl CompTy {
     /// returning `Unit`.  Landing on the byte side of any decision means
     /// unifying with this whole, so the `Bytes`/`Unit` pairing travels
     /// structurally and no grounding site carries half of it from memory.
-    pub fn bytes() -> Self {
+    pub(crate) fn bytes() -> Self {
         Self::Return(PayloadRoute::Bytes, Box::new(Ty::Unit))
     }
 }

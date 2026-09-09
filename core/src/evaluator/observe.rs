@@ -52,16 +52,16 @@ pub(crate) fn observe(reg: &Register, shell: &Shell) -> Result<Value, Error> {
             )
             .map(Value::String)
             .map_err(|cause| {
-                shell.err_hint(
+                Error::new(
                     format!("cannot resolve {}: {}", path.to_literal(), cause.why()),
-                    match cause {
-                        Unexpandable::HomeUnknown => "set HOME, or spell out an explicit path",
-                        Unexpandable::ForeignUser => {
-                            "use bare ~ for the current user, or spell out an explicit path"
-                        }
-                    },
                     1,
                 )
+                .with_hint(match cause {
+                    Unexpandable::HomeUnknown => "set HOME, or spell out an explicit path",
+                    Unexpandable::ForeignUser => {
+                        "use bare ~ for the current user, or spell out an explicit path"
+                    }
+                })
             })
         }
     }

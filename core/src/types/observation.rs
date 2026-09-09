@@ -249,7 +249,7 @@ impl Observation {
 
     /// A door with a body behind it: the caller stamped `start` before the
     /// body ran and `end` after it settled.
-    pub fn spanning(
+    pub(crate) fn spanning(
         site: CallSite,
         start: i64,
         end: i64,

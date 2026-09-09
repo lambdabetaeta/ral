@@ -25,7 +25,7 @@ pub enum Word {
 }
 
 impl Word {
-    pub fn as_plain(&self) -> Option<&str> {
+    pub(crate) fn as_plain(&self) -> Option<&str> {
         match self {
             Self::Plain(s) => Some(s),
             Self::Slash(_) | Self::Tilde(_) => None,
@@ -132,15 +132,15 @@ pub enum Ast {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CaseArm {
     pub tag: Spanned<String>,
-    pub body: Spanned<Box<Ast>>,
+    pub(crate) body: Spanned<Box<Ast>>,
 }
 
 /// One branch of an [`Ast::If`]: a condition and the body to run when that
 /// condition is the first to match.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IfBranch {
-    pub cond: Spanned<Box<Ast>>,
-    pub body: Spanned<Box<Ast>>,
+    pub(crate) cond: Spanned<Box<Ast>>,
+    pub(crate) body: Spanned<Box<Ast>>,
 }
 
 /// One statement of a sequence: a program, a block body, a lambda body, a
@@ -151,7 +151,7 @@ pub struct IfBranch {
 /// since [`crate::ir::Val`] is unspanned, so the caret falls back to this and
 /// must underline the whole statement. Synthetic statements carry no span at
 /// all, and the elaborator then keeps the position it already had.
-pub type Stmt = Spanned<Ast>;
+pub(crate) type Stmt = Spanned<Ast>;
 
 /// Parsed command head — a closed category, so nothing downstream has to
 /// recover a head's meaning from a generic [`Ast`].
@@ -194,13 +194,13 @@ pub enum Pattern<D = Ast> {
 /// field, and a default that fires when the key is absent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MapPatternEntry<D = Ast> {
-    pub key: MapKey,
-    pub pattern: Pattern<D>,
-    pub default: Option<D>,
+    pub(crate) key: MapKey,
+    pub(crate) pattern: Pattern<D>,
+    pub(crate) default: Option<D>,
 }
 
 /// Lambda parameter.
-pub type Param = Pattern;
+pub(crate) type Param = Pattern;
 
 /// Element of a list literal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -235,7 +235,7 @@ pub enum MapKey {
 impl MapKey {
     /// The single-string row label the IR and typechecker want: bare unchanged,
     /// tag prefixed by [`crate::syntax::tag::tag_row_label`].
-    pub fn row_label(&self) -> String {
+    pub(crate) fn row_label(&self) -> String {
         match self {
             Self::Bare(s) => s.clone(),
             Self::Tag(label) => tag_row_label(label),
@@ -244,7 +244,7 @@ impl MapKey {
 
     /// True for tag-alphabet keys. The parser reads it to bar a single map
     /// literal or pattern from mixing the two alphabets.
-    pub fn is_tag(&self) -> bool {
+    pub(crate) fn is_tag(&self) -> bool {
         matches!(self, Self::Tag(_))
     }
 }
@@ -358,7 +358,7 @@ pub enum RedirectMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum RedirectTarget {
+pub(crate) enum RedirectTarget {
     /// A file path, or the payload for [`RedirectMode::HereString`].
     File(Box<Ast>),
     Fd(u32),
@@ -368,9 +368,9 @@ pub enum RedirectTarget {
 /// than an entry in their argument lists, so it can never pass for a value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Redirect {
-    pub fd: u32,
-    pub mode: RedirectMode,
-    pub target: RedirectTarget,
+    pub(crate) fd: u32,
+    pub(crate) mode: RedirectMode,
+    pub(crate) target: RedirectTarget,
 }
 
 /// Operand shape of a control-operator scope form, one variant per surface
@@ -394,18 +394,18 @@ pub enum ScopeAst {
 /// The surface name, the operand arity, a description of the operands for
 /// the arity-mismatch message, and a constructor from the validated operand
 /// vector.
-pub struct ScopeKeyword {
+pub(crate) struct ScopeKeyword {
     pub name: &'static str,
-    pub arity: usize,
-    pub operand_desc: &'static str,
-    pub build: fn(Vec<Ast>) -> ScopeAst,
+    pub(crate) arity: usize,
+    pub(crate) operand_desc: &'static str,
+    pub(crate) build: fn(Vec<Ast>) -> ScopeAst,
 }
 
 impl ScopeAst {
     /// Every control-operator keyword. [`crate::syntax::is_keyword`] reads this
     /// list, so the parser's ban on these names in binding positions and
     /// exarch's syntax highlighter cannot drift apart.
-    pub const KEYWORDS: &'static [ScopeKeyword] = &[
+    pub(crate) const KEYWORDS: &'static [ScopeKeyword] = &[
         ScopeKeyword {
             name: "try",
             arity: 2,
@@ -468,7 +468,7 @@ impl ScopeAst {
     ];
 
     /// Look up a control-operator keyword by surface name.
-    pub fn lookup_keyword(name: &str) -> Option<&'static ScopeKeyword> {
+    pub(crate) fn lookup_keyword(name: &str) -> Option<&'static ScopeKeyword> {
         Self::KEYWORDS.iter().find(|kw| kw.name == name)
     }
 }
@@ -484,14 +484,14 @@ impl ScopeAst {
 /// stays a string; `007` and `1.50` are numerals all the same, and normalise
 /// to `7` and `1.5` wherever they are printed.
 #[derive(Debug, Clone, PartialEq)]
-pub enum WordLiteral {
+pub(crate) enum WordLiteral {
     Bool(bool),
     Int(i64),
     Float(f64),
 }
 
 impl WordLiteral {
-    pub fn classify(s: &str) -> Option<Self> {
+    pub(crate) fn classify(s: &str) -> Option<Self> {
         match s {
             "true" => Some(Self::Bool(true)),
             "false" => Some(Self::Bool(false)),
@@ -517,7 +517,7 @@ impl<D> Pattern<D> {
     /// The first name this pattern binds twice, if any. A pattern binds all
     /// its names at once, so a repeat is an ambiguity, not a shadow — the
     /// parser rejects it at both binder sites (`let` and lambda parameter).
-    pub fn duplicate_name(&self) -> Option<&str> {
+    pub(crate) fn duplicate_name(&self) -> Option<&str> {
         fn walk<'a, D>(pat: &'a Pattern<D>, seen: &mut HashSet<&'a str>) -> Option<&'a str> {
             match pat {
                 Pattern::Wildcard => None,
@@ -532,7 +532,7 @@ impl<D> Pattern<D> {
         walk(self, &mut HashSet::new())
     }
 
-    pub fn collect_names(&self, set: &mut HashSet<String>) {
+    pub(crate) fn collect_names(&self, set: &mut HashSet<String>) {
         match self {
             Self::Wildcard => {}
             Self::Name(n) => {
@@ -560,7 +560,7 @@ impl Ast {
     /// `{|p| …}` lambda. `syntax::group` admits only these into a `LetRec`,
     /// since only a thunk can close over a forward reference without the
     /// binding being settled first.
-    pub fn is_thunk_form(&self) -> bool {
+    pub(crate) fn is_thunk_form(&self) -> bool {
         matches!(self, Self::Lambda { .. } | Self::Block(_))
     }
 
@@ -582,7 +582,7 @@ impl Ast {
 impl ScopeAst {
     /// Operands in source order, matching the arity in [`Self::KEYWORDS`].
     /// Free-variable collection walks them.
-    pub fn operands(&self) -> Vec<&Ast> {
+    pub(crate) fn operands(&self) -> Vec<&Ast> {
         match self {
             Self::Try { body, handler } => vec![body, handler],
             Self::Guard { body, cleanup } => vec![body, cleanup],

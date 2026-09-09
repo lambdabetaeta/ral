@@ -78,7 +78,7 @@ impl Value {
     }
 
     /// `Int` and `Float` only; strings go through the `float` builtin.
-    pub fn as_float(&self) -> Option<f64> {
+    pub(crate) fn as_float(&self) -> Option<f64> {
         match self {
             #[allow(
                 clippy::cast_precision_loss,
@@ -105,7 +105,7 @@ impl Value {
     /// total on purpose, and so is unlike the exec boundary, which refuses the
     /// shapes [`super::RefusedArg`] names because it is heading for `execve(2)`:
     /// total inside, gated at the OS call.
-    pub fn render_argv(args: &[Self]) -> Vec<String> {
+    pub(crate) fn render_argv(args: &[Self]) -> Vec<String> {
         args.iter().map(ToString::to_string).collect()
     }
 
@@ -140,7 +140,7 @@ impl Value {
     /// arity, it is what `validate_handler_arity` in `types/handler.rs` checks
     /// a handler against at its install site. `None` for a `Thunk` whose
     /// `comp.arrow()` is `None` — a block, not a lambda.
-    pub fn lambda_arity(&self) -> Option<usize> {
+    pub(crate) fn lambda_arity(&self) -> Option<usize> {
         let Self::Thunk(c) = self else {
             return None;
         };
@@ -163,7 +163,7 @@ impl Value {
     /// walk this design refuses throughout, `pins_running_work` in
     /// `types/handle.rs` refusing it identically. A nudge, then, not an
     /// account — structure shared under `Arc` counts twice, captures not at all.
-    pub fn shallow_size(&self) -> usize {
+    pub(crate) fn shallow_size(&self) -> usize {
         /// Small and fixed rather than zero, so a binding full of closures
         /// still moves the estimate without pretending to measure captures.
         const OPAQUE_CONSTANT: usize = 32;

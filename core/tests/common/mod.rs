@@ -11,7 +11,9 @@
 
 #![allow(dead_code)] // not every test file uses every helper
 
-use ral_core::boot::BakedPrelude;
+use ral_core::boot::{BakedPrelude, HostSurface, boot_shell};
+use ral_core::io::TerminalState;
+use ral_core::types::Shell;
 use ral_core::{Scheme, ir::Comp, ir::Toplevel};
 use std::sync::{Arc, OnceLock};
 
@@ -31,6 +33,12 @@ fn init_test_binary() {
 pub fn prelude() -> &'static BakedPrelude {
     static B: OnceLock<BakedPrelude> = OnceLock::new();
     B.get_or_init(BakedPrelude::bake_runtime)
+}
+
+/// A shell booted as every front end boots one: core's builtin surface,
+/// the default env vars, the prelude registered with its schemes.
+pub fn fresh_shell() -> Shell {
+    boot_shell(TerminalState::default(), prelude(), &HostSurface::default())
 }
 
 /// The annotated prelude toplevel — its `Phrase::Define`s carry the
@@ -67,7 +75,9 @@ pub fn walk_comp(comp: &Comp, visit: &mut impl FnMut(&Comp)) {
             sub(then);
             sub(else_);
         }
-        CompKind::Case { arms, .. } => arms.iter().for_each(|arm| sub(arm.body.comp())),
+        CompKind::Case { arms, .. } => arms
+            .iter()
+            .for_each(|arm| sub(ral_core::test_access::case_arm_comp(arm))),
         CompKind::Rec { group, .. } => group.iter().for_each(|(_, m)| sub(m)),
         CompKind::Source { path, rest } => {
             sub(path);

@@ -20,12 +20,12 @@ mod unify;
 
 pub use self::builtins::builtin_type_hint;
 pub use self::env::{InferCtx, TyEnv};
-pub use self::error::{CompDiff, PinFailure, Reason, TypeError, TypeErrorKind};
+pub use self::error::{PinFailure, Reason, TypeError, TypeErrorKind};
 pub use self::fmt::{
     FmtCtx, fmt_comp_ty_ctx, fmt_route, fmt_route_ctx, fmt_scheme, fmt_ty, fmt_ty_ctx,
 };
 pub use self::route::{PayloadRoute, PayloadVar, RouteMismatch};
-pub use self::scheme::{CachedFreeVars, Scheme};
+pub use self::scheme::Scheme;
 pub use self::ty::{CompTy, CompTyVar, Row, RowVar, Ty, TyVar};
 pub use self::unify::Unifier;
 
@@ -39,9 +39,9 @@ use crate::ir::{Comp, Phrase, Toplevel};
 /// plugin — and infers at a fresh variable per use site.
 #[derive(Debug, Clone)]
 pub struct SessionSchemes {
-    pub bindings: Vec<(String, Option<Scheme>)>,
-    pub aliases: Vec<(String, Scheme)>,
-    pub builtins: crate::types::BuiltinTable,
+    pub(crate) bindings: Vec<(String, Option<Scheme>)>,
+    pub(crate) aliases: Vec<(String, Scheme)>,
+    pub(crate) builtins: crate::types::BuiltinTable,
 }
 
 impl Default for SessionSchemes {
@@ -184,7 +184,7 @@ pub fn bake_prelude(top: &Toplevel) -> (Toplevel, Vec<(String, Scheme)>) {
 /// # Errors
 /// The arm's route disagrees with the head's, or a byte-routed pin leaves
 /// the arm still returning a value.
-pub fn alias_arm_scheme(
+pub(crate) fn alias_arm_scheme(
     head: &str,
     param: &crate::ir::IrPattern,
     body: &Comp,
@@ -217,7 +217,7 @@ pub fn alias_arm_scheme(
 /// value type, not the argv list an alias arm is forced onto.  Closed
 /// against its own unifier; with no head to pin to, the scheme comes back
 /// directly.
-pub fn binding_value_scheme(
+pub(crate) fn binding_value_scheme(
     param: Option<&crate::ir::IrPattern>,
     body: &Comp,
     schemes: SessionSchemes,

@@ -58,13 +58,13 @@ pub type ByteBuffer = Arc<CapturedBytes>;
 /// Only [`Sink::child_stdout`] and [`Sink::child_stderr`] decide which, so no
 /// caller reasons about "inherit, pipe, pump, tee" on its own.
 pub struct ChildStdioPlan {
-    pub stdio: crate::process::StdioSpec,
-    pub pump: Option<Sink>,
+    pub(crate) stdio: crate::process::StdioSpec,
+    pub(crate) pump: Option<Sink>,
 }
 
 impl ChildStdioPlan {
     /// The child gets the parent's matching fd directly.
-    pub fn inherit() -> Self {
+    pub(crate) fn inherit() -> Self {
         Self {
             stdio: crate::process::StdioSpec::inherit(),
             pump: None,
@@ -183,7 +183,7 @@ impl Sink {
     ///
     /// # Errors
     /// Returns `Err` if writing the tail to an inner sink fails.
-    pub fn flush_pending(&mut self) -> io::Result<()> {
+    pub(crate) fn flush_pending(&mut self) -> io::Result<()> {
         match self {
             Self::LineFramed {
                 inner,
@@ -214,7 +214,7 @@ impl Sink {
     ///
     /// # Errors
     /// Returns `Err` if cloning the sink to pump fails.
-    pub fn child_stdout(&self, inherit_tty: bool) -> io::Result<ChildStdioPlan> {
+    pub(crate) fn child_stdout(&self, inherit_tty: bool) -> io::Result<ChildStdioPlan> {
         if matches!(self, Self::Terminal)
             || (inherit_tty && matches!(self, Self::Stderr | Self::External(_)))
         {
@@ -228,7 +228,7 @@ impl Sink {
     ///
     /// # Errors
     /// Returns `Err` if cloning the sink to pump fails.
-    pub fn child_stderr(&self) -> io::Result<ChildStdioPlan> {
+    pub(crate) fn child_stderr(&self) -> io::Result<ChildStdioPlan> {
         if matches!(self, Self::Stderr) {
             return Ok(ChildStdioPlan::inherit());
         }
@@ -253,7 +253,10 @@ impl Sink {
     /// drain outlives any write failure — a child must never find the pipe it
     /// writes into closed under it, and a dead edge still needs the bytes to
     /// land for the sentinel to hear them.
-    pub fn pump(self, mut reader: impl Read + Send + 'static) -> std::thread::JoinHandle<()> {
+    pub(crate) fn pump(
+        self,
+        mut reader: impl Read + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let mut sink = self;
             let mut buf = [0u8; 8 * 1024];

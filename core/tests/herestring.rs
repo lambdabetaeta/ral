@@ -11,18 +11,11 @@
 
 mod common;
 
-use ral_core::io::TerminalState;
+use common::fresh_shell;
+
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{GrantStack, Settled, Shell};
 use ral_core::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin, Value};
-
-fn fresh_shell() -> Shell {
-    ral_core::boot::boot_shell(
-        TerminalState::default(),
-        common::prelude(),
-        &ral_core::boot::HostSurface::default(),
-    )
-}
 
 fn top_level(shell: &mut Shell, source: &str) -> Settled<Value> {
     match shell.run(RunRequest {

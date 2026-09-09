@@ -193,7 +193,7 @@ fn outcome_from_waitid(status: WaitIdStatus) -> WaitOutcome {
 // ── Public API ───────────────────────────────────────────────────────────
 
 /// Deliver `pid`'s exit to `tx`, shaped by `f`, exactly once.
-pub fn watch<E: Send + 'static>(
+pub(crate) fn watch<E: Send + 'static>(
     pid: u32,
     tx: Sender<E>,
     f: impl FnOnce(WaitOutcome) -> E + Send + 'static,
@@ -217,19 +217,19 @@ pub fn watch<E: Send + 'static>(
 /// A subscription on one watched pid. Dropping it unsubscribes and reaps;
 /// [`Self::reap`] does the same explicitly.
 #[must_use]
-pub struct Watch {
+pub(crate) struct Watch {
     pid: u32,
 }
 
 impl Watch {
     /// Signal the watched child — the only sanctioned way to, since a bare
     /// pid held outside a `Watch` is racy against reuse.
-    pub fn signal(&self, sig: Signal) {
+    pub(crate) fn signal(&self, sig: Signal) {
         unsafe { libc::kill(self.pid.cast_signed(), sig.number()) };
     }
 
     /// `SIGKILL` — the terminal escalation, on both platforms.
-    pub fn kill(&self) {
+    pub(crate) fn kill(&self) {
         unsafe { libc::kill(self.pid.cast_signed(), libc::SIGKILL) };
     }
 
@@ -239,7 +239,7 @@ impl Watch {
     ///
     /// # Errors
     /// Returns `Err` if the reaping wait fails.
-    pub fn reap(self) -> io::Result<()> {
+    pub(crate) fn reap(self) -> io::Result<()> {
         let pid = self.pid;
         std::mem::forget(self);
         finish(pid)

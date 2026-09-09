@@ -10,8 +10,8 @@
 
 use crate::ir::{CommandName, CommandWord};
 use crate::types::{
-    Break, BuiltinEntry, CommandOrigin, Env, HandlerEntry, HandlerLookup, Mooring, Settled, Shell,
-    Value,
+    Break, BuiltinEntry, CommandOrigin, Env, Error, HandlerEntry, HandlerLookup, Mooring, Settled,
+    Shell, Value,
 };
 
 use super::command::{self, CommandIdentity, EvalRedirectV};
@@ -115,7 +115,7 @@ fn refuse_head(id: &CommandIdentity, mooring: &Mooring, shell: &mut Shell) -> Br
     };
     let fields = std::collections::BTreeMap::from([("name".to_string(), id.shown.clone())]);
     audit::record_capability(shell, mooring, "exec", fields);
-    shell.err_hint(msg, hint, 1).into()
+    Error::new(msg, 1).with_hint(hint).into()
 }
 
 // ── Runners ─────────────────────────────────────────────────────────────

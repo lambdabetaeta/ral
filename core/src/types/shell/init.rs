@@ -78,7 +78,7 @@ impl Shell {
         clippy::disallowed_methods,
         reason = "host-env: seeding the baseline $ENV at boot — the host process env is the source the overlay later shadows"
     )]
-    pub fn seed_default_env_vars(&mut self) {
+    pub(crate) fn seed_default_env_vars(&mut self) {
         let home = crate::host::home();
         let user = crate::host::user();
         let path = std::env::var("PATH").unwrap_or_else(|_| {

@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct DetachPolicy {
     /// A whole-life total, not a concurrency limit.
     pub budget: u64,
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) births: AtomicU64,
 }
 
@@ -37,7 +38,8 @@ impl DetachPolicy {
     /// # Errors
     ///
     /// The budget, once spent, so a caller can name the number to the user.
-    pub fn admit(&self) -> Result<Reservation<'_>, u64> {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn admit(&self) -> Result<Reservation<'_>, u64> {
         self.births
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n < self.budget).then_some(n + 1)
@@ -61,6 +63,7 @@ impl DetachPolicy {
 /// release and so the destructor that performs the release must never run
 /// for one.
 #[must_use = "an unheld reservation releases its slot at once; hold it across the launch and commit on success"]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct Reservation<'a> {
     policy: &'a DetachPolicy,
 }
@@ -69,7 +72,8 @@ impl Reservation<'_> {
     /// Make the birth permanent. The reservation is consumed without running
     /// its `Drop`, so the slot it holds is never released — exactly the
     /// monotone counting a real birth demands.
-    pub fn commit(self) {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn commit(self) {
         std::mem::forget(self);
     }
 }

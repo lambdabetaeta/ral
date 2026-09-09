@@ -19,6 +19,8 @@
 
 mod common;
 
+use common::fresh_shell;
+
 use ral_core::protocol::{Program, Run};
 #[cfg(unix)]
 use ral_core::types::FsPolicy;
@@ -32,14 +34,6 @@ use ral_core::{Break, RequestedTerminalAccess, RunIo, RunReport, RunRequest, Run
 /// default env vars seeded, capabilities at root.  Equivalent to
 /// `exarch::bootstrap::boot_shell()` without the TUI / signal-handler
 /// pieces, which are irrelevant to boundary semantics.
-fn fresh_shell() -> Shell {
-    ral_core::boot::boot_shell(
-        ral_core::io::TerminalState::default(),
-        common::prelude(),
-        &ral_core::boot::HostSurface::default(),
-    )
-}
-
 /// Run one top-level run against `shell` through the public `run`
 /// door, matching exarch's per-tool flow: the door checks `source`
 /// against the live env, then evaluates it.  Returns whatever the body
@@ -575,7 +569,7 @@ fn source_in_a_block_scopes_over_the_rest_of_the_block() {
 #[test]
 fn block_local_source_leases_nothing() {
     let mut shell = fresh_shell();
-    let before = shell.leased_binding_count();
+    let before = ral_core::test_access::leased_binding_count(&shell);
     let path = module_loader_fixture(
         "top_level_vs_block_source_no_lease.ral",
         "let leased_from_file = 1",
@@ -583,7 +577,7 @@ fn block_local_source_leases_nothing() {
     let _ = top_level(&mut shell, &format!("!{{ source '{}' }}", path.display()));
     let _ = std::fs::remove_file(&path);
     assert_eq!(
-        shell.leased_binding_count(),
+        ral_core::test_access::leased_binding_count(&shell),
         before,
         "a block-local `source` must not add to the binding-lease ledger"
     );

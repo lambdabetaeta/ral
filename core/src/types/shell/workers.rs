@@ -94,7 +94,7 @@ pub struct ReapNotice {
     pub id: WorkerId,
     pub cmd: String,
     pub class: LeaseClass,
-    pub cause: ReapCause,
+    pub(crate) cause: ReapCause,
 }
 
 /// One registered worker, paired with the handle a caller observes or cancels

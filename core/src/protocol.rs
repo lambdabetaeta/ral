@@ -29,7 +29,7 @@ use crate::types::DeferredSink;
 use crate::types::SurfaceSink;
 use std::sync::OnceLock;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub(crate) const PROTOCOL_VERSION: u32 = 7;
 
 /// The byte before the first frame, written by a guest that has just spawned
 /// a child engine onto this connection and read by the host that dialled it.
@@ -220,8 +220,8 @@ pub enum Control {
 /// Terminal window size in rows × columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Winsize {
-    pub rows: u16,
-    pub cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) cols: u16,
 }
 
 // ── Terminal endpoint ─────────────────────────────────────────────────
@@ -410,7 +410,7 @@ impl crate::run::RunReport {
     /// # Panics
     /// Never: [`Observation::to_wire`] is total over exactly the vocabulary
     /// [`FOValue`] admits.
-    pub fn into_report(self, sources: &crate::source::SourceDb) -> Report {
+    pub(crate) fn into_report(self, sources: &crate::source::SourceDb) -> Report {
         match self {
             // Not `sources`: a static failure carries the text its carets point
             // into, so nothing about it was ever registered.
@@ -1008,7 +1008,7 @@ impl EventReceiver {
     /// `recv` would park on the mutex for as long as that `recv` blocks.
     /// Nothing here makes that safe — see the type's own doc for why no two
     /// callers may drain at once.
-    pub fn try_recv(&self) -> Option<(DispatchId, Event)> {
+    pub(crate) fn try_recv(&self) -> Option<(DispatchId, Event)> {
         let stashed = self.stash.lock_ignore_poison().pop_front();
         if let Some(item) = stashed {
             return Some(item);
@@ -1182,12 +1182,6 @@ impl IdentityTransport {
             dispatches,
             cancel_target,
         }
-    }
-
-    /// A shared handle on the event receiver, for a caller that drains it
-    /// alongside the transport rather than through a borrow of `&self`.
-    pub fn events_shared(&self) -> Arc<EventReceiver> {
-        self.events_recv.clone()
     }
 
     /// Install `target` as where an interrupt lands. This call writes no scope;
@@ -1929,7 +1923,7 @@ impl WireTransport {
     /// write error, a read EOF, a refused `Attach`, or the heartbeat's silence
     /// deadline. This is how a front-end tells *detached* from merely failed:
     /// once severed, no further frame will ever cross.
-    pub fn severed(&self) -> Option<Severed> {
+    pub(crate) fn severed(&self) -> Option<Severed> {
         self.severance.get().cloned()
     }
 

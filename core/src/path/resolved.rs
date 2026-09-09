@@ -62,7 +62,7 @@ impl ResolvedPath {
     }
 
     /// For audit fields and denial messages.
-    pub fn display(&self) -> std::path::Display<'_> {
+    pub(crate) fn display(&self) -> std::path::Display<'_> {
         self.0.display()
     }
 
@@ -75,7 +75,7 @@ impl ResolvedPath {
     /// observation fan-out (`evaluator::audit::observe_stamped`), which calls
     /// it no *mutation* — nothing changed in the world, so nothing is
     /// reported.
-    pub fn is_discard(&self) -> bool {
+    pub(crate) fn is_discard(&self) -> bool {
         super::lex::is_discard_device(&self.0.to_string_lossy(), cfg!(windows))
     }
 
@@ -186,7 +186,7 @@ impl NormalizedPrefix {
         clippy::disallowed_methods,
         reason = "lexical Path::new over a surface already in normal form — no I/O behind it"
     )]
-    pub fn surface_path(&self) -> &Path {
+    pub(crate) fn surface_path(&self) -> &Path {
         Path::new(&self.surface)
     }
 
@@ -201,17 +201,17 @@ impl NormalizedPrefix {
         clippy::disallowed_methods,
         reason = "lexical Path::new over a resolved form already in normal form — no I/O behind it"
     )]
-    pub fn resolved_path(&self) -> &Path {
+    pub(crate) fn resolved_path(&self) -> &Path {
         Path::new(&self.resolved)
     }
 
     /// The symlink-followed form, for composition overlap.
-    pub fn resolved(&self) -> &str {
+    pub(crate) fn resolved(&self) -> &str {
         &self.resolved
     }
 
     /// Which namespace `resolved` was resolved in.
-    pub fn namespace(&self) -> Namespace {
+    pub(crate) fn namespace(&self) -> Namespace {
         self.namespace
     }
 
@@ -227,7 +227,7 @@ impl NormalizedPrefix {
     /// frozen against different disk state can differ in `resolved`.  Any
     /// set operation asking "does this clash with something the gate calls
     /// the same dir" needs this, not the derived `Eq`/`Ord`.
-    pub fn same_gate_dir(&self, other: &Self) -> bool {
+    pub(crate) fn same_gate_dir(&self, other: &Self) -> bool {
         self.namespace == other.namespace
             && super::lex::path_within_str(&self.surface, &other.surface)
             && super::lex::path_within_str(&other.surface, &self.surface)

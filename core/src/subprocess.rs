@@ -22,10 +22,10 @@ use serde::{Deserialize, Serialize};
 /// thunk at install.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct WireHandlerFrame {
-    pub entries: Vec<(String, SerialValue, Option<typecheck::Scheme>)>,
-    pub catch_all: Option<SerialValue>,
+    pub(crate) entries: Vec<(String, SerialValue, Option<typecheck::Scheme>)>,
+    pub(crate) catch_all: Option<SerialValue>,
     #[serde(default)]
-    pub removable_by_unalias: bool,
+    pub(crate) removable_by_unalias: bool,
 }
 
 impl WireHandlerFrame {
@@ -84,8 +84,8 @@ pub(crate) struct WireShell {
     pub env: SerialEnvSnapshot,
     /// The cap rides so the child continues the parent's rc / CLI-configured
     /// ceiling rather than the compile-time default.
-    pub stack_limit: usize,
-    pub context: WireContext,
+    pub(crate) stack_limit: usize,
+    pub(crate) context: WireContext,
 }
 
 /// Wire mirror of [`Context`].
@@ -95,12 +95,12 @@ pub(crate) struct WireShell {
 /// receiver starts with an empty table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireContext {
-    pub env_overrides: crate::types::EnvVars,
-    pub dir: Option<std::path::PathBuf>,
-    pub grants: GrantStack,
-    pub handlers: Vec<WireHandlerFrame>,
-    pub args: Vec<String>,
-    pub modules: crate::types::Modules,
+    pub(crate) env_overrides: crate::types::EnvVars,
+    pub(crate) dir: Option<std::path::PathBuf>,
+    pub(crate) grants: GrantStack,
+    pub(crate) handlers: Vec<WireHandlerFrame>,
+    pub(crate) args: Vec<String>,
+    pub(crate) modules: crate::types::Modules,
     pub cwd: crate::types::Cwd,
 }
 
@@ -108,8 +108,8 @@ pub(crate) struct WireContext {
 /// caller needs to write onto a `Shell`.
 pub(crate) struct DecodedShell {
     pub env: Env,
-    pub stack_limit: usize,
-    pub context: Context,
+    pub(crate) stack_limit: usize,
+    pub(crate) context: Context,
 }
 
 impl WireShell {

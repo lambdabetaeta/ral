@@ -29,7 +29,8 @@ pub(crate) fn f64_to_i64(name: &str, f: f64) -> Settled<i64> {
 ///
 /// # Errors
 /// Returns `Err` if `args.len() < min`.
-pub fn check_arity(args: &[Value], min: usize, name: &str) -> Settled<()> {
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn check_arity(args: &[Value], min: usize, name: &str) -> Settled<()> {
     if args.len() < min {
         let noun = if min == 1 { "argument" } else { "arguments" };
         return Err(sig(format!("{name} requires {min} {noun}")));
@@ -287,7 +288,7 @@ pub fn checked_read_path(shell: &mut Shell, path: &str) -> Settled<crate::path::
 
 /// [`checked_read_path`] as a predicate, so a walk skips an off-limits entry
 /// instead of aborting.
-pub fn admits_read(shell: &mut Shell, path: &str) -> bool {
+pub(crate) fn admits_read(shell: &mut Shell, path: &str) -> bool {
     let rp = shell.resolve(path);
     shell.check_fs_read(&rp).is_ok()
 }
@@ -323,7 +324,7 @@ pub(crate) fn stdin_reader(name: &str, shell: &Shell) -> Settled<Box<dyn std::io
 ///
 /// # Errors
 /// Returns `Err` if stdin cannot be resolved, if a read fails, or if `f` does.
-pub fn for_each_stdin_line(
+pub(crate) fn for_each_stdin_line(
     name: &str,
     shell: &mut Shell,
     mut f: impl FnMut(String, &mut Shell) -> Settled<()>,

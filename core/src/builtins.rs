@@ -31,7 +31,6 @@ mod predicates;
 mod print;
 mod shell;
 pub mod strings;
-pub use codecs::value_to_json;
 pub use util::value_to_json_lossy_bytes;
 pub mod util;
 
@@ -401,7 +400,7 @@ static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, and `^echo` reaches this frame rather than a PATH binary.",
     BuiltinBody::Static(codecs::builtin_echo),
 )];
-pub static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
+pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;
 
 /// `help` and `explain`: the only two rows that read the lexical environment
 /// at the call, so they carry [`BuiltinBody::Scoped`] rather than the value
@@ -420,7 +419,7 @@ static CORE_HELP_BUILTINS_ARR: [BuiltinEntry; 2] = [
         BuiltinBody::Scoped(|args, env, _mooring, shell| help::builtin_explain(args, env, shell)),
     ),
 ];
-pub static CORE_HELP_BUILTINS: &[BuiltinEntry] = &CORE_HELP_BUILTINS_ARR;
+pub(crate) static CORE_HELP_BUILTINS: &[BuiltinEntry] = &CORE_HELP_BUILTINS_ARR;
 
 /// A [`BuiltinTable`](crate::types::BuiltinTable) of core's manifest, every
 /// half, alone.

@@ -272,7 +272,7 @@ pub(super) fn builtin_to_lines(args: &[Value], shell: &mut Shell) -> Settled<Val
 /// # Errors
 /// If `v` or anything nested within it is a non-finite `Float` or a
 /// computation value (`Lambda` / `Block` / `Handle`).
-pub fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
+pub(crate) fn value_to_json(v: &Value) -> Settled<serde_json::Value> {
     Ok(match v {
         Value::Unit => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),

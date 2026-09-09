@@ -14,7 +14,7 @@ pub struct Error {
     pub hint: Option<String>,
     /// The shown name of the command whose failure this is; `None` until
     /// `evaluator::audit`'s `frame_call` stamps the innermost dispatch.
-    pub command: Option<String>,
+    pub(crate) command: Option<String>,
 }
 
 /// An error's exit status: a bare code, or the process failure behind one.
@@ -41,7 +41,7 @@ impl Error {
     /// A poll point is any site that reads `CancelScope::cause()` (or
     /// `is_cancelled()`) and answers `Some` by ending the evaluation with an
     /// error; every such site mints that error through `Error::cancelled(cause)`.
-    pub fn cancelled(cause: CancelCause) -> Self {
+    pub(crate) fn cancelled(cause: CancelCause) -> Self {
         Self {
             message: cause.message().into(),
             status: Status::Cancelled(cause),
@@ -53,7 +53,7 @@ impl Error {
 
     /// The cancellation this error reports, from either door: minted here by
     /// `Error::cancelled`, or reported by a child ral tore down.
-    pub fn cancelled_by(&self) -> Option<CancelCause> {
+    pub(crate) fn cancelled_by(&self) -> Option<CancelCause> {
         match self.status {
             Status::Cancelled(cause) | Status::Process(CommandFailure::Cancelled { cause, .. }) => {
                 Some(cause)
@@ -63,7 +63,7 @@ impl Error {
     }
 
     /// A bare exit code takes its hint from the session's `exit_hints` table.
-    pub fn from_command_failure(
+    pub(crate) fn from_command_failure(
         cmd: &str,
         failure: CommandFailure,
         shell: &crate::types::Shell,
@@ -81,12 +81,12 @@ impl Error {
         }
     }
 
-    pub fn at_span(mut self, span: Span) -> Self {
+    pub(crate) fn at_span(mut self, span: Span) -> Self {
         self.span = Some(span);
         self
     }
 
-    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+    pub(crate) fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
     }
@@ -101,7 +101,7 @@ impl Error {
     }
 
     /// `None` for a process failure, whose message already names its status.
-    pub fn status_code_for_display(&self) -> Option<i32> {
+    pub(crate) fn status_code_for_display(&self) -> Option<i32> {
         match &self.status {
             Status::Code(0) | Status::Process(_) => None,
             Status::Code(code) => Some(*code),

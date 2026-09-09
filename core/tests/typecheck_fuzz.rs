@@ -18,7 +18,6 @@ mod common;
 
 use std::collections::HashSet;
 
-use ral_core::diagnostic::format_type_error_ariadne;
 use ral_core::typecheck::TypeError;
 use ral_core::{elaborator::elaborate, syntax::parser::parse, typecheck};
 
@@ -311,7 +310,9 @@ fn rendered_reports_are_jargon_free() {
             continue;
         }
         for err in &errs {
-            let rendered = strip_ansi(&format_type_error_ariadne("fuzz.ral", sc.src, err));
+            let rendered = strip_ansi(&ral_core::test_access::format_type_error_ariadne(
+                "fuzz.ral", sc.src, err,
+            ));
             assert_no_jargon(&rendered, &sc);
         }
     }

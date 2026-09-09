@@ -7,7 +7,7 @@
 
 mod common;
 
-use ral_core::typecheck::{CompTy, CompTyVar, Scheme, Ty, fmt_scheme};
+use ral_core::typecheck::{CompTy, CompTyVar, Ty, fmt_scheme};
 use ral_core::{TypeError, elaborator::elaborate, syntax::parser::parse, typecheck};
 
 fn raw_errors(src: &str) -> Vec<TypeError> {
@@ -390,16 +390,11 @@ fn let_generalize_through_map_pattern() {
 #[test]
 fn fmt_scheme_shows_quantified_comp_vars() {
     let beta = CompTyVar(17);
-    let scheme = Scheme {
-        ty_vars: vec![],
-        comp_ty_vars: vec![beta],
-        route_vars: vec![],
-        row_vars: vec![],
-        ty: Ty::Thunk(Box::new(CompTy::Var(beta))),
-        comp_ty_bindings: vec![],
-        ty_bindings: vec![],
-        cached_fv: None,
-    };
+    let scheme = ral_core::test_access::scheme_over_comp_vars(
+        vec![beta],
+        Ty::Thunk(Box::new(CompTy::Var(beta))),
+        vec![],
+    );
     let rendered = fmt_scheme(&scheme);
     assert_eq!(rendered, "∀ϕ. ϕ");
 }
@@ -407,16 +402,11 @@ fn fmt_scheme_shows_quantified_comp_vars() {
 #[test]
 fn fmt_scheme_quantifies_cyclic_comp_roots() {
     let root = CompTyVar(29);
-    let scheme = Scheme {
-        ty_vars: vec![],
-        comp_ty_vars: vec![],
-        route_vars: vec![],
-        row_vars: vec![],
-        ty: Ty::Thunk(Box::new(CompTy::Var(root))),
-        comp_ty_bindings: vec![(root.0, CompTy::pure(Ty::Unit))],
-        ty_bindings: vec![],
-        cached_fv: None,
-    };
+    let scheme = ral_core::test_access::scheme_over_comp_vars(
+        vec![],
+        Ty::Thunk(Box::new(CompTy::Var(root))),
+        vec![(root.0, CompTy::pure(Ty::Unit))],
+    );
     let rendered = fmt_scheme(&scheme);
     assert_eq!(rendered, "∀ϕ. ϕ");
 }
@@ -588,7 +578,7 @@ fn pipeline_ending_in_audit_binds_the_audit_record() {
     let bound = schemes
         .iter()
         .find(|(name, _)| name == "v")
-        .map(|(_, scheme)| scheme.ty.clone());
+        .map(|(_, scheme)| ral_core::test_access::scheme_ty(scheme).clone());
     let Some(Ty::Record(row)) = bound else {
         panic!("`v` must bind `audit`'s record, got: {bound:?}");
     };
@@ -1811,7 +1801,7 @@ fn case_arms_captured(src: &str) -> Vec<(String, bool)> {
         };
         for arm in arms {
             let mut captured = false;
-            common::walk_comp(arm.body.comp(), &mut |c| {
+            common::walk_comp(ral_core::test_access::case_arm_comp(arm), &mut |c| {
                 captured |= matches!(c.item, CompKind::Capture(_));
             });
             out.push((arm.tag.item.clone(), captured));
@@ -1944,8 +1934,10 @@ fn sibling_arms_grounding_apart_report_under_the_joins_own_reason() {
     );
     assert!(
         errs.iter().any(|e| {
-            matches!(e.reason, Some(ral_core::typecheck::Reason::CaseArms))
-                && e.kind.render_message().contains("payload route")
+            matches!(
+                ral_core::test_access::type_error_reason(e),
+                Some(ral_core::typecheck::Reason::CaseArms)
+            ) && e.kind.render_message().contains("payload route")
         }),
         "expected the join's own conduit mismatch under CaseArms, got: {errs:?}"
     );
@@ -1966,8 +1958,10 @@ fn inner_bind_does_not_collapse_the_enclosing_groups_join() {
     );
     assert!(
         errs.iter().any(|e| {
-            matches!(e.reason, Some(ral_core::typecheck::Reason::CaseArms))
-                && e.kind.render_message().contains("payload route")
+            matches!(
+                ral_core::test_access::type_error_reason(e),
+                Some(ral_core::typecheck::Reason::CaseArms)
+            ) && e.kind.render_message().contains("payload route")
         }),
         "expected the join's own conduit mismatch under CaseArms, got: {errs:?}"
     );
@@ -2001,8 +1995,10 @@ fn late_byte_arm_beside_value_payload_arm_is_a_conduit_mismatch_under_try_arms()
     );
     assert!(
         errs.iter().any(|e| {
-            matches!(e.reason, Some(ral_core::typecheck::Reason::TryArms))
-                && e.kind.render_message().contains("payload route")
+            matches!(
+                ral_core::test_access::type_error_reason(e),
+                Some(ral_core::typecheck::Reason::TryArms)
+            ) && e.kind.render_message().contains("payload route")
         }),
         "expected the join's own conduit mismatch under TryArms, got: {errs:?}"
     );

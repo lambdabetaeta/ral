@@ -3108,7 +3108,7 @@ fn elaborator_never_wraps_exec_in_redirect() {
 
     fn walk(comp: &ral_core::ir::Comp, saw_exec_with_redirects: &mut bool) {
         match &comp.item {
-            CompKind::Exec(e) if !e.redirects.is_empty() => {
+            CompKind::Exec(e) if ral_core::test_access::exec_has_redirects(e) => {
                 *saw_exec_with_redirects = true;
             }
             CompKind::Lam { body, .. } => walk(body, saw_exec_with_redirects),

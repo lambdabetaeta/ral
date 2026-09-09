@@ -36,7 +36,7 @@ pub(crate) struct Frame(());
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AuditStart {
     pub site: CallSite,
-    pub time: i64,
+    pub(crate) time: i64,
 }
 
 /// Report one observation to everyone listening: the surface sink and the

@@ -19,7 +19,7 @@ use std::fmt;
 // ── Hook identity ───────────────────────────────────────────────────────
 
 /// The unique name a plugin was loaded under.
-pub type PluginId = String;
+pub(crate) type PluginId = String;
 
 /// Which namespace a hook lives in.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -31,7 +31,7 @@ pub enum Namespace {
 /// Fully-qualified name of a registered hook.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HookName {
-    pub namespace: Namespace,
+    pub(crate) namespace: Namespace,
     pub name: String,
 }
 
@@ -82,7 +82,7 @@ pub enum HookSig {
 
 impl HookSig {
     /// Parameters a thunk must take to register under this signature.
-    pub fn expected_arity(&self) -> usize {
+    pub(crate) fn expected_arity(&self) -> usize {
         match self {
             Self::Prompt => 0,
             Self::Hook { .. } | Self::PluginFactory | Self::Lifecycle { .. } => 1,
@@ -90,7 +90,7 @@ impl HookSig {
     }
 
     /// Human-readable label for diagnostics.
-    pub fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             Self::Prompt => "prompt body",
             Self::Hook { kind } | Self::Lifecycle { kind } => kind.as_str(),
@@ -114,7 +114,7 @@ pub enum TerminalPolicy {
 #[derive(Debug, Clone)]
 pub struct DefaultPolicy {
     pub terminal: TerminalPolicy,
-    pub capture: bool,
+    pub(crate) capture: bool,
 }
 
 impl DefaultPolicy {
@@ -147,10 +147,10 @@ impl DefaultPolicy {
 pub struct Hook {
     /// Built by the same scheme-inference path an ordinary session `let` uses.
     pub binding: Binding,
-    pub sig: HookSig,
-    pub policy: DefaultPolicy,
+    pub(crate) sig: HookSig,
+    pub(crate) policy: DefaultPolicy,
     /// Declaration site, for diagnostics.
-    pub origin: Span,
+    pub(crate) origin: Span,
 }
 impl Hook {
     /// The single registration gate: the bound value must be a `Block` or a
@@ -159,7 +159,7 @@ impl Hook {
     /// # Errors
     /// [`RegisterError::NotFunction`] if it is neither,
     /// [`RegisterError::ArityMismatch`] if the parameter count differs.
-    pub fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
+    pub(crate) fn validate(&self, name: &HookName) -> Result<(), RegisterError> {
         let expected = self.sig.expected_arity();
         let actual = match &self.binding.value {
             Value::Thunk(c) if c.comp.arrow().is_none() => 0,

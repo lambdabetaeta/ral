@@ -6,7 +6,7 @@
 
 use crate::ir::IrPattern;
 use crate::typecheck::Scheme;
-use crate::types::{Binding, Closure, Env, Mooring, Settled, Shell, Value};
+use crate::types::{Binding, Closure, Env, Error, Mooring, Settled, Shell, Value};
 use std::sync::Arc;
 
 /// Refuse every name a `let` pattern binds that would shadow a PATH command.
@@ -43,16 +43,15 @@ pub(crate) fn check_pattern_shadow(pattern: &IrPattern, shell: &Shell) -> Settle
 /// by never calling in.
 pub(crate) fn check_path_shadow(name: &str, shell: &Shell) -> Settled<()> {
     if let Some(path) = shell.locate_command(name) {
-        return Err(shell
-            .err_hint(
-                format!(
-                    "cannot bind `{name}`: a command named `{name}` is reachable on PATH ({})",
-                    path.display()
-                ),
-                "ral keeps value and command names disjoint; rename the binding",
-                1,
-            )
-            .into());
+        return Err(Error::new(
+            format!(
+                "cannot bind `{name}`: a command named `{name}` is reachable on PATH ({})",
+                path.display()
+            ),
+            1,
+        )
+        .with_hint("ral keeps value and command names disjoint; rename the binding")
+        .into());
     }
     Ok(())
 }
@@ -153,13 +152,11 @@ fn stage_pattern(
         }
         IrPattern::List { elems, rest } => {
             let Value::List(items) = value else {
-                return Err(shell
-                    .err_hint(
-                        format!("expected List, got {}", value.type_name()),
-                        "right-hand side must be a list",
-                        1,
-                    )
-                    .into());
+                return Err(
+                    Error::new(format!("expected List, got {}", value.type_name()), 1)
+                        .with_hint("right-hand side must be a list")
+                        .into(),
+                );
             };
             // `Ty::List` carries no length, so a too-short list typechecks;
             // catch it here rather than silently skip element patterns.
@@ -169,23 +166,21 @@ fn stage_pattern(
                 } else {
                     "the list has too few elements for the named bindings"
                 };
-                return Err(shell
-                    .err_hint(
-                        format!("need {} values, got {}", elems.len(), items.len()),
-                        hint,
-                        1,
-                    )
-                    .into());
+                return Err(Error::new(
+                    format!("need {} values, got {}", elems.len(), items.len()),
+                    1,
+                )
+                .with_hint(hint)
+                .into());
             }
             // Without a `...rest` tail, a longer list would lose its extras in silence.
             if rest.is_none() && items.len() > elems.len() {
-                return Err(shell
-                    .err_hint(
-                        format!("need {} values, got {}", elems.len(), items.len()),
-                        "there are more elements; use [..., ...rest] to capture them",
-                        1,
-                    )
-                    .into());
+                return Err(Error::new(
+                    format!("need {} values, got {}", elems.len(), items.len()),
+                    1,
+                )
+                .with_hint("there are more elements; use [..., ...rest] to capture them")
+                .into());
             }
             for (i, pat) in elems.iter().enumerate() {
                 stage_pattern(pat, &items[i], schemes, env, mooring, shell, staged)?;
@@ -206,13 +201,11 @@ fn stage_pattern(
         }
         IrPattern::Map(entries) => {
             let Value::Map(m) = value else {
-                return Err(shell
-                    .err_hint(
-                        format!("expected Map, got {}", value.type_name()),
-                        "right-hand side must be a map",
-                        1,
-                    )
-                    .into());
+                return Err(
+                    Error::new(format!("expected Map, got {}", value.type_name()), 1)
+                        .with_hint("right-hand side must be a map")
+                        .into(),
+                );
             };
             for entry in entries {
                 let key_label = entry.key.row_label();
@@ -230,12 +223,8 @@ fn stage_pattern(
                     }
                     (None, None) => {
                         let ks: Vec<&str> = m.keys().map(std::string::String::as_str).collect();
-                        return Err(shell
-                            .err_hint(
-                                format!("key '{key_label}' not found"),
-                                format!("available: {}", ks.join(", ")),
-                                1,
-                            )
+                        return Err(Error::new(format!("key '{key_label}' not found"), 1)
+                            .with_hint(format!("available: {}", ks.join(", ")))
                             .into());
                     }
                 };

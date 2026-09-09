@@ -17,13 +17,16 @@ use std::path::Path;
 
 /// The one containment judgment: does `a` cover `b`?  Same namespace, `b`'s
 /// resolved form within `a`'s — never the surface spelling.
-pub fn covers(a: &NormalizedPrefix, b: &NormalizedPrefix) -> bool {
+pub(crate) fn covers(a: &NormalizedPrefix, b: &NormalizedPrefix) -> bool {
     a.namespace() == b.namespace() && path_within_str(b.resolved(), a.resolved())
 }
 
 /// Intersect two prefix lists: the deeper prefix of each overlapping pair
 /// survives.  Unsorted and possibly duplicated; callers dedup.
-pub fn meet_prefixes(a: &[NormalizedPrefix], b: &[NormalizedPrefix]) -> Vec<NormalizedPrefix> {
+pub(crate) fn meet_prefixes(
+    a: &[NormalizedPrefix],
+    b: &[NormalizedPrefix],
+) -> Vec<NormalizedPrefix> {
     let is_covered =
         |x: &NormalizedPrefix, others: &[NormalizedPrefix]| others.iter().any(|o| covers(o, x));
     a.iter()
@@ -36,7 +39,7 @@ pub fn meet_prefixes(a: &[NormalizedPrefix], b: &[NormalizedPrefix]) -> Vec<Norm
 /// A sorted, deduplicated set of [`NormalizedPrefix`]es.  `Default` is the
 /// empty set, the identity for [`union`](PrefixSet::union).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PrefixSet(Vec<NormalizedPrefix>);
+pub(crate) struct PrefixSet(Vec<NormalizedPrefix>);
 
 impl PrefixSet {
     /// Freeze each prefix afresh against the live filesystem — sigil/`~`
@@ -57,7 +60,7 @@ impl PrefixSet {
 
     /// Accumulate without intersecting — what a deny region wants, since
     /// denies are sticky across layers.
-    pub fn union(mut self, other: Self) -> Self {
+    pub(crate) fn union(mut self, other: Self) -> Self {
         self.0.extend(other.0);
         self.0.sort();
         self.0.dedup();
@@ -68,7 +71,7 @@ impl PrefixSet {
     /// projection itself, so an allow beneath a deny never reaches a
     /// backend, including one whose own primitive would order an explicit
     /// allow before an inherited deny (Windows ACLs).
-    pub fn outside(mut self, deny: &Self) -> Self {
+    pub(crate) fn outside(mut self, deny: &Self) -> Self {
         self.0.retain(|p| !deny.0.iter().any(|d| covers(d, p)));
         self
     }
@@ -83,7 +86,7 @@ impl PrefixSet {
     /// names the narrowest authority the path fell under, which is what the
     /// audit record wants, and a set that has been through
     /// [`meet`](Meet::meet) has no order left to prefer instead.
-    pub fn covering(&self, path: &Path) -> Option<&NormalizedPrefix> {
+    pub(crate) fn covering(&self, path: &Path) -> Option<&NormalizedPrefix> {
         self.0
             .iter()
             .filter(|prefix| path_within(path, prefix.resolved_path()))

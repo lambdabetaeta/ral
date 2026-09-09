@@ -99,18 +99,18 @@ mod win_groups {
     /// *whole job* drains, which is what reap waits on; the duplicated handles
     /// outlive the spawner's `Child`, so an exit code stays readable after.
     pub(super) struct GroupState {
-        pub job: HANDLE,
-        pub completion_port: HANDLE,
-        pub leader_handle: HANDLE,
-        pub member_handles: Vec<HANDLE>,
-        pub members: Vec<u32>,
+        pub(crate) job: HANDLE,
+        pub(crate) completion_port: HANDLE,
+        pub(crate) leader_handle: HANDLE,
+        pub(crate) member_handles: Vec<HANDLE>,
+        pub(crate) members: Vec<u32>,
         /// Latched once the job reported `ACTIVE_PROCESS_ZERO`, so a later reap
         /// answers from here instead of pumping a possibly closed port.
-        pub all_done: bool,
+        pub(crate) all_done: bool,
         /// Set for a `PgidPolicy::NewSession` group — a detached background
         /// worker.  [`break_foreground`] skips these; the escalation ladder's
         /// [`break_all`] / [`terminate_all`] deliberately do not.
-        pub detached: bool,
+        pub(crate) detached: bool,
     }
 
     // SAFETY: `HANDLE` is a raw pointer, but never escapes the Mutex, and the
@@ -672,7 +672,7 @@ mod win_groups {
 ///
 /// Surviving members die with it.  Idempotent, and needs to be —
 /// `PipelineGroup::Drop` and a standalone `RunningChild` both reach for it.
-pub fn release_win_group(leader: i32) {
+pub(crate) fn release_win_group(leader: i32) {
     win_groups::release(leader);
 }
 
@@ -681,20 +681,23 @@ pub fn release_win_group(leader: i32) {
 /// For `sandbox::apply_child_limits_in_pipeline`: a child inside a pipeline
 /// cannot join a second job, so a grant's limit lands on the one it is
 /// already in.
-pub fn apply_group_active_process_limit(leader: i32, limit: u32) -> bool {
+pub(crate) fn apply_group_active_process_limit(leader: i32, limit: u32) -> bool {
     win_groups::apply_active_process_limit(leader, limit)
 }
 
 /// Cap the active-process count of a Job Object the caller owns — the per-child
 /// job `sandbox::windows::apply_job_limits` creates.
-pub fn set_active_process_limit(job: windows_sys::Win32::Foundation::HANDLE, limit: u32) -> bool {
+pub(crate) fn set_active_process_limit(
+    job: windows_sys::Win32::Foundation::HANDLE,
+    limit: u32,
+) -> bool {
     win_groups::set_active_process_limit(job, limit)
 }
 
 /// True when `leader` names a live group.
 /// `sandbox::apply_child_limits_in_pipeline` asks before choosing between a fresh
 /// per-child job and constraining this one.
-pub fn is_known_group(leader: i32) -> bool {
+pub(crate) fn is_known_group(leader: i32) -> bool {
     let groups = win_groups::GROUPS.lock_ignore_poison();
     groups.iter().any(|(p, _)| *p == leader)
 }
@@ -739,7 +742,7 @@ pub enum ReapStatus {
 
 /// Block until every member of the group has exited, then report the leader's
 /// exit code.  `Unknown` once the group is no longer tracked.
-pub fn wait_leader_blocking(pgid: Pgid) -> ReapStatus {
+pub(crate) fn wait_leader_blocking(pgid: Pgid) -> ReapStatus {
     win_groups::wait_job_blocking(pgid.as_raw())
 }
 
@@ -750,7 +753,7 @@ pub fn try_reap_leader(pgid: Pgid) -> ReapStatus {
 }
 
 /// `SIGKILL` analogue: terminate every member of the group.  Idempotent.
-pub fn kill_pipeline_group(pgid: Pgid) {
+pub(crate) fn kill_pipeline_group(pgid: Pgid) {
     win_groups::kill_group(pgid.as_raw());
 }
 
@@ -773,7 +776,10 @@ pub fn disown_pipeline_group(pgid: Pgid) {
 pub struct ForegroundGuard;
 
 impl ForegroundGuard {
-    pub fn try_acquire(_target: i32, _lease: &crate::process::TerminalLease) -> Option<Self> {
+    pub(crate) fn try_acquire(
+        _target: i32,
+        _lease: &crate::process::TerminalLease,
+    ) -> Option<Self> {
         None
     }
 }

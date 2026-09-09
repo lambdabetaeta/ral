@@ -21,7 +21,7 @@ pub(crate) mod linux;
 /// Cgroup limits applied to every jailed exec.  The numbers are policy for an
 /// office workload, not architecture: retune them freely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct JailLimits {
+pub(crate) struct JailLimits {
     pub(crate) memory_max: u64,
     pub(crate) pids_max: u32,
     pub(crate) cpu_quota_pct: u32,
@@ -41,7 +41,7 @@ impl Default for JailLimits {
 /// `cfg`, so `RunningChild` carries an `Option<JailCgroup>` on every platform
 /// — `None` anywhere but a real Linux guest.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JailCgroup {
+pub(crate) struct JailCgroup {
     path: PathBuf,
 }
 
@@ -67,15 +67,17 @@ impl JailCgroup {
 
 /// One exec's whole jail decision, reached without touching the kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JailPlan {
-    pub uid: u32,
-    pub gid: u32,
-    pub cgroup: PathBuf,
-    pub limits: JailLimits,
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct JailPlan {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) cgroup: PathBuf,
+    pub(crate) limits: JailLimits,
 }
 
 /// The guest-global counter file every booted engine's [`GuestJail`] mints
 /// its sequence numbers from, on a real Linux guest.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const GUEST_SEQ_FILE: &str = "/run/ral/jail.seq";
 
 /// The guest-wide jail: one per booted engine, shared by `Arc` across every
@@ -85,14 +87,14 @@ const GUEST_SEQ_FILE: &str = "/run/ral/jail.seq";
 /// grouping only, since the sequence file already makes `seq` itself
 /// guest-global — so teardown can reach exactly one engine's tree without
 /// disturbing a sibling's.
-pub struct GuestJail {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct GuestJail {
     cgroup_root: PathBuf,
     base_uid: u32,
     limits: JailLimits,
     engine_pid: u32,
     /// Read only by the Linux [`Self::next_seq`]; off Linux, where
     /// `GuestJail` is never actually installed, nothing reads it.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     seq_file: PathBuf,
     /// Unused on a real Linux guest, where [`Self::next_seq`] reads
     /// [`Self::seq_file`] instead; kept so this module's own tests — which
@@ -101,6 +103,7 @@ pub struct GuestJail {
     counter: AtomicU64,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl GuestJail {
     pub fn new(cgroup_root: PathBuf, base_uid: u32, limits: JailLimits) -> Self {
         Self {
@@ -119,7 +122,7 @@ impl GuestJail {
     /// # Errors
     /// Returns the sequence file's io error, on a Linux guest, if it cannot
     /// be opened, locked, read, or written.
-    pub fn plan(&self) -> io::Result<JailPlan> {
+    pub(crate) fn plan(&self) -> io::Result<JailPlan> {
         let seq = self.next_seq()?;
         #[allow(
             clippy::cast_possible_truncation,

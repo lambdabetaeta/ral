@@ -154,7 +154,7 @@ pub fn occurrence_starts(input: &str, from: &str) -> Vec<usize> {
 /// # Errors
 /// If given fewer than three arguments, if `from` is empty, or if `from` does not
 /// occur in `s` exactly once.
-pub fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
+pub(crate) fn builtin_string_replace(args: &[Value]) -> Settled<Value> {
     let from = args[0].to_string();
     let to = args[1].to_string();
     let input = args[2].to_string();

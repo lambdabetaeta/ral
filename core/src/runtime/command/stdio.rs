@@ -17,7 +17,7 @@ use super::redirect::{EvalRedirect, EvalRedirectV, PendingWrite, open_file, stde
 /// A child whose pgid will not hold the foreground must get
 /// `StdinRoute::Null` instead: hand it the terminal and the kernel SIGTTINs
 /// it on its first read, leaving ral's pump waiting forever.
-pub struct TtyInputPermit {
+pub(crate) struct TtyInputPermit {
     _private: (),
 }
 
@@ -40,14 +40,14 @@ impl TtyInputPermit {
 }
 
 /// How a child's stdin is wired; `Inherit` costs a [`TtyInputPermit`].
-pub enum StdinRoute {
+pub(crate) enum StdinRoute {
     Inherit(TtyInputPermit),
     Reader(crate::io::SourceReader),
     Null,
 }
 
 impl StdinRoute {
-    pub fn into_stdio(self) -> crate::process::StdioSpec {
+    pub(crate) fn into_stdio(self) -> crate::process::StdioSpec {
         match self {
             Self::Inherit(_) => crate::process::StdioSpec::inherit(),
             Self::Reader(r) => r.into(),

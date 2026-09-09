@@ -23,12 +23,12 @@ impl Context {
     }
 
     /// Insert `k → v` only if `k` is unbound.
-    pub fn set_env_var_or_keep(&mut self, k: impl Into<String>, v: impl Into<String>) {
+    pub(crate) fn set_env_var_or_keep(&mut self, k: impl Into<String>, v: impl Into<String>) {
         self.env_overrides.insert_or_keep(k.into(), v.into());
     }
 
     /// Bulk-insert each item.
-    pub fn extend_env<I, K, V>(&mut self, items: I)
+    pub(crate) fn extend_env<I, K, V>(&mut self, items: I)
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,

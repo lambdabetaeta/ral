@@ -59,17 +59,17 @@ pub fn git() -> Option<GitStatus> {
 }
 
 /// The host OS — `"macos"`, `"linux"`, `"windows"`, …
-pub fn os_name() -> &'static str {
+pub(crate) fn os_name() -> &'static str {
     std::env::consts::OS
 }
 
 /// The host architecture — `"aarch64"`, `"x86_64"`, …
-pub fn arch() -> &'static str {
+pub(crate) fn arch() -> &'static str {
     std::env::consts::ARCH
 }
 
 /// The host OS family — `"unix"` or `"windows"`.
-pub fn family() -> &'static str {
+pub(crate) fn family() -> &'static str {
     std::env::consts::FAMILY
 }
 

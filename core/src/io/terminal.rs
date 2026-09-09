@@ -34,7 +34,7 @@ impl InteractiveMode {
         }
     }
 
-    pub fn is_minimal(self) -> bool {
+    pub(crate) fn is_minimal(self) -> bool {
         matches!(self, Self::Minimal)
     }
 }
@@ -50,9 +50,9 @@ impl InteractiveMode {
 // obscure rather than clarify.
 #[allow(clippy::struct_excessive_bools)]
 pub struct TerminalState {
-    pub startup_stdin_tty: bool,
-    pub startup_stdout_tty: bool,
-    pub startup_stderr_tty: bool,
+    pub(crate) startup_stdin_tty: bool,
+    pub(crate) startup_stdout_tty: bool,
+    pub(crate) startup_stderr_tty: bool,
     /// ral's process group owned the controlling terminal's foreground, and so
     /// the mint condition for the session's
     /// [`TerminalLease`](crate::process::TerminalLease): an interactive REPL or
@@ -60,24 +60,24 @@ pub struct TerminalState {
     /// backgrounded `ral … &` does not.  False when stdin is not a tty.
     pub startup_foreground: bool,
     /// stdout is a tty and TERM says ANSI works, or the mode is `Full`.
-    pub supports_ansi: bool,
+    pub(crate) supports_ansi: bool,
     /// TERM says stderr's terminal accepts ANSI.  Snapshotted here so
     /// `stderr_ansi_ok` never has to live-query.
-    pub stderr_ansi_capable: bool,
-    pub no_color: bool,
-    pub is_tmux: bool,
-    pub is_asciinema: bool,
-    pub is_ci: bool,
-    pub truecolor: bool,
+    pub(crate) stderr_ansi_capable: bool,
+    pub(crate) no_color: bool,
+    pub(crate) is_tmux: bool,
+    pub(crate) is_asciinema: bool,
+    pub(crate) is_ci: bool,
+    pub(crate) truecolor: bool,
     /// OSC 8 hyperlinks recognised by the host terminal.
-    pub hyperlinks: bool,
+    pub(crate) hyperlinks: bool,
     /// OSC 52 clipboard *write*.  Read is deliberately unprobed: too many
     /// terminals gate it behind a permission prompt.
-    pub clipboard_write: bool,
+    pub(crate) clipboard_write: bool,
     /// Bracketed paste, taken to follow `supports_ansi` rather than costing a
     /// round-trip query — it is universal in modern ANSI terminals.
-    pub bracketed_paste: bool,
-    pub mode: InteractiveMode,
+    pub(crate) bracketed_paste: bool,
+    pub(crate) mode: InteractiveMode,
 }
 
 impl TerminalState {
@@ -100,7 +100,7 @@ impl TerminalState {
         clippy::disallowed_methods,
         reason = "TMUX and ASCIINEMA_REC are read for presence alone — the value is never a path, so there is no relative override for the XDG rule to ignore"
     )]
-    pub fn probe_with_mode(mode: InteractiveMode) -> Self {
+    pub(crate) fn probe_with_mode(mode: InteractiveMode) -> Self {
         let (startup_stdin_tty, startup_stdout_tty, startup_stderr_tty) = probe_isatty();
         let startup_foreground = probe_foreground(startup_stdin_tty);
         let env = TerminalEnv::from_process();
@@ -151,7 +151,7 @@ impl TerminalState {
     }
 
     /// 24-bit foreground/background colors may be emitted.
-    pub fn ui_truecolor_ok(&self) -> bool {
+    pub(crate) fn ui_truecolor_ok(&self) -> bool {
         self.ui_ansi_ok() && self.truecolor
     }
 
@@ -167,14 +167,14 @@ impl TerminalState {
     }
 
     /// Bracketed-paste mode may be enabled by the line editor.
-    pub fn ui_bracketed_paste_ok(&self) -> bool {
+    pub(crate) fn ui_bracketed_paste_ok(&self) -> bool {
         self.ui_round_trips_ok() && self.bracketed_paste
     }
 
     /// Diagnostics may emit ANSI.  Separate from `ui_ansi_ok` because stderr
     /// can be a tty while stdout is piped to a pager, and errors should still
     /// be colored there.
-    pub fn stderr_ansi_ok(&self) -> bool {
+    pub(crate) fn stderr_ansi_ok(&self) -> bool {
         !self.mode.is_minimal()
             && !self.no_color
             && self.startup_stderr_tty

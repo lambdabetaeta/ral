@@ -27,7 +27,7 @@ use std::fmt;
 /// Why a parse failed because the input *stopped short* rather than being
 /// malformed — the REPL reads another line instead of reporting an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Incompleteness {
+pub(crate) enum Incompleteness {
     /// A string, balanced `{}` / `[]`, or `$(…)` ran past end of input —
     /// exactly the kinds [`LexErrorKind::is_incomplete`] admits.
     UnclosedLexeme,
@@ -44,9 +44,9 @@ pub struct ParseError {
     pub span: Option<Span>,
     /// Set for a lexer-originating failure; carries the structure the
     /// diagnostic layer needs to draw more than one label.
-    pub lex_kind: Option<LexErrorKind>,
+    pub(crate) lex_kind: Option<LexErrorKind>,
     /// Set when the input merely ran short; drives REPL line continuation.
-    pub incompleteness: Option<Incompleteness>,
+    pub(crate) incompleteness: Option<Incompleteness>,
 }
 
 impl fmt::Display for ParseError {
@@ -107,7 +107,10 @@ pub fn needs_continuation(input: &str) -> bool {
 ///
 /// # Errors
 /// Returns `Err` if lexing fails or the tokens do not form a valid program.
-pub fn parse_with(source: &str, file: crate::source::FileId) -> Result<Vec<Stmt>, ParseError> {
+pub(crate) fn parse_with(
+    source: &str,
+    file: crate::source::FileId,
+) -> Result<Vec<Stmt>, ParseError> {
     let tokens = lexer::lex_with(source, file)?;
     Parser::run_complete(tokens, Parser::parse_program)
 }

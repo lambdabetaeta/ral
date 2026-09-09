@@ -157,7 +157,7 @@ pub struct FsRules<N> {
     /// `W/alias → W/top/deep` with deny `W/alias/secret` pins `W/top` too —
     /// an ancestor chain only the resolved spelling reveals.
     #[serde(skip)]
-    pub pinned_dirs: Vec<N>,
+    pub(crate) pinned_dirs: Vec<N>,
 }
 
 /// Empty under any naming: rules over no paths, the shape a backend falls back
@@ -201,7 +201,7 @@ impl<N> FsProjection<N> {
     /// The rules when restricted, `None` at the unrestricted top.  Renderers
     /// wanting only the prefixes match on this; the macOS profile builder
     /// branches on the variant, since the two emit different SBPL shapes.
-    pub fn rules(&self) -> Option<&FsRules<N>> {
+    pub(crate) fn rules(&self) -> Option<&FsRules<N>> {
         match self {
             Self::Unrestricted => None,
             Self::Restricted(r) => Some(r),
@@ -253,7 +253,8 @@ impl<N> ExecProjection<N> {
     /// Whether some layer denied a command rather than merely not admitting
     /// one — the distinction between an allow-set that is narrow and one that
     /// is narrowed on purpose, which is what a backend must protect.
-    pub fn carries_veto(&self) -> bool {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn carries_veto(&self) -> bool {
         match self {
             Self::Unrestricted => false,
             Self::Restricted {
@@ -321,7 +322,8 @@ impl SandboxProjection<String> {
     ///
     /// Whatever `f` refuses; [`render_paths`] refuses a name whose expansion
     /// it cannot spell faithfully.
-    pub fn traverse(
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn traverse(
         &self,
         f: impl Fn(&[String]) -> Result<Vec<Rendered>, String>,
     ) -> Result<SandboxProjection<Rendered>, String> {
@@ -386,7 +388,8 @@ impl SandboxProjection<String> {
     /// # Errors
     ///
     /// As [`render_paths`].
-    pub fn rendered(&self) -> Result<SandboxProjection<Rendered>, String> {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn rendered(&self) -> Result<SandboxProjection<Rendered>, String> {
         self.traverse(render_paths)
     }
 }
@@ -399,9 +402,9 @@ impl SandboxProjection<String> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EditorPolicy {
-    pub read: bool,
-    pub write: bool,
-    pub tui: bool,
+    pub(crate) read: bool,
+    pub(crate) write: bool,
+    pub(crate) tui: bool,
 }
 
 /// Gates the `cd` builtin.
@@ -477,16 +480,16 @@ impl GrantStack {
         self.0.push(layer);
     }
 
-    pub fn pop(&mut self) -> Option<Capabilities> {
+    pub(crate) fn pop(&mut self) -> Option<Capabilities> {
         self.0.pop()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, Capabilities> {
@@ -511,7 +514,8 @@ impl GrantStack {
     /// verb whatever sits above it.  Folded here and not into
     /// [`SandboxProjection`] because it decides only whether the survivor is
     /// born; what it inherits is the projection of the frame it was born in.
-    pub fn permits_detach(&self) -> bool {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn permits_detach(&self) -> bool {
         self.0.iter().all(|c| c.detach != Some(false))
     }
 }

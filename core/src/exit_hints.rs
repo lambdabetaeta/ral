@@ -25,7 +25,7 @@ impl ExitHints {
     ///
     /// Signals never reach here — the caller consults this only for
     /// `CommandFailure::ExitCode`, so no status is ever a 128+N encoding.
-    pub fn lookup(&self, cmd: &str, status: i32) -> Option<String> {
+    pub(crate) fn lookup(&self, cmd: &str, status: i32) -> Option<String> {
         let name = crate::path::basename(cmd);
 
         if let Some(h) = self.table.get(&(name.to_string(), status)) {

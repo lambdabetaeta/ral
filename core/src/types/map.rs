@@ -30,13 +30,8 @@ impl Map {
         self.0.get(key)
     }
 
-    pub fn contains_key(&self, key: &str) -> bool {
+    pub(crate) fn contains_key(&self, key: &str) -> bool {
         self.0.contains_key(key)
-    }
-
-    /// Insert `key → value`, returning the prior binding if any.
-    pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
-        self.0.insert(key, value)
     }
 
     pub fn iter(&self) -> Iter<'_> {

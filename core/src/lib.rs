@@ -36,11 +36,13 @@ pub(crate) mod runtime;
 pub mod sandbox;
 pub mod serial;
 pub mod source;
-pub mod stream;
+pub(crate) mod stream;
 pub(crate) mod subprocess;
 pub(crate) mod subprocess_codec;
 pub mod sync;
 pub mod syntax;
+#[cfg(feature = "test-util")]
+pub mod test_access;
 #[cfg(test)]
 pub(crate) mod test_env;
 pub mod test_helper;
@@ -80,7 +82,8 @@ pub(crate) use syntax::parser::{ParseError, parse, parse_with};
 /// # Errors
 /// Parse failure, or any `$SCRIPT` in `source` — this caller passes no name,
 /// so there is no script identity to bake the reference against.
-pub fn compile(source: &str) -> Result<Toplevel, ParseError> {
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn compile(source: &str) -> Result<Toplevel, ParseError> {
     parse(source).and_then(|ast| elaborate(&ast, std::collections::HashSet::default(), ""))
 }
 
@@ -100,7 +103,7 @@ impl CompileOutcome {
     ///
     /// # Errors
     /// The rendered parse error, or the newline-joined type errors.
-    pub fn into_comp_or_message(self) -> Result<Toplevel, String> {
+    pub(crate) fn into_comp_or_message(self) -> Result<Toplevel, String> {
         match self {
             Self::Compiled(top) => Ok(top),
             Self::Parse(e) => Err(e.to_string()),

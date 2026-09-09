@@ -36,12 +36,12 @@ impl XdgKind {
     }
 
     /// Every kind's token name, so a typo can be answered with the alternatives.
-    pub fn all() -> &'static [&'static str] {
+    pub(crate) fn all() -> &'static [&'static str] {
         &["config", "data", "cache", "state", "bin"]
     }
 
     /// The lower-case `NAME` a policy author writes.
-    pub fn token_name(self) -> &'static str {
+    pub(crate) fn token_name(self) -> &'static str {
         match self {
             Self::Config => "config",
             Self::Data => "data",
@@ -63,7 +63,7 @@ impl XdgKind {
     }
 
     /// The home-relative default used when the env var is unset or relative.
-    pub fn default_suffix(self) -> &'static str {
+    pub(crate) fn default_suffix(self) -> &'static str {
         match self {
             Self::Config => ".config",
             Self::Data => ".local/share",

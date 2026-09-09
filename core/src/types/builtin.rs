@@ -23,7 +23,7 @@ use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 /// Runtime closure backing a captured builtin body.
-pub type CapturedBuiltinFn = Arc<
+pub(crate) type CapturedBuiltinFn = Arc<
     dyn Fn(&[Value], &crate::types::Mooring, &mut crate::types::Shell) -> Settled<Value>
         + Send
         + Sync,
@@ -75,12 +75,12 @@ pub enum Convention {
 pub struct BuiltinEntry {
     pub name: Cow<'static, str>,
     pub convention: Convention,
-    pub type_rule: BuiltinTypeRule,
+    pub(crate) type_rule: BuiltinTypeRule,
     pub doc: &'static str,
     /// Extra non-typing behaviour the checker's application path reads: which
     /// diagnostic an over-application or a literal misuse earns.  `None` for
     /// the overwhelming majority of rows.
-    pub diagnostic: BuiltinDiagnostic,
+    pub(crate) diagnostic: BuiltinDiagnostic,
     body: BuiltinBody,
     /// [`Self::fixed_arity`]'s cache: a `Scheme` rule needs a fresh
     /// [`Unifier`] to derive its curry depth, so this spares every
@@ -130,7 +130,7 @@ impl BuiltinEntry {
     /// Attach a diagnostic facet to an otherwise-built entry — a builder
     /// rather than a `new`/`base_frame` parameter, so the common case names
     /// none.
-    pub const fn with_diagnostic(mut self, diagnostic: BuiltinDiagnostic) -> Self {
+    pub(crate) const fn with_diagnostic(mut self, diagnostic: BuiltinDiagnostic) -> Self {
         self.diagnostic = diagnostic;
         self
     }
@@ -141,7 +141,7 @@ impl BuiltinEntry {
     /// arity gate.  Structural, read off the type rule's curry spine
     /// ([`scheme_curry_depth`]) once and cached: application calls this every
     /// apply step, and instantiating a scheme fresh is not free.
-    pub fn fixed_arity(&self) -> usize {
+    pub(crate) fn fixed_arity(&self) -> usize {
         *self
             .arity_cache
             .get_or_init(|| scheme_curry_depth(self.type_rule))
@@ -212,7 +212,7 @@ impl BuiltinTable {
     ///
     /// # Panics
     /// If a name collides with an installed builtin or repeats in `entries`.
-    pub fn install_static(&mut self, entries: &'static [BuiltinEntry]) -> bool {
+    pub(crate) fn install_static(&mut self, entries: &'static [BuiltinEntry]) -> bool {
         self.install_arc(Arc::from(entries))
     }
 
@@ -224,7 +224,7 @@ impl BuiltinTable {
     /// # Panics
     /// If a name collides with a *different* installed set — host crates must
     /// own disjoint surfaces — or repeats in `entries`.
-    pub fn install_arc(&mut self, entries: Arc<[BuiltinEntry]>) -> bool {
+    pub(crate) fn install_arc(&mut self, entries: Arc<[BuiltinEntry]>) -> bool {
         if self
             .sets
             .iter()
@@ -261,13 +261,13 @@ impl BuiltinTable {
 
     /// Every base-frame row — what the handler stack and the checker's handler
     /// bindings are both seeded from.
-    pub fn base_frames(&self) -> impl Iterator<Item = &BuiltinEntry> {
+    pub(crate) fn base_frames(&self) -> impl Iterator<Item = &BuiltinEntry> {
         self.rows()
             .filter(|entry| entry.convention == Convention::Argv)
     }
 
     /// Names of installed builtins, newest installed set first.
-    pub fn names(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         self.rows().map(|entry| entry.name.as_ref())
     }
 }

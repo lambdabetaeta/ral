@@ -11,11 +11,11 @@ use super::unify::{Unifier, Visited};
 use std::collections::{HashMap, HashSet};
 
 /// All four variable kinds, collected in one traversal.
-pub struct FreeVars {
-    pub tys: HashSet<TyVar>,
-    pub comps: HashSet<CompTyVar>,
-    pub routes: HashSet<PayloadVar>,
-    pub rows: HashSet<RowVar>,
+pub(crate) struct FreeVars {
+    pub(crate) tys: HashSet<TyVar>,
+    pub(crate) comps: HashSet<CompTyVar>,
+    pub(crate) routes: HashSet<PayloadVar>,
+    pub(crate) rows: HashSet<RowVar>,
 }
 
 impl FreeVars {
@@ -28,14 +28,14 @@ impl FreeVars {
         }
     }
 
-    pub fn merge_cached(&mut self, cached: &super::scheme::CachedFreeVars) {
+    pub(crate) fn merge_cached(&mut self, cached: &super::scheme::CachedFreeVars) {
         self.tys.extend(&cached.ty_fv);
         self.comps.extend(&cached.comp_fv);
         self.routes.extend(&cached.route_fv);
         self.rows.extend(&cached.row_fv);
     }
 
-    pub fn merge_into(self, target: &mut Self) {
+    pub(crate) fn merge_into(self, target: &mut Self) {
         target.tys.extend(self.tys);
         target.comps.extend(self.comps);
         target.routes.extend(self.routes);
@@ -43,7 +43,7 @@ impl FreeVars {
     }
 
     /// Instantiation mints these fresh, so they are not free in the environment.
-    pub fn remove_quantified(&mut self, s: &Scheme) {
+    pub(crate) fn remove_quantified(&mut self, s: &Scheme) {
         for v in &s.ty_vars {
             self.tys.remove(v);
         }
@@ -59,7 +59,7 @@ impl FreeVars {
     }
 
     /// The *residual* free vars — mentioned by `env`, so left unquantified.
-    pub fn intersect_into_cached(&self, env: &Self) -> super::scheme::CachedFreeVars {
+    pub(crate) fn intersect_into_cached(&self, env: &Self) -> super::scheme::CachedFreeVars {
         super::scheme::CachedFreeVars {
             ty_fv: self.tys.intersection(&env.tys).copied().collect(),
             comp_fv: self.comps.intersection(&env.comps).copied().collect(),
@@ -69,7 +69,7 @@ impl FreeVars {
     }
 }
 
-pub fn free_ty(u: &mut Unifier, ty: &Ty, out: &mut FreeVars) {
+pub(crate) fn free_ty(u: &mut Unifier, ty: &Ty, out: &mut FreeVars) {
     let mut visited = Visited::default();
     free_ty_inner(u, ty, out, &mut visited);
 }
@@ -139,12 +139,12 @@ fn free_comp_inner(u: &mut Unifier, cty: &CompTy, out: &mut FreeVars, visited: &
 }
 
 fn free_route_inner(u: &mut Unifier, route: PayloadRoute, out: &mut FreeVars) {
-    if let PayloadRoute::Var(v) = u.resolve_route(&route) {
+    if let PayloadRoute::Var(v) = u.resolve_route(route) {
         out.routes.insert(v);
     }
 }
 
-pub fn env_free_vars(u: &mut Unifier, env: &TyEnv) -> FreeVars {
+pub(crate) fn env_free_vars(u: &mut Unifier, env: &TyEnv) -> FreeVars {
     let mut out = FreeVars::new();
     for s in env.all_schemes() {
         if let Some(cached) = &s.cached_fv {
@@ -159,7 +159,7 @@ pub fn env_free_vars(u: &mut Unifier, env: &TyEnv) -> FreeVars {
     out
 }
 
-pub fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
+pub(crate) fn generalize(u: &mut Unifier, env: &TyEnv, ty: &Ty) -> Scheme {
     let applied = u.apply_ty(ty);
 
     let mut fvs = FreeVars::new();
@@ -250,10 +250,9 @@ fn residuals_are_live_roots(u: &mut Unifier, residuals: &super::scheme::CachedFr
         && residuals.comp_fv.iter().all(|v| {
             u.comp_root(v.0) == v.0 && matches!(u.resolve_comp_ty(&CompTy::Var(*v)), CompTy::Var(_))
         })
-        && residuals
-            .route_fv
-            .iter()
-            .all(|v| matches!(u.resolve_route(&PayloadRoute::Var(*v)), PayloadRoute::Var(rv) if rv == *v))
+        && residuals.route_fv.iter().all(
+            |v| matches!(u.resolve_route(PayloadRoute::Var(*v)), PayloadRoute::Var(rv) if rv == *v),
+        )
         && residuals
             .row_fv
             .iter()
@@ -264,7 +263,7 @@ fn residuals_are_live_roots(u: &mut Unifier, residuals: &super::scheme::CachedFr
 /// captured as a cyclic-binding root.  An unquantified residual is an id no
 /// live slot owns, which `Store` in `unify.rs` tolerates as free and a later
 /// `fresh()` can re-mint, aliasing two unrelated variables.
-pub fn scheme_is_closed(u: &mut Unifier, scheme: &Scheme) -> bool {
+pub(crate) fn scheme_is_closed(u: &mut Unifier, scheme: &Scheme) -> bool {
     let mut fvs = FreeVars::new();
     free_ty(u, &scheme.ty, &mut fvs);
     let ty_roots: std::collections::HashSet<u32> =
@@ -289,11 +288,11 @@ pub fn scheme_is_closed(u: &mut Unifier, scheme: &Scheme) -> bool {
     clippy::debug_assert_with_mut_call,
     reason = "the &mut is union-find path compression, semantically idempotent; skipping it in release is harmless"
 )]
-pub fn debug_assert_scheme_closed(u: &mut Unifier, scheme: &Scheme, msg: &str) {
+pub(crate) fn debug_assert_scheme_closed(u: &mut Unifier, scheme: &Scheme, msg: &str) {
     debug_assert!(scheme_is_closed(u, scheme), "{msg}");
 }
 
-pub fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
+pub(crate) fn instantiate(u: &mut Unifier, scheme: &Scheme) -> Ty {
     if !scheme.is_poly() {
         return scheme.ty.clone();
     }

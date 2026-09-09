@@ -18,10 +18,12 @@
 /// serialising one a compile error rather than a leak of one machine's
 /// canonical forms into another's rules.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Rendered(String);
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct Rendered(String);
 
 impl Rendered {
     /// The spelling itself, for the emitter splicing it into an OS rule.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -37,7 +39,8 @@ impl Rendered {
 /// would name a different inode; a grant that cannot be expressed
 /// faithfully is refused, not approximated.
 #[allow(clippy::disallowed_methods)]
-pub fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, String> {
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn render_paths<S: AsRef<str>>(paths: &[S]) -> Result<Vec<Rendered>, String> {
     Ok(
         super::canon::match_variants_paths(paths.iter().map(|p| std::path::Path::new(p.as_ref())))?
             .into_iter()
@@ -74,6 +77,7 @@ pub(crate) fn rendered_ancestors<'a>(
 /// through a symlinked chain (`W/alias/secret` where `W/alias → W/top/deep`)
 /// pins every ancestor of both the surface and the resolved spelling, not
 /// just the ones the pre-expansion string happened to share with `write`.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn rendered_pins(deny: &[Rendered], write: &[Rendered]) -> Vec<Rendered> {
     super::proper_ancestors(deny.iter().map(Rendered::as_str))
         .into_iter()

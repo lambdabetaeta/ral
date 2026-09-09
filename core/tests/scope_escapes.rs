@@ -11,24 +11,16 @@
 
 mod common;
 
+use common::fresh_shell;
+
 use ral_core::protocol::{Program, Run};
 use ral_core::types::{Escape, GrantStack, Mooring, Settled, Shell};
 use ral_core::{
     Break, HostSurface, RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin,
-    SessionSchemes, Value, builtins, elaborator::elaborate, syntax::parser::parse, typecheck,
+    SessionSchemes, Value, elaborator::elaborate, syntax::parser::parse, typecheck,
 };
 
 // ── Harness (same shape as `top_level_vs_block.rs`) ─────────────────────
-
-/// Mirror of `top_level_vs_block::fresh_shell` — prelude registered, default
-/// env vars seeded, caps at root.  Equivalent to what every front end
-/// (`ral`, `exarch`, scripts) ends up with after bootstrap.
-fn fresh_shell() -> Shell {
-    let mut shell = Shell::default();
-    shell.seed_default_env_vars();
-    builtins::register(&mut shell, common::prelude_comp());
-    shell
-}
 
 /// Run one top-level run of `source` through the public `run` door
 /// and return the body's `Settled<Value>`.  Every test below picks source

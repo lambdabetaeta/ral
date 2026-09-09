@@ -82,7 +82,7 @@ impl CancelCause {
     /// report can read "stopped because …" into.  Its grammar differs from
     /// [`message`](Self::message)'s — a bare participle cannot be a clause — but
     /// the vocabulary is one, and lives here so it cannot drift.
-    pub fn event(self) -> &'static str {
+    pub(crate) fn event(self) -> &'static str {
         match self {
             Self::ReaderGone => "reader-gone",
             Self::Interrupt => "the call was interrupted",
@@ -387,7 +387,7 @@ impl DurableRoot {
     /// runs' dynamic extent: a nested run observes the interrupt its outer run
     /// carries, and an outer run's wall reaches into the nest.  Stamped with
     /// its birth instant under a signal-facing root, deaf under any other.
-    pub fn foreground(&self, displaced: &ForegroundScope) -> ForegroundScope {
+    pub(crate) fn foreground(&self, displaced: &ForegroundScope) -> ForegroundScope {
         let hears = match self.0.0.hears {
             Hears::Shutdown => Hears::InterruptsSince(CLOCK.load(Ordering::Acquire)),
             _ => Hears::Nothing,

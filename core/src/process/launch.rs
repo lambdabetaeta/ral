@@ -16,7 +16,7 @@ use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 pub(crate) use windows::RawChild;
 
 #[cfg(not(windows))]
-pub struct Launch {
+pub(crate) struct Launch {
     cmd: std::process::Command,
     jail: Option<crate::process::jail::JailCgroup>,
     envelope: Option<Envelope>,
@@ -36,7 +36,7 @@ pub(crate) struct Envelope {
 }
 
 #[cfg(windows)]
-pub struct Launch {
+pub(crate) struct Launch {
     program: OsString,
     args: Vec<OsString>,
     env: std::collections::BTreeMap<EnvKey, EnvEdit>,
@@ -91,7 +91,7 @@ enum EnvEdit {
     Remove,
 }
 
-pub enum StdioSpec {
+pub(crate) enum StdioSpec {
     Inherit,
     Null,
     Piped,
@@ -102,15 +102,15 @@ pub enum StdioSpec {
 }
 
 impl StdioSpec {
-    pub fn inherit() -> Self {
+    pub(crate) fn inherit() -> Self {
         Self::Inherit
     }
 
-    pub fn null() -> Self {
+    pub(crate) fn null() -> Self {
         Self::Null
     }
 
-    pub fn piped() -> Self {
+    pub(crate) fn piped() -> Self {
         Self::Piped
     }
 
@@ -125,16 +125,16 @@ impl StdioSpec {
     }
 
     #[cfg(not(windows))]
-    pub fn from_stdio(stdio: std::process::Stdio) -> Self {
+    pub(crate) fn from_stdio(stdio: std::process::Stdio) -> Self {
         Self::Stdio(stdio)
     }
 
     #[cfg(windows)]
-    pub fn from_owned_handle(handle: std::os::windows::io::OwnedHandle) -> Self {
+    pub(crate) fn from_owned_handle(handle: std::os::windows::io::OwnedHandle) -> Self {
         Self::Handle(handle)
     }
 
-    pub fn from_pipe_reader(reader: os_pipe::PipeReader) -> Self {
+    pub(crate) fn from_pipe_reader(reader: os_pipe::PipeReader) -> Self {
         #[cfg(windows)]
         {
             use std::os::windows::io::OwnedHandle;
@@ -146,7 +146,7 @@ impl StdioSpec {
         }
     }
 
-    pub fn from_pipe_writer(writer: os_pipe::PipeWriter) -> Self {
+    pub(crate) fn from_pipe_writer(writer: os_pipe::PipeWriter) -> Self {
         #[cfg(windows)]
         {
             use std::os::windows::io::OwnedHandle;
@@ -158,7 +158,7 @@ impl StdioSpec {
         }
     }
 
-    pub fn from_file(file: std::fs::File) -> Self {
+    pub(crate) fn from_file(file: std::fs::File) -> Self {
         #[cfg(windows)]
         {
             use std::os::windows::io::OwnedHandle;
@@ -220,12 +220,12 @@ impl Launch {
         }
     }
 
-    pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
+    pub(crate) fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
         self.cmd.arg(arg);
         self
     }
 
-    pub fn args<I, S>(&mut self, args: I) -> &mut Self
+    pub(crate) fn args<I, S>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -239,12 +239,12 @@ impl Launch {
         self
     }
 
-    pub fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
+    pub(crate) fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
         self.cmd.env_remove(key);
         self
     }
 
-    pub fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
+    pub(crate) fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
         self.cmd.current_dir(dir.into());
         self
     }
@@ -265,12 +265,12 @@ impl Launch {
     }
 
     #[cfg(unix)]
-    pub fn apply_unix_resource_limits(&mut self) {
+    pub(crate) fn apply_unix_resource_limits(&mut self) {
         crate::sandbox::apply_resource_limits(&mut self.cmd);
     }
 
     #[cfg(unix)]
-    pub fn dup_stdout_to_stderr(&mut self) {
+    pub(crate) fn dup_stdout_to_stderr(&mut self) {
         use std::os::unix::process::CommandExt;
         unsafe {
             self.cmd.pre_exec(|| {
@@ -298,23 +298,6 @@ impl Launch {
         crate::process::jail::linux::install_pre_exec(&mut self.cmd, plan, procs);
         self.jail = Some(cgroup);
         Ok(())
-    }
-
-    #[cfg(unix)]
-    pub fn clear_cloexec_on_spawn(&mut self, fd: std::os::fd::RawFd) {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            self.cmd.pre_exec(move || {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
     }
 
     /// Lower to a `std::process::Command` and spawn it with the requested
@@ -394,6 +377,10 @@ impl Launch {
     /// exposes no stdio getters, so stdio set on it is dropped and must be
     /// re-set here, exactly as on the non-Windows arm.
     #[allow(
+        dead_code,
+        reason = "shape, not use: every caller of the pair — `pipeline::helper::self_reexec`, `sandbox::launch` — is `cfg(unix)` or Linux/macOS-only today, and both arms present one signature for the day one is not"
+    )]
+    #[allow(
         clippy::needless_pass_by_value,
         reason = "the non-Windows arm moves the `Command` into the launch it returns; both arms take it by value so the shared callers see one cross-platform signature"
     )]
@@ -416,12 +403,12 @@ impl Launch {
         launch
     }
 
-    pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
+    pub(crate) fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
         self.args.push(arg.as_ref().to_os_string());
         self
     }
 
-    pub fn args<I, S>(&mut self, args: I) -> &mut Self
+    pub(crate) fn args<I, S>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -439,12 +426,12 @@ impl Launch {
         self
     }
 
-    pub fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
+    pub(crate) fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
         self.env.insert(env_key(key.as_ref()), EnvEdit::Remove);
         self
     }
 
-    pub fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
+    pub(crate) fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
         self.cwd = Some(dir.into());
         self
     }
@@ -464,22 +451,11 @@ impl Launch {
         self
     }
 
-    pub fn creation_flags(&mut self, flags: u32) -> &mut Self {
-        self.creation_flags |= flags;
-        self
-    }
-
-    pub fn admit_handle(&mut self, handle: std::os::windows::io::RawHandle) {
-        if !self.admitted_handles.contains(&handle) {
-            self.admitted_handles.push(handle);
-        }
-    }
-
     /// Stage `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` for the spawn.
     /// Only the raw SID values are borrowed, so they must stay valid until
     /// [`Self::spawn`] returns; `sandbox::windows::session::confine` passes
     /// SIDs the session owns for the whole process lifetime.
-    pub fn security_capabilities(
+    pub(crate) fn security_capabilities(
         &mut self,
         app_container_sid: PSID,
         capabilities: &[SID_AND_ATTRIBUTES],

@@ -63,6 +63,6 @@ impl From<GroundRoute> for PayloadRoute {
 /// `typecheck::alias_arm_scheme`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteMismatch {
-    pub left: PayloadRoute,
-    pub right: PayloadRoute,
+    pub(crate) left: PayloadRoute,
+    pub(crate) right: PayloadRoute,
 }

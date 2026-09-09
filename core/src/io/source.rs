@@ -37,7 +37,7 @@ impl Source {
     ///
     /// # Errors
     /// Returns `Err` if duplicating the underlying pipe or file fails.
-    pub fn reader(&self) -> io::Result<Option<SourceReader>> {
+    pub(crate) fn reader(&self) -> io::Result<Option<SourceReader>> {
         match self {
             Self::Terminal | Self::Empty => Ok(None),
             Self::Reader(r) => r.try_clone().map(Some),
@@ -46,14 +46,14 @@ impl Source {
 }
 
 impl SourceReader {
-    pub fn pipe(r: os_pipe::PipeReader) -> Self {
+    pub(crate) fn pipe(r: os_pipe::PipeReader) -> Self {
         Self {
             fd: Fd::Pipe(r),
             wake: None,
         }
     }
 
-    pub fn file(f: std::fs::File) -> Self {
+    pub(crate) fn file(f: std::fs::File) -> Self {
         Self {
             fd: Fd::File(f),
             wake: None,
@@ -62,7 +62,7 @@ impl SourceReader {
 
     /// This reader as a stage thread's stdin, ended by `wake`; a wake it
     /// already carried belonged to an enclosing stage and is replaced.
-    pub fn interruptible(self, wake: Arc<Wake>) -> Self {
+    pub(crate) fn interruptible(self, wake: Arc<Wake>) -> Self {
         Self {
             fd: self.fd,
             wake: Some(wake),
@@ -71,7 +71,7 @@ impl SourceReader {
 
     /// # Errors
     /// Returns `Err` if duplicating the pipe or file fails.
-    pub fn try_clone(&self) -> io::Result<Self> {
+    pub(crate) fn try_clone(&self) -> io::Result<Self> {
         let fd = match &self.fd {
             Fd::Pipe(r) => Fd::Pipe(r.try_clone()?),
             Fd::File(f) => Fd::File(f.try_clone()?),

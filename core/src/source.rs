@@ -17,7 +17,7 @@ use crate::text::floor_char_boundary;
 pub struct Span {
     pub start: u32,
     pub end: u32,
-    pub file: FileId,
+    pub(crate) file: FileId,
 }
 
 impl Span {
@@ -28,7 +28,7 @@ impl Span {
     }
 
     /// A zero-width span at `pos`.
-    pub fn point(file: FileId, pos: u32) -> Self {
+    pub(crate) fn point(file: FileId, pos: u32) -> Self {
         Self {
             start: pos,
             end: pos,
@@ -110,19 +110,20 @@ impl<T> Spanned<T> {
     }
 
     /// Construct from an already-optional span.
-    pub fn with_span(span: Option<Span>, item: T) -> Self {
+    pub(crate) fn with_span(span: Option<Span>, item: T) -> Self {
         Self { span, item }
     }
 }
 
 impl<T> Spanned<Box<T>> {
     /// Box `inner` and pair it with `span`.
-    pub fn boxed(span: Span, inner: T) -> Self {
+    pub(crate) fn boxed(span: Span, inner: T) -> Self {
         Self::new(span, Box::new(inner))
     }
 
     /// Span-less counterpart of [`Self::boxed`].
-    pub fn synthetic_boxed(inner: T) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn synthetic_boxed(inner: T) -> Self {
         Self::synthetic(Box::new(inner))
     }
 }
@@ -211,7 +212,7 @@ impl Source {
 
     /// A byte offset as a 1-indexed (line, col) pair: binary search for the
     /// line, then one `chars()` walk of that line for the column.
-    pub fn byte_to_line_col(&self, byte_offset: usize) -> (usize, usize) {
+    pub(crate) fn byte_to_line_col(&self, byte_offset: usize) -> (usize, usize) {
         let safe = floor_char_boundary(&self.text, byte_offset);
         #[allow(
             clippy::cast_possible_truncation,
@@ -278,7 +279,7 @@ impl SourceDb {
 /// 1-indexed (line, col) by linear scan, for a caller holding source text but
 /// no [`Source`]; anything repeated should build one and use
 /// [`Source::byte_to_line_col`].
-pub fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
+pub(crate) fn byte_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
     let safe = floor_char_boundary(source, byte_offset);
     let prefix = &source[..safe];
     let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;

@@ -33,20 +33,20 @@ impl List {
         self.0.get(index)
     }
 
-    pub fn push_back(&mut self, v: Value) {
+    pub(crate) fn push_back(&mut self, v: Value) {
         self.0.push_back(v);
     }
 
-    pub fn push_front(&mut self, v: Value) {
+    pub(crate) fn push_front(&mut self, v: Value) {
         self.0.push_front(v);
     }
 
-    pub fn append(&mut self, other: Self) {
+    pub(crate) fn append(&mut self, other: Self) {
         self.0.append(other.0);
     }
 
     /// `self` keeps `[0, index)`; the returned list takes `[index, len)`.
-    pub fn split_off(&mut self, index: usize) -> Self {
+    pub(crate) fn split_off(&mut self, index: usize) -> Self {
         Self(self.0.split_off(index))
     }
 }
