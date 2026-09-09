@@ -220,8 +220,7 @@ impl TurnKind {
 /// the count of turns evicted from it and the truth about what is sent.
 ///
 /// `total_bytes` is the assembled context's own weight, not the sum of the
-/// rows: an abandoned exchange's turns report their own weights while the
-/// context sends only its one-line note.
+/// rows: the head marker weighs too, and is no turn.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContextSurvey {
     pub rows: Vec<TurnRow>,
@@ -838,8 +837,8 @@ impl AgentLog {
     /// End an exchange that produced no real assistant reply, recording only
     /// what the log still owes: an answer to tool calls that never ran, and a
     /// capstone for an exchange that ended on `reply`.  An exchange abandoned
-    /// short of a reply is left as it lies — the model reads no trace of it,
-    /// and the next prompt opens a fresh one over the top.
+    /// short of a reply is left as it lies, and the next prompt opens a fresh
+    /// one after it.
     pub fn quiesce(&mut self, reason: QuiesceReason) {
         for record in self.context.quiesce_records(reason) {
             self.record_protocol_lossy(record);
@@ -1977,44 +1976,11 @@ mod tests {
         );
     }
 
-    /// The exchange in hand is the one the request is being built for, so it
-    /// renders as it lies — prompt, the assistant frame that called a tool,
-    /// and the results — never as the note an unsettled *closed* exchange
-    /// would have rendered as.
-    #[test]
-    fn the_exchange_in_hand_renders_as_it_lies() {
-        let mut s = fresh_root();
-        s.append_user("work".into(), None).unwrap();
-        s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
-            .unwrap();
-        s.append_tool_results(vec![ToolResult {
-            id: "call".into(),
-            content: "result".into(),
-        }])
-        .unwrap();
-
-        let rendered = s.render_messages().expect("the request is owed a reply");
-        assert_eq!(
-            rendered
-                .iter()
-                .map(|message| message.role.clone())
-                .collect::<Vec<_>>(),
-            vec![ChatRole::User, ChatRole::Assistant, ChatRole::Tool]
-        );
-        assert!(
-            !rendered.iter().any(|message| message
-                .content
-                .first_text()
-                .is_some_and(|text| text.starts_with("[EXARCH // An exchange here"))),
-            "the exchange in hand is unsettled by definition, and owes no note"
-        );
-    }
-
     /// An exchange abandoned before any reply is closed by the next prompt,
-    /// not by a fabricated one: nothing is recorded in its place, and none of
-    /// its content reaches the model — only a user-voice note that it happened.
+    /// not by a fabricated one: nothing is recorded in its place, and the
+    /// model reads it exactly as it lies, the next prompt following.
     #[test]
-    fn an_abandoned_exchange_is_kept_whole_and_read_as_a_note() {
+    fn an_abandoned_exchange_is_kept_whole_and_read_whole() {
         let mut s = fresh_root();
         s.append_user("interrupted".into(), None).unwrap();
         s.quiesce(QuiesceReason::Cancelled);
@@ -2032,33 +1998,14 @@ mod tests {
             .iter()
             .filter_map(|message| message.content.first_text())
             .collect();
-        assert_eq!(
-            read,
-            vec![
-                "[EXARCH // An exchange here was interrupted before any reply; \
-                 its content is not in your context. No tool had been called.]",
-                "next",
-                "answer"
-            ]
-        );
-        assert!(
-            rendered.iter().all(|message| message.role == ChatRole::User
-                || message.content.first_text() == Some("answer")),
-            "the note speaks as the user, never as the assistant"
-        );
-        assert!(
-            records(&s).iter().any(|record| matches!(
-                record,
-                Record::Protocol(Protocol::UserPrompt { text, .. }) if text == "interrupted"
-            )),
-            "record.jsonl keeps the abandoned exchange unabridged"
-        );
+        assert_eq!(read, vec!["interrupted", "next", "answer"]);
     }
 
-    /// The note names the one fact that outlives the context the exchange
-    /// lost: whether tools had run, and so whether the world was touched.
+    /// The work an interrupted exchange did stays in the context: an agentic
+    /// run is one prompt and then many tool turns, and an Esc that dropped
+    /// them all would leave the model to rediscover its own session.
     #[test]
-    fn an_abandoned_exchange_that_ran_tools_says_so() {
+    fn an_abandoned_exchange_keeps_its_tool_turns_in_context() {
         let mut s = fresh_root();
         s.append_user("run the tool".into(), None).unwrap();
         s.append_assistant(assistant_with_tool("call"), vec!["call".into()], None)
@@ -2070,40 +2017,19 @@ mod tests {
         .unwrap();
         s.quiesce(QuiesceReason::Cancelled);
         complete_exchange(&mut s, "next", "answer");
-        assert!(
-            s.history_rendered().iter().any(|message| {
-                message
-                    .content
-                    .first_text()
-                    .is_some_and(|text| text.contains("any effects on the shell and filesystem"))
-            }),
-            "an exchange that touched the world must say so"
+        assert_eq!(
+            s.history_rendered()
+                .iter()
+                .map(|message| message.role.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                ChatRole::User,
+                ChatRole::Assistant,
+                ChatRole::Tool,
+                ChatRole::User,
+                ChatRole::Assistant
+            ]
         );
-    }
-
-    /// The door is the record, not the context: an exchange the context
-    /// replaced with a note reads back as the material the model actually
-    /// sent, since that is what `record.jsonl` holds.
-    #[test]
-    fn an_abandoned_exchange_reads_back_as_its_material() {
-        let mut s = fresh_root();
-        s.append_user("interrupted".into(), None).unwrap();
-        s.quiesce(QuiesceReason::Cancelled);
-        complete_exchange(&mut s, "next", "answer");
-        assert!(
-            s.history_rendered().iter().any(|message| {
-                message
-                    .content
-                    .first_text()
-                    .is_some_and(|text| text.starts_with("[EXARCH // An exchange here"))
-            }),
-            "the context still sends the model the note"
-        );
-
-        let read = s
-            .read_transcript(&[1], None)
-            .expect("the abandoned exchange is recorded, so it is readable");
-        assert_eq!(openings(&read[0]), vec!["interrupted"]);
     }
 
     /// Tool calls that never ran are the one thing a quiesce still owes: the

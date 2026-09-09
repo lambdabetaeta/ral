@@ -155,16 +155,13 @@ structure, then the file".
 ### The provider-facing context is a pure function of the structure
 
 `Context::rendered()` builds an owned `Vec<ChatMessage>`, with no render memo
-behind it. Assembly is one walk: the head marker
-where `render_head` yields one, then the exchanges holding a resident turn, in
-order. Each earlier exchange renders as its turns' messages if it is settled
-and as its one `abandoned_note` if not; the last is the exchange *in hand* and
-renders as it lies, since its last turn may still be growing and an abandoned
-exchange is not yet abandoned while it is the one in hand. Settled is a look
-at one record — the last of that exchange's last resident turn — a turn's body
-holding material alone. `history_bytes` is the same walk over the per-turn
-sums with no turn rendered at all, and `context_survey` reports it as
-`total-bytes` beside the rows rather than summing them.
+behind it. Assembly is one walk: the head marker where `render_head` yields
+one, then every resident turn's messages, in order — an exchange interrupted
+short of a reply included, as it lies
+([[invariants/turn-ends-ready|exchange-ends-ready]]). `history_bytes` is the
+same walk over the per-turn sums with no turn rendered at all, and
+`context_survey` reports it as `total-bytes` beside the rows rather than
+summing them.
 
 `render_head` renders on every call too. It groups the departed rows by the
 cut their body names — maximal runs of table-adjacent rows sharing an exchange

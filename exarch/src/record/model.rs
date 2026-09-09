@@ -363,9 +363,9 @@ impl Context {
     }
 
     /// One row per resident turn, at the weight the fold summed, beside the
-    /// truth about what is sent: `total_bytes` is [`Self::history_bytes`] and
-    /// not a second opinion on it, so an abandoned exchange's turns report
-    /// their own weights while the context sends only its note.
+    /// truth about what is sent: `total_bytes` is [`Self::history_bytes`],
+    /// not a second opinion on it, so the head marker's weight is counted
+    /// once and never as a row.
     pub(crate) fn context_survey(&self) -> ContextSurvey {
         ContextSurvey {
             rows: self.resident().map(Turn::row).collect(),

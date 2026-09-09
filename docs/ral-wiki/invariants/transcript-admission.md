@@ -23,14 +23,15 @@ Consecutive same-role messages are routine: a session that has evicted sends
 the head marker — the harness's user-voice index of what left — as message 0,
 immediately before the oldest surviving user turn's prompt, an
 inherited import can end on a user message with the child's launch prompt
-behind it, and an abandoned exchange's note is a user message before the prompt
-that replaced it ([[invariants/turn-ends-ready|exchange-ends-ready]]). genai's
-Anthropic adapter pushes one JSON object per `ChatMessage` and merges nothing,
-so those reach the provider as written. What the wire actually constrains is
-the tool-call *pairing* — a structural relation between content blocks — which
-is why `AwaitingToolResults` and `validate_result_ids` exist, and why a closed
-exchange that never settles is dropped rather than sent: it would carry a
-dangling `tool_use`.
+behind it, and the prompt after an interrupted exchange follows that exchange's
+last tool results or steering directly
+([[invariants/turn-ends-ready|exchange-ends-ready]]). genai's Anthropic
+adapter pushes one JSON object per `ChatMessage` and merges nothing, so those
+reach the provider as written. What the wire actually constrains is the
+tool-call *pairing* — a structural relation between content blocks — which is
+why `AwaitingToolResults` and `validate_result_ids` exist, and why a quiesce
+answers every call that never ran before the next prompt is admitted: a
+dangling `tool_use` must never reach the wire.
 
 Three commit-time obligations, all in `Agent::deliberate` (the deep-review X-tags):
 

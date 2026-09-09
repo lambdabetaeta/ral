@@ -3,49 +3,24 @@
 //! was.
 
 use super::{Context, Held, OPENING_CHARS, Turn, message_bytes, resident_messages};
-use crate::record::{Protocol, Recorded};
 use genai::chat::ChatMessage;
 use std::collections::HashSet;
 
 impl Context {
-    /// The context's exchanges, each with its resident turns, in id order.
-    fn resident_exchanges(&self) -> Vec<(u64, Vec<&Turn>)> {
-        let mut exchanges: Vec<(u64, Vec<&Turn>)> = Vec::new();
-        for turn in self.resident() {
-            match exchanges.last_mut() {
-                Some((exchange, turns)) if *exchange == turn.exchange => turns.push(turn),
-                _ => exchanges.push((turn.exchange, vec![turn])),
-            }
-        }
-        exchanges
-    }
-
     /// The provider-facing context: the marker where a cut has left one, then
-    /// the exchanges with a resident turn, in order.
+    /// every resident turn as it lies, in order.
     ///
-    /// The last of them is the exchange in hand and renders as it lies,
-    /// whatever state it rests in — its last turn may still be growing. Each
-    /// earlier exchange renders as its turns' messages if it is settled, else
-    /// as its one [`abandoned_note`].
+    /// An exchange interrupted short of a reply renders whole too — it is the
+    /// work the model did, and the next prompt following its last tool
+    /// results is the interruption's own mark. Nothing is synthesised in its
+    /// place: a quiesce has already answered any call that never ran, so no
+    /// dangling tool-call block can be here.
     pub fn rendered(&self) -> Vec<ChatMessage> {
         let mut rendered: Vec<ChatMessage> = Vec::new();
         if let Some(text) = render_head(self) {
             rendered.push(ChatMessage::user(text));
         }
-        let exchanges = self.resident_exchanges();
-        let Some((live, closed)) = exchanges.split_last() else {
-            return rendered;
-        };
-        for (_, turns) in closed {
-            if is_settled(turns) {
-                for turn in turns {
-                    rendered.extend(resident_messages(turn.records()));
-                }
-            } else {
-                rendered.push(ChatMessage::user(abandoned_note(turns)));
-            }
-        }
-        for turn in &live.1 {
+        for turn in self.resident() {
             rendered.extend(resident_messages(turn.records()));
         }
         rendered
@@ -53,86 +28,13 @@ impl Context {
 
     /// Approximate context size in serialised bytes — the fallback eviction
     /// trigger when the model's context window is unknown. Renders no turn:
-    /// the marker's weight, plus each resident exchange's own per-turn sums,
-    /// or its note's weight where the exchange never settled.
+    /// the marker's weight, plus each resident turn's own sum.
     pub(crate) fn history_bytes(&self) -> usize {
-        let mut bytes = render_head(self).map_or(0, note_bytes);
-        let exchanges = self.resident_exchanges();
-        let Some((live, closed)) = exchanges.split_last() else {
-            return bytes;
-        };
-        for (_, turns) in closed {
-            let weight = if is_settled(turns) {
-                turns.iter().map(|turn| turn.bytes).sum()
-            } else {
-                note_bytes(abandoned_note(turns))
-            };
-            bytes = bytes.saturating_add(weight);
-        }
-        bytes.saturating_add(live.1.iter().map(|turn| turn.bytes).sum())
+        let head = render_head(self)
+            .map_or(0, |text| message_bytes(std::slice::from_ref(&ChatMessage::user(text))));
+        self.resident()
+            .fold(head, |bytes, turn| bytes.saturating_add(turn.bytes))
     }
-}
-
-/// What a note weighs as the one message it becomes.
-fn note_bytes(text: String) -> usize {
-    message_bytes(std::slice::from_ref(&ChatMessage::user(text)))
-}
-
-/// Whether an exchange's own fold comes to rest: a reply that called no tool,
-/// or an import, which advances nothing and so rests where it lies. An
-/// interrupted exchange does not, and reads as its note.
-///
-/// One look at the exchange's last record, since a turn's body holds material
-/// alone. An exchange whose resident turns hold nothing — a fork's link left
-/// a turn the seed never re-recorded — rests: there is no interruption to
-/// report about material that is not there.
-fn is_settled(turns: &[&Turn]) -> bool {
-    match turns
-        .iter()
-        .rev()
-        .flat_map(|turn| turn.records().iter().rev())
-        .next()
-        .map(Recorded::value)
-    {
-        Some(Protocol::AssistantMessage {
-            pending_tool_ids, ..
-        }) => pending_tool_ids.is_empty(),
-        Some(Protocol::ContextMessage { .. }) | None => true,
-        Some(
-            Protocol::UserPrompt { .. }
-            | Protocol::ToolResults { .. }
-            | Protocol::ContextEdited { .. }
-            | Protocol::Inherited { .. },
-        ) => false,
-    }
-}
-
-/// What the model reads in place of an exchange that never reached a reply.
-///
-/// In the user's voice, never the assistant's: the harness may state a fact
-/// about the conversation, but must not put words in the model's mouth — a
-/// placeholder in the assistant's own voice is read back as something it chose
-/// to say, and imitated. It is cause-neutral because it has to be: a cancel
-/// and an abort are told apart only by a `Forensic` record, and this fold
-/// projects the protocol subsequence alone.
-///
-/// Whether tools were called is the fact that changes what to do next, since
-/// their effects outlive the context the exchange lost. "Had been called" and
-/// "any effects" are both hedged deliberately: a batch answered wholly by
-/// `UNRUN_TOOL_CALL` is a call made and not run.
-fn abandoned_note(turns: &[&Turn]) -> String {
-    let called = turns
-        .iter()
-        .flat_map(|turn| turn.records())
-        .any(|record| matches!(record.value(), Protocol::ToolResults { .. }));
-    let effects = if called {
-        "Tools had been called, so any effects on the shell and filesystem stand."
-    } else {
-        "No tool had been called."
-    };
-    format!(
-        "[EXARCH // An exchange here was interrupted before any reply; its content is not in your context. {effects}]"
-    )
 }
 
 /// Exchange fragments the head marker draws a row each for; everything older
@@ -213,8 +115,9 @@ fn fragments(turns: &[Turn]) -> Vec<Fragment> {
 /// no clock, no path, no ordering-unstable container — so between two edits
 /// the provider's prompt cache sees a byte-stable message 0.
 ///
-/// Voice and bracket as [`abandoned_note`]: the harness may state a fact
-/// about the conversation, never speak in the model's own voice.
+/// In the user's voice, bracketed: the harness may state a fact about the
+/// conversation, never speak in the model's own voice — a placeholder in the
+/// assistant's voice is read back as something it chose to say, and imitated.
 pub(super) fn render_head(context: &Context) -> Option<String> {
     let fragments = fragments(context.table.turns());
     if fragments.is_empty() {

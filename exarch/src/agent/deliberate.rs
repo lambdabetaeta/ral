@@ -396,6 +396,12 @@ impl Avatar {
             }
             results.push(self.invoke(call, emit));
         }
+        // A cancelled batch admits nothing: a steer drained here would be
+        // recorded on the exchange being dropped and never answered, so it
+        // waits in the inbox and opens the next exchange instead.
+        if token.is_cancelled() {
+            return (results, Vec::new());
+        }
         // The tool-boundary drain, each message tagged with its source; a slash
         // command is the lone exception, held for the exchange boundary.  A
         // result that settled across a `/clear` is dropped at the inbox's own
@@ -902,7 +908,7 @@ mod tests {
     ) -> Settled<Value> {
         T2_CANCEL_TOKEN.with(|cell| {
             if let Some(token) = cell.borrow().as_ref() {
-                token.cancel(ral_core::process::CancelCause::Explicit);
+                token.cancel(ral_core::process::CancelCause::Interrupt);
             }
         });
         Ok(Value::Unit)
@@ -912,12 +918,45 @@ mod tests {
         mk_scheme(&[], &[], &[], thunk(pure(Ty::Unit)))
     }
 
-    static T2_CANCEL_BUILTINS_ARR: [BuiltinEntry; 1] = [BuiltinEntry::new(
-        Cow::Borrowed("t2-cancel-now"),
-        scheme_t2_cancel_now,
-        "test-only: cancel the token staged in T2_CANCEL_TOKEN.",
-        BuiltinBody::Static(builtin_t2_cancel_now),
-    )];
+    thread_local! {
+        /// The mailbox [`builtin_t2_queue_prompt`] posts to — a human typing
+        /// while a batch runs, from inside that batch.
+        static T2_QUEUE: std::cell::RefCell<Option<crate::bus::Mailbox>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// test-only: queues "queued prompt" on the mailbox staged in [`T2_QUEUE`].
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "fixed BuiltinBody::Static signature"
+    )]
+    fn builtin_t2_queue_prompt(
+        _args: &[Value],
+        _mooring: &Mooring,
+        _shell: &mut Shell,
+    ) -> Settled<Value> {
+        T2_QUEUE.with(|cell| {
+            if let Some(mailbox) = cell.borrow().as_ref() {
+                mailbox.push_user("queued prompt".into());
+            }
+        });
+        Ok(Value::Unit)
+    }
+
+    static T2_CANCEL_BUILTINS_ARR: [BuiltinEntry; 2] = [
+        BuiltinEntry::new(
+            Cow::Borrowed("t2-cancel-now"),
+            scheme_t2_cancel_now,
+            "test-only: cancel the token staged in T2_CANCEL_TOKEN.",
+            BuiltinBody::Static(builtin_t2_cancel_now),
+        ),
+        BuiltinEntry::new(
+            Cow::Borrowed("t2-queue-prompt"),
+            scheme_t2_cancel_now,
+            "test-only: queue a human prompt on the mailbox staged in T2_QUEUE.",
+            BuiltinBody::Static(builtin_t2_queue_prompt),
+        ),
+    ];
     static T2_CANCEL_BUILTINS: &[BuiltinEntry] = &T2_CANCEL_BUILTINS_ARR;
 
     /// A `reply` staged mid-batch and then overtaken by a cancellation must not
@@ -965,6 +1004,59 @@ mod tests {
                 "a reply staged in a cancelled batch must not leak into the next deliberation, got {other:?}"
             ),
         }
+    }
+
+    /// A prompt queued behind a batch that Esc then cancels is not steering on
+    /// the exchange being dropped: it waits, opens the next exchange, and that
+    /// exchange's request still carries the interrupted work in full.
+    #[test]
+    fn a_prompt_queued_across_an_interrupt_opens_the_next_exchange_over_the_whole_context() {
+        let mut session = Avatar::for_test("system").unwrap();
+        session
+            .seat
+            .shell_mut()
+            .shell
+            .install_builtins(T2_CANCEL_BUILTINS);
+        T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = Some(session.agent.cancel.clone()));
+        T2_QUEUE.with(|cell| *cell.borrow_mut() = Some(session.mailbox()));
+        session.agent.provider.swap(scripted(
+            "test-model",
+            Script::new()
+                .then(Reply::tool_calls(vec![
+                    ral_call("c1", "t2-queue-prompt"),
+                    ral_call("c2", "t2-cancel-now"),
+                ]))
+                .then(Reply::text("answered"))
+                .then(Reply::text("ok"))
+                .then(Reply::text("ok"))
+                .then(Reply::text("ok")),
+        ));
+        session.seed("go".into());
+        let (tx, _rx) = crate::bus::channel();
+        let emit = Emitter::new(tx, session.agent.id);
+        session.attend(&mut NoControl, &emit);
+        T2_CANCEL_TOKEN.with(|cell| *cell.borrow_mut() = None);
+        T2_QUEUE.with(|cell| *cell.borrow_mut() = None);
+
+        assert_eq!(
+            session.log.lock().current_exchange(),
+            Some(3),
+            "the queued prompt opens exchange 3 after turns 1–2, rather than steering exchange 1"
+        );
+        let rendered = session.log.lock().history_rendered();
+        let position = |text: &str| {
+            rendered
+                .iter()
+                .position(|m| m.content.first_text() == Some(text))
+                .unwrap_or_else(|| panic!("{text:?} is not in the context"))
+        };
+        let tool_result = rendered
+            .iter()
+            .position(|m| m.role == ChatRole::Tool)
+            .expect("the cancelled call's result is in the context");
+        assert!(position("go") < tool_result);
+        assert!(tool_result < position("queued prompt"));
+        assert!(position("queued prompt") < position("answered"));
     }
 
     /// A worker delivers before it retires, so a result that settled across a

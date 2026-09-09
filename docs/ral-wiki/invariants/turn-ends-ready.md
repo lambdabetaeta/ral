@@ -51,21 +51,24 @@ not take:
   share, and would drop the child's whole exchange from its own context.
 
 Nothing else is synthesised, and an abandoned exchange is left exactly as it
-lies. `record.jsonl` keeps it unabridged for the TUI, resume, and the human
-audit trail; the model reads none of its content. A *closed* exchange whose own
-fold does not settle renders as exactly one `User`-role note in place of
-everything its turns held — which catches by the same test the exchange
-abandoned
-with pending tool ids, whose dangling tool-call block must never reach the
-wire. The note is cause-neutral, a cancel and an abort being told apart only
-by a `Forensic` record this fold never sees, and says whether tools had been
-called: their effects outlive the context the exchange lost, so a model that
-reads no trace of them would re-run them.
+lies — in `record.jsonl` and in the context alike. `Context::rendered` sends
+every resident turn as written; the next prompt, following the interrupted
+exchange's last tool results, is the interruption's own mark. The unrun-call
+answer above is what keeps this legal: a closed exchange can never hold a
+dangling tool-call block, because `take_up` quiesces before any prompt is
+admitted.
 
-Its voice is the point. The harness may state a fact about the conversation;
-it must never put words in the model's mouth. The
-placeholder this replaced (`"[EXARCH // Request interrupted by user.]"`) rode
-forward into the model's own history on every later round-trip, and in one
+The content must stay because an exchange in exarch is *all the work since the
+last human prompt*. One recorded session had a single exchange run fifty-seven
+tool turns; an Esc there, followed by "what are you struggling with", left the
+model — its whole session replaced by a one-line "its content is not in your
+context" note — running `git status` and then reading its own `record.jsonl`
+to find out what it had been doing. Dropping an interrupted exchange is not
+tidiness, it is amnesia.
+
+What the harness may not do is speak for the model. The placeholder before
+that (`"[EXARCH // Request interrupted by user.]"`, an *assistant* capstone)
+rode forward into the model's own history on every later round-trip, and in one
 recorded session the model — having seen itself apparently say
 `(cancelled by user)` a few turns earlier — emitted that string verbatim as a
 genuine `stop_reason: "completed"` reply. A `System`-role marker in its place

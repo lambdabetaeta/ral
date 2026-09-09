@@ -166,8 +166,8 @@ const UNRUN_TOOL_CALL: &str = "[EXARCH // No result: the exchange ended before t
 /// resting state the two share.
 ///
 /// Nothing else is synthesised. An exchange that stopped before any reply is
-/// left exactly as it lies, and [`Context::rendered`] reads it as its note
-/// once it closes, so the model never reads a turn it never took.
+/// left exactly as it lies and rendered as it lies, so the model never reads
+/// a turn it never took.
 fn quiesce_records(state: &State, reason: QuiesceReason, turn: u64) -> Vec<Protocol> {
     let mut records = Vec::new();
     let mut state = state.clone();
