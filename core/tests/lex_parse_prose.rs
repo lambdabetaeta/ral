@@ -42,10 +42,9 @@ use ral_core::syntax::parser::parse;
 ///
 /// These are matched as plain substrings — no regex — so each entry must
 /// be specific enough that it doesn't false-positive on a sentence a
-/// user-facing message might legitimately use.  "atom" appears in
-/// "expected expression atom"; that's still jargon for a beginner, but
-/// the spelled-out alternative ("number, variable, or parenthesised
-/// expression") is exactly the form we want — see `parse_expr_bad_atom`.
+/// user-facing message might legitimately use.  "atom" is jargon for a
+/// beginner; a message names the shapes instead ("an operand on each
+/// side") — see `parse_expr_operator_without_operand`.
 const JARGON_FRAGMENTS: &[&str] = &[
     // Rust-internal: structural give-aways of an unintended Debug print.
     "ParseError {",
@@ -412,14 +411,14 @@ fn nested_stream_error_spans_point_into_the_outer_source() {
         (
             "expr_in_string",
             "echo \"aaa !{return $[1 2]} bbb\"",
-            "trailing input",
+            "expected an operator",
             "2",
             ":1:24",
         ),
         (
             "index_in_string",
             "let m = [a: 1]\necho \"xx $m[a b] yy\"",
-            "trailing input",
+            "expected ]",
             "b",
             ":2:15",
         ),
@@ -516,10 +515,12 @@ const REACHABLE: &[Reachable] = &[
     r("lex_unclosed_dollar_paren", "\"$(", "unterminated"),
     // ─── Lexer: free-form errors ─────────────────────────────────────
     r("lex_empty_tag", "echo ` foo", "tag label"),
-    r("lex_force_dollar_no_ident", "\"!$\"", "identifier"),
     r("lex_dollar_paren_no_ident", "echo $(123)", "identifier"),
+    r("lex_background_amp", "sleep 1 &", "spawn"),
+    r("lex_and_and", "a && b", "no `&&`"),
     r("lex_dollar_paren_unclosed_inline", "echo $(name 42", "')'"),
     r("lex_redirect_amp_no_fd", "cmd >& foo", "file descriptor"),
+    r("lex_dollar_bare", "echo $", "$name"),
     r("lex_stdout_onto_stderr", "cmd 1>&2", "warn"),
     // ─── Lexer: escape errors ────────────────────────────────────────
     r("lex_x_too_short", "return \"\\x4\"", "two hex digits"),
@@ -558,7 +559,7 @@ const REACHABLE: &[Reachable] = &[
     r("parse_redirect_no_command", "> out", "follow a command"),
     r("parse_caret_path", "^/abs/path", "bare command name"),
     r("parse_caret_bad", "^[1,2]", "command name"),
-    r("parse_dollar_bare", "echo $", "$name"),
+    r("parse_or_or", "a || b", "no `||`"),
     r(
         "parse_caret_in_value",
         "return ^name",
@@ -585,29 +586,38 @@ const REACHABLE: &[Reachable] = &[
     r("lex_unterm_block", "{ echo hello", "unterminated"),
     r("lex_unterm_list", "[a, b", "unterminated"),
     // ─── Parser: expression-block (Pratt) ────────────────────────────
-    r("parse_expr_unexpected", "return $[$]", "unexpected"),
+    r("parse_expr_bare_dollar", "return $[$]", "$name"),
     r(
-        "parse_expr_bad_atom",
-        "return $[foo]",
-        "did you mean `$foo`",
+        "parse_expr_operator_without_operand",
+        "return $[* 2]",
+        "operand on each side",
+    ),
+    r(
+        "parse_expr_bare_word_under_arith",
+        "return $[x + 1]",
+        "did you mean `$x`",
+    ),
+    r("parse_expr_bare_word_negated", "return $[-x]", "did you mean `$x`"),
+    r(
+        "parse_expr_bare_non_ident_under_arith",
+        "return $[1e5 + 1]",
+        "not a number",
     ),
     // ─── Parser: sub-stream completion contract ──────────────────────
-    // Every sub-token-stream parse goes through `Parser::run_complete`,
-    // which requires EOF and names the first leftover token.  These
-    // pin the three shapes that used to truncate silently (review F4,
-    // F5): an expression block with extra atoms, index keys with a
-    // second word, and a stray top-level `}` (which previously served
-    // as a stop condition and dropped the rest of the program, and is
-    // now named as an unmatched brace rather than generic trailing input).
+    // No sub-parse may stop short and drop what follows.  These pin the
+    // three shapes that used to truncate silently: an expression block
+    // with extra operands (named as a missing operator), index keys with
+    // a second word, and a stray top-level `}` (named as an unmatched
+    // brace rather than generic trailing input).
     r(
         "parse_trailing_expr_block",
         "echo $[1 2 3]",
-        "trailing input",
+        "expected an operator",
     ),
     r(
         "parse_trailing_index_keys",
         "let m = [a: 1]\necho $m[a b]",
-        "trailing input",
+        "expected ]",
     ),
     r(
         "parse_trailing_stray_rbrace",

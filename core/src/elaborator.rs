@@ -23,7 +23,7 @@ use crate::source::Span;
 use crate::source::Spanned;
 use crate::source::WithSpan;
 use crate::syntax::ast::{
-    self, Ast, Expr, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Pattern, Redirect,
+    self, Ast, Head, IfBranch, ListElem, MapEntry, MapPatternEntry, Pattern, Redirect,
     RedirectTarget, ScopeAst, Stmt, Word,
 };
 use crate::syntax::group::{StmtGroup, group_stmts};
@@ -816,7 +816,21 @@ impl Elaborator {
                 )
             }
 
-            Ast::Expr(expr) => self.lower_expr(expr, binds),
+            Ast::Binary(l, op, r) => {
+                let lv = self.with_span(l.span, |this| this.to_val(&l.item, binds));
+                let rv = self.with_span(r.span, |this| this.to_val(&r.item, binds));
+                comp!(self, CompKind::Binary(*op, lv, rv))
+            }
+            Ast::Negate(inner) => {
+                let v = self.with_span(inner.span, |this| this.to_val(&inner.item, binds));
+                comp!(self, CompKind::Negate(v))
+            }
+            Ast::Not(inner) => {
+                let v = self.with_span(inner.span, |this| this.to_val(&inner.item, binds));
+                comp!(self, CompKind::Not(v))
+            }
+            Ast::And(l, r) => self.lower_short_circuit(l, r, binds, /*on_true_is_rhs=*/ true),
+            Ast::Or(l, r) => self.lower_short_circuit(l, r, binds, /*on_true_is_rhs=*/ false),
 
             Ast::Index { target, keys } => comp!(
                 self,
@@ -1065,73 +1079,18 @@ impl Elaborator {
             .collect()
     }
 
-    /// Lower an `Ast::Expr` into CBPV primitives — there is no expression IR,
-    /// so `$[a + b > 0]` unfolds into a flat `Comp::Bind` chain over
-    /// primitive-operator leaves at the enclosing statement boundary.
-    fn lower_expr(&mut self, expr: &Expr, binds: &mut Vec<(IrPattern, Comp)>) -> Comp {
-        match expr {
-            Expr::Integer(n) => comp!(self, CompKind::Return(Val::Int(*n))),
-            Expr::Number(n) => comp!(self, CompKind::Return(Val::Float(*n))),
-            Expr::Bool(b) => comp!(self, CompKind::Return(Val::Bool(*b))),
-            Expr::Variable(name) => {
-                let v = self.variable_val(name);
-                comp!(self, CompKind::Return(v))
-            }
-            Expr::Index(name, keys) => {
-                let target = self.variable_val(name);
-                comp!(
-                    self,
-                    CompKind::Index {
-                        target,
-                        keys: keys
-                            .iter()
-                            .map(|k| Spanned::with_span(
-                                k.span,
-                                self.with_span(k.span, |this| this.to_val(&k.item, binds)),
-                            ))
-                            .collect(),
-                    }
-                )
-            }
-            Expr::Force(inner) => self.with_span(inner.span, |this| {
-                comp!(this, CompKind::Force(this.to_val(&inner.item, binds)))
-            }),
-            Expr::BinOp(l, op, r) => {
-                let lv = self.expr_to_val(l, binds);
-                let rv = self.expr_to_val(r, binds);
-                comp!(self, CompKind::Binary(*op, lv, rv))
-            }
-            Expr::Negate(inner) => {
-                let v = self.expr_to_val(inner, binds);
-                comp!(self, CompKind::Negate(v))
-            }
-            Expr::Not(inner) => {
-                let v = self.expr_to_val(inner, binds);
-                comp!(self, CompKind::Not(v))
-            }
-            Expr::And(l, r) => self.lower_short_circuit(l, r, binds, /*on_true_is_rhs=*/ true),
-            Expr::Or(l, r) => self.lower_short_circuit(l, r, binds, /*on_true_is_rhs=*/ false),
-        }
-    }
-
-    /// `to_val` for `Expr` instead of `Ast`.
-    fn expr_to_val(&mut self, expr: &Expr, binds: &mut Vec<(IrPattern, Comp)>) -> Val {
-        let c = self.lower_expr(expr, binds);
-        self.hoist(c, binds)
-    }
-
     /// Desugar `a && b` / `a || b` into an `If`.  The RHS runs only
     /// conditionally, so it lowers in an isolated `binds` vector.
     fn lower_short_circuit(
         &mut self,
-        l: &Expr,
-        r: &Expr,
+        l: &Spanned<Box<Ast>>,
+        r: &Spanned<Box<Ast>>,
         binds: &mut Vec<(IrPattern, Comp)>,
         on_true_is_rhs: bool,
     ) -> Comp {
-        let cond = self.expr_to_val(l, binds);
+        let cond = self.with_span(l.span, |this| this.to_val(&l.item, binds));
         let mut r_binds = Vec::new();
-        let r_comp = self.lower_expr(r, &mut r_binds);
+        let r_comp = self.with_span(r.span, |this| this.elab_expr(&r.item, &mut r_binds));
         let r_comp = wrap_binds(self.current_span, r_binds, r_comp);
         let short = comp!(self, CompKind::Return(Val::Bool(!on_true_is_rhs)));
         let (then_branch, else_branch) = if on_true_is_rhs {

@@ -33,9 +33,13 @@ impl Word {
     }
 }
 
-/// One syntactic form. The tree is flat — no statement/expression split here;
-/// command position, value position, and thunk are read off the surrounding
-/// structure by the elaborator and the evaluator.
+/// One syntactic form.
+///
+/// The tree is flat — no statement/expression split here; command position,
+/// value position, and thunk are read off the surrounding structure by the
+/// elaborator and the evaluator. `$[…]` leaves no node of its own: it is the
+/// lexical mode in which the operator forms are written, and their operands
+/// are ordinary atoms.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Ast {
     Word(Word),
@@ -100,9 +104,17 @@ pub enum Ast {
         scrutinee: Spanned<Box<Self>>,
         arms: Vec<CaseArm>,
     },
-    /// `$[expr]`
-    Expr(Box<Expr>),
-    /// `$name[k1][k2]`; each key's span covers its brackets too.
+    /// `a op b` inside `$[…]`: arithmetic, ordering, equality.
+    Binary(Spanned<Box<Self>>, BinaryOp, Spanned<Box<Self>>),
+    /// `-e` inside `$[…]`, strict.
+    Negate(Spanned<Box<Self>>),
+    /// `not e` inside `$[…]`, strict.
+    Not(Spanned<Box<Self>>),
+    /// `a && b` — short-circuiting, so the RHS runs only when the LHS is true.
+    And(Spanned<Box<Self>>, Spanned<Box<Self>>),
+    /// `a || b` — short-circuiting, so the RHS runs only when the LHS is false.
+    Or(Spanned<Box<Self>>, Spanned<Box<Self>>),
+    /// `target[k1][k2]`; each key's span covers its brackets too.
     Index {
         target: Spanned<Box<Self>>,
         keys: Vec<Spanned<Self>>,
@@ -247,28 +259,6 @@ impl MapKey {
     pub(crate) fn is_tag(&self) -> bool {
         matches!(self, Self::Tag(_))
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Expr {
-    Integer(i64),
-    Number(f64),
-    Bool(bool),
-    Variable(String),
-    /// `$name[k₁][k₂] …` inside `$[…]`. Name targets only — unlike
-    /// [`Ast::Index`], the surface syntax admits no arbitrary target here.
-    Index(String, Vec<Spanned<Ast>>),
-    /// `!atom` inside `$[…]`; the span covers only the operand.
-    Force(Spanned<Box<Ast>>),
-    BinOp(Box<Self>, BinaryOp, Box<Self>),
-    /// `-e`, strict.
-    Negate(Box<Self>),
-    /// `not e`, strict.
-    Not(Box<Self>),
-    /// `a && b` — short-circuiting, so the RHS runs only when the LHS is true.
-    And(Box<Self>, Box<Self>),
-    /// `a || b` — short-circuiting, so the RHS runs only when the LHS is false.
-    Or(Box<Self>, Box<Self>),
 }
 
 /// Binary primitive on values: arithmetic, ordering, equality.

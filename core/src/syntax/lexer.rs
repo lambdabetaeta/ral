@@ -1,16 +1,19 @@
 //! Lexer: source text → a flat `Vec<(Token, Span)>`.  Spans carry byte
 //! offsets and a [`FileId`]; line and column are recovered at render time.
 //!
-//! Newlines separate statements except inside `[…]`, where they are
-//! whitespace.  The *innermost* open delimiter decides, so `{ [ ] }` and
-//! `[ { } ]` both behave.  A `;` is a hard separator: the parser continues
-//! pipelines and chains across newlines, never across a `;`.
+//! The innermost open delimiter sets the lexical mode.  Newlines separate
+//! statements except inside `[…]` and `$[…]`, where they are whitespace, so
+//! `{ [ ] }` and `[ { } ]` both behave.  Inside `$[…]` the operators are
+//! words of their own — `<` is a comparison, not a redirect, and `1+1` is
+//! three tokens — while everywhere else they keep their shell meaning.  A `;`
+//! is a hard separator: the parser continues pipelines and chains across
+//! newlines, never across a `;`.
 //!
-//! Nested forms — `!{…}` and `$[…]` inside `"…"`, `$name[k]` keys, and the
-//! top-level `$[…]` — are lexed in place and stored as token streams inside
-//! the enclosing [`StringPart`] or [`Token::Expr`].  The parser sub-parses
-//! those streams instead of re-lexing the bytes, and their spans already
-//! point into the outer file, so diagnostics underline the right columns.
+//! Nested forms — the body of `$[…]`, and every `$…` / `!…` splice inside
+//! `"…"` — are lexed in place and stored as token streams inside
+//! [`Token::Expr`] or [`StringPart::Splice`].  The parser sub-parses those
+//! streams instead of re-lexing the bytes, and their spans already point
+//! into the outer file, so diagnostics underline the right columns.
 
 use crate::path::tilde::TildePath;
 use crate::source::{FileId, Span, Spanned};
@@ -71,21 +74,21 @@ pub(crate) fn is_bare_char(ch: char) -> bool {
     )
 }
 
+/// The bare-word characters that are operators inside `$[…]`, where they end
+/// a word instead: `1+1` is a sum there and a word everywhere else.  `<` `>`
+/// `!` `&` `|` are not bare anywhere and take their own arms.
+fn is_operator_char(ch: char) -> bool {
+    matches!(ch, '+' | '-' | '*' | '/' | '%' | '=')
+}
+
 /// Parts of an interpolated (double-quoted) string.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StringPart {
     Literal(String),
-    Variable(String),
-    /// `!{…}` or `!$name`, carrying its already-lexed token stream.
-    Force(Vec<(Token, Span)>),
-    /// `$[…]`, carrying its token stream with `&&`/`||` already fused.
-    Expr(Vec<(Token, Span)>),
-    /// `$name[k1][k2]`.  Each key's span runs from its opening bracket to
-    /// its closing one, so a diagnostic can narrow to the key alone.
-    Index {
-        name: Spanned<String>,
-        keys: Vec<Spanned<Vec<(Token, Span)>>>,
-    },
+    /// A `$…` or `!…` splice, as the very tokens it lexes to outside a
+    /// string — `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name`, each with any
+    /// adjacent `[key]` groups — so the parser reads it as one atom.
+    Splice(Vec<(Token, Span)>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,10 +96,8 @@ pub enum Token {
     Word(Word),
     SingleQuoted(String),
     DoubleQuoted(Vec<Spanned<StringPart>>),
-    Dollar,
     Caret,
     Pipe,
-    Ampersand,
     Question,
     Colon,
     LBrace,
@@ -109,9 +110,9 @@ pub enum Token {
     Spread,
     /// Variant tag `` `ident ``, stored without its backtick.
     Tag(String),
-    /// Deref resolved by the lexer: `$name`, `$(name)`, `$name[key]`.
-    Deref(StringPart),
-    /// Expression block `$[…]` outside strings, with `&&`/`||` fused.
+    /// `$name` or `$(name)`, stored without its sigil.
+    Variable(String),
+    /// Expression block `$[…]`, carrying its body's token stream.
     Expr(Vec<(Self, Span)>),
     Bang,
     Newline,
@@ -142,10 +143,8 @@ impl fmt::Display for Token {
                 write!(f, "'{s}'")
             }
             Self::DoubleQuoted(_) => write!(f, "\"...\""),
-            Self::Dollar => write!(f, "$"),
             Self::Caret => write!(f, "^"),
             Self::Pipe => write!(f, "|"),
-            Self::Ampersand => write!(f, "&"),
             Self::Question => write!(f, "?"),
             Self::Colon => write!(f, ":"),
             Self::LBrace => write!(f, "{{"),
@@ -157,11 +156,7 @@ impl fmt::Display for Token {
             Self::Comma => write!(f, ","),
             Self::Spread => write!(f, "..."),
             Self::Tag(s) => write!(f, "`{s}"),
-            Self::Deref(part) => match part {
-                StringPart::Variable(n) => write!(f, "${n}"),
-                StringPart::Index { name, .. } => write!(f, "${}[...]", name.item),
-                _ => write!(f, "$..."),
-            },
+            Self::Variable(n) => write!(f, "${n}"),
             Self::Expr(_) => write!(f, "$[...]"),
             Self::Bang => write!(f, "!"),
             Self::Newline => write!(f, "newline"),
@@ -183,7 +178,7 @@ impl Token {
 
 /// Which lexical form a string came from, so an unterminated-string
 /// diagnostic can name the shape that wasn't closed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringForm {
     SingleQuoted,
     DoubleQuoted,
@@ -342,19 +337,22 @@ struct Lexer {
     delim_stack: Vec<OpenDelim>,
 }
 
-/// Which paired delimiter is open: a `{…}` block, whose newlines separate
-/// statements, or a `[…]` list/map, whose newlines are whitespace.
+/// Which paired delimiter is open, and so which lexical mode holds: a `{…}`
+/// block, whose newlines separate statements; a `[…]` list/map, whose
+/// newlines are whitespace and whose commas punctuate; or a `$[…]`
+/// expression, which is a bracket whose operators are words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DelimKind {
     Brace,
     Bracket,
+    Expr,
 }
 
 impl DelimKind {
     fn chars(self) -> (char, char) {
         match self {
             Self::Brace => ('{', '}'),
-            Self::Bracket => ('[', ']'),
+            Self::Bracket | Self::Expr => ('[', ']'),
         }
     }
 }
@@ -466,14 +464,21 @@ impl Lexer {
         out
     }
 
+    fn innermost(&self) -> Option<DelimKind> {
+        self.delim_stack.last().map(|d| d.kind)
+    }
+
+    /// Inside `[…]` or `$[…]`, newlines are whitespace and commas punctuate.
     fn suppress_newline(&self) -> bool {
         // The *innermost* delimiter decides, not whether a bracket is open
         // anywhere: `{ [ … ] }` suppresses newlines inside the list, while
         // `[ { … } ]` keeps them as separators inside the block.
-        matches!(
-            self.delim_stack.last().map(|d| d.kind),
-            Some(DelimKind::Bracket)
-        )
+        matches!(self.innermost(), Some(DelimKind::Bracket | DelimKind::Expr))
+    }
+
+    /// Inside `$[…]`, where the operators are words of their own.
+    fn in_expr(&self) -> bool {
+        self.innermost() == Some(DelimKind::Expr)
     }
 
     fn skip_inline_whitespace(&mut self) {
@@ -548,35 +553,58 @@ impl Lexer {
                 }
                 '\n' | ';' => Ok(self.scan_separator(span)),
                 '{' => Ok(self.open_delim(Token::LBrace, DelimKind::Brace)),
-                '}' => Ok(self.close_delim(Token::RBrace, DelimKind::Brace)),
+                '}' => Ok(self.close_delim(Token::RBrace)),
                 '[' => Ok(self.open_delim(Token::LBracket, DelimKind::Bracket)),
-                ']' => Ok(self.close_delim(Token::RBracket, DelimKind::Bracket)),
+                ']' => Ok(self.close_delim(Token::RBracket)),
                 '(' => Ok(self.bump_simple(Token::LParen, span)),
                 ')' => Ok(self.bump_simple(Token::RParen, span)),
+                '|' if self.in_expr() && self.peek_n(1) == Some('|') => {
+                    Ok(self.two_char_word("||", span))
+                }
                 '|' => Ok(self.bump_simple(Token::Pipe, span)),
-                '&' => Ok(self.bump_simple(Token::Ampersand, span)),
+                '&' if self.in_expr() && self.peek_n(1) == Some('&') => {
+                    Ok(self.two_char_word("&&", span))
+                }
+                '&' if self.peek_n(1) == Some('&') => Err(Self::error(
+                    Span::new(span.file, span.start, span.start + 2),
+                    "ral has no `&&`: a newline or `;` sequences commands, and an \
+                     uncaught failure already stops the script — inside `$[…]`, \
+                     `&&` is the Boolean connective",
+                )),
+                '&' if self.in_expr() => Err(Self::error(
+                    Span::new(span.file, span.start, span.start + 1),
+                    "`&` is not an operator — the Boolean connective is `&&`",
+                )),
+                '&' => Err(Self::error(
+                    Span::new(span.file, span.start, span.start + 1),
+                    "`&` does not background a command in ral — wrap it in \
+                     `spawn { … }`, which returns a handle you `await`",
+                )),
                 ',' if self.suppress_newline() => Ok(self.bump_simple(Token::Comma, span)),
                 ',' => Ok(self.scan_bare_word(span)),
                 '$' => {
                     self.bump();
-                    match self.scan_deref()? {
-                        Some(StringPart::Expr(toks)) => Ok((Token::Expr(toks), self.finish(span))),
-                        Some(part) => Ok((Token::Deref(part), self.finish(span))),
-                        None => Ok((Token::Dollar, self.finish(span))),
+                    match self.scan_dollar()? {
+                        Some(tok) => Ok((tok, self.finish(span))),
+                        None => Err(Self::error(
+                            self.finish(span),
+                            "expected a name after `$` — write `$name`, `$(name)`, or `$[…]`",
+                        )),
                     }
                 }
                 '^' => Ok(self.bump_simple(Token::Caret, span)),
-                '!' if self.peek_n(1) == Some('=') => Ok(self.two_char_word("!=", span)),
+                '!' if self.in_expr() && self.peek_n(1) == Some('=') => {
+                    Ok(self.two_char_word("!=", span))
+                }
                 '!' => Ok(self.bump_simple(Token::Bang, span)),
                 '~' => Ok(self.scan_tilde(span)),
                 '?' => Ok(self.bump_simple(Token::Question, span)),
                 '\'' => self.scan_quoted(span, 0),
                 '"' => self.scan_double_quoted(span),
-                '>' if self.peek_n(1) == Some('=') => Ok(self.two_char_word(">=", span)),
+                '<' | '>' if self.in_expr() => Ok(self.scan_comparison(span)),
                 '>' => self.scan_redirect_gt(None, span),
-                '<' if self.peek_n(1) == Some('=') => Ok(self.two_char_word("<=", span)),
                 '<' => self.scan_redirect_lt(None, span),
-                _ if ch.is_ascii_digit() && self.is_fd_redirect_start() => {
+                _ if !self.in_expr() && ch.is_ascii_digit() && self.is_fd_redirect_start() => {
                     self.scan_fd_redirect(span)
                 }
                 '.' if self.peek_n(1) == Some('.') && self.peek_n(2) == Some('.') => {
@@ -597,6 +625,8 @@ impl Lexer {
                         Ok((Token::Tag(label), self.finish(span)))
                     }
                 }
+                _ if self.in_expr() && is_operator_char(ch) => Ok(self.scan_operator(span)),
+                _ if self.in_expr() && self.at_numeral() => Ok(self.scan_numeral_word(span)),
                 _ if is_bare_char(ch) => Ok(self.scan_bare_word(span)),
                 _ => {
                     self.bump();
@@ -611,11 +641,66 @@ impl Lexer {
         (token, self.finish(span))
     }
 
-    /// Two-char operators lex as plain words, not as tokens of their own.
+    /// Operators lex as plain words, not as tokens of their own: the Pratt
+    /// parser reads them by spelling, as it does `+` and `==`.
     fn two_char_word(&mut self, op: &str, span: Span) -> (Token, Span) {
         self.bump();
         self.bump();
         (Token::Word(Word::Plain(op.into())), self.finish(span))
+    }
+
+    /// `<`, `>`, `<=`, `>=` inside `$[…]`.
+    fn scan_comparison(&mut self, span: Span) -> (Token, Span) {
+        let mut op = String::from(self.bump().expect("caller peeked `<` or `>`"));
+        if self.peek() == Some('=') {
+            self.bump();
+            op.push('=');
+        }
+        (Token::Word(Word::Plain(op)), self.finish(span))
+    }
+
+    /// One of the word characters that is an operator inside `$[…]`: a
+    /// single char, or `==`.
+    fn scan_operator(&mut self, span: Span) -> (Token, Span) {
+        let mut op = String::from(self.bump().expect("caller peeked an operator char"));
+        if op == "=" && self.peek() == Some('=') {
+            self.bump();
+            op.push('=');
+        }
+        (Token::Word(Word::Plain(op)), self.finish(span))
+    }
+
+    /// A digit, or a `.` with a digit after it, under the cursor.
+    fn at_numeral(&self) -> bool {
+        self.peek().is_some_and(|c| c.is_ascii_digit())
+            || (self.peek() == Some('.') && self.peek_n(1).is_some_and(|c| c.is_ascii_digit()))
+    }
+
+    /// A word beginning with a numeral inside `$[…]`, where `+` and `-` are
+    /// operators: the numeral grammar of `WordLiteral::classify` is followed
+    /// through its exponent sign, so `1.5e+3` stays one word, and whatever
+    /// bare text is glued after it (`1abc`) stays in the word too.
+    fn scan_numeral_word(&mut self, span: Span) -> (Token, Span) {
+        let mut word = self.take_while(|c| c.is_ascii_digit());
+        if self.peek() == Some('.') {
+            word.push('.');
+            self.bump();
+            word.push_str(&self.take_while(|c| c.is_ascii_digit()));
+        }
+        if matches!(self.peek(), Some('e' | 'E')) {
+            let (sign, digit) = match self.peek_n(1) {
+                Some('+' | '-') => (1, 2),
+                _ => (0, 1),
+            };
+            if self.peek_n(digit).is_some_and(|c| c.is_ascii_digit()) {
+                for _ in 0..=sign {
+                    word.push(self.bump().expect("peeked"));
+                }
+                word.push_str(&self.take_while(|c| c.is_ascii_digit()));
+            }
+        }
+        word.push_str(&self.scan_bare_fragment());
+        (Token::Word(Word::Plain(word)), self.finish(span))
     }
 
     fn open_delim(&mut self, token: Token, kind: DelimKind) -> (Token, Span) {
@@ -626,15 +711,15 @@ impl Lexer {
         (token, opened)
     }
 
-    /// Emit a closing token, popping only when it matches the innermost
-    /// opener.  A wrong-kind closer (`}` while a `[` is open) or one at
-    /// depth 0 leaves the stack alone, so newline suppression stays in step
-    /// with the genuinely open delimiters and the parser reports the
+    /// Emit the closing token under the cursor, popping only when it closes
+    /// the innermost opener.  A wrong-kind closer (`}` while a `[` is open)
+    /// or one at depth 0 leaves the stack alone, so the lexical mode stays in
+    /// step with the genuinely open delimiters and the parser reports the
     /// mismatch.
-    fn close_delim(&mut self, token: Token, kind: DelimKind) -> (Token, Span) {
+    fn close_delim(&mut self, token: Token) -> (Token, Span) {
         let span = self.span();
-        self.bump();
-        if self.delim_stack.last().map(|d| d.kind) == Some(kind) {
+        let close = self.bump().expect("caller peeked a closer");
+        if self.innermost().is_some_and(|kind| kind.chars().1 == close) {
             self.delim_stack.pop();
         }
         (token, self.finish(span))
@@ -695,6 +780,10 @@ impl Lexer {
             // `suppress_newline` reads as "we are inside `[…]`", where a
             // comma punctuates instead of joining the word.
             if ch == ',' && self.suppress_newline() {
+                break;
+            }
+
+            if self.in_expr() && is_operator_char(ch) {
                 break;
             }
 
@@ -818,88 +907,27 @@ impl Lexer {
                         literal_start.get_or_insert(cursor);
                     }
                 }
-                Some('$') => {
-                    self.bump();
-                    match self.scan_deref() {
-                        Ok(Some(part)) => {
-                            Self::flush_literal(
-                                &mut parts,
-                                &mut literal,
-                                &mut literal_start,
-                                cursor,
-                                file,
-                            );
-                            let part_end = self.byte_pos();
-                            parts.push(Spanned::new(Span::new(file, cursor, part_end), part));
-                        }
-                        Ok(None) => {
-                            literal_start.get_or_insert(cursor);
-                            literal.push('$');
-                        }
-                        Err(inner) => {
-                            return Err(Self::rewrap_inner_into_string(span, form, inner));
-                        }
-                    }
-                }
-                Some('!') => {
-                    self.bump();
-                    match self.peek() {
-                        Some('{') => {
-                            Self::flush_literal(
-                                &mut parts,
-                                &mut literal,
-                                &mut literal_start,
-                                cursor,
-                                file,
-                            );
-                            let open = self.span();
-                            self.bump();
-                            match self.scan_token_group(open, '{', '}') {
-                                Ok(body) => {
-                                    let part_end = self.byte_pos();
-                                    parts.push(Spanned::new(
-                                        Span::new(file, cursor, part_end),
-                                        StringPart::Force(body),
-                                    ));
-                                }
-                                Err(inner) => {
-                                    return Err(Self::rewrap_inner_into_string(span, form, inner));
-                                }
-                            }
-                        }
-                        Some('$') => {
-                            Self::flush_literal(
-                                &mut parts,
-                                &mut literal,
-                                &mut literal_start,
-                                cursor,
-                                file,
-                            );
-                            // `!$name` is `!{$name}`: synthesise the
-                            // one-token group instead of re-lexing.
-                            let deref_span = self.span();
-                            self.bump();
-                            let name = self.scan_deref_ident();
-                            if name.is_empty() {
-                                return Err(Self::error(
-                                    deref_span,
-                                    "expected identifier after `!$` in double-quoted string",
-                                ));
-                            }
-                            let inner_span = self.finish(deref_span);
-                            let part_end = self.byte_pos();
-                            parts.push(Spanned::new(
-                                Span::new(file, cursor, part_end),
-                                StringPart::Force(vec![(
-                                    Token::Deref(StringPart::Variable(name)),
-                                    inner_span,
-                                )]),
-                            ));
-                        }
-                        _ => {
-                            literal_start.get_or_insert(cursor);
-                            literal.push('!');
-                        }
+                Some(sigil @ ('$' | '!')) => {
+                    let splice = self
+                        .scan_splice()
+                        .map_err(|inner| Self::rewrap_inner_into_string(span, form, inner))?;
+                    if let Some(tokens) = splice {
+                        Self::flush_literal(
+                            &mut parts,
+                            &mut literal,
+                            &mut literal_start,
+                            cursor,
+                            file,
+                        );
+                        let part_end = self.byte_pos();
+                        parts.push(Spanned::new(
+                            Span::new(file, cursor, part_end),
+                            StringPart::Splice(tokens),
+                        ));
+                    } else {
+                        // A sigil that opens nothing is text: `"$ 5"`, `"hi!"`.
+                        literal_start.get_or_insert(cursor);
+                        literal.push(sigil);
                     }
                 }
                 Some(ch) => {
@@ -1065,36 +1093,64 @@ impl Lexer {
         }
     }
 
-    /// A deref after the `$` the caller consumed: `$name`, `$(name)`,
-    /// `$name[key]`, `$[expr]`, or `None` for a bare `$`.  The bare form
-    /// stops before a trailing `-` (see [`Self::scan_deref_ident`]); the
-    /// explicit `$(name)` keeps one.
-    fn scan_deref(&mut self) -> Result<Option<StringPart>, LexError> {
-        match self.peek() {
-            Some(ch) if is_ident_start(ch) => {
-                // The `$` is gone, so the cursor is the name's first byte.
-                let name_start = self.span().start;
-                let name_file = self.span().file;
-                let name = self.scan_deref_ident();
-                let name_end = self.span().start;
-                let name = Spanned::new(Span::new(name_file, name_start, name_end), name);
-                let mut keys: Vec<Spanned<Vec<(Token, Span)>>> = Vec::new();
-                while self.peek() == Some('[') {
+    /// A splice inside `"…"`, at its `$` or `!`: the tokens of `$name`,
+    /// `$(name)`, `$[…]`, `!{…}` or `!$name`, followed by any adjacent
+    /// `[key]` groups — exactly what the same text lexes to outside the
+    /// string.  `None` when the sigil opens nothing and is text.
+    fn scan_splice(&mut self) -> Result<Option<Vec<(Token, Span)>>, LexError> {
+        let start = self.span();
+        let mut tokens = Vec::new();
+        if self.peek() == Some('!') {
+            self.bump();
+            match self.peek() {
+                Some('{') => {
+                    tokens.push((Token::Bang, self.finish(start)));
                     let open = self.span();
                     self.bump();
-                    let body = self.scan_token_group(open, '[', ']')?;
-                    // `scan_token_group` has consumed the matching `]`, so
-                    // the cursor sits exactly one past it.
-                    let after_close = self.span().start;
-                    let key_span = Span::new(open.file, open.start, after_close);
-                    keys.push(Spanned::new(key_span, body));
+                    let (body, close) = self.scan_token_group(open, DelimKind::Brace)?;
+                    tokens.push((Token::LBrace, open));
+                    tokens.extend(body);
+                    tokens.push((Token::RBrace, close));
                 }
-                Ok(Some(if keys.is_empty() {
-                    StringPart::Variable(name.item)
-                } else {
-                    StringPart::Index { name, keys }
-                }))
+                Some('$') => {
+                    tokens.push((Token::Bang, self.finish(start)));
+                    let dollar = self.span();
+                    self.bump();
+                    let Some(tok) = self.scan_dollar()? else {
+                        // Hand the `$` back: the next iteration reads it.
+                        self.pos -= 1;
+                        return Ok(None);
+                    };
+                    tokens.push((tok, self.finish(dollar)));
+                }
+                _ => return Ok(None),
             }
+        } else {
+            self.bump();
+            match self.scan_dollar()? {
+                Some(tok) => tokens.push((tok, self.finish(start))),
+                None => return Ok(None),
+            }
+        }
+        while self.peek() == Some('[') {
+            let open = self.span();
+            self.bump();
+            let (body, close) = self.scan_token_group(open, DelimKind::Bracket)?;
+            tokens.push((Token::LBracket, open));
+            tokens.extend(body);
+            tokens.push((Token::RBracket, close));
+        }
+        Ok(Some(tokens))
+    }
+
+    /// The token after a `$` the caller consumed: `$name`, `$(name)`, or
+    /// `$[…]`; `None` for a bare `$`.  The bare name stops before a trailing
+    /// `-` (see [`Self::scan_deref_ident`]); the explicit `$(name)` keeps one.
+    /// A following `[key]` is not this token's business: outside a string it
+    /// lexes as an ordinary bracket group and the parser reads the adjacency.
+    fn scan_dollar(&mut self) -> Result<Option<Token>, LexError> {
+        match self.peek() {
+            Some(ch) if is_ident_start(ch) => Ok(Some(Token::Variable(self.scan_deref_ident()))),
             Some('(') => {
                 let span = self.span();
                 self.bump();
@@ -1118,12 +1174,13 @@ impl Lexer {
                     ));
                 }
                 self.bump();
-                Ok(Some(StringPart::Variable(name)))
+                Ok(Some(Token::Variable(name)))
             }
             Some('[') => {
                 let open = self.span();
                 self.bump();
-                Ok(Some(StringPart::Expr(self.scan_expr_block(open)?)))
+                let (body, _) = self.scan_token_group(open, DelimKind::Expr)?;
+                Ok(Some(Token::Expr(body)))
             }
             _ => Ok(None),
         }
@@ -1156,22 +1213,21 @@ impl Lexer {
         name
     }
 
-    /// Lex a balanced `open`/`close` body: the caller has already consumed
-    /// the opener (`opener` is its span, anchoring an `UnterminatedBalanced`
-    /// if EOF comes first), and this consumes the closer without emitting it.
+    /// Lex a balanced body under `kind`: the caller has already consumed the
+    /// opener (`opener` is its span, anchoring an `UnterminatedBalanced` if
+    /// EOF comes first), and this consumes the closer without emitting it,
+    /// returning the body and the closer's span.
     ///
     /// That bypass of [`Self::open_delim`] is why we push onto `delim_stack`
-    /// here — it gives the body the right newline rule and makes the stack
-    /// falling below our entry depth the signal that our own closer arrived.
+    /// here — it gives the body its lexical mode and makes the stack falling
+    /// below our entry depth the signal that our own closer arrived.
     /// [`Self::close_delim`] does that pop on success; each error path pops
     /// explicitly.
     fn scan_token_group(
         &mut self,
         opener: Span,
-        open: char,
-        close: char,
-    ) -> Result<Vec<(Token, Span)>, LexError> {
-        debug_assert!(matches!((open, close), ('{', '}') | ('[', ']')));
+        kind: DelimKind,
+    ) -> Result<(Vec<(Token, Span)>, Span), LexError> {
         // Every lexer recursion runs through here, so `delim_stack.len()`
         // bounds the recursion depth.  Cap it, or `$[$[$[$[…` overflows the
         // call stack instead of failing cleanly.
@@ -1182,11 +1238,7 @@ impl Lexer {
             ));
         }
         self.delim_stack.push(OpenDelim {
-            kind: match open {
-                '[' => DelimKind::Bracket,
-                '{' => DelimKind::Brace,
-                _ => unreachable!("scan_token_group opener is restricted to '[' or '{{'"),
-            },
+            kind,
             opened: opener,
         });
         let entry_depth = self.delim_stack.len();
@@ -1200,14 +1252,15 @@ impl Lexer {
                     return Err(e);
                 }
             };
-            match (&tok, open) {
+            match (&tok, kind) {
                 // Our closer: `close_delim` already popped us, so the stack
                 // sits below the entry depth.  A mismatched one (`]` while
                 // scanning `{…}`) falls through and the parser reports it.
-                (Token::RBrace, '{') | (Token::RBracket, '[')
+                (Token::RBrace, DelimKind::Brace)
+                | (Token::RBracket, DelimKind::Bracket | DelimKind::Expr)
                     if self.delim_stack.len() < entry_depth =>
                 {
-                    return Ok(tokens);
+                    return Ok((tokens, span));
                 }
                 // With our delim open, `eof_or_unterminated` turns end of
                 // input into the `Err` caught above.
@@ -1217,15 +1270,6 @@ impl Lexer {
                 _ => tokens.push((tok, span)),
             }
         }
-    }
-
-    /// Lex the body of `$[…]`, whose `[` the caller consumed.  Inside an
-    /// expression block adjacent `&`/`|` pairs are the logical `&&`/`||`,
-    /// and fusing them belongs to the lexer because the cue — being inside
-    /// `$[…]` — is lexical.
-    fn scan_expr_block(&mut self, opener: Span) -> Result<Vec<(Token, Span)>, LexError> {
-        let raw = self.scan_token_group(opener, '[', ']')?;
-        Ok(fuse_paired_pipeline_ops(raw))
     }
 
     fn is_fd_redirect_start(&self) -> bool {
@@ -1356,30 +1400,6 @@ impl Lexer {
     }
 }
 
-/// Fuse byte-adjacent `&`/`|` pairs into the logical `&&`/`||`, taking the
-/// first member's span.  A space between them (`& &`) leaves two single-char
-/// tokens, and outside `$[…]` the single-char meaning stands — hence only
-/// [`Lexer::scan_expr_block`] calls this.
-fn fuse_paired_pipeline_ops(tokens: Vec<(Token, Span)>) -> Vec<(Token, Span)> {
-    let mut out: Vec<(Token, Span)> = Vec::with_capacity(tokens.len());
-    let mut iter = tokens.into_iter().peekable();
-    while let Some((tok, span)) = iter.next() {
-        let adjacent = iter.peek().is_some_and(|(_, next)| span.end == next.start);
-        let fused = match (&tok, iter.peek().map(|(t, _)| t)) {
-            (Token::Ampersand, Some(Token::Ampersand)) if adjacent => Some("&&"),
-            (Token::Pipe, Some(Token::Pipe)) if adjacent => Some("||"),
-            _ => None,
-        };
-        if let Some(s) = fused {
-            iter.next();
-            out.push((Token::Word(Word::Plain(s.into())), span));
-        } else {
-            out.push((tok, span));
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1423,6 +1443,25 @@ mod tests {
             Err(e) => e.span,
             Ok(_) => panic!("expected Err: {source:?}"),
         }
+    }
+
+    /// The parts of the one double-quoted token `source` lexes to.
+    fn string_parts(source: &str) -> Vec<Spanned<StringPart>> {
+        match lex_ok(source).into_iter().next() {
+            Some(Token::DoubleQuoted(parts)) => parts,
+            other => panic!("expected DoubleQuoted, got {other:?}"),
+        }
+    }
+
+    fn splice_kinds(part: &StringPart) -> Vec<&Token> {
+        let StringPart::Splice(tokens) = part else {
+            panic!("expected a splice, got {part:?}");
+        };
+        tokens.iter().map(|(t, _)| t).collect()
+    }
+
+    fn variable(name: &str) -> Token {
+        Token::Variable(name.into())
     }
 
     /// A bad escape underlines the escape — `\q` at bytes 4..6 — not the
@@ -1477,7 +1516,10 @@ mod tests {
         assert_eq!(parts.len(), 2);
         let var = parts[0].span.unwrap();
         let lit = parts[1].span.unwrap();
-        assert_eq!(parts[0].item, StringPart::Variable("x".into()));
+        assert_eq!(
+            splice_kinds(&parts[0].item),
+            vec![&Token::Variable("x".into())]
+        );
         assert_eq!((var.start, var.end), (3, 5));
         assert_eq!(parts[1].item, StringPart::Literal(" y".into()));
         assert_eq!((lit.start, lit.end), (5, 7));
@@ -1507,13 +1549,23 @@ mod tests {
     }
 
     #[test]
-    fn variable() {
+    fn variable_token() {
         let toks = tok_types("echo $x");
+        assert_eq!(toks, vec![plain("echo"), variable("x"), Token::Eof]);
+    }
+
+    /// `$x[0]` is two tokens and a bracket group; the parser reads the
+    /// adjacency, as it does for `$(x)[0]` and `!{f}[0]`.
+    #[test]
+    fn indexed_variable_is_not_fused() {
+        let toks = tok_types("$xs[0]");
         assert_eq!(
             toks,
             vec![
-                plain("echo"),
-                Token::Deref(StringPart::Variable("x".into())),
+                variable("xs"),
+                Token::LBracket,
+                plain("0"),
+                Token::RBracket,
                 Token::Eof,
             ]
         );
@@ -1731,7 +1783,7 @@ mod tests {
     fn spread() {
         let toks = tok_types("[...$a, b]");
         assert_eq!(toks[1], Token::Spread);
-        assert_eq!(toks[2], Token::Deref(StringPart::Variable("a".into())));
+        assert_eq!(toks[2], variable("a"));
     }
 
     #[test]
@@ -1745,7 +1797,7 @@ mod tests {
                 plain("x"),
                 Token::Pipe,
                 plain("echo"),
-                Token::Deref(StringPart::Variable("x".into())),
+                variable("x"),
                 Token::RBrace,
                 Token::Eof,
             ]
@@ -1784,76 +1836,48 @@ mod tests {
 
     #[test]
     fn double_quoted_interpolation() {
-        let toks = tok_types("echo \"hello $name\"");
-        assert_eq!(toks.len(), 3);
-        match &toks[1] {
-            Token::DoubleQuoted(parts) => {
-                assert_eq!(parts.len(), 2);
-                assert_eq!(parts[0].item, StringPart::Literal("hello ".into()));
-                assert_eq!(parts[1].item, StringPart::Variable("name".into()));
-            }
-            _ => panic!("expected DoubleQuoted"),
-        }
+        let parts = string_parts("\"hello $name\"");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].item, StringPart::Literal("hello ".into()));
+        assert_eq!(splice_kinds(&parts[1].item), vec![&variable("name")]);
     }
 
     /// A bare `$name` never eats a trailing `-`, so a kebab-adjacent
     /// interpolation cannot fold the dash into the first name.
     #[test]
     fn interpolation_stops_before_trailing_dash() {
-        let toks = tok_types("\"$os-$arch\"");
-        let Token::DoubleQuoted(parts) = &toks[0] else {
-            panic!("expected DoubleQuoted");
-        };
-        let items: Vec<&StringPart> = parts.iter().map(|p| &p.item).collect();
-        assert_eq!(
-            items,
-            vec![
-                &StringPart::Variable("os".into()),
-                &StringPart::Literal("-".into()),
-                &StringPart::Variable("arch".into()),
-            ]
-        );
+        let parts = string_parts("\"$os-$arch\"");
+        assert_eq!(parts.len(), 3);
+        assert_eq!(splice_kinds(&parts[0].item), vec![&variable("os")]);
+        assert_eq!(parts[1].item, StringPart::Literal("-".into()));
+        assert_eq!(splice_kinds(&parts[2].item), vec![&variable("arch")]);
     }
 
     /// A `-` with more name after it is interior, so a genuine kebab
     /// identifier stays one deref.
     #[test]
     fn interpolation_keeps_interior_dash() {
-        let toks = tok_types("\"$os-arch\"");
-        let Token::DoubleQuoted(parts) = &toks[0] else {
-            panic!("expected DoubleQuoted");
-        };
+        let parts = string_parts("\"$os-arch\"");
         assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].item, StringPart::Variable("os-arch".into()));
+        assert_eq!(splice_kinds(&parts[0].item), vec![&variable("os-arch")]);
     }
 
     /// A `-` at end of string is literal text, not part of the name.
     #[test]
     fn interpolation_trailing_dash_at_end() {
-        let toks = tok_types("\"$foo-\"");
-        let Token::DoubleQuoted(parts) = &toks[0] else {
-            panic!("expected DoubleQuoted");
-        };
-        let items: Vec<&StringPart> = parts.iter().map(|p| &p.item).collect();
-        assert_eq!(
-            items,
-            vec![
-                &StringPart::Variable("foo".into()),
-                &StringPart::Literal("-".into()),
-            ]
-        );
+        let parts = string_parts("\"$foo-\"");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(splice_kinds(&parts[0].item), vec![&variable("foo")]);
+        assert_eq!(parts[1].item, StringPart::Literal("-".into()));
     }
 
     /// `$(name)` fixes where the name ends, so it keeps the trailing `-`
     /// that the bare form drops.
     #[test]
     fn explicit_boundary_keeps_trailing_dash() {
-        let toks = tok_types("\"$(foo-)\"");
-        let Token::DoubleQuoted(parts) = &toks[0] else {
-            panic!("expected DoubleQuoted");
-        };
+        let parts = string_parts("\"$(foo-)\"");
         assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].item, StringPart::Variable("foo-".into()));
+        assert_eq!(splice_kinds(&parts[0].item), vec![&variable("foo-")]);
     }
 
     /// A bare deref outside strings obeys the same rule.
@@ -1862,31 +1886,67 @@ mod tests {
         let toks = tok_types("$os-$arch");
         assert_eq!(
             toks,
-            vec![
-                Token::Deref(StringPart::Variable("os".into())),
-                plain("-"),
-                Token::Deref(StringPart::Variable("arch".into())),
-                Token::Eof,
-            ]
+            vec![variable("os"), plain("-"), variable("arch"), Token::Eof]
         );
     }
 
+    /// A splice is the tokens the same text lexes to outside the string: the
+    /// inner `echo hello` is lexed in place, not sliced back out as raw text,
+    /// and `!$d` is `!` then `$d` — not a synthesised `!{$d}`.
     #[test]
-    fn double_quoted_substitution() {
-        let toks = tok_types("\"!{echo hello}\"");
-        match &toks[0] {
-            Token::DoubleQuoted(parts) => {
-                assert_eq!(parts.len(), 1);
-                let StringPart::Force(inner) = &parts[0].item else {
-                    panic!("expected Force");
-                };
-                // The inner `echo hello` is lexed in place, not sliced back
-                // out as raw text.
-                let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
-                assert_eq!(kinds, vec![&plain("echo"), &plain("hello")]);
-            }
-            _ => panic!("expected DoubleQuoted"),
-        }
+    fn double_quoted_splices_are_outer_tokens() {
+        let parts = string_parts("\"!{echo hello}\"");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            splice_kinds(&parts[0].item),
+            vec![
+                &Token::Bang,
+                &Token::LBrace,
+                &plain("echo"),
+                &plain("hello"),
+                &Token::RBrace,
+            ]
+        );
+
+        let parts = string_parts("\"!$d\"");
+        assert_eq!(
+            splice_kinds(&parts[0].item),
+            vec![&Token::Bang, &variable("d")]
+        );
+    }
+
+    /// Adjacent `[key]` groups extend a splice, and each closer keeps its own
+    /// span so the parser sees the same stream the outer lexer would emit.
+    #[test]
+    fn double_quoted_splice_takes_postfix_keys() {
+        let src = "\"$h[file][0]\"";
+        let parts = string_parts(src);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            splice_kinds(&parts[0].item),
+            vec![
+                &variable("h"),
+                &Token::LBracket,
+                &plain("file"),
+                &Token::RBracket,
+                &Token::LBracket,
+                &plain("0"),
+                &Token::RBracket,
+            ]
+        );
+        let StringPart::Splice(tokens) = &parts[0].item else {
+            unreachable!()
+        };
+        assert_eq!(&src[tokens[3].1.range()], "]");
+        assert_eq!(&src[tokens[6].1.range()], "]");
+    }
+
+    /// A sigil that opens nothing is text, `!$` included.
+    #[test]
+    fn double_quoted_bare_sigils_are_literal() {
+        let parts = string_parts("\"cost: $ 5!$ ok\"");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].item, StringPart::Literal("cost: $ 5!$ ok".into()));
     }
 
     #[test]
@@ -1895,7 +1955,7 @@ mod tests {
         let t = |src: &str| match &lex_ok(src)[0] {
             Token::DoubleQuoted(p) => match &p[0].item {
                 StringPart::Literal(s) => s.clone(),
-                _ => panic!("expected Literal"),
+                StringPart::Splice(_) => panic!("expected Literal"),
             },
             _ => panic!("expected DoubleQuoted"),
         };
@@ -1912,7 +1972,7 @@ mod tests {
         let t = |src: &str| match &lex_ok(src)[0] {
             Token::DoubleQuoted(p) => match &p[0].item {
                 StringPart::Literal(s) => s.clone(),
-                _ => panic!("expected Literal"),
+                StringPart::Splice(_) => panic!("expected Literal"),
             },
             _ => panic!("expected DoubleQuoted"),
         };
@@ -1937,21 +1997,11 @@ mod tests {
         assert_eq!(kinds, vec![&plain("2"), &plain("+"), &plain("3")]);
     }
 
+    /// Inside `$[…]` the operator characters end a word, so no spacing is
+    /// needed, and a numeral is read whole through its exponent sign.
     #[test]
-    fn dollar_bracket_fuses_logical_ops() {
-        // Outside `$[…]` these stay single-char pipeline punctuation.
-        let toks = tok_types("$[1 && 0]");
-        let Token::Expr(inner) = &toks[0] else {
-            panic!("expected Expr token");
-        };
-        let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
-        assert_eq!(kinds, vec![&plain("1"), &plain("&&"), &plain("0")]);
-    }
-
-    /// Fusion is by byte adjacency: `& &` is two backgrounders, not `&&`.
-    #[test]
-    fn dollar_bracket_does_not_fuse_spaced_ampersands() {
-        let toks = tok_types("$[1 & & 0]");
+    fn dollar_bracket_operators_split_words_and_numerals_stay_whole() {
+        let toks = tok_types("$[1+1*2==-3/4%5 && 1.5e+3-.5 && a-b]");
         let Token::Expr(inner) = &toks[0] else {
             panic!("expected Expr token");
         };
@@ -1960,11 +2010,117 @@ mod tests {
             kinds,
             vec![
                 &plain("1"),
-                &Token::Ampersand,
-                &Token::Ampersand,
-                &plain("0"),
+                &plain("+"),
+                &plain("1"),
+                &plain("*"),
+                &plain("2"),
+                &plain("=="),
+                &plain("-"),
+                &plain("3"),
+                &plain("/"),
+                &plain("4"),
+                &plain("%"),
+                &plain("5"),
+                &plain("&&"),
+                &plain("1.5e+3"),
+                &plain("-"),
+                &plain(".5"),
+                &plain("&&"),
+                &plain("a"),
+                &plain("-"),
+                &plain("b"),
             ]
         );
+        // Outside, the same characters are word characters.
+        assert_eq!(
+            tok_types("echo 1+1"),
+            vec![plain("echo"), plain("1+1"), Token::Eof]
+        );
+    }
+
+    /// Inside `$[…]` the operators are words, redirect spellings included.
+    #[test]
+    fn dollar_bracket_operators_are_words() {
+        let toks = tok_types("$[1 && 0 || 2>3 && 2>=3 && 1<2 && 1<=2 && 1!=2]");
+        let Token::Expr(inner) = &toks[0] else {
+            panic!("expected Expr token");
+        };
+        let kinds: Vec<&Token> = inner.iter().map(|(t, _)| t).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                &plain("1"),
+                &plain("&&"),
+                &plain("0"),
+                &plain("||"),
+                &plain("2"),
+                &plain(">"),
+                &plain("3"),
+                &plain("&&"),
+                &plain("2"),
+                &plain(">="),
+                &plain("3"),
+                &plain("&&"),
+                &plain("1"),
+                &plain("<"),
+                &plain("2"),
+                &plain("&&"),
+                &plain("1"),
+                &plain("<="),
+                &plain("2"),
+                &plain("&&"),
+                &plain("1"),
+                &plain("!="),
+                &plain("2"),
+            ]
+        );
+    }
+
+    /// The mode is the innermost delimiter's: a `!{…}` inside `$[…]` is back
+    /// in the shell, where `<` reads a file, and a lone `&` in the
+    /// expression names the connective it is not.
+    #[test]
+    fn dollar_bracket_mode_is_innermost() {
+        let toks = tok_types("$[!{wc -l < f} > 1]");
+        let Token::Expr(inner) = &toks[0] else {
+            panic!("expected Expr token");
+        };
+        assert!(inner.iter().any(|(t, _)| matches!(
+            t,
+            Token::Redirect {
+                kind: RedirectMode::Read,
+                ..
+            }
+        )));
+        assert!(lex_err("$[1 & 0]").contains("`&&`"));
+    }
+
+    /// Outside `$[…]` the shell meaning stands: `&` is refused by name, `&&`
+    /// too, and `>=` is a redirect to a word starting with `=`.
+    #[test]
+    fn shell_mode_keeps_shell_meanings() {
+        assert!(lex_err("sleep 1 &").contains("spawn"));
+        assert!(lex_err("a && b").contains("no `&&`"));
+        assert_eq!(
+            tok_types("echo a >= b"),
+            vec![
+                plain("echo"),
+                plain("a"),
+                Token::Redirect {
+                    fd: None,
+                    kind: RedirectMode::Write,
+                    target_fd: None
+                },
+                plain("="),
+                plain("b"),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_dollar_is_refused() {
+        assert!(lex_err("echo $").contains("$name"));
     }
 
     #[test]

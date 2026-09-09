@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 6d48e9af
-verified_at_date: 2026-08-26
-anchors: [lex, parse, Head, scan_expr_block, WordLiteral::classify, is_bare_word]
+verified_at_commit: dfe6e55c
+verified_at_date: 2026-09-09
+anchors: [lex, parse, Head, DelimKind, scan_token_group, scan_splice, WordLiteral::classify, is_bare_word]
 ---
 
 # Surface syntax: lexing and parsing
@@ -9,16 +9,34 @@ anchors: [lex, parse, Head, scan_expr_block, WordLiteral::classify, is_bare_word
 The front of the [[internals/compilation-ladder|ladder]]. `core/src/syntax/` is
 the only code that sees raw bytes and bare words.
 
-**Lexing has no context-dependent rules.** `lex(source)` produces
-`Vec<(Token, Span)>` in one pass under one grammar — ral carries none of the
-mode-switching a POSIX shell's lexer needs (no separate arithmetic / test / glob
-lexers), because it has no history forcing them. The two sigils stay lexically
-distinct: `$name` is a value dereference, a bare word in head position is a
-command token. A bare `$name` never absorbs a *trailing* `-` even though `-` is
-a name character, so `"$os-$arch"` splits into two derefs around a literal `-`;
-`$(name)` is the explicit interpolation boundary and keeps such a dash. The
-arithmetic sublanguage `$[…]` is pre-scanned by a dedicated `scan_expr_block` so
-its Pratt parser downstream sees exactly those tokens.
+**The lexer's only context is the innermost open delimiter.** `lex(source)`
+produces `Vec<(Token, Span)>` in one pass; the delimiter stack (`DelimKind`)
+picks among three modes and nothing else does. In a `{…}` block newlines
+separate statements. In a `[…]` collection newlines are whitespace and `,`
+punctuates. `$[…]` is a bracket in which, additionally, the comparison and
+Boolean spellings `<` `>` `<=` `>=` `!=` `&&` `||` are operator *words* and the
+arithmetic characters `+ - * / % =` end a word (a numeral is read whole, sign
+of exponent included) — so `$[2>3]` is a comparison, `$[1+1]` a sum, and
+`$[!{wc -l < f} > 1]` reads a file inside its `!{…}` and compares outside it.
+Everywhere else those characters keep their shell meaning: `1+1` is a word,
+`>` begins a redirect, `&` and `&&` and `||` are refused by name (`spawn`, `;`,
+`?`). This is one stack and one predicate, not the separate
+arithmetic / test / glob lexers a POSIX shell inherits
+([[decisions/260909_expression-block-is-a-lexical-mode|expression-block-is-a-lexical-mode]]).
+The two sigils stay lexically distinct: `$name` is a value dereference, a bare
+word in head position is a command token. A bare `$name` never absorbs a
+*trailing* `-` even though `-` is a name character, so `"$os-$arch"` splits
+into two derefs around a literal `-`; `$(name)` is the explicit interpolation
+boundary and keeps such a dash.
+
+**A splice in `"…"` is the tokens it would be outside the string.**
+`scan_splice` lexes `$name`, `$(name)`, `$[…]`, `!{…}`, `!$name` and any
+adjacent `[key]` groups in place and stores the stream in
+`StringPart::Splice`; the parser reads it with the ordinary `parse_atom`. So
+`"!$d"` is the same `Force(Variable)` as `!$d`, and `"$(h)[file]"` indexes as
+`$(h)[file]` does. Outside a string nothing is fused: `$xs[0]` is a variable
+followed by a bracket group, and `parse_atom` reads the adjacency, as it does
+for `!{f}[k]`.
 
 **A word's *literal* shape is lexical too.** `WordLiteral::classify` (`ast.rs`)
 reads a bare word and nothing else — no expected type, no scope, no head — so a
@@ -31,14 +49,20 @@ printed text would come back as a value. The remaining literals are
 *punctuation*, not words — `()` for unit beside `[]` and `[:]` — so no
 spelling of a name can collide with them.
 
-**Parsing is recursive descent with a Pratt core for expressions.**
+**Parsing is recursive descent with a Pratt core for `$[…]`.**
 `parse(source)` returns `Vec<Stmt>` or a `ParseError`. Statement and pipeline
 productions descend recursively (`parse_stmt`, `parse_pipeline`, `parse_primary`)
 under a depth counter that fails cleanly on pathological nesting rather than
-overflowing the host stack. The `$[…]` sublanguage — arithmetic, comparison,
-Boolean — is one Pratt parser by binding power (`parse_expr_prec`), not bash's
-partitioned `(( ))` / `[[ ]]`; one grammar, again because no history forces
-several.
+overflowing the host stack. The body of `$[…]` is one Pratt parser by binding
+power (`parse_expr_prec`), not bash's partitioned `(( ))` / `[[ ]]`, and its
+operands are the ordinary atoms of the value grammar: `$[$s == 'quit']` is
+admitted by the parser and judged by the checker. The one judgement the parser
+keeps is the one that needs no types: a bare non-numeral word is a string, so
+under `-`, arithmetic or ordering it can never typecheck, and `numeric_operand`
+refuses `$[x + 1]` asking whether `$x` was meant — the old sublanguage's best
+diagnostic, kept without its leaf grammar. The five operator forms —
+`Binary`, `Negate`, `Not`, `And`, `Or` — are `Ast` variants like any other;
+there is no `Expr` type, and `$[…]` leaves no node behind.
 
 **The AST is flat by decision.** `Ast` (expressions) and `Stmt` are wide flat
 enums ([[decisions/260530_ast-stays-flat|ast-stays-flat]]); no desugaring happens

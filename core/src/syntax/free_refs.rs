@@ -5,7 +5,7 @@
 //! the strongly connected components of that graph become the `LetRec` knots.
 
 use crate::syntax::ast::{
-    Ast, Expr, Head, ListElem, MapEntry, Pattern, Redirect, RedirectTarget, ScopeAst, Stmt, Word,
+    Ast, Head, ListElem, MapEntry, Pattern, Redirect, RedirectTarget, ScopeAst, Stmt, Word,
 };
 use std::collections::HashSet;
 
@@ -122,8 +122,12 @@ impl Ast {
                     arm.body.item.collect_free_refs(candidates, scopes, out);
                 }
             }
-            Self::Expr(expr) => {
-                expr.collect_free_refs(candidates, scopes, out);
+            Self::Binary(l, _, r) | Self::And(l, r) | Self::Or(l, r) => {
+                l.item.collect_free_refs(candidates, scopes, out);
+                r.item.collect_free_refs(candidates, scopes, out);
+            }
+            Self::Negate(inner) | Self::Not(inner) => {
+                inner.item.collect_free_refs(candidates, scopes, out);
             }
             Self::Index { target, keys } => {
                 target.item.collect_free_refs(candidates, scopes, out);
@@ -195,36 +199,6 @@ impl Pattern {
                         .pattern
                         .collect_default_free_refs(candidates, scopes, out);
                 }
-            }
-        }
-    }
-}
-
-impl Expr {
-    fn collect_free_refs(
-        &self,
-        candidates: &HashSet<String>,
-        scopes: &mut Vec<HashSet<String>>,
-        out: &mut HashSet<String>,
-    ) {
-        match self {
-            Self::Integer(_) | Self::Number(_) | Self::Bool(_) => {}
-            Self::Variable(n) => note_free(n, candidates, scopes, out),
-            Self::Index(n, keys) => {
-                note_free(n, candidates, scopes, out);
-                for k in keys {
-                    k.item.collect_free_refs(candidates, scopes, out);
-                }
-            }
-            Self::Force(inner) => {
-                inner.item.collect_free_refs(candidates, scopes, out);
-            }
-            Self::BinOp(l, _, r) | Self::And(l, r) | Self::Or(l, r) => {
-                l.collect_free_refs(candidates, scopes, out);
-                r.collect_free_refs(candidates, scopes, out);
-            }
-            Self::Negate(inner) | Self::Not(inner) => {
-                inner.collect_free_refs(candidates, scopes, out);
             }
         }
     }

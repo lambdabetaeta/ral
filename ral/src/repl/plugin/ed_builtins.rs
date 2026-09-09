@@ -334,7 +334,7 @@ fn is_word_token(tok: &Token) -> bool {
             | Token::SingleQuoted(_)
             | Token::DoubleQuoted(_)
             | Token::Tag(_)
-            | Token::Deref(_)
+            | Token::Variable(_)
             | Token::Expr(_)
     )
 }

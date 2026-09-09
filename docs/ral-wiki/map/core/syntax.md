@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6d48e9af
-generated_at_date: 2026-08-26
+generated_at_commit: dfe6e55c
+generated_at_date: 2026-09-09
 covers_paths: [core/src/syntax/]
 ---
 
@@ -10,19 +10,31 @@ covers_paths: [core/src/syntax/]
 sees raw bytes and bare words.
 
 - `lexer.rs` — `lex(source) -> Result<Vec<(Token, Span)>, LexError>`; the
-  `Token` enum. An unterminated string names the exact closer it still wants,
-  `StringForm::closing()` — a bumped literal wants its `#` run back after the
-  `'`, so the bare reflex never closes it. Folding fd 1 onto fd 2 (`1>&2`, and
-  `>&2`, which is the same redirect spelled short) is refused at the lexer,
-  pointing at the `warn` builtin, and at `2>&1` for a program holding the
-  direction backwards: a diagnostic is a verb here, not a second name for the
-  byte channel.
+  `Token` enum. The innermost open delimiter (`DelimKind`: `Brace`,
+  `Bracket`, `Expr`) is the lexer's whole context: it decides whether a
+  newline separates, whether `,` punctuates, and — inside `$[…]` only —
+  whether `<` `>` `<=` `>=` `!=` `&&` `||` are operator words rather than a
+  redirect and refused punctuation. `&` outside `$[…]` is refused at the
+  lexer naming `spawn { … }`, `&&` naming `;`; a bare `$` is refused naming
+  the three things it can open. A splice inside `"…"` (`scan_splice`) is the
+  token stream the same text has outside the string, `[key]` groups
+  included, so `"!$d"` and `!$d` are one form. An unterminated string names
+  the exact closer it still wants, `StringForm::closing()` — a bumped literal
+  wants its `#` run back after the `'`, so the bare reflex never closes it.
+  Folding fd 1 onto fd 2 (`1>&2`, and `>&2`, which is the same redirect
+  spelled short) is refused at the lexer, pointing at the `warn` builtin, and
+  at `2>&1` for a program holding the direction backwards: a diagnostic is a
+  verb here, not a second name for the byte channel.
 - `parser.rs` — `parse(source) -> Result<Vec<Stmt>, ParseError>`; `parse_with`
-  carries a `FileId`. A trailing `&` is a stage terminator only so its refusal
-  can name `spawn { … }`, whose handle you `await`. A digit glued to a
-  comparison operator inside `$[…]`
-  (`$[2>3]`, lexed as the file-descriptor redirect `2>`) earns a diagnostic
-  that names the shape and asks for spaces, not a bare "redirect" token.
+  carries a `FileId`. A `||` after a pipe is refused naming `?`. A bracketed
+  literal is read as one list of items and sorted into a list or a map by its
+  first non-spread item, so no token-level lookahead has to skip a spread's
+  nested brackets. The `$[…]` body is a Pratt parser whose operands are
+  `parse_atom`'s atoms, plus `(…)` grouping and the prefixes `-` and `not`;
+  an operator in operand position, or two operands with no operator between
+  them, each earn an error naming the gap; a bare non-numeral word under
+  `-`, arithmetic, or ordering (`numeric_operand`) is refused as the string
+  it is, asking whether `$name` was meant.
   `<<` is the here-string redirect; the bash spellings (`<<<`, a glued
   heredoc `<<EOF`) earn targeted diagnostics naming ral's form. A run of
   separators collapses to one token, `Token::Semi` when it contains a `;` and
@@ -33,7 +45,11 @@ sees raw bytes and bare words.
   repeat across curried parameters stays ordinary shadowing.
 - `ast.rs` — the surface AST. `Ast` is the expression node and `Stmt` the
   statement node; the enum is deliberately wide and flat
-  ([[decisions/260530_ast-stays-flat|ast-stays-flat]]). `Ast::Unit` is the `()`
+  ([[decisions/260530_ast-stays-flat|ast-stays-flat]]). The operator forms
+  `Binary`, `Negate`, `Not`, `And`, `Or` are ordinary variants with `Ast`
+  operands; `$[…]` itself leaves no node
+  ([[decisions/260909_expression-block-is-a-lexical-mode|expression-block-is-a-lexical-mode]]).
+  `Ast::Unit` is the `()`
   literal — punctuation denoting the unit value, like `[]` and `[:]`, so not a
   word. `Ast::Case` carries `arms: Vec<CaseArm>`, a finite list of tag-and-body
   alternatives the parser hands on whole
@@ -57,8 +73,8 @@ governs both stages.
   bracketed token groups.
 - The parser's three mutually-recursive sub-grammars each descend through
   exactly one guarded chokepoint, all counting against `Parser::nested`'s
-  shared `depth`: values through `parse_primary`, arithmetic through
-  `parse_expr_atom` (the unary prefixes `-` / `not` and parenthesised
+  shared `depth`: values through `parse_primary`, expressions through
+  `parse_expr_operand` (the unary prefixes `-` / `not` and parenthesised
   sub-expressions bottom out here), patterns through `parse_pattern` (list and
   map patterns recurse back through it per element).
 

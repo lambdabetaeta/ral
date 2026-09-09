@@ -368,7 +368,10 @@ group expressions inside `$[...]`, and they delimit names in `$(name)`. They
 are not a general command-grouping form.
 
 Postfix indexing requires no space before `[`. Thus `$item[key]` is one
-indexed value, while `$item [key]` is two values in a command.
+indexed value, while `$item [key]` is two values in a command. A `!` reaches
+over a dereference's keys, so `!$item[key]` forces the field; any other
+primary is forced first and indexed after, so `!{cmd}[key]` selects from the
+forced result.
 
 ral reports mismatched or unclosed delimiters. It also rejects source with
 more than 64 nested forms. This limit prevents an implementation stack
@@ -394,7 +397,15 @@ Some characters depend on their position:
   It remains part of forms such as `localhost:5432`.
 - `?` and `&` are punctuation where a new word can start. They can occur
   inside a longer bare word. `?` is the failure chain; a lone `&` is always
-  refused (§11.1).
+  refused (§11.1), and so are the shell spellings `&&` and `||`, whose jobs
+  here belong to `;` and `?`.
+- Inside `$[...]`, and only there, `<`, `>`, `<=`, `>=`, `!=`, `&&`, and `||`
+  are operators rather than redirects and punctuation, and the word
+  characters `+`, `-`, `*`, `/`, `%`, and `=` end a word, so `$[1+1]` is a
+  sum and needs no spaces (§17.1). A numeral is still read whole, exponent
+  sign included: `$[1.5e+3]` is a number. Outside `$[...]` all of these are
+  word characters or shell punctuation: `1+1` is a word and `a >= b` writes
+  to a file named `=`.
 - `...` is the spread marker where a new word can start. It can occur inside
   a longer word.
 
@@ -575,7 +586,10 @@ return "sum: $[2 + 3]"
 ```
 
 `$(name)` marks the exact end of a name when the following text could be part
-of it. The supported escapes are `\n`, `\r`, `\t`, `\\`, `\0`, `\e`, `\"`,
+of it. A splice is exactly the atom the same text denotes outside the string:
+`$name`, `$(name)`, `$[...]`, `!{...}`, or `!$name`, followed by any `[key]`
+written immediately after it. A `$` or `!` that opens none of these is text.
+The supported escapes are `\n`, `\r`, `\t`, `\\`, `\0`, `\e`, `\"`,
 `\$`, `\!`, `\xNN`, `\u{X..}`, and backslash followed by a line ending.
 `\xNN` accepts one ASCII byte from `00` to `7F`. `\u{X..}` accepts one valid
 Unicode scalar value written with one to six hexadecimal digits. An unknown
@@ -675,7 +689,7 @@ let problem = `error [message: 'not found']
 ```
 
 The tag takes the next value atom as its payload. A statement boundary, comma,
-closing bracket, pipe, `?`, redirect, or `&` leaves it without a payload.
+closing bracket, pipe, `?`, or redirect leaves it without a payload.
 Section 8 defines `case`, which chooses one arm by tag.
 
 ### 4.7. Indexing
@@ -4130,10 +4144,15 @@ Metavariables used below are:
 ### 17.1. Concrete grammar
 
 The lexer supplies words, quoted strings, interpolation segments, tags,
-redirect tokens, newlines, and punctuation. A newline or `;` separates
-statements. The shared stage parser requires every stage to end at a statement
-boundary, `|`, `?`, `&`, a closing delimiter, or end of input; juxtaposed
-same-line statements are not admitted.
+redirect tokens, newlines, and punctuation. Its mode is set by the innermost
+open delimiter: inside `[...]` and `$[...]` newlines are whitespace and commas
+punctuate, and inside `$[...]` alone the spellings `<`, `>`, `<=`, `>=`, `!=`,
+`&&`, `||`, `+`, `-`, `*`, `/`, `%`, `=`, and `==` are operator words that end
+the word before them, a numeral being read whole. A newline or `;` separates
+statements. The
+shared stage parser requires every stage to end at a statement boundary, `|`,
+`?`, a closing delimiter, or end of input; juxtaposed same-line statements are
+not admitted.
 
 The following EBNF omits lexical escape details and source-span bookkeeping.
 `NL` denotes a newline and `sep` denotes `NL` or `;`.
@@ -4180,9 +4199,11 @@ word-value    ::= lexical-word
                 | force
                 | tag
 index         ::= "[" word-value "]"        /* adjacent to its target */
-force         ::= "!" primary
+force         ::= "!" variable index* | "!" primary
 variable      ::= "$" identifier | "$(" identifier ")"
 expr-block    ::= "$[" expression "]"
+expression    ::= operand (infix-op operand)*    /* by the precedence below */
+operand       ::= "(" expression ")" | "-" operand | "not" operand | atom
 tag           ::= "`" identifier atom?
 
 block         ::= "{" program "}"
@@ -4264,10 +4285,16 @@ Inside `$[...]`, expressions have the following precedence, from low to high:
 unary - and not
 ```
 
-Binary operators associate left. `&&` and `||` short-circuit. Expression
-operands are finite numeric literals, Booleans, variable or indexed-variable
-references, forced atoms, and parenthesized expressions. The expression
-grammar is deliberately smaller than the command grammar.
+Binary operators associate left. `&&` and `||` short-circuit. An operand is
+any atom of the value grammar — a numeral, a quoted string, a variable, an
+indexed value, a forced block, a collection — or a parenthesized expression;
+`()` is the unit atom, not an empty group. `$[...]` therefore adds no node of
+its own to the tree: it is the lexical mode in which the operators can be
+written, and which values each operator accepts is the type system's question
+(§4.8 for `==`; arithmetic and ordering want numbers). One case is settled
+earlier: a bare word that is not a numeral is a string here as everywhere, so
+under `-`, arithmetic, or ordering it can never typecheck, and ral refuses it
+at parse time, asking whether `$name` was meant.
 
 ### 17.2. Core terms
 

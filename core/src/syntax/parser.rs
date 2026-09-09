@@ -2,21 +2,22 @@
 //!
 //! The grammar is statement-oriented: a program is statements separated by
 //! newlines or `;`; a statement is a `let` binding or a `?`-chain of
-//! `|`-pipelines, each arm optionally backgrounded with `&`; a stage is
-//! `return`, `if`, `case`, a control operator, or a command.  Newlines bend
-//! around continuations — freely either side of `|`, one before `?`, any
-//! number after a binder's `=` — and inside `[…]` the lexer drops them.
+//! `|`-pipelines; a stage is `return`, `if`, `case`, a control operator, or a
+//! command.  Newlines bend around continuations — freely either side of `|`,
+//! one before `?`, any number after a binder's `=` — and inside `[…]` the
+//! lexer drops them.
 //!
 //! Each [`Stmt`] carries the span of its own tokens and the elaborator stamps
 //! that span on the IR it emits, so no constructor here threads a span.
-//! Arithmetic inside `$[…]` is a Pratt sub-parser over the tokens the outer
-//! lexer already produced for the block: no re-lex, no substring round trip.
+//! The body of `$[…]` is a Pratt sub-parser over the tokens the lexer already
+//! produced for the block — no re-lex, no substring round trip — whose
+//! operands are the ordinary atoms of the value grammar.
 
 use crate::source::{Span, Spanned};
 use crate::syntax::ast::{
-    Ast, BinaryOp, CaseArm, Expr, Head, IfBranch, ListElem, MapEntry, MapKey, MapPatternEntry,
-    Pattern, Redirect, RedirectMode, RedirectTarget, ScopeAst, ScopeKeyword, Stmt, Word,
-    WordLiteral,
+    Ast, BinaryOp, BinaryOpKind, CaseArm, Head, IfBranch, ListElem, MapEntry, MapKey,
+    MapPatternEntry, Pattern, Redirect, RedirectMode, RedirectTarget, ScopeAst, ScopeKeyword, Stmt,
+    Word, WordLiteral,
 };
 use crate::syntax::lexer::{self, LexError, LexErrorKind, StringPart, Token};
 use crate::types;
@@ -217,7 +218,7 @@ impl Parser {
     fn at_stmt_end(&self) -> bool {
         matches!(
             self.peek(),
-            Token::Newline | Token::Semi | Token::Eof | Token::RBrace | Token::Ampersand
+            Token::Newline | Token::Semi | Token::Eof | Token::RBrace
         )
     }
 
@@ -389,6 +390,12 @@ impl Parser {
         let mut stages = vec![Spanned::new(first_span, first)];
 
         while self.eat_continuation(&Token::Pipe) {
+            if self.peek() == &Token::Pipe {
+                return Err(self.error(
+                    "ral has no `||`: `a ? b` runs `b` when `a` fails — inside \
+                     `$[…]`, `||` is the Boolean connective",
+                ));
+            }
             self.require_continuation("a pipeline stage")?;
             let (span, stage) = self.capture_span(Self::parse_stage)?;
             stages.push(Spanned::new(span, stage));
@@ -446,14 +453,6 @@ impl Parser {
             },
             None => self.parse_command(),
         }?;
-        // `&` is a stage terminator (see `at_stmt_end`) purely so the refusal
-        // below can name the replacement instead of a stray-token error.
-        if self.peek() == &Token::Ampersand {
-            return Err(self.error(
-                "`&` does not background a command in ral — wrap it in \
-                 `spawn { … }`, which returns a handle you `await`",
-            ));
-        }
         if self.at_cmd_end() {
             return Ok(stage);
         }
@@ -844,10 +843,12 @@ impl Parser {
         let mut alphabet: Option<bool> = None;
 
         self.parse_separated_until(&Token::RBracket, "map pattern", |p| {
+            let key_span = p.span();
             let key = p.parse_static_key()?;
-            p.check_key_alphabet(
+            check_key_alphabet(
                 &mut alphabet,
                 key.is_tag(),
+                key_span,
                 "map pattern mixes bare and tag keys — pick one alphabet",
             )?;
             p.expect(&Token::Colon)?;
@@ -900,37 +901,21 @@ impl Parser {
             Token::SingleQuoted(_) | Token::Tag(_) => {
                 Ok(MapKeyForm::Static(self.parse_static_key()?))
             }
-            Token::Deref(StringPart::Variable(k)) => {
+            Token::Variable(k) => {
                 self.advance();
                 Ok(MapKeyForm::Deref(k))
             }
-            Token::Word(Word::Plain(k)) if k.parse::<f64>().is_ok() => Err(self.error(
+            Token::Word(Word::Plain(k)) if WordLiteral::classify(&k).is_some() => Err(self.error(
                 "map keys must be identifiers or quoted strings, not numbers; use '0': val",
             )),
             _ => Err(self.error("expected map key: name, 'quoted', backtick tag, or $var")),
         }
     }
 
-    /// The first key fixes the alphabet and every later one must match, so
-    /// `` [host: …, `dev: …] `` is rejected in literal and pattern alike.
-    fn check_key_alphabet(
-        &self,
-        seen_is_tag: &mut Option<bool>,
-        this_is_tag: bool,
-        mismatch_msg: &str,
-    ) -> Result<(), ParseError> {
-        match seen_is_tag {
-            None => *seen_is_tag = Some(this_is_tag),
-            Some(prev) if *prev != this_is_tag => return Err(self.error(mismatch_msg)),
-            Some(_) => {}
-        }
-        Ok(())
-    }
-
     /// primary = word | tag | block | collection
     ///
-    /// The value grammar's `nested()` chokepoint.  Arithmetic and patterns
-    /// route around it and guard themselves, at [`Self::parse_expr_atom`] and
+    /// The value grammar's `nested()` chokepoint.  Expressions and patterns
+    /// guard their own prefixes too, at [`Self::parse_expr_operand`] and
     /// [`Self::parse_pattern`]; the lexer caps its delimiter nesting likewise.
     fn parse_primary(&mut self) -> Result<Ast, ParseError> {
         self.nested(|p| match p.peek() {
@@ -1159,24 +1144,13 @@ impl Parser {
                 self.advance();
                 Self::parse_interpolation_parts(&parts)
             }
-            Token::Deref(part) => {
+            Token::Variable(name) => {
                 self.advance();
-                match part {
-                    StringPart::Variable(name) => Ok(Ast::Variable(name)),
-                    StringPart::Index { name, keys } => deref_index_to_ast(name, keys),
-                    _ => Err(self.error(
-                        "unexpected form after `$` — write `$name`, `$(name)`, \
-                         `$name[key]`, or `$[expr]`",
-                    )),
-                }
+                Ok(Ast::Variable(name))
             }
             Token::Expr(tokens) => {
                 self.advance();
-                Ok(Ast::Expr(Box::new(parse_expr_block(tokens)?)))
-            }
-            Token::Dollar => {
-                self.advance();
-                Err(self.error("expected dereference after '$' (e.g. $name, $(name), or $[...])"))
+                parse_expr_block(tokens)
             }
             Token::Caret => Err(self.error("'^name' is only valid in command-head position")),
             Token::Bang => self.parse_bang(),
@@ -1207,7 +1181,6 @@ impl Parser {
                 | Token::RParen
                 | Token::Pipe
                 | Token::Question
-                | Token::Ampersand
                 | Token::Comma
                 | Token::Colon
                 | Token::Spread
@@ -1215,13 +1188,21 @@ impl Parser {
         )
     }
 
-    /// force = '!' primary — both callers leave the `!` for us, so the span
-    /// starts there.  A `primary`, not an atom: leaving postfix `[k]` to the
-    /// enclosing `parse_atom` makes `!{cmd}[k]` force first and index after.
+    /// force = '!' variable index* | '!' primary — both callers leave the `!`
+    /// for us, so the span starts there.
+    ///
+    /// A dereference reaches over its keys, so `!$p[tail]` forces the field
+    /// that `$p[tail]` names.  Any other primary is forced first: leaving its
+    /// postfix `[k]` to the enclosing `parse_atom` makes `!{cmd}[k]` select
+    /// from the forced result.
     fn parse_bang(&mut self) -> Result<Ast, ParseError> {
         let (span, inner) = self.capture_span(|p| {
             p.advance(); // consume `!`
-            p.parse_primary()
+            if matches!(p.peek(), Token::Variable(_)) {
+                p.parse_atom()
+            } else {
+                p.parse_primary()
+            }
         })?;
         Ok(Ast::Force(Spanned::boxed(span, inner)))
     }
@@ -1276,8 +1257,11 @@ impl Parser {
         }
     }
 
-    /// collection = list | map — `[]` is the empty list, `[:]` the empty map,
-    /// and anything else is settled by lookahead for a `key:`.
+    /// collection = list | map — `[]` is the empty list, `[:]` the empty map.
+    ///
+    /// A spread belongs to either shape, so the items are read in one pass
+    /// and the first plain one — a `key: value` entry or a bare element —
+    /// settles which literal this is.
     fn parse_collection(&mut self) -> Result<Ast, ParseError> {
         self.expect(&Token::LBracket)?;
 
@@ -1294,111 +1278,104 @@ impl Parser {
             return Ok(Ast::Map(vec![]));
         }
 
-        let is_map = self.is_map_ahead();
+        let mut items = Vec::new();
+        self.parse_separated_until(&Token::RBracket, "collection", |p| {
+            items.push(p.parse_collection_item()?);
+            Ok(SepFlow::Cont)
+        })?;
 
-        if is_map {
-            self.parse_map_entries()
-        } else {
-            self.parse_list_elems()
+        if items
+            .iter()
+            .any(|item| matches!(item, CollectionItem::Entry { .. }))
+        {
+            // Bare `name` versus tag `` `name ``; a dynamic `$var` key is
+            // unknown until runtime and so votes for neither alphabet.
+            let mut alphabet: Option<bool> = None;
+            let entries = items
+                .into_iter()
+                .map(|item| match item {
+                    CollectionItem::Spread(a) => Ok(MapEntry::Spread(a)),
+                    CollectionItem::Entry {
+                        key: MapKeyForm::Static(key),
+                        key_span,
+                        value,
+                    } => {
+                        check_key_alphabet(
+                            &mut alphabet,
+                            key.is_tag(),
+                            key_span,
+                            "record literal mixes bare and tag keys — pick one alphabet",
+                        )?;
+                        Ok(MapEntry::Entry { key, value })
+                    }
+                    CollectionItem::Entry {
+                        key: MapKeyForm::Deref(name),
+                        value,
+                        ..
+                    } => Ok(MapEntry::Deref { name, value }),
+                    CollectionItem::Elem(a) => Err(ParseError {
+                        message: "this collection has `key: value` entries, so every entry \
+                                  needs a key — or drop the keys to make it a list"
+                            .into(),
+                        span: a.span,
+                        lex_kind: None,
+                        incompleteness: None,
+                    }),
+                })
+                .collect::<Result<_, _>>()?;
+            return Ok(Ast::Map(entries));
         }
+
+        Ok(Ast::List(
+            items
+                .into_iter()
+                .map(|item| match item {
+                    CollectionItem::Spread(a) => ListElem::Spread(a),
+                    CollectionItem::Elem(a) => ListElem::Single(a),
+                    CollectionItem::Entry { .. } => unreachable!("no entry found above"),
+                })
+                .collect(),
+        ))
     }
 
-    fn is_map_ahead(&self) -> bool {
-        let mut i = self.pos;
-        // A leading `...` decides nothing, so skip past it.  Its operand is a
-        // whole atom and may nest (`...[a: 1]`), so only a `,` or `]` at the
-        // operand's own level ends it — or the end of input, without which an
-        // unterminated nesting would spin here.
-        while matches!(self.tokens.get(i).map(|(t, _)| t), Some(Token::Spread)) {
-            i += 1;
-            let mut depth = 0usize;
-            loop {
-                match self.tokens.get(i).map(|(t, _)| t) {
-                    None => break,
-                    Some(Token::LBracket | Token::LBrace) => depth += 1,
-                    Some(Token::RBracket | Token::RBrace) if depth > 0 => depth -= 1,
-                    Some(Token::Comma | Token::RBracket) if depth == 0 => break,
-                    _ => {}
-                }
-                i += 1;
-            }
-            if matches!(self.tokens.get(i).map(|(t, _)| t), Some(Token::Comma)) {
-                i += 1;
-            }
+    /// item = '...' atom | mapkey ':' atom | atom
+    fn parse_collection_item(&mut self) -> Result<CollectionItem, ParseError> {
+        if self.peek() == &Token::Spread {
+            self.advance();
+            let (sp, a) = self.capture_span(Self::parse_atom)?;
+            return Ok(CollectionItem::Spread(Spanned::new(sp, a)));
         }
-
-        // Literals admit a dynamic `$var` key; patterns cannot bind through
-        // one, so `parse_pattern_inner` passes `false` here.
-        self.key_colon_at(i, /*allow_deref=*/ true)
+        if self.key_colon_at(self.pos, /*allow_deref=*/ true) {
+            let key_span = self.span();
+            let key = self.parse_map_key()?;
+            self.expect(&Token::Colon)?;
+            let (sp, a) = self.capture_span(Self::parse_atom)?;
+            return Ok(CollectionItem::Entry {
+                key,
+                key_span,
+                value: Spanned::new(sp, a),
+            });
+        }
+        let (sp, a) = self.capture_span(Self::parse_atom)?;
+        Ok(CollectionItem::Elem(Spanned::new(sp, a)))
     }
 
     /// True when `tokens[i]` is a map key followed by `:`.  The one shape test
-    /// behind both lookaheads, so the two cannot drift on what a key is.
+    /// behind literal and pattern alike, so the two cannot drift on what a key
+    /// is; a literal admits a dynamic `$var` key, a pattern cannot bind
+    /// through one.
     fn key_colon_at(&self, i: usize, allow_deref: bool) -> bool {
         let is_key = matches!(
             self.tokens.get(i).map(|(t, _)| t),
             Some(Token::Word(Word::Plain(_)) | Token::SingleQuoted(_) | Token::Tag(_))
         ) || (allow_deref
-            && matches!(self.tokens.get(i).map(|(t, _)| t), Some(Token::Deref(_))));
+            && matches!(self.tokens.get(i).map(|(t, _)| t), Some(Token::Variable(_))));
         is_key && matches!(self.tokens.get(i + 1).map(|(t, _)| t), Some(Token::Colon))
     }
 
-    /// elem = atom | '...' atom
-    fn parse_list_elems(&mut self) -> Result<Ast, ParseError> {
-        let mut elems = Vec::new();
-
-        self.parse_separated_until(&Token::RBracket, "list", |p| {
-            if p.peek() == &Token::Spread {
-                p.advance();
-                let (sp, a) = p.capture_span(Self::parse_atom)?;
-                elems.push(ListElem::Spread(Spanned::new(sp, a)));
-            } else {
-                let (sp, a) = p.capture_span(Self::parse_atom)?;
-                elems.push(ListElem::Single(Spanned::new(sp, a)));
-            }
-            Ok(SepFlow::Cont)
-        })?;
-
-        Ok(Ast::List(elems))
-    }
-
-    fn parse_map_entries(&mut self) -> Result<Ast, ParseError> {
-        let mut entries = Vec::new();
-        // Bare `name` versus tag `` `name ``; a dynamic `$var` key is unknown
-        // until runtime and so votes for neither alphabet.
-        let mut alphabet: Option<bool> = None;
-
-        self.parse_separated_until(&Token::RBracket, "map", |p| {
-            if p.peek() == &Token::Spread {
-                p.advance();
-                let (sp, a) = p.capture_span(Self::parse_atom)?;
-                entries.push(MapEntry::Spread(Spanned::new(sp, a)));
-                return Ok(SepFlow::Cont);
-            }
-            let key_form = p.parse_map_key()?;
-            if let MapKeyForm::Static(ref key) = key_form {
-                p.check_key_alphabet(
-                    &mut alphabet,
-                    key.is_tag(),
-                    "record literal mixes bare and tag keys — pick one alphabet",
-                )?;
-            }
-            p.expect(&Token::Colon)?;
-            let (val_span, val) = p.capture_span(Self::parse_atom)?;
-            let value = Spanned::new(val_span, val);
-            entries.push(match key_form {
-                MapKeyForm::Static(key) => MapEntry::Entry { key, value },
-                MapKeyForm::Deref(name) => MapEntry::Deref { name, value },
-            });
-            Ok(SepFlow::Cont)
-        })?;
-
-        Ok(Ast::Map(entries))
-    }
-
-    /// Lower the segments of a double-quoted string.  Each keeps the byte range
-    /// the lexer gave it, and a `Force` segment passes that range to its inner
-    /// block too, so the forced body has a span of its own.
+    /// Lower the segments of a double-quoted string.  A splice is the tokens
+    /// it would be outside the string, and parses as the same atom; their
+    /// spans still address the outer source.
     fn parse_interpolation_parts(parts: &[Spanned<StringPart>]) -> Result<Ast, ParseError> {
         if parts.len() == 1
             && let StringPart::Literal(s) = &parts[0].item
@@ -1410,13 +1387,7 @@ impl Parser {
         for part in parts {
             let segment = match &part.item {
                 StringPart::Literal(s) => Ast::Literal(s.clone()),
-                StringPart::Variable(name) => Ast::Variable(name.clone()),
-                StringPart::Force(tokens) => {
-                    let stmts = parse_force_body(tokens.clone())?;
-                    Ast::Force(Spanned::with_span(part.span, Box::new(Ast::Block(stmts))))
-                }
-                StringPart::Expr(tokens) => Ast::Expr(Box::new(parse_expr_block(tokens.clone())?)),
-                StringPart::Index { name, keys } => deref_index_to_ast(name.clone(), keys.clone())?,
+                StringPart::Splice(tokens) => Self::run_complete(tokens.clone(), Self::parse_atom)?,
             };
             ast_parts.push(Spanned::with_span(part.span, segment));
         }
@@ -1424,13 +1395,15 @@ impl Parser {
         Ok(Ast::Interpolation(ast_parts))
     }
 
-    // ── Arithmetic (Pratt parser) ────────────────────────────────────
+    // ── Expression blocks (Pratt parser) ────────────────────────────
 
     /// Precedence-climbing loop.  It needs no depth guard of its own: every
-    /// depth-growing recursion bottoms out in [`Self::parse_expr_atom`], and
-    /// the binary right-hand side is bounded by the precedence ladder.
-    fn parse_expr_prec(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
-        let mut left = self.parse_expr_atom()?;
+    /// depth-growing recursion bottoms out in [`Self::parse_expr_operand`],
+    /// and the binary right-hand side is bounded by the precedence ladder.
+    fn parse_expr_prec(&mut self, min_prec: u8) -> Result<Spanned<Box<Ast>>, ParseError> {
+        let start = self.span();
+        let (span, first) = self.capture_span(Self::parse_expr_operand)?;
+        let mut left = Spanned::boxed(span, first);
 
         while let Some((op, prec)) = self.peek_expr_op() {
             if prec < min_prec {
@@ -1438,116 +1411,59 @@ impl Parser {
             }
             self.advance(); // consume operator token
             let right = self.parse_expr_prec(prec + 1)?;
-            left = match op {
-                InfixOp::And => Expr::And(Box::new(left), Box::new(right)),
-                InfixOp::Or => Expr::Or(Box::new(left), Box::new(right)),
-                InfixOp::Op(o) => Expr::BinOp(Box::new(left), o, Box::new(right)),
+            let node = match op {
+                InfixOp::And => Ast::And(left, right),
+                InfixOp::Or => Ast::Or(left, right),
+                InfixOp::Op(o) => {
+                    if !matches!(o.kind(), BinaryOpKind::Eq(_)) {
+                        numeric_operand(&left)?;
+                        numeric_operand(&right)?;
+                    }
+                    Ast::Binary(left, o, right)
+                }
             };
+            left = Spanned::boxed(start.join(self.prev_byte_span()), node);
         }
 
         Ok(left)
     }
 
-    /// The arithmetic grammar's `nested()` chokepoint, wrapping
-    /// [`Self::parse_expr_operand`].  Parenthesised sub-expressions and the
-    /// unary prefixes both come back here, so this guard bounds every
-    /// depth-growing path inside `$[…]`.
-    fn parse_expr_atom(&mut self) -> Result<Expr, ParseError> {
-        self.nested(Self::parse_expr_operand)
-    }
-
-    fn parse_expr_operand(&mut self) -> Result<Expr, ParseError> {
-        match self.peek().clone() {
-            Token::LParen => {
-                self.advance();
-                let expr = self.parse_expr_prec(0)?;
-                self.expect(&Token::RParen)?;
-                Ok(expr)
-            }
-            Token::Deref(part) => {
-                let result = match part {
-                    StringPart::Variable(name) => Ok(Expr::Variable(name)),
-                    StringPart::Index { name, keys } => {
-                        Ok(Expr::Index(name.item, parse_index_keys(keys)?))
-                    }
-                    _ => Err(self
-                        .error("unexpected `$…` form inside `$[…]` — use `$name` or `$name[key]`")),
-                };
-                self.advance();
-                result
-            }
-            Token::Bang => {
-                // Lifted rather than re-parsed, so the operand span crosses
-                // into the expression grammar intact.
-                let Ast::Force(body) = self.parse_bang()? else {
-                    unreachable!("parse_bang yields Ast::Force by construction");
-                };
-                Ok(Expr::Force(body))
+    /// operand = '(' expr ')' | '-' operand | 'not' operand | atom
+    ///
+    /// The expression grammar's `nested()` chokepoint: parenthesised
+    /// sub-expressions and the unary prefixes both come back here, so this
+    /// guard bounds every depth-growing path inside `$[…]`.  An operand is
+    /// any atom — the typechecker, not the parser, says which values `+`
+    /// or `==` accept.
+    fn parse_expr_operand(&mut self) -> Result<Ast, ParseError> {
+        self.nested(|p| match p.peek().clone() {
+            // `()` is the unit literal, an atom; anything else `(` opens
+            // here is a grouped sub-expression.
+            Token::LParen if p.tokens.get(p.pos + 1).map(|(t, _)| t) != Some(&Token::RParen) => {
+                p.advance();
+                let expr = p.parse_expr_prec(0)?;
+                p.expect(&Token::RParen)?;
+                Ok(*expr.item)
             }
             Token::Word(Word::Plain(s)) if s == "-" => {
-                self.advance();
-                let inner = self.parse_expr_atom()?;
-                Ok(Expr::Negate(Box::new(inner)))
+                p.advance();
+                let (span, inner) = p.capture_span(Self::parse_expr_operand)?;
+                let inner = Spanned::boxed(span, inner);
+                numeric_operand(&inner)?;
+                Ok(Ast::Negate(inner))
             }
             Token::Word(Word::Plain(s)) if s == "not" => {
-                self.advance();
-                // An atom, not an expression: `not` binds tighter than every
-                // binary operator, so `not $x == 0` is `(not $x) == 0`.
-                let inner = self.parse_expr_atom()?;
-                Ok(Expr::Not(Box::new(inner)))
+                p.advance();
+                // An operand, not an expression: `not` binds tighter than
+                // every binary operator, so `not $x == 0` is `(not $x) == 0`.
+                let (span, inner) = p.capture_span(Self::parse_expr_operand)?;
+                Ok(Ast::Not(Spanned::boxed(span, inner)))
             }
-            Token::Word(Word::Plain(s)) if s == "true" => {
-                self.advance();
-                Ok(Expr::Bool(true))
-            }
-            Token::Word(Word::Plain(s)) if s == "false" => {
-                self.advance();
-                Ok(Expr::Bool(false))
-            }
-            Token::Word(Word::Plain(s)) => {
-                // `classify`, not a blanket `f64` parse, so `inf`, `nan`, and
-                // `1e5` stay the strings they are outside `$[…]`.
-                match WordLiteral::classify(&s) {
-                    Some(WordLiteral::Int(n)) => {
-                        self.advance();
-                        Ok(Expr::Integer(n))
-                    }
-                    Some(WordLiteral::Float(f)) => {
-                        self.advance();
-                        Ok(Expr::Number(f))
-                    }
-                    _ => Err(self.error(format!(
-                        "expected a number, variable, or `(…)` here, but found '{s}' \
-                         — did you mean `${s}` to reference a variable?"
-                    ))),
-                }
-            }
-            // `<` and `>` arrive as `Redirect` tokens.  One in *operand*
-            // position is usually a digit glued to the operator — `$[2>3]`
-            // lexes `2>` as a file descriptor — so name the spacing.
-            Token::Redirect { fd, kind, .. } => {
-                let op = match kind {
-                    RedirectMode::Read => Some("<"),
-                    RedirectMode::Write => Some(">"),
-                    _ => None,
-                };
-                Err(self.error(match (op, fd) {
-                    (Some(op), Some(n)) => format!(
-                        "unexpected `{n}{op}` in expression; a digit glued to `{op}` is read \
-                         as a file-descriptor redirect — write `{n} {op} …` with spaces for a \
-                         comparison"
-                    ),
-                    (Some(op), None) => format!(
-                        "unexpected `{op}` in expression; `{op}` is a comparison operator and \
-                         needs an operand on each side"
-                    ),
-                    (None, _) => {
-                        format!("unexpected redirect in expression: {}", self.peek())
-                    }
-                }))
-            }
-            _ => Err(self.error(format!("unexpected token in expression: {}", self.peek()))),
-        }
+            Token::Word(Word::Plain(op)) if p.peek_expr_op().is_some() => Err(p.error(format!(
+                "`{op}` is an operator and needs an operand on each side"
+            ))),
+            _ => p.parse_atom(),
+        })
     }
 
     /// The operator at the cursor and its binding power, low to high: `||`,
@@ -1571,20 +1487,28 @@ impl Parser {
                 ">=" => Some((InfixOp::Op(BinaryOp::Ge), 3)),
                 _ => None,
             },
-            Token::Word(Word::Slash(s)) if s == "/" => Some((InfixOp::Op(BinaryOp::Div), 5)),
-            // A bare `<` or `>` lexes as a redirect; here it is a comparison.
-            Token::Redirect {
-                fd: None,
-                kind: RedirectMode::Read,
-                target_fd: None,
-            } => Some((InfixOp::Op(BinaryOp::Lt), 3)),
-            Token::Redirect {
-                fd: None,
-                kind: RedirectMode::Write,
-                target_fd: None,
-            } => Some((InfixOp::Op(BinaryOp::Gt), 3)),
             _ => None,
         }
+    }
+}
+
+/// A bare non-numeral word is a string in `$[…]` as everywhere, so under an
+/// operator that wants numbers it is a certain type error — and almost always
+/// a dropped `$`.  Refused here so the error can say so; `==` and `!=` accept
+/// strings and are exempt.
+fn numeric_operand(operand: &Spanned<Box<Ast>>) -> Result<(), ParseError> {
+    match &*operand.item {
+        Ast::Word(Word::Plain(w)) if WordLiteral::classify(w).is_none() => Err(ParseError {
+            message: if lexer::is_ident(w) {
+                format!("`{w}` is the string '{w}' here, not a number — did you mean `${w}`?")
+            } else {
+                format!("`{w}` is the string '{w}' here, not a number")
+            },
+            span: operand.span,
+            lex_kind: None,
+            incompleteness: None,
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -1595,42 +1519,35 @@ enum InfixOp {
     Or,
 }
 
-/// Parse the pre-lexed key streams of `$name[k1][k2]…`, one `word` apiece,
-/// through the ordinary [`Parser::parse_word`].  Their spans still address the
-/// outer source, so a diagnostic from down here underlines the right column.
-fn parse_index_keys(
-    keys: Vec<Spanned<Vec<(Token, Span)>>>,
-) -> Result<Vec<Spanned<Ast>>, ParseError> {
-    keys.into_iter()
-        .map(|key| {
-            let ast = Parser::run_complete(key.item, Parser::parse_word)?;
-            Ok(Spanned::with_span(key.span, ast))
-        })
-        .collect()
+/// The first key fixes the alphabet and every later one must match, so
+/// `` [host: …, `dev: …] `` is rejected in literal and pattern alike.
+fn check_key_alphabet(
+    seen_is_tag: &mut Option<bool>,
+    this_is_tag: bool,
+    key_span: Span,
+    mismatch_msg: &str,
+) -> Result<(), ParseError> {
+    match seen_is_tag {
+        None => *seen_is_tag = Some(this_is_tag),
+        Some(prev) if *prev != this_is_tag => {
+            return Err(Parser::error_at(key_span, mismatch_msg));
+        }
+        Some(_) => {}
+    }
+    Ok(())
 }
 
-/// Build an [`Ast::Index`] from a lexer-fused `$name[k1][k2]…` deref.  Shared
-/// by both consumers of a [`StringPart::Index`], bare and inside a string, so
-/// the two cannot construct it differently.
-fn deref_index_to_ast(
-    name: Spanned<String>,
-    keys: Vec<Spanned<Vec<(Token, Span)>>>,
-) -> Result<Ast, ParseError> {
-    Ok(Ast::Index {
-        target: Spanned::with_span(name.span, Box::new(Ast::Variable(name.item))),
-        keys: parse_index_keys(keys)?,
-    })
-}
-
-/// Parse the pre-lexed body of `$[…]` as a Pratt expression.  The lexer has
-/// already fused the block's adjacent `&` / `|` pairs into `&&` / `||` words.
-fn parse_expr_block(tokens: Vec<(Token, Span)>) -> Result<Expr, ParseError> {
-    Parser::run_complete(tokens, |p| p.parse_expr_prec(0))
-}
-
-/// Parse the pre-lexed body of a `!{…}` interpolation as a statement list.
-fn parse_force_body(tokens: Vec<(Token, Span)>) -> Result<Vec<Stmt>, ParseError> {
-    Parser::run_complete(tokens, Parser::parse_program)
+/// Parse the pre-lexed body of `$[…]` as one expression.
+fn parse_expr_block(tokens: Vec<(Token, Span)>) -> Result<Ast, ParseError> {
+    let mut parser = Parser::new(tokens);
+    let expr = parser.parse_expr_prec(0)?;
+    if parser.peek() != &Token::Eof {
+        let found = parser.peek().clone();
+        return Err(parser.error(format!(
+            "expected an operator before {found} — `$[…]` holds one expression"
+        )));
+    }
+    Ok(*expr.item)
 }
 
 /// Names no binding may take: a keyword by [`crate::syntax::is_keyword`], or a
@@ -1645,6 +1562,17 @@ fn is_reserved(s: &str) -> bool {
 enum MapKeyForm {
     Static(MapKey),
     Deref(String),
+}
+
+/// One item of a bracketed literal, read before the literal's shape is known.
+enum CollectionItem {
+    Spread(Spanned<Ast>),
+    Elem(Spanned<Ast>),
+    Entry {
+        key: MapKeyForm,
+        key_span: Span,
+        value: Spanned<Ast>,
+    },
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -1841,8 +1769,17 @@ mod tests {
                 payload: payload.map(|p| Spanned::synthetic_boxed(strip_one(*p.item))),
             },
             Ast::Spread(value) => Ast::Spread(Spanned::synthetic_boxed(strip_one(*value.item))),
+            Ast::Binary(l, op, r) => Ast::Binary(strip_boxed(l), op, strip_boxed(r)),
+            Ast::And(l, r) => Ast::And(strip_boxed(l), strip_boxed(r)),
+            Ast::Or(l, r) => Ast::Or(strip_boxed(l), strip_boxed(r)),
+            Ast::Negate(inner) => Ast::Negate(strip_boxed(inner)),
+            Ast::Not(inner) => Ast::Not(strip_boxed(inner)),
             other => other,
         }
+    }
+
+    fn strip_boxed(node: Spanned<Box<Ast>>) -> Spanned<Box<Ast>> {
+        Spanned::synthetic_boxed(strip_one(*node.item))
     }
 
     fn strip_scope(op: ScopeAst) -> ScopeAst {
@@ -2036,24 +1973,78 @@ mod tests {
 
     // ── Sub-token-stream parsers require EOF ─────────────────────────
 
-    /// `$[2>3]` lexes `2>` as a file descriptor, so `>` lands in operand
-    /// position; the error must name the glued shape, not "redirect".
+    /// Inside `$[…]` a `>` is a comparison however it is spaced: `2>` is not
+    /// a file descriptor there.
     #[test]
-    fn glued_comparison_suggests_spacing() {
-        let err = parse("return $[2>3]").unwrap_err();
-        assert!(
-            err.message.contains("`2>`") && err.message.contains("with spaces"),
-            "expected a spacing hint naming `2>`, got: {}",
-            err.message
-        );
+    fn glued_comparison_is_a_comparison() {
+        for src in ["return $[2>3]", "return $[2 > 3]", "return $[$x<3]"] {
+            let ast = unwrap_stmts(parse(src).unwrap());
+            let Ast::Return(Some(v)) = &ast[0] else {
+                panic!("{src:?}: expected a return, got {ast:?}");
+            };
+            assert!(
+                matches!(*v.item, Ast::Binary(_, BinaryOp::Gt | BinaryOp::Lt, _)),
+                "{src:?}: expected a comparison, got {:?}",
+                v.item
+            );
+        }
 
-        // No glued digit to blame, so the message names the comparison.
         let err = parse("return $[< 3]").unwrap_err();
         assert!(
-            err.message.contains("comparison operator"),
-            "expected a comparison-operator error, got: {}",
+            err.message.contains("operand on each side"),
+            "expected an operator-position error, got: {}",
             err.message
         );
+    }
+
+    /// An operand is any atom, so a string may be compared — the typechecker,
+    /// not the grammar, says what `+` accepts.
+    #[test]
+    fn expression_operands_are_atoms() {
+        let ast = unwrap_stmts(parse("$[$s == 'quit']").unwrap());
+        assert_eq!(
+            ast,
+            vec![binary(
+                Ast::Variable("s".into()),
+                BinaryOp::Eq,
+                Ast::Literal("quit".into()),
+            )]
+        );
+        let ast = unwrap_stmts(parse("$[!{f}[k] + [1][0]]").unwrap());
+        assert!(matches!(ast[0], Ast::Binary(_, BinaryOp::Add, _)));
+    }
+
+    /// Two operands with no operator between them name the gap, not
+    /// "trailing input".
+    #[test]
+    fn juxtaposed_operands_name_the_missing_operator() {
+        let err = parse("$[1 2]").unwrap_err();
+        assert!(
+            err.message.contains("expected an operator"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    /// Outside `$[…]` the shell meaning of `>` stands, so `>=` is a redirect
+    /// to a file named `=…`, exactly as §3.5 lists `>` among the word-enders.
+    #[test]
+    fn comparison_spellings_are_redirects_outside_expressions() {
+        let ast = unwrap_stmts(parse("echo a >= b").unwrap());
+        let Ast::Call { redirects, .. } = &ast[0] else {
+            panic!("expected a call, got {ast:?}");
+        };
+        assert_eq!(redirects.len(), 1);
+    }
+
+    /// The bash reflexes `&&` and `||` each earn an error naming ral's own
+    /// spelling, rather than a stray-token complaint.
+    #[test]
+    fn logical_connectives_outside_expressions_are_refused_by_name() {
+        let err = parse("echo a && echo b").unwrap_err();
+        assert!(err.message.contains("no `&&`"), "got: {}", err.message);
+        let err = parse("echo a || echo b").unwrap_err();
+        assert!(err.message.contains("no `||`"), "got: {}", err.message);
     }
 
     /// `(` opens the unit literal and nothing else, so a reader reaching for
@@ -2207,17 +2198,15 @@ mod tests {
         );
     }
 
+    fn binary(l: Ast, op: BinaryOp, r: Ast) -> Ast {
+        Ast::Binary(Spanned::synthetic_boxed(l), op, Spanned::synthetic_boxed(r))
+    }
+
     #[test]
     fn parse_arithmetic() {
-        let ast = unwrap_stmts(parse("$[2 + 3]").unwrap());
-        assert_eq!(
-            ast,
-            vec![Ast::Expr(Box::new(Expr::BinOp(
-                Box::new(Expr::Integer(2)),
-                BinaryOp::Add,
-                Box::new(Expr::Integer(3)),
-            )))]
-        );
+        let sum = vec![binary(plain("2"), BinaryOp::Add, plain("3"))];
+        assert_eq!(unwrap_stmts(parse("$[2 + 3]").unwrap()), sum);
+        assert_eq!(unwrap_stmts(parse("$[2+3]").unwrap()), sum);
     }
 
     #[test]
@@ -2225,35 +2214,19 @@ mod tests {
         let ast = unwrap_stmts(parse("$[2 + 3 * 4]").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::Expr(Box::new(Expr::BinOp(
-                Box::new(Expr::Integer(2)),
+            vec![binary(
+                plain("2"),
                 BinaryOp::Add,
-                Box::new(Expr::BinOp(
-                    Box::new(Expr::Integer(3)),
-                    BinaryOp::Mul,
-                    Box::new(Expr::Integer(4)),
-                )),
-            )))]
+                binary(plain("3"), BinaryOp::Mul, plain("4")),
+            )]
         );
     }
 
-    /// A float needs a `.`, so these three stay strings inside `$[…]` too.
+    /// `$[…]` leaves no node of its own: a lone operand is that operand.
     #[test]
-    fn expr_atom_rejects_non_dotted_float_shapes() {
-        for s in ["$[nan]", "$[inf]", "$[1e5]"] {
-            let err = parse(s).unwrap_err();
-            assert!(
-                err.message.contains("expected a number"),
-                "{s:?} should be rejected as a number, got: {}",
-                err.message
-            );
-        }
-    }
-
-    #[test]
-    fn expr_atom_accepts_dotted_float() {
+    fn expression_block_of_one_operand_is_the_operand() {
         let ast = unwrap_stmts(parse("$[1.5]").unwrap());
-        assert_eq!(ast, vec![Ast::Expr(Box::new(Expr::Number(1.5)))]);
+        assert_eq!(ast, vec![plain("1.5")]);
     }
 
     /// `not $x == 0` is `(not $x) == 0`, never `not ($x == 0)`.
@@ -2262,12 +2235,77 @@ mod tests {
         let ast = unwrap_stmts(parse("$[not $x == 0]").unwrap());
         assert_eq!(
             ast,
-            vec![Ast::Expr(Box::new(Expr::BinOp(
-                Box::new(Expr::Not(Box::new(Expr::Variable("x".into())))),
+            vec![binary(
+                Ast::Not(Spanned::synthetic_boxed(Ast::Variable("x".into()))),
                 BinaryOp::Eq,
-                Box::new(Expr::Integer(0)),
-            )))]
+                plain("0"),
+            )]
         );
+    }
+
+    /// `"!$d"` is the same force as `!$d`: a splice parses as the atom its
+    /// tokens spell outside the string, so no `!{$d}` thunk wraps the value.
+    #[test]
+    fn interpolated_force_of_a_variable_is_a_bare_force() {
+        let ast = unwrap_stmts(parse("echo \"<!$d>\"").unwrap());
+        assert_eq!(
+            ast,
+            vec![app(
+                bare_head("echo"),
+                vec![Ast::Interpolation(vec![
+                    sp(Ast::Literal("<".into())),
+                    sp(Ast::Force(Spanned::synthetic_boxed(Ast::Variable(
+                        "d".into()
+                    )))),
+                    sp(Ast::Literal(">".into())),
+                ])],
+            )]
+        );
+    }
+
+    /// `!` reaches over a dereference's keys but not over a block's: the
+    /// prelude's `!$p[tail]` forces the field, while `!{cmd}[k]` indexes the
+    /// forced result.  The same two shapes hold inside a string.
+    #[test]
+    fn force_reaches_over_a_dereference_but_not_a_block() {
+        let field = Ast::Force(Spanned::synthetic_boxed(Ast::Index {
+            target: Spanned::synthetic_boxed(Ast::Variable("p".into())),
+            keys: vec![sp(plain("tail"))],
+        }));
+        let result = Ast::Index {
+            target: Spanned::synthetic_boxed(Ast::Force(Spanned::synthetic_boxed(Ast::Block(
+                body(vec![plain("cmd")]),
+            )))),
+            keys: vec![sp(plain("k"))],
+        };
+        assert_eq!(
+            unwrap_stmts(parse("!$p[tail]").unwrap()),
+            vec![field.clone()]
+        );
+        assert_eq!(
+            unwrap_stmts(parse("!{cmd}[k]").unwrap()),
+            vec![result.clone()]
+        );
+        assert_eq!(
+            unwrap_stmts(parse("\"!$p[tail]!{cmd}[k]\"").unwrap()),
+            vec![Ast::Interpolation(vec![sp(field), sp(result)])]
+        );
+    }
+
+    /// A splice absorbs adjacent `[key]` groups, whatever it began with.
+    #[test]
+    fn interpolated_splices_take_postfix_keys() {
+        for src in ["\"$(h)[file]\"", "\"!{f}[file]\"", "\"$h[file]\""] {
+            let ast = unwrap_stmts(parse(src).unwrap());
+            let Ast::Interpolation(parts) = &ast[0] else {
+                panic!("{src:?}: expected an interpolation, got {ast:?}");
+            };
+            assert!(
+                matches!(&parts[0].item, Ast::Index { keys, .. } if keys.len() == 1),
+                "{src:?}: expected one index, got {:?}",
+                parts[0].item
+            );
+        }
     }
 
     #[test]

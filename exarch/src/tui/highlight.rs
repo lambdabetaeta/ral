@@ -65,7 +65,7 @@ fn highlighted_spans(src: &str, tokens: &[(Token, ral_core::source::Span)]) -> V
 fn class(tok: &Token) -> Style {
     let fg = match tok {
         Token::SingleQuoted(_) | Token::DoubleQuoted(_) => CODE_STRING,
-        Token::Deref(_) | Token::Dollar => CODE_VARIABLE,
+        Token::Variable(_) => CODE_VARIABLE,
         Token::Tag(_) => CODE_TAG,
         Token::LBrace
         | Token::RBrace

@@ -111,7 +111,6 @@ module.exports = grammar({
     pipeline: $ => prec.left(seq(
       $.cmd,
       repeat(seq('|', optional(/\n+/), $.cmd)),
-      optional('&'),
     )),
 
     cmd: $ => choice(
@@ -444,7 +443,9 @@ module.exports = grammar({
 
     // ── Arithmetic expressions ────────────────────────────────────────────────
 
-    // $[ expr ] — arithmetic/logic expression block.
+    // $[ expr ] — the expression block: the one context whose operators are
+    // words, and whose operands are the ordinary value atoms (the checker,
+    // not the grammar, says which values `+` or `==` accept).
     // '$[' is a compound token so the lexer doesn't confuse it with '$' + '['.
     arith_expr: $ => seq(
       token(seq('$', '[')),
@@ -457,13 +458,7 @@ module.exports = grammar({
       $.arith_negate,
       $.arith_not,
       $.arith_group,
-      $.arith_force,
-      $.deref_paren,
-      $.deref_index,
-      $.deref,
-      $.integer,
-      $.float,
-      $.boolean,
+      $._value_bracket,
     ),
 
     arith_binary: $ => choice(
@@ -477,13 +472,6 @@ module.exports = grammar({
     arith_negate: $ => prec(6, seq('-', $._arith)),
     arith_not:    $ => prec(6, seq('not', $._arith)),
     arith_group:  $ => seq('(', $._arith, ')'),
-
-    // Force inside arithmetic: !{ cmd }
-    arith_force: $ => seq(
-      token(seq('!', '{')),
-      optional($._block_body),
-      '}',
-    ),
 
     // ── Dereferences ─────────────────────────────────────────────────────────
 
@@ -516,11 +504,9 @@ module.exports = grammar({
       '}',
     ),
 
-    // !$name or !name — force a stored thunk
-    force_bang: $ => choice(
-      token(seq('!', '$', IDENT)),
-      token(seq('!', IDENT)),
-    ),
+    // !$name — force a stored thunk.  A `!` before anything else is the
+    // literal character (in a string) or a force of that primary.
+    force_bang: $ => token(seq('!', '$', IDENT)),
 
     // ── Tilde ────────────────────────────────────────────────────────────────
 
@@ -642,10 +628,8 @@ module.exports = grammar({
     // $name inside a string
     interp_deref: $ => token.immediate(seq('$', IDENT)),
 
-    // !$name or !name inside a string
-    interp_force_plain: $ => token.immediate(
-      seq('!', choice(seq('$', IDENT), IDENT)),
-    ),
+    // !$name inside a string; `!` before anything else is text
+    interp_force_plain: $ => token.immediate(seq('!', '$', IDENT)),
 
     // ── Primitives ───────────────────────────────────────────────────────────
 
