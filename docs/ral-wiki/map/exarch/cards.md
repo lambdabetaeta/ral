@@ -136,7 +136,8 @@ a box with its heading lifted into the top rule, no rail glyph (the frame is its
 mark, see [[map/exarch/frontend|frontend]]).
 
 `render_card_framed` takes the box's left indent rather than owning one, so where a card
-sits is a property of the placement that asks for it: `CARD_INDENT` (4) for the
+sits is a property of the placement that asks for it: `CARD_INDENT` (2, prose's
+column, so the text inside lands level with a call's effect rows) for the
 transcript, `banner::OPENING_INDENT` for the session card, which shares the
 constant with the wordmark so the two align by construction rather than by a pad
 baked into `data/banner.txt`. The opening is one rail-free `Chrome::Opening`

@@ -606,9 +606,10 @@ pub(super) fn render_card_unframed(card: &Card, at: Detail) -> Vec<Line<'static>
     ls
 }
 
-/// Left indent of a framed card in the transcript. Diff cards render unframed
-/// and therefore do not pay this inset.
-pub(super) const CARD_INDENT: usize = 4;
+/// Left indent of a framed card in the transcript: the frame sits on prose's
+/// column, so the text inside lands level with a call's effect rows.  Diff
+/// cards render unframed and do not pay this inset.
+pub(super) const CARD_INDENT: usize = 2;
 
 /// A deliberately bounded card at `indent_w`. General surfaced cards and
 /// fixed placements use this path; transcript diffs use [`render_card_unframed`].
