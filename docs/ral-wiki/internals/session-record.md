@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 146084be
+verified_at_commit: ed466ea2
 verified_at_date: 2026-09-09
-anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Blocks::step, Delta, Printer::fact, replay, model::resume, Scrollback::fact, Scrollback::trim, seed, flush_log, rotate, clear, Context, Turn, Body, Pointer, TurnRow, Held, Locus, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
+anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Blocks::step, Delta, Sink::fact, Blocks::model, replay, model::resume, Scrollback::fact, Scrollback::trim, seed, flush_log, rotate, clear, Context, Turn, Body, Pointer, TurnRow, Held, Locus, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
 ---
 
 # Session record: one seam, one log
@@ -30,7 +30,12 @@ Append-then-publish makes channel order log order, so a missing or slow
 receiver cannot lose the fact: it is already in the file and a later replay
 can catch up. The sink is attachable because the session log outlives a TUI
 session bus and the headless per-exchange buses that are attached to it in
-turn.
+turn. A log keeps what it appended while it had no sink at all — a session's
+head bookend, a fork's inherited context — and `attach` publishes that backlog
+in order through the arriving sink, so the seam delivers every record to the
+sink exactly once, whenever the sink arrives. Redelivery is safe because the
+view fold ignores a `Seq` it has already folded: a resumed memo seeded from
+the file is not stepped a second time by the same head records.
 
 `Emitter::transient` uses the same log mutex for ordering but never writes a
 line or takes a sequence number. It publishes the other channel passenger,
@@ -199,15 +204,22 @@ The view path is `Blocks::step` over `Display` and `Forensic`; it skips
 `Protocol` explicitly. `Blocks::push` joins consecutive records of one lane
 into a block, while a different kind opens the next block. `Block` construction
 is private to the fold, and the memo keeps a bounded resident window
-(`BLOCKS_WINDOW`) — the one window, for every printer.
+(`BLOCKS_WINDOW`) — the one window, for every frontend.
 
 Each step reports what it did as a `Delta`: `Opened` a block, `Grew` the lane
-the tail held, `Patched` a call with its result, or `Quiet`. A
-`record::Printer` owns its own `Blocks` memo, steps it through
-`Printer::fact(rec)`, and draws that increment — so a printer is itself a fold
-over the one log, and cannot invent a third block projection: it renders from
-`BlockKind` off its memo, never from the record vocabulary
+the tail held, `Patched` a call with its result, or `Quiet`. A frontend is a
+`bus::Sink`: it owns its own `Blocks` memo, steps it through
+`Sink::fact(id, rec)` — the witnessed record, since a fold is stepped by the
+record *and* its locus — and draws that increment, so a frontend is itself a
+fold over the one log, and cannot invent a third block projection: it renders
+from `BlockKind` off its memo, never from the record vocabulary
 ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
+Beside the blocks the memo holds the ambient facts none of them draws:
+cumulative usage from the forensic deltas, and the model in force — named by
+the session's head bookend, renamed by each `Forensic::ModelChanged`, so
+`Blocks::model` is total from a session's first record and the context floor a
+frontend stamps prose with reads both of its terms off the fold rather than
+being told the denominator.
 The TUI keeps a 1:1 mirror of its memo, one `tui::Block` per incident, with
 deliberation and the work it ordered collapsed into a group as they land;
 headless keeps one memo per source agent and prints each opened block.

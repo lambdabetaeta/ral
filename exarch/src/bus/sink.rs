@@ -7,7 +7,7 @@
 //! and the TUI's `ui_loop` in `tui/tui_loop.rs` drive it, so they cannot drift.
 
 use super::{AgentId, BusReceiver, Emitter, FleetBus, Signal, WORKER_PANIC_PREFIX};
-use crate::record::{Forensic, Record, Transient};
+use crate::record::{Forensic, Record, Recorded, Transient};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
@@ -62,20 +62,27 @@ fn drain_signals(
     }
 }
 
-/// One presentation surface.
+/// One frontend: itself a fold over the one log, stepping its own memo per
+/// record and drawing the increment that step reports.
 ///
 /// The default [`Self::drive`] — headless and the tests — blocks between
 /// drain passes; the TUI is not a `Sink`, but its `ui_loop` drains
 /// [`drain_signals`] on its render cadence, so completion is identical on both.
 pub trait Sink {
-    /// A durable fact reaching the sink live, as [`Signal::Fact`] carries it.
-    /// The default does nothing: a printer draws whichever half of the seam
+    /// A durable fact reaching the sink live, as [`Signal::Fact`] carries it —
+    /// witnessed, since a fold is stepped by the record *and* its locus.
+    ///
+    /// The default does nothing: a frontend draws whichever half of the seam
     /// it has a use for, and one that folds a session into blocks (headless)
-    /// or narrates it as a stream (synod) overrides this.
-    fn fact(&mut self, _id: AgentId, _fact: &Record) {}
+    /// or narrates it as a stream (synod) overrides this.  A sink is handed
+    /// the record only to step its own memo — never to render the record
+    /// vocabulary from it, which it draws from
+    /// [`BlockKind`](crate::record::BlockKind) off the memo instead, so a
+    /// second hand-rolled projection cannot compile.
+    fn fact(&mut self, _id: AgentId, _rec: &Recorded<Record>) {}
 
     /// A [`Transient`] delta reaching the sink live — no durable form and no
-    /// sequence number, so only a printer folding over `Transient` directly
+    /// sequence number, so only a frontend folding over `Transient` directly
     /// has a use for one.
     fn transient(&mut self, _id: AgentId, _t: &Transient) {}
 
@@ -99,7 +106,7 @@ pub trait Sink {
     /// Route one raw signal to `fact` or `transient`.
     fn accept(&mut self, sig: Signal) {
         match sig {
-            Signal::Fact(id, fact) => self.fact(id, fact.value()),
+            Signal::Fact(id, fact) => self.fact(id, &fact),
             Signal::Transient(id, t) => self.transient(id, &t),
         }
     }
@@ -166,7 +173,7 @@ pub(crate) fn drain_records(rx: &BusReceiver) -> Vec<Record> {
 mod tests {
     use super::{Sink, pump};
     use crate::bus::{AgentId, Emitter, FleetBus, Inbox};
-    use crate::record::{Record, Transient};
+    use crate::record::{Record, Recorded, Transient};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
@@ -215,8 +222,8 @@ mod tests {
     fn recovered_panic_records_a_forensic_error() {
         struct FactSink(Vec<String>);
         impl Sink for FactSink {
-            fn fact(&mut self, _id: AgentId, fact: &Record) {
-                if let Record::Forensic(crate::record::Forensic::Error { text }) = fact {
+            fn fact(&mut self, _id: AgentId, rec: &Recorded<Record>) {
+                if let Record::Forensic(crate::record::Forensic::Error { text }) = rec.value() {
                     self.0.push(text.clone());
                 }
             }

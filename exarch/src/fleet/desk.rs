@@ -2852,7 +2852,7 @@ mod tests {
         assert!(desk.services.acts.audit().is_none(), "a read has no act");
         let record = crate::bus::drain_records(&rx)
             .into_iter()
-            .next()
+            .find(|record| matches!(record, Record::Display(Display::HarnessCall { .. })))
             .expect("the read must reach the trace");
         assert!(matches!(
             record,
@@ -2876,7 +2876,7 @@ mod tests {
         );
         let record = crate::bus::drain_records(&rx)
             .into_iter()
-            .next()
+            .find(|record| matches!(record, Record::Display(Display::HarnessCall { .. })))
             .expect("a refused read still reaches the trace");
         assert!(matches!(
             record,

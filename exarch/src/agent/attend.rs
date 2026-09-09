@@ -1114,7 +1114,9 @@ mod tests {
             "the early return never advances the check epoch"
         );
         assert!(
-            crate::bus::drain_records(&rx).is_empty(),
+            !crate::bus::drain_records(&rx)
+                .into_iter()
+                .any(|record| matches!(record, Record::Forensic(Forensic::SystemNote { .. }))),
             "unconfigured: never emits, ever"
         );
     }
@@ -1135,7 +1137,9 @@ mod tests {
             .check_disk_warn()
             .expect("an identity seat never severs");
         assert!(
-            !crate::bus::drain_records(&rx).is_empty(),
+            crate::bus::drain_records(&rx)
+                .into_iter()
+                .any(|record| matches!(record, Record::Forensic(Forensic::SystemNote { .. }))),
             "the first crossing warns"
         );
 
@@ -1169,16 +1173,14 @@ mod tests {
         session
             .check_disk_warn()
             .expect("an identity seat never severs");
-        let fact = crate::bus::drain_records(&rx)
+        let note = crate::bus::drain_records(&rx)
             .into_iter()
-            .next()
+            .find_map(|record| match record {
+                Record::Forensic(Forensic::SystemNote { text }) => Some(text),
+                _ => None,
+            })
             .expect("the first crossing warns");
-        match fact {
-            Record::Forensic(Forensic::SystemNote { text }) => {
-                assert!(text.contains("disk"), "{text}");
-            }
-            other => panic!("expected Forensic::SystemNote, got {other:?}"),
-        }
+        assert!(note.contains("disk"), "{note}");
 
         std::fs::remove_file(&big).unwrap();
         session.disk_check_epoch = session.ral_epoch;
@@ -1197,7 +1199,9 @@ mod tests {
             .check_disk_warn()
             .expect("an identity seat never severs");
         assert!(
-            !crate::bus::drain_records(&rx).is_empty(),
+            crate::bus::drain_records(&rx)
+                .into_iter()
+                .any(|record| matches!(record, Record::Forensic(Forensic::SystemNote { .. }))),
             "re-crossing after falling below warns again"
         );
     }

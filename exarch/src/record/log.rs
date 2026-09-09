@@ -11,9 +11,13 @@
 //! construction.  The publisher is *attachable* rather than fixed at
 //! construction because the log outlives any one bus — a session's log is
 //! built before the first frontend and survives every per-exchange bus a
-//! headless run mints — and an unattached (or dead-channel) publish is a
-//! no-op on purpose: the record is already durable, and a consumer that was
-//! not listening catches up from the file, never from the channel.
+//! headless run mints.
+//!
+//! The seam therefore delivers every record to the sink exactly once,
+//! whenever the sink arrives: records appended before the first attach are
+//! kept and published, in order, by [`Log::attach`].  A publish onto a *dead*
+//! channel stays a no-op on purpose — the record is already durable, and a
+//! consumer that stopped listening catches up from the file.
 
 use super::{Entry, Locus, Record, Recorded, Seq, Transient};
 use crate::bootstrap::now_unix_ms;
@@ -36,6 +40,23 @@ pub(crate) struct FleetSink {
     pub(crate) meter: UsageMeter,
 }
 
+/// Meter one witnessed record and publish it — the one publish rule, shared
+/// by a live [`Log::append`] and the backlog [`Log::attach`] delivers.
+fn publish(sink: &FleetSink, recorded: Recorded<Record>) {
+    if let Record::Forensic(super::Forensic::UsageDelta { usage }) = recorded.value() {
+        sink.meter.add(usage.into());
+    }
+    if sink
+        .tx
+        .send_signal(Signal::Fact(sink.id, recorded))
+        .is_err()
+    {
+        // No live receiver — the record is already durable on disk, which is
+        // the whole point: a pressured or absent consumer catches up from the
+        // file, never from the channel.
+    }
+}
+
 /// `inner` is outside the workspace's poison door ([`ral_core::sync::LockExt`])
 /// on purpose: `seq` and `pos` are the file's own position, restated in memory,
 /// and [`Self::append`] advances them only after the bytes are written. A panic
@@ -51,6 +72,11 @@ struct Inner {
     /// publish, they just have no durable form.
     writer: Option<BufWriter<File>>,
     sink: Option<FleetSink>,
+    /// What was appended before any sink attached — a session's bookend, a
+    /// fork's inherited context — held so the first sink to arrive is not
+    /// missing the head of its own log.  Emptied by [`Log::attach`] and never
+    /// refilled: after an attach there is a sink, live or dead.
+    pending: Vec<Recorded<Record>>,
     seq: u64,
     /// This process's own append cursor, tracked rather than re-derived from
     /// `Seek`, so a flush never has to double as a position query.
@@ -119,6 +145,7 @@ impl Log {
             inner: Mutex::new(Inner {
                 writer,
                 sink: None,
+                pending: Vec::new(),
                 seq,
                 pos,
             }),
@@ -151,21 +178,29 @@ impl Log {
             .lock()
             .map_err(|_| io::Error::other("record log lock poisoned"))?;
         inner.writer = writer;
+        // Undelivered records of the segment being left behind: the new
+        // numbering starts at zero, so publishing them past this point would
+        // hand a fold two records claiming one `Seq`.
+        inner.pending.clear();
         inner.seq = 0;
         inner.pos = 0;
         drop(inner);
         Ok(())
     }
 
-    /// Point this log's publisher at a live fleet channel.  Called wherever a
-    /// session's seam meets a run's bus (attend, deliberate, a direct
-    /// `run_shell`); re-attaching over a dead per-exchange channel is the
-    /// ordinary way a headless session's next exchange comes back on air.
+    /// Point this log's publisher at a live fleet channel, delivering whatever
+    /// was appended before any sink existed.  Called wherever a session's seam
+    /// meets a run's bus (attend, deliberate, a direct `run_shell`);
+    /// re-attaching over a dead per-exchange channel is the ordinary way a
+    /// headless session's next exchange comes back on air.
     #[allow(clippy::disallowed_methods, reason = "see [`Log`]")]
     pub(super) fn attach(&self, sink: FleetSink) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
+        for recorded in std::mem::take(&mut inner.pending) {
+            publish(&sink, recorded);
+        }
         inner.sink = Some(sink);
     }
 
@@ -197,20 +232,10 @@ impl Log {
         inner.seq += 1;
         let body = &line[..line.len() - 1];
         let locus = Locus::over(Seq::new(inner.seq), start, body);
-        if let Some(sink) = &inner.sink {
-            if let Record::Forensic(super::Forensic::UsageDelta { usage }) = &record {
-                sink.meter.add(usage.into());
-            }
-            let recorded = Recorded::new(locus.clone(), record);
-            if sink
-                .tx
-                .send_signal(Signal::Fact(sink.id, recorded))
-                .is_err()
-            {
-                // No live receiver — the record is already durable on disk,
-                // which is the whole point: a pressured or absent consumer
-                // catches up from the file, never from the channel.
-            }
+        let recorded = Recorded::new(locus.clone(), record);
+        match &inner.sink {
+            Some(sink) => publish(sink, recorded),
+            None => inner.pending.push(recorded),
         }
         drop(inner);
         Ok(locus)

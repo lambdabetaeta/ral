@@ -21,7 +21,7 @@ use crate::agent::resources::{BusFigures, ScrollbackFigures};
 use crate::bus::{AgentId, AgentState, BusReceiver, Inbox};
 use crate::provider::identity::Account;
 use crate::provider::{Provider, Usage};
-use crate::record::{Display, Forensic, Printer as _, Record, Recorded, Transient};
+use crate::record::{Display, Forensic, Record, Recorded, Transient};
 
 use ratatui::{
     crossterm::event::{
@@ -128,10 +128,6 @@ impl App {
             format!("{status_provider}/{} ({effort})", p.model())
         };
         self.context_window = crate::provider::pricing::caps_or_default(p.model()).context_window;
-        // The denominator of the fidelity each scrollback stamps its prose with.
-        for sb in self.tabs.views_mut() {
-            sb.set_context_window(self.context_window);
-        }
     }
 
     /// Whether the focused tab has an agent to steer.  Root's own handle
@@ -288,7 +284,7 @@ impl App {
     /// Fold one witnessed record fact into the screen — the sole way a
     /// `Display`/`Forensic` commit reaches it.  The recording scrollback steps
     /// its own fold-memo and draws what the step reports
-    /// ([`Scrollback::fact`](crate::record::Printer::fact));
+    /// ([`Scrollback::fact`]);
     /// [`Display::SubagentDone`] always lands in root's scrollback, whatever
     /// nesting depth drained the result, since the trunk is the permanent
     /// record of delegated work.
@@ -323,7 +319,7 @@ impl App {
     /// mirror of [`Self::fact`] for [`crate::bus::Signal::Transient`].
     /// [`Transient::Born`]/[`Died`]/[`Resources`] need the tabs a bare
     /// `Scrollback` cannot see, so they are answered here; everything else
-    /// forwards to [`record::Printer::transient`] on the recording scrollback.
+    /// forwards to [`Scrollback::transient`] on the recording scrollback.
     pub fn transient(&mut self, id: AgentId, t: Transient, bus: &BusReceiver) {
         // A `Cleared` answering *our* `/clear` is the gate's key and nothing
         // more: [`Self::clear`] already blanked the scrollback and redrew the
@@ -747,11 +743,11 @@ mod tests {
     /// buffer at all, so it cannot split a run it is never offered to.  This
     /// drives the real production pipeline — `SurfaceBuffer` grouping into a
     /// `Display::ObservationGroup` commit, stepped through the scrollback's own
-    /// fold by `Printer::fact`.
+    /// fold by `Scrollback::fact`.
     #[test]
     fn a_pin_never_splits_a_coalesced_observation_run() {
         use crate::record::commit::SurfaceBuffer;
-        use crate::record::{Emitter as RecordEmitter, FleetSink, Printer};
+        use crate::record::{Emitter as RecordEmitter, FleetSink};
 
         let (mut app, _rx, root) = app();
         let path = std::env::temp_dir().join(format!(

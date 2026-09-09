@@ -156,16 +156,17 @@ pub const BLOCKS_WINDOW: usize = 1000;
 pub struct Blocks {
     blocks: Vec<Block>,
     usage: UsageTotal,
-    /// The model in force, from the most recent [`Forensic::ModelChanged`].
-    /// A session's *first* model rides [`Forensic::SessionStarted`], which
-    /// this fold ignores — so a session that never switches models has no
-    /// entry here.  A printer wanting the opening model too must read it off
-    /// the model fold's own memo; this fold does not duplicate it.
+    /// The model in force: the one the session opened under, and then each
+    /// [`Forensic::ModelChanged`]'s.
     model: Option<(String, String)>,
     /// The [`Seq`] of the first block this fold ever held, remembered past
     /// eviction — the door [`Self::blocks`] no longer names once the window
     /// has moved off the session's opening block.
     origin: Option<Seq>,
+    /// High-water [`Seq`]: a resumed memo is seeded from the file and then
+    /// handed the same head records again when the seam's sink attaches, so a
+    /// record at or below this has been folded already.
+    seen: Option<Seq>,
 }
 
 impl Blocks {
@@ -192,20 +193,25 @@ impl Blocks {
         self.usage.output
     }
 
-    /// `(model, provider)` of the most recent switch, if any.  See
-    /// [`Self::model`]'s field doc for why a session's opening model is not
-    /// available here.
+    /// `(model, provider)` in force — total from the session's first record,
+    /// its head bookend, onward.
     pub fn model(&self) -> Option<(&str, &str)> {
         self.model.as_ref().map(|(m, p)| (m.as_str(), p.as_str()))
     }
 
-    /// Fold one witnessed fact in, reporting what it moved.
+    /// Fold one witnessed fact in, reporting what it moved.  A record the
+    /// memo has already folded moves nothing, so the same log stepped twice
+    /// and stepped once are the same memo.
     ///
     /// # Errors
     /// Returns [`Refusal`] when this fold does not recognise the record —
     /// during replay that refuses the session rather than skip it silently.
     pub fn step(&mut self, record: &Recorded<super::Record>) -> Result<Delta, Refusal> {
         let seq = record.locus().seq();
+        if self.seen.is_some_and(|folded| seq <= folded) {
+            return Ok(Delta::Quiet);
+        }
+        self.seen = Some(seq);
         Ok(match record.value().clone() {
             super::Record::Protocol(_) => Delta::Quiet,
             super::Record::Display(d) => self.step_display(seq, d),
@@ -352,15 +358,18 @@ impl Blocks {
             Forensic::HarnessResult { text } => self.push(seq, BlockKind::HarnessResult { text }),
             // The history informs a resume note; the live register follows the
             // shell boundary and is not restored — so neither is a scrollback
-            // block this fold draws.  The session bookends and a turn's effort
-            // dial draw none either: evidence with a display twin, or with none.
+            // block this fold draws.  The tail bookend and a turn's effort dial
+            // draw none either: evidence with a display twin, or with none.
             Forensic::Pin { .. }
             | Forensic::Unpin { .. }
-            | Forensic::SessionStarted { .. }
-            | Forensic::SessionResumed { .. }
             | Forensic::SessionEnded
             | Forensic::TurnStarted { .. } => Delta::Quiet,
-            Forensic::ModelChanged { model, label, .. } => {
+            // A head bookend opens the session under a model exactly as a
+            // switch names one mid-session, so all three land in the memo and
+            // none of them draws a block.
+            Forensic::SessionStarted { model, label, .. }
+            | Forensic::SessionResumed { model, label, .. }
+            | Forensic::ModelChanged { model, label, .. } => {
                 self.model = Some((model, label));
                 Delta::Quiet
             }

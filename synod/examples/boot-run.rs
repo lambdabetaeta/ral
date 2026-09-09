@@ -51,7 +51,7 @@ use exarch::egress::Egress;
 use exarch::headless::converse_settled;
 use exarch::provider::scripted::{Reply, Script};
 use exarch::provider::{Bureau, Provider, ToolCall};
-use exarch::record::{Display, Record, Transient};
+use exarch::record::{Display, Record, Recorded, Transient};
 use ral_core::types::GrantStack;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -233,8 +233,8 @@ fn ral_call(id: &str, cmd: &str) -> ToolCall {
 struct PrintSink;
 
 impl Sink for PrintSink {
-    fn fact(&mut self, _id: AgentId, fact: &Record) {
-        if let Record::Display(Display::SubagentDone { name, error, .. }) = fact {
+    fn fact(&mut self, _id: AgentId, rec: &Recorded<Record>) {
+        if let Record::Display(Display::SubagentDone { name, error, .. }) = rec.value() {
             match error {
                 Some(e) => println!("\n[{name} failed: {e}]"),
                 None => println!("\n[{name} finished]"),

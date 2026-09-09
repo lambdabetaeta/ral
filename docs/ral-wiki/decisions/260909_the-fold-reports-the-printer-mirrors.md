@@ -1,17 +1,17 @@
 ---
 status: accepted
-generated_at_commit: 146084be
+generated_at_commit: ed466ea2
 ---
 
 # The fold reports, the printer mirrors
 
-**The view fold says what each record did to it, and a printer keeps a 1:1
+**The view fold says what each record did to it, and a frontend keeps a 1:1
 mirror of its own memo driven by those reports.** `Blocks::step` returns a
-`Delta` — `Opened` / `Grew` / `Patched` / `Quiet` — and `Printer::fact(rec)`
-replaces `Printer::sync(&Blocks)`: every printer is itself a fold over the one
-log, stepping its own memo and drawing the increment. Nothing downstream
-re-derives the memo, so there is no revision to compare, no floor to rebuild
-from, and no second window.
+`Delta` — `Opened` / `Grew` / `Patched` / `Quiet` — and `Sink::fact(id, rec)`
+replaces the whole-memo sync: a frontend is a `bus::Sink`, itself a fold over
+the one log, stepping its own memo and drawing the increment. Nothing
+downstream re-derives the memo, so there is no revision to compare, no floor to
+rebuild from, and no second window.
 
 ## Why a re-derivation existed
 
@@ -63,11 +63,13 @@ each such thing needed a side table or a bridge of its own:
   `Patched`, or `Quiet` where the call it names has gone. Ambient facts — usage,
   the model in force, a protocol record — are `Quiet`. `Block::rev` and
   `Blocks::rev` go.
-- **`Printer::fact(rec)`.** A printer owns its memo(s) and steps them. The
-  trait's contract is narrowed to say what it always meant: a printer is handed
-  the record *only* to step its own memo and act on the delta, and renders from
-  `record::BlockKind` off that memo, never from the record vocabulary. Headless
-  keeps one memo per source agent and prints the block each `Opened` opened.
+- **`Sink::fact(id, rec)`.** One trait describes the frontend seam: a `Sink`
+  owns its memo(s) and steps them, and takes the witnessed record because a
+  fold is stepped by the record *and* its locus. The contract says what it
+  always meant: a frontend is handed the record *only* to step its own memo and
+  act on the delta, and renders from `record::BlockKind` off that memo, never
+  from the record vocabulary. Headless keeps one memo per source agent and
+  prints the block each `Opened` opened.
 - **The TUI mirror.** `Scrollback` holds a `Vec<Block>` built by `fact`:
   `Opened` tail-merges into the group standing at the tail or pushes what the
   incident reads as, `Grew` replaces the text of the block the fold's tail row
@@ -122,7 +124,7 @@ each such thing needed a side table or a bridge of its own:
 ## What does not change
 
 - The fold, its window, its privacy: `Block`'s constructor stays private, a
-  printer draws blocks it cannot mint, and eviction stays the fold's own and
+  frontend draws blocks it cannot mint, and eviction stays the fold's own and
   unconditional.
 - The live open line. `Transient::Token`/`Thinking` still carry only the text
   past the last newline, still drawn *inside* the part that will absorb it, in
@@ -154,7 +156,7 @@ each such thing needed a side table or a bridge of its own:
 
 ## See also
 
-[[decisions/260814_one-seam-one-log|one-seam-one-log]] (amended: printers are
+[[decisions/260814_one-seam-one-log|one-seam-one-log]] (amended: frontends are
 folds over the one log, stepped by record),
 [[decisions/260816_the-window-is-not-the-transcript|the-window-is-not-the-transcript]]
 (supersedes its `rev`/floor mechanism and its "deliberately left" paragraph),

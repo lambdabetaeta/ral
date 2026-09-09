@@ -9,11 +9,10 @@
 //! each tick, so scrollback is ours, not the host terminal's, and every tab
 //! keeps its own scroll position.
 //!
-//! [`crate::record::Printer`] is the sole producer: [`Printer::fact`] steps
-//! the fold beside the mirror and acts on what the step reports, and
-//! [`Printer::transient`] draws whatever is live-only — [`Self::push_chrome`],
-//! the chrome door, and [`Self::push_thinking`], which carries the open line
-//! the live tail draws.
+//! [`Scrollback::fact`] is the sole producer: it steps the fold beside the
+//! mirror and acts on what the step reports, and [`Scrollback::transient`]
+//! draws whatever is live-only — [`Self::push_chrome`], the chrome door, and
+//! [`Self::push_thinking`], which carries the open line the live tail draws.
 
 use super::block::{AgentSlot, Block, BlockKind, ChromeKind, Detail, Member, Part, seam};
 use super::fidelity::Fidelity;
@@ -29,7 +28,7 @@ use crate::bus::card::{
     observation_from_wire, reads_card,
 };
 use crate::provider::Usage;
-use crate::record::{self, BlockId, Blocks, Delta, Printer, Seq, Transient};
+use crate::record::{self, BlockId, Blocks, Delta, Seq, Transient};
 use ral_core::types::{Observation, Observed};
 use ratatui::text::Line;
 use std::fs;
@@ -81,7 +80,7 @@ pub(super) struct Scrollback {
     /// The thinking lane's open line — `answer`'s twin on the `∴` lane, drawn
     /// by [`Self::live_tail`] and grown by [`Self::push_thinking`].
     thinking_line: String,
-    /// This printer's own view-fold memo, stepped by every [`Printer::fact`].
+    /// This mirror's own view-fold memo, stepped by every [`Self::fact`].
     /// Its window is the one window: a block leaves the mirror exactly as the
     /// block it was built from leaves the fold.
     fold: Blocks,
@@ -102,10 +101,6 @@ pub(super) struct Scrollback {
     /// datum, which [`Self::set_thinking_level`] moves on every group at once
     /// and every group still to arrive is born at.
     thinking: Detail,
-    /// The model's context window, for the fidelity a prose block is stamped
-    /// with — set by `App::update_live_model`, since the fold's own memo
-    /// carries usage but not the provider's cap.
-    context_window: Option<u64>,
     /// The most recent `ral` script, which an answer's echo signal is read
     /// against — a fact about the stream, accumulated as the calls land.
     last_ral_cmd: Option<String>,
@@ -312,7 +307,6 @@ impl Scrollback {
             state: StateSpan::new(crate::bus::AgentState::Ready),
             pins: Vec::new(),
             thinking,
-            context_window: None,
             last_ral_cmd: None,
         }
     }
@@ -342,13 +336,6 @@ impl Scrollback {
 
     pub(super) fn usage(&self) -> Usage {
         self.usage
-    }
-
-    /// The model's context window, the denominator of the fidelity a prose
-    /// block is stamped with.  Set once per focus or model change, beside
-    /// `App::update_live_model`.
-    pub(super) fn set_context_window(&mut self, window: Option<u64>) {
-        self.context_window = window;
     }
 
     /// Per-turn "had a tool call" flags, oldest first — one bool per turn
@@ -430,9 +417,7 @@ impl Scrollback {
     pub(super) fn reset(&mut self) {
         let log_path = self.log_path.clone();
         let agent = self.agent;
-        let context_window = self.context_window;
         *self = Self::new(log_path, agent, false, self.thinking);
-        self.context_window = context_window;
     }
 
     /// Whether this view has been evicted — the one bit that says its tab has
@@ -672,8 +657,14 @@ impl Scrollback {
     }
 
     /// The turn's degradation floor, graded against the session's billed input.
+    /// Both terms are the fold's own: the model in force names the denominator
+    /// through the catalog.
     fn context_floor(&self) -> u8 {
-        super::fidelity::context_floor(self.fold.input_tokens(), self.context_window)
+        let window = self
+            .fold
+            .model()
+            .and_then(|(model, _)| crate::provider::pricing::context_window(model));
+        super::fidelity::context_floor(self.fold.input_tokens(), window)
     }
 
     // ── interaction ──────────────────────────────────────────────────────
@@ -1153,20 +1144,20 @@ fn observation_group_items(values: &[ral_core::serial::FOValue]) -> Vec<Item> {
     out
 }
 
-// ── `record::Printer`: the sole live producer ───────────────────────────────
+// ── the sole live producer ──────────────────────────────────────────────────
 
-impl Printer for Scrollback {
+impl Scrollback {
     /// A transient never authors scrollback: [`Transient::Token`] and
     /// [`Transient::Thinking`] only carry their lane's open line, which the
     /// live tail draws ([`Self::live_tail`], [`Self::push_thinking`]).  Every
-    /// line the worker has finished arrives as a record through
-    /// [`Printer::fact`] instead — a printer never mints a
-    /// [`record::Block`] of its own — and grows the block it belongs to.
+    /// line the worker has finished arrives as a record through [`Self::fact`]
+    /// instead — a mirror never mints a [`record::Block`] of its own — and
+    /// grows the block it belongs to.
     ///
     /// [`Transient::Born`], [`Transient::Died`], and [`Transient::Resources`]
     /// reach no-ops here: they need the tabs a bare `Scrollback` cannot see, so
     /// `App::transient` intercepts and answers them itself, ahead of this call.
-    fn transient(&mut self, t: &Transient) {
+    pub(super) fn transient(&mut self, t: &Transient) {
         match t {
             // Prose ends the thinking run, on this side exactly as on the
             // worker's: the run's tail records where the prose begins, so the
@@ -1208,10 +1199,14 @@ impl Printer for Scrollback {
     /// record moves one block, so the work here is that block's and not the
     /// window's around it — the difference between a session that costs more
     /// the longer it runs and one that does not.
-    fn fact(&mut self, rec: &record::Recorded<record::Record>) {
+    ///
+    /// The record is handed over only to step that memo: the drawing below
+    /// reads [`record::BlockKind`] off the fold, never the record vocabulary,
+    /// so a second hand-rolled projection cannot compile.
+    pub(super) fn fact(&mut self, rec: &record::Recorded<record::Record>) {
         // `Blocks::step` never actually refuses a live commit — no arm returns
         // `Err` — so a refusal here would mean the fold learned a new failure
-        // mode this printer does not yet know to report.
+        // mode this mirror does not yet know to report.
         let delta = self
             .fold
             .step(rec)

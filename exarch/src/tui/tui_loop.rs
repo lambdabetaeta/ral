@@ -570,14 +570,17 @@ mod tests {
         let mut control = ReplControl;
         let _ = session.attend(&mut control, &emit);
 
-        let sig = rx
-            .try_recv()
-            .expect("the /resources command must publish its fold");
-        match sig {
-            crate::bus::Signal::Transient(
-                _,
-                crate::record::Transient::Resources { rows, card },
-            ) => {
+        // The fold is a transient; the session's own head bookend rides the
+        // same channel, so the claim below is about the live half alone.
+        let mut transients = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|sig| match sig {
+            crate::bus::Signal::Transient(_, t) => Some(t),
+            crate::bus::Signal::Fact(..) => None,
+        });
+        match transients
+            .next()
+            .expect("the /resources command must publish its fold")
+        {
+            crate::record::Transient::Resources { rows, card } => {
                 assert!(!rows.is_empty(), "the agent half of the fold has rows");
                 assert!(
                     rows.iter().any(|r| r.name == "workers.running"),
@@ -585,22 +588,21 @@ mod tests {
                 );
                 assert_eq!(card.marks().len(), 2, "a heading and one matrix");
             }
-            _ => panic!("expected Transient::Resources"),
+            other => panic!("expected Transient::Resources, got {other:?}"),
         }
         // The park the loop settles into announces itself, and nothing else
         // follows: a command is not a turn, so no state ran before the fold.
         assert!(
             matches!(
-                rx.try_recv(),
-                Ok(crate::bus::Signal::Transient(
-                    _,
-                    crate::record::Transient::State(crate::bus::AgentState::Ready)
+                transients.next(),
+                Some(crate::record::Transient::State(
+                    crate::bus::AgentState::Ready
                 ))
             ),
             "the fold is followed by the ready-boundary state alone"
         );
         assert!(
-            rx.try_recv().is_err(),
+            transients.next().is_none(),
             "one /resources command, exactly one fold"
         );
     }

@@ -586,20 +586,6 @@ pub trait Fold {
     fn step(memo: &mut Self::Memo, record: &Recorded<Record>) -> Result<(), Refusal>;
 }
 
-/// A frontend that draws the log: itself a fold, stepping its own [`Blocks`]
-/// memo and acting on the [`Delta`] that step reports.
-///
-/// A printer is handed the record only to step that memo — never to render
-/// the record vocabulary from it, which it draws from [`BlockKind`] off the
-/// memo instead, so a third hand-rolled projection cannot compile.
-pub trait Printer {
-    fn transient(&mut self, t: &Transient);
-
-    /// Step this printer's own memo over one witnessed fact and draw what the
-    /// step changed.
-    fn fact(&mut self, rec: &Recorded<Record>);
-}
-
 /// Read `path`'s [`Record`]s back, past their `Entry` envelope, for tests
 /// across the crate that assert on the raw log rather than on a fold's
 /// memo — the one sanctioned exception to this module's own "read the log

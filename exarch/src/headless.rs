@@ -15,18 +15,16 @@ use crate::bus::card::{
     self, Card, Mark, Row, execs_card, greps_card, landing, observation_card,
     observation_from_wire, reads_card,
 };
-use crate::bus::{AgentId, AgentOutcome, BusReceiver, FleetBus, Signal, Sink, pump};
+use crate::bus::{AgentId, AgentOutcome, FleetBus, Sink, pump};
 use crate::provider::{Provider, Usage};
-use crate::record::{self, Blocks, Delta, Printer, Record, Recorded, Transient};
+use crate::record::{self, Blocks, Delta, Record, Recorded, Transient};
 use crate::shell_eval::user_json;
 use crate::tui::SessionInfo;
 use ral_core::serial::FOValue;
 use ral_core::types::{CommandOrigin, Observation, Observed};
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// What the root agent's output looks like on stdout in headless mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -208,71 +206,17 @@ fn result_json(h: &Headless, r: &Result<(), String>, elapsed: std::time::Duratio
 }
 
 impl Sink for Headless<'_> {
-    /// Drain the bus fully, dispatching every `Signal`, then block for the
-    /// next arrival exactly as the default [`Sink::drive`] does.  Headless
-    /// overrides rather than shares that default because it folds each source
-    /// agent's facts into its own [`Blocks`] memo, which the default's
-    /// stateless `accept` has nowhere to keep.
-    fn drive(&mut self, rx: &BusReceiver, done: &AtomicBool) -> io::Result<()> {
-        /// How often a blocked drain wakes to re-check `done` — mirrors
-        /// `bus::sink::DRAIN_POLL`, kept as its own constant rather than a
-        /// shared one so this override stays self-contained.
-        const POLL: Duration = Duration::from_millis(10);
-        loop {
-            loop {
-                match rx.try_recv() {
-                    Ok(sig) => self.absorb(sig),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return Ok(()),
-                }
-            }
-            if done.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            match rx.recv_timeout(POLL) {
-                Ok(sig) => self.absorb(sig),
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return Ok(()),
-            }
-        }
-    }
-}
-
-impl Headless<'_> {
-    /// One `Signal`, dispatched to whichever half carries it.
-    fn absorb(&mut self, sig: Signal) {
-        match sig {
-            Signal::Fact(id, rec) => self.step(id, &rec),
-            Signal::Transient(id, t) => {
-                // Every printer draws a fault whatever its source, since an
-                // unwritable log is a fact about the plumbing, not one agent;
-                // everything else here rides root's own register.
-                if id == self.root_id || matches!(t, Transient::Fault { .. }) {
-                    Printer::transient(self, &t);
-                }
-            }
-        }
+    fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
+        self.step(id, rec);
     }
 
-    /// Step this source agent's own fold and print what the step opened.
-    ///
-    /// A block opened is a block to narrate; a block *grown* is prose or
-    /// reasoning, the two lanes this projection draws nothing for at all, and
-    /// a patched call's line count reaches stderr through no line either.
-    fn step(&mut self, id: AgentId, rec: &Recorded<Record>) {
-        let mut fold = self.folds.remove(&id).unwrap_or_default();
-        let delta = fold
-            .step(rec)
-            .expect("the view fold never refuses a live Display/Forensic record");
-        if let (Delta::Opened(_), Some(block)) = (delta, fold.blocks().last()) {
-            self.print_block(id, block.kind());
+    fn transient(&mut self, id: AgentId, t: &Transient) {
+        // Every frontend draws a fault whatever its source, since an
+        // unwritable log is a fact about the plumbing, not one agent;
+        // everything else here rides root's own register.
+        if id != self.root_id && !matches!(t, Transient::Fault { .. }) {
+            return;
         }
-        let _ = self.folds.insert(id, fold);
-    }
-}
-
-impl Printer for Headless<'_> {
-    fn transient(&mut self, t: &Transient) {
         match t {
             Transient::Token(text) if self.projection == Projection::Conversation => {
                 let _ = self.out.write_all(text.as_bytes());
@@ -285,7 +229,7 @@ impl Printer for Headless<'_> {
                 self.last_stop = Some(raw.clone());
                 let _ = writeln!(self.err, "[stop: {raw}]");
             }
-            // The seam's own diagnostic: drawn by every printer whatever
+            // The seam's own diagnostic: drawn by every frontend whatever
             // else it is doing, since it is a fact about the log itself.
             Transient::Fault { text } => {
                 let _ = writeln!(self.err, "{text}");
@@ -309,16 +253,27 @@ impl Printer for Headless<'_> {
             | Transient::Unpin { .. } => {}
         }
     }
-
-    fn fact(&mut self, rec: &Recorded<Record>) {
-        let root_id = self.root_id;
-        self.step(root_id, rec);
-    }
 }
 
 impl Headless<'_> {
+    /// Step this source agent's own fold and print what the step opened.
+    ///
+    /// A block opened is a block to narrate; a block *grown* is prose or
+    /// reasoning, the two lanes this projection draws nothing for at all, and
+    /// a patched call's line count reaches stderr through no line either.
+    fn step(&mut self, id: AgentId, rec: &Recorded<Record>) {
+        let mut fold = self.folds.remove(&id).unwrap_or_default();
+        let delta = fold
+            .step(rec)
+            .expect("the view fold never refuses a live Display/Forensic record");
+        if let (Delta::Opened(_), Some(block)) = (delta, fold.blocks().last()) {
+            self.print_block(id, block.kind());
+        }
+        let _ = self.folds.insert(id, fold);
+    }
+
     /// One fold block, projected onto stderr as a rendering chosen fresh
-    /// each time from the block kinds this printer's own memo holds.
+    /// each time from the block kinds this frontend's own memo holds.
     #[allow(clippy::match_same_arms)]
     fn print_block(&mut self, id: AgentId, kind: &record::BlockKind) {
         use record::BlockKind as K;
@@ -743,7 +698,7 @@ pub fn converse_settled<S: Sink>(
 mod tests {
     use super::*;
     use crate::agent::{RecordedAccount, RootConfig, RootSeat, SPAWN_FUEL};
-    use crate::bus::AgentState;
+    use crate::bus::{AgentState, Signal};
     use crate::provider::scripted::{Reply, Script};
     use crate::record::{Display, Record};
     use crate::shell_eval::tools::agent::{AsyncSpawn, spawn_async};
@@ -836,7 +791,7 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-        h.absorb(
+        h.accept(
             Signal::Fact(
                 root,
                 Recorded::new(
@@ -853,9 +808,9 @@ mod tests {
         assert_eq!(v["stop_reason"], serde_json::json!("panicked"), "{out}");
     }
 
-    /// A `Display::Turn` fact through the real live path — `absorb`, which
-    /// `drive` calls in production — folded into blocks and drawn from there.
-    /// A child's own turns never count toward root's.
+    /// A `Display::Turn` fact through the real live path — `Sink::accept`,
+    /// which `drive` calls in production — folded into blocks and drawn from
+    /// there.  A child's own turns never count toward root's.
     #[test]
     fn num_turns_counts_root_turns() {
         use crate::record::{Display, Locus, Record, Recorded, Seq};
@@ -876,16 +831,16 @@ mod tests {
             )
         };
         for turn in [1, 2, 3, 4, 5] {
-            h.absorb(turn_started(root, turn));
+            h.accept(turn_started(root, turn));
         }
-        h.absorb(turn_started(sub, 1));
+        h.accept(turn_started(sub, 1));
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert_eq!(v["num_turns"], serde_json::json!(5), "{out}");
     }
 
     /// A `Display::Card` fact reaches stderr only through the view fold
-    /// `absorb` drives.
+    /// `Sink::accept` drives.
     #[test]
     fn a_card_fact_reaches_stderr_through_the_view_fold() {
         use crate::record::{Display, Locus, Record, Recorded, Seq};
@@ -897,7 +852,7 @@ mod tests {
             bytes: b"a rendered surface".to_vec(),
         }]))
         .expect("a Card always serialises");
-        h.absorb(
+        h.accept(
             Signal::Fact(
                 root,
                 Recorded::new(
@@ -922,7 +877,7 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessText, root, &mut sink_out, &mut sink_err);
-        h.absorb(
+        h.accept(
             Signal::Transient(
                 sub,
                 Transient::Fault {
@@ -1151,8 +1106,8 @@ mod tests {
         transients: Vec<Transient>,
     }
     impl Sink for Collecting {
-        fn fact(&mut self, _id: AgentId, fact: &Record) {
-            self.facts.push(fact.clone());
+        fn fact(&mut self, _id: AgentId, rec: &Recorded<Record>) {
+            self.facts.push(rec.value().clone());
         }
         fn transient(&mut self, _id: AgentId, t: &Transient) {
             self.transients.push(t.clone());
@@ -1169,8 +1124,8 @@ mod tests {
     }
 
     impl<S: Sink> Sink for SignalOnWaiting<S> {
-        fn fact(&mut self, id: AgentId, fact: &Record) {
-            self.inner.fact(id, fact);
+        fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
+            self.inner.fact(id, rec);
         }
         fn transient(&mut self, id: AgentId, t: &Transient) {
             if matches!(t, Transient::State(AgentState::WaitingOnAgents)) {

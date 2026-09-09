@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 146084be
+generated_at_commit: ed466ea2
 generated_at_date: 2026-09-09
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -88,13 +88,15 @@ projection is built as, on call and memoised nowhere — see
 [[internals/session-record#The provider-facing context is a pure function of the structure|the context-as-projection section]]
 and [[decisions/260827_the-transcript-is-a-value|the-transcript-is-a-value]]);
 `record/view.rs` (the view fold into `Blocks`; block construction is private).
-`Scrollback` and `Headless` both implement `record::Printer`
-(`transient`/`fact`): each is itself a fold over the one log, owning its own
-`Blocks` memo, stepping it per record and acting on the `Delta` that step
-reports — `Opened`, `Grew`, `Patched`, `Quiet`
+A frontend is a `bus::Sink` (`fact`/`transient`), one trait for the whole
+seam: it is itself a fold over the one log, owning its own `Blocks` memo,
+stepping it per witnessed record (`Sink::fact(id, rec)`) and acting on the
+`Delta` that step reports — `Opened`, `Grew`, `Patched`, `Quiet`
 ([[decisions/260909_the-fold-reports-the-printer-mirrors|the-fold-reports-the-printer-mirrors]]).
-A printer is handed the record only to step that memo, and renders from
-`record::BlockKind` off it. Resume hands the scrollback a replayed memo
+It is handed the record only to step that memo, and renders from
+`record::BlockKind` off it. `Headless` is that `Sink` for the pipe; the TUI's
+`App` owns one `Scrollback` per session, each a mirror with a memo of its own
+stepped by `Scrollback::fact`. Resume hands the scrollback a replayed memo
 (`Scrollback::seed`) and builds its mirror block by block the way a live commit
 does — so the live path and resume are one construction.
 
@@ -234,7 +236,7 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
    open fence, a list) is the block's own. What is on screen is the authority,
    which agrees with the fold because both are "the run of records of one
    lane". At most one lane is ever open: prose ends the thinking run on the
-   printer's side exactly as it does on the worker's, so `Transient::Token`
+   mirror's side exactly as it does on the worker's, so `Transient::Token`
    clears the thinking lane's open line as `Stream::push` flushes it, and
    `Transient::Boundary` clears whatever is left when no record will cover it.
    Thinking therefore streams as thinking — dimmed through
@@ -429,12 +431,10 @@ Two presentation surfaces, both folding the one `Signal` vocabulary through
   `converse_on` is the conversational projection that keeps streaming tokens
   to a non-CLI host (synod's GUI) one exchange at a time on a parked interactive
   trunk.
-  `Headless` overrides `Sink::drive` rather than taking the default, since it
-  folds each source agent's facts into its own `Blocks` memo, which the
-  default's stateless `accept` has nowhere to keep; it takes a per-exchange
-  bus, so its async children stay muted. It is a display only — the durable
-  `record.jsonl` is written by each session's own `agent/event.rs` seam, in
-  headless exactly as in the TUI.
+  `Headless` takes `Sink::drive` as it comes and keeps one `Blocks` memo per
+  source agent; it takes a per-exchange bus, so its async children stay muted.
+  It is a display only — the durable `record.jsonl` is written by each
+  session's own `agent/event.rs` seam, in headless exactly as in the TUI.
 
 `agent/cancel.rs` is the per-agent exchange cancellation layered on ral's interrupt
 handling. Every agent holds one **sticky** `Token` (an `Arc<AtomicU8>`) for its
@@ -478,7 +478,7 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
         - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Scrollback`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management and the parent climb, `tick`'s tombstone eviction past `LINGER`
-        - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Printer::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
+        - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
         - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
         - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal

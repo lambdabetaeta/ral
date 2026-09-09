@@ -22,7 +22,7 @@ use exarch::bus::card::{
     observation_display_card, observation_group_card, to_card_notice,
 };
 use exarch::bus::{AgentId, Sink};
-use exarch::record::{Display, Forensic, Protocol, Record, Transient};
+use exarch::record::{Display, Forensic, Protocol, Record, Recorded, Transient};
 use serde::Serialize;
 use ts_rs::TS;
 
@@ -640,8 +640,8 @@ impl TauriSink {
 }
 
 impl Sink for TauriSink {
-    fn fact(&mut self, id: AgentId, fact: &Record) {
-        let dto = self.router.route_fact(id, fact);
+    fn fact(&mut self, id: AgentId, rec: &Recorded<Record>) {
+        let dto = self.router.route_fact(id, rec.value());
         self.send(dto);
     }
 
