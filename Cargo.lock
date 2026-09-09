@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "exarch"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -2934,7 +2934,7 @@ dependencies = [
 
 [[package]]
 name = "guest-net"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "exarch",
  "http",
@@ -5632,7 +5632,7 @@ dependencies = [
 
 [[package]]
 name = "prompt-editor"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "crossterm",
  "edtui",
@@ -5751,7 +5751,7 @@ dependencies = [
 
 [[package]]
 name = "ral"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ansi-to-tui",
  "base64 0.22.1",
@@ -5770,7 +5770,7 @@ dependencies = [
 
 [[package]]
 name = "ral-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anstyle-query",
  "ariadne",
@@ -5862,7 +5862,7 @@ dependencies = [
 
 [[package]]
 name = "ral-daemon"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "rustix",
@@ -5870,7 +5870,7 @@ dependencies = [
 
 [[package]]
 name = "ral-initramfs"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ral-daemon",
  "rustix",
@@ -5894,7 +5894,7 @@ dependencies = [
 
 [[package]]
 name = "ral-sh"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
 ]
@@ -7190,7 +7190,7 @@ dependencies = [
 
 [[package]]
 name = "synod"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "exarch",
@@ -9326,7 +9326,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vm-manager"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "block2",
  "dispatch2",
