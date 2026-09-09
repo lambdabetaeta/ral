@@ -563,8 +563,7 @@ impl App {
 
     pub fn banner(&mut self, term: &mut Term, s: &banner::SessionInfo<'_>) -> io::Result<()> {
         if let Some(sb) = self.tabs.scrollback_mut(self.tabs.root()) {
-            sb.push_chrome(Chrome::Splash);
-            sb.push_chrome(Chrome::Session(banner::session_card(s)));
+            sb.push_chrome(Chrome::Opening(banner::session_card(s)));
         }
         draw(self, term)
     }

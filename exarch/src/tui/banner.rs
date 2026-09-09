@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 
 use crate::bus::card::{Card, Field, FieldVal, Mark, Role, Span as CardSpan};
 
-use super::block::AgentSlot;
+use super::block::{AgentSlot, Detail};
 use super::fidelity::Fidelity;
 use super::line;
 use super::md;
@@ -25,9 +25,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// files carry no pad of their own; this is the only thing that positions them.
 pub(super) const OPENING_INDENT: usize = 1;
 
-/// The wordmark and eagle, side by side.  They sit outside Bertin's data
-/// variables, so this alone keeps the saturated palette and carries no rail.
-pub(super) fn splash() -> Vec<Line<'static>> {
+/// The wordmark and eagle over the session card, the card filling their width
+/// so the opening's two edges form one block.  The art sits outside Bertin's
+/// data variables, so this alone keeps the saturated palette and carries no
+/// rail.
+pub(super) fn opening(card: &Card, width: u16) -> Vec<Line<'static>> {
     let inset = " ".repeat(OPENING_INDENT);
     let mut lines = vec![Line::default()];
     lines.extend(ART.lines().zip(EAGLE.lines()).map(|(a, e)| {
@@ -38,14 +40,10 @@ pub(super) fn splash() -> Vec<Line<'static>> {
             line::bold(e.to_string(), BANNER_GOLD),
         ])
     }));
+    let art_w = lines.iter().map(Line::width).max().unwrap_or_default();
+    let card_w = u16::try_from(art_w).unwrap_or(u16::MAX).min(width);
+    lines.extend(line::render_filled_card(card, OPENING_INDENT, card_w, Detail::Full));
     lines
-}
-
-/// The splash's own width, capped at the reading measure: the session card
-/// fills it so the two edges of the opening form one block.
-pub(super) fn opening_width() -> u16 {
-    let widest = splash().iter().map(Line::width).max().unwrap_or_default();
-    u16::try_from(widest.min(usize::from(READ_W))).expect("READ_W fits u16")
 }
 
 /// Metadata shown in the startup banner.

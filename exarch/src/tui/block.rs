@@ -60,11 +60,8 @@ pub(super) enum Chrome {
     /// the act that made it: work leaving the run, to which [`Self::Settled`]
     /// is the `↘` of its return.
     Spawned(Vec<CardSpan>),
-    /// The startup wordmark: fixed art, so it alone is not laid out at width.
-    Splash,
-    /// The startup metadata card, filling the splash's width so the opening's
-    /// two edges form one block.
-    Session(Card),
+    /// The startup wordmark over the session card, one picture.
+    Opening(Card),
     Legend,
     /// A general surfaced card framed at the block's own width — the
     /// `/resources` readout.
@@ -92,13 +89,7 @@ impl Chrome {
             Self::Stalled(e) => line::stalled(e, width),
             Self::Cancelled => line::note("cancelled"),
             Self::Settled(spans) | Self::Spawned(spans) => text(line::render_text(spans)),
-            Self::Splash => banner::splash(),
-            Self::Session(card) => line::render_filled_card(
-                card,
-                banner::OPENING_INDENT,
-                banner::opening_width().min(width),
-                Detail::Full,
-            ),
+            Self::Opening(card) => banner::opening(card, width),
             Self::Legend => banner::legend_panel(),
             Self::Framed(card) => {
                 line::render_card_framed(card, line::CARD_INDENT, width, Detail::Full)
@@ -117,7 +108,7 @@ impl Chrome {
             Self::Note(_) | Self::StopReason(_) | Self::Legend | Self::Framed(_) => {
                 Some(RailKind::Note)
             }
-            Self::Splash | Self::Session(_) => None,
+            Self::Opening(_) => None,
             Self::Prompt(_) => Some(RailKind::Prompt),
         }
     }
@@ -373,7 +364,7 @@ pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usiz
     for message in messages {
         let prompt = Block::chrome(Chrome::Prompt(message.clone()), None);
         let (seated, _) = prompt.seated(width, AgentSlot::default(), None, "");
-        let rows = trim_blanks(&seated, Row::is_blank);
+        let rows = trim_blanks(seated, Row::is_blank);
         let _ = seat_rows(&mut out, rows, width, true, Some(QUEUED_PROMPT_BG));
     }
 
@@ -399,7 +390,7 @@ pub(super) fn queued_prompt_rows(messages: &[String], width: u16, max_rows: usiz
 /// prompt's rule reads the same committed or queued.
 pub(super) fn seat_rows(
     out: &mut Vec<Row>,
-    rows: &[Row],
+    rows: Vec<Row>,
     width: u16,
     prompt: bool,
     wash: Option<Color>,
@@ -412,8 +403,8 @@ pub(super) fn seat_rows(
             fenced = true;
         }
         out.push(match wash {
-            Some(bg) => row.clone().wash(bg, width),
-            None => row.clone(),
+            Some(bg) => row.wash(bg, width),
+            None => row,
         });
     }
     out.len() - before
@@ -745,8 +736,8 @@ impl Block {
     }
 
     fn wrapped(&self, width: u16, agent: AgentSlot, at: Option<Detail>, open: &str) -> Memo {
-        let (seated, split) = self.seated(width, agent, at, open);
-        let (head, tail) = seated.split_at(split);
+        let (mut head, split) = self.seated(width, agent, at, open);
+        let tail = head.split_off(split);
         let mut rows = Vec::new();
         let thinking = seat_rows(&mut rows, head, width, false, None);
         let _ = seat_rows(&mut rows, tail, width, self.prompt(), None);
@@ -879,14 +870,13 @@ impl Block {
             // The mirror collapses the gap against a blank tail, so framing
             // here reads as one row between neighbours, never two.
             BlockKind::Chrome(chrome) => {
-                let lines = chrome.render(width);
-                let body = trim_blanks(&lines, |l| line::is_blank(l));
+                let body = trim_blanks(chrome.render(width), |l| line::is_blank(l));
                 if body.is_empty() {
                     // The turn rule *is* a gap; there is nothing to frame.
                     vec![Line::default()]
                 } else {
                     std::iter::once(Line::default())
-                        .chain(body.iter().cloned())
+                        .chain(body)
                         .chain(std::iter::once(Line::default()))
                         .collect()
                 }
@@ -925,10 +915,12 @@ impl Block {
 }
 
 /// `items` without its leading and trailing blank rows.
-fn trim_blanks<T>(items: &[T], blank: impl Fn(&T) -> bool) -> &[T] {
-    let start = items.iter().take_while(|i| blank(i)).count();
-    let tail = items[start..].iter().rev().take_while(|i| blank(i)).count();
-    &items[start..items.len() - tail]
+fn trim_blanks<T>(mut items: Vec<T>, blank: impl Fn(&T) -> bool) -> Vec<T> {
+    let tail = items.iter().rev().take_while(|i| blank(i)).count();
+    items.truncate(items.len() - tail);
+    let head = items.iter().take_while(|i| blank(i)).count();
+    items.drain(..head);
+    items
 }
 
 #[cfg(test)]
@@ -1141,7 +1133,7 @@ mod tests {
 
     #[test]
     fn opening_chrome_has_no_rail() {
-        let block = Block::chrome(Chrome::Splash, None);
+        let block = Block::chrome(Chrome::Opening(Card(Vec::new())), None);
         assert_eq!(block.rail_kind(), None);
     }
 
