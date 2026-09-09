@@ -373,18 +373,14 @@ impl Headless<'_> {
                 elapsed_ms,
                 ..
             } => {
-                #[allow(
-                    clippy::cast_precision_loss,
-                    reason = "elapsed-ms display precision; far below f64's mantissa"
-                )]
-                let secs = *elapsed_ms as f64 / 1000.0;
+                let took =
+                    crate::bus::elapsed_phrase(std::time::Duration::from_millis(*elapsed_ms));
                 match error {
                     Some(reason) => {
-                        let _ =
-                            writeln!(self.err, "[agent: {name} failed in {secs:.1}s — {reason}]");
+                        let _ = writeln!(self.err, "[agent {name} failed after {took} — {reason}]");
                     }
                     None => {
-                        let _ = writeln!(self.err, "[agent: {name} done in {secs:.1}s]");
+                        let _ = writeln!(self.err, "[agent {name} finished after {took}]");
                     }
                 }
             }

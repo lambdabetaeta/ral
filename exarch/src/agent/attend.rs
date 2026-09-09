@@ -460,15 +460,13 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
             );
         }
         Item::Agent(r) => {
-            // The record carries the breadcrumb-reduced pair the scrollback
-            // block is built from, not the raw outcome enum.
-            let (text, error) = r.outcome.breadcrumb();
+            // The record carries the reduced fault the scrollback block is
+            // built from, not the raw outcome enum.
             record_commit(
                 recorder,
                 crate::record::Display::SubagentDone {
                     name: r.name.clone(),
-                    text,
-                    error,
+                    error: r.outcome.fault(),
                     elapsed_ms: u64::try_from(r.elapsed.as_millis()).unwrap_or(u64::MAX),
                 },
             );

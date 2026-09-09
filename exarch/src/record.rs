@@ -207,9 +207,11 @@ pub enum Display {
     ObservationGroup {
         values: Vec<FOValue>,
     },
+    /// A child's landed line.  No body: the reply is a value on the child's own
+    /// agent, fetched with `` agents `read ``, never copied into the parent's
+    /// scrollback.
     SubagentDone {
         name: String,
-        text: String,
         error: Option<String>,
         elapsed_ms: u64,
     },

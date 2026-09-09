@@ -1456,7 +1456,7 @@ mod tests {
         loop {
             match session.next_item_for_test() {
                 Some(crate::bus::Item::Agent(r)) => {
-                    let notice = r.outcome.marked_item(&r.name);
+                    let notice = r.outcome.marked_item(&r.name, r.elapsed);
                     assert!(
                         notice.contains("agents `read 'helper'"),
                         "the reply notice must name the fetch command, got: {notice}"

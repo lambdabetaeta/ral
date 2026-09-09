@@ -11,6 +11,7 @@
 use super::{Display, Fold, Forensic, Recorded, Refusal, Row, Seq};
 use crate::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
 use ral_core::serial::FOValue;
+use std::time::Duration;
 
 pub use super::{DoneOutcome, NoticeFact};
 
@@ -46,7 +47,6 @@ pub enum BlockKind {
     },
     SubagentDone {
         name: String,
-        text: String,
         error: Option<String>,
         elapsed_ms: u64,
     },
@@ -307,18 +307,13 @@ fn render_block_text(out: &mut String, kind: &BlockKind) {
         }
         BlockKind::SubagentDone {
             name,
-            text,
             error,
             elapsed_ms,
         } => {
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "elapsed-ms display precision; far below f64's mantissa"
-            )]
-            let secs = *elapsed_ms as f64 / 1000.0;
+            let took = crate::bus::elapsed_phrase(Duration::from_millis(*elapsed_ms));
             match error {
-                Some(e) => format!("↘ {name} failed in {secs:.1}s — {e}"),
-                None => format!("↘ {name} done in {secs:.1}s\n{text}"),
+                Some(e) => format!("↘ agent {name} failed [{took}] — {e}"),
+                None => format!("↘ agent {name} finished [{took}]"),
             }
         }
         BlockKind::Observation { value } => format!("· {value:?}"),
@@ -419,14 +414,12 @@ fn step_display(memo: &mut Blocks, seq: Seq, d: Display) {
         }
         Display::SubagentDone {
             name,
-            text,
             error,
             elapsed_ms,
         } => memo.push(
             seq,
             BlockKind::SubagentDone {
                 name,
-                text,
                 error,
                 elapsed_ms,
             },

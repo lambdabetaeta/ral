@@ -1260,25 +1260,13 @@ impl Viewport {
             )],
             K::SubagentDone {
                 name,
-                text,
                 error,
                 elapsed_ms,
-            } => {
-                let fidelity = super::fidelity::Fidelity {
-                    context: super::fidelity::context_floor(
-                        blocks.input_tokens(),
-                        self.context_window,
-                    ),
-                    echo: 0,
-                };
-                vec![Block::subagent(
-                    name.clone(),
-                    text.clone(),
-                    error.clone(),
-                    Duration::from_millis(*elapsed_ms),
-                    fidelity,
-                )]
-            }
+            } => vec![Block::subagent(
+                name.clone(),
+                error.clone(),
+                Duration::from_millis(*elapsed_ms),
+            )],
             K::Observation { value } => render_observation(value.clone()),
             K::ObservationGroup { values } => render_observation_group(values),
             K::Card { marks } => match serde_json::from_value::<Card>(marks.clone()) {

@@ -120,7 +120,6 @@ pub(super) enum BlockKind {
     /// would lose the `↘` identity.
     Subagent {
         name: String,
-        text: String,
         error: Option<String>,
         elapsed: Duration,
     },
@@ -251,9 +250,7 @@ impl Block {
     /// included, so a trace streams in the open — full.
     fn new(kind: BlockKind, fidelity: Fidelity) -> Self {
         let level = match kind {
-            BlockKind::DiallableTool { .. }
-            | BlockKind::Subagent { .. }
-            | BlockKind::Act { .. } => Reveal::Summary,
+            BlockKind::DiallableTool { .. } | BlockKind::Act { .. } => Reveal::Summary,
             _ => Reveal::Full,
         };
         Self {
@@ -308,22 +305,14 @@ impl Block {
             Fidelity::default(),
         )
     }
-    /// `fidelity` is root's, so the revealed markdown degrades as its prose does.
-    pub(super) fn subagent(
-        name: String,
-        text: String,
-        error: Option<String>,
-        elapsed: Duration,
-        fidelity: Fidelity,
-    ) -> Self {
+    pub(super) fn subagent(name: String, error: Option<String>, elapsed: Duration) -> Self {
         Self::new(
             BlockKind::Subagent {
                 name,
-                text,
                 error,
                 elapsed,
             },
-            fidelity,
+            Fidelity::default(),
         )
     }
     pub(super) fn card(card: Card) -> Self {
@@ -361,7 +350,6 @@ impl Block {
             BlockKind::Card { card, .. } => card.magnitude(),
             BlockKind::Markdown { src, .. } => Some(src.lines().count() as u32),
             BlockKind::Thinking(t) => Some(t.text.lines().count() as u32),
-            BlockKind::Subagent { text, .. } => Some(text.lines().count() as u32),
             _ => None,
         }
     }
@@ -378,14 +366,15 @@ impl Block {
 
     pub(super) fn dialable(&self) -> bool {
         match &self.kind {
-            BlockKind::DiallableTool { .. }
-            | BlockKind::Subagent { .. }
-            | BlockKind::Act { .. }
-            | BlockKind::Thinking(_) => true,
-            BlockKind::Card { card, .. } => card.has_diff(),
-            BlockKind::Markdown { .. } | BlockKind::PlainTool { .. } | BlockKind::Chrome { .. } => {
-                false
+            BlockKind::DiallableTool { .. } | BlockKind::Act { .. } | BlockKind::Thinking(_) => {
+                true
             }
+            BlockKind::Card { card, .. } => card.has_diff(),
+            // A subagent line has no body to disclose.
+            BlockKind::Subagent { .. }
+            | BlockKind::Markdown { .. }
+            | BlockKind::PlainTool { .. }
+            | BlockKind::Chrome { .. } => false,
         }
     }
 
@@ -652,28 +641,9 @@ impl Block {
             }
             BlockKind::Subagent {
                 name,
-                text,
                 error,
                 elapsed,
-            } => {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "transcript-block line count; u32 headroom far exceeds any in-memory transcript"
-                )]
-                let size = text.lines().count() as u32;
-                let mut ls = line::subagent_header(name, size, error.as_deref(), *elapsed);
-                // The header is built first so it stays row 0, out of reach of
-                // the markdown's own leading-blank and first-rows handling.
-                match level {
-                    Reveal::Full => ls.extend(md::render_md(text, width, MD_INDENT, self.fidelity)),
-                    Reveal::Context => ls.extend(first_rows(
-                        md::render_md(text, width, MD_INDENT, self.fidelity),
-                        N,
-                    )),
-                    Reveal::Summary | Reveal::Census => {}
-                }
-                ls
-            }
+            } => line::subagent_header(name, error.as_deref(), *elapsed),
             // A surfaced general card is a deliberate bounded artifact. Diffs
             // already carry the patch rail and gutters; effect cards belong in their
             // surrounding group, so both render unframed.

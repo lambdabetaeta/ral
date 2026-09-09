@@ -364,39 +364,36 @@ pub(super) fn act_row(
     out
 }
 
-/// An async subagent's landed result, in one line: the bold `name` ([`ORANGE`]
-/// when `error` is set), the elapsed seconds, a [`size_bar`] of `size`, and an
-/// error or empty-output suffix.
+/// An async subagent's landed line: `agent NAME finished [1 min 12 secs]`, the
+/// bold `name` turning [`ORANGE`] with the verb when `error` is set.  No body
+/// and no magnitude — a reply is a value on the child's own agent, read with
+/// `` agents `read ``, so there is nothing here to size or to disclose.  The
+/// `↘` is the rail's, not this line's.
 pub(super) fn subagent_header(
     name: &str,
-    size: u32,
     error: Option<&str>,
     elapsed: Duration,
 ) -> Vec<Line<'static>> {
-    let secs = elapsed.as_secs();
-    let name_color = if error.is_some() { ORANGE } else { LIME };
-    let mut spans = vec![
-        bold(name.to_string(), name_color),
-        Span::styled(
-            format!(" {secs}s "),
-            Style::default().fg(SLATE).add_modifier(Modifier::DIM),
-        ),
-        size_bar(size),
-    ];
-    let suffix = match error {
-        None if size == 0 => Some("[done, no output]".to_string()),
-        None => None,
-        Some(reason) if reason.eq_ignore_ascii_case("cancelled") => Some("[cancelled]".to_string()),
-        Some(reason) => Some(format!("[failed: {reason}]")),
+    let cancelled = error.is_some_and(|r| r.eq_ignore_ascii_case("cancelled"));
+    let verb = match error {
+        None => "finished",
+        Some(_) if cancelled => "cancelled",
+        Some(_) => "failed",
     };
-    if let Some(suffix) = suffix {
-        let suffix_color = if error.is_some() { ORANGE } else { SLATE };
-        spans.push(Span::raw("  "));
+    let dim = Style::default().fg(SLATE).add_modifier(Modifier::DIM);
+    let mut spans = vec![
+        Span::styled("agent ", dim),
+        bold(name.to_string(), if error.is_some() { ORANGE } else { LIME }),
+        Span::styled(
+            format!(" {verb}  [{}]", crate::bus::elapsed_phrase(elapsed)),
+            dim,
+        ),
+    ];
+    // `cancelled` is the verb itself; repeating it as a reason says nothing.
+    if let Some(reason) = error.filter(|_| !cancelled) {
         spans.push(Span::styled(
-            suffix,
-            Style::default()
-                .fg(suffix_color)
-                .add_modifier(Modifier::DIM),
+            format!("  — {reason}"),
+            Style::default().fg(ORANGE).add_modifier(Modifier::DIM),
         ));
     }
     vec![Line::default(), Line::from(spans)]

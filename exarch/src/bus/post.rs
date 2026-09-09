@@ -3,10 +3,21 @@
 //! [`Item`] for the attend loop to render.  The queue itself is `bus::inbox`.
 
 use crate::fleet::schedule::ScheduleId;
+use jiff::fmt::friendly::{Designator, Spacing, SpanPrinter};
 use ral_core::Value;
 use std::time::Duration;
 
 use super::AgentId;
+
+/// How long something took, in prose: `47 secs`, `1 min 12 secs`, `1 hr 3 mins`.
+/// Whole seconds — a child's runtime is not a stopwatch reading — and jiff
+/// balances the units up to hours on its own.
+pub fn elapsed_phrase(elapsed: Duration) -> String {
+    static PRINTER: SpanPrinter = SpanPrinter::new()
+        .designator(Designator::Short)
+        .spacing(Spacing::BetweenUnitsAndDesignators);
+    PRINTER.unsigned_duration_to_string(&Duration::from_secs(elapsed.as_secs()))
+}
 
 /// When a message may be drained into the model's context — per message, not a
 /// global rule.
@@ -45,29 +56,33 @@ pub enum AgentOutcome {
 }
 
 impl AgentOutcome {
-    /// The `(body, error)` a `↘` subagent breadcrumb shows.  Every consumer
-    /// of `record::Display::SubagentDone` — transcript, headless stderr, the
-    /// TUI — reduces through here, so the three render alike.
-    pub(crate) fn breadcrumb(&self) -> (String, Option<String>) {
+    /// Why a `↘` subagent breadcrumb reads as a failure, or `None` where the
+    /// child simply finished.  Every consumer of
+    /// `record::Display::SubagentDone` — transcript, headless stderr, the TUI
+    /// — reduces through here, so the three render alike.
+    pub(crate) fn fault(&self) -> Option<String> {
         match self {
-            Self::Replied => (String::new(), None),
-            Self::Stopped(r) => (String::new(), Some(r.clone())),
-            Self::Cancelled => (String::new(), Some("cancelled".into())),
-            Self::Failed(e) => (String::new(), Some(e.clone())),
+            Self::Replied => None,
+            Self::Stopped(r) => Some(r.clone()),
+            Self::Cancelled => Some("cancelled".into()),
+            Self::Failed(e) => Some(e.clone()),
         }
     }
 
     /// The marked text the model sees when a child's line drains.  The reply
     /// notice quotes the very command that fetches the value, with the child's
-    /// own name already in it, so the model has nothing left to assemble.
-    pub(crate) fn marked_item(&self, name: &str) -> String {
+    /// own name already in it, so the model has nothing left to assemble; the
+    /// elapsed time rides along because how long a child ran is part of how
+    /// much to trust what it says.
+    pub(crate) fn marked_item(&self, name: &str, elapsed: Duration) -> String {
+        let took = elapsed_phrase(elapsed);
         match self {
-            Self::Replied => {
-                format!("[agent '{name}' replied — run agents `read '{name}' to read it]")
-            }
-            Self::Stopped(r) => format!("[agent '{name}' stopped: {r}]"),
-            Self::Cancelled => format!("[agent '{name}' was cancelled]"),
-            Self::Failed(e) => format!("[agent '{name}' failed: {e}]"),
+            Self::Replied => format!(
+                "[agent '{name}' replied after {took} — run agents `read '{name}' to read it]"
+            ),
+            Self::Stopped(r) => format!("[agent '{name}' stopped after {took}: {r}]"),
+            Self::Cancelled => format!("[agent '{name}' was cancelled after {took}]"),
+            Self::Failed(e) => format!("[agent '{name}' failed after {took}: {e}]"),
         }
     }
 }
@@ -84,7 +99,7 @@ pub(crate) struct AgentResult {
 
 impl AgentResult {
     pub(super) fn render(&self) -> String {
-        self.outcome.marked_item(&self.name)
+        self.outcome.marked_item(&self.name, self.elapsed)
     }
 }
 
@@ -335,5 +350,45 @@ impl Item {
             Self::Nudge { exchange, .. } => Some(*exchange),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one duration prose every subagent line shares: whole seconds,
+    /// balanced up to hours, no unit that would read as zero.
+    #[test]
+    fn elapsed_reads_as_prose() {
+        let phrase = |secs| elapsed_phrase(Duration::from_secs(secs));
+        assert_eq!(phrase(0), "0 secs");
+        assert_eq!(phrase(1), "1 sec");
+        assert_eq!(phrase(47), "47 secs");
+        assert_eq!(phrase(72), "1 min 12 secs");
+        assert_eq!(phrase(120), "2 mins");
+        assert_eq!(phrase(3780), "1 hr 3 mins");
+    }
+
+    /// Sub-second precision is noise in a breadcrumb: a child that ran for
+    /// 12.7s reports the seconds, not the stopwatch.
+    #[test]
+    fn elapsed_truncates_below_the_second() {
+        assert_eq!(elapsed_phrase(Duration::from_millis(12_700)), "12 secs");
+    }
+
+    /// The parent's own context carries how long the child ran, and a reply
+    /// still quotes the fetch command rather than any payload.
+    #[test]
+    fn the_marked_item_names_the_fetch_and_the_runtime() {
+        let took = Duration::from_secs(72);
+        assert_eq!(
+            AgentOutcome::Replied.marked_item("helper", took),
+            "[agent 'helper' replied after 1 min 12 secs — run agents `read 'helper' to read it]"
+        );
+        assert_eq!(
+            AgentOutcome::Failed("boom".into()).marked_item("helper", took),
+            "[agent 'helper' failed after 1 min 12 secs: boom]"
+        );
     }
 }
