@@ -457,9 +457,7 @@ mod tests {
             },
             apply: SurfaceApplier {
                 pins: None,
-                id: trunk.id,
                 recorder: crate::record::Emitter::none(),
-                surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
             },
         });
 
@@ -504,9 +502,7 @@ mod tests {
             },
             apply: SurfaceApplier {
                 pins: None,
-                id: root_id,
                 recorder: crate::record::Emitter::none(),
-                surface: std::sync::Mutex::new(crate::record::commit::SurfaceBuffer::new()),
             },
         });
 

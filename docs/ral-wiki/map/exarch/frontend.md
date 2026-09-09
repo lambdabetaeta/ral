@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed466ea2
+generated_at_commit: 109eb9be
 generated_at_date: 2026-09-09
 covers_paths: [exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record.rs, exarch/src/record/, exarch/src/agent/event.rs, exarch/src/tui.rs, exarch/src/tui/, exarch/src/headless.rs, exarch/src/agent/cancel.rs, exarch/src/prompt/host.rs]
 ---
@@ -80,8 +80,8 @@ order); `record/log.rs` (the `record.jsonl` syscall site, with the attachable
 `FleetSink` inside the writer's mutex); `record/replay.rs` (the generic
 `fold == memo` driver and `Refusal`, with `Log::read` streaming one entry at a
 time); `record/commit.rs` (the worker-side
-commit producer: one `Chopper` per lane of the model's stream, and
-`SurfaceBuffer`, moved whole from `tui/surface.rs`); `record/model.rs` and its
+commit producer: one `Chopper` per lane of the model's stream, cutting it into
+records at the last newline it holds); `record/model.rs` and its
 `model/` children (the model fold, `Protocol` alone, with streaming
 resume/admission, and the owned `Vec<ChatMessage>` the provider-facing
 projection is built as, on call and memoised nowhere — see
@@ -478,8 +478,8 @@ user, git state) once at startup for the [[map/exarch/policy|system prompt]].
         - `tui/tui_loop.rs` — REPL/ui loop: `run`, `Tui`, `CommandCtx`, `ReplControl`, `ui_loop`, `OverlayTick`, `overlay_tick`, `KeyAction`, `key_action`, `ctrl_key`
         - `tui/terminal.rs` — terminal lifetime: `TerminalGuard`, raw mode, alt screen, panic hook, stderr redirect, editor hatch, `compose_in_editor`
         - `tui/tabs.rs` — session/view lifecycle: `Tab` (`Weak<Agent>`, birth facts, `Scrollback`, linger clock), `Tabs` as one birth-ordered `Vec`, `TabRow` (the matrix's per-frame projection, demotion included), titles, attachment management and the parent climb, `tick`'s tombstone eviction past `LINGER`
-        - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
-        - `record/commit.rs` — event coalescing, worker-side: `Stream`/`Chopper`, `SurfaceBuffer`, `PatchBuf`, `ObservationBuf`, absorb/flush into `Display` commits
+        - `tui/scrollback.rs` — per-session scrollback as a mirror of the view fold: `Scrollback`, `Scrollback::fact` acting on a `Delta` (`opened`/`grew`/`patched`), the record vocabulary decoded once into `Item`s, `absorb`'s four tail rules (an effect walks back to its call, a write is a barrier, a surfaced diff tail-merges, everything else grows the tail), `trim`'s head retirement against the fold's own window, `live_tail`, `screen`'s one seam rule, the `Log` transcript writer
+        - `record/commit.rs` — the model's stream, cut into records worker-side: `Stream`/`Chopper` into `Display::Answer`/`Thinking` commits
         - `tui/prompt.rs` — prompt editor state: `PromptState`, history, draft, editor request, key input, the live slash-command popup (`refresh_menu`, `menu_key`)
         - `tui/gesture.rs` — the mouse as a transition system: `Cell`, `FrameGeom` (the one place pointer → buffer cell), `Phase` (Idle/Pressed/Dragging/Selected), copy `Toast`, hover. Reads come in as `&Scrollback`; writes go out as an `Effect` (`Scroll`, `CycleBlock`, `Copy`) that `App::apply` runs — the module never mutates a scrollback or touches the terminal
         - `tui/render.rs` — `strips` lays the frame out as a value, `draw` paints it; `paint_selection`, `paint_hover`, `footer_hint`, `emit_tab_title`; the screen-side `Row::into_line` flatten

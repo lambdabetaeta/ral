@@ -19,7 +19,7 @@
 use exarch::agent::event::ProviderErrorRecord;
 use exarch::bus::card::{
     Card, Field, Hunk, Mark, Measure, Span, context_rows_card, notice_card,
-    observation_display_card, observation_group_card, to_card_notice,
+    observation_display_card, to_card_notice,
 };
 use exarch::bus::{AgentId, Sink};
 use exarch::record::{Display, Forensic, Protocol, Record, Recorded, Transient};
@@ -319,7 +319,6 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
             payload: payload.clone(),
             failed: *failed,
         }),
-        Display::ObservationGroup { values } => process_card(observation_group_card(values)),
         Display::Observation { value } => process_card(observation_display_card(value)),
         Display::Card { card } => Some(SynodEvent::Card {
             marks: marks_dto(card.clone()),
@@ -352,7 +351,6 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
 #[allow(clippy::match_same_arms)]
 fn project_display_helper(display: &Display) -> Option<SynodEvent> {
     match display {
-        Display::ObservationGroup { values } => process_card(observation_group_card(values)),
         Display::Observation { value } => process_card(observation_display_card(value)),
         Display::Card { card } => process_card(Some(card.clone())),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
@@ -652,7 +650,7 @@ mod tests {
     use ral_core::types::{CallSite, Observation, Observed};
     use std::path::PathBuf;
 
-    /// The wire form a `Display::ObservationGroup`/`Observation` carries —
+    /// The wire form a `Display::Observation` carries —
     /// the round trip `observation_wire` and `observation_from_wire` take in
     /// the seam itself, rebuilt here without pulling the private conversion
     /// into this crate.
@@ -765,23 +763,6 @@ mod tests {
             }))
             .is_none()
         );
-    }
-
-    #[test]
-    fn a_grouped_run_of_reads_collapses_to_one_process_card() {
-        let values = vec![
-            observation_wire(Observed::Read {
-                path: "a.rs".to_string(),
-            }),
-            observation_wire(Observed::Read {
-                path: "b.rs".to_string(),
-            }),
-        ];
-        let record = Record::Display(Display::ObservationGroup { values });
-        let Some(SynodEvent::ProcessCard { marks }) = project(&record) else {
-            panic!("expected a ProcessCard event");
-        };
-        assert!(!marks.is_empty());
     }
 
     #[test]

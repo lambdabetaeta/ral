@@ -735,70 +735,62 @@ mod tests {
         );
     }
 
-    /// A pin is ambient register state: the grouping window is
-    /// `SurfaceBuffer`'s, entirely worker-side, and a pin never reaches that
-    /// buffer at all, so it cannot split a run it is never offered to.  This
-    /// drives the real production pipeline — `SurfaceBuffer` grouping into a
-    /// `Display::ObservationGroup` commit, stepped through the scrollback's own
-    /// fold by `Scrollback::fact`.
+    /// A pin is ambient register state: it lands in the scrollback's own
+    /// register, never in the mirror, so it cannot split the run it is offered
+    /// to no block of.  The call and its two reads are one group either side
+    /// of it.
     #[test]
     fn a_pin_never_splits_a_coalesced_observation_run() {
-        use crate::record::commit::SurfaceBuffer;
-        use crate::record::{Emitter as RecordEmitter, FleetSink};
+        use crate::bus::card::observation_wire;
+        use crate::record::{Display, Locus, Record, Recorded, Seq};
 
-        let (mut app, _rx, root) = app();
-        let path = std::env::temp_dir().join(format!(
-            "exarch-pin-coalesce-test-{}-{:?}.jsonl",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let recorder = RecordEmitter::create(&path).expect("temp record log");
-        let (tx, brx) = crate::bus::channel();
-        recorder.attach(FleetSink {
-            id: root.id,
-            tx: tx.downgrade(),
-            meter: crate::bus::UsageMeter::default(),
-        });
-        let _recorded = recorder
-            .emit(crate::record::Display::ToolCall {
-                tool: "ral".into(),
-                cmd: "read 'a.rs'".into(),
-                summary: Some("look around".into()),
-            })
-            .unwrap();
-
+        let (mut app, rx, root) = app();
+        let mut seq = 0;
+        let mut fact = |app: &mut App, display| {
+            seq += 1;
+            app.fact(
+                root.id,
+                &Recorded::new(Locus::placeholder(Seq::new(seq)), Record::Display(display)),
+            );
+        };
         let read_at = |path: &str| {
-            Observation::instant(
+            observation_wire(&Observation::instant(
                 CallSite::default(),
                 None,
                 Observed::Read { path: path.into() },
-            )
+            ))
         };
-        let mut buf = SurfaceBuffer::new();
-        buf.absorb_observation(&recorder, root.id, read_at("a.rs"))
-            .unwrap();
-        // The pin lands directly in the scrollback's own register — it is
-        // ambient state like usage, never routed through the buffer that
-        // groups reads — so it cannot stand between the two below.
-        app.tabs
-            .scrollback_mut(root.id)
-            .expect("root has a scrollback")
-            .set_pin(
-                "tasks".into(),
-                Card(vec![Mark::Raw {
+
+        fact(
+            &mut app,
+            Display::ToolCall {
+                tool: "ral".into(),
+                cmd: "read 'a.rs'".into(),
+                summary: Some("look around".into()),
+            },
+        );
+        fact(
+            &mut app,
+            Display::Observation {
+                value: read_at("a.rs"),
+            },
+        );
+        app.transient(
+            root.id,
+            Transient::Pin {
+                key: "tasks".into(),
+                card: Card(vec![Mark::Raw {
                     bytes: b"one left".to_vec(),
                 }]),
-            );
-        buf.absorb_observation(&recorder, root.id, read_at("b.rs"))
-            .unwrap();
-        buf.flush_surfaces(&recorder).unwrap();
-
-        let sb = app.tabs.scrollback_mut(root.id).expect("root has a scrollback");
-        while let Ok(sig) = brx.try_recv() {
-            if let crate::bus::Signal::Fact(_, rec) = sig {
-                sb.fact(&rec);
-            }
-        }
+            },
+            &rx,
+        );
+        fact(
+            &mut app,
+            Display::Observation {
+                value: read_at("b.rs"),
+            },
+        );
 
         let sb = app.tabs.scrollback(root.id).expect("root has a scrollback");
         assert_eq!(

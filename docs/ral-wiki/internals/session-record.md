@@ -1,5 +1,5 @@
 ---
-verified_at_commit: ed466ea2
+verified_at_commit: 109eb9be
 verified_at_date: 2026-09-09
 anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Blocks::step, Delta, Sink::fact, Blocks::model, replay, model::resume, Scrollback::fact, Scrollback::trim, seed, flush_log, rotate, clear, Context, Turn, Body, Pointer, TurnRow, Held, Locus, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
 ---
@@ -52,11 +52,12 @@ The outer `Record` vocabulary is closed:
   model fold consumes this class alone, and every record in it acts on the
   fold.
 - `Display` is worker-authored presentation data: chopped prose and reasoning,
-  tool calls and results, grouped observations, cards, notices, done outcomes,
-  and other committed rows. `record/commit.rs` does the chopping and grouping
-  before the fact reaches the seam. Cards and observations carry their
-  round-trippable data, not a pre-rendered terminal image; the view fold builds
-  the marks again.
+  tool calls and results, one observation per observation, cards, notices, done
+  outcomes, and other committed rows. `record/commit.rs` does the chopping
+  before the fact reaches the seam; grouping a call's effects is the frontend's,
+  derived online ([[map/exarch/io-surface|io-surface]]). Cards and observations
+  carry their round-trippable data, not a pre-rendered terminal image; the view
+  fold builds the marks again.
 - `Forensic` is durable evidence that is not model context: the session
   bookends (`SessionStarted`, `SessionResumed`, `SessionEnded`), a turn's
   effort dial (`TurnStarted`), usage deltas, cancellation,

@@ -166,17 +166,11 @@ impl Avatar {
                 };
             }
         };
-        // Built once and shared by `Arc`: the run's dispatch and
-        // `shell_eval::run_shell`'s own flush reach the very same desk and
-        // the very same applier, so neither can be handed one this call did
-        // not also hand the other.
         let host = Arc::new(desk::RunHost {
             desk: desk::ExarchDesk { services },
             apply: desk::SurfaceApplier {
                 pins: Some(self.agent.pins.clone()),
-                id: self.agent.id,
                 recorder: self.recorder(),
-                surface: Mutex::new(crate::record::commit::SurfaceBuffer::new()),
             },
         });
         // Stamped with this session's inbox epoch as read now, so a batch
@@ -191,10 +185,6 @@ impl Avatar {
             timeout_secs,
             host.clone() as Arc<dyn ral_core::protocol::Host>,
         );
-        // The call boundary: whatever the commit producer still buffers —
-        // deduped io groups, a coalesced diff — records now, so a call's
-        // effects land contiguously ahead of its result.
-        host.apply.flush();
         // Only now, with the dispatch returned: the worker probe below is
         // legal at a run boundary and nowhere else.
         let content = match outcome {

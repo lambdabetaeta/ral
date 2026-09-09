@@ -470,21 +470,18 @@ mod tests {
         let transport = ral_core::protocol::IdentityTransport::new(taken);
         let applier = Arc::new(crate::fleet::desk::SurfaceApplier {
             pins: None,
-            id: 0,
             recorder: recorder.clone(),
-            surface: Mutex::new(crate::record::commit::SurfaceBuffer::new()),
         });
         let outcome = run_shell(
             &transport,
             &ral_core::types::GrantStack::of(caps.clone()),
             cmd,
             timeout_secs,
-            applier.clone(),
+            applier,
         );
         // Recover the mutated shell so `let`/`cd`/binding state reaches the
         // caller's next run — the across-calls contract these tests pin.
         *shell = transport.into_shell();
-        applier.flush();
         match outcome {
             Outcome::Ran {
                 stdout,

@@ -40,6 +40,9 @@ pub(crate) use encode::encode_card;
 pub(crate) use notice::value_to_notice;
 pub(crate) use observation::observation_wire;
 pub(crate) use observation::{Landing, ObservationKind, landing};
+/// The comma-joined bucket cards a run's effects render as; `pub(crate)`
+/// because only the mirror groups, and it groups at render time.
+pub(crate) use observation::{execs_card, greps_card, reads_card};
 
 /// `done` and `notice` each word one class of event core surfaces, `pub`
 /// alongside [`to_card_done`] and [`to_card_notice`], the two record-type
@@ -48,9 +51,7 @@ pub(crate) use observation::{Landing, ObservationKind, landing};
 /// than a [`Card`] nothing would draw.
 pub use done::{settled_spans, settled_text};
 pub use notice::notice_card;
-pub use observation::{
-    execs_card, greps_card, observation_card, observation_from_wire, observation_spans, reads_card,
-};
+pub use observation::{observation_card, observation_from_wire, observation_spans};
 
 /// The closed nominal role set — the identity channel a [`Span`] may carry.
 /// An unrecognised tag degrades to plain ink rather than dropping the span.
@@ -218,24 +219,6 @@ impl Card {
             _ => None,
         }
     }
-
-    /// Consume a lone `diff` card into its owned `(path, hunks)` for the
-    /// patch-aggregation buffer.
-    ///
-    /// # Errors
-    /// `Err(self)` hands a richer card back untouched, for the caller to push
-    /// as its own block.
-    pub(crate) fn into_single_diff(self) -> Result<(String, Vec<Hunk>), Self> {
-        if self.single_diff().is_some() {
-            let Self(mut marks) = self;
-            match marks.pop() {
-                Some(Mark::Diff { path, hunks }) => Ok((path, hunks)),
-                _ => unreachable!("single_diff checked exactly one diff mark"),
-            }
-        } else {
-            Err(self)
-        }
-    }
 }
 
 /// `record::DoneOutcome` → [`DoneOutcome`]: identical shapes.
@@ -364,55 +347,6 @@ fn context_exchanges(rows: &[crate::record::TurnRow]) -> Vec<ContextExchange> {
 pub fn observation_display_card(value: &FOValue) -> Option<Card> {
     let observation = observation_from_wire(value.clone())?;
     Some(observation_card(&observation.what))
-}
-
-/// A producer-grouped run of reads, execs, or greps, decoded once.
-///
-/// [`Display::ObservationGroup`](crate::record::Display::ObservationGroup)'s
-/// payload is homogeneous by construction (the commit-time buffer never mixes
-/// kinds in one run), so the first value alone names which card fits, and the
-/// group's own kind and member count ride along for a caller that draws the
-/// card as one effect row. An empty or unrecognised group draws nothing
-/// rather than guessing.
-pub(crate) fn observation_group(values: &[FOValue]) -> Option<(Card, ObservationKind, u32)> {
-    let observations: Vec<ral_core::types::Observed> = values
-        .iter()
-        .filter_map(|v| observation_from_wire(v.clone()))
-        .map(|o| o.what)
-        .collect();
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "one flush's observation count; u32 headroom far exceeds any real burst"
-    )]
-    let count = observations.len() as u32;
-    match observations.first()? {
-        ral_core::types::Observed::Read { .. } => {
-            let paths: Vec<String> = observations
-                .into_iter()
-                .filter_map(|o| match o {
-                    ral_core::types::Observed::Read { path } => Some(path),
-                    _ => None,
-                })
-                .collect();
-            reads_card(&paths).map(|card| (card, ObservationKind::Read, count))
-        }
-        ral_core::types::Observed::Command { .. } => {
-            execs_card(&observations).map(|card| (card, ObservationKind::Exec, count))
-        }
-        ral_core::types::Observed::Grep { .. } => {
-            greps_card(&observations).map(|card| (card, ObservationKind::Grep, count))
-        }
-        ral_core::types::Observed::Write { .. }
-        | ral_core::types::Observed::Capability { .. }
-        | ral_core::types::Observed::Worker { .. }
-        | ral_core::types::Observed::Act { .. } => None,
-    }
-}
-
-/// [`observation_group`], stripped to the card alone — synod's own fold draws
-/// no per-effect count.
-pub fn observation_group_card(values: &[FOValue]) -> Option<Card> {
-    observation_group(values).map(|(card, ..)| card)
 }
 
 /// A [`Card`] as one line — the digest the periodic nudge shows the model of

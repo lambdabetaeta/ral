@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 0c6ec335
-generated_at_date: 2026-09-03
+generated_at_commit: 109eb9be
+generated_at_date: 2026-09-09
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -204,9 +204,9 @@ layered a protected-pin guard over it is gone with the guard itself. The
 codomain is `Surface`, the shell's own closed vocabulary: five channels (the
 `Pin`/`Unpin` variants are one pin channel), tried pin-first. It carries only
 the structured value each channel names —
-no `Card` mark tree, since that is built by whoever renders (a printer's fold
-over the recorded `Display` commit) or whoever records (the commit producer's
-`SurfaceBuffer`, [[map/exarch/frontend|frontend]]), never by the decoder:
+no `Card` mark tree, since that is built by whoever renders — a printer's fold
+over the recorded `Display` commit ([[map/exarch/frontend|frontend]]) — and
+never by the decoder or by the seam that records it (`absorb_surface`):
 
 - a `` `pin ``/`` `unpin `` wrapper decodes to `Surface::Pin { key, card }` /
   `Surface::Unpin { key }` — a pin is a rendered card in a slot, so its card

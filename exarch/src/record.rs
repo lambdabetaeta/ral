@@ -198,14 +198,6 @@ pub enum Display {
         text: String,
         call: BlockId,
     },
-    /// One read/exec/grep run the producer grouped into a single visual
-    /// card — the same dedup and grouping `SurfaceBuffer` already does at
-    /// record time, carried as its members' wire forms so a printer can
-    /// rebuild exactly the one card the user saw via
-    /// `bus::card::observation_group`, never a mark tree recorded up front.
-    ObservationGroup {
-        values: Vec<FOValue>,
-    },
     /// A child's landed line.  No body: the reply is a value on the child's own
     /// agent, fetched with `` agents `read ``, never copied into the parent's
     /// scrollback.

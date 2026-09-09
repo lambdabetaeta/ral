@@ -3,12 +3,11 @@
 //!
 //! A [`Call`] is opened by its tool call and grows as that call's effects —
 //! reads, greps, execs — land on it; a diff or a write is a barrier that ends
-//! the burst and renders as its own always-visible block.  A barrier only
-//! ever *follows* the effects of the call that reached it
-//! ([`crate::record::commit`] buffers a write until its call's reads have
-//! landed), so a burst is contiguous and a call's effects are never stranded
-//! past its end.  This module renders the run's body at one of three
-//! [`Detail`] rungs:
+//! the burst and renders as its own always-visible block.  An effect joins
+//! the call that issued it whatever barrier landed at the seam between the two
+//! (`Scrollback::absorb`), so a burst reads as one run and a call's effects
+//! are never stranded past its end.  This module renders the run's body at
+//! one of three [`Detail`] rungs:
 //!
 //! - `Tally` — one line counting the run's `|>` effects by verb.  A run is
 //!   the only object that reaches this floor, and only by being dialled
@@ -24,8 +23,9 @@ use super::highlight::highlight_ral;
 use super::line::{self, push_wrapped, wash, wrap_line};
 use super::md;
 use super::palette::{CODE_BG, SLATE};
-use crate::bus::card::ObservationKind;
+use crate::bus::card::{Landing, ObservationKind, execs_card, greps_card, landing, reads_card};
 use crate::record::Seq;
+use ral_core::types::Observed;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -40,12 +40,19 @@ pub(super) struct Tally {
 }
 
 impl Tally {
-    fn add(&mut self, kind: ObservationKind, n: u32) {
-        match kind {
-            ObservationKind::Exec => self.binaries += n,
-            ObservationKind::Read => self.files += n,
-            ObservationKind::Grep => self.searches += n,
+    /// The buckets `effects` fall in, one apiece — the facts are deduped
+    /// already, so the count is their length and never a carried counter.
+    fn of(effects: &[Observed]) -> Self {
+        let mut total = Self::default();
+        for what in effects {
+            match landing(what) {
+                Some(Landing::Effect(ObservationKind::Exec)) => total.binaries += 1,
+                Some(Landing::Effect(ObservationKind::Read)) => total.files += 1,
+                Some(Landing::Effect(ObservationKind::Grep)) => total.searches += 1,
+                _ => {}
+            }
         }
+        total
     }
 
     fn merge(&mut self, other: Self) {
@@ -56,7 +63,8 @@ impl Tally {
 }
 
 /// One observation call as rendered: the magnitude drives its sparkline bar,
-/// the context is the turn's floor, and the effect rows arrive rail-less.
+/// the context is the turn's floor, and its effects are the facts themselves,
+/// grouped into rows only at render.
 ///
 /// Named by the [`Seq`] of the commit that opened it, which is how the result
 /// patch addressed to that commit finds the bar it earned.
@@ -66,8 +74,7 @@ pub(super) struct Call {
     cmd: String,
     magnitude: Option<u32>,
     context: u8,
-    tally: Tally,
-    effects: Vec<Line<'static>>,
+    effects: Vec<Observed>,
 }
 
 impl Call {
@@ -80,16 +87,17 @@ impl Call {
             cmd,
             magnitude: None,
             context,
-            tally: Tally::default(),
             effects: Vec::new(),
         }
     }
 
-    /// Fold one of this call's effects in: its rail-less rows, and `n` of
-    /// `kind` for the tally.
-    pub(super) fn absorb(&mut self, rows: Vec<Line<'static>>, kind: ObservationKind, n: u32) {
-        self.effects.extend(rows);
-        self.tally.add(kind, n);
+    /// Fold one of this call's effects in, dropping a repeat: a call that read
+    /// one file twice, ran one argv twice, or searched one pattern in one
+    /// scope twice did the one thing worth showing.
+    pub(super) fn absorb(&mut self, what: Observed) {
+        if !self.effects.iter().any(|seen| same_effect(seen, &what)) {
+            self.effects.push(what);
+        }
     }
 
     /// Stamp the result magnitude the fold patched onto this call.
@@ -100,6 +108,49 @@ impl Call {
     pub(super) fn at(&self) -> Seq {
         self.at
     }
+}
+
+/// When two effects are the one fact: a path read again, an argv run again, a
+/// pattern searched again in the same scope.
+fn same_effect(a: &Observed, b: &Observed) -> bool {
+    match (a, b) {
+        (Observed::Read { path: p }, Observed::Read { path: q }) => p == q,
+        (Observed::Command { argv: p, .. }, Observed::Command { argv: q, .. }) => p == q,
+        (
+            Observed::Grep {
+                scope: s,
+                pattern: p,
+            },
+            Observed::Grep {
+                scope: t,
+                pattern: q,
+            },
+        ) => (s, p) == (t, q),
+        _ => false,
+    }
+}
+
+/// One call's effects as rail-less rows: its reads, then its execs, then its
+/// greps, each bucket one comma-joined card.  The order is fixed rather than
+/// the arrival order — the user does not care in what order a burst
+/// interleaved, only what the call touched.
+fn effect_rows(effects: &[Observed]) -> Vec<Line<'static>> {
+    let mut reads: Vec<&str> = Vec::new();
+    let mut execs: Vec<&Observed> = Vec::new();
+    let mut greps: Vec<&Observed> = Vec::new();
+    for what in effects {
+        match what {
+            Observed::Read { path } => reads.push(path),
+            Observed::Command { .. } => execs.push(what),
+            Observed::Grep { .. } => greps.push(what),
+            _ => {}
+        }
+    }
+    [reads_card(&reads), execs_card(&execs), greps_card(&greps)]
+        .into_iter()
+        .flatten()
+        .flat_map(|card| line::render_card_unframed(&card, Detail::Full))
+        .collect()
 }
 
 /// Columns held clear at the right edge, so the per-call bars and the tip's
@@ -161,7 +212,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     ));
     // The effects open in the intent's own column, so each reads as belonging
     // to the call above it.
-    ls.extend(indent_rows(&tip.effects, "", width));
+    ls.extend(indent_rows(&effect_rows(&tip.effects), "", width));
     ls
 }
 
@@ -170,7 +221,7 @@ fn live_tip(calls: &[Call], width: usize) -> Vec<Line<'static>> {
 fn tally(calls: &[Call], width: usize) -> Vec<Line<'static>> {
     let mut total = Tally::default();
     for call in calls {
-        total.merge(call.tally);
+        total.merge(Tally::of(&call.effects));
     }
     #[allow(clippy::cast_possible_truncation, reason = "coalesced-run call count")]
     let text = tally_line(calls.len() as u32, total);
@@ -212,7 +263,7 @@ fn full_list(calls: &[Call], width: usize) -> Vec<Line<'static>> {
         }
         ls.extend(intent_row(call, i == 0, width));
         ls.extend(source_rows(call, width));
-        ls.extend(indent_rows(&call.effects, BODY_INDENT, width));
+        ls.extend(indent_rows(&effect_rows(&call.effects), BODY_INDENT, width));
     }
     ls
 }

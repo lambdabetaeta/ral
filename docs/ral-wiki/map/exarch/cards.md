@@ -1,5 +1,5 @@
 ---
-generated_at_commit: ed466ea2
+generated_at_commit: 109eb9be
 generated_at_date: 2026-09-09
 covers_paths: [exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/headless.rs, exarch/src/tui/line.rs, exarch/src/tui/palette.rs, exarch/src/tui/block.rs, exarch/src/tui/group.rs, exarch/src/tui/rail.rs, exarch/src/record.rs, exarch/src/record/commit.rs, exarch/src/record/view.rs, exarch/src/tui/scrollback.rs, exarch/data/agent.ral]
 ---
@@ -113,7 +113,7 @@ vocabulary, so none widens the closed mark set above.
 
 A notice's raw fact is what reaches the record log — `Display::Notice
 { notice }` — exactly as a structural observation records only its raw wire
-form (`Display::Observation`/`ObservationGroup`, [[map/exarch/io-surface|io-surface]]):
+form (`Display::Observation`, [[map/exarch/io-surface|io-surface]]):
 the card is a rendering, built fresh by whoever draws, and is never itself
 recorded ([[map/exarch/agent|agent]]).
 
@@ -161,14 +161,15 @@ rather than carrying its own rail. `magnitude()` is the summed diff magnitude,
 feeding the rail's value-step; `lines_changed()` exposes the same diff total as
 the matrix's write footprint, distinct from prose volume.
 
-A single-`diff` card joins the patch-grouping buffer in `record/commit.rs`
-(`Card::into_single_diff` → `SurfaceBuffer::absorb_patch`): consecutive
-same-`(id, path)` diff cards merge their hunks into one `diff <path>` block, the
-way a unified diff presents one file. Every richer card is its own block: the
-scrollback reads a `Display::Card`'s card once, as the fold opens it, and pushes
-it as a barrier (`Scrollback::items`, `tui/scrollback.rs`); a grouped observation
-effect is instead a `Member::Effect` folded onto the call above it, and a write
-card a barrier of its own.
+A single-`diff` card tail-merges in the mirror (`Card::single_diff` →
+`Block::merge_diff`): a surfaced diff arriving while a surfaced diff of the
+same path still stands at the tail extends its hunks, so one file reads as one
+`diff <path>` block, the way a unified diff presents one file. Every richer
+card is its own block: the scrollback reads a `Display::Card`'s card once, as
+the fold opens it, and pushes it as a barrier (`Scrollback::absorb`,
+`tui/scrollback.rs`); an observation effect is instead a `Member::Effect`
+folded onto the call that issued it, and a write card a barrier of its own —
+two writes to one path being two facts, never merged.
 
 ## Machine log
 

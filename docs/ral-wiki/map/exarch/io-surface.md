@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 146084be
+generated_at_commit: 109eb9be
 generated_at_date: 2026-09-09
 covers_paths: [core/src/types/observation.rs, core/src/evaluator/audit.rs, core/src/path/walk.rs, core/src/types/shell/checks.rs, core/src/runtime/command/redirect.rs, core/src/runtime/command/detach.rs, core/src/runtime/pipeline/collect.rs, core/src/evaluator/redirect.rs, core/src/runtime/command.rs, core/src/runtime/command/stdio.rs, core/src/types/shell/mod.rs, core/src/types/mooring.rs, exarch/src/bus/card.rs, exarch/src/bus/card/diff.rs, exarch/src/bus/card/value.rs, exarch/src/bus/card/decode.rs, exarch/src/bus/card/encode.rs, exarch/src/bus/card/observation.rs, exarch/src/bus/card/done.rs, exarch/src/bus/card/notice.rs, exarch/src/bus/card/testkit.rs, exarch/src/shell_eval.rs, exarch/src/bus.rs, exarch/src/bus/post.rs, exarch/src/bus/inbox.rs, exarch/src/bus/signal.rs, exarch/src/bus/channel.rs, exarch/src/bus/emitter.rs, exarch/src/bus/sink.rs, exarch/src/record/commit.rs, exarch/src/headless.rs, exarch/src/shell_eval/builtins.rs, clippy.toml, core/tests/syscall_sites.rs]
 ---
@@ -164,8 +164,8 @@ decoder: a map matching the projection above decodes through
 alone — no card built yet, since the decoder's own codomain carries the
 structured value and nothing a printer merely wants a copy of. The card is
 bound by `observation_card` only at draw time — from whichever printer's fold
-reads the recorded `Display::Observation`/`ObservationGroup` — never by the
-commit producer (`record/commit.rs`'s `SurfaceBuffer`) that records it: the
+reads the recorded `Display::Observation` — never by the seam
+(`fleet/desk.rs`'s `absorb_surface`) that records it: the
 observation crosses the seam as its raw wire form alone (`observation_wire`),
 and the card is rebuilt fresh wherever it is drawn. The other surface shapes
 (pin, notice, card, done) have their own arms; a value matching none drops,
@@ -194,34 +194,43 @@ as `key=value` pairs in the map's own order, whatever is present, nothing
 inferred. `Role::Path` carries a real hue, so the subject of every row stands
 as figure against the muted label and the body prose.
 
-The TUI renders observations not one card per event but **grouped by
-kind**. Core surfaces each effect as its own observation, so a burst would read
-as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. An
-`ObservationBuf` (`record/commit.rs`, beside the patch buffer but kept separate)
-buckets a consecutive run — even *interleaved*, order-independent — into deduped
-buckets (reads by path, execs by argv, greps by `(scope, pattern)`), flushed at
-natural boundaries through per-kind group helpers into **one card per
-non-empty kind** in a fixed Read → Exec → Grep order. A capability check or
-worker birth never joins the buffer — rare and high-signal enough to earn its
-own line. A denial stands as its own card; a **worker birth** is not a card at
-all but a rail notice wearing the `↗` of the fleet act that made it, mirroring
-the `↘` its settlement arrives on — the departure and the return of the same
-detached work read as a pair of announcements around the run. A **write**
-joins it but no group: its diff is a barrier, not a foldable
-observation, so it flushes as its own card, *last*, after the read/exec/grep
-groups. That last position is the point. A redirect writes at the *seam*,
-mid-call, so a write landed eagerly would sit between a call and the reads it
-had yet to make — stranding those reads behind a barrier, where the printer's
-mirror could not fold them onto the call and the run's tally would not count
-them. Buffered, every effect of one call reaches
-[[map/exarch/frontend|the mirror]] contiguously and the barrier merely
-*closes* the group. Each group reuses the exact
-`observation_card` span vocabulary, so a lone surface renders identically; the
-one departure is that the exec group **drops the `→ status` tail** — a
-comma-joined run reads as the *set* of commands run, and per-command status
-survives in the structured observation. The render path is shared with a
-deliberately `surface`d `Display::Card` (`render_card`), so width-reflow and
-the rest are free.
+The record carries raw facts — one `Display::Observation` per observation,
+one `Display::Card` per edit — and the **grouping is the frontend's**, derived
+online by [[map/exarch/frontend|the mirror]] from four tail rules. Core
+surfaces each effect as its own observation, so a burst would otherwise read
+as `read…`, `$…`, `read…`, `$…` — noisy clutter at the rail. The rules:
+
+- **An effect joins the most recent call.** `Landing::Effect` walks back from
+  the mirror's tail past whatever landed since to the nearest group holding a
+  call, and folds onto it (`Scrollback::absorb`); with no such group it
+  renders alone, unframed. A redirect writes at the *seam*, mid-call, so
+  `read a · write b · read c` would otherwise strand `read c` behind a
+  barrier, where the run's tally could not count it. Walking back, every
+  effect of one call reaches the mirror's picture of that call whatever landed
+  between the two.
+- **A write stays a barrier.** Its diff is a mutation, not a foldable
+  observation, so it pushes its own always-visible `▎` card and *closes* the
+  group: the next call opens a new one.
+- **Dedupe and comma-join at render.** `group::Call` holds its effects as the
+  facts themselves and drops a repeat — a read by path, an exec by argv, a
+  grep by `(scope, pattern)` — then renders **one card per non-empty kind** in
+  a fixed Read → Exec → Grep order, the order-independence being the point: a
+  reader does not care how a burst interleaved. The `Tally` counts the same
+  deduped sets.
+- **Diff hunks tail-merge.** Consecutive surfaced diffs of one path grow one
+  card (`Block::merge_diff`), so one file reads as one change.
+
+A capability check or worker birth joins no call — rare and high-signal enough
+to earn its own line. A denial stands as its own card; a **worker birth** is
+not a card at all but a rail notice wearing the `↗` of the fleet act that made
+it, mirroring the `↘` its settlement arrives on — the departure and the return
+of the same detached work read as a pair of announcements around the run. Each
+group reuses the exact `observation_card` span vocabulary, so a lone surface
+renders identically; the one departure is that the exec group **drops the
+`→ status` tail** — a comma-joined run reads as the *set* of commands run, and
+per-command status survives in the structured observation. The render path is
+shared with a deliberately `surface`d `Display::Card` (`render_card`), so
+width-reflow and the rest are free.
 
 ## One surface per operation — bulk plumbing below the ral line
 

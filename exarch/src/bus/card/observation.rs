@@ -302,14 +302,14 @@ fn write_preview(path: &str, new: Option<&[u8]>) -> Vec<Mark> {
     }
 }
 
-// ── Observation groups: a run of buffered surfaces of one kind → one card ────
+// ── Observation groups: a call's effects of one kind → one card ─────────────
 //
 // Each reuses the exact `observation_card` span vocabulary, so a run of one
 // renders like its own card, modulo the deliberate exec departure below.
 // Writes and capability checks never reach here — each lands alone.
 
 /// `read p1, read p2, …`
-pub fn reads_card(reads: &[String]) -> Option<Card> {
+pub(crate) fn reads_card(reads: &[&str]) -> Option<Card> {
     if reads.is_empty() {
         return None;
     }
@@ -326,13 +326,13 @@ pub fn reads_card(reads: &[String]) -> Option<Card> {
 /// joined run reads as the *set of commands run*, where per-command statuses
 /// would be noise. Nothing is lost — each status still rides its own bus
 /// event; only this presentation omits it.
-pub fn execs_card(execs: &[Observed]) -> Option<Card> {
+pub(crate) fn execs_card(execs: &[&Observed]) -> Option<Card> {
     if execs.is_empty() {
         return None;
     }
     let mut spans = vec![Span::plain("$ ")];
     join_spans(&mut spans, execs, |spans, e| {
-        if let Observed::Command { argv, .. } = e {
+        if let Observed::Command { argv, .. } = *e {
             spans.extend(exec_cmd_spans(argv));
         }
     });
@@ -340,13 +340,13 @@ pub fn execs_card(execs: &[Observed]) -> Option<Card> {
 }
 
 /// `grep p1 in s1, p2 in s2, …` under one verb.
-pub fn greps_card(greps: &[Observed]) -> Option<Card> {
+pub(crate) fn greps_card(greps: &[&Observed]) -> Option<Card> {
     if greps.is_empty() {
         return None;
     }
     let mut spans = vec![Span::new(Role::Muted, "grep ")];
     join_spans(&mut spans, greps, |spans, e| {
-        if let Observed::Grep { scope, pattern } = e {
+        if let Observed::Grep { scope, pattern } = *e {
             spans.extend(grep_spans(scope, pattern));
         }
     });
@@ -381,8 +381,8 @@ pub(crate) fn observation_wire(event: &Observation) -> FOValue {
 }
 
 /// The decode leg, inverse of [`observation_wire`]: rebuilds the
-/// [`Observation`] a `Display::Observation` or `Display::ObservationGroup`
-/// record carried, for a renderer to hand to [`observation_card`].
+/// [`Observation`] a `Display::Observation` record carried, for a renderer to
+/// hand to [`observation_card`].
 pub fn observation_from_wire(value: FOValue) -> Option<Observation> {
     Observation::from_value(&RalValue::from(value))
 }

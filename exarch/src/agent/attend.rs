@@ -472,18 +472,14 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
             );
         }
         // A detached `spawn`'s deferred batch, decoded as the live foreground
-        // decode would — its io and diff surfaces through the same commit
-        // producer, one buffer per batch.  It was stamped with and posted to
-        // this same session, so the emitter's id already routes its cards to
-        // the right scrollback.
-        Item::Surface { id, values, .. } => {
-            let mut buf = crate::record::commit::SurfaceBuffer::new();
+        // decode would — through the very same seam.  It was stamped with and
+        // posted to this same session, so the emitter's id already routes its
+        // cards to the right scrollback.
+        Item::Surface { values, .. } => {
             for v in values {
                 match shell_eval::decode_surface(v) {
                     shell_eval::Decoded::Surface(surface) => {
-                        if let Err(error) =
-                            crate::fleet::desk::absorb_surface(&mut buf, recorder, *id, &surface)
-                        {
+                        if let Err(error) = crate::fleet::desk::absorb_surface(recorder, &surface) {
                             recorder.report_fault(&error);
                         }
                     }
@@ -496,9 +492,6 @@ pub(super) fn announce(item: &Item, recorder: &crate::record::Emitter) {
                         }
                     }
                 }
-            }
-            if let Err(error) = buf.flush_surfaces(recorder) {
-                recorder.report_fault(&error);
             }
         }
         Item::Nudge { .. } | Item::Command(_) => {}

@@ -17,8 +17,9 @@ use super::md::{self, MD_INDENT};
 use super::palette::{QUEUED_PROMPT_BG, READ_W, SLATE, content_w};
 use super::rail::{self, RailKind};
 use super::row::Row;
-use crate::bus::card::{Card, Landing, ObservationKind};
+use crate::bus::card::{Card, Landing, Mark};
 use crate::record::Seq;
+use ral_core::types::Observed;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::time::Duration;
@@ -181,11 +182,9 @@ pub(super) struct Group {
 pub(super) enum Member {
     Thinking(String),
     Call(group::Call),
-    Effect {
-        card: Card,
-        kind: ObservationKind,
-        count: u32,
-    },
+    /// One of a call's `|>` effects, as the fact itself: the group dedupes it
+    /// and renders its bucket at every width.
+    Effect(Observed),
     /// A turn boundary interior to a burst: each call is its own provider
     /// round-trip, so one lands between consecutive calls.  Bookkeeping,
     /// drawn as nothing — left a barrier it would cut every burst to one call.
@@ -206,9 +205,9 @@ impl Group {
     }
 
     /// Whether `member` may join this group.  An effect belongs to the call
-    /// above it, so one reaching a group with no call belongs to none.
+    /// that issued it, so one reaching a group with no call belongs to none.
     fn admits(&self, member: &Member) -> bool {
-        !matches!(member, Member::Effect { .. }) || !self.calls.is_empty()
+        !matches!(member, Member::Effect(_)) || !self.calls.is_empty()
     }
 
     /// Take `member` in, reporting whether the group's picture moved: a turn
@@ -223,15 +222,11 @@ impl Group {
                 self.calls.push(call);
                 self.last = Part::Run;
             }
-            Member::Effect { card, kind, count } => {
+            Member::Effect(what) => {
                 let Some(call) = self.calls.last_mut() else {
                     return false;
                 };
-                call.absorb(
-                    line::render_card_unframed(&card, Detail::Full),
-                    kind,
-                    count,
-                );
+                call.absorb(what);
             }
             Member::Turn => return false,
         }
@@ -443,8 +438,8 @@ impl Block {
         }
     }
 
-    /// Take `member` into this block's group, or hand it back for a block of
-    /// its own.  A group standing at the mirror's tail is open by
+    /// Take `member` into this block's group, or hand it back for the next
+    /// block to try.  A group standing at the mirror's tail is open by
     /// construction: every barrier pushes a block after it, so a group that is
     /// still the tail is a group nothing has closed.
     pub(super) fn admit(&mut self, member: Member) -> Option<Member> {
@@ -457,6 +452,34 @@ impl Block {
         if group.grow(member) {
             self.memo = None;
         }
+        None
+    }
+
+    /// Grow this block's lone diff with `card`'s hunks where both are surfaced
+    /// diffs of one file, so consecutive edits to it read as the one change;
+    /// `Some` hands back a card that does not fit.  The hunks carry the
+    /// magnitude, so the memo goes with them.
+    pub(super) fn merge_diff(&mut self, card: Card) -> Option<Card> {
+        let BlockKind::Card {
+            card: tail,
+            landing: Landing::Surfaced,
+            ..
+        } = &mut self.kind
+        else {
+            return Some(card);
+        };
+        match (tail.single_diff(), card.single_diff()) {
+            (Some((into, _)), Some((path, _))) if into == path => {}
+            _ => return Some(card),
+        }
+        let Card(mut marks) = card;
+        match (marks.pop(), tail.0.as_mut_slice()) {
+            (Some(Mark::Diff { hunks, .. }), [Mark::Diff { hunks: into, .. }]) => {
+                into.extend(hunks);
+            }
+            _ => unreachable!("both cards answered `single_diff`"),
+        }
+        self.memo = None;
         None
     }
 

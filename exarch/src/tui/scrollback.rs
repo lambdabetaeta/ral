@@ -144,9 +144,7 @@ struct Tail {
     live: Vec<Row>,
 }
 
-/// What one fold block contributes to the mirror, in arrival order.  One
-/// observation flush can hold a write beside its reads, so a single fold
-/// block may contribute several.
+/// What one fold block contributes to the mirror, in arrival order.
 enum Item {
     /// Something a group may take in.
     Member(Member),
@@ -565,9 +563,24 @@ impl Scrollback {
         }
     }
 
-    /// Take `item` into the group at the tail, or draw it as its own block.
+    /// Take `item` into the group it belongs to, or draw it as its own block.
     fn absorb(&mut self, seq: Seq, item: Item) {
         match item {
+            // An effect belongs to the call that issued it, and a redirect
+            // writes at the seam mid-call: so the walk passes whatever barrier
+            // landed since — the `▎ write` card above all — back to the
+            // nearest call.  `read a · write b · read c` is one run.
+            Item::Member(mut member @ Member::Effect(_)) => {
+                for block in self.blocks.iter_mut().rev() {
+                    match block.admit(member) {
+                        None => return,
+                        Some(back) => member = back,
+                    }
+                }
+                self.open(seq, member);
+            }
+            // Deliberation and work grow the tail alone: a barrier between
+            // them is a boundary, not a seam.
             Item::Member(member) => {
                 let spare = match self.blocks.last_mut() {
                     Some(tail) => tail.admit(member),
@@ -575,6 +588,30 @@ impl Scrollback {
                 };
                 if let Some(member) = spare {
                     self.open(seq, member);
+                }
+            }
+            // Consecutive edits to one file are one change: a surfaced diff
+            // still standing at the tail grows rather than stacking a second
+            // card.  A write is offered no such merge — two writes to one path
+            // are two facts.
+            Item::Barrier(BlockKind::Card {
+                card,
+                landing: Landing::Surfaced,
+                at,
+            }) => {
+                let spare = match self.blocks.last_mut() {
+                    Some(tail) => tail.merge_diff(card),
+                    None => Some(card),
+                };
+                if let Some(card) = spare {
+                    self.blocks.push(Block::new(
+                        BlockKind::Card {
+                            card,
+                            landing: Landing::Surfaced,
+                            at,
+                        },
+                        Some(seq),
+                    ));
                 }
             }
             Item::Barrier(kind) => self.blocks.push(Block::new(kind, Some(seq))),
@@ -590,8 +627,9 @@ impl Scrollback {
             Member::Thinking(_) | Member::Call(_) => {
                 Block::group(member, self.thinking, Some(seq))
             }
-            Member::Effect { card, kind, .. } => {
-                Block::new(BlockKind::card(card, Landing::Effect(kind)), Some(seq))
+            Member::Effect(what) => {
+                let place = landing(&what).expect("an effect member has an effect landing");
+                Block::new(BlockKind::card(observation_card(&what), place), Some(seq))
             }
             Member::Turn => Block::chrome(ChromeKind::Turn, super::line::turn(), Some(seq)),
         };
@@ -936,9 +974,9 @@ fn continues_prose(blocks: &[Block]) -> bool {
 
 impl Scrollback {
     /// One fold block, decoded into what it contributes to the mirror — a
-    /// card built here once rather than at every frame, and an
-    /// [`record::BlockKind::ObservationGroup`] split into one contribution per
-    /// bucket.  A kind that draws nothing contributes nothing.
+    /// card built here once rather than at every frame, an effect as the bare
+    /// fact its call will group.  A kind that draws nothing contributes
+    /// nothing.
     fn items(&self, kind: &record::BlockKind, seq: Seq) -> Vec<Item> {
         use record::BlockKind as K;
         let chrome = |shape, lines| vec![Item::Barrier(BlockKind::Chrome { shape, lines })];
@@ -992,10 +1030,6 @@ impl Scrollback {
                 elapsed: Duration::from_millis(*elapsed_ms),
             })],
             K::Observation { value } => observation_items(value.clone()),
-            K::ObservationGroup { values } => card::observation_group(values)
-                .map(|(card, kind, count)| Item::Member(Member::Effect { card, kind, count }))
-                .into_iter()
-                .collect(),
             K::Card { card } => vec![surfaced(card.clone())],
             // Not a card: a settled block is announced, not bounded — a line
             // on the rail, exactly as a subagent's answer arrives.  The shape
@@ -1068,11 +1102,7 @@ fn observed_items(what: &Observed) -> Vec<Item> {
         return Vec::new();
     };
     match place {
-        Landing::Effect(kind) => vec![Item::Member(Member::Effect {
-            card: observation_card(what),
-            kind,
-            count: 1,
-        })],
+        Landing::Effect(_) => vec![Item::Member(Member::Effect(what.clone()))],
         Landing::Write => vec![Item::Barrier(BlockKind::card(
             observation_card(what),
             Landing::Write,

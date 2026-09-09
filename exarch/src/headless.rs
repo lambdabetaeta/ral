@@ -340,11 +340,6 @@ impl Headless<'_> {
                 let _ = writeln!(self.err, "stream stalled, turn resumes: {error:?}");
             }
             K::Observation { value } => self.print_observation(value.clone()),
-            K::ObservationGroup { values } => {
-                if let Some((card, ..)) = card::observation_group(values) {
-                    self.print_card(&card);
-                }
-            }
             K::Card { card } => self.print_card(card),
             K::Done { outcome } => {
                 let _ = writeln!(

@@ -14,11 +14,10 @@ use crate::agent::event::{
 };
 use crate::agent::seat::SeatKind;
 use crate::agent::{Agent, Avatar, Build, LogCell, ProviderHandle, ReplyCell};
-use crate::bus::{AgentId, Emitter, Stamp};
+use crate::bus::{Emitter, Stamp};
 use crate::fleet::schedule::{CronSchedule, Trigger, parse_duration};
 use crate::fleet::{Fleet, check_name, roster::listing};
 use crate::provider::Provider;
-use crate::record::commit::SurfaceBuffer;
 use crate::shell_eval::{self, PinDigests, Surface};
 use genai::chat::ChatRole;
 use ral_core::Value as RalValue;
@@ -2075,21 +2074,14 @@ fn text_field(name: &str, value: String) -> (String, FOValue) {
 }
 
 /// Decodes a surfaced value onto the bus, folding a `` `pin ``/`` `unpin ``
-/// into the pin mirror and the io/diff surfaces into the commit producer's
-/// [`SurfaceBuffer`], so what reaches the record is the deduped, coalesced
-/// form the user saw. [`RunHost::apply`] is what every dispatch's drain loop
+/// into the pin mirror and every other surface class straight into the record.
+/// [`RunHost::apply`] is what every dispatch's drain loop
 /// ([`ral_core::protocol::dispatch_to_report`]) reaches through the protocol,
 /// so a call's surfaced values always render off the one applier it was built
 /// with.
 pub(crate) struct SurfaceApplier {
     pub(crate) pins: Option<PinDigests>,
-    /// The owning session's id and record seam — what the buffered commits
-    /// stamp through when they flush.
-    pub(crate) id: AgentId,
     pub(crate) recorder: crate::record::Emitter,
-    /// Per-call, like the applier itself: `run_shell` flushes it at the call
-    /// boundary, so a call's effects record contiguously.
-    pub(crate) surface: Mutex<SurfaceBuffer>,
 }
 
 impl SurfaceApplier {
@@ -2125,19 +2117,7 @@ impl SurfaceApplier {
                 _ => {}
             }
         }
-        let mut buf = self.surface.lock_ignore_poison();
-        if let Err(error) = absorb_surface(&mut buf, &self.recorder, self.id, &surface) {
-            drop(buf);
-            self.recorder.report_fault(&error);
-        }
-    }
-
-    /// The call boundary: record whatever the buffers still hold, in their
-    /// barrier order.
-    pub(crate) fn flush(&self) {
-        let mut buf = self.surface.lock_ignore_poison();
-        if let Err(error) = buf.flush_surfaces(&self.recorder) {
-            drop(buf);
+        if let Err(error) = absorb_surface(&self.recorder, &surface) {
             self.recorder.report_fault(&error);
         }
     }
@@ -2159,18 +2139,15 @@ impl Host for SurfaceApplier {
     }
 }
 
-/// Feed one decoded [`Surface`] to the commit producer — an io observation
-/// into its bucket, a lone diff card into the patch buffer, and every other
-/// surface class as its own commit — shared by [`SurfaceApplier::live`] and
+/// Record one decoded [`Surface`] — shared by [`SurfaceApplier::live`] and
 /// the deferred-batch path in `agent::attend::announce`, so the two cannot
 /// drift on what records.
 ///
-/// Only the bucketed observations — read, exec, grep, write — enter the
-/// buffer; a worker birth or capability check joins no group and records at
-/// once as its own commit, exactly the line the buffer's own `unreachable!`
-/// arms draw.  A done, notice, or generic card flushes the buffer first:
-/// those close or interrupt the run around them, so the record keeps the
-/// order the user saw.
+/// The record carries raw facts in arrival order: one
+/// [`crate::record::Display::Observation`] per observation, one
+/// [`crate::record::Display::Card`] per card.  Grouping a call's effects and
+/// merging a file's consecutive hunks belong to the frontend, which derives
+/// them online and so needs no coalesced log to rebuild from.
 ///
 /// A pin publishes twice, per the mirror it also feeds in
 /// [`SurfaceApplier::live`]: [`crate::record::Forensic::Pin`]/`Unpin` is the
@@ -2178,53 +2155,32 @@ impl Host for SurfaceApplier {
 /// `Unpin` is the register the live process is holding, which a resume does
 /// not restore.
 pub(crate) fn absorb_surface(
-    buf: &mut SurfaceBuffer,
     recorder: &crate::record::Emitter,
-    id: AgentId,
     surface: &Surface,
 ) -> std::io::Result<()> {
     match surface {
-        Surface::Observation(event) => match &event.what {
-            Observed::Read { .. }
-            | Observed::Command { .. }
-            | Observed::Grep { .. }
-            | Observed::Write { .. } => buf.absorb_observation(recorder, id, (**event).clone()),
-            Observed::Worker { .. } | Observed::Capability { .. } | Observed::Act { .. } => {
-                let value = crate::bus::card::observation_wire(event);
-                let _recorded = recorder.emit(crate::record::Display::Observation { value })?;
-                Ok(())
-            }
-        },
-        Surface::Card(card) => match card.clone().into_single_diff() {
-            Ok((path, hunks)) => buf.absorb_patch(recorder, id, path, hunks),
-            // A richer card is the kit's own communication: the mark tree is
-            // the fact, so it records whole, as the typed card.  The buffers
-            // flush first, keeping the record in the order the user saw — a
-            // card never joins a group, so nothing coalesced is torn by the
-            // flush.
-            Err(card) => {
-                buf.flush_surfaces(recorder)?;
-                let _recorded = recorder.emit(crate::record::Display::Card { card })?;
-                Ok(())
-            }
-        },
+        Surface::Observation(event) => {
+            let value = crate::bus::card::observation_wire(event);
+            let _recorded = recorder.emit(crate::record::Display::Observation { value })?;
+            Ok(())
+        }
+        Surface::Card(card) => {
+            let _recorded = recorder.emit(crate::record::Display::Card { card: card.clone() })?;
+            Ok(())
+        }
         Surface::Done(outcome) => {
-            buf.flush_surfaces(recorder)?;
             let _recorded = recorder.emit(crate::record::Display::Done {
                 outcome: done_fact(outcome),
             })?;
             Ok(())
         }
         Surface::Notice(notice) => {
-            buf.flush_surfaces(recorder)?;
             let _recorded = recorder.emit(crate::record::Display::Notice {
                 notice: notice_fact(notice),
             })?;
             Ok(())
         }
-        // Register state, not scrollback: the history informs the resume note,
-        // and the buffer is left unflushed on purpose — a pin joins no group
-        // and must not split the one it is never offered to.
+        // Register state, not scrollback: the history informs the resume note.
         Surface::Pin { key, card } => {
             let _recorded = recorder.emit(crate::record::Forensic::Pin { key: key.clone() })?;
             recorder.transient(crate::record::Transient::Pin {
@@ -3225,9 +3181,7 @@ mod tests {
         let d = desk();
         SurfaceApplier {
             pins: Some(d.services.agent.pins.clone()),
-            id: 0,
             recorder: crate::record::Emitter::none(),
-            surface: Mutex::new(SurfaceBuffer::new()),
         }
         .live(pin_value("tasks", "hi"));
 
@@ -3253,9 +3207,7 @@ mod tests {
         let d = desk();
         let applier = SurfaceApplier {
             pins: Some(d.services.agent.pins.clone()),
-            id: 0,
             recorder: crate::record::Emitter::none(),
-            surface: Mutex::new(SurfaceBuffer::new()),
         };
 
         assert!(
@@ -3278,9 +3230,7 @@ mod tests {
         let d = desk();
         let applier = SurfaceApplier {
             pins: Some(d.services.agent.pins.clone()),
-            id: 0,
             recorder: crate::record::Emitter::none(),
-            surface: Mutex::new(SurfaceBuffer::new()),
         };
         let keys = |d: &ExarchDesk| match d
             .handle(FOValue::Variant {
@@ -3314,12 +3264,10 @@ mod tests {
     }
 
     /// Every surface class the live applier renders also records through the
-    /// seam — a `Display` record (or, for the pin register, `Forensic`) —
-    /// and a generic card records *behind* the io group buffered before it,
-    /// keeping the record
-    /// in the order the user saw.  A pin/unpin additionally publishes a
-    /// `Transient` beside its `Forensic` twin: the durable breadcrumb and the
-    /// live register the process is holding, two records for one act.
+    /// seam — a `Display` record (or, for the pin register, `Forensic`) — in
+    /// the order it arrived.  A pin/unpin additionally publishes a `Transient`
+    /// beside its `Forensic` twin: the durable breadcrumb and the live
+    /// register the process is holding, two records for one act.
     #[test]
     fn live_surfaces_record_their_seam_twins() {
         use crate::bus::Signal;
@@ -3334,9 +3282,7 @@ mod tests {
         });
         let applier = SurfaceApplier {
             pins: None,
-            id: 0,
             recorder,
-            surface: Mutex::new(SurfaceBuffer::new()),
         };
 
         let read = ral_core::types::Observation::instant(
@@ -3432,7 +3378,7 @@ mod tests {
         assert_eq!(
             facts,
             ["io", "card", "done", "notice", "pin", "unpin"],
-            "every class records its twin, the buffered read flushed ahead of the card"
+            "every class records its twin, in the order it surfaced"
         );
     }
 

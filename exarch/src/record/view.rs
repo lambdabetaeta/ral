@@ -38,9 +38,6 @@ pub enum BlockKind {
         summary: Option<String>,
         result_lines: Option<u32>,
     },
-    ObservationGroup {
-        values: Vec<FOValue>,
-    },
     HarnessCall {
         verb: String,
         subject: Option<String>,
@@ -292,9 +289,6 @@ impl Blocks {
                 },
             ),
             Display::Result { text, call } => self.attach_result(call, &text),
-            Display::ObservationGroup { values } => {
-                self.push(seq, BlockKind::ObservationGroup { values })
-            }
             Display::SubagentDone {
                 name,
                 error,
