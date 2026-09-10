@@ -954,11 +954,12 @@ impl AgentLog {
     ///
     /// # Errors
     /// See the meta-records note above.
-    pub fn record_turn_start(&mut self, tuning: Tuning) -> io::Result<()> {
+    pub fn record_turn_start(&mut self, tuning: Tuning, route: Option<String>) -> io::Result<()> {
         let id = self.context.next_id();
-        self.record_forensic(Forensic::TurnStarted { tuning })?;
-        // The display twin: `tuning` never showed on screen, and the id is
-        // the screen's alone — nothing duplicates across the pair.
+        self.record_forensic(Forensic::TurnStarted { tuning, route })?;
+        // The display twin: neither `tuning` nor `route` ever showed on
+        // screen, and the id is the screen's alone — nothing duplicates
+        // across the pair.
         self.record_display(Display::Turn { id })
     }
 
@@ -1376,7 +1377,7 @@ mod tests {
     fn transcript_addresses_exchanges_and_names_their_turns() {
         let mut s = fresh_root();
         s.append_user("first prompt".into(), None).unwrap();
-        s.record_turn_start(Tuning::default()).unwrap();
+        s.record_turn_start(Tuning::default(), None).unwrap();
         s.append_assistant(ChatMessage::assistant("first answer"), vec![], None)
             .unwrap();
         complete_exchange(&mut s, "second prompt", "second answer");

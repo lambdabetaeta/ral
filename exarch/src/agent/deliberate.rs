@@ -96,7 +96,10 @@ impl Avatar {
             // protocol one — so this is the one authoring site.
             self.log
                 .lock()
-                .record_turn_start(provider.tuning().clone())
+                .record_turn_start(
+                    provider.tuning().clone(),
+                    provider.openrouter_route().map(str::to_owned),
+                )
                 .map_err(|e| ProviderError::Other(e.to_string()))?;
             #[cfg(debug_assertions)]
             let t_render = std::time::Instant::now();

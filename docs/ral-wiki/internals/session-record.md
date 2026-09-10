@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 109eb9be
-verified_at_date: 2026-09-09
+verified_at_commit: 36ea3c65
+verified_at_date: 2026-09-10
 anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Blocks::step, Delta, Sink::fact, Blocks::model, replay, model::resume, Scrollback::fact, Scrollback::trim, seed, flush_log, rotate, clear, Context, Turn, Body, Pointer, TurnRow, Held, Locus, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
 ---
 
@@ -59,8 +59,9 @@ The outer `Record` vocabulary is closed:
   carry their round-trippable data, not a pre-rendered terminal image; the view
   fold builds the marks again.
 - `Forensic` is durable evidence that is not model context: the session
-  bookends (`SessionStarted`, `SessionResumed`, `SessionEnded`), a turn's
-  effort dial (`TurnStarted`), usage deltas, cancellation,
+  bookends (`SessionStarted`, `SessionResumed`, `SessionEnded`), the shape a
+  turn's request goes out under — sampling and routing both (`TurnStarted`),
+  usage deltas, cancellation,
   provider/stall/error rows, nudges, and other breadcrumbs. The view fold
   admits the rows that belong on scrollback; the model fold ignores them.
 

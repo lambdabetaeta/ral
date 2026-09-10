@@ -180,8 +180,8 @@ impl Provider {
 
     /// The `OpenRouter` serving-provider pin, when this selection's service
     /// actually routes — never sent to a service for which the string would
-    /// mean nothing.
-    fn openrouter_route(&self) -> Option<&str> {
+    /// mean nothing.  What the request carries, hence what the trace records.
+    pub fn openrouter_route(&self) -> Option<&str> {
         if self.account.service.routes {
             self.route.as_deref()
         } else {

@@ -313,10 +313,15 @@ pub enum Forensic {
     },
     /// Tail bookend.
     SessionEnded,
-    /// The meta half of taking a turn: the effort dial the request goes out
-    /// under.  The id the request will produce is the display twin's.
+    /// The meta half of taking a turn: the shape the request goes out under,
+    /// sampling and routing both.  The id the request will produce is the
+    /// display twin's.
     TurnStarted {
         tuning: Tuning,
+        /// The serving provider actually pinned, which is not the selection's
+        /// stored pin: a service that does not route drops it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route: Option<String>,
     },
     UsageDelta {
         usage: UsageDelta,
