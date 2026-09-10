@@ -5,8 +5,6 @@
 //! seam, and turns a resolved [`picker::PickAction`] into a live provider swap
 //! plus a saved [`state::State`]. [`super::login`] mirrors the split.
 
-use std::fmt::Write;
-
 use crate::provider::identity::{self, Account};
 use crate::provider::listing::{Fetches, Listing};
 use crate::provider::models::{ModelSource, ProviderEndpoint};
@@ -161,11 +159,10 @@ fn drive_picker(
 
 /// Rebuild the provider for `model` and swap it into the *focused* agent's
 /// handle, which its next turn reads; a failed persist leaves that switch
-/// standing. The note records as a [`Forensic::SystemNote`] beside its own
-/// [`Forensic::ModelChanged`], so a real operational event reaches the trace
-/// the same way a worker's does; its own failures are view chrome.
+/// standing. The switch reaches the trace as a [`Forensic::ModelChanged`] and
+/// the screen as the status bar's live label — never as transcript chatter;
+/// its own failures are view chrome.
 ///
-/// [`Forensic::SystemNote`]: crate::record::Forensic::SystemNote
 /// [`Forensic::ModelChanged`]: crate::record::Forensic::ModelChanged
 fn apply_model_switch(
     tui: &mut Tui,
@@ -220,13 +217,6 @@ fn apply_model_switch(
         tui.app
             .push_error(focused, &format!("could not persist selection: {e}"));
     }
-    let text = format!(
-        "[Switched to {label} {model}{}]",
-        tuning_suffix(tuning, route.map(String::as_str))
-    );
-    if let Err(error) = recorder.emit(crate::record::Forensic::SystemNote { text }) {
-        recorder.report_fault(&error);
-    }
     if let Err(error) = recorder.emit(crate::record::Forensic::ModelChanged {
         model: model.to_string(),
         label,
@@ -235,23 +225,4 @@ fn apply_model_switch(
     }) {
         recorder.report_fault(&error);
     }
-}
-
-/// The switch note's ` · effort high · temp 0.7 · via deepinfra` tail; empty
-/// when every knob is auto and no route is pinned.
-fn tuning_suffix(tuning: &provider::Tuning, route: Option<&str>) -> String {
-    let mut parts = String::new();
-    if let Some(effort) = &tuning.effort {
-        let _ = write!(parts, " · effort {}", effort.variant_name());
-    }
-    if let Some(temperature) = tuning.temperature {
-        let _ = write!(parts, " · temp {temperature:.1}");
-    }
-    if let Some(top_p) = tuning.top_p {
-        let _ = write!(parts, " · top_p {top_p:.2}");
-    }
-    if let Some(slug) = route {
-        let _ = write!(parts, " · via {slug}");
-    }
-    parts
 }

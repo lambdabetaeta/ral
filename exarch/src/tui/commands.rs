@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use super::App;
 use super::banner::SessionInfo;
-use super::block::{Chrome, Detail};
+use super::block::Chrome;
 use super::login;
 use super::model_picker::pick_model;
 use super::scrollback;
@@ -295,13 +295,9 @@ pub(super) fn cmd_legend(app: &mut App) {
 
 /// Flip the disclosure of deliberation everywhere at once: one setting, so a
 /// group already on screen and one that arrives an hour from now read alike.
+/// The repaint is the answer; no note restates it.
 pub(super) fn cmd_thinking(app: &mut App) {
-    let id = app.tabs.focused();
-    let note = match app.tabs.toggle_thinking() {
-        Detail::Full => "[thinking expanded]",
-        _ => "[thinking collapsed to its header]",
-    };
-    app.push_note(id, note);
+    app.tabs.toggle_thinking();
 }
 
 /// Copy the latest reply, as raw markdown, to the clipboard via OSC 52.  A reply

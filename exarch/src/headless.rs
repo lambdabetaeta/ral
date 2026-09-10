@@ -394,7 +394,6 @@ impl Headless<'_> {
             | K::Answer { .. }
             | K::Cancelled
             | K::HarnessResult { .. }
-            | K::ModelChanged { .. }
             | K::Nudge { .. } => {}
         }
     }

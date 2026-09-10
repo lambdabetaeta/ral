@@ -1049,9 +1049,6 @@ impl Scrollback {
             K::ProviderError { error } => chrome(Chrome::ProviderError(error.clone())),
             K::Stalled { error } => chrome(Chrome::Stalled(error.clone())),
             K::SystemNote { text } => note(text),
-            K::ModelChanged { model, provider } => {
-                note(&format!("model changed: {provider}/{model}"))
-            }
             K::Turn { .. } => vec![Item::Member(Member::Turn)],
             K::ContextEdited { op, by } => {
                 let authority = match by {

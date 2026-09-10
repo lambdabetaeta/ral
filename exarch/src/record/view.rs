@@ -86,10 +86,6 @@ pub enum BlockKind {
     HarnessResult {
         text: String,
     },
-    ModelChanged {
-        model: String,
-        provider: String,
-    },
     Turn {
         id: u64,
     },
