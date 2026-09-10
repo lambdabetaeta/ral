@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 04bf396e
+generated_at_commit: 1f91aaa0
 generated_at_date: 2026-09-10
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
@@ -381,18 +381,29 @@ inside the envelope; its deny sets stay with the in-process gate —
 a kernel-reported sandbox denial into an actionable hint on the
 failing command's `Error`: it reads the kernel log over the call's wall window
 (Seatbelt on macOS, the seccomp record inside bwrap on Linux), keeps only lines
-attributable to the call's descendant PIDs, and appends them. **Only a `file-*`
-denial yields a concrete path to grant** — ipc/mach/network operands name a
-service or endpoint, not a filesystem path, so they reproduce verbatim for
-transparency but never fill the path-to-grant slot. macOS logs fully-resolved
-paths, so the hint names the exact path with the symlink caveat; on Linux, a
-pathless denial first tries `describe_denial`, which consults
+attributable to the call's descendant PIDs, and appends them. **The operand's
+class decides the remedy, and the hint answers once per class present**: a
+`file-read*` path is offered to the grant's `read` set and a `file-write*` one
+to `write` (advice that fails twice, otherwise), a `process-exec` path to the
+`exec` set — the layer a re-exec through `sh -c` or `find -exec` reaches, and
+the only one that sees it — a `network-*` denial to the `net:` bit alone, and a
+`mach-*`/`ipc-*` operand to nothing at all, because a door is the base
+profile's to decide and no grant widens one. `Denied` is that taxonomy as a
+type, so a service name cannot arrive where a path is expected; withheld doors
+carrying a reason (`macos.rs::withheld_doors`, the `.sbpl`'s prose as data) are
+quoted with it and lead the hint, since they are the one class the reader
+cannot act on — the securityd denial that broke `cargo fetch` was once ranked
+below a `.GlobalPreferences.plist` probe and answered with a grant that would
+have changed nothing. macOS logs fully-resolved paths, so the hint names the
+exact path with the symlink caveat; on Linux, an operandless denial first tries
+`describe_denial`, which consults
 [[decisions/260906_seccomp-is-a-typed-deny-set|the seccomp deny-set]] by
 syscall number and, when it names one, repeats that rule's own reason instead
 of guessing at an fs grant — a foreign-ABI record (an `arch=` mismatch) is
 named as such rather than misread as an unlisted syscall; only where the
-deny-set has nothing to say does the hint degrade to the generic "widen the
-grant's fs read set" wording. Windows has no kernel denial log to scrape at
+deny-set has nothing to say does the hint fall back, and it then says the
+record names no operand rather than guessing at a set to widen. Windows has no
+kernel denial log to scrape at
 all, so its arm gates on the exit code alone: only an access-denied-shaped
 exit (`ERROR_ACCESS_DENIED` / `STATUS_ACCESS_DENIED`) under an active sandbox
 yields the fixed, pathless hint — never a fabricated path.

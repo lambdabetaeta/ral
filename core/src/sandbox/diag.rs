@@ -40,12 +40,48 @@ pub(super) mod platform {
     pub(super) fn extract_pid(_: &str) -> Option<u32> {
         None
     }
-    pub(super) fn parse_denial(_: &str) -> Option<(String, Option<&str>)> {
+    pub(super) fn parse_denial(_: &str) -> Option<(String, super::Denied<'_>)> {
         None
     }
     pub(crate) fn describe_denial(_: &str) -> Option<String> {
         None
     }
+    pub(super) fn door_reason(_: &str) -> Option<&'static str> {
+        None
+    }
+}
+
+/// What a denial's record names, and so which remedy the hint owes.  A service
+/// never arrives as a path, so no wording can offer a door as something to
+/// grant — the confusion this taxonomy exists to make unsayable.
+#[cfg(not(windows))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "a seccomp record names no operand, so Linux constructs `Opaque` alone; the other classes are Seatbelt's, and the hint reading them is shared"
+    )
+)]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Denied<'a> {
+    /// A resolved path the grant's `fs.read` set can admit.  Metadata and
+    /// ioctl denials ride here: read is the set that admits them.
+    Read(&'a str),
+    /// A resolved path the grant's `fs.write` set can admit.
+    Write(&'a str),
+    /// A binary outside the grant's `exec` allow-list — the re-execs
+    /// (`sh -c`, `find -exec`) the in-process gate never sees.
+    Exec(&'a str),
+    /// A Mach or IPC name.  The base profile decides these, so no grant
+    /// widens one, and most such denials are a library probing a service it
+    /// can do without.
+    Door(&'a str),
+    /// A socket.  The grant's `net:` bit is the whole remedy, so the endpoint
+    /// the record names is not worth repeating.
+    Socket,
+    /// A record with no operand a remedy could use — every Linux seccomp
+    /// record, where [`platform::describe_denial`] speaks instead.
+    Opaque,
 }
 
 /// Denial lines the hint reproduces verbatim before it starts counting; more
@@ -134,9 +170,7 @@ fn collect_denial_hint(_pids: &HashSet<u32>, _since: Instant, exit_code: i32) ->
 /// colours the `hint:` line as a whole.
 #[cfg(not(windows))]
 fn build_hint(denials: &[&str]) -> String {
-    let mut out = String::from(
-        "the OS sandbox blocked a filesystem access this command needs — the kernel reported:",
-    );
+    let mut out = String::from("the OS sandbox denied this command — the kernel reported:");
     for line in denials.iter().take(MAX_DENIAL_LINES) {
         out.push_str("\n  ");
         out.push_str(line.trim());
@@ -144,48 +178,190 @@ fn build_hint(denials: &[&str]) -> String {
     if denials.len() > MAX_DENIAL_LINES {
         let _ = write!(out, "\n  ({} more)", denials.len() - MAX_DENIAL_LINES);
     }
-
-    // Not the first denial but the first that yields a path: a benign `ipc-*`
-    // or `mach-*` startup denial often comes first, and its operand is a
-    // service name that `parse_denial` rightly withholds.
-    let path = denials
-        .iter()
-        .find_map(|l| platform::parse_denial(l).and_then(|(_, p)| p));
-    if let Some(path) = path {
-        let _ = write!(
-            out,
-            "\n\nthe path `{path}` is outside the active grant's fs.read, so the access was \
-             denied. To allow it, add this path (or a parent directory) to the grant's read \
-             set: the `grant [ fs: [read: ['{path}']] ] {{ … }}` block in ral, or \
-             `--extend-base` for exarch."
-        );
-        out.push_str(
-            "\n\nNote: the sandbox matches fully-resolved paths. If this path was reached \
-             through a symlink inside a granted directory (e.g. ~/.config), granting the \
-             link's directory will not help — grant the resolved path shown above.",
-        );
-    } else {
-        let op = denials
-            .iter()
-            .find_map(|l| platform::parse_denial(l).map(|(op, _)| op));
-        // A typed deny-set (Linux) names the syscall in its own words; only
-        // where it has nothing to say does the generic fs-read wording apply.
-        if let Some(described) = op.as_deref().and_then(platform::describe_denial) {
-            let _ = write!(out, "\n\n{described}");
-        } else {
-            let what = op.map_or_else(
-                || "A sandboxed operation was denied".to_string(),
-                |op| format!("The sandboxed operation `{op}` was denied"),
-            );
-            let _ = write!(
-                out,
-                "\n\n{what} (the kernel record carries no path here). The access lies outside \
-                 the active grant; widen the grant's fs read set — the \
-                 `grant [ fs: [read: […]] ] {{ … }}` block in ral, or `--extend-base` for exarch."
-            );
-        }
+    for remedy in remedies(denials) {
+        out.push_str("\n\n");
+        out.push_str(&remedy);
     }
     out
+}
+
+/// One remedy per class of denial present, because the classes have different
+/// answers and only some are the grant's: a path it can admit, a binary its
+/// `exec` set can admit, a door it cannot open at all, a socket that is the
+/// `net:` bit alone.  Leading with whichever line happened to carry a path is
+/// what once offered a startup plist as the cure for a withheld keychain door.
+#[cfg(not(windows))]
+fn remedies(denials: &[&str]) -> Vec<String> {
+    let (mut reads, mut writes, mut execs, mut doors) = (vec![], vec![], vec![], vec![]);
+    let mut socket = false;
+    let mut opaque = None;
+    for (op, denied) in denials
+        .iter()
+        .filter_map(|line| platform::parse_denial(line))
+    {
+        match denied {
+            Denied::Read(path) => note(&mut reads, path),
+            Denied::Write(path) => note(&mut writes, path),
+            Denied::Exec(path) => note(&mut execs, path),
+            Denied::Door(name) => note(&mut doors, name),
+            Denied::Socket => socket = true,
+            Denied::Opaque => opaque = opaque.or(Some(op)),
+        }
+    }
+    let mut out = Vec::new();
+    // A door the profile can explain leads, because it is the one class the
+    // reader cannot act on: left below a grantable path, it reads as an aside
+    // while the path it cannot help gets granted in vain.
+    let explained = doors
+        .iter()
+        .any(|door| platform::door_reason(door).is_some());
+    if explained {
+        out.push(door_remedy(&doors));
+    }
+    if !reads.is_empty() {
+        out.push(path_remedy(&reads, "read"));
+    }
+    if !writes.is_empty() {
+        out.push(path_remedy(&writes, "write"));
+    }
+    if !execs.is_empty() {
+        out.push(exec_remedy(&execs));
+    }
+    if !doors.is_empty() && !explained {
+        out.push(door_remedy(&doors));
+    }
+    if socket {
+        out.push(NET_REMEDY.to_string());
+    }
+    if out.is_empty() {
+        out.push(opaque_remedy(opaque.as_deref()));
+    }
+    out
+}
+
+/// Keep what is not already listed: one denied operand is logged once per
+/// probe, and a hint that repeats it reads as several separate problems.
+#[cfg(not(windows))]
+fn note<'a>(seen: &mut Vec<&'a str>, item: &'a str) {
+    if !seen.contains(&item) {
+        seen.push(item);
+    }
+}
+
+/// The class's operands under the same cap as the verbatim lines above them.
+#[cfg(not(windows))]
+fn listing(items: &[&str]) -> String {
+    let mut out = String::new();
+    for item in items.iter().take(MAX_DENIAL_LINES) {
+        let _ = write!(out, "\n  {item}");
+    }
+    if items.len() > MAX_DENIAL_LINES {
+        let _ = write!(out, "\n  ({} more)", items.len() - MAX_DENIAL_LINES);
+    }
+    out
+}
+
+/// `set` is the grant's own field, `read` or `write`: a denied write answered
+/// by widening `read` is advice that fails a second time.
+#[cfg(not(windows))]
+fn path_remedy(paths: &[&str], set: &str) -> String {
+    let one = paths.len() == 1;
+    let mut out = format!(
+        "{} outside the active grant's fs.{set}:",
+        if one {
+            "this path lies"
+        } else {
+            "these paths lie"
+        }
+    );
+    out.push_str(&listing(paths));
+    let _ = write!(
+        out,
+        "\nAdd {} (or a parent directory) to the grant's {set} set — the \
+         `grant [ fs: [{set}: ['{}']] ] {{ … }}` block in ral, or `--extend-base` for \
+         exarch. The sandbox matches fully-resolved paths, so a path reached through a \
+         symlink inside a granted directory (e.g. ~/.config) needs the resolved path \
+         above, not the link's own.",
+        if one { "it" } else { "each" },
+        paths[0]
+    );
+    out
+}
+
+/// Exec is its own set, and the kernel layer is the only one that sees a
+/// re-exec — so this denial is never the fs grant's to answer.
+#[cfg(not(windows))]
+fn exec_remedy(paths: &[&str]) -> String {
+    let mut out = String::from("the active grant's exec allow-list does not admit what ran here:");
+    out.push_str(&listing(paths));
+    let _ = write!(
+        out,
+        "\nAdmit it by name or directory — the `grant [ exec: ['{}': 'allow'] ] {{ … }}` \
+         block in ral, or `--extend-base` for exarch. A re-exec (`sh -c`, `find -exec`) \
+         reaches only this layer, so an in-process admit alone does not carry it.",
+        paths[0]
+    );
+    out
+}
+
+/// Doors carrying a stated reason first: a refusal the profile can explain is
+/// worth more than the startup probes that outnumber it.
+#[cfg(not(windows))]
+fn door_remedy(doors: &[&str]) -> String {
+    let mut ranked: Vec<(&str, Option<&'static str>)> = doors
+        .iter()
+        .map(|door| (*door, platform::door_reason(door)))
+        .collect();
+    ranked.sort_by_key(|(_, why)| why.is_none());
+    let mut out = String::from(
+        "the base profile withheld a door no grant opens — a Mach or IPC name is the \
+         profile's to decide, and the grant's fs, net and exec sets do not reach one:",
+    );
+    for (door, why) in ranked.iter().take(MAX_DENIAL_LINES) {
+        match why {
+            Some(why) => {
+                let _ = write!(out, "\n  {door} — {why}");
+            }
+            None => {
+                let _ = write!(out, "\n  {door}");
+            }
+        }
+    }
+    if ranked.len() > MAX_DENIAL_LINES {
+        let _ = write!(out, "\n  ({} more)", ranked.len() - MAX_DENIAL_LINES);
+    }
+    if ranked.iter().any(|(_, why)| why.is_none()) {
+        out.push_str(
+            "\nA door with no reason given is usually harmless: a library probes a service \
+             it can do without, and the denial is noise beside whatever actually failed.",
+        );
+    }
+    out
+}
+
+#[cfg(not(windows))]
+const NET_REMEDY: &str = "a socket was denied, so the active grant is `net: false` — and that bit is the whole of \
+     it. No fs or exec widening opens a socket, and a hostname cannot carry bytes out as a \
+     query label either: the resolver is closed at the same layer.";
+
+/// The record names nothing to act on, so the hint says so rather than
+/// guessing at an fs grant — unless a typed deny-set (Linux) has its own words
+/// for the syscall.
+#[cfg(not(windows))]
+fn opaque_remedy(op: Option<&str>) -> String {
+    if let Some(described) = op.and_then(platform::describe_denial) {
+        return described;
+    }
+    let what = op.map_or_else(
+        || "a sandboxed operation was denied".to_string(),
+        |op| format!("the sandboxed operation `{op}` was denied"),
+    );
+    format!(
+        "{what}, and the kernel record names no operand — so this hint cannot say what to \
+         widen. If the command needs a path the grant does not admit, add it to the grant's \
+         read or write set: the `grant [ fs: [read: […]] ] {{ … }}` block in ral, or \
+         `--extend-base` for exarch."
+    )
 }
 
 /// The live descendants of `root`, `root` itself excluded: one `/bin/ps` sample
@@ -262,23 +438,27 @@ mod tests {
         assert!(hint.contains("deny(1)"), "hint must show the kernel line");
     }
 
-    /// A benign non-filesystem denial logged first must not hijack the
-    /// path-to-grant slot with its service name.
+    /// Each class present answers for itself: the path is offered to the fs
+    /// set, the service named as a door, and neither is dressed as the other.
     #[cfg(target_os = "macos")]
     #[test]
-    fn hint_selects_filesystem_path_over_ipc_operand() {
+    fn hint_answers_every_class_of_denial_it_was_given() {
         let shm = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                    ipc-posix-shm-read-data apple.shm.notification_center";
         let read = "2026-06-19 12:00:00.100 kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                     file-read-data /Users/me/dotfiles/git/.config/git/config";
         let hint = build_hint(&[shm, read]);
         assert!(
-            hint.contains("the path `/Users/me/dotfiles/git/.config/git/config`"),
+            hint.contains("fs.read:\n  /Users/me/dotfiles/git/.config/git/config"),
             "hint must offer the resolved filesystem path to grant; got {hint:?}"
         );
         assert!(
-            !hint.contains("the path `apple.shm.notification_center`"),
-            "hint must not offer the IPC service operand as a path to grant; got {hint:?}"
+            hint.contains("no grant opens") && hint.contains("apple.shm.notification_center"),
+            "hint must name the IPC operand as a door, not a path; got {hint:?}"
+        );
+        assert!(
+            !hint.contains("fs.read:\n  apple.shm"),
+            "hint must never list a service under a filesystem set; got {hint:?}"
         );
         assert!(
             hint.contains("ipc-posix-shm-read-data") && hint.contains("file-read-data"),
@@ -286,21 +466,59 @@ mod tests {
         );
     }
 
-    /// A lone non-filesystem denial degrades to the pathless wording rather than
-    /// inventing a path from a service name.
+    /// A withheld door is answered by the profile's own reason, not by an fs
+    /// widening no grant could perform — the securityd case that offered a
+    /// startup plist as the cure.
     #[cfg(target_os = "macos")]
     #[test]
-    fn hint_without_filesystem_denial_offers_no_path() {
-        let shm = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
-                   ipc-posix-shm-read-data apple.shm.notification_center";
-        let hint = build_hint(&[shm]);
+    fn hint_quotes_the_profile_reason_for_a_withheld_door() {
+        let plist = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: cargo(1) deny(1) \
+                     file-read-data /Users/me/Library/Preferences/.GlobalPreferences.plist";
+        let door = "2026-06-19 12:00:00.100 kernel[0] (Sandbox) Sandbox: cargo(1) deny(1) \
+                    mach-lookup com.apple.SecurityServer";
+        let hint = build_hint(&[plist, door]);
         assert!(
-            hint.contains("carries no path here"),
-            "a lone non-fs denial must use the no-path arm; got {hint:?}"
+            hint.contains("keychain") && hint.contains("git-fetch-with-cli"),
+            "a withheld door must carry the profile's reason; got {hint:?}"
         );
         assert!(
-            !hint.contains("apple.shm.notification_center`"),
-            "the service operand must never appear as a grantable path; got {hint:?}"
+            hint.contains("com.apple.SecurityServer —"),
+            "the reason must be attached to the door that has one; got {hint:?}"
+        );
+    }
+
+    /// A denied write is answered by the write set: `read` would fail again.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hint_offers_the_write_set_for_a_denied_write() {
+        let line = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: tee(1) deny(1) \
+                    file-write-create /Users/me/notes.txt";
+        let hint = build_hint(&[line]);
+        assert!(
+            hint.contains("fs.write") && hint.contains("[write: ['/Users/me/notes.txt']]"),
+            "a denied write must name the write set; got {hint:?}"
+        );
+        assert!(
+            !hint.contains("fs.read"),
+            "a denied write must not be blamed on the read set; got {hint:?}"
+        );
+    }
+
+    /// `net: false` is the whole remedy for a socket, and no fs wording
+    /// belongs anywhere near it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hint_names_the_net_bit_for_a_denied_socket() {
+        let line = "2026-06-19 12:00:00.000 kernel[0] (Sandbox) Sandbox: curl(1) deny(1) \
+                    network-outbound";
+        let hint = build_hint(&[line]);
+        assert!(
+            hint.contains("`net: false`"),
+            "a denied socket must name the net bit; got {hint:?}"
+        );
+        assert!(
+            !hint.contains("read set"),
+            "a denied socket must not be answered with an fs widening; got {hint:?}"
         );
     }
 

@@ -52,6 +52,11 @@
 ;; grant mentions) nor `com.apple.SecurityServer` (securityd hands out
 ;; keychain items to `security find-generic-password`).
 ;;
+;; Those three refusals are data as well as prose — `macos.rs`'s
+;; `withheld_doors` — because a comment cannot reach the agent holding
+;; the EPERM: the denial hint quotes the reason from there, so a
+;; deliberate `no` does not read as an accident.  Keep the two in step.
+;;
 ;; This is not a resolver door: `getaddrinfo` reaches mDNSResponder
 ;; over the UNIX socket /private/var/run/mDNSResponder, which Seatbelt
 ;; gates as `network-outbound`, not as `mach-lookup`.  The services a

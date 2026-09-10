@@ -309,6 +309,43 @@ fn system_paths() -> &'static [(&'static str, SystemAccess)] {
     ]
 }
 
+/// Mach and IPC doors the base profile withholds on purpose, each with the
+/// reason `macos-base.sbpl` states beside the services it does admit — data
+/// rather than a comment, because a comment cannot reach the agent holding the
+/// `EPERM`, and a deliberate refusal read as an accident is chased instead of
+/// worked around.  Absence from this table withholds a door just as firmly
+/// (deny-default does that); what a name here buys is the sentence.
+fn withheld_doors() -> &'static [(&'static str, &'static str)] {
+    &[
+        (
+            "com.apple.SecurityServer",
+            "securityd hands out keychain items, so no profile admits it; cargo's bundled \
+             git needs it for TLS, so set `net.git-fetch-with-cli` and cargo will fetch \
+             through the git binary instead",
+        ),
+        (
+            "com.apple.coreservices.launchservicesd",
+            "launchservicesd spawns `/usr/bin/open`'s target as a child of launchd, outside \
+             this profile — an escape, and for a URL an egress channel under `net: false`",
+        ),
+        (
+            "com.apple.pasteboard",
+            "the pasteboard is a clipboard no grant mentions",
+        ),
+    ]
+}
+
+/// The reason the base profile withholds `name`, for
+/// [`crate::sandbox::diag`]'s denial hint.  Matched by prefix: Seatbelt logs a
+/// Mach name with the instance suffix the lookup carried
+/// (`com.apple.pasteboard.1`, `com.apple.distributed_notifications@Uv3`).
+pub(super) fn withheld_door(name: &str) -> Option<&'static str> {
+    withheld_doors()
+        .iter()
+        .find(|(door, _)| name.starts_with(door))
+        .map(|(_, why)| *why)
+}
+
 /// Host-existing system paths admitted for read — every entry, since `Exec`
 /// implies read.  Each expands to its firmlink-equivalent forms (`/private/etc`
 /// → `[/etc, /private/etc]`), matching whichever spelling Seatbelt presents.
@@ -396,7 +433,7 @@ unsafe extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use super::build_profile;
+    use super::{build_profile, withheld_doors};
     use crate::path::proper_ancestors;
     use crate::types::{ExecProjection, FsProjection, FsRules, SandboxProjection};
 
@@ -742,6 +779,14 @@ mod tests {
             rules(&open).contains("com.apple.dnssd.service"),
             "net: true emitted no resolver door:\n{open}"
         );
+        // A door the hint explains must be one no projection opens, or the
+        // reason is quoted about a door the child actually holds.
+        for (door, _) in withheld_doors() {
+            assert!(
+                !closed.contains(door) && !rules(&open).contains(door),
+                "{door} carries a withheld-door reason yet some profile admits it"
+            );
+        }
     }
 
     #[test]

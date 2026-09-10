@@ -6,6 +6,7 @@
 //! Mount attenuation leaves no record at all — an unbound path is merely absent,
 //! and the caller just sees ENOENT.
 
+use super::Denied;
 use std::time::Duration;
 
 #[allow(
@@ -66,13 +67,14 @@ fn extract_arch(line: &str) -> Option<u32> {
     u32::from_str_radix(&after[..end], 16).ok()
 }
 
-/// The blocked syscall, as `(op, path)`; a `type=1326` record carries no
-/// path, so the second element is always `None`.  A record whose `arch=`
+/// The blocked syscall, as `(op, denied)`; a `type=1326` record names no
+/// operand, so the second element is always [`Denied::Opaque`] and
+/// [`describe_denial`] carries the whole remedy.  A record whose `arch=`
 /// does not match this host's own `AUDIT_ARCH` names a syscall table
 /// `seccomp::Filter` never numbered — the filter's own x32 guard is exactly
 /// this case — so `op` becomes a sentence [`describe_denial`] recognises
 /// rather than a bare number [`seccomp::Filter::explain`] would silently miss.
-pub(super) fn parse_denial(line: &str) -> Option<(String, Option<&str>)> {
+pub(super) fn parse_denial(line: &str) -> Option<(String, Denied<'_>)> {
     let after_syscall = line.split_once("syscall=")?.1;
     let end = after_syscall
         .find(|c: char| c.is_whitespace())
@@ -87,7 +89,13 @@ pub(super) fn parse_denial(line: &str) -> Option<(String, Option<&str>)> {
         }
         _ => syscall.to_string(),
     };
-    Some((op, None))
+    Some((op, Denied::Opaque))
+}
+
+/// A seccomp record names a syscall, never a door; the deny-set's own words
+/// are all this platform has to add.
+pub(super) fn door_reason(_name: &str) -> Option<&'static str> {
+    None
 }
 
 /// What `seccomp::Filter::ENVELOPE` says about a denied syscall, in prose —
@@ -135,10 +143,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_denial_returns_syscall_and_no_path() {
+    fn parse_denial_returns_syscall_and_no_operand() {
         assert_eq!(
             parse_denial(&line(AUDIT_ARCH, 101)),
-            Some(("101".to_string(), None))
+            Some(("101".to_string(), Denied::Opaque))
         );
         assert_eq!(parse_denial("type=1326 with no syscall token"), None);
     }
@@ -149,7 +157,10 @@ mod tests {
         const FOREIGN: u32 = 0xC0DE_0001;
         assert_eq!(
             parse_denial(&line(FOREIGN, 101)),
-            Some(("foreign-ABI syscall 101 (arch=c0de0001)".to_string(), None))
+            Some((
+                "foreign-ABI syscall 101 (arch=c0de0001)".to_string(),
+                Denied::Opaque
+            ))
         );
     }
 

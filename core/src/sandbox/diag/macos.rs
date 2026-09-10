@@ -6,6 +6,7 @@
 //! `(Sandbox) Sandbox: <comm>(<pid>) deny(<n>) <op> <operand…>` that every
 //! parser below keys off.
 
+use super::Denied;
 use std::time::Duration;
 
 #[allow(
@@ -44,16 +45,16 @@ pub(super) fn extract_pid(line: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Split a denial into `(operation, path)`.  The operand is the whole trimmed
-/// remainder, since macOS paths contain spaces, and counts as a path only for
-/// `file-*`: an `ipc-*`/`mach-*`/`network-*` operand names a service, which
-/// `build_hint` must never offer the user as a path to grant.  Seatbelt
-/// resolves the filesystem paths it logs, so the path returned is exactly the
-/// one the grant needs.
+/// Split a denial into its operation and what that operation names.  The
+/// operand is the whole trimmed remainder, since macOS paths contain spaces,
+/// and the operation decides which remedy class it belongs to — Seatbelt
+/// resolves the paths it logs, so a [`Denied::Read`] path is exactly the one
+/// the grant needs, while a Mach or IPC name reaches the caller as a
+/// [`Denied::Door`] it cannot mistake for one.
 ///
 /// The operation is owned because Linux's counterpart builds a syscall name
 /// rather than borrowing one, and one caller reads both.
-pub(super) fn parse_denial(line: &str) -> Option<(String, Option<&str>)> {
+pub(super) fn parse_denial(line: &str) -> Option<(String, Denied<'_>)> {
     let after_tag = line.split_once("Sandbox: ")?.1;
     let after_deny = after_tag.split_once("deny(")?.1.split_once(')')?.1;
     let mut rest = after_deny.trim_start().splitn(2, char::is_whitespace);
@@ -61,17 +62,28 @@ pub(super) fn parse_denial(line: &str) -> Option<(String, Option<&str>)> {
     if op.is_empty() {
         return None;
     }
-    let path = rest
-        .next()
-        .map(str::trim)
-        .filter(|p| !p.is_empty() && op.starts_with("file-"));
-    Some((op.to_string(), path))
+    let operand = rest.next().map(str::trim).filter(|o| !o.is_empty());
+    let denied = match operand {
+        // `file-write*` names the write set; metadata and ioctl ride with read.
+        Some(o) if op.starts_with("file-write") => Denied::Write(o),
+        Some(o) if op.starts_with("file-") => Denied::Read(o),
+        Some(o) if op == "process-exec" => Denied::Exec(o),
+        Some(o) if op.starts_with("mach-") || op.starts_with("ipc-") => Denied::Door(o),
+        _ if op.starts_with("network-") => Denied::Socket,
+        _ => Denied::Opaque,
+    };
+    Some((op.to_string(), denied))
 }
 
 /// Seatbelt's log line already names the operation; there is no typed
 /// deny-set here to add anything to it.
 pub(crate) fn describe_denial(_op: &str) -> Option<String> {
     None
+}
+
+/// Why the base profile withholds this door, where it has a reason on record.
+pub(super) fn door_reason(name: &str) -> Option<&'static str> {
+    super::super::macos::withheld_door(name)
 }
 
 #[cfg(test)]
@@ -99,7 +111,7 @@ mod tests {
             parse_denial(LINE),
             Some((
                 "file-read-data".to_string(),
-                Some("/private/var/folders/ab/secret/data.txt")
+                Denied::Read("/private/var/folders/ab/secret/data.txt")
             ))
         );
     }
@@ -112,32 +124,90 @@ mod tests {
             parse_denial(line),
             Some((
                 "file-read-data".to_string(),
-                Some("/Users/me/My Documents/the file.txt")
+                Denied::Read("/Users/me/My Documents/the file.txt")
             ))
         );
     }
 
+    /// A write answered by widening `read` fails a second time, so the write
+    /// ops are their own class.
     #[test]
-    fn parse_denial_handles_op_without_a_path() {
-        let line = "kernel[0] (Sandbox) Sandbox: foo(1) deny(1) network-outbound";
+    fn parse_denial_separates_a_denied_write_from_a_denied_read() {
+        let write = "kernel[0] (Sandbox) Sandbox: tee(1) deny(1) file-write-create \
+                     /Users/me/notes.txt";
         assert_eq!(
-            parse_denial(line),
-            Some(("network-outbound".to_string(), None))
+            parse_denial(write),
+            Some((
+                "file-write-create".to_string(),
+                Denied::Write("/Users/me/notes.txt")
+            ))
+        );
+        let meta = "kernel[0] (Sandbox) Sandbox: ls(1) deny(1) file-read-metadata /etc/hosts";
+        assert_eq!(
+            parse_denial(meta),
+            Some(("file-read-metadata".to_string(), Denied::Read("/etc/hosts")))
         );
     }
 
     #[test]
-    fn parse_denial_drops_non_filesystem_operand() {
+    fn parse_denial_handles_op_without_an_operand() {
+        let line = "kernel[0] (Sandbox) Sandbox: foo(1) deny(1) network-outbound";
+        assert_eq!(
+            parse_denial(line),
+            Some(("network-outbound".to_string(), Denied::Socket))
+        );
+    }
+
+    /// A service name reaches the caller as a door, so no wording can offer it
+    /// as a path to grant.
+    #[test]
+    fn parse_denial_calls_a_service_operand_a_door() {
         let shm = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                    ipc-posix-shm-read-data apple.shm.notification_center";
         assert_eq!(
             parse_denial(shm),
-            Some(("ipc-posix-shm-read-data".to_string(), None))
+            Some((
+                "ipc-posix-shm-read-data".to_string(),
+                Denied::Door("apple.shm.notification_center")
+            ))
         );
 
         let mach = "kernel[0] (Sandbox) Sandbox: git(58522) deny(1) \
                     mach-lookup com.apple.system.notification_center";
-        assert_eq!(parse_denial(mach), Some(("mach-lookup".to_string(), None)));
+        assert_eq!(
+            parse_denial(mach),
+            Some((
+                "mach-lookup".to_string(),
+                Denied::Door("com.apple.system.notification_center")
+            ))
+        );
+    }
+
+    /// The kernel layer is the only one a re-exec reaches, and its remedy is
+    /// the exec set, not the fs one.
+    #[test]
+    fn parse_denial_calls_a_denied_spawn_an_exec() {
+        let line = "kernel[0] (Sandbox) Sandbox: sh(1) deny(1) process-exec /usr/bin/security";
+        assert_eq!(
+            parse_denial(line),
+            Some((
+                "process-exec".to_string(),
+                Denied::Exec("/usr/bin/security")
+            ))
+        );
+    }
+
+    /// The reason is quoted from the profile's own table, and only for the
+    /// doors it names.
+    #[test]
+    fn door_reason_answers_a_withheld_door_and_withholds_it_from_a_probe() {
+        let why = door_reason("com.apple.SecurityServer").expect("securityd is on record");
+        assert!(why.contains("keychain"), "{why:?}");
+        assert!(
+            door_reason("com.apple.pasteboard.1").is_some(),
+            "an instance suffix must still match its door"
+        );
+        assert_eq!(door_reason("com.apple.metadata.mds"), None);
     }
 
     #[test]
