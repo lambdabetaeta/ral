@@ -173,6 +173,14 @@ const LEGACY_TOOL_HOMES: &[(&str, &str)] = &[
     ("RUSTUP_HOME", "rustup"),
 ];
 
+/// Settings the confinement forces on a tool, as against relocating one.
+/// Cargo's bundled libgit2 speaks TLS through `SecureTransport`, whose handshake
+/// reaches securityd — the keychain door no profile admits — and reports the
+/// denial as `ssl handshake -9808`, which cargo then blames on a missing
+/// revision.  The `git` binary's TLS needs no such door, so cargo fetches
+/// through it.
+const CONFINED_TOOL_SETTINGS: &[(&str, &str)] = &[("CARGO_NET_GIT_FETCH_WITH_CLI", "true")];
+
 impl Scratch {
     /// Create this session's scratch under a lock that says it is live, and
     /// delete the scratches whose sessions are over.
@@ -271,16 +279,21 @@ impl Scratch {
         Ok(path)
     }
 
-    /// Seed [`Scratch::var`] and the legacy-tool homes into `shell`, overriding
-    /// whatever was inherited: a `CARGO_HOME` under `~/.cargo` lands outside
-    /// reasonable's write set, so the sandbox is the trust boundary, not the
-    /// environment exarch was launched in.
+    /// Seed [`Scratch::var`], the legacy-tool homes and
+    /// [`CONFINED_TOOL_SETTINGS`] into `shell`, overriding whatever was
+    /// inherited: a `CARGO_HOME` under `~/.cargo` lands outside reasonable's
+    /// write set, so the sandbox is the trust boundary, not the environment
+    /// exarch was launched in.  One seeder for all three, because the seat's
+    /// test double mirrors this call and a second site would drift from it.
     pub fn install_into(&self, shell: &mut Shell) {
         let scratch = self.dir.to_string_lossy().into_owned();
         seed_var(shell, &self.var(), &scratch);
         for (var, sub) in LEGACY_TOOL_HOMES {
             let value = format!("{scratch}/{sub}");
             seed_var(shell, var, &value);
+        }
+        for (var, value) in CONFINED_TOOL_SETTINGS {
+            seed_var(shell, var, value);
         }
     }
 }
@@ -583,6 +596,21 @@ mod tests {
         resume_candidates_in,
     };
     use std::fs;
+
+    /// Cargo's own TLS wants a door no profile admits, so a confined session
+    /// must hand it the `git` binary instead — invisible in every log, hence
+    /// asserted here.
+    #[test]
+    fn a_confined_session_tells_cargo_to_fetch_through_git() {
+        let scratch =
+            super::Scratch::for_test(super::EXARCH, "confined-settings").expect("test scratch");
+        let mut shell = super::boot_shell();
+        scratch.install_into(&mut shell);
+        assert_eq!(
+            shell.env_var("CARGO_NET_GIT_FETCH_WITH_CLI"),
+            Some("true".to_string())
+        );
+    }
 
     /// Seed a scratch and its lock file, as [`super::Scratch::new`] would.
     fn seed_scratch(temp: &std::path::Path, name: &str) -> std::path::PathBuf {

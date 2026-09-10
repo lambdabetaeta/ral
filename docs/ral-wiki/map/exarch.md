@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c5df4203
-generated_at_date: 2026-09-06
+generated_at_commit: 04bf396e
+generated_at_date: 2026-09-10
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -136,7 +136,11 @@ can inherit a live key.**
 - **`Scratch`** — the disposable per-session directory, exposed under its
   `App`'s own name (`$EXARCH_SCRATCH`; synod's is `$SYNOD_SCRATCH`), with the
   legacy build-tool homes (`CARGO_HOME`, …) redirected
-  into it so a write lands inside the grant rather than in a denied real cache.
+  into it so a write lands inside the grant rather than in a denied real cache,
+  and beside them the one setting the confinement forces without relocating
+  anything (`CARGO_NET_GIT_FETCH_WITH_CLI`, because cargo's bundled TLS reaches
+  the keychain door the profile withholds — see
+  [[map/core/capabilities|capabilities]]).
 - **`App`** — the product identity that owns the directory conventions as
   methods, and the engine names every product itself (`EXARCH`, `SYNOD`, over
   `APPS`) rather than each naming its own: composing a grant means carving out

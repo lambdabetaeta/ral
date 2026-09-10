@@ -225,6 +225,19 @@ These values replace inherited ones. A build therefore writes to disposable
 scratch instead of silently targeting a real cache that the active profile
 does not permit.
 
+One further variable is forced, though it relocates nothing:
+
+| variable                       | tool  | value  |
+|--------------------------------|-------|--------|
+| `CARGO_NET_GIT_FETCH_WITH_CLI` | Cargo | `true` |
+
+Cargo's bundled git speaks TLS through macOS SecureTransport, whose handshake
+reaches securityd — the keychain door no profile admits — so a git dependency
+otherwise fails as `ssl handshake -9808`, which cargo reports as a missing
+revision. The `git` binary's TLS needs no such door, so cargo fetches through
+it. A profile that denies `git`, such as `edit-only`, therefore cannot resolve
+git dependencies at all.
+
 ## Enforcement
 
 ral checks executable authority before spawning on every platform. Filesystem

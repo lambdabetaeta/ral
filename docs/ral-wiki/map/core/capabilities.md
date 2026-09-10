@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6686e770
-generated_at_date: 2026-09-09
+generated_at_commit: 04bf396e
+generated_at_date: 2026-09-10
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 
@@ -353,6 +353,16 @@ behalf *outside* the profile, so `(allow mach-lookup)` hands out
 launchservicesd, and with it `/usr/bin/open`, whose target launchd spawns
 unconfined (`open -a Terminal ./payload.command`), and whose URL form carries
 bytes out under `net: false`. Same door: the pasteboard server and securityd.
+Withholding securityd has one measured cost worth naming. Cargo's bundled
+libgit2 speaks TLS through SecureTransport, whose handshake reaches securityd
+and, denied, returns `errSSLBadCert`; cargo surfaces that as `ssl handshake
+-9808` and then blames a missing revision. Apple's `curl` and `git` reach trust
+through trustd alone and are unaffected — measured on Darwin 25.5.0 under
+`(allow default)` with that one door denied: `cargo fetch` fails, `git
+ls-remote` and `curl` succeed, and `security list-keychains` fails too, which is
+the door's other half. So exarch tells cargo to fetch through the `git` binary
+(`bootstrap::CONFINED_TOOL_SETTINGS`) rather than admitting a door that would
+hand the agent the login keychain.
 The base now names the services dyld and libSystem need and no others,
 `macos-net.sbpl` carries the resolver and trust doors under `net: true` so DNS
 closes at both layers at once, and `mac_profile_names_every_mach_service` holds

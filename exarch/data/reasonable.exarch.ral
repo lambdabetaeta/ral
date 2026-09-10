@@ -99,8 +99,9 @@ return [
       # xdg variant covers `git config --global` when XDG_CONFIG_HOME
       # is set.  SSH keys (~/.ssh) and GPG keys (~/.gnupg) stay
       # unreadable, so SSH push and signed commits fail by lack of
-      # admit; HTTPS push via osxkeychain remains possible on macOS
-      # since securityd is reached over Mach IPC, not the filesystem.
+      # admit.  HTTPS push fails too, by a door rather than a path:
+      # osxkeychain asks securityd, which the base profile withholds
+      # because the same door hands out keychain items.
       '~/.gitconfig',
       '~/.gitignore_global',     # path `core.excludesfile` points at by default
       'xdg:config/git',
@@ -279,8 +280,9 @@ return [
     # rest of the local-only subcommands work.  Credential and
     # signing helpers fail by separate lack of admit: ~/.ssh and
     # ~/.gnupg are not in fs reads, so SSH push and `commit -S` die
-    # naturally.  HTTPS push via osxkeychain on macOS still works
-    # because securityd is reached over Mach IPC.
+    # naturally, and osxkeychain with them — its securityd door is
+    # one the base profile withholds.  This binary is also how cargo
+    # fetches git dependencies here; see PROFILES.md.
     git: 'allow',
     gh:  'allow',
 
