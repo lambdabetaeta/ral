@@ -321,57 +321,10 @@ capability SIDs — a LowBox token without them cannot open a socket, so
 `net_enforced()` holds on Windows.
 
 `macos-base.sbpl` is the policy-independent Seatbelt base every rendered macOS
-profile inherits: deny-default, libSystem/dyld startup allowances, common device
-writes, and the runtime support needed before the policy-derived fs/net/exec rules
-can matter. Its broad `file-ioctl` compatibility allowance deliberately leaves
-`/dev/tty` configurable, because sandboxed full-screen children need termios and
-window-size ioctls when a run has an explicit terminal loan. This is a known
-hole: the current `SandboxProjection` carries fs/net/exec, not terminal-loan
-state, so the Seatbelt profile cannot yet deny `/dev/tty` ioctls for ordinary
-Denied-terminal tool runs while admitting them for `_ed-tui`-style children.
-The notification-center carve-out is named in the POSIX shared-memory namespace
-(`ipc-posix-name "apple.shm.notification_center"`), matching Apple's profiles.
-`(allow signal (target same-sandbox))` scopes signalling to the envelope: the
-filter binds sending only, so an external kill *into* the sandbox (how a
-timeout lands) is unaffected, while `kill -STOP` back out at the host ral is
-not a denial-of-service a confined child can perform. Descendants share the
-instance; two per-command children of one grant do not, so signalling between
-sibling jobs is denied too.
-
-`net: false` on macOS is enforced by *absence*: `build_profile` emits `(allow
-network*)` only under `net: true`, and the base admits `network-outbound` for
-nothing. That silence is what closes DNS, because `getaddrinfo` reaches
-mDNSResponder over the UNIX socket `/private/var/run/mDNSResponder`, which
-Seatbelt gates as `network-outbound` rather than as `mach-lookup` — measured on
-Darwin 25.5.0: denying `mach-lookup` outright still resolves names, and
-admitting that socket alone resolves them with `mach-lookup` denied. So
-`mach-lookup` is not a *resolver* door, which is why the base once admitted it
-unfiltered — dyld needs it before `main()`. It is other doors, and the
-conclusion drawn from that measurement — that scoping it buys nothing — held
-only for the resolver: a Mach name is a door to a daemon that acts on your
-behalf *outside* the profile, so `(allow mach-lookup)` hands out
-launchservicesd, and with it `/usr/bin/open`, whose target launchd spawns
-unconfined (`open -a Terminal ./payload.command`), and whose URL form carries
-bytes out under `net: false`. Same door: the pasteboard server and securityd.
-Withholding securityd has one measured cost worth naming. Cargo's bundled
-libgit2 speaks TLS through SecureTransport, whose handshake reaches securityd
-and, denied, returns `errSSLBadCert`; cargo surfaces that as `ssl handshake
--9808` and then blames a missing revision. Apple's `curl` and `git` reach trust
-through trustd alone and are unaffected — measured on Darwin 25.5.0 under
-`(allow default)` with that one door denied: `cargo fetch` fails, `git
-ls-remote` and `curl` succeed, and `security list-keychains` fails too, which is
-the door's other half. So exarch tells cargo to fetch through the `git` binary
-(`bootstrap::CONFINED_TOOL_SETTINGS`) rather than admitting a door that would
-hand the agent the login keychain.
-The base now names the services dyld and libSystem need and no others,
-`macos-net.sbpl` carries the resolver and trust doors under `net: true` so DNS
-closes at both layers at once, and `mac_profile_names_every_mach_service` holds
-the shape. The invariant worth keeping is the narrower one: admit `network-outbound` for no local socket, or a
-hostname becomes an egress channel — an attacker-chosen query label leaves via
-the resolver daemon, which is outside the sandbox — while `net: false` still
-reads as closed. `mac_profile_denies_network_when_disabled` asserts it over
-every rule in the rendered profile, with a `net: true` positive control so the
-denial cannot pass vacuously.
+profile inherits, and `build_profile` lays the grant's rules over it. Both are
+read rule by rule — what each admits, what it withholds and why, and what the
+backend pays to express an object policy in Seatbelt's name language — in
+[[internals/seatbelt-profile|seatbelt-profile]].
 
 Path-scoped *exec* confinement on Linux is a Landlock layer the payload enters
 inside the envelope; its deny sets stay with the in-process gate —

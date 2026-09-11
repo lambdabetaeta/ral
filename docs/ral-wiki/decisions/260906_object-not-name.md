@@ -24,7 +24,12 @@ old bytes into a script-readable `old_bytes`.
 
 **Decision.** One door. `Shell::locate(rp, op)` walks the name from the root
 through directory handles (`path/walk.rs`), never letting the kernel follow a
-symlink: an intermediate component is opened `O_DIRECTORY|O_NOFOLLOW`; a
+symlink: an intermediate component is opened as a *search handle* with
+`O_NOFOLLOW` — `O_SEARCH` on Apple, `O_PATH` on Linux — the right to resolve
+names through it and nothing more, which is what the kernel's own resolver
+holds on an ancestor and so all a sandbox need grant one (the Seatbelt
+profile admits ancestors as `file-read-metadata` only; a read handle there
+was refused, and every ral-owned read under a ral sandbox with it); a
 symlink met anywhere — leaf included — is read and spliced into the remaining
 name, which is re-walked from the root (40 hops is a cycle). The path assembled
 is canonical by construction. The verdict (`check_fs_exact`) is taken on that

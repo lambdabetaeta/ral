@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 6d48e9af
+verified_at_commit: b554b2c3
 verified_at_date: 2026-08-26
 anchors: [compile, compile_and_typecheck, CompileOutcome, SessionSchemes, bake_prelude, bake_prelude_to_out_dir, BakedPrelude, postcard, annotate, PipeYield, stage_types, Capture, CaseArm, ArmWalk, eta_expand_captured]
 ---

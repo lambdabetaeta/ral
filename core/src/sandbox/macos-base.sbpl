@@ -1,130 +1,71 @@
-;; ral macOS Seatbelt base profile.
+;; ral macOS Seatbelt base profile: the policy-independent preamble
+;; `core/src/sandbox/macos.rs::build_profile` lays a grant's rules over.
+;; Everything here holds for every entry, whatever the grant.  Why each
+;; rule: docs/ral-wiki/internals/seatbelt-profile.md.
 ;;
-;; This file is the policy-independent preamble of the Seatbelt profile
-;; ral installs at the entry of every `grant { fs: ... | net: ...
-;; | exec: ... }` block on macOS.  It is concatenated with policy-derived
-;; rules emitted by `core/src/sandbox/macos.rs::build_profile` (write
-;; prefixes, deny_paths, exec allow-list, network bit) at runtime.
-;;
-;; Structure adapted from BrianSwift/macOSSandboxBuild's `confined.sb`:
+;; Shape adapted from BrianSwift/macOSSandboxBuild's `confined.sb`:
 ;;   https://github.com/BrianSwift/macOSSandboxBuild/blob/master/confined.sb
-;; The deny-default + selective-allow shape, the folded `file-read*
-;; process-exec` idiom for binary directories, and the use of
-;; `(allow process-fork)` next to `(allow process-exec ...)` (Seatbelt
-;; gates fork separately from exec) all come from there.  ral diverges
-;; in two places:
-;;
-;;   * paths are inlined at profile-build time rather than passed as
-;;     `(param "_RX1")`, since a grant's exec directory admits are
-;;     variable-length and Seatbelt parameters are scalars; and
-;;   * read prefixes for the user's policy-allowed system roots are
-;;     derived from the projection at runtime, not hard-coded — see
-;;     `system_read_paths` in `macos.rs`.
-;;
-;; Anything in this file should be true for *every* sandbox entry,
-;; independent of which grant the user wrote.
+;; Paths are inlined at build time rather than passed as `(param …)`s,
+;; a grant's admits being variable-length.
 
 (version 1)
 (deny default)
 
-;; Signals — without this even `process::exit` paths can hit a denial.
-;; The filter binds only sending, so timeout cancellation (an external
-;; kill *into* the sandbox) still lands; what it stops is `kill -STOP`
-;; back out at the host ral or the user's own shell.  Descendants share
-;; the instance, but two per-command children of one grant do not, so
-;; signalling between sibling jobs is denied with everything else.
+;; Sending only: a kill *into* the sandbox still lands.  Sibling
+;; per-command children are separate instances, so not each other's.
 (allow signal (target same-sandbox))
 
-;; Read sysctls — many runtimes (libdispatch, libmalloc) probe these on
-;; init and abort if denied.  Read-only.
+;; libdispatch and libmalloc probe these on init and abort if denied.
 (allow sysctl-read)
 
-;; dyld talks to launchd over Mach to locate the dyld shared cache;
-;; without it `(allow process-exec)` is not enough — the child aborts
-;; before main().  Named services rather than the wholesale form,
-;; because a Mach name is a door to a daemon that acts on your behalf
-;; *outside* this profile: launchservicesd would spawn whatever
-;; `/usr/bin/open` names as an unconfined child of launchd, making
-;; `open -a Terminal ./payload.command` a full escape and `open
-;; https://…` an exfil channel under `net: false`.  Hence no
-;; `com.apple.coreservices.launchservicesd` and no `com.apple.lsd.*`
-;; below — nor `com.apple.pasteboard.1` (pbpaste reads a clipboard no
-;; grant mentions) nor `com.apple.SecurityServer` (securityd hands out
-;; keychain items to `security find-generic-password`).
-;;
-;; Those three refusals are data as well as prose — `macos.rs`'s
-;; `withheld_doors` — because a comment cannot reach the agent holding
-;; the EPERM: the denial hint quotes the reason from there, so a
-;; deliberate `no` does not read as an accident.  Keep the two in step.
-;;
-;; This is not a resolver door: `getaddrinfo` reaches mDNSResponder
-;; over the UNIX socket /private/var/run/mDNSResponder, which Seatbelt
-;; gates as `network-outbound`, not as `mach-lookup`.  The services a
-;; resolver *does* want are emitted by `build_profile` under `net`.
+;; Named, never wholesale: a Mach name is a door to a daemon acting on
+;; your behalf outside this profile.  The refusals — launchservicesd,
+;; the pasteboard, SecurityServer — are data in `macos.rs`'s
+;; `withheld_doors`, so the denial hint can quote them; keep in step.
+;; Not a resolver door: the resolver's socket is `network-outbound`.
 (allow mach-lookup
+  ;; dyld locates the shared cache through launchd, before main().
   (global-name "com.apple.dyld")
-  ;; libnotify, on the first notify_register_* — libdispatch's, among others.
+  ;; libnotify, on the first notify_register_*.
   (global-name "com.apple.system.notification_center")
-  ;; getpwuid/getgrgid: `~` expansion, whoami, id, and every tool that
-  ;; asks who it is running as.
+  ;; getpwuid/getgrgid: `~`, whoami, id.
   (global-name "com.apple.system.opendirectoryd.libinfo")
   (global-name "com.apple.system.opendirectoryd.membership")
-  ;; os_log.  A denial here is survivable but every libSystem process
-  ;; hits it, so it would drown the denial log this profile's own
-  ;; diagnostics read (`sandbox::diag`).
+  ;; os_log; denied, every libSystem process would drown the denial
+  ;; log `sandbox::diag` reads.
   (global-name "com.apple.system.logger")
   (global-name "com.apple.logd")
   (global-name "com.apple.diagnosticd"))
 
-;; No network rule appears in this file, and that silence is what closes
-;; DNS under `net: false`: with `network-outbound` denied by default the
-;; resolver socket cannot be opened, so a hostname cannot carry bytes out
-;; as a query label.  Allowing that form for *any* local socket would
-;; reopen the channel while `net: false` still reads as closed — hence
-;; the profile admits `network-outbound` for nothing at all, and only
-;; `net: true` appends `macos-net.sbpl`, which carries the wholesale
-;; `(allow network*)` and the resolver's own Mach doors.
+;; No network rule here, and that silence closes DNS under `net: false`:
+;; admitting `network-outbound` for any local socket would let a
+;; hostname carry bytes out as a query label.  `net: true` appends
+;; `macos-net.sbpl`.
 
-;; process-exec without process-fork yields EPERM at spawn time:
 ;; Seatbelt gates fork() separately from execve().
 (allow process-fork)
 
-;; Path resolution requires reading the root inode itself, even when
-;; every interesting subpath is allowed via (subpath ...).  Without this
-;; dyld aborts with SIGABRT before main().
+;; dyld reads the root inode before main().
 (allow file-read* (literal "/"))
 
-;; Shell redirections and common libc / tooling paths open these device
-;; nodes for write.  Without explicit literal allows, `2>/dev/null` and
-;; similar patterns fail under Seatbelt even though `/dev` is readable.
+;; `2>/dev/null` and libc open these for write though /dev is readable.
 (allow file-write* (literal "/dev/null"))
 (allow file-write* (literal "/dev/zero"))
 (allow file-write* (literal "/dev/dtracehelper"))
 (allow file-write* (literal "/dev/tty"))
 (allow file-ioctl (literal "/dev/dtracehelper"))
-;; ── Toolchain support (libc / libdispatch / dyld init) ──
-;; Every process linked against the system libc reads the ICU timezone
-;; database on first localtime_r call.  This path is outside every
-;; user-grant prefix; without it rustc/cc/ld SIGABRT in tzsetwall_basic.
+
+;; libc's first localtime_r; outside every grant prefix, and rustc, cc
+;; and ld SIGABRT in tzsetwall_basic without it.
 (allow file-read* (literal "/private/var/db/timezone/icutz"))
 
-;; libdispatch registers with the shared-memory notification center on
-;; first queue creation (libSystem init).  This is a POSIX shared-memory
-;; name, not a Mach service name.
+;; libdispatch, on first queue creation — a POSIX shm name, not Mach.
 (allow ipc-posix-shm (ipc-posix-name "apple.shm.notification_center"))
 
-;; The arm64 dynamic linker issues an fsctl ioctl during code-signature
-;; validation.  The unfiltered form here is safe — and is standard in
-;; every macOS build sandbox (Xcode's, Bazel's, Chromium's) — because
-;; ioctl operates on file descriptors you already hold; it grants no
-;; new open(2) capability.  Dangerous ioctls (format a disk, eject a
-;; volume, reconfigure raw sockets) all require a file descriptor to a
-;; device node that the sandbox prevents you from opening in the first
-;; place.  The open-time gate provides the real security boundary.
+;; Unfiltered, as in every macOS build sandbox: an ioctl acts on a
+;; descriptor already held, and the device nodes the dangerous ones need
+;; cannot be opened here.  The open-time gate is the boundary.
 (allow file-ioctl)
 
-;; CoreFoundation and libdispatch use POSIX shared memory (shm_open /
-;; shm_unlink) for internal state.  Every process that links against
-;; CoreFoundation — which is every non-trivial build tool — hits this
-;; during framework init.  Standard in every macOS build sandbox.
+;; CoreFoundation and libdispatch, during framework init.
 (allow ipc-posix-shm)

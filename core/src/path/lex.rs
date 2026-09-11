@@ -379,12 +379,8 @@ pub fn basename(path: &str) -> &str {
 }
 
 /// Proper ancestors of `paths`, sorted, dedup'd across inputs, root excluded.
-///
-/// The macOS Seatbelt builder emits `file-read-metadata` allows on them,
-/// since Seatbelt checks parent-directory metadata during path lookup and a
-/// grant on a deep prefix is unreachable without its chain.
 #[allow(clippy::disallowed_methods)]
-pub fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+pub(crate) fn proper_ancestors<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut out = std::collections::BTreeSet::new();
     for path in paths {
         for ancestor in Path::new(path).ancestors().skip(1) {

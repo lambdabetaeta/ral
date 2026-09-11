@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 6d48e9af
+verified_at_commit: b554b2c3
 verified_at_date: 2026-08-26
 against: [design/effects-handlers, design/row-types, design/types, design/scoping]
 ---

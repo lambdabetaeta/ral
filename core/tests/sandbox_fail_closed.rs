@@ -1,51 +1,19 @@
 #![allow(clippy::disallowed_methods)]
 
-//! Fail-closed property of the evaluator at **external dispatch**.
+//! Fail-closed at **external dispatch**: a grant body evaluates in process,
+//! and what confines the commands it spawns is the per-command launcher
+//! (`runtime::command::process::build_command`), so a child writing outside
+//! the grant is held by Seatbelt at spawn.  Each test pairs a positive control
+//! (a write inside the grant lands) with a denial (one outside never appears);
+//! the control is load-bearing — a blanket deny would fail it, a disabled
+//! sandbox would let the denied write land.
 //!
-//! History: this file used to test fail-closed at *grant-body entry*. The
-//! evaluator detected a restrictive grant body and re-execed the whole
-//! body into an OS sandbox over IPC; if that confined transport was
-//! unavailable, the body errored before it ran. The premise of the
-//! original tests was therefore "register no `SANDBOX_SELF`, push a
-//! projecting capability frame, and the trivial body never runs". That
-//! whole-body re-exec is gone (milestone 4 of
-//! `decisions/260617_sandbox-external-children`): a `grant` body now
-//! always evaluates **locally** in-process. RAL-owned filesystem effects
-//! are checked in process by `capability::check_fs_op`; the surviving
-//! confinement boundary is the **per-command sandbox launcher** in
-//! `runtime::command::process::build_command`, which confines each
-//! external/bundled child it spawns under the effective
-//! `SandboxProjection`.
-//!
-//! So the fail-closed locus moved. Under a restrictive fs grant, an
-//! external command that tries to write outside the grant is held by the
-//! kernel sandbox (Seatbelt here) when it is spawned — not refused at
-//! grant-body entry. These tests assert that new locus: each pairs a
-//! positive control (a write *inside* the grant succeeds) with a denial (a
-//! write *outside* fails, the file never appears). The positive control is
-//! load-bearing: it makes the test fail if confinement were broken in
-//! *either* direction — a blanket-deny would fail the control, and a
-//! disabled sandbox would let the denied write land.
-//!
-//! Unlike the old version, this target **imports** `core/tests/common` on
-//! purpose: its `#[ctor::ctor]` runs `serve_sandbox_early_init`, which is
-//! what lets the per-command re-exec child actually enter Seatbelt and
-//! `execve` the target inside it. Without that ctor the re-exec child
-//! would land in the libtest framework and crash on the unknown
-//! `--sandbox-projection` flag — the command would "fail" for the wrong
-//! reason (a broken child, not an enforced policy), which would not prove
-//! enforcement at all.
-//!
-//! Gated to macOS, matching the end-to-end denial tests in
-//! `sandbox/launch.rs`: it is the backend that can confine an in-tree
-//! re-exec child end-to-end without an external helper binary (`bwrap` on
-//! Linux is commonly absent in CI). The *other* fail-closed axis —
-//! `projection_enforceable` rejecting `net: false` on a backend with no
-//! kernel network enforcement — is covered by the unit tests
-//! `sandbox::tests::projection_enforceable_net_false_tracks_net_enforced`
-//! and, on Windows specifically (where the `AppContainer` backend *does*
-//! enforce it), `sandbox::tests::projection_enforceable_allows_net_false_on_windows`;
-//! neither is re-driven through the eval path here.
+//! Imports `common` for its `#[ctor]`, which runs `serve_sandbox_early_init`
+//! so the re-exec child enters Seatbelt and `execve`s the target rather than
+//! landing in libtest and dying on `--sandbox-projection` — a failure for the
+//! wrong reason.  macOS-only: the one backend that confines an in-tree re-exec
+//! end-to-end without a helper binary (`bwrap` is often absent in CI).
+//! `projection_enforceable`'s own fail-closed axis is unit-tested in `sandbox`.
 
 #![cfg(all(feature = "test-util", target_os = "macos"))]
 

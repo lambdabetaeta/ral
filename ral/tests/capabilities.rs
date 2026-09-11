@@ -175,6 +175,40 @@ fn unknown_xdg_token_in_profile_names_the_typo_and_the_alternatives() {
     );
 }
 
+/// A ral confined by a ral grant reaches a granted file the way the kernel's
+/// resolver does: by search on ancestors the profile admits as metadata only.
+/// The walk once opened them for read and was refused at the first, so every
+/// ral-owned read under a ral sandbox failed — a case no unconfined test sees.
+#[cfg(target_os = "macos")]
+#[test]
+fn confined_ral_walks_to_a_granted_file() {
+    let d = scratch_dir("walk");
+    std::fs::write(d.join("f.txt"), "walked\n").unwrap();
+    let d_s = d.to_string_lossy().into_owned();
+    let bin = common::ral_bin();
+    let bin_s = bin.to_string_lossy().into_owned();
+    let bin_dir_s = bin.parent().unwrap().to_string_lossy().into_owned();
+
+    let out = ral(&[
+        "-c",
+        &format!(
+            "grant [fs: [read: ['{d_s}', '{bin_dir_s}']]] {{ {bin_s} -c 'cat < {d_s}/f.txt' }}"
+        ),
+    ]);
+    std::fs::remove_dir_all(&d).ok();
+
+    assert_eq!(
+        out.status, 0,
+        "the confined ral could not read a granted file; stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("walked"),
+        "expected the file's content; stdout:\n{}",
+        out.stdout
+    );
+}
+
 /// Content that must never survive a defeated `deny`.
 #[cfg(target_os = "macos")]
 const DENY_PIN_SENTINEL: &str = "ral-deny-pin-sentinel-do-not-leak";

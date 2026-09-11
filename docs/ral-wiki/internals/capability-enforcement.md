@@ -59,8 +59,11 @@ stay a [[invariants/single-binary|single binary]].
 Canonicalising *before* matching is why a directory scoped by a grant cannot be
 escaped through a symlink or `..` — for a read *by name*. **An open takes a
 fifth stage instead** (`path/walk.rs`): `Shell::locate` walks the name from
-the root through directory handles, never letting the kernel follow a
-symlink, splicing each link it meets into the remaining name itself, and
+the root through *search* handles — the right to resolve names through a
+directory, not to read it, so the walk asks of an ancestor exactly what the
+kernel's resolver asks and a sandbox's metadata-only ancestor rule suffices —
+never letting the kernel follow a symlink, splicing each link it meets into
+the remaining name itself, and
 judges the *object* it lands on (`check_fs_exact` on `Located::real`, which is
 canonical by construction). The `Located` then performs the open, stat,
 staging, rename and unlink relative to the directory handle with
@@ -135,7 +138,7 @@ spawned process does on its own.**
   handed one. On macOS the directories a deny needs kept in place
   (`FsRules::pinned_dirs`) are the ancestor closure of every *rendered* deny
   name within a rendered write name, so an alias's chain is pinned alongside
-  its target's.
+  its target's ([[internals/seatbelt-profile|seatbelt-profile]]).
   One target is excused before either region is consulted: the *discard
   device* — `/dev/null`, or `NUL` on Windows — which `ResolvedPath::is_discard`
   names on either host, and which needs no authority because nothing reaches

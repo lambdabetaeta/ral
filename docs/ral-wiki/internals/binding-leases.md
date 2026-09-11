@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 6d48e9af
+verified_at_commit: b554b2c3
 verified_at_date: 2026-08-26
 anchors: [BindingLedger, arm_binding_lease, install_scope_binding, referenced_names, prune_idle_bindings, pins_running_work, emit_ready_boundary_notices, BINDING_IDLE_CALLS, renew_one]
 ---

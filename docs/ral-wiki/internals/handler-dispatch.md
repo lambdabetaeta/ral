@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 6d48e9af
+verified_at_commit: b554b2c3
 verified_at_date: 2026-08-26
 anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, restore_matched, apply_handler, render_handler_args, Frame::Unmask, WithinUndo]
 ---

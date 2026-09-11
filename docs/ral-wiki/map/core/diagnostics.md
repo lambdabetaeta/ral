@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 6d48e9af
+generated_at_commit: b554b2c3
 generated_at_date: 2026-08-26
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---

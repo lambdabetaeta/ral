@@ -88,6 +88,7 @@ const SYSCALL_SITES: &[(&str, &str)] = &[
     ("core/src/path/walk.rs", "silent:walk-descend"),
     ("core/src/path/walk.rs", "silent:walk-link-probe"),
     ("core/src/path/walk.rs", "silent:walk-link-read"),
+    ("core/src/path/walk.rs", "silent:walk-search"),
     ("core/src/path/walk.rs", "surface:locate-commit"),
     ("core/src/path/walk.rs", "surface:locate-open"),
     ("core/src/path/walk.rs", "surface:locate-stage"),

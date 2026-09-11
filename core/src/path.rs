@@ -29,9 +29,10 @@ pub(crate) mod which;
 pub use tilde::{abbreviate_home, home, user_name};
 
 pub use git::{discover_git_dir, find_git_entry};
+pub(crate) use lex::proper_ancestors;
 pub use lex::{
-    PathShape, basename, exists, is_absolute, is_dir, parent_or_cwd, path_aliases,
-    proper_ancestors, resolve_path, resolve_relative_to_script, resolve_str, shape,
+    PathShape, basename, exists, is_absolute, is_dir, parent_or_cwd, path_aliases, resolve_path,
+    resolve_relative_to_script, resolve_str, shape,
 };
 // The containment kernel stays crate-private: outside core the only fs
 // containment question is `GrantStack::admits_fs`, so no caller can re-derive

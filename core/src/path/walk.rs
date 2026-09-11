@@ -160,7 +160,7 @@ const LOOP_MESSAGE: &str = "too many levels of symbolic links";
 /// that itself crosses links is handled by the same rule.
 #[allow(
     clippy::disallowed_methods,
-    reason = "[silent:walk-descend] Opens the root and then each directory component with FollowSymlinks::No, to reach the object a grant will judge. Path resolution, not the model's data I/O — the card belongs to the site that then opens the leaf."
+    reason = "[silent:walk-descend] Opens the root and then each directory component as a search handle with FollowSymlinks::No, to reach the object a grant will judge. Path resolution, not the model's data I/O — the card belongs to the site that then opens the leaf."
 )]
 fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
     let mut comps = path.components().peekable();
@@ -178,7 +178,7 @@ fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
     };
     let mut dir = open_ambient_dir(&real, ambient_authority())?;
     for (i, name) in dirs.iter().enumerate() {
-        match open_dir_nofollow(&dir, name.as_ref()) {
+        match open_search_dir(&dir, name) {
             Ok(next) => {
                 dir = next;
                 real.push(name);
@@ -200,6 +200,29 @@ fn descend(path: &Path, leaf_mode: Leaf) -> io::Result<Step> {
         leaf: leaf.to_os_string(),
         real,
     }))
+}
+
+/// A search handle on `name` in `dir`: the right to resolve names through
+/// it, not to read it — what the kernel's own resolver holds on an ancestor,
+/// and so all a sandbox need grant one.  cap-primitives opens it `O_PATH`
+/// where the platform has that; Apple's spelling is `O_SEARCH`, which it does
+/// not know, so there it would fall back to a read handle.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "[silent:walk-search] Opens one directory component of the walk as a search handle with FollowSymlinks::No. Path resolution, not the model's data I/O — the card belongs to the site that then opens the leaf."
+)]
+fn open_search_dir(dir: &File, name: &OsStr) -> io::Result<File> {
+    #[cfg(target_os = "macos")]
+    {
+        use cap_primitives::fs::OpenOptionsExt;
+        let mut opts = OpenOptions::new();
+        opts.read(true)
+            .custom_flags(libc::O_SEARCH)
+            .follow(FollowSymlinks::No);
+        open(dir, name.as_ref(), &opts)
+    }
+    #[cfg(not(target_os = "macos"))]
+    open_dir_nofollow(dir, name.as_ref())
 }
 
 /// Absent counts as not a link: a missing leaf is a legitimate create target,
@@ -552,6 +575,22 @@ mod tests {
         std::os::unix::fs::symlink("top/deep", dir.join("alias")).unwrap();
         let loc = located(&dir, "alias/secret").unwrap();
         assert_eq!(loc.real(), dir.join("top/deep/secret"));
+    }
+
+    /// The walk asks of an ancestor what the kernel's resolver asks — search,
+    /// not read — so a `--x` directory, and a sandbox that admits ancestors as
+    /// metadata only, let it through.
+    #[test]
+    fn a_search_only_ancestor_is_walked() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = root(&tmp);
+        std::fs::create_dir_all(dir.join("gate/inner")).unwrap();
+        std::fs::write(dir.join("gate/inner/f"), b"body").unwrap();
+        std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o111)).unwrap();
+        let loc = located(&dir, "gate/inner/f");
+        std::fs::set_permissions(dir.join("gate"), PermissionsExt::from_mode(0o755)).unwrap();
+        assert_eq!(loc.unwrap().stat().unwrap().unwrap().kind, Kind::File);
     }
 
     #[test]

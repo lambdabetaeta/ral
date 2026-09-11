@@ -131,11 +131,10 @@ pub(super) fn build_profile(policy: &SandboxProjection) -> Result<String, String
 /// `Err` when the system paths' own name-class expansion is not valid UTF-8,
 /// which [`render_paths`] refuses rather than approximates.
 fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) -> Result<(), String> {
-    let system_read_paths = existing_system_read_paths()?;
+    // `Exec` implies read.
+    let system_read_paths = existing_system_paths(|_| true)?;
     emit_ancestor_metadata(lines, &system_read_paths);
     emit_read_subpaths(lines, &system_read_paths);
-    // Seatbelt checks parent metadata during lookup; without these, traversal
-    // and posix_spawn report ENOENT even where the final subpath is allowed.
     emit_ancestor_metadata(
         lines,
         rules.read_prefixes.iter().chain(&rules.write_prefixes),
@@ -151,40 +150,18 @@ fn emit_fs_restricted(lines: &mut Vec<String>, rules: &FsRules<Rendered>) -> Res
     Ok(())
 }
 
-/// Render the `process-exec` rules.  `Unrestricted` emits a wildcard so an
-/// fs-only `grant [fs: …]` block does not attenuate exec at the OS layer.
-/// `Restricted` folds the resolved `[exec]` literals and `allow_dirs` into one
-/// `file-read* process-exec` allow: Seatbelt requires both operations to spawn
-/// a binary, and the reads granted by `system_paths` miss user-installed
-/// toolchain dirs like `~/.rustup/.../bin`.
-///
-/// `(subpath …)` admits every binary under an admitted dir, so this layer is
-/// deliberately coarser than the in-ral gate — its job is to close the
-/// interpreter-bypass class (`sh -c`, `env`, `xargs`, `find -exec`) by denying
-/// what lies *outside* the granted dirs.  `deny_basenames` still vetoes a name
-/// inside one, so a denied command cannot be re-execed through the covering
-/// subpath by an interpreter the gate never sees.
-///
-/// `freeze_admitted_set` denies writes to everything the rule admits: no
-/// writing to a directory whose contents this profile will run.  Its caller
-/// asks for it where `(allow file-write*)` would otherwise make every veto
-/// hollow — copy the denied binary under a fresh name into an admitted
-/// directory, or drop any binary at all into the unconditionally admitted
-/// `/opt/homebrew/bin`, and run it from there.  Freezing contradicts no layer:
-/// none asked to write here.  It also restores the premise
-/// [`crate::capability::deputy`] reasons from, that an unrestricted `fs` is
-/// not "everything writable" — true of the folded grant, but false of this
-/// backend, which renders that `fs` as `(allow file-write*)`, until here.
-///
-/// A grant that *does* restrict fs is never frozen, even where its write set
-/// overlaps the allow-set, because there the overlap is a stance somebody took
-/// — `reasonable` admits `cwd:/` for exactly the scripts it lets the agent
-/// write — and a name veto has never been more than a narrowing of the allow
-/// set (see `identity.rs`).
+/// Render the `process-exec` rules.  `Unrestricted` is a wildcard, so an
+/// fs-only grant does not attenuate exec here.  `Restricted` folds the grant's
+/// admits, the `Exec` system paths and ral's own binary into one
+/// `file-read* process-exec` allow — Seatbelt needs both to spawn — then the
+/// denies, both operations each.  Coarser than the gate by design: this layer
+/// closes the interpreter-bypass class by denying what lies *outside* the
+/// admitted set.  `freeze_admitted_set` denies writes under every admitted
+/// dir, without which `(allow file-write*)` makes every veto hollow.  Rule by
+/// rule: `docs/ral-wiki/internals/seatbelt-profile.md`.
 ///
 /// `Err` when the platform base's or the self-exec path's own name-class
-/// expansion is not valid UTF-8, which [`render_paths`] refuses rather than
-/// approximates; the projection's own sets arrive already rendered.
+/// expansion is not valid UTF-8, which [`render_paths`] refuses.
 fn emit_exec_rules(
     lines: &mut Vec<String>,
     exec: &ExecProjection<Rendered>,
@@ -201,19 +178,12 @@ fn emit_exec_rules(
             deny_dirs,
             deny_basenames,
         } => {
-            // The platform exec base folds in alongside the user's admits:
-            // Apple's real binaries live under CommandLineTools / Xcode, so a
-            // chain like `gcc → cc1 → as → ld` would die at the first
-            // descendant exec when `[exec]` names only `/usr/bin/`.
-            let system_dirs = existing_system_exec_paths()?;
-            // Bundled tools dispatch through `--ral-bundled-tool`, which
-            // re-execs the running binary.  Admitting our own path
-            // unconditionally spares every policy from naming wherever the
-            // embedding binary lives; the per-tool admission gate is `vet` in
-            // `core/src/runtime/command/vet.rs`.  It renders like everything
-            // else: it is a path outside the projection, so nothing has
-            // expanded it, and execve would present `/tmp/x` as
-            // `/private/tmp/x` against a literal that named only the former.
+            // `gcc → cc1 → as → ld` lives under CommandLineTools and would die
+            // at the first descendant exec were only `[exec]`'s dirs admitted.
+            let system_dirs = existing_system_paths(|k| k == SystemAccess::Exec)?;
+            // Bundled tools re-exec this binary (`--ral-bundled-tool`; the
+            // per-tool gate is `vet`).  Rendered like the rest: execve presents
+            // `/tmp/x` as `/private/tmp/x`.
             let self_exec = render_paths(super::reexec::self_exec_path_string().as_slice())?;
             let mut clauses = String::new();
             for path in allow_paths.iter().chain(&self_exec) {
@@ -228,12 +198,9 @@ fn emit_exec_rules(
             if !clauses.is_empty() {
                 lines.push(format!("(allow file-read* process-exec{clauses})"));
             }
-            // posix_spawn walks the parent directories and Seatbelt gates
-            // each lookup independently of the allow on the binary itself.
             emit_ancestor_metadata(lines, allow_paths.iter().chain(&self_exec));
-            // After the broad allow: last-match-wins.  Both ops are denied —
-            // read alone would let the exec through to fail later, exec
-            // alone would leave the binary readable.
+            // After the allow: last-match-wins.  Both ops — read alone lets the
+            // exec through to fail later, exec alone leaves the binary readable.
             for path in deny_paths {
                 let escaped = escape_path(path);
                 lines.push(format!("(deny file-read* (literal \"{escaped}\"))"));
@@ -244,10 +211,8 @@ fn emit_exec_rules(
                 lines.push(format!("(deny file-read* (subpath \"{escaped}\"))"));
                 lines.push(format!("(deny process-exec (subpath \"{escaped}\"))"));
             }
-            // A bare-name deny vetoes the command wherever it resolves, hence
-            // a final-component regex rather than one literal.  Exec only:
-            // denying reads of every same-named file would over-reach past
-            // the veto the gate carries.
+            // A bare name vetoes wherever it resolves: a final-component regex,
+            // exec only — denying every same-named file's reads would over-reach.
             for name in deny_basenames {
                 let pattern = format!("/{}$", escape_regex(name));
                 lines.push(format!("(deny process-exec (regex #\"{pattern}\"))"));
@@ -293,28 +258,19 @@ fn system_paths() -> &'static [(&'static str, SystemAccess)] {
         ("/System", Read),
         ("/dev", Read),
         ("/private/var/db/dyld", Read),
-        // Wholesale rather than cherry-picked: tools read whatever they read
-        // (gitconfig, paths.d, zshenv, nix.conf, …) and omitting one breaks
-        // them mysteriously.  Nothing user-secret lives here — master.passwd
-        // is 0600, and Seatbelt enforces inode permissions atop the profile.
+        // Wholesale: tools read whatever they read (gitconfig, paths.d,
+        // zshenv, nix.conf, …); nothing user-secret sits here unprotected.
         ("/private/etc", Read),
-        // xcode-select state: the CommandLineTools shims read
-        // /var/select/developer_dir, libtool and make probe /var/select/sh.
-        // Denied, build drivers misreport the EPERM as a broken install.
+        // xcode-select state; denied, build drivers report a broken install.
         ("/private/var/select", Read),
-        // /etc/resolv.conf symlinks to /var/run/resolv.conf and
-        // mDNSResponder's socket lives at /var/run/mDNSResponder, so DNS
-        // resolution goes through here.
+        // resolv.conf's target and the mDNSResponder socket.
         ("/private/var/run", Read),
     ]
 }
 
-/// Mach and IPC doors the base profile withholds on purpose, each with the
-/// reason `macos-base.sbpl` states beside the services it does admit — data
-/// rather than a comment, because a comment cannot reach the agent holding the
-/// `EPERM`, and a deliberate refusal read as an accident is chased instead of
-/// worked around.  Absence from this table withholds a door just as firmly
-/// (deny-default does that); what a name here buys is the sentence.
+/// Mach doors the base profile withholds on purpose, each with its reason as
+/// data: a comment cannot reach the agent holding the `EPERM`, and a deliberate
+/// refusal read as an accident is chased instead of worked around.
 fn withheld_doors() -> &'static [(&'static str, &'static str)] {
     &[
         (
@@ -346,30 +302,15 @@ pub(super) fn withheld_door(name: &str) -> Option<&'static str> {
         .map(|(_, why)| *why)
 }
 
-/// Host-existing system paths admitted for read — every entry, since `Exec`
-/// implies read.  Each expands to its firmlink-equivalent forms (`/private/etc`
-/// → `[/etc, /private/etc]`), matching whichever spelling Seatbelt presents.
-fn existing_system_read_paths() -> Result<Vec<Rendered>, String> {
-    render_paths(&filter_existing(system_paths().iter().map(|(p, _)| *p)))
-}
-
-/// The `Exec`-tagged subset, folded into the combined exec rule alongside
-/// the user's admits when exec is `Restricted`.
-fn existing_system_exec_paths() -> Result<Vec<Rendered>, String> {
-    render_paths(&filter_existing(
-        system_paths()
-            .iter()
-            .filter(|(_, k)| *k == SystemAccess::Exec)
-            .map(|(p, _)| *p),
-    ))
-}
-
-fn filter_existing<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    paths
-        .into_iter()
-        .filter(|p| crate::path::exists(p))
-        .map(str::to_string)
-        .collect()
+/// The host-existing `system_paths` whose access `wanted` selects, rendered
+/// to every firmlink spelling (`/private/etc` → `[/etc, /private/etc]`).
+fn existing_system_paths(wanted: impl Fn(SystemAccess) -> bool) -> Result<Vec<Rendered>, String> {
+    let existing: Vec<String> = system_paths()
+        .iter()
+        .filter(|(p, k)| wanted(*k) && crate::path::exists(p))
+        .map(|(p, _)| (*p).to_string())
+        .collect();
+    render_paths(&existing)
 }
 
 fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item = &'a Rendered>) {
@@ -381,13 +322,10 @@ fn emit_read_subpaths<'a>(lines: &mut Vec<String>, paths: impl IntoIterator<Item
     }
 }
 
-/// Expand-then-ancestors, the same order `FsRules::pinned_dirs` now derives
-/// in.  What still separates the two is the *set*, not the order: this walks
-/// the ancestors of every rendered path handed to it — including the system
-/// paths and the self-exec literal, which the projection never carried and
-/// so `traverse` never saw — for the read-metadata allowances Seatbelt's
-/// lookup needs, while a pin is only the deny ancestors that fall within a
-/// write name, kept for the unlink veto.
+/// Seatbelt gates each directory lookup on the way to a granted name.
+/// Metadata is enough: search is all a resolver — the kernel's, or ral's walk
+/// — holds on an ancestor.  Over every rendered path handed in, system and
+/// self-exec included, which the projection's `pinned_dirs` never saw.
 fn emit_ancestor_metadata<'a>(
     lines: &mut Vec<String>,
     paths: impl IntoIterator<Item = &'a Rendered>,

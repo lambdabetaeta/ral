@@ -115,4 +115,6 @@ See also [[design/syscalls-are-effects|syscalls-are-effects]] (the gate sits whe
 [[design/grant|grant]], [[design/scoping|scoping]],
 [[design/capability-carriers|capability-carriers]] (this split as a type
 distinction — the sharp judge's view vs the blunt guard's checklist); realised in
-[[internals/capability-enforcement|capability-enforcement]]. `docs/SPEC.md` §12.
+[[internals/capability-enforcement|capability-enforcement]], and on macOS in
+[[internals/seatbelt-profile|seatbelt-profile]] — an object policy rendered in
+a name language, and what that costs. `docs/SPEC.md` §12.
