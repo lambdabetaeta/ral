@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 68f1964e
-generated_at_date: 2026-08-26
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
 
@@ -129,9 +129,10 @@ Internals:
   reaches by dispatching an `Exec` node through `command_call::classify_command`
   → `run_base_frame` / `run_external`, and at
   `PipeNode::launch`/`join`; runtime re-enters the machine only through
-  `machine::apply_handler` (`detach`'s one-shot handler call) and `machine::evaluate` (a re-exec'd
-  stage's closure) — the boundary itself always evaluates its body in
-  process, OS confinement being per-child in `build_command`
+  `machine::apply_handler` (`cfg(unix)`, `detach`'s one-shot handler call) and
+  `machine::evaluate` (a stage thread's own closure, from `pipeline/thread.rs` —
+  a stage no longer rides a re-exec) — the boundary itself always evaluates its
+  body in process, OS confinement being per-child in `build_command`
   ([[decisions/260610_evaluator-runtime-split|evaluator-runtime-split]]).
 - `audit.rs` — trail recording (`run_native`, the one audited call site for
   every native).

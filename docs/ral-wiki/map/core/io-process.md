@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 5b17290a
-generated_at_date: 2026-09-09
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/io/, core/src/io.rs, core/src/process/, core/src/process.rs, core/src/stream.rs]
 ---
 

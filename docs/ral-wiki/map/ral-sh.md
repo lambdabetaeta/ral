@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6686e770
-generated_at_date: 2026-09-09
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [ral-sh/]
 ---
 
@@ -33,7 +33,10 @@ Both exec sites are **silent syscall sites**: `exec_ral` and `exec_posix_sh`
 carry `#[allow(clippy::disallowed_methods, reason = "[silent:respawn-…]")]`,
 classifying the re-exec as infra plumbing — not a surfaced model exec image — so
 the workspace syscall-site discipline accounts for them (see
-[[map/exarch/io-surface|io-surface]]).
+[[map/exarch/io-surface|io-surface]]). Every `std::process::exit` in the binary
+is reviewed the same way, each `#[allow]` naming the fact that makes exiting
+safe there: the dispatcher links no `ral-core`, so no `TerminalLease`, reaped
+child, or staged atomic write exists in this process to leak.
 
 It is a registration shim, not a division of the runtime — see
 [[invariants/single-binary|single-binary]] for why this does not violate the

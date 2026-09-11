@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cd052a22
-generated_at_date: 2026-09-08
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [ral/src/main.rs, ral/src/startup.rs, ral/src/cli.rs, ral/src/batch.rs, ral/src/platform.rs, ral/build.rs]
 ---
 
@@ -66,15 +66,16 @@ Both tails exit here, never reaching clap.
 through it: terminator injection, clap, then `Cli::into_mode`. The mode tests
 enter by the same door, so the parse they exercise cannot drift from the one
 `startup::identify` performs. `Cli::into_mode` distils the parsed flags into a
-`Mode`: `Login(InteractiveOpts)`, `Interactive(InteractiveOpts)`, `Script`, or
-`Command`. The login bit (`-l` or a `-`-prefixed argv\[0\]) does not
-short-circuit: a login shell with `-c` or a script positional resolves to
-`Command`/`Script` and runs it, as cron, `su -`, and `$SHELL -l -c …` require;
-login only selects between the two interactive variants, decided after `-c` and
-the script positional are ruled out, and carries the same `InteractiveOpts`
-(so `--norc` survives). `RunOpts` (`--recursion-limit`, `--capabilities`) rides
-every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` / `--dump-ast`;
-`InteractiveOpts` adds `--norc`, `-i`, `-s`, and `--surface`.
+`Mode`: `Interactive(InteractiveOpts)`, `Script`, or `Command` — login is not a
+mode of its own but a flag on `InteractiveOpts` (`login`, set by `-l` or a
+`-`-prefixed argv\[0\]), so a login shell with `-c` or a script positional
+still resolves to `Command`/`Script` and runs it, as cron, `su -`, and
+`$SHELL -l -c …` require; the flag matters only once resolution has landed on
+`Interactive`, where it gates login-profile sourcing at REPL boot
+([[map/repl/loop|loop]]). `RunOpts` (`--recursion-limit`, `--capabilities`)
+rides every mode; `BatchOpts` adds `--audit` / `--pretty` / `--check` /
+`--dump-ast`; `InteractiveOpts` adds `-l`, `--norc`, `-i`, `-s`, and
+`--surface`.
 
 - **Argv terminator.** `inject_arg_terminator` splices a `--` before the first
   positional, and immediately after a `-c`, so flag-shaped script arguments and
@@ -120,7 +121,7 @@ rather than evaluating it directly**
   `--check` runs the same check and exits without evaluating.
 - **The run.** `shell.run(RunRequest { … })` with
   `Program::Source(source)` runs the annotated comp under
-  `Capabilities::root()` with no wall or detached limit, inheriting IO and
+  `GrantStack::root()` with no wall or detached limit, inheriting IO and
   stdin. Its `RunReport` has two arms: `Ran` yields the `result` to score;
   `Static` cannot occur on this path (batch already typechecked) and is
   treated defensively as a fatal exit.
@@ -131,15 +132,16 @@ rather than evaluating it directly**
 - **The verdict.** The `Settled` result is scored into an exit code: `Ok`
   reports 0; `Escape::Exit(code)` clamps and returns it
   (`platform::exit_byte`); `Error` prints a runtime diagnostic (unless
-  `--audit` will carry it) and returns the error's exit code; on Unix a
-  `Stopped` escape exits 1.
+  `--audit` will carry it) and returns the error's exit code
+  ([[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]: there is no
+  `Stopped` escape to score).
 - **Capabilities and audit.** `--capabilities` composition goes through
   `platform.rs::apply_session_capabilities` (shared with the REPL boot), a
   thin map from `ral_core::capability::apply_session_profiles`'s outcome to a
-  process exit; the composition itself (load each `.ral` profile, `meet`
-  left-to-right, freeze against home/cwd, push one permanent session ceiling)
-  lives in core ([[design/grant|grant]]). `--audit` wraps the run in a traced
-  [[map/core/evaluator|audit trail]] emitted as JSON.
+  process exit; the composition itself (load and freeze each `.ral` profile
+  against home/cwd, pushing it as its own layer onto the session
+  `GrantStack`) lives in core ([[design/grant|grant]]). `--audit` wraps the
+  run in a traced [[map/core/evaluator|audit trail]] emitted as JSON.
 
 ## Embedding and the baked prelude
 

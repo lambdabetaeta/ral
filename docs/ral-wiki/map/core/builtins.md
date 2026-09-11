@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 77f7bf14
-generated_at_date: 2026-09-04
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/builtins/, core/src/builtins.rs, core/src/uutils.rs]
 ---
 

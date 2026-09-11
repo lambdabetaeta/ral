@@ -1,5 +1,5 @@
 ---
-generated_at_commit: d9abfb52
+generated_at_commit: a2d120d2
 generated_at_date: 2026-09-11
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---

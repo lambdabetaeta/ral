@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 109eb9be
-generated_at_date: 2026-09-09
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [exarch/src/shell_eval.rs, exarch/src/shell_eval/builtins.rs, exarch/data/agent.ral]
 ---
 
@@ -34,7 +34,7 @@ and `run_shell` owns only the run it builds and the outcome it formats:
   the caret report the protocol drew, which `run_shell` passes through to
   `Outcome::Static`; on success the *annotated* comp
   runs ([[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]]);
-- **`caps`** — the session `Capabilities`, pushed for the eval's dynamic extent.
+- **`caps`** — the agent's `GrantStack` (`Agent::caps`), pushed for the eval's dynamic extent.
   **This is the sandbox**: the boundary is the pushed [[design/grant|grant]]
   frame plus the [[map/core/evaluator|top-level contract]], not a source-level
   `grant { … }` the model could escape. External commands route through the same

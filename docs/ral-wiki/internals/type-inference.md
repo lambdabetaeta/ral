@@ -1,5 +1,5 @@
 ---
-verified_at_commit: 5afa1c81
+verified_at_commit: 2f2c84a0
 verified_at_date: 2026-08-12
 anchors: [Inferencer, Unifier, Pairs, unify_row, unify_route, generalize, instantiate, annotate, SessionSchemes, PayloadRoute, extract_return, force_return_shape, stage_root_stdin_feed, pin_arm_to_head, InferCtx, join_arm_results, solve_at_boundary, solve_and_finalize, ArmResults]
 ---

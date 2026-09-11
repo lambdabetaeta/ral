@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f8750c53
-generated_at_date: 2026-09-01
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/typecheck/, core/src/typecheck.rs]
 ---
 
@@ -106,7 +106,12 @@ Internals:
 - `builtins.rs` — the scheme factory each entry names, and the readings taken
   off it (`fixed_arity`, `builtin_type_hint`), which is where
   [[invariants/fixed-arity|fixed-arity]] is enforced: every entry in the table
-  declares its arguments, so it has an arity and a value form;
+  declares its arguments, so it has an arity and a value form. `audit_record`
+  types `audit { }`'s report as `{outcome: `` `ok v | `err E``, trail:
+  [Observation]}`; `observed_ty` gives each `Observation`'s `what` a closed
+  variant, one arm per kind (`command`, `write`, `read`, `grep`, `check`,
+  `worker`, `act`), each its own closed record — so reading a fact's fields is
+  ordinary row typing rather than a `Map` lookup [[design/audit|audit]];
 - `scope.rs` — the five structural scope nodes.
 
 `infer.rs`'s `infer_case` is left whole by decision

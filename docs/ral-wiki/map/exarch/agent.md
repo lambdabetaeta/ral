@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 77628b97
+generated_at_commit: a2d120d2
 generated_at_date: 2026-09-11
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
@@ -233,8 +233,9 @@ Three nested loops, the same for trunk and child alike:
   the ceiling again.
 - `run_batch` — runs one turn's tool-call batch in order, each call through
   `invoke`. Every call returns a
-  `SessionToolResult` synchronously — and there is only `ral` to call
-  ([[map/exarch/tools|tools]]); a spawn verb inside it hands the script a start
+  `SessionToolResult` synchronously — dispatched through the agent's own
+  `Toolset` (`ral`, and `thinking` under `--thinking-tool`,
+  [[map/exarch/tools|tools]]); a spawn verb inside `ral` hands the script a start
   receipt after launching the detached child. Once every requested tool id has
   a result,
   `run_batch` drains this agent's [[map/exarch/frontend|inbox]]'s tool-boundary
@@ -841,8 +842,8 @@ head-on. `run_shell` here threads to [[map/exarch/shell-eval|shell-eval]].
 
 [[design/agents|agents]] (the role model these nodes realise — one `parent`
 predicate, the conversing trunk vs returning agents),
-[[map/exarch/tools|tools]] (the one `ral` tool the
-provider sees) and [[map/exarch/builtins|builtins]] (the harness verbs the
+[[map/exarch/tools|tools]] (the `Toolset` a request advertises — `ral`, and
+`thinking` under `--thinking-tool`) and [[map/exarch/builtins|builtins]] (the harness verbs the
 desk answers), [[map/exarch/frontend|frontend]] (the bus, the inbox, the
 fleet doors, and the two frontends), [[map/exarch/provider|provider]],
 [[map/exarch/policy|policy]], [[map/exarch|exarch]],

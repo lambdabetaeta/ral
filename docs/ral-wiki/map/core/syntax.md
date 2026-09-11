@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 703628d7
-generated_at_date: 2026-09-10
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/syntax/]
 ---
 

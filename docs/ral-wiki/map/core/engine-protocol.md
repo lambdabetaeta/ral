@@ -1,6 +1,6 @@
 ---
-generated_at_commit: e68d97f2
-generated_at_date: 2026-09-09
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/protocol.rs, core/src/engine.rs, core/src/wire.rs, core/src/hatch.rs]
 ---
 

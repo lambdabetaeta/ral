@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 99226d37
-verified_at_date: 2026-09-05
+verified_at_commit: d9abfb52
+verified_at_date: 2026-09-11
 anchors: [PipeNode, PipeNode::launch, resolve_pipeline, resolve_launch, StageLaunch, StageLaunch::Direct, open_stage_routes, spawn_stage, launch_thread_stage, ThreadStage, StageHandle, file_external_end, file_thread_end, Slot, Event, Event::Witnessed, Event::Wrote, SettleOnDrop, Effect, Effect::ArmEdge, Effect::KillStage, Effect::CancelAll, step, StageObservation, StageEnd, CollectState, CollectState::fold, CollectState::run, CollectState::addresses, Address, kill_live, stronger, grace_signal, PipelineGroup, PipelineGroup::prepare, PipelineGroup::joining, owned_pgid, AnchorProcess, ChildHandle, into_watch, watch_cancel, Watch, ForegroundGuard, TerminalLease, terminal_lease, PipeYield, Capture, infer_pipeline, sentinel::listen, Edge, HeldEdge]
 ---
 

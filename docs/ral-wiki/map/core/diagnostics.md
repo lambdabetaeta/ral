@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b554b2c3
-generated_at_date: 2026-08-26
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/source.rs, core/src/diagnostic.rs, core/src/text.rs, core/src/ansi.rs, core/src/exit_hints.rs]
 ---
 
@@ -56,6 +56,13 @@ observation carries the position of the dispatch that produced it.
 Parse and type errors render against the source they were just handed, so their
 entry points still take `(file, source)` strings: a module's *compile* error is
 surfaced by the loader as a plain message, never reaching the runtime renderer.
+A run that never reached evaluation carries its `StaticDiagnostics` (`run.rs`)
+instead of registering into the session's `SourceDb`: the spanned arms
+(`Parse`/`Types`) hold their own `Source`, since a failed compile leaves no
+live span to justify a permanent, unreclaimable registry slot; `Host` is a
+spanless pre-run failure (an unknown hook, a non-ground argument). This is what
+every host on the wire renders through `Report::Static`
+([[map/core/engine-protocol|engine-protocol]]).
 
 ## Rendering — `core/src/diagnostic.rs`
 
@@ -66,7 +73,10 @@ one-liner is used instead. The per-stage entry points are
 `(file, source)`), and `format_runtime_error_ariadne` / `format_runtime_error_auto`
 (resolving the error's `Span` against a `SourceDb`) / `_compact`, with `cmd_error` and
 `shell_warning` for unstructured command-layer output. Color is gated through
-`ansi::use_color`.
+`ansi::use_color`. `format_static_diagnostics` is `StaticDiagnostics`'s own
+renderer — the one place a static failure becomes text and an exit status (2
+parse, 1 type, the host error's own otherwise) together, so every host prints
+the same report.
 
 `format_runtime_error_auto` picks between the two by asking where the error
 came from, not what the input looked like: it takes `compact_root:

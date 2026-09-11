@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 1c0ceaeb
-verified_at_date: 2026-09-06
+verified_at_commit: d9abfb52
+verified_at_date: 2026-09-11
 against: [design/two-enforcers, design/syscalls-are-effects, decisions/260715_vm-workspaces-cross-by-copy]
 ---
 

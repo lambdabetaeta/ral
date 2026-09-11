@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 6686e770
-generated_at_date: 2026-09-09
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [exarch/src/shell_eval/builtins.rs, exarch/src/shell_eval/builtins/, exarch/src/shell_eval/skill.rs, exarch/src/fleet/desk.rs, exarch/data/agent.ral]
 ---
 
@@ -409,7 +409,9 @@ retired tool form lacked. Acting verbs render as *acts* — the
 ([[decisions/260720_harness-calls-are-acts|harness-calls-are-acts]]; a spawn
 additionally derives a child tab);
 listings stay silent, since their value *is* the returned record.
-[[map/exarch/tools|tools]] is what remains a tool.
+[[map/exarch/tools|`ral`]] is what remains a tool for all of them; `thinking`
+is a second, narration-only tool outside this harness/tool boundary
+([[map/exarch/agent|agent]]).
 
 ## Where to look
 

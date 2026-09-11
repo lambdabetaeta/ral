@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c8af3823
-generated_at_date: 2026-09-02
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/serial.rs, core/src/subprocess.rs, core/src/subprocess_codec.rs, core/src/engine_seed.rs]
 ---
 

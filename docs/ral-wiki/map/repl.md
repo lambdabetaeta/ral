@@ -1,6 +1,6 @@
 ---
-generated_at_commit: cd052a22
-generated_at_date: 2026-09-08
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [ral/src/]
 ---
 
@@ -12,11 +12,11 @@ door, driving one of three selectable frontends over the REPL session and
 plugins;** the language, evaluator, and capability machinery all
 live in core.
 
-- *Argv dispatch.* `cli.rs` resolves argv to a `Mode` — interactive,
-  login, script, or `-c` (`Command`) — each carrying only the flags valid for
-  it; `startup.rs` decides whether this process is the shell at all, `main.rs` is
-  the thin dispatch over the answer, and `batch.rs` runs the non-interactive
-  modes.
+- *Argv dispatch.* `cli.rs` resolves argv to a `Mode` — interactive
+  (carrying a login flag), script, or `-c` (`Command`) — each carrying only
+  the flags valid for it; `startup.rs` decides whether this process is the
+  shell at all, `main.rs` is the thin dispatch over the answer, and `batch.rs`
+  runs the non-interactive modes.
 - *Framed run.* Every evaluation, batch or interactive, enters core through
   the same *framed run door* (`shell.run`): a run is one
   synchronous call carrying its own policy — capabilities, limits, IO regime,
@@ -56,7 +56,7 @@ REPL makes that state the thing the loop threads.
   the captured plugin-lifecycle commands, and the one ordered keybinding router
   (chord, guard, first match, built-in tail) every frontend dispatches
   through; plugin hooks run inside a framed run
-  (`ral/src/repl/plugin*`, `plugin_ed_builtins.rs`, `host_handlers.rs`,
+  (`ral/src/repl/plugin*`, `plugin/ed_builtins.rs`, `host_handlers.rs`,
   `keybinding.rs`).
 
 ## Siblings

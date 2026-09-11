@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 68f1964e
-generated_at_date: 2026-08-26
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/types/, core/src/types.rs]
 ---
 
@@ -34,8 +34,10 @@ everything `crate::types::*`.
   `imbl::Vector` / `imbl::OrdMap`.
 - `flow.rs` — the whole control-flow surface, four declarations:
   `Settled<T> = Result<T, Break>`, `Break` (`Error` catchable, `Escape`
-  propagating), `Escape` (`Exit`, and `Stopped` on Unix), and `PolicyError`
-  ([[decisions/260514_completion-escape-refactor|completion-escape-refactor]]). No `Option`/null appears;
+  propagating), `Escape` (`Exit` alone — ral does not suspend, so there is no
+  stop variant to propagate), and `PolicyError`
+  ([[decisions/260514_completion-escape-refactor|completion-escape-refactor]],
+  [[decisions/260903_ral-does-not-suspend|ral-does-not-suspend]]). No `Option`/null appears;
   optionality is open variants ([[invariants/optionality-via-variants|optionality-via-variants]]).
 - `error.rs` — `Error`, `Status`, and the `BodyResult` split. `audit.rs` — the
   `Audit` collector, over `observation.rs`'s `Observation` / `Observed` — the
@@ -57,11 +59,15 @@ everything `crate::types::*`.
 ## Capabilities
 
 `capability.rs` holds the capability *types* the [[map/core/capabilities|grant]]
-decision layer interprets: `Capabilities`, `ExecPolicy`, `FsPolicy`,
-`EditorPolicy`, `ShellPolicy`, `GrantStack`, `SandboxProjection`, and the `Meet`
-/ `Join` lattice operations (tested in `capability/lattice_tests.rs`). `Meet`
-attenuates live frames; `Join` widens a base overlay, but Boolean `false`
-permissions remain sticky vetoes.
+decision layer interprets: `Capabilities` (one layer), `ExecPolicy`, `FsPolicy`,
+`EditorPolicy`, `ShellPolicy`, `GrantStack` (`Vec<Capabilities>`, a *stack* of
+layers rather than a folded aggregate — attenuation is the fold over the
+stack's verdicts, not a `Capabilities::meet`
+([[decisions/260906_object-not-name|object-not-name]])), `SandboxProjection`,
+and the `Join` lattice operation (tested in `capability/lattice_tests.rs`),
+which widens a base overlay for `--extend-base`; Boolean `false` permissions
+remain sticky vetoes. `Meet` survives only where a value genuinely narrows by
+intersection — `bool`, `ExecPolicy` — not as a whole-`Capabilities` operation.
 
 ## Shell
 
@@ -339,17 +345,18 @@ holds **no terminal authority**: no lease on the session, and the mooring the
 fork is handed carries `TerminalAccess::Denied` — the safe
 default for a store that is not the session's:
 
-- `spawn_thread` — a spawned worker (`spawn`, `par`, the detached-worker helper)
-  on a fresh OS thread that owns its own IO; nothing flows back. Its mooring is
-  rebuilt by `Mooring::for_worker` on the calling thread (so the door can hand
-  the caller the worker's scope) and moved into the thread, which is why the
-  worker runs under a child of the durable root rather than the foreground
-  scope, and a run timeout or Esc does not reach it.
-- `inherit_from` / `return_to` — the per-substate manifests a cross-process
-  pipeline stage (`child_of`, [[decisions/260610_child-eval-unification|child-eval]])
-  leans on. Their asymmetry *is* the flow matrix: the dispatch call site
-  (`local.audit.call_site`)
-  and the `within`-attenuable bits do not flow back, but `context.cwd` does.
+- `spawn_thread` — a spawned worker (`spawn`, `par`, the detached-worker
+  helper) *and* a ral-written pipeline stage
+  ([[map/core/runtime|runtime]]'s `pipeline/thread.rs`) — a pipeline no longer
+  rides a re-exec'd child — on a fresh OS thread that owns its own IO; nothing
+  flows back. A worker's mooring is rebuilt by `Mooring::for_worker` on the
+  calling thread (so the door can hand the caller the worker's scope) and moved
+  into the thread, which is why it runs under a child of the durable root
+  rather than the foreground scope, and a run timeout or Esc does not reach
+  it; a stage thread instead gets `Mooring::for_stage_thread`, a child of the
+  *node's own* cancel scope, so a pipeline-wide cancel reaches every stage
+  transitively and the pipeline's own surface/deferred rail carries over
+  rather than a worker's fresh one.
 - `child_from` — a REPL aside (the hook shell, one call site in the
   [[map/repl|REPL plugin runtime]]): an independent sibling that clones the
   parent's `context`, source cursor, and builtin table without touching its IO /

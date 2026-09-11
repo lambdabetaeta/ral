@@ -1,6 +1,6 @@
 ---
-generated_at_commit: f8750c53
-generated_at_date: 2026-09-01
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/ir.rs]
 ---
 

@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 99226d37
-generated_at_date: 2026-09-05
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 

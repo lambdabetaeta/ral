@@ -1,6 +1,6 @@
 ---
-generated_at_commit: ccb05833
-generated_at_date: 2026-09-05
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -88,7 +88,7 @@ the framed run doors** ([[decisions/260618_run-turn-host-loop|run-turn-host-loop
 
 `exec.rs::step` is the per-line entry. `execute_input` builds the transport
 `Run` — `Program::Source(trimmed)`, `script_name: "<stdin>"`,
-`Capabilities::root()`, no wall, `RunIo::Inherit`,
+`GrantStack::root()`, no wall, `RunIo::Inherit`,
 `RequestedTerminalAccess::Leased`, `RunStdin::Inherit` — and dispatches it
 through `protocol::dispatch_to_report` on the session's `IdentityTransport`
 with the mute `Arc::new(())` host, draining the event stream to the terminal

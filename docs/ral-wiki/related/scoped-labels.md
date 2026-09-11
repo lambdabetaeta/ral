@@ -1,6 +1,6 @@
 ---
-verified_at_commit: b554b2c3
-verified_at_date: 2026-08-26
+verified_at_commit: a2d120d2
+verified_at_date: 2026-09-11
 against: [design/row-types, internals/type-inference, design/scoping]
 ---
 

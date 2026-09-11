@@ -1,7 +1,7 @@
 ---
-verified_at_commit: b554b2c3
-verified_at_date: 2026-08-26
-against: [design/grant, design/effects-handlers, design/cbpv, design/syscalls-are-effects, design/scoping, design/capability-freeze]
+verified_at_commit: d9abfb52
+verified_at_date: 2026-09-11
+against: [design/grant, design/effects-handlers, design/cbpv, design/syscalls-are-effects, design/scoping, design/capability-freeze, decisions/260906_object-not-name]
 ---
 
 # System C — effects and capabilities reconciled
@@ -46,16 +46,25 @@ runtime, System C lifts the same structure into types, toggled term-by-term.
   (what is available) — grant's meet-narrowed authority; as output it is a
   context *requirement* (what the body actually uses). ral tracks only the
   restriction. Nothing in ral computes which operations a body will perform.
-- **Capability sets form a lattice; ral's order is relative to a namespace.**
-  System C orders sets by inclusion (subeffecting) over *bound term variables* —
-  an order settled by binding, so α-equivalence carries it anywhere. grant
-  narrows authority by intersection with anti-monotone denies
-  ([[design/grant|grant]]): the same reading on permission rather than on use,
-  but over path prefixes, and containment between prefixes holds only against the
-  kernel that folds them ([[design/capability-freeze|capability-freeze]],
-  [[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]]). A
-  bundle frozen for one namespace has no meet in another, since the meet re-mints
-  its prefixes through the local fold.
+- **Capability sets form a lattice; ral folds its order per access, not once
+  over a flattened value.** System C orders sets by inclusion (subeffecting)
+  over *bound term variables* — an order settled by binding, so α-equivalence
+  carries it anywhere, and the ordered term is a single static set. grant
+  narrows authority the same way, by intersection with anti-monotone denies
+  ([[design/grant|grant]]) — but ral has no single artifact to order: a
+  bare-name `exec` literal's meaning depends on where it resolves, so
+  `(dirs, literals)` is not closed under intersection and there is no
+  `Capabilities::meet` flattening two grants into a third. The `GrantStack`
+  holds each pushed layer instead, and a verdict folds the layers' answers only
+  at the concrete access, where the question is closed
+  ([[decisions/260906_object-not-name|object-not-name]]). The one place a
+  single frozen bundle still exists is the *projection* serialised to a
+  re-exec'd child or a guest, and containment between its prefixes holds only
+  against the kernel that folds them
+  ([[design/capability-freeze|capability-freeze]],
+  [[decisions/260726_guest-namespace-prefixes|guest-namespace-prefixes]]): a
+  bundle frozen for one namespace has no meet in another, since the meet
+  re-mints its prefixes through the local fold.
 - **Regions are `within`.** System C's scoped state (§5.2) needs no type ceremony
   while a handle is used second-class, and surfaces in the type only when *boxed*
   to escape. ral's `within [dir: …]` is morally a region; the pattern generalises

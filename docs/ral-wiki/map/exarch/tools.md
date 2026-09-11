@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 77628b97
+generated_at_commit: d9abfb52
 generated_at_date: 2026-09-11
 covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 ---

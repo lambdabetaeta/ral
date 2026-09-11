@@ -218,9 +218,10 @@ between statements have no effect.
 
 ### 3.1. Source text
 
-Source files must contain valid UTF-8 text. When ral loads a script or module,
-it converts Windows line endings (`CRLF`) and old-style `CR` line endings to
-`LF`. These files therefore have the same meaning on every platform.
+Source text must be valid UTF-8. When ral loads a script, a module, a `-c`
+program, or a program read from standard input, it converts Windows line
+endings (`CRLF`) and old-style `CR` line endings to `LF`. Source therefore has
+the same meaning on every platform, however it was supplied.
 
 Spaces and tabs separate words. They do not separate statements. A newline
 usually ends the current statement. A semicolon always ends it.
@@ -1530,6 +1531,8 @@ Redirects attach input or output to one command or compound command:
 
 The default descriptor is 0 for input redirects and 1 for output redirects. Redirects are applied from left to right, so descriptor duplication uses the destination established so far. Redirect targets are evaluated before their files are opened. Relative paths use the scoped logical working directory.
 
+ral has no numbered descriptors beyond these three streams. A redirect naming any other file descriptor — `3> path`, `4< path`, `>&5` — is rejected outright, with a diagnostic naming standard input, output, and error as the only three that exist; there is no general facility for managing a spawned process's own inherited handles.
+
 Descriptor duplication runs in that one direction only. `1>&2`, and its short spelling `>&2`, are rejected: their only honest use is the shell idiom for writing a diagnostic, and a diagnostic is what `warn` is for. The message names `warn`, and names `2>&1` too, since a program holding the exchange backwards means that one.
 
 A redirect on a stage overrides the route the pipeline would otherwise use. In `cmd > file | next`, `cmd` writes to `file` and `next` sees end of input. Within one stage, if more than one redirect supplies standard input, the last one wins.
@@ -2664,7 +2667,7 @@ fs: [
 
 Read and write authority are separate: write permission does not imply read permission. A present `fs` map with no `read` or no `write` entry grants nothing for that operation. Deny regions are carve-outs and accumulate across nested grants.
 
-ral resolves the accessed path, including symlinks, before testing prefix membership. Policy prefixes also carry a symlink-resolved identity captured when the policy is decoded. Nested policies are intersected using that frozen identity; point-of-use checks resolve the live path again. `/dev/null` is always permitted as a discard device.
+ral resolves the accessed path, including symlinks, before testing prefix membership. Policy prefixes also carry a symlink-resolved identity captured when the policy is decoded. Composition never flattens nested policies into one: each active layer keeps its own frozen prefixes, and a check folds the whole stack afresh — the allow region for a `read` or `write` is the intersection of every opining layer's admitted prefixes, the deny region is the union of every layer's carve-outs, and a denial at any layer wins over an allow admitted elsewhere in the stack. Point-of-use checks resolve the live path again. `/dev/null` is always permitted as a discard device.
 
 ral checks filesystem operations that it performs itself. A spawned program’s own filesystem access is instead confined by the host sandbox where supported.
 
@@ -2799,9 +2802,9 @@ Dynamic loader injection variables such as `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY
 
 ### 12.11. Host differences and limits
 
-**macOS.** ral launches confined children under Seatbelt. Filesystem, offline-network, and executable-path restrictions are kernel-enforced. The executable allow-list also constrains programs launched internally by an admitted child. Subcommand restrictions remain an in-process check on the original invocation.
+**macOS.** ral launches confined children under Seatbelt. Filesystem, offline-network, and executable-path restrictions are kernel-enforced. The executable allow-list also constrains programs launched internally by an admitted child. Subcommand restrictions remain an in-process check on the original invocation. Since Seatbelt logs filesystem, executable, network, and Mach/IPC denials through one stream, a denial's diagnostic hint (§13.2) is classed by what was actually refused, never assumed to be a filesystem read merely because a hint has to say something.
 
-**Linux.** ral uses bubblewrap for filesystem restrictions and `net: false`; on x86-64 and aarch64 every confined child also runs under a seccomp deny-set: kernel attack surface (ptrace, bpf, module loading, keyrings, `userfaultfd`, `open_by_handle_at`, the mount family) is killed with SIGSYS, and user-namespace creation, `setns`, `clone3` and `ioctl(TIOCSTI)` are refused with an errno — no mounting and no containers inside a grant. `RAL_DUMP_SANDBOX_PROFILE` prints the set. Under a restricted `fs` the envelope always binds the system read-only: `/bin`, `/usr`, `/lib`, `/lib64`, the files under `/etc` that dynamic linking, name resolution, user lookup and toolchain resolution need, and of `/sys` only what sizes a program (`/sys/devices/system/cpu`, `/sys/kernel/mm/transparent_hugepage`). The rest of `/sys` describes the host — its `class/net` lists the host's interfaces whatever `net` says — and a grant that wants it lists `/sys` under `read`. Every confined child runs in its own ipc and uts namespaces and, wherever the host can mount a fresh procfs, its own pid namespace with its own `/proc`: on every projection it sees and can signal no host process. Wherever the kernel builds a cgroup namespace the child has one, and on every projection `/sys/fs/cgroup` is the tree its own `/proc/self/cgroup` names — ral's cgroup, so a runtime reads its real limits; where the kernel cannot, the child sees the host's tree. A container runtime that masks `/proc` prevents the pid namespace; the launch still runs, and `RAL_DUMP_SANDBOX_PROFILE` reports the table as the container's own, and each other invariant the host does not hold. A confined command has no controlling terminal. Bubblewrap has no path-based executable filter, so the confined child enters a Landlock domain of its own inside the envelope: executable-path restrictions are kernel-enforced on kernels with Landlock (Linux 5.13 and later), constraining programs launched internally by an admitted child as on macOS, and on Landlock 6 kernels (Linux 6.12 and later) the child can signal no process outside the envelope even where no pid namespace could be built. What the kernel gates is the path passed to `execve`, and Landlock is allow-list only, so both a denied path *inside* an admitted directory and an admitted dynamic loader or interpreter invoked explicitly on an unadmitted file are refused by ral's own check but not by the kernel. `RAL_DUMP_SANDBOX_PROFILE` reports whether the host holds each of these. Pure `exec` attenuation does not by itself create a bubblewrap sandbox.
+**Linux.** ral uses bubblewrap for filesystem restrictions and `net: false`; on x86-64 and aarch64 every confined child also runs under a seccomp deny-set: kernel attack surface (ptrace, bpf, module loading, kexec/reboot/swap, keyrings, `userfaultfd`, `open_by_handle_at`, the mount family) is killed with SIGSYS, and user-namespace creation, `setns`, `clone3` and `ioctl(TIOCSTI)` are refused with an errno — no mounting and no containers inside a grant. `RAL_DUMP_SANDBOX_PROFILE` prints the set. Under a restricted `fs` the envelope always binds the system read-only: `/bin`, `/usr`, `/lib`, `/lib64`, the files under `/etc` that dynamic linking, name resolution, user lookup and toolchain resolution need, and of `/sys` only what sizes a program (`/sys/devices/system/cpu`, `/sys/kernel/mm/transparent_hugepage`). The rest of `/sys` describes the host — its `class/net` lists the host's interfaces whatever `net` says — and a grant that wants it lists `/sys` under `read`. Every confined child runs in its own ipc and uts namespaces and, wherever the host can mount a fresh procfs, its own pid namespace with its own `/proc`: on every projection it sees and can signal no host process. Wherever the kernel builds a cgroup namespace the child has one, and on every projection `/sys/fs/cgroup` is the tree its own `/proc/self/cgroup` names — ral's cgroup, so a runtime reads its real limits; where the kernel cannot, the child sees the host's tree. A container runtime that masks `/proc` prevents the pid namespace; the launch still runs, and `RAL_DUMP_SANDBOX_PROFILE` reports the table as the container's own, and each other invariant the host does not hold. A confined command has no controlling terminal. Bubblewrap has no path-based executable filter, so the confined child enters a Landlock domain of its own inside the envelope: executable-path restrictions are kernel-enforced on kernels with Landlock (Linux 5.13 and later), constraining programs launched internally by an admitted child as on macOS, and on Landlock 6 kernels (Linux 6.12 and later) the child can signal no process outside the envelope even where no pid namespace could be built. What the kernel gates is the path passed to `execve`, and Landlock is allow-list only, so both a denied path *inside* an admitted directory and an admitted dynamic loader or interpreter invoked explicitly on an unadmitted file are refused by ral's own check but not by the kernel. `RAL_DUMP_SANDBOX_PROFILE` reports whether the host holds each of these. Pure `exec` attenuation does not by itself create a bubblewrap sandbox.
 
 **Windows.** ral uses a projection-specific AppContainer token, filesystem capability SIDs, and a Job Object. AppContainer is deny-by-default: a child confined only to obtain `net: false` does not automatically retain ordinary access to the user’s working tree. Windows has no path-based executable filter, so an admitted program may execute another visible program internally. Network and UNC grant paths are unsupported. Filesystem capability entries are attached to NTFS objects; same-volume renames and hard links can therefore preserve or omit authority differently from a purely path-based rule.
 
@@ -2842,9 +2845,11 @@ that ends in `Unit`, a scalar, a list, or any other non-map value is rejected.
 
 All listed profiles use the same load-time home and working directory. They
 are decoded by the same strict decoder as inline grants. Each decoded profile
-already contains frozen paths; the profiles are then intersected from left to
-right and installed as a session-wide ceiling. Later inline grants may narrow
-that ceiling but cannot widen it.
+already contains frozen paths; the profiles are then pushed onto the session's
+capability stack in listed order, each its own permanent layer above the
+ambient root, rather than flattened into one composite policy — the ceiling
+they form is whatever the ordinary per-check fold of that stack decides. Later
+inline grants may narrow that ceiling but cannot widen it.
 
 `source 'profile.ral'` instead returns the profile’s value, which can be used dynamically:
 
@@ -2970,6 +2975,22 @@ The status suffix is omitted when the failure message already describes a
 process failure, and the hint line appears only when a hint exists. Errors in
 scripts, startup files, aliases, and other stored sources use the source-aware
 form instead.
+
+A failure the OS sandbox reports for a spawned program is diagnosed from the
+kernel's own denial log over that call's window (§12.11), and the hint answers
+once for each class of denial the log actually contains, rather than assuming
+every denial is the same kind. On macOS, a denied filesystem read or write
+names the fully-resolved path — so a symlink inside a granted directory does
+not make the link's own directory sufficient — and the grant's matching `read`
+or `write` set; a denied executable names the path and the grant's `exec`
+allow-list, the only layer a re-exec such as `sh -c` or `find -exec` reaches; a
+denied socket names the `net: false` bit as the whole of the remedy; and a
+denied Mach or IPC lookup names the door itself, quoting the base profile's own
+recorded reason for withholding it where one exists — an unexplained door is
+still named, since it is usually a harmless probe rather than the failure's
+real cause. On Linux, the kernel log carries only the seccomp deny-set: a
+denied syscall is described by that deny-set's own reason where it has one,
+and otherwise named by number alone.
 
 Colour is presentation, not meaning. It is disabled when the terminal cannot
 support it or the usual no-colour conditions apply.
@@ -3481,6 +3502,14 @@ filesystem grant.
 `list-dir` returns records rather than formatted columns. `file-info` uses
 link metadata and reports fields including name, type, size, timestamps,
 readonly state, and symbolic-link target. An unavailable timestamp is 0.
+
+`exists`, `is-link`, and `file-info` judge a symbolic link at the link itself,
+never at the name it points to: a dangling link is judged and reported there,
+not as absent. `exists` and `is-link` both answer `true` for a dangling link,
+and `file-info` reports its own `symlink` type and target rather than failing
+as though nothing were there. `is-file`, `is-dir`, `is-readable`, and
+`is-writable` instead resolve through the link, so a dangling link answers
+`false` to each of them.
 
 The prelude adds `file-empty`, `line-count`, and `from-lines-list`.
 `from-lines-list` refuses files larger than 10 MiB because it materialises the
@@ -4100,6 +4129,8 @@ ral seeds a stable dynamic environment at boot. Inherited values win; otherwise 
 `PWD` and `OLDPWD` are not exposed through `$ENV`. ral owns the current and previous directories as shell state so parallel work cannot race through the process-wide current directory. Each external child receives the correct `PWD`, `OLDPWD`, and actual launch directory.
 
 `RAL_PATH` is a platform-separated list used to find modules and plugins. `RAL_TIMING`, when present, prints batch phase timings to stderr.
+
+On Unix, `ral` refuses a setuid invocation (effective and real user id differ) before it does anything else — before argument parsing, and before any of the four modes above is selected. The refusal is therefore unconditional: it does not depend on which mode the arguments would otherwise name.
 
 ### 16.7. `ral-sh`: the POSIX bridge
 

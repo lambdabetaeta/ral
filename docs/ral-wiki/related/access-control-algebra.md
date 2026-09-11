@@ -1,8 +1,8 @@
 ---
-verified_at_commit: 2cfeb108
-verified_at_date: 2026-09-06
+verified_at_commit: a2d120d2
+verified_at_date: 2026-09-11
 anchors: [GrantStack, Capabilities::join, FsPolicy::join, ExecPolicy::meet, ExecPolicy::join, join_literal_exec, evaluate_exec, allow_region, deny_region, check_fs_op, layer_exec_verdict, for_invocation]
-against: [design/grant, internals/capability-enforcement, design/two-enforcers]
+against: [design/grant, internals/capability-enforcement, design/two-enforcers, decisions/260906_object-not-name]
 ---
 
 # Composing capability policies

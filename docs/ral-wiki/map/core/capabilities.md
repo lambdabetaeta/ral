@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 1f91aaa0
-generated_at_date: 2026-09-10
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [core/src/capability/, core/src/capability.rs, core/src/sandbox/, core/src/sandbox.rs, core/src/path/, core/src/path.rs]
 ---
 

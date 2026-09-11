@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 99226d37
-verified_at_date: 2026-09-05
+verified_at_commit: d9abfb52
+verified_at_date: 2026-09-11
 anchors: [ESCALATION, CancelScope, CancelCause, Terminate, DurableRoot, ForegroundScope, Hears, request_foreground_cancel, request_root_cancel, CLOCK, STAMPED, REQUESTED_ROOT, Mooring, run_under, Chrome, Scrollback::last_is_error, Shell::face_signals, Shell::join_session, Shell::cancel_handle, interrupt_handler, sigint_handler, sigquit_handler, grace_signal, process::check, RunningChild::wait, watch_cancel, escalation_pending]
 ---
 

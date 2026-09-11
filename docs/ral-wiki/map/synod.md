@@ -1,6 +1,6 @@
 ---
-generated_at_commit: b46ad7ad
-generated_at_date: 2026-09-06
+generated_at_commit: a2d120d2
+generated_at_date: 2026-09-11
 covers_paths: [synod/, vm-manager/, ral-daemon/, ral-initramfs/, vm-image/, core/src/wire.rs, core/src/protocol.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs]
 ---
 
@@ -351,7 +351,7 @@ frontend can never fold an undo into a report from a different job;
 `scratch_dir` — wiped along with the rest of the store at `wipe`, never a
 system `temp_dir`, so nothing opened this way needs cleanup of its own.
 `synod/src/main.rs` runs exarch's
-`dispatch_pre_main` re-exec trampoline first, like every
+`exit_if_re_exec_child` re-exec trampoline first, like every
 [[invariants/single-binary|multicall]] binary here.
 
 The frontend is `synod/ui/`: `index.html` holds the markup and its tags,

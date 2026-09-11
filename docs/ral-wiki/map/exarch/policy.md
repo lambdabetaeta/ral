@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 99226d37
-generated_at_date: 2026-09-05
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
 covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 ---
 
@@ -9,25 +9,31 @@ covers_paths: [exarch/src/policy.rs, exarch/src/policy/]
 `policy/` composes the session's effective [[design/grant|grant]] —
 [[map/core/capabilities|ral's capability lattice]] — from the CLI flags. The
 boundary *is* ral's grant: exarch never invents its own sandbox, it just hands a
-frozen `Capabilities` to the host that pushes it.
+frozen `GrantStack` to the host that pushes it. There is no `Capabilities::meet`
+any more — composition is layering, and the stack's own per-check fold is the
+one meet that ever runs ([[decisions/260906_object-not-name|object-not-name]],
+[[map/core/capabilities|capabilities]]).
 
 ```text
-  ceiling   = base ∨ extend_base?
-  effective = ceiling ⊓ restrict₁ ⊓ restrict₂ ⊓ ...
+  ceiling = base ∨ extend_base?
+  stack   = [ceiling, restrict₁, restrict₂, ..., deny(restricts)?, deny(credentials)?]
 ```
 
-`for_invocation` composes the lattice in a fixed order — **a single optional join
-widens the ceiling, then any number of commuting meets attenuate from it**:
+`for_invocation` builds that stack in a fixed order — **a single optional join
+widens the ceiling into its own layer; every other attenuation is its own
+pushed layer**:
 
-- resolves the named base (`resolve_base`);
-- joins an optional `--extend-base` (widens the ceiling);
-- meets each `--restrict` file (attenuates);
-- adds each restrict file's path to `fs.deny_paths` (below);
-- denies [[decisions/260905_a-grant-does-not-hand-out-its-own-key|exarch's and synod's own credential files]]
+- resolves the named base (`resolve_base`) as the ceiling;
+- joins an optional `--extend-base` into the ceiling (widens it, still one
+  layer);
+- pushes each `--restrict` file as its own layer (attenuates);
+- pushes a deny layer carving out each restrict file's own path (below);
+- pushes a deny layer for
+  [[decisions/260905_a-grant-does-not-hand-out-its-own-key|exarch's and synod's own credential files]]
   the same way, for every base but `dangerous`;
-- lints the composed ceiling for confused-deputy prefixes
+- lints the assembled stack for confused-deputy prefixes
   (`lint_deputy_prefixes` over `ral_core::capability::deputy_prefixes`) — a
-  warning, never a denial, judged after every join and meet has run. It fires
+  warning, never a denial, run once every layer is pushed. It fires
   on every bake-in: `reasonable` alone flags `cwd:`, `/tmp`, and `tempdir:`,
   all three deliberate, since in-projection overlap escalates nothing
   ([[design/grant|grant]] §Concessions). The predicate is thus not the one that
@@ -44,38 +50,41 @@ composition could discard it. Loading reuses
 `--capabilities <path>.ral` (`policy/load.rs` wraps it with exarch's error
 format, the `absolute_in` cwd-join helper, and the deputy lint).
 
-`narrow(parent, base_name, cwd)` is the **meet-sibling of `for_invocation`**: it
-freezes the named base against the child's working directory and returns
-`parent ⊓ base`. Where `for_invocation` builds the *root's* ceiling (a join then
-meets), `narrow` bounds a *child's* — so the same lattice that grants the root's
-authority also attenuates a spawned [[design/agents|sub-agent]]'s. Meet only ever
-removes authority and the result is ≤ both operands, so a spawn can reduce a
-child's reach but never escalate it past the parent's: naming a base looser than
-the parent changes nothing (a network-off parent stays offline even under
-`minimal`, since `false ⊓ true = false`), and `dangerous` — the lattice top —
-leaves the parent's authority verbatim. The desk behind the
-[[map/exarch/builtins|`` agents `start `` tag]] (`fleet/desk.rs`) calls it at
-the spawn site with the spawn record's mandatory `grant` base.
+`base_layer(base_name, cwd)` resolves a bake-in base, frozen against the
+child's working directory, as the one layer a [[design/agents|sub-agent]]
+spawn pushes. It no longer takes the parent: the desk behind the
+[[map/exarch/builtins|`` agents `start `` tag]] (`fleet/desk.rs`'s
+`fork_child`) clones the parent's own `GrantStack` and pushes this layer onto
+the clone, so the same stack that carries the root's authority also carries a
+spawned child's attenuation. The stack's per-check fold ANDs every layer's
+verdict, so an added layer can only remove authority: a spawn can reduce a
+child's reach but never escalate it past the parent's — naming a base looser
+than the parent changes nothing (a network-off parent stays offline even
+under `minimal`) — and `dangerous` — the lattice top — leaves the parent's
+authority verbatim.
 
-`deny_paths` makes two kinds of bytes structurally unreachable: a restrict
-file's own bytes, so the agent cannot edit the file that shapes its authority,
-and — after composition finishes — `provider::credential_files()`, so the
-agent cannot read the credentials that authorise its own turn
+`deny_layer(paths, ctx)` is a pure constructor, not a mutator: it returns a
+fresh `Capabilities` layer holding only those paths as `fs.deny_paths`, for the
+caller to push, rather than folding them into whatever layer already carries
+an `fs` opinion. `for_invocation` pushes two such layers, each making a kind
+of bytes structurally unreachable: a restrict file's own path, so the agent
+cannot edit the file that shapes its authority, and — once some layer already
+holds an `fs` opinion — `provider::credential_files()`, so the agent cannot
+read the credentials that authorise its own turn
 ([[decisions/260905_a-grant-does-not-hand-out-its-own-key|a-grant-does-not-hand-out-its-own-key]]).
-The credential deny lives in composition rather than in any of the six
-profile `.ral` files: deny sets **union** under both meet and join, so a deny
-placed there is one no profile can omit by neglect and no `--extend-base` can
-widen back open. **Only the user-supplied lexical form is pushed** — both
+Pushed as its own layer, a credential deny is one no profile can omit by
+neglect and no `--extend-base` can widen back open — the stack's fold can
+only narrow past it. **Only the user-supplied lexical form is pushed** — both
 capability enforcers expand a deny entry to its canonical (and, on macOS,
 firmlink) variants themselves, so canonicalising here would duplicate, less
 completely, work that belongs to core. Each path is frozen through the same
 lexer the grant decoder uses, so deny entries land as `NormalizedPrefix`es in
 the grant-side normal form. The `--extend-base` file is *not* denied: it
-widens authority, so denying writes to it is a trust-source concern, not a
+widens the ceiling, so denying writes to it is a trust-source concern, not a
 self-protection one. The credential deny is skipped for `dangerous` alone: it
-attenuates nothing by contract, and installing an `fs` policy there just to
-hold these denies would confine a session that asked not to be, against an
-agent that can read the same bytes a hundred other ways.
+attenuates nothing by contract, and pushing an `fs`-opinionated layer there
+just to hold these denies would confine a session that asked not to be,
+against an agent that can read the same bytes a hundred other ways.
 
 `policy/base.rs` embeds the six bake-in profiles from `exarch/data/*.exarch.ral`
 via `include_str!`, ordered from most to least authority:

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: 36ea3c65
-verified_at_date: 2026-09-10
+verified_at_commit: d9abfb52
+verified_at_date: 2026-09-11
 anchors: [Emitter::emit, Log::append, Log::read, Signal::Fact, Signal::Transient, Record, Protocol, Display, Forensic, Transient, Model::step, View::step, BLOCKS_WINDOW, Blocks::step, Delta, Sink::fact, Blocks::model, replay, model::resume, Scrollback::fact, Scrollback::trim, seed, flush_log, rotate, clear, Context, Turn, Body, Pointer, TurnRow, Held, Locus, render_head, Context::step, Context::plan_eviction, apply_context_op, Context::place]
 ---
 

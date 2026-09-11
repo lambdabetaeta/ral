@@ -1,7 +1,7 @@
 ---
-generated_at_commit: 0c6ec335
-generated_at_date: 2026-09-03
-covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/plugin_editor.rs, ral/src/repl/plugin_ed_builtins.rs, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
+generated_at_commit: d9abfb52
+generated_at_date: 2026-09-11
+covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
 # Map: repl / plugins
@@ -75,7 +75,7 @@ context, so a `Break::Error` reads against the right `FileId`.
 
 ## The `_ed-*` builtins
 
-`plugin_ed_builtins.rs` defines `ED_BUILTINS`, the line-editor builtin family,
+`plugin/ed_builtins.rs` defines `ED_BUILTINS`, the line-editor builtin family,
 one `BuiltinEntry` per op so the typechecker sees each return type and arity is
 fixed per op ([[invariants/fixed-arity|fixed-arity]]). The `_` prefix hides them
 from `help`. They split into reads (`_ed-get`, `_ed-text`, `_ed-cursor`,
@@ -90,7 +90,7 @@ the session's own builtin table from the first rc check.
 
 ## Context and editor state
 
-`plugin_editor.rs` holds the runtime types. `PluginContext` is set on `Shell`
+`plugin/editor.rs` holds the runtime types. `PluginContext` is set on `Shell`
 before each hook/keybinding call and splits its data flow explicitly: `inputs`
 (history, `in_readline`), `outputs` (ghost text, highlight spans, pushed
 buffer, accept flag), the live `editor_state`, and a per-plugin `state_cell`.
@@ -144,7 +144,9 @@ once, so the frontends cannot disagree.
   reversible: hooks and aliases are committed only after every validation
   passes, so a rejected load rolls back cleanly; unloading is the exact
   inverse, unregistering the plugin's hooks and keybindings and undoing the
-  env installation.
+  env installation. Loading also runs the shadow lint: a binding the
+  router's `dead_entries` flags (an earlier unguarded entry owns its chord)
+  is warned about, not rejected.
 - `keybinding.rs` — when a plugin-registered key fires, rustyline stashes a
   `PendingKeybinding` and accepts the line; `dispatch_keybinding` then runs the
   handler outside the readline borrow under `HookFraming::Framed` with `Leased`
@@ -154,12 +156,15 @@ once, so the frontends cannot disagree.
   plugin's name plus a binding index *within* it, never a position in the
   runtime `Vec` — `unload_plugin` compacts that vector, so a runtime index
   would address the wrong plugin after an unload; a resolution miss re-edits
-  the line unchanged. `sync_plugins` reconciles rustyline's binding table by
-  full unbind-then-rebind, registering one `RouterKeyHandler` per distinct
-  bound chord (`bound_chords`) that consults the live router on each press; a
-  frontend matching keys itself snapshots the `KeyRouter` instead. Loading also
-  runs the shadow lint: a binding `dead_entries` flags (an earlier unguarded
-  entry owns its chord) is warned about, not rejected.
+  the line unchanged.
+- `plugin/rustyline.rs` is the runtime's rustyline boundary: `sync_plugins`
+  reconciles rustyline's binding table by full unbind-then-rebind,
+  registering one `RouterKeyHandler` per distinct bound chord
+  (`bound_chords`, in `plugin/router.rs`) that consults the live router on
+  each press; a frontend matching keys itself snapshots the `KeyRouter`
+  instead. `CtrlDHandler` and the rustyline `chord_to_key_event` conversion
+  live here too, over the `RalHelper` editor rustyline adapts against
+  ([[map/repl/frontend|frontend]]).
 
 ## Captured session commands
 

@@ -1,6 +1,6 @@
 ---
-verified_at_commit: be7c59e3
-verified_at_date: undefined
+verified_at_commit: d9abfb52
+verified_at_date: 2026-09-11
 against: [design/cbpv, design/types, design/pipelines, internals/evaluator-machine]
 ---
 
@@ -56,9 +56,14 @@ touches the world ([[design/cbpv|cbpv]],
   whose static rule says just that both sides are computations — `Γ ⊢ M : F[ρ] A`
   and `Γ ⊢ N : F[σ] B` give `Γ ⊢ M | N : F[σ] B`. What the combinator *does* is
   operational: it connects `M`'s stdout to `N`'s stdin with an
-  operating-system pipe, discards `M`'s returned value, and runs both in one
-  process group ([[design/pipelines|pipelines]]). It is not a CBPV connective;
-  it is exactly where ral is a shell rather than a λ-calculus, and the honest
+  operating-system pipe and discards `M`'s returned value. A ral-written
+  stage runs its own CEK machine on an OS thread over a cloned `Shell`; only
+  an external command is a process, and only externals are members of the
+  pipeline's process group, which the parent shell itself is not
+  ([[design/pipelines|pipelines]],
+  [[decisions/260902_stages-are-threads|stages-are-threads]]). It is not a
+  CBPV connective; it is exactly where ral is a shell rather than a
+  λ-calculus, and the honest
   reading is that the shell's one composition operator lives outside the
   calculus rather than being encoded into it.
 - **No computation products.** ral's computation types are `F[ρ] A` and

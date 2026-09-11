@@ -1,6 +1,6 @@
 ---
-verified_at_commit: b554b2c3
-verified_at_date: 2026-08-26
+verified_at_commit: d9abfb52
+verified_at_date: 2026-09-11
 against: [design/effects-handlers, design/syscalls-are-effects, design/pipelines]
 ---
 
@@ -70,9 +70,12 @@ primary.
   `t₁ | t₂` ("the difficulty is very much like that with the CCS parallel
   combinator") and leave it as the paper's principal open question. ral agrees
   by architecture: the pipe is a primitive computation combinator whose whole
-  content is operational — connect stdout to stdin, run both in one process
-  group ([[design/pipelines|pipelines]]) — orthogonal to the handler stack, not
-  a deconstruction of one computation.
+  content is operational — connect stdout to stdin; a ral-written stage runs
+  as a thread over a cloned shell, an external command as a process, the two
+  sharing one process group only on the external side
+  ([[design/pipelines|pipelines]],
+  [[decisions/260902_stages-are-threads|stages-are-threads]]) — orthogonal to
+  the handler stack, not a deconstruction of one computation.
 
 ## What ral could borrow
 
