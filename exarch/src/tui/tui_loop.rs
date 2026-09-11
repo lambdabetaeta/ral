@@ -209,7 +209,10 @@ pub fn run(
         // not replay a prior resume's note as if it were history.
         tui.app.push_note(
             session.agent.id,
-            &format!("resumed: {exchanges} exchanges, {} KB", bytes.div_ceil(1024)),
+            &format!(
+                "resumed: {exchanges} exchanges, {} KB",
+                bytes.div_ceil(1024)
+            ),
         );
     }
     // Without a way to wake the parked worker with a `/quit`, the `join` below
@@ -565,10 +568,11 @@ mod tests {
 
         // The fold is a transient; the session's own head bookend rides the
         // same channel, so the claim below is about the live half alone.
-        let mut transients = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|sig| match sig {
-            crate::bus::Signal::Transient(_, t) => Some(t),
-            crate::bus::Signal::Fact(..) => None,
-        });
+        let mut transients =
+            std::iter::from_fn(|| rx.try_recv().ok()).filter_map(|sig| match sig {
+                crate::bus::Signal::Transient(_, t) => Some(t),
+                crate::bus::Signal::Fact(..) => None,
+            });
         match transients
             .next()
             .expect("the /resources command must publish its fold")

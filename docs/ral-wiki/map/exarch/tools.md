@@ -1,19 +1,31 @@
 ---
-generated_at_commit: fb52275a
-generated_at_date: 2026-08-25
+generated_at_commit: 77628b97
+generated_at_date: 2026-09-11
 covers_paths: [exarch/src/shell_eval/tools.rs, exarch/src/shell_eval/tools/]
 ---
 
 # Map: exarch / tools
 
-**`ral` is exarch's one tool.** Every other harness affordance the model once
+**`ral` is exarch's tool.** Every other harness affordance the model once
 reached as a provider-advertised `Tool` — spawning, messaging, cancelling,
 scheduling, replying, and reading a reply — is now a ral builtin reached by writing ral inside
 `ral` itself, per the
 [[decisions/260702_agent-tool-to-exarch-builtin|agent-tool-to-exarch-builtin]]
 migration; see [[map/exarch/builtins|builtins]] for the verbs and
 [[map/core/engine-protocol|engine-protocol]] for the desk they speak
-through. `shell_eval/tools.rs` shrinks to:
+through.
+
+`shell_eval/tools.rs` holds the two-line seam that makes this parametric. A
+`Tool` is a static record — name, description, schema, dispatch `fn` — and
+`Toolset` is a `Copy` slice of them: `Toolset::offered(thinking)` is `ral`
+alone or `ral` plus `thinking`; `Toolset::default()` is empty (`--chat`). The
+agent carries one `Toolset`, and both `provider.complete` (which puts
+`Toolset::wire()` on the request) and `Avatar::invoke` (which dispatches through
+`Toolset::get`) read it, so what was advertised and what is recognised cannot
+disagree; an unadvertised name earns `unknown tool` and a `Forensic::Error`.
+Every fork and desk spawn inherits its parent's set verbatim. Malformed input is
+answered through the shared `required_str`/`input_error`, in the same words
+for every tool.
 
 - **`ral`** (`shell_eval/tools/ral.rs`) — the one call that crosses the provider
   boundary: evaluate ral source against the session shell, synchronously,
@@ -34,6 +46,15 @@ through. `shell_eval/tools.rs` shrinks to:
   call label but still gets a paired diagnostic result; if the call row itself
   cannot be appended, the seam reports a transient fault and cannot invent a
   result target.
+- **`thinking`** (`shell_eval/tools/thinking.rs`) — offered only under the
+  hidden `--thinking-tool` flag: a relay whose one field, `thought`, is recorded
+  as a single `Display::Thinking` — the same lane the provider's own reasoning
+  commits on, so a thought wears the `∴` rail, the drained ink, and the
+  `/thinking` dial (newline-terminated, since the view fold grows one thinking
+  block by every thinking record that follows) — and answered with the
+  bare `relayed`. Nothing else happens — no call row, no model-view twin — so a
+  model may narrate between calls without ending its turn. A record failure is
+  a seam fault, not a tool error: the model still gets its acknowledgement.
 - **`shell_eval/tools/agent.rs`** — no longer a tool module, but the
   fork-detach-register spine every launch shares: `spawn_async`, `AsyncSpawn`,
   `SpawnedChild`. Both `/branch`'s `spawn_branch` and the desk's

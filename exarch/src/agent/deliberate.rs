@@ -132,7 +132,7 @@ impl Avatar {
                 provider.complete(
                     &self.agent.system,
                     &messages,
-                    self.agent.tool_enabled,
+                    self.agent.tools,
                     self.agent.search,
                     &mut |delta: Delta<'_>| {
                         match delta {
@@ -419,19 +419,18 @@ impl Avatar {
     }
 
     fn invoke(&mut self, call: ToolCall, emit: &Emitter) -> SessionToolResult {
-        // `ral` is the only name this agent recognises, and only when the
-        // request advertised it (withheld for a `--chat` trunk).  Every harness
-        // verb (`agent`, `reply`, `schedule`, …) is a builtin *inside* it.
-        if self.agent.tool_enabled && call.fn_name == crate::shell_eval::tools::ral::NAME {
-            crate::shell_eval::tools::ral::dispatch(call.call_id, &call.fn_arguments, self, emit)
-        } else {
+        // The names this agent recognises are exactly the ones its request
+        // advertised.  Every harness verb (`agent`, `reply`, `schedule`, …)
+        // is a builtin *inside* `ral`, not a tool of its own.
+        let Some(tool) = self.agent.tools.get(&call.fn_name) else {
             let msg = format!("unknown tool `{}`", call.fn_name);
             self.note_error(msg.clone());
-            SessionToolResult {
+            return SessionToolResult {
                 id: call.call_id,
                 content: msg,
-            }
-        }
+            };
+        };
+        tool.run(call.call_id, &call.fn_arguments, self, emit)
     }
 
     /// The batch carried a `reply`.  The round-trip never asked for a final

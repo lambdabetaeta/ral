@@ -151,6 +151,10 @@ pub struct Cli {
     /// or `--edit`.
     #[arg(long = "chat", conflicts_with_all = ["headless", "system_files"])]
     pub chat: bool,
+
+    /// Also offer the `thinking` relay — an experiment, so kept off `--help`.
+    #[arg(long = "thinking-tool", hide = true, conflicts_with = "chat")]
+    pub thinking_tool: bool,
 }
 
 /// The editing scheme `--edit` selects: one system-prompt section, since both

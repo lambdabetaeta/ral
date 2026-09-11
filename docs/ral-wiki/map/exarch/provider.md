@@ -1,6 +1,6 @@
 ---
-generated_at_commit: c5df4203
-generated_at_date: 2026-09-06
+generated_at_commit: 77628b97
+generated_at_date: 2026-09-11
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
 
@@ -262,7 +262,7 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
 
 ## The streaming path
 
-- `complete(system, transcript, tool_enabled, search, on_delta, cancel)` —
+- `complete(system, transcript, tools, search, on_delta, cancel)` —
   streams one assistant reply, calling `on_delta` with a `Delta::Say` per text
   chunk and a `Delta::Think` per reasoning chunk, and projects the `StreamEnd`
   into a `StepOut` (assistant message, tool calls, `Usage`, `StopReason`). One
@@ -384,9 +384,9 @@ the ChatGPT and Codex Responses endpoints reject outright (rust-genai #273),
 so every other adapter carries its system prompt in the request's own
 `system` field — where the Responses adapter's `instructions` string wants it
 anyway — and leans on the per-process `prompt_cache_key` alone, which genai
-reads as intent for the free implicit cache. `tool_defs(adapter, tool_enabled,
-search)`, also in `wire.rs`, builds the request's tool array: the `ral` wire
-tool under `tool_enabled`, plus the provider's own hosted web-search tool
+reads as intent for the free implicit cache. `tool_defs(adapter, tools,
+search)`, also in `wire.rs`, builds the request's tool array: the agent's
+[[map/exarch/tools|`Toolset`]] on the wire, plus the provider's own hosted web-search tool
 under `search` — carried only on the three adapters genai maps it for
 (`OpenAIResp`, `Anthropic`, `Gemini`), and `OpenAIResp` alone adds the
 `external_web_access` config that switches codex from its cached index to the

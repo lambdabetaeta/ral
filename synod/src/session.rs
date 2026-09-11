@@ -270,6 +270,7 @@ impl Conversation {
             // drives one exchange at a time over this same session.
             interactive: true,
             chat: false,
+            thinking_tool: false,
             disk_warn_bytes,
             // Every agent may delegate: the office assistant hatches
             // helpers that run concurrently in the same guest, and

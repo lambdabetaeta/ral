@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 146084be
-generated_at_date: 2026-09-09
+generated_at_commit: 77628b97
+generated_at_date: 2026-09-11
 covers_paths: [exarch/src/agent.rs, exarch/src/agent/, exarch/src/fleet.rs, exarch/src/fleet/desk.rs, exarch/src/fleet/roster.rs, exarch/src/prompt.rs, exarch/src/config.rs, exarch/src/net_policy.rs, exarch/src/net_policy/, exarch/src/egress.rs]
 ---
 
@@ -166,7 +166,7 @@ stamps, since a conversing root has no parent to prune it away and parking
 `Held` past that stamp would be a zombie; busy children hold it until they reply or
 die; a live self-schedule holds it until cancelled; otherwise it terminates at
 quiescence — the one-shot contract a headless trunk satisfies. `--chat` builds the trunk with no system
-prompt, no tool at all (`tool_enabled: false`), and no nudge registry — a bare
+prompt, no tool at all (an empty `Toolset`), and no nudge registry — a bare
 conversation, the same attend loop.
 
 ## The attend loop

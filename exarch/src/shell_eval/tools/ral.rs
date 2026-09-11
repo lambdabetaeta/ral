@@ -1,18 +1,17 @@
-//! `ral` — the one tool the provider is offered: evaluate ral source against
-//! the session's live shell, synchronously on the dispatching thread.  Input
+//! `ral` — the tool every agent is offered: evaluate ral source against the
+//! session's live shell, synchronously on the dispatching thread.  Input
 //! that does not parse never reaches the session; it becomes an error block.
 
+use super::{input_error, required_str};
 use crate::agent::Avatar;
 use crate::agent::event::ToolResult as SessionToolResult;
 use crate::bus::Emitter;
 use crate::record::{BlockId, Display};
 use serde_json::{Value, json};
-use std::sync::OnceLock;
 
-/// The name on the wire; `Avatar::invoke` recognises no other.
 pub(crate) const NAME: &str = "ral";
 
-const DESC: &str = "Run a ral shell command in the sandboxed working directory.";
+pub(crate) const DESC: &str = "Run a ral shell command in the sandboxed working directory.";
 
 #[cfg_attr(test, derive(Debug))]
 struct RalArgs {
@@ -31,20 +30,8 @@ const DESCRIPTION_MAX: usize = 60;
 
 /// Parse the model's JSON, or a reason short enough for the rail's error block.
 fn parse_args(input: &Value) -> Result<RalArgs, String> {
-    let obj = input
-        .as_object()
-        .ok_or_else(|| "tool input is not a JSON object".to_string())?;
-    let cmd = obj
-        .get("cmd")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "missing required string field `cmd`".to_string())?
-        .to_string();
-    let description = obj
-        .get("description")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "missing required string field `description`".to_string())?
-        .trim()
-        .to_string();
+    let cmd = required_str(input, "cmd")?.to_string();
+    let description = required_str(input, "description")?.trim().to_string();
     if description.is_empty() {
         return Err("`description` must be non-empty".to_string());
     }
@@ -62,7 +49,7 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     };
     // Absent or `null` takes the default, anything else must be a `u64`: a bare
     // `as_u64` lookup could not tell those apart from present-but-junk.
-    let timeout_secs = match obj.get("timeout_secs") {
+    let timeout_secs = match input.get("timeout_secs") {
         None | Some(Value::Null) => CALL_TIMEOUT_SECS,
         Some(v) => {
             let n = v
@@ -81,38 +68,28 @@ fn parse_args(input: &Value) -> Result<RalArgs, String> {
     })
 }
 
-fn schema() -> &'static Value {
-    static S: OnceLock<Value> = OnceLock::new();
-    S.get_or_init(|| {
-        json!({
-            "type": "object",
-            "properties": {
-                "cmd": { "type": "string", "description": "The ral source to evaluate." },
-                "description": {
-                    "type": "string",
-                    "maxLength": DESCRIPTION_MAX,
-                    "description": "One line (≤60 chars) stating the script's \
+pub(crate) fn schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "cmd": { "type": "string", "description": "The ral source to evaluate." },
+            "description": {
+                "type": "string",
+                "maxLength": DESCRIPTION_MAX,
+                "description": "One line (≤60 chars) stating the script's \
         intent — what it is for, not what it types. Present continuous, e.g. \
         \"Counting TODOs across src/.\". Shown on the rail; no newlines. Do not echo the source, or the mechanics of ral.",
-                },
-                "timeout_secs": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Wall-clock limit in seconds; default 60. \
+            },
+            "timeout_secs": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Wall-clock limit in seconds; default 60. \
         Raise it for a command known to run long, rather than defer-then-wait. \
         Keep defer for work you can overlap.",
-                },
             },
-            "required": ["cmd", "description"],
-        })
+        },
+        "required": ["cmd", "description"],
     })
-}
-
-/// The definition `tool_defs` in `provider/request.rs` puts on the wire.
-pub(crate) fn wire_tool() -> genai::chat::Tool {
-    genai::chat::Tool::new(NAME)
-        .with_description(DESC)
-        .with_schema(schema().clone())
 }
 
 /// Sentinel `cmd` for a call that did not parse.  `tui::app` renders no
@@ -122,7 +99,7 @@ pub(crate) const INVALID_INPUT: &str = "<invalid input>";
 /// Rail header and error block for a malformed call, and the result to commit.
 fn invalid_input(id: String, reason: &str, session: &Avatar) -> SessionToolResult {
     let call = record_call(session, INVALID_INPUT.to_string(), None);
-    let msg = format!("tool input error: {reason}\nexpected an object matching the tool's schema");
+    let msg = input_error(reason);
     record_result(session, &msg, call);
     SessionToolResult { id, content: msg }
 }

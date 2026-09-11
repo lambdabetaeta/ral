@@ -683,6 +683,7 @@ mod tests {
                 allow_schedule: false,
                 interactive: true,
                 chat: false,
+                thinking_tool: false,
                 disk_warn_bytes: None,
                 fuel: 0,
                 egress: crate::egress::Egress::for_test(),
@@ -750,17 +751,15 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessJson, root, &mut sink_out, &mut sink_err);
-        h.accept(
-            Signal::Fact(
-                root,
-                Recorded::new(
-                    Locus::placeholder(Seq::new(1)),
-                    Record::Forensic(Forensic::Error {
-                        text: format!("{}boom", crate::bus::WORKER_PANIC_PREFIX),
-                    }),
-                ),
+        h.accept(Signal::Fact(
+            root,
+            Recorded::new(
+                Locus::placeholder(Seq::new(1)),
+                Record::Forensic(Forensic::Error {
+                    text: format!("{}boom", crate::bus::WORKER_PANIC_PREFIX),
+                }),
             ),
-        );
+        ));
         let out = result_json(&h, &Ok(()), std::time::Duration::ZERO);
         let v: serde_json::Value = serde_json::from_str(&out).expect("result is JSON");
         assert_eq!(v["is_error"], serde_json::json!(true), "{out}");
@@ -810,15 +809,13 @@ mod tests {
         let card = Card(vec![Mark::Raw {
             bytes: b"a rendered surface".to_vec(),
         }]);
-        h.accept(
-            Signal::Fact(
-                root,
-                Recorded::new(
-                    Locus::placeholder(Seq::new(1)),
-                    Record::Display(Display::Card { card }),
-                ),
+        h.accept(Signal::Fact(
+            root,
+            Recorded::new(
+                Locus::placeholder(Seq::new(1)),
+                Record::Display(Display::Card { card }),
             ),
-        );
+        ));
         let err = String::from_utf8_lossy(&sink_err);
         assert!(
             err.contains("a rendered surface"),
@@ -835,14 +832,12 @@ mod tests {
         let mut sink_out = Vec::new();
         let mut sink_err = Vec::new();
         let mut h = Headless::new(Projection::HeadlessText, root, &mut sink_out, &mut sink_err);
-        h.accept(
-            Signal::Transient(
-                sub,
-                Transient::Fault {
-                    text: "disk is full".into(),
-                },
-            ),
-        );
+        h.accept(Signal::Transient(
+            sub,
+            Transient::Fault {
+                text: "disk is full".into(),
+            },
+        ));
         let err = String::from_utf8_lossy(&sink_err);
         assert!(err.contains("disk is full"), "{err:?}");
     }
@@ -1029,6 +1024,7 @@ mod tests {
                 allow_schedule,
                 interactive: true,
                 chat: false,
+                thinking_tool: false,
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
                 egress: crate::egress::Egress::for_test(),

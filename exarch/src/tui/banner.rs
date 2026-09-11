@@ -42,7 +42,12 @@ pub(super) fn opening(card: &Card, width: u16) -> Vec<Line<'static>> {
     }));
     let art_w = lines.iter().map(Line::width).max().unwrap_or_default();
     let card_w = u16::try_from(art_w).unwrap_or(u16::MAX).min(width);
-    lines.extend(line::render_filled_card(card, OPENING_INDENT, card_w, Detail::Full));
+    lines.extend(line::render_filled_card(
+        card,
+        OPENING_INDENT,
+        card_w,
+        Detail::Full,
+    ));
     lines
 }
 

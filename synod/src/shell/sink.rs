@@ -324,7 +324,9 @@ fn project_display(display: &Display) -> Option<SynodEvent> {
             marks: marks_dto(card.clone()),
         }),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
-        Display::Context { turns, evicted } => process_card(Some(context_rows_card(turns, *evicted))),
+        Display::Context { turns, evicted } => {
+            process_card(Some(context_rows_card(turns, *evicted)))
+        }
         Display::Turn { id } => Some(SynodEvent::Turn { id: *id }),
         // The trunk's committed reasoning, its prose cut line by line for
         // the durable scrollback, a tool result already said on its call row,
@@ -354,7 +356,9 @@ fn project_display_helper(display: &Display) -> Option<SynodEvent> {
         Display::Observation { value } => process_card(observation_display_card(value)),
         Display::Card { card } => process_card(Some(card.clone())),
         Display::Notice { notice } => process_card(Some(notice_card(&to_card_notice(notice)))),
-        Display::Context { turns, evicted } => process_card(Some(context_rows_card(turns, *evicted))),
+        Display::Context { turns, evicted } => {
+            process_card(Some(context_rows_card(turns, *evicted)))
+        }
         Display::Done { .. }
         | Display::Thinking { .. }
         | Display::Prompt { .. }

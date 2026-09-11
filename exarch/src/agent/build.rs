@@ -14,6 +14,7 @@ use crate::bus::{AgentId, Emitter, Inbox};
 use crate::fleet::{Fleet, Unborn};
 use crate::prompt::Grants;
 use crate::provider::Provider;
+use crate::shell_eval::tools::Toolset;
 use ral_core::sync::LockExt;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,7 +54,7 @@ const TRUNK_NAME: &str = "main";
 /// the ordinary in-thread path.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, tool_enabled, search); not a candidate for a combined enum"
+    reason = "each bool sets an independent, orthogonal axis on the constructed agent (interactive, returns, allow_schedule, search); not a candidate for a combined enum"
 )]
 pub(crate) struct Build {
     /// The tab-bar identity — known to every caller before construction, `/branch`'s
@@ -86,9 +87,9 @@ pub(crate) struct Build {
     pub(crate) interactive: bool,
     pub(crate) returns: bool,
     pub(crate) allow_schedule: bool,
-    /// Whether provider requests advertise the `ral` tool at all — `false`
-    /// only for a `--chat` trunk.
-    pub(crate) tool_enabled: bool,
+    /// The tools provider requests advertise — empty only for a `--chat`
+    /// trunk.
+    pub(crate) tools: Toolset,
     /// Whether the agent may ride the provider's own hosted web search —
     /// bounded by the IT policy verdict, never a CLI flag or user config.
     pub(crate) search: bool,
@@ -190,6 +191,8 @@ pub struct RootConfig {
     pub allow_schedule: bool,
     pub interactive: bool,
     pub chat: bool,
+    /// Whether requests also advertise the `thinking` relay — `--thinking-tool`.
+    pub thinking_tool: bool,
     pub disk_warn_bytes: Option<u64>,
     /// The depth budget this trunk starts with — `SPAWN_FUEL`, the one
     /// figure both products' trunks carry: every agent may delegate, and an
@@ -255,7 +258,7 @@ impl Avatar {
             interactive,
             returns,
             allow_schedule,
-            tool_enabled,
+            tools,
             search,
             fleet,
             run_lock,
@@ -266,7 +269,7 @@ impl Avatar {
             bureau,
             reach,
         } = b;
-        let nudges = tool_enabled.then(nudge::Nudges::new);
+        let nudges = (!tools.is_empty()).then(nudge::Nudges::new);
         let log_dir = log.dir().to_path_buf();
         let inbox = Inbox::new();
         let mailbox = inbox.mailbox();
@@ -288,7 +291,7 @@ impl Avatar {
             fuel,
             provider,
             interactive,
-            tool_enabled,
+            tools,
             search,
             returns,
             allow_schedule,
@@ -349,6 +352,7 @@ impl Avatar {
             allow_schedule,
             interactive,
             chat,
+            thinking_tool,
             disk_warn_bytes,
             fuel,
             egress,
@@ -467,8 +471,11 @@ impl Avatar {
             interactive,
             returns: !interactive,
             allow_schedule,
-            // Chat mode advertises no tool at all: a bare conversation.
-            tool_enabled: !chat,
+            tools: if chat {
+                Toolset::default()
+            } else {
+                Toolset::offered(thinking_tool)
+            },
             search,
             fleet: Fleet::new(),
             run_lock,
@@ -631,8 +638,7 @@ impl Avatar {
             interactive: self.agent.interactive,
             returns,
             allow_schedule: self.agent.allow_schedule,
-            // `--chat` is trunk-only, so every fork keeps the tool.
-            tool_enabled: true,
+            tools: self.agent.tools,
             // Never a fresh grant: a child's reach is bounded by its parent's.
             search: self.agent.search,
             fleet: self.fleet.clone(),
@@ -761,7 +767,7 @@ impl Avatar {
             interactive: false,
             returns: true,
             allow_schedule,
-            tool_enabled: true,
+            tools: Toolset::offered(false),
             search,
             fleet: Fleet::with_lease(lease),
             run_lock: None,
@@ -1019,6 +1025,7 @@ mod tests {
                 // interactive: withholds `reply`.
                 interactive: true,
                 chat: false,
+                thinking_tool: false,
                 disk_warn_bytes: None,
                 fuel: SPAWN_FUEL,
                 egress: crate::egress::Egress::for_test(),
@@ -1418,6 +1425,7 @@ mod tests {
                 allow_schedule: false,
                 interactive: true,
                 chat: false,
+                thinking_tool: false,
                 disk_warn_bytes: None,
                 fuel: 0,
                 egress: crate::egress::Egress::for_test(),
@@ -1557,6 +1565,7 @@ mod tests {
                 allow_schedule: false,
                 interactive: true,
                 chat: false,
+                thinking_tool: false,
                 disk_warn_bytes: None,
                 fuel: 1,
                 egress: crate::egress::Egress::for_test(),

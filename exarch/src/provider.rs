@@ -36,6 +36,7 @@ pub use stream::{CutShort, Delta, StepOut};
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};
 
+use crate::shell_eval::tools::Toolset;
 use genai::chat::ChatMessage;
 pub use genai::chat::{ReasoningEffort, StopReason, ToolCall};
 
@@ -148,14 +149,14 @@ impl Provider {
 
     /// Stream one assistant turn; `on_delta` fires per chunk, prose and
     /// reasoning in arrival order. Raced against `cancel`, so an interrupt
-    /// need not wait on the next network chunk. `tool_enabled` gates our tool
-    /// definitions, `search` the provider's own built-in web search.
+    /// need not wait on the next network chunk. `tools` is the agent's own
+    /// offer, `search` the provider's built-in web search.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn complete<F: FnMut(Delta<'_>)>(
         &self,
         system: &str,
         transcript: &[ChatMessage],
-        tool_enabled: bool,
+        tools: Toolset,
         search: bool,
         on_delta: &mut F,
         cancel: &cancel::Token,
@@ -169,7 +170,7 @@ impl Provider {
                 self.openrouter_route(),
                 system,
                 transcript,
-                tool_enabled,
+                tools,
                 search,
                 on_delta,
                 cancel,

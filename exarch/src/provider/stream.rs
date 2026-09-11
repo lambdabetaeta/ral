@@ -7,6 +7,7 @@ use super::transport::{Engine, Transport};
 use super::usage::{Usage, usage_from};
 use super::wire::{manufacture, tool_defs};
 use crate::agent::cancel;
+use crate::shell_eval::tools::Toolset;
 use futures_util::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatStreamEvent, StopReason, StreamEnd, ToolCall};
@@ -53,14 +54,14 @@ impl Engine {
         route: Option<&str>,
         system: &str,
         transcript: &[ChatMessage],
-        tool_enabled: bool,
+        tools: Toolset,
         search: bool,
         on_delta: &mut F,
         cancel: &cancel::Token,
     ) -> Result<StepOut, ProviderError> {
         self.refresh_if_stale(transport);
         let adapter = transport.adapter();
-        let tools = tool_defs(adapter, tool_enabled, search);
+        let tools = tool_defs(adapter, tools, search);
         let options = complete_options(self.cache_key(), max_tokens_override, tuning, route);
 
         self.block_on(retry_with_backoff(

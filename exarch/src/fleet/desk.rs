@@ -905,7 +905,7 @@ impl ExarchDesk {
             interactive: s.agent.interactive(),
             returns: true,
             allow_schedule: s.agent.allow_schedule,
-            tool_enabled: true,
+            tools: s.agent.tools(),
             // A child may narrow its parent's search reach, never widen it.
             search: s.agent.search() && spec.search,
             fleet: s.fleet.clone(),
@@ -1098,7 +1098,7 @@ impl ExarchDesk {
             interactive: s.agent.interactive(),
             returns: true,
             allow_schedule: s.agent.allow_schedule,
-            tool_enabled: true,
+            tools: s.agent.tools(),
             search: s.agent.search() && spec.search,
             fleet: s.fleet.clone(),
             run_lock: None,

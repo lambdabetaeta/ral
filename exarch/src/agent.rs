@@ -69,6 +69,7 @@ use crate::bus::{
 use crate::fleet::Fleet;
 use crate::provider::Provider;
 use crate::shell_eval;
+use crate::shell_eval::tools::Toolset;
 use ral_core::process::CancelCause;
 use ral_core::serial::FOValue;
 use ral_core::sync::LockExt;
@@ -86,7 +87,7 @@ use std::time::{Duration, Instant};
 /// only [`Weak`], and every walk prunes what fails to upgrade.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, tool_enabled, search); not a candidate for a combined enum"
+    reason = "each bool gates an independent, orthogonal axis (interactive, returns, allow_schedule, search); not a candidate for a combined enum"
 )]
 pub struct Agent {
     pub id: AgentId,
@@ -134,9 +135,9 @@ pub struct Agent {
     /// it.
     cancel: cancel::Token,
     /// `provider.complete` (advertisement) and [`Avatar::invoke`] (dispatch)
-    /// read this one bit, so they cannot disagree about whether the `ral` call
+    /// read this one value, so they cannot disagree about whether the call
     /// they are handling was ever invited.
-    tool_enabled: bool,
+    tools: Toolset,
     /// Whether this agent may ride the provider's hosted web search — the IT
     /// network policy's verdict ([`crate::egress::Egress`]), inherited verbatim.
     search: bool,
@@ -329,6 +330,10 @@ impl Agent {
 
     pub(crate) fn search(&self) -> bool {
         self.search
+    }
+
+    pub(crate) fn tools(&self) -> Toolset {
+        self.tools
     }
 
     pub(crate) fn interactive(&self) -> bool {

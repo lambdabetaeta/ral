@@ -490,7 +490,8 @@ impl App {
         self.prompt_state.clear_cx_pending();
         // Motion and press alike, so the dial glyph brightens the instant the
         // pointer crosses a dialable block.
-        self.gesture.update_hover(me, self.tabs.focused_scrollback());
+        self.gesture
+            .update_hover(me, self.tabs.focused_scrollback());
         let effect = match me.kind {
             MouseEventKind::ScrollUp => Some(Effect::Scroll(-SCROLL_STEP)),
             MouseEventKind::ScrollDown => Some(Effect::Scroll(SCROLL_STEP)),

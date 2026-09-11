@@ -15,6 +15,7 @@
 //! marks below guarantee. Every other adapter keeps the dedicated
 //! `system` field, untouched by any of this.
 
+use crate::shell_eval::tools::Toolset;
 use genai::adapter::AdapterKind;
 use genai::chat::{CacheControl, ChatMessage, ChatRequest, MessageOptions, Tool, ToolConfig};
 
@@ -64,7 +65,7 @@ pub(super) fn manufacture(
     Sealed(request)
 }
 
-/// The tools a request carries: the `ral` wire tool under `tool_enabled`, the
+/// The tools a request carries: the agent's own `offered` set, and the
 /// provider's built-in web search under `search`.
 ///
 /// Search rides only the adapters genai maps `Tool::new_web_search()` to a
@@ -75,11 +76,8 @@ pub(super) fn manufacture(
 /// `ToolConfig::WebSearch`, and `OpenAIResp`-only because genai merges a
 /// `Custom` config onto the tool object, where Anthropic's
 /// `web_search_20250305` would reject the unknown field.
-pub(super) fn tool_defs(adapter: AdapterKind, tool_enabled: bool, search: bool) -> Vec<Tool> {
-    let mut tools: Vec<Tool> = tool_enabled
-        .then(crate::shell_eval::tools::wire_tool)
-        .into_iter()
-        .collect();
+pub(super) fn tool_defs(adapter: AdapterKind, offered: Toolset, search: bool) -> Vec<Tool> {
+    let mut tools: Vec<Tool> = offered.wire().collect();
     if search
         && matches!(
             adapter,
@@ -166,7 +164,7 @@ mod tests {
 
     #[test]
     fn openai_resp_search_carries_live_internet_access() {
-        let tools = tool_defs(AdapterKind::OpenAIResp, false, true);
+        let tools = tool_defs(AdapterKind::OpenAIResp, Toolset::default(), true);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, ToolName::WebSearch);
         assert_eq!(
@@ -179,7 +177,7 @@ mod tests {
 
     #[test]
     fn anthropic_search_carries_the_bare_tool() {
-        let tools = tool_defs(AdapterKind::Anthropic, false, true);
+        let tools = tool_defs(AdapterKind::Anthropic, Toolset::default(), true);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, ToolName::WebSearch);
         assert_eq!(tools[0].config, None);
@@ -187,7 +185,7 @@ mod tests {
 
     #[test]
     fn unsupported_adapter_gets_no_search_tool() {
-        let tools = tool_defs(AdapterKind::OpenAI, false, true);
+        let tools = tool_defs(AdapterKind::OpenAI, Toolset::default(), true);
         assert!(tools.is_empty());
     }
 
@@ -198,7 +196,7 @@ mod tests {
             AdapterKind::Anthropic,
             AdapterKind::Gemini,
         ] {
-            assert!(tool_defs(adapter, false, false).is_empty());
+            assert!(tool_defs(adapter, Toolset::default(), false).is_empty());
         }
     }
 }

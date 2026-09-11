@@ -622,9 +622,7 @@ impl Scrollback {
     /// the boundary it draws.
     fn open(&mut self, seq: Seq, member: Member) {
         let block = match member {
-            Member::Thinking(_) | Member::Call(_) => {
-                Block::group(member, self.thinking, Some(seq))
-            }
+            Member::Thinking(_) | Member::Call(_) => Block::group(member, self.thinking, Some(seq)),
             Member::Effect(what) => {
                 let place = landing(&what).expect("an effect member has an effect landing");
                 Block::new(BlockKind::card(observation_card(&what), place), Some(seq))
@@ -716,7 +714,9 @@ impl Scrollback {
         for (block, rows) in self.screen() {
             if block == hit.block {
                 let trimmed = self.blocks[block].rendered().len() - rows.len();
-                let start = self.blocks[block].part_start(hit.part).saturating_sub(trimmed);
+                let start = self.blocks[block]
+                    .part_start(hit.part)
+                    .saturating_sub(trimmed);
                 return (start < rows.len()).then_some(at + start);
             }
             at += rows.len();
@@ -1587,10 +1587,7 @@ mod tests {
         let mut sb = scrollback();
         let mut log = Stream::new();
         let think = |log: &mut Stream, sb: &mut Scrollback, text: &str| {
-            let _ = log.land(
-                sb,
-                Record::Display(Display::Thinking { text: text.into() }),
-            );
+            let _ = log.land(sb, Record::Display(Display::Thinking { text: text.into() }));
         };
         think(&mut log, &mut sb, "weighing the shape\n");
         sb.set_thinking_level(Detail::Summary);
@@ -1598,14 +1595,24 @@ mod tests {
         think(&mut log, &mut sb, "and again\n");
 
         let w = sb.render_window(READ_W, 60);
-        let all = w.lines.iter().map(Row::plain).collect::<Vec<_>>().join("\n");
+        let all = w
+            .lines
+            .iter()
+            .map(Row::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             !all.contains("weighing the shape") && !all.contains("and again"),
             "both deliberations read as their headers alone: {all:?}"
         );
         sb.set_thinking_level(Detail::Full);
         let w = sb.render_window(READ_W, 60);
-        let all = w.lines.iter().map(Row::plain).collect::<Vec<_>>().join("\n");
+        let all = w
+            .lines
+            .iter()
+            .map(Row::plain)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             all.contains("weighing the shape") && all.contains("and again"),
             "and both open again together: {all:?}"
@@ -1740,7 +1747,11 @@ mod tests {
         );
         resumed.flush_log().expect("the transcript flushes");
 
-        assert_eq!(logged(&path, "one"), 1, "the seeded prefix is not rewritten");
+        assert_eq!(
+            logged(&path, "one"),
+            1,
+            "the seeded prefix is not rewritten"
+        );
         assert_eq!(logged(&path, "two"), 1, "and the new block joins it");
     }
 }

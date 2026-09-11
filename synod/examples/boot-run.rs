@@ -154,6 +154,7 @@ fn main() {
         allow_schedule: false,
         interactive: true,
         chat: false,
+        thinking_tool: false,
         disk_warn_bytes: None,
         fuel: SPAWN_FUEL,
         egress: Egress::for_test(),

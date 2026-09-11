@@ -30,8 +30,9 @@ impl Context {
     /// trigger when the model's context window is unknown. Renders no turn:
     /// the marker's weight, plus each resident turn's own sum.
     pub(crate) fn history_bytes(&self) -> usize {
-        let head = render_head(self)
-            .map_or(0, |text| message_bytes(std::slice::from_ref(&ChatMessage::user(text))));
+        let head = render_head(self).map_or(0, |text| {
+            message_bytes(std::slice::from_ref(&ChatMessage::user(text)))
+        });
         self.resident()
             .fold(head, |bytes, turn| bytes.saturating_add(turn.bytes))
     }

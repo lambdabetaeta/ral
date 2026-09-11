@@ -249,6 +249,7 @@ pub fn run() -> Result<(), String> {
             // terminates once its seeded work is idle.
             interactive: !c.headless,
             chat: c.chat,
+            thinking_tool: c.thinking_tool,
             disk_warn_bytes,
             fuel: agent::SPAWN_FUEL,
             egress,

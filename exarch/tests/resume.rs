@@ -69,6 +69,7 @@ fn root_config(run_dir: &Path, resume: bool) -> RootConfig {
         allow_schedule: false,
         interactive: true,
         chat: false,
+        thinking_tool: false,
         disk_warn_bytes: None,
         fuel: 0,
         egress: exarch::egress::Egress::for_test(),

@@ -25,10 +25,10 @@ use super::line;
 use super::matrix::strip;
 use super::palette::{AGENT_HUES, LIME_HOT, PINK, READ_W, SLATE};
 use super::row::Row;
+use super::scrollback::{Scrollback, StateSpan};
 use super::select::highlight_range;
 use super::status::rule_line;
 use super::terminal::Term;
-use super::scrollback::{Scrollback, StateSpan};
 
 const PROMPT_PAD_H: u16 = 1;
 /// The matrix is a navigable window, not a second transcript.  Eight rows

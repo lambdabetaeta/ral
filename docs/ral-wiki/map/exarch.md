@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 04bf396e
-generated_at_date: 2026-09-10
+generated_at_commit: 77628b97
+generated_at_date: 2026-09-11
 covers_paths: [exarch/src/main.rs, exarch/src/lib.rs, exarch/src/cli.rs, exarch/src/bootstrap.rs, exarch/src/provider/credential.rs, exarch/src/prompt.rs, exarch/src/agent/build.rs, exarch/src/fleet/desk.rs, exarch/data/system.md, exarch/data/agents.md, exarch/data/reply.md, exarch/data/ral.md, exarch/data/script-style.md]
 ---
 
@@ -225,8 +225,9 @@ the per-agent index and optional sections still resolve from the stored base.
   pushed capabilities frame; the streaming digest and the surface host sink.
 - [[map/exarch/policy|policy]] — capability composition (base ∨ extend ⊓ restrict) and
   the bake-in profiles; the boundary *is* ral's [[design/grant|grant]].
-- [[map/exarch/tools|tools]] — `ral` is the one tool; `tools.rs` is a thin
-  seam over it, with no registry. Every other harness verb — the
+- [[map/exarch/tools|tools]] — `ral` is the tool, and `thinking` a hidden-flag
+  relay beside it; `tools.rs` is a static `Tool` record and a `Copy` `Toolset`
+  the agent carries, with no registry. Every other harness verb — the
   `` agents `start `` spawn (one record-spec tag, `` `amnemon ``/`` `mnemon ``
   by field, fuel-gated, `` `reply ``/`` `read `` gated on `returns`), the schedule family — is a builtin reached
   through it, answered by the desk. The sub-agent model is [[design/agents|agents]].

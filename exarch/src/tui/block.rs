@@ -328,7 +328,9 @@ pub(super) enum BlockKind {
     /// A summary-less tool call, inert under the shut triangle.  `details` is
     /// `None` for a parse failure (`INVALID_INPUT`): such a call renders
     /// nothing, present only as the barrier a stray result stops at.
-    Tool { details: Option<String> },
+    Tool {
+        details: Option<String>,
+    },
     /// Meta content the mirror draws itself, not authored by a fold block.
     Chrome(Chrome),
 }
@@ -801,7 +803,13 @@ impl Block {
     /// Whether this block leads its own rail mark.  A continuing paragraph
     /// keeps the margin and drops the glyph, so one response wears one `·`.
     fn leads(&self) -> bool {
-        !matches!(self.kind, BlockKind::Prose { continues: true, .. })
+        !matches!(
+            self.kind,
+            BlockKind::Prose {
+                continues: true,
+                ..
+            }
+        )
     }
 
     /// Changed lines for a card, source lines for prose.  The rail's value
@@ -977,12 +985,17 @@ mod tests {
     #[test]
     fn a_continuing_paragraph_drops_the_rail_mark() {
         let gutters = |continues| {
-            Block::prose("more of the answer".into(), Fidelity::default(), continues, None)
-                .seated(READ_W, AgentSlot(0), None, "")
-                .0
-                .iter()
-                .map(|r| r.gutter().to_owned())
-                .collect::<Vec<_>>()
+            Block::prose(
+                "more of the answer".into(),
+                Fidelity::default(),
+                continues,
+                None,
+            )
+            .seated(READ_W, AgentSlot(0), None, "")
+            .0
+            .iter()
+            .map(|r| r.gutter().to_owned())
+            .collect::<Vec<_>>()
         };
         assert!(
             gutters(false).iter().any(|g| g.trim() == "·"),
@@ -1059,7 +1072,12 @@ mod tests {
         assert!(outcome.style.add_modifier.contains(Modifier::BOLD));
 
         // A landed act of the same verb wears the ordinary body ink.
-        let landed = act("cancel", Some("hunter"), "no live agent by that name", false);
+        let landed = act(
+            "cancel",
+            Some("hunter"),
+            "no live agent by that name",
+            false,
+        );
         let landed = landed.body(READ_W, Detail::Summary, "");
         assert_eq!(
             landed
