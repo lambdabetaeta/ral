@@ -597,7 +597,11 @@ const REACHABLE: &[Reachable] = &[
         "return $[x + 1]",
         "did you mean `$x`",
     ),
-    r("parse_expr_bare_word_negated", "return $[-x]", "did you mean `$x`"),
+    r(
+        "parse_expr_bare_word_negated",
+        "return $[-x]",
+        "did you mean `$x`",
+    ),
     r(
         "parse_expr_bare_non_ident_under_arith",
         "return $[1e5 + 1]",
