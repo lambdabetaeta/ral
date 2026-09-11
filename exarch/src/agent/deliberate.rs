@@ -15,7 +15,7 @@ use crate::agent::event::{
     ContextOp, EditAuthority, QuiesceReason, ToolResult as SessionToolResult,
 };
 use crate::bus::{AgentState, Emitter, Item};
-use crate::provider::{CutShort, Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
+use crate::provider::{Delta, Provider, ProviderError, StepOut, StopReason, ToolCall};
 use crate::record::Transient;
 use ral_core::serial::FOValue;
 use std::sync::Arc;
@@ -229,34 +229,14 @@ impl Avatar {
             // nudge's `append_user` would fail on pending results — so fall
             // through and let the next round-trip resume with the results.
             if truncated && tool_calls.is_empty() {
-                let reason = match cut_short.as_ref().expect("truncated implies cut_short") {
-                    CutShort::OutputCap => {
-                        let reason = stop_reason
-                            .as_ref()
-                            .map_or_else(|| "max_tokens".into(), |r| r.raw().to_string());
-                        self.note_error(format!(
-                            "turn truncated (stop_reason={reason}): output cap reached. \
-                             re-run with `--max-tokens N` for a larger ceiling, \
-                             or ask the agent to split the work into smaller turns.",
-                        ));
-                        reason
-                    }
-                    CutShort::Stalled(cause) => {
-                        // Committing the streamed prefix salvages the turn; it does
-                        // not make the provider's failure any less of one, and the
-                        // cause — a refusal, a dropped connection — is the user's to
-                        // read in full.  Its own record, not `ProviderError`: that
-                        // one ends an exchange, and this one is survived.
-                        let recorded = self.log.lock().record_stall(cause);
-                        if let Err(error) = recorded {
-                            eprintln!("exarch: a stream stall was not recorded: {error}");
-                        }
-                        // The block above carries the detail; what rides on as the
-                        // truncation reason is the one-line spelling.
-                        cause.summary()
-                    }
-                };
-                return Err(ProviderError::Truncated { reason });
+                // The cut rides on whole, cause and all: the caller's own
+                // `record_provider_error` is the one record of it, and the
+                // renderers read the remedy — and, for a stall, the fact that
+                // the exchange survives it — off the cause itself.
+                let cause = cut_short.expect("truncated implies cut_short");
+                return Err(ProviderError::Truncated {
+                    cause: Box::new(cause),
+                });
             }
             if tool_calls.is_empty() {
                 return Ok(match &stop_reason {

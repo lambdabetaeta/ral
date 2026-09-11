@@ -56,20 +56,43 @@ pub enum ProviderError {
         message: String,
         body: Option<Body>,
     },
-    /// The turn was cut off short of the model finishing — output cap or
-    /// mid-stream stall ([`crate::provider::CutShort`]).  Raised by
+    /// The turn was cut off short of the model finishing.  Raised by
     /// [`crate::agent::Avatar::deliberate`] *after* it appends the partial
-    /// assistant message, so a re-prompt keeps that work as context.
-    Truncated {
-        /// The provider's normalised stop reason (`"max_tokens"`) for a cap,
-        /// the stream cause for a stall.
-        reason: String,
-    },
+    /// assistant message, so a re-prompt keeps that work as context.  Boxed:
+    /// a stall's cause is a `ProviderError` in turn.
+    Truncated { cause: Box<CutShort> },
     /// Anything else, rendered raw.
     Other(String),
 }
 
+/// Why an assistant turn ended before the model chose to stop.
+///
+/// The two have different remedies — a cap is the user's ceiling to raise, a
+/// stall is nobody's to fix and is survived — so they are one type with two
+/// arms rather than one reason string the reader has to interpret.
+#[derive(Debug, Clone)]
+pub enum CutShort {
+    /// The output ceiling, under the provider's own raw stop reason.
+    OutputCap { stop_reason: String },
+    /// The stream broke after text or reasoning had already reached the
+    /// caller.  The failure rides along whole — a stall is a provider error
+    /// that arrived too late to retry, and the user is owed the same detail
+    /// either way.
+    Stalled(ProviderError),
+}
+
 impl ProviderError {
+    /// A fault this boundary raised itself, having never reached a response:
+    /// retryable, and with neither a status nor a provider body to show.
+    pub(crate) fn local_transient(cause: impl Into<String>) -> Self {
+        Self::Transient {
+            cause: cause.into(),
+            attempts: 1,
+            body: None,
+            status: None,
+        }
+    }
+
     /// Classify a typed genai error into a provider-boundary failure.
     ///
     /// The whole verdict rests on the leaf [`Fault::of`] recovers, never on
@@ -103,8 +126,11 @@ impl ProviderError {
                 message: msg,
                 body,
             },
-            Fault::Transport => Self::Transient {
-                cause: msg,
+            Fault::Transport(detail) => Self::Transient {
+                cause: match detail {
+                    Some(detail) => format!("{msg}: {detail}"),
+                    None => msg,
+                },
                 attempts: 1,
                 body: None,
                 status: None,
@@ -131,7 +157,12 @@ enum Fault<'a> {
     },
     /// A `reqwest` fault that never reached a status — connect, timeout, a
     /// body that dropped or would not decode.  Retryable.
-    Transport,
+    ///
+    /// The payload is [`source_chain`]: reqwest maps *every* mid-stream body
+    /// failure through one `Display` string ("error decoding response body"),
+    /// so without the chain under it a reset peer, an h2 `GOAWAY` and this
+    /// client's own read timeout are one indistinguishable message.
+    Transport(Option<String>),
     /// Neither status nor transport: a request built wrong, an auth gap, a 2xx
     /// whose body was not the JSON genai required.  Retrying only re-loses.
     /// The payload is the unwrapped cause's own message, when one was found,
@@ -195,7 +226,7 @@ impl<'a> Fault<'a> {
             || err.is_body()
             || err.is_decode()
         {
-            Fault::Transport
+            Fault::Transport(source_chain(err))
         } else {
             Fault::Terminal(None)
         }
@@ -208,6 +239,19 @@ impl<'a> Fault<'a> {
             body: serde_json::from_str(body).ok(),
         }
     }
+}
+
+/// The `source` chain under an error, joined — its own `Display` excluded,
+/// since the message it is appended to already carries that.  `None` when the
+/// error is its own root.
+fn source_chain(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut links = Vec::new();
+    let mut source = err.source();
+    while let Some(link) = source {
+        links.push(link.to_string());
+        source = link.source();
+    }
+    (!links.is_empty()).then(|| links.join(": "))
 }
 
 /// The error-detail object inside a provider JSON body.  Providers wrap
@@ -333,8 +377,19 @@ impl ProviderError {
                     None => format!("api error: {detail}"),
                 }
             }
-            Self::Truncated { reason } => format!("reply cut off ({reason})"),
+            Self::Truncated { cause } => format!("reply cut off: {}", cause.summary()),
             Self::Other(s) => first_line(s).to_string(),
+        }
+    }
+}
+
+impl CutShort {
+    /// One line naming the cut and what it was: the remedy is the renderer's
+    /// business, not this string's.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::OutputCap { stop_reason } => format!("output cap ({stop_reason})"),
+            Self::Stalled(cause) => format!("stream stalled ({})", cause.summary()),
         }
     }
 }
@@ -397,8 +452,8 @@ impl fmt::Display for ProviderError {
                 Some(s) => write!(f, "api error {s} ({model}): {message}"),
                 None => write!(f, "api error ({model}): {message}"),
             },
-            Self::Truncated { reason } => {
-                write!(f, "reply cut off before completion (reason={reason})")
+            Self::Truncated { cause } => {
+                write!(f, "reply cut off before completion: {}", cause.summary())
             }
             Self::Other(s) => f.write_str(s),
         }

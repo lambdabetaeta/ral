@@ -15,6 +15,14 @@ use std::time::Duration;
 /// three minutes is the room a slow high-effort time-to-first-token needs.
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_mins(3);
 
+/// The socket's own bound, held clear of [`STREAM_IDLE_TIMEOUT`] so the stream
+/// loop's idle arm always wins the race to name a silent provider: it says
+/// which wait ran out, where reqwest's read timeout arrives as the same
+/// "error decoding response body" every other mid-stream body failure does.
+/// This is the backstop under it, for a socket that goes quiet where no
+/// `next()` is waiting on it.
+const READ_TIMEOUT: Duration = Duration::from_secs(STREAM_IDLE_TIMEOUT.as_secs() + 30);
+
 /// rustls config validating against the bundled Mozilla webpki roots, never the
 /// host's trust store: exarch must run unchanged on container images that ship
 /// no `ca-certificates` bundle, where reqwest's default platform verifier finds
@@ -46,8 +54,8 @@ const TCP_KEEP_ALIVE: Duration = Duration::from_secs(30);
 
 /// A `reqwest::Client` bound to [`config`], handed to the genai transport and
 /// the model listing so neither builds its own against the host trust store.
-/// It sets no *total* request timeout: [`STREAM_IDLE_TIMEOUT`] and the
-/// keep-alives are what bound a hung request, so a slow one is never cut off.
+/// It sets no *total* request timeout: [`READ_TIMEOUT`] and the keep-alives
+/// are what bound a hung request, so a slow one is never cut off.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:provider-client] the one HTTPS client the genai transport and the model listing share. Per-turn machinery carrying the conversation to the provider, which the transcript already is; a card here would card the transcript's own delivery."
@@ -55,7 +63,7 @@ const TCP_KEEP_ALIVE: Duration = Duration::from_secs(30);
 pub(crate) fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .use_preconfigured_tls(config())
-        .read_timeout(STREAM_IDLE_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
         .tcp_keepalive(TCP_KEEP_ALIVE)
         .http2_keep_alive_interval(H2_KEEP_ALIVE_INTERVAL)
         .http2_keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT)

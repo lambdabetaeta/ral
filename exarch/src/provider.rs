@@ -27,12 +27,12 @@ mod usage;
 mod wire;
 
 pub use bureau::Bureau;
-pub use error::ProviderError;
+pub use error::{CutShort, ProviderError};
 pub(crate) use error::{error_object, extract_url, transient_label};
 pub use identity::{Account, AccountId, Auth, Billing, Service, ServiceName};
 pub use identity::{built_in, built_in_services, chatgpt_service, scripted_service};
 pub use request::{EFFORT_LADDER, Tuning, default_effort_label, effort_by_label, effort_label};
-pub use stream::{CutShort, Delta, StepOut};
+pub use stream::{Delta, StepOut};
 pub use transport::Engine;
 pub use usage::{Usage, UsageParts, humanize_tokens};
 

@@ -1,5 +1,5 @@
 ---
-generated_at_commit: 77628b97
+generated_at_commit: d9abfb52
 generated_at_date: 2026-09-11
 covers_paths: [exarch/src/provider.rs, exarch/src/provider/, exarch/src/tui/model_picker.rs]
 ---
@@ -280,10 +280,11 @@ the total fallback.** `ModelCatalog` memoises and disk-caches both paths:
   decoded `ChatStreamEvent`s. The first attempt uses `STREAM_IDLE_TIMEOUT`
   (180s, `provider/tls.rs`); retries use a one-minute bound. Each event,
   including a provider heartbeat, re-arms the semantic watchdog, while
-  reqwest's per-read timeout turns true byte-level silence into a retryable
-  stream error. A ping genai consumes below the semantic event layer may keep
-  the transport read alive, but cannot re-arm exarch's event watchdog; only a
-  decoded event can do that.
+  reqwest's per-read timeout — `READ_TIMEOUT`, held 30s clear of the semantic
+  bound so the two never race to name the same silence — turns true byte-level
+  silence into a retryable stream error. A ping genai consumes below the
+  semantic event layer may keep the transport read alive, but cannot re-arm
+  exarch's event watchdog; only a decoded event can do that.
   This lands the first local slice of
   [[decisions/260702_provider-heartbeats-and-retry-boundaries|provider-heartbeats-and-retry-boundaries]].
 - Streaming is the **only** call the engine makes. There is no second,
@@ -309,7 +310,10 @@ driver**, `provider/retry.rs::retry_with_backoff`, over an `Attempt<T>` (`Done`
   re-issue that would double output is *not* retried — `stalled_step_out`
   projects the streamed prefix and reasoning into a `CutShort::Stalled`
   `StepOut` returned as `Attempt::Done`, and the session commits it. No third
-  "don't retry" variant is needed.
+  "don't retry" variant is needed. `CutShort` lives in `provider/error.rs`
+  beside `ProviderError`, whose `Truncated` carries it: one type says why a
+  turn was cut short, and each arm carries its own remedy
+  ([[internals/provider-fault-recovery|provider-fault-recovery]]).
 - Rate limits get a larger budget and a higher backoff ceiling than transient
   failures (`retry_limits`), and an explicit `retry-after` is honoured.
 

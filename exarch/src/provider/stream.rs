@@ -1,6 +1,7 @@
 //! Streaming turns and partial-response projection.
 
 use super::ProviderError;
+use super::error::CutShort;
 use super::request::{Tuning, complete_options};
 use super::retry::{Attempt, idle_timeout, retry_with_backoff, wait_for_cancel};
 use super::transport::{Engine, Transport};
@@ -31,16 +32,6 @@ pub struct StepOut {
 pub enum Delta<'a> {
     Say(&'a str),
     Think(&'a str),
-}
-
-/// Why an assistant turn ended before the model chose to stop.
-#[derive(Debug, Clone)]
-pub enum CutShort {
-    OutputCap,
-    /// The stream broke after text or reasoning had already reached the caller.
-    /// The failure rides along whole — a stall is a provider error that arrived
-    /// too late to retry, and the user is owed the same detail either way.
-    Stalled(ProviderError),
 }
 
 impl Engine {
@@ -79,12 +70,9 @@ impl Engine {
                             return Err(ProviderError::Cancelled("before request"));
                         }
                         () = tokio::time::sleep(idle_timeout(attempt)) => {
-                            return Err(ProviderError::Transient {
-                                cause: "stream idle: no response within timeout".into(),
-                                attempts: 1,
-                                body: None,
-                                status: None,
-                            });
+                            return Err(ProviderError::local_transient(
+                                "stream idle: no response within timeout",
+                            ));
                         }
                         result = transport.client().exec_chat_stream(
                             model,
@@ -102,12 +90,9 @@ impl Engine {
                                 return Err(ProviderError::Cancelled("mid-stream"));
                             }
                             () = tokio::time::sleep(idle_timeout(attempt)) => {
-                                return Err(ProviderError::Transient {
-                                    cause: "stream idle: no event within timeout".into(),
-                                    attempts: 1,
-                                    body: None,
-                                    status: None,
-                                });
+                                return Err(ProviderError::local_transient(
+                                    "stream idle: no event within timeout",
+                                ));
                             }
                             event = response.stream.next() => match event {
                                 Some(Ok(event)) => event,
@@ -139,12 +124,9 @@ impl Engine {
                             | ChatStreamEvent::ToolCallChunk(_) => {}
                         }
                     }
-                    Err(ProviderError::Transient {
-                        cause: "stream ended without End event".into(),
-                        attempts: 1,
-                        body: None,
-                        status: None,
-                    })
+                    Err(ProviderError::local_transient(
+                        "stream ended without End event",
+                    ))
                 }
                 .await;
 
@@ -177,10 +159,12 @@ fn step_out_from_end(model: &str, end: StreamEnd, metered: bool, adapter: Adapte
     let reasoning = end.captured_reasoning_content.clone();
     let content = end.captured_content.clone().unwrap_or_default();
     let tool_calls = end.captured_into_tool_calls().unwrap_or_default();
-    let cut_short = stop_reason
-        .as_ref()
-        .filter(|reason| matches!(reason, StopReason::MaxTokens(_)))
-        .map(|_| CutShort::OutputCap);
+    let cut_short = match &stop_reason {
+        Some(StopReason::MaxTokens(raw)) => Some(CutShort::OutputCap {
+            stop_reason: raw.clone(),
+        }),
+        _ => None,
+    };
     StepOut {
         assistant_message: ChatMessage::assistant(content).with_reasoning_content(reasoning),
         tool_calls,
@@ -268,8 +252,12 @@ mod tests {
         };
         let out = step_out_from_end("m", end, true, AdapterKind::Anthropic);
         assert!(
-            matches!(out.cut_short, Some(CutShort::OutputCap)),
-            "an output cap must read as one, got {:?}",
+            matches!(
+                &out.cut_short,
+                Some(CutShort::OutputCap { stop_reason }) if stop_reason == "max_tokens"
+            ),
+            "an output cap must read as one, under the provider's own raw \
+             stop reason, got {:?}",
             out.cut_short
         );
         assert!(matches!(out.stop_reason, Some(StopReason::MaxTokens(_))));
@@ -301,7 +289,7 @@ mod tests {
             ..Default::default()
         };
         let out = step_out_from_end("m", end, true, AdapterKind::Anthropic);
-        assert!(matches!(out.cut_short, Some(CutShort::OutputCap)));
+        assert!(matches!(out.cut_short, Some(CutShort::OutputCap { .. })));
         assert_eq!(out.tool_calls.len(), 1);
         assert_eq!(out.tool_calls[0].fn_name, "ral");
     }

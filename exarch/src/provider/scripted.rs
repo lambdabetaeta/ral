@@ -90,7 +90,9 @@ impl Reply {
                 tool_calls: calls,
                 usage: Usage::default(),
                 stop_reason: Some(StopReason::MaxTokens("max_tokens".into())),
-                cut_short: Some(CutShort::OutputCap),
+                cut_short: Some(CutShort::OutputCap {
+                    stop_reason: "max_tokens".into(),
+                }),
             }),
         }
     }

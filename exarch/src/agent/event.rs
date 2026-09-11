@@ -8,7 +8,7 @@
 
 use crate::agent::build::RecordedAccount;
 use crate::bus::AgentId;
-use crate::provider::{ProviderError, Tuning, Usage};
+use crate::provider::{CutShort, ProviderError, Tuning, Usage};
 use crate::record::model::{Context, Linked, TranscriptRead, TurnRow};
 use crate::record::{Display, Fold as _, Forensic, Protocol, Record, Recorded, widen};
 use genai::chat::{ChatMessage, ChatRole};
@@ -103,11 +103,41 @@ pub enum ProviderErrorRecord {
         body: Option<serde_json::Value>,
     },
     Truncated {
-        reason: String,
+        cause: CutShortRecord,
     },
     Other {
         cause: String,
     },
+}
+
+/// Serialisable mirror of [`CutShort`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "cut", rename_all = "snake_case")]
+pub enum CutShortRecord {
+    OutputCap {
+        stop_reason: String,
+    },
+    /// Boxed for the same reason [`ProviderError::Truncated`] boxes its cause:
+    /// the mirror is recursive too.
+    Stalled {
+        error: Box<ProviderErrorRecord>,
+    },
+}
+
+impl ProviderErrorRecord {
+    /// The failure that broke the stream, for a truncation the streamed prefix
+    /// survived — and `None` for every failure that ends its exchange.  The
+    /// one place that reading is derived: the TUI fold, synod's seam and the
+    /// headless printer all grade a stall below a fatal error, and each asks
+    /// here rather than re-matching the shape.
+    pub fn stall_cause(&self) -> Option<&Self> {
+        match self {
+            Self::Truncated {
+                cause: CutShortRecord::Stalled { error },
+            } => Some(error),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,8 +203,15 @@ impl From<&ProviderError> for ProviderErrorRecord {
                 message: message.clone(),
                 body: body.as_deref().cloned(),
             },
-            ProviderError::Truncated { reason } => Self::Truncated {
-                reason: reason.clone(),
+            ProviderError::Truncated { cause } => Self::Truncated {
+                cause: match cause.as_ref() {
+                    CutShort::OutputCap { stop_reason } => CutShortRecord::OutputCap {
+                        stop_reason: stop_reason.clone(),
+                    },
+                    CutShort::Stalled(error) => CutShortRecord::Stalled {
+                        error: Box::new(error.into()),
+                    },
+                },
             },
             ProviderError::Other(s) => Self::Other { cause: s.clone() },
         }
@@ -991,12 +1028,6 @@ impl AgentLog {
     /// See the meta-records note above.
     pub fn record_provider_error(&mut self, e: &ProviderError) -> io::Result<()> {
         self.record_forensic(Forensic::ProviderError { error: e.into() })
-    }
-
-    /// # Errors
-    /// See the meta-records note above.
-    pub fn record_stall(&mut self, e: &ProviderError) -> io::Result<()> {
-        self.record_forensic(Forensic::Stalled { error: e.into() })
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────

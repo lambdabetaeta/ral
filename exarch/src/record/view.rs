@@ -322,8 +322,18 @@ impl Blocks {
             Forensic::Nudge { used, max, cause } => {
                 self.push(seq, BlockKind::Nudge { used, max, cause })
             }
-            Forensic::ProviderError { error } => self.push(seq, BlockKind::ProviderError { error }),
-            Forensic::Stalled { error } => self.push(seq, BlockKind::Stalled { error }),
+            // One record, two blocks: a stall wears the chrome that says the
+            // exchange survived it, and draws its cause rather than the
+            // truncation wrapping it.
+            Forensic::ProviderError { error } => match error.stall_cause() {
+                Some(cause) => self.push(
+                    seq,
+                    BlockKind::Stalled {
+                        error: cause.clone(),
+                    },
+                ),
+                None => self.push(seq, BlockKind::ProviderError { error }),
+            },
             Forensic::SystemNote { text } => self.push(seq, BlockKind::SystemNote { text }),
             Forensic::HarnessResult { text } => self.push(seq, BlockKind::HarnessResult { text }),
             // The history informs a resume note; the live register follows the

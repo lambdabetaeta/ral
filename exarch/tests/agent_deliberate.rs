@@ -17,7 +17,7 @@ use exarch::agent::event::{ContextOp, EditAuthority, ProviderErrorRecord};
 use exarch::agent::{Avatar, deliberate};
 use exarch::bus::{AgentId, AgentState, Emitter, channel};
 use exarch::provider::scripted::{Reply, Script};
-use exarch::provider::{Provider, ProviderError};
+use exarch::provider::{CutShort, Provider, ProviderError};
 use exarch::record::{Display, Forensic, Protocol, Record, Transient};
 use genai::chat::{ChatRole, ContentPart, ToolCall};
 use std::sync::Arc;
@@ -253,11 +253,11 @@ fn truncated_with_tool_calls_runs_and_continues() {
 
 /// A stream that stalls after some text has streamed must not discard the
 /// work and end the run: `deliberate` commits the streamed prefix as the
-/// assistant message and returns `Truncated` (carrying the stall cause) so
-/// the nudge continues the exchange with `continue`.  Salvaging the prefix
-/// does not soften the failure — it surfaces as `Forensic::Stalled`, carrying
-/// the classified cause under the error chrome — but neither does it end the
-/// run, which is why the fact is its own and not `Forensic::ProviderError`.
+/// assistant message and returns `Truncated` carrying the stall cause, so the
+/// nudge continues the exchange with `continue`.  Salvaging the prefix does
+/// not soften the failure — the classified cause reaches the user whole, under
+/// the error chrome — but the fact is recorded exactly once, and it is
+/// `stall_cause` that tells every renderer the exchange survived it.
 #[test]
 fn stalled_stream_commits_partial_and_truncates() {
     let mut session = Avatar::for_test("system").unwrap();
@@ -268,10 +268,16 @@ fn stalled_stream_commits_partial_and_truncates() {
 
     let Drive { outcome, facts, .. } =
         drive_deliberate(&mut session, &provider, Some("answer at length"));
-    match outcome {
-        Err(ProviderError::Truncated { reason }) => {
-            assert_eq!(reason, "Failed to parse stream data for model 'test-model'");
-        }
+    match &outcome {
+        Err(ProviderError::Truncated { cause }) => match cause.as_ref() {
+            CutShort::Stalled(cause) => assert_eq!(
+                cause.summary(),
+                "Failed to parse stream data for model 'test-model'"
+            ),
+            other @ CutShort::OutputCap { .. } => {
+                panic!("a stall must carry its own cut, got {other:?}")
+            }
+        },
         other => panic!("a committed stall must surface as Truncated, got {other:?}"),
     }
     // The streamed prefix is committed verbatim, so the exchange the nudge
@@ -288,23 +294,33 @@ fn stalled_stream_commits_partial_and_truncates() {
             .any(|t| t == "partial answer before the stall"),
         "the streamed prefix must be committed, got {committed:?}",
     );
-    // The provider's own words reach the user whole and at error weight: a
-    // ` | `-joined slate note beside a model switch reads as housekeeping, and a
-    // stall is a refusal or a dropped connection the user has to act on.
+    // One fact, one record: the returned cut is the whole report of it, and
+    // the caller's `record_provider_error` the one site that writes it down —
+    // so `deliberate` leaves no forensic of its own beside it.
     assert!(
-        facts.iter().any(|f| matches!(
+        !facts.iter().any(|f| matches!(
             f,
-            Record::Forensic(Forensic::Stalled { error: ProviderErrorRecord::Other { cause } })
-                if cause == "Failed to parse stream data for model 'test-model'"
+            Record::Forensic(Forensic::ProviderError { .. } | Forensic::Error { .. })
         )),
-        "the stall cause must surface as Forensic::Stalled",
+        "a cut `deliberate` returns must not also be recorded by it, \
+         got {facts:?}",
     );
-    // Not the fact that ends an exchange: this run continues.
+    // And what that record grades below a failure ending the exchange is
+    // `stall_cause`, carrying the provider's own words whole and at error
+    // weight: a ` | `-joined slate note beside a model switch reads as
+    // housekeeping, and a stall is a dropped connection the user must act on.
+    let Err(error) = &outcome else {
+        unreachable!("asserted Truncated above")
+    };
+    let record = ProviderErrorRecord::from(error);
     assert!(
-        !facts
-            .iter()
-            .any(|f| matches!(f, Record::Forensic(Forensic::ProviderError { .. }))),
-        "a survived stall is not a ProviderError",
+        matches!(
+            record.stall_cause(),
+            Some(ProviderErrorRecord::Other { cause })
+                if cause == "Failed to parse stream data for model 'test-model'"
+        ),
+        "the stall cause must reach the renderers through stall_cause, \
+         got {record:?}",
     );
     assert!(session.is_ready());
     assert_admissible(&session);

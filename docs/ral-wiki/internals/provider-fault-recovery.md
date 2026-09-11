@@ -1,7 +1,7 @@
 ---
-verified_at_commit: 559e15b3
-verified_at_date: 2026-09-06
-anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
+verified_at_commit: d9abfb52
+verified_at_date: 2026-09-11
+anchors: [from_genai, error_object, Fault, of_webc, of_boxed, of_reqwest, ProviderError, RateLimited, Transient, Api, Truncated, retry_with_backoff, Attempt, retry_limits, backoff_sleep, parse_retry_after, retry_after_header, json_status_code, CutShort, stall_cause, source_chain, stalled_step_out, STREAM_IDLE_TIMEOUT, MAX_ATTEMPTS, RATE_LIMIT_MAX_ATTEMPTS, manufacture, Sealed]
 ---
 
 # Provider faults and recovery
@@ -60,7 +60,7 @@ distillation is `Fault`:
 ```
 enum Fault<'a> {
     Status { status: StatusCode, headers: Option<&'a HeaderMap>, body: Option<Value> },
-    Transport,
+    Transport(Option<String>),
     Terminal,
 }
 ```
@@ -70,7 +70,8 @@ enum Fault<'a> {
   ride along; the *caller* decides what a given status means.
 - **`Transport`** — a `reqwest` fault with no status: connect, timeout, a
   malformed request, or a body that dropped or failed to decode mid-flight.
-  Retryable by nature — nothing reached the model.
+  Retryable by nature — nothing reached the model. It carries the leaf's own
+  `source` chain, the only thing that tells one of these apart.
 - **`Terminal`** — no status and no transport leaf: a request built wrong, an
   auth gap, a contract breach, a parse corruption. Retrying only re-loses.
 
@@ -114,7 +115,7 @@ three ways:
 | `Status` 429 | `RateLimited { retry_after, cause, body }` | yes — patient tier |
 | `Status` 5xx | `Transient { cause, attempts, body }` | yes — transient tier |
 | `Status` other (4xx, redirect) | `Api { status, model, message, url, body }` | **no** — the user must change the request |
-| `Transport` | `Transient` (no body) | yes |
+| `Transport(detail)` | `Transient` (no body) | yes |
 | `Terminal` | `Other(String)` | no — rendered raw |
 
 For a 429 the wait is honoured precisely: `retry_after_header` reads the
@@ -122,6 +123,14 @@ structured `Retry-After` straight off the response headers when carried,
 falling back to `parse_retry_after` scraping the cause text only when it is not.
 (`parse_retry_after` slices the *lowercased* copy it searches, so a
 length-changing lowercase like `İ` can never land mid-character and panic.)
+
+A transport leaf carries its `source` chain (`source_chain`) as `detail`,
+appended to the cause. Without it the whole class is mute: reqwest maps *every*
+mid-stream body failure — a reset peer, an h2 `GOAWAY`, a truncated chunk, this
+client's own read timeout — through the single `Display` string "error decoding
+response body", and only the chain beneath it says which happened. The
+classifier already walked to that leaf for the verdict; the message now keeps
+what it found there.
 
 Every retryable and 4xx variant carries the provider's parsed JSON body as
 `Option<Value>` to the boundary, so [[map/exarch/cards|the renderer]] can print
@@ -132,9 +141,22 @@ Two more `ProviderError` variants never come from `from_genai`:
 
 - **`Cancelled(&'static str)`** — the user raised the cancel flag in flight; the
   `&'static str` records *where* so the UI pins the blame ([[internals/cancellation|cancellation]]).
-- **`Truncated { reason }`** — the assistant turn was cut off *cleanly* by the
-  output cap or a stall, raised after the partial assistant message is already
-  appended, so re-prompting with `continue` preserves the work.
+- **`Truncated { cause: CutShort }`** — the assistant turn was cut off *cleanly*
+  by the output cap or a stall, raised after the partial assistant message is
+  already appended, so re-prompting with `continue` preserves the work. The cut
+  rides on as `CutShort` — `OutputCap { stop_reason }` or `Stalled(cause)` —
+  rather than as one flattened reason string, because the two have different
+  remedies: a cap is a ceiling the user raises with `--max-tokens`, a stall is
+  nobody's to fix and is survived. A single string made the renderer print the
+  cap's remedy under a dropped connection.
+
+  That is also the whole record of the cut. The stall once wrote a second
+  record of its own at the point it happened, so a survived stall drew two
+  error blocks — one saying the turn resumes, one immediately reading as the
+  end of the run. Now the caller's `record_provider_error` writes it once, and
+  `ProviderErrorRecord::stall_cause` is the one place the "survived, not fatal"
+  reading is derived: the TUI fold, synod's seam and the headless printer each
+  ask it rather than re-matching the shape.
 
 ## The retry driver
 
@@ -211,10 +233,17 @@ Before a streaming response opens, `idle_timeout` bounds connect and
 time-to-first-event: the first attempt gets `STREAM_IDLE_TIMEOUT` (180 s), then
 retries get `RETRY_IDLE_TIMEOUT` (60 s). Once a stream is open there is no
 timeout between decoded `ChatStreamEvent`s. Liveness moves down to the
-transport's 180-second per-read timeout, so raw byte silence fails while SSE
-pings or provider heartbeats consumed below the semantic event layer keep a
+transport's per-read timeout, so raw byte silence fails while SSE pings or
+provider heartbeats consumed below the semantic event layer keep a
 long-thinking model alive. A read timeout surfaces as a stream error and enters
 the same transient-or-committed rule above.
+
+That read timeout is held 30 s clear of `STREAM_IDLE_TIMEOUT` (210 s) so the
+two bounds do not race: whichever fires names the failure, and only the stream
+loop's own arm can say *which* wait ran out. Held equal, reqwest's — armed on
+the last byte, not the last event — won every first attempt, and every silent
+provider read as "error decoding response body". The socket bound is the
+backstop under the semantic one, for bytes stopping where no `next()` waits.
 
 The worst pre-stream idle burn is bounded by construction at 180 + 60 + 60 =
 300 seconds. Tests pin the
@@ -273,5 +302,5 @@ attempt count.
   transport outcome.
 - `exarch/src/provider/error.rs` (`from_genai`, `Fault`),
   `exarch/src/provider/retry.rs` (`retry_with_backoff`), and
-  `exarch/src/provider/tls.rs` (`STREAM_IDLE_TIMEOUT`, the `read_timeout` it
-  backs).
+  `exarch/src/provider/tls.rs` (`STREAM_IDLE_TIMEOUT`, the `READ_TIMEOUT`
+  backstop under it).

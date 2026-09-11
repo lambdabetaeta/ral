@@ -273,8 +273,8 @@ pub enum NoticeFact {
 
 /// Breadcrumbs that determine no model projection but are worth keeping.
 ///
-/// `Error`, `Nudge`, `ProviderError`, and `Stalled` are each the one record
-/// their dual-write sites emit for a single fact.
+/// `Error`, `Nudge`, and `ProviderError` are each the one record their
+/// dual-write sites emit for a single fact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Forensic {
@@ -338,9 +338,6 @@ pub enum Forensic {
         cause: String,
     },
     ProviderError {
-        error: ProviderErrorRecord,
-    },
-    Stalled {
         error: ProviderErrorRecord,
     },
     /// An operational note the attend loop issued — the model never saw it.

@@ -10,7 +10,7 @@ use super::palette::{
     CYAN, LIME, LIME_HOT, ORANGE, PROMPT_INK, RAIL_W, RED, RED_HOT, SLATE, content_w,
 };
 use super::row::Row;
-use crate::agent::event::ProviderErrorRecord;
+use crate::agent::event::{CutShortRecord, ProviderErrorRecord};
 use crate::bus::card::{
     Card, Field as CardField, FieldVal, Hunk, Mark, Measure, Role, Row as DiffRow, Seg,
     Span as CardSpan,
@@ -1184,13 +1184,19 @@ fn error_fields(e: &ProviderErrorRecord) -> Vec<FieldRow> {
             }
             fs
         }
-        ProviderErrorRecord::Truncated { reason } => vec![
-            text_field("stop_reason", reason.clone()),
-            text_field(
-                "remedy",
-                "raise `--max-tokens N` or split the turn into smaller writes",
-            ),
-        ],
+        // A stall's fields are its cause's: `record::view` routes one to
+        // [`stalled`] with the cause already unwrapped, so the delegation here
+        // is what keeps this match total rather than a path the TUI walks.
+        ProviderErrorRecord::Truncated { cause } => match cause {
+            CutShortRecord::OutputCap { stop_reason } => vec![
+                text_field("stop_reason", stop_reason.clone()),
+                text_field(
+                    "remedy",
+                    "raise `--max-tokens N` or split the turn into smaller writes",
+                ),
+            ],
+            CutShortRecord::Stalled { error } => error_fields(error),
+        },
         ProviderErrorRecord::Other { cause } => vec![text_field("cause", prettify(cause))],
     }
 }

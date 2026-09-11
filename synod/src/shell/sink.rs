@@ -16,7 +16,7 @@
 //! so a new variant on either is a compile error here, not a silent drop.
 #![deny(clippy::wildcard_enum_match_arm)]
 
-use exarch::agent::event::ProviderErrorRecord;
+use exarch::agent::event::{CutShortRecord, ProviderErrorRecord};
 use exarch::bus::card::{
     Card, Field, Hunk, Mark, Measure, Span, context_rows_card, notice_card,
     observation_display_card, to_card_notice,
@@ -154,7 +154,14 @@ fn provider_error_text(label: &str, record: &ProviderErrorRecord) -> String {
                 format!("{model} ")
             },
         ),
-        ProviderErrorRecord::Truncated { reason } => format!("truncated{}", suffix(" — ", reason)),
+        ProviderErrorRecord::Truncated { cause } => match cause {
+            CutShortRecord::OutputCap { stop_reason } => {
+                format!("truncated — output cap ({stop_reason})")
+            }
+            // A stall's sentence is its cause's: `project` reaches one only
+            // through `stall_cause`, with the cause already unwrapped.
+            CutShortRecord::Stalled { error } => return provider_error_text(label, error),
+        },
         ProviderErrorRecord::Other { cause } => {
             if cause.is_empty() {
                 "error".to_string()
@@ -385,13 +392,15 @@ fn project_forensic(forensic: &Forensic) -> Option<SynodEvent> {
         Forensic::Error { text } => Some(SynodEvent::Error {
             message: text.clone(),
         }),
-        Forensic::ProviderError { error } => Some(SynodEvent::ProviderError {
-            text: provider_error_text("provider", error),
-            severity: provider_error_severity(error),
-        }),
-        Forensic::Stalled { error } => Some(SynodEvent::Stalled {
-            text: provider_error_text("stalled", error),
-            severity: Severity::Warn,
+        Forensic::ProviderError { error } => Some(match error.stall_cause() {
+            Some(cause) => SynodEvent::Stalled {
+                text: provider_error_text("stalled", cause),
+                severity: Severity::Warn,
+            },
+            None => SynodEvent::ProviderError {
+                text: provider_error_text("provider", error),
+                severity: provider_error_severity(error),
+            },
         }),
         // The harness minding itself, a forensic pairing whose act row
         // already said everything, a cancellation with nothing to pair
@@ -425,7 +434,6 @@ fn project_forensic_helper(forensic: &Forensic) -> Option<SynodEvent> {
         | Forensic::Error { .. }
         | Forensic::Nudge { .. }
         | Forensic::ProviderError { .. }
-        | Forensic::Stalled { .. }
         | Forensic::SystemNote { .. }
         | Forensic::HarnessResult { .. }
         | Forensic::Pin { .. }
