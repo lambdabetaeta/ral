@@ -208,6 +208,34 @@ fn source_leaks_bindings_into_caller_scope() {
     std::fs::remove_file(&path).ok();
 }
 
+/// A name a `source` installs is unknown to the check of the very run that
+/// sources it, so its call is typed as an external command and the byte route
+/// that implies is a promise the run then falsifies.  Both places that promise
+/// is cashed — a capture and a pipeline's yield — must say so, never assume it.
+#[test]
+fn calling_a_name_the_same_run_sources_is_refused_not_assumed() {
+    let path = write_module("ral_source_then_call.ral", "let sourced-answer = { 42 }\n");
+    let p = path.to_string_lossy();
+
+    for call in [
+        "let got = sourced-answer",
+        "let got = echo hi | sourced-answer",
+    ] {
+        let mut shell = fresh_shell();
+        let err = match top_level(&mut shell, &format!("source '{p}'\n{call}")) {
+            Err(Break::Error(e)) => e,
+            other => panic!("expected a runtime error from {call:?}, got {other:?}"),
+        };
+        assert!(
+            err.message.contains("returned Int"),
+            "the broken byte promise must name what came back instead: {}",
+            err.message
+        );
+    }
+
+    std::fs::remove_file(&path).ok();
+}
+
 /// `use` runs the module under the *session* environment (S7), not the
 /// caller's block scope: inside `{ let local = 1; use 'm' }`, a module
 /// reading `$local` fails with an undefined variable, while a session

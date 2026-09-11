@@ -81,8 +81,8 @@ The formation rule is one line:
 - **WF-2** — `ρ = Bytes` implies the return type is `Unit`.
 
 A byte-routed computation's returned value is discarded at capture, so a
-non-`Unit` value under a byte route is a value the checker promised and the
-runtime will never produce. The rule cannot be asserted once at the type's
+non-`Unit` value under a byte route is a value the checker promised and no
+checked derivation produces. The rule cannot be asserted once at the type's
 definition: `PayloadRoute` and the value type are independent fields, and a
 route is often a variable that some later operation *grounds*. What makes the
 rule hold everywhere is its consequence: WF-2 leaves **exactly one**
@@ -99,6 +99,27 @@ structural step — never writing a bare route:
 No live code unifies a route against a detached `Bytes`, so a new decision
 site cannot forget the pairing — it has no way to spell half of it
 ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
+
+### At run time WF-2 is a promise, not a fact
+
+Not every head is checked. A bare name that resolves to nothing the checker can
+see is typed as an external command — `Inferencer::exec_comp_ty`'s last arm,
+mirroring the runtime's own `env → handlers → PATH` order. That mirror holds
+only while the two environments agree, and `source` is exactly what makes them
+differ: it installs its bindings *while the run is under way*, long after the
+whole run was checked, so a name the checker read as an external can resolve to
+a block returning an `Int`. WF-2 then fails of a derivation the checker
+accepted.
+
+So the byte route is a promise the run must keep rather than an invariant it
+may assume, and it is cashed in exactly two places — `Frame::Capture`, which
+reads the buffer as the value, and `PipeYield::Unit`, which declines to carry
+the last stage's value home. Both check that the value really is `Unit`
+(`machine::bytes_promise_broken`) and fail with a diagnostic naming what came
+back and pointing at `use`, which hands a file's names over as values where the
+checker can see them. Neither asserts, and neither drops the value in silence:
+the first would abort the process, the second would lose the answer the user
+asked for.
 
 ## Where a route variable may live
 

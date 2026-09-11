@@ -506,11 +506,12 @@ impl CollectState {
             }
         }
         verdict.map_or_else(
-            || {
-                Ok(match yields {
-                    PipeYield::Unit => Value::Unit,
-                    PipeYield::Last => last,
-                })
+            || match yields {
+                PipeYield::Last => Ok(last),
+                PipeYield::Unit if matches!(last, Value::Unit) => Ok(Value::Unit),
+                PipeYield::Unit => Err(Break::Error(
+                    crate::evaluator::machine::bytes_promise_broken(&last),
+                )),
             },
             Err,
         )

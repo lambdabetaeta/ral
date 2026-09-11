@@ -163,6 +163,52 @@ fn as_value(t: Terminal) -> Result<Value, Break> {
     }
 }
 
+/// A capture that cannot become the value it promised: what the body already
+/// wrote is an effect that happened, so it goes to the visible stream before
+/// the halt rather than dying in the abandoned buffer.
+fn abandon_capture(bytes: &[u8], error: Error, span: Option<Span>, shell: &mut Shell) -> Focus {
+    if !bytes.is_empty()
+        && let Err(br) = shell.write_ambient(bytes)
+    {
+        return Focus::Halt(br);
+    }
+    Focus::Halt(stamp(Break::Error(error), span))
+}
+
+/// WF-2 makes a byte-routed computation's value `Unit`, so a byte-routed
+/// position that meets a value met a head the checker could not see: an
+/// unresolved bare name is typed as an external, and a `source` installs the
+/// real binding only once the run is under way.  Both places the route is
+/// cashed — [`Frame::Capture`] and [`crate::ir::PipeYield::Unit`] — keep the
+/// promise here rather than assume it.
+pub(crate) fn bytes_promise_broken(v: &Value) -> Error {
+    Error::new(
+        format!(
+            "this command returned {}, but here ral reads what a command writes, not what it \
+             returns",
+            v.type_name()
+        ),
+        1,
+    )
+    .with_hint(
+        "ral checks a whole script before running it, so a name unknown then is read as an \
+         external command — did a `source` in this same script define this one? `use` hands a \
+         file's names back as values: `let lib = use 'lib.ral'`, then `!$lib[name]`",
+    )
+}
+
+fn capture_overflowed() -> Error {
+    Error::new(
+        format!(
+            "capture exceeded {} MiB — the bytes that fit went out to the visible stream rather \
+             than into the value, because a prefix is not what the command wrote",
+            io::SINK_BUFFER_CAP / (1024 * 1024)
+        ),
+        1,
+    )
+    .with_hint("did you mean to write this to a file? `cmd > out.txt` keeps every byte")
+}
+
 fn rec_node(group: &Arc<[(String, Arc<Comp>)]>, index: usize) -> Arc<Comp> {
     Arc::new(crate::source::Spanned::synthetic(CompKind::Rec {
         group: group.clone(),
@@ -953,31 +999,11 @@ impl Machine {
                     Ok(v) => v,
                     Err(b) => return Focus::Halt(stamp(b, span)),
                 };
-                assert!(
-                    matches!(v, Value::Unit),
-                    "capture's operand is result: Bytes, so WF-2 makes its value Unit"
-                );
+                if !matches!(v, Value::Unit) {
+                    return abandon_capture(&bytes, bytes_promise_broken(&v), span, shell);
+                }
                 if overflowed {
-                    if !bytes.is_empty()
-                        && let Err(br) = shell.write_ambient(&bytes)
-                    {
-                        return Focus::Halt(br);
-                    }
-                    return Focus::Halt(stamp(
-                        Break::Error(
-                            Error::new(
-                                format!(
-                                    "capture exceeded {} MiB — the bytes that fit went out to the \
-                                     visible stream rather than into the value, because a prefix is \
-                                     not what the command wrote",
-                                    io::SINK_BUFFER_CAP / (1024 * 1024)
-                                ),
-                                1,
-                            )
-                            .with_hint("did you mean to write this to a file? `cmd > out.txt` keeps every byte"),
-                        ),
-                        span,
-                    ));
+                    return abandon_capture(&bytes, capture_overflowed(), span, shell);
                 }
                 Focus::Return(Terminal::Value(Value::Bytes(bytes)))
             }
