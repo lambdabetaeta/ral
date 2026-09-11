@@ -23,6 +23,20 @@ strip_list() { # "[a, b]" -> "a b"
   tr -d '[]' <<<"$1" | tr ',' ' ' | xargs echo
 }
 
+srcs=(core ral ral-sh exarch)
+
+# A `Foo::bar` anchor names a member, and a member is written `fn bar` inside
+# `impl … Foo` — qualified nowhere, so a literal search alone cannot see it.
+anchor_present() {
+  rg -q --fixed-strings "$1" "${srcs[@]}" 2>/dev/null && return 0
+  [[ $1 == *::* ]] || return 1
+  local ty=${1%::*} member=${1##*::} file
+  while read -r file; do
+    if rg -q "\bfn $member\b" "$file"; then return 0; fi
+  done < <(rg -l "^[[:space:]]*impl\b[^{]*\b$ty\b" -g '*.rs' "${srcs[@]}" 2>/dev/null)
+  return 1
+}
+
 # --- map/: stamp..HEAD over covers_paths ---
 find "$wiki/map" -name '*.md' | sort | while read -r page; do
   stamp=$(frontmatter_field "$page" generated_at_commit)
@@ -43,7 +57,7 @@ find "$wiki/internals" -name '*.md' | sort | while read -r page; do
   [[ -z $anchors ]] && continue
   missing=()
   for a in $(strip_list "$anchors"); do
-    rg -q --fixed-strings "$a" core ral ral-sh exarch 2>/dev/null || missing+=("$a")
+    anchor_present "$a" || missing+=("$a")
   done
   [[ ${#missing[@]} -gt 0 ]] && printf 'ANCHOR\t%s\t%s\t%s\n' "$page" "${stamp:-UNSTAMPED}" "$(IFS=,; echo "${missing[*]}")" || true
 done
