@@ -69,6 +69,21 @@ pub(super) struct ManifestHandlers {
     pub(super) aliases: Vec<(String, Value)>,
 }
 
+/// Schema for the manifest map's one scalar-typed field.
+///
+/// Checked statically against a literal manifest return by
+/// `check_return_schema`. `hooks:`, `keybindings:`, and `aliases:` hold
+/// handler values of varying shape, validated at load instead, by
+/// `parse_hooks`/`parse_keybindings`/`parse_aliases` below; `capabilities:`
+/// is rejected outright rather than type-checked, so it has no schema entry
+/// either.
+pub(super) fn manifest_field_ty(key: &str, _u: &mut ral_core::typecheck::Unifier) -> Option<ral_core::typecheck::Ty> {
+    match key {
+        "name" => Some(ral_core::typecheck::Ty::String),
+        _ => None,
+    }
+}
+
 impl LoadedPlugin {
     /// Parse a plugin manifest value into the plugin record plus the
     /// handler values the caller registers into the hook table and env.

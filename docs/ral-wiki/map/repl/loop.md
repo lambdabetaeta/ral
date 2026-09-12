@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: 4bed97a
+generated_at_date: 2026-09-12
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -74,7 +74,16 @@ with, so an alias or function it defines keeps naming the rc for the whole
 session. Both failing `CompileOutcome` arms — `Parse` and `Types` — are
 *reported and skipped*: the file has no runnable annotation, while the boot
 always survives
-([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]).
+([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]). A
+successful compile gets one more static pass before it runs:
+`ral_core::typecheck::check_return_schema` checks the rc's own returned
+literal map against `config.rs::rc_field_ty` — the same static, spanned
+treatment `within`/`grant` options get, reused for a program's own return
+value — and a schema failure is reported and skipped exactly like a `Types`
+failure, the whole rc unapplied rather than only the offending key. It only
+sees a literal `return [...]`; a *computed* rc return (a bound variable, a
+call) is invisible to it, and stays on `config.rs`'s own per-key runtime
+check below, which still applies the keys around a bad one.
 An rc `startup` block registers as the
 `Session/"startup"` hook and runs through a **framed hook run** under
 `Denied` terminal authority — a fresh frame whose `let`s do not leak —
@@ -155,7 +164,12 @@ the structural worksheet projection, and completion live in
 - `config.rs` — rc is ral source returning a map; recognised keys (`env`,
   `prompt` — registered as the `Session/"prompt"` hook — `bindings`,
   `aliases`, `edit_mode`, `bell`, `surface`, `recursion_limit`, `plugins`,
-  `startup`, `theme`) map to REPL state, unknown keys ignored.
+  `startup`, `theme`) map to REPL state, unknown keys ignored. A malformed
+  *literal* value for `edit_mode`/`surface`/`bell`/`recursion_limit`/`env`/
+  `theme` is now `rc_field_ty`'s static failure, above — this per-key
+  runtime check is what still catches a computed one, or any of those six
+  keys' own further shape rules (e.g. `edit_mode` must be `'emacs'`/`'vi'`,
+  not just a `String`), reporting it by name and applying the rest.
 - `theme.rs` — `OutputTheme` (the `value_prefix`, default `"=> "`, and an
   optional `value_color`, default yellow) governs value rendering;
   process-global behind an `RwLock`, set once from rc.

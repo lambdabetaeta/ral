@@ -18,7 +18,7 @@ mod scope;
 mod ty;
 mod unify;
 
-pub use self::builtins::builtin_type_hint;
+pub use self::builtins::{FieldSchema, builtin_type_hint};
 pub use self::env::{InferCtx, TyEnv};
 pub use self::error::{PinFailure, Reason, TypeError, TypeErrorKind};
 pub use self::fmt::{
@@ -30,7 +30,7 @@ pub use self::ty::{CompTy, CompTyVar, Row, RowVar, Ty, TyVar};
 pub use self::unify::Unifier;
 
 use self::generalize::generalize;
-use crate::ir::{Comp, Phrase, Toplevel};
+use crate::ir::{Comp, CompKind, Phrase, Toplevel, Val, ValMapEntry};
 
 /// The seed of a run's check, read off the live session by
 /// `Shell::session_schemes`.
@@ -185,6 +185,55 @@ fn harvest_schemes(top: &Toplevel) -> Vec<(String, Scheme)> {
             Phrase::Run(_) => Vec::new(),
         })
         .collect()
+}
+
+/// The literal map a program's own `return [k: v, ...]` produces.
+///
+/// Recognised only when the toplevel's last phrase is exactly that shape. A
+/// preceding top-level `let` is fine (it is its own `Phrase::Define`,
+/// harvested separately by [`check_return_schema`]); anything else the
+/// return value could be — a bound variable, a call, a plugin factory's
+/// `return { |opts| ... }` — is invisible here, so only the caller's own
+/// runtime check still catches a mistake in it.
+fn literal_return_map(top: &Toplevel) -> Option<&[ValMapEntry]> {
+    match &top.phrases.last()?.item {
+        Phrase::Run(comp) => match &comp.item {
+            CompKind::Return(Val::Map(entries)) => Some(entries),
+            _ => None,
+        },
+        Phrase::Define { .. } => None,
+    }
+}
+
+/// Check a program's returned literal map against `schema`.
+///
+/// An rc file's top-level keys, or a plugin manifest's fields — the same
+/// static, spanned treatment `within`/`grant` options already get, extended
+/// to a program's own return value. Only fires on [`literal_return_map`]'s
+/// narrow shape; a program whose return is computed some other way yields
+/// no errors here, unchecked rather than wrongly rejected.
+///
+/// `top` must already be the *annotated* result of an earlier, successful
+/// [`typecheck`] against `schemes` — its `Phrase::Define`s carry the local
+/// bindings a return-map value may itself reference, harvested here so
+/// this second, one-shot pass resolves them instead of misreporting them
+/// unbound.
+pub fn check_return_schema(
+    top: &Toplevel,
+    mut schemes: SessionSchemes,
+    form: &'static str,
+    schema: FieldSchema,
+) -> Vec<TypeError> {
+    let Some(entries) = literal_return_map(top) else {
+        return Vec::new();
+    };
+    schemes
+        .bindings
+        .extend(harvest_schemes(top).into_iter().map(|(n, s)| (n, Some(s))));
+    one_shot_inference(schemes, |inferencer| {
+        inferencer.check_map_entry_fields(entries, form, schema);
+        std::mem::take(&mut inferencer.ctx.errors)
+    })
 }
 
 /// Type-check the prelude IR, returning the annotated [`Toplevel`] and the

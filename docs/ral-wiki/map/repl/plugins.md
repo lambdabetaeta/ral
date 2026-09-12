@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: 4bed97a
+generated_at_date: 2026-09-12
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -137,18 +137,26 @@ once, so the frontends cannot disagree.
   as an ordered match with the built-in as the final arm. A `capabilities:` key
   is a load error, not silent confinement
   — plugins run with host authority; to attenuate, wrap the invocation in
-  `grant { … }`.
+  `grant { … }`. `manifest_field_ty` gives `name:` a static schema (below);
+  `hooks:`/`keybindings:`/`aliases:` stay on this file's own runtime parse,
+  their handler values having no one fixed shape to pin.
 - `plugin/load.rs` — resolves a plugin under `~/.config/ral/plugins/` or
-  `RAL_PATH`, typechecks and evaluates it, instantiates a parameterised plugin
-  block through a framed hook run, registers its hooks into the shell's hook
-  table (`register_plugin_hooks`), installs alias bindings, and records it
-  (retaining the file source on the `LoadedPlugin`). Registration is
-  reversible: hooks and aliases are committed only after every validation
-  passes, so a rejected load rolls back cleanly; unloading is the exact
-  inverse, unregistering the plugin's hooks and keybindings and undoing the
-  env installation. Loading also runs the shadow lint: a binding the
-  router's `dead_entries` flags (an earlier unguarded entry owns its chord)
-  is warned about, not rejected.
+  `RAL_PATH`, typechecks and evaluates it through
+  `modules::evaluate_source_checked` — the same load as `evaluate_source`,
+  plus `ral_core::typecheck::check_return_schema` against
+  `manifest::manifest_field_ty` — instantiates a parameterised plugin block
+  through a framed hook run, registers its hooks into the shell's hook table
+  (`register_plugin_hooks`), installs alias bindings, and records it
+  (retaining the file source on the `LoadedPlugin`). The schema check only
+  sees a literal `return [...]`; a parameterised plugin's manifest is the
+  *factory block's own* return, computed once the hook run above applies
+  `options`, and stays on `LoadedPlugin::parse`'s runtime check alone.
+  Registration is reversible: hooks and aliases are committed only after
+  every validation passes, so a rejected load rolls back cleanly; unloading
+  is the exact inverse, unregistering the plugin's hooks and keybindings and
+  undoing the env installation. Loading also runs the shadow lint: a binding
+  the router's `dead_entries` flags (an earlier unguarded entry owns its
+  chord) is warned about, not rejected.
 - `keybinding.rs` — when a plugin-registered key fires, rustyline stashes a
   `PendingKeybinding` and accepts the line; `dispatch_keybinding` then runs the
   handler outside the readline borrow under `HookFraming::Framed` with `Leased`

@@ -8,10 +8,11 @@
 //! terminating.
 //!
 //! [`evaluate_checked`]/[`evaluate_source`] are the sibling door for every
-//! *other* runtime load: the plugin loader and
-//! [`crate::capability::load_capabilities_from_str`] call
-//! [`evaluate_source`]; the REPL's rc loader, which renders type errors
-//! itself, calls [`evaluate_checked`] with an already-checked `Toplevel`.
+//! *other* runtime load: [`crate::capability::load_capabilities_from_str`]
+//! calls [`evaluate_source`]; the plugin loader calls
+//! [`evaluate_source_checked`], its manifest-schema sibling; the REPL's rc
+//! loader, which renders type errors itself, calls [`evaluate_checked`]
+//! with an already-checked `Toplevel`.
 
 use crate::evaluator::{Mode, Ran};
 use crate::ir::Toplevel;
@@ -88,6 +89,35 @@ pub fn evaluate_source(
     virtual_path: &str,
 ) -> Settled<Value> {
     let top = check_source(source, virtual_path, shell)?;
+    evaluate_checked(mooring, shell, &top, source, virtual_path)
+}
+
+/// Like [`evaluate_source`], but also schema-checked.
+///
+/// Checks `source`'s returned literal map against `schema` (see
+/// [`crate::typecheck::check_return_schema`]) before running it — the
+/// plugin loader's door, for a manifest's fields.
+///
+/// # Errors
+/// Returns `Err` if `source` fails to compile, fails `schema`, or for any
+/// error from [`evaluate_checked`].
+pub fn evaluate_source_checked(
+    mooring: &Mooring,
+    shell: &mut Shell,
+    source: &str,
+    virtual_path: &str,
+    form: &'static str,
+    schema: crate::typecheck::FieldSchema,
+) -> Settled<Value> {
+    let top = check_source(source, virtual_path, shell)?;
+    let errs = crate::typecheck::check_return_schema(&top, shell.session_schemes(), form, schema);
+    if !errs.is_empty() {
+        return Err(sig(errs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")));
+    }
     evaluate_checked(mooring, shell, &top, source, virtual_path)
 }
 

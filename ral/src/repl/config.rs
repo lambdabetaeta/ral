@@ -139,6 +139,26 @@ pub(crate) fn apply_rc_config(
     (settings, startup)
 }
 
+/// Schema for the rc top-level map's scalar-typed keys.
+///
+/// Checked statically against a literal rc return by `check_return_schema`
+/// — a first pass, deliberately partial: `prompt:`/`aliases:`/`bindings:`
+/// hold handler or heterogeneous values, and `plugins:` already gets its
+/// own static check elsewhere (`infer_map_val` routes it to
+/// `infer_plugins_list`), so none of those are pinned here. `apply_rc_key`'s
+/// own per-key check below is what still catches all of them, and every
+/// key here besides.
+pub(super) fn rc_field_ty(key: &str, u: &mut ral_core::typecheck::Unifier) -> Option<ral_core::typecheck::Ty> {
+    use ral_core::typecheck::Ty;
+    match key {
+        "edit_mode" | "surface" => Some(Ty::String),
+        "bell" => Some(Ty::Bool),
+        "recursion_limit" => Some(Ty::Int),
+        "env" | "theme" => Some(Ty::Map(Box::new(Ty::Var(u.fresh_tyvar())))),
+        _ => None,
+    }
+}
+
 /// Apply a single rc top-level `key: val` pair.  An `Err` names the
 /// offending key and the shape it expected; the caller reports it and moves
 /// on to the next key, so one malformed entry does not block the rest of
@@ -622,6 +642,23 @@ mod tests {
 
         // Map missing 'plugin:' — rejected.
         let (_, runtime) = apply_rc_with_runtime("return [plugins: [[options: [key: 'x']]]]\n");
+        assert!(runtime.lock().unwrap().plugins.is_empty());
+    }
+
+    /// A plugin manifest's `name:` field with the wrong literal type is a
+    /// type error caught before the manifest is ever parsed as a value —
+    /// not merely a runtime rejection once the map comes back.
+    #[test]
+    fn rc_plugin_entry_bad_manifest_name_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad-name.ral");
+        std::fs::write(&path, "return [name: 42]\n").unwrap();
+
+        let rc_src = format!(
+            "return [plugins: [[plugin: '{}']]]\n",
+            path.to_string_lossy()
+        );
+        let (_shell, runtime) = apply_rc_with_runtime(&rc_src);
         assert!(runtime.lock().unwrap().plugins.is_empty());
     }
 

@@ -959,9 +959,11 @@ pub(in crate::typecheck) fn lines_step_ty(u: &mut Unifier) -> Ty {
 }
 
 /// A per-key type schema, driving `check_map_entry_fields` in `super::infer`.
+///
 /// `None` for a key leaves that entry runtime-dispatched: still inferred for its
-/// side-effects, but unified against nothing.
-pub(crate) type FieldSchema = fn(&str, &mut Unifier) -> Option<Ty>;
+/// side-effects, but unified against nothing. `pub`, not `pub(crate)`: a host
+/// crate's own rc/manifest schema (`check_return_schema`) is one of these too.
+pub type FieldSchema = fn(&str, &mut Unifier) -> Option<Ty>;
 
 /// Schema for rc plugin entries `[plugin: Str, options: Map]`.
 pub(crate) fn plugin_entry_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {

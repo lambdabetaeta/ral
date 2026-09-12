@@ -91,11 +91,39 @@ fn rc_theme_bindings_and_startup_reach_a_live_session() {
     );
 }
 
-/// A key the rc gets wrong is reported by name and skipped; the keys around it
-/// still apply.  One typo must not disable the whole file.
+/// A malformed *literal* rc key is a type error, caught before the file
+/// runs at all: the whole rc is skipped, not merely that one key — the
+/// keys around it do not survive either.
+/// `rc_computed_bad_key_is_reported_and_the_rest_still_applies`, below, is
+/// the same mistake through a computed rc, where today's tolerant, per-key
+/// runtime check is still the only one that can see it.
 #[test]
-fn rc_bad_key_is_reported_and_the_rest_still_applies() {
+fn rc_bad_literal_key_fails_the_whole_file() {
     let (_dir, env) = rc_home("return [edit_mode: 42, bindings: [okname: 'yes']]");
+
+    let out = repl(&["-i"], &env, "$okname\n");
+    assert!(
+        out.stderr.contains("skipped due to type errors"),
+        "the bad literal key must fail the whole rc: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("=> yes"),
+        "a failed rc must not apply any of its keys: {}",
+        out.stdout
+    );
+}
+
+/// The same mistake through a *computed* rc return: `check_return_schema`
+/// cannot see past the bound variable, so `apply_rc_key`'s own runtime
+/// check is what still catches it — reporting the bad key by name and
+/// applying the keys around it, exactly as before this file grew a static
+/// schema for the literal case.
+#[test]
+fn rc_computed_bad_key_is_reported_and_the_rest_still_applies() {
+    let (_dir, env) = rc_home(
+        "let cfg = [edit_mode: 42, bindings: [okname: 'yes']]\nreturn $cfg",
+    );
 
     let out = repl(&["-i"], &env, "$okname\n");
     assert!(

@@ -17,7 +17,7 @@ use ral_core::{RequestedTerminalAccess, RunReport, Shell, Value};
 use std::sync::{Arc, Mutex};
 
 use super::super::errfmt::plugin_warning;
-use super::manifest::{LoadedPlugin, ManifestHandlers};
+use super::manifest::{LoadedPlugin, ManifestHandlers, manifest_field_ty};
 use super::{PluginRuntime, framed_run_request, load_err, lock};
 
 /// Load a plugin by name (or path) with an optional options map.
@@ -61,7 +61,14 @@ pub(crate) fn load_plugin(
     // top-level helper bindings are discarded, since the manifest is the
     // file's *return value*, not its bindings.
     let value = shell.in_fresh_scope(|shell| {
-        ral_core::builtins::modules::evaluate_source(mooring, shell, &source, &path)
+        ral_core::builtins::modules::evaluate_source_checked(
+            mooring,
+            shell,
+            &source,
+            &path,
+            "plugin manifest",
+            manifest_field_ty,
+        )
     })?;
     let module = instantiate(value, options, name_or_path, shell)?;
     check_is_manifest(&module, name_or_path)?;

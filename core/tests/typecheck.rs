@@ -2962,3 +2962,61 @@ fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
         "expected g : U (B → C), got: {rendered}"
     );
 }
+
+// ─── check_return_schema: the rc/manifest literal-return vet ─────────────────
+
+fn test_field_ty(key: &str, _u: &mut ral_core::typecheck::Unifier) -> Option<Ty> {
+    match key {
+        "n" => Some(Ty::Int),
+        _ => None,
+    }
+}
+
+fn schema_errors(src: &str) -> Vec<TypeError> {
+    let top = annotated(src);
+    ral_core::typecheck::check_return_schema(
+        &top,
+        ral_core::SessionSchemes::from_schemes(
+            common::prelude_schemes(),
+            ral_core::HostSurface::default().builtin_table(),
+        ),
+        "test",
+        test_field_ty,
+    )
+}
+
+#[test]
+fn return_schema_catches_a_wrong_typed_literal_field() {
+    let errs = schema_errors("return [n: \"x\"]");
+    assert!(!errs.is_empty(), "expected a schema error, got none");
+}
+
+#[test]
+fn return_schema_accepts_a_correctly_typed_literal_field() {
+    let errs = schema_errors("return [n: 1]");
+    assert!(errs.is_empty(), "expected no schema errors, got: {errs:?}");
+}
+
+/// The return value is a bound variable, not a literal map: nothing for
+/// `check_return_schema` to see, so it must not fire at all — not even to
+/// (wrongly) reject the map `m` happens to hold.
+#[test]
+fn return_schema_skips_a_computed_return_value() {
+    let errs = schema_errors("let m = [n: \"x\"]\nreturn m");
+    assert!(
+        errs.is_empty(),
+        "a computed return must not be statically checked, got: {errs:?}"
+    );
+}
+
+/// `$x` is bound by an earlier top-level `let` — a separate `Phrase::Define`
+/// from the final `return`'s own phrase — and `check_return_schema` must
+/// resolve it too, not misreport it as unbound.
+#[test]
+fn return_schema_resolves_an_earlier_top_level_let() {
+    let errs = schema_errors("let x = 1\nreturn [n: $x]");
+    assert!(
+        errs.is_empty(),
+        "an earlier top-level let must resolve, got: {errs:?}"
+    );
+}

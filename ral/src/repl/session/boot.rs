@@ -15,7 +15,7 @@ use ral_core::types::{Break, Closure, DefaultPolicy, Escape, HookName, HookSig, 
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, diagnostic};
 use std::sync::{Arc, Mutex};
 
-use super::super::config::{RcSettings, apply_rc_config, create_default_rc, find_ralrc};
+use super::super::config::{RcSettings, apply_rc_config, create_default_rc, find_ralrc, rc_field_ty};
 #[cfg(feature = "structural")]
 use super::super::frontend::StructuralFrontend;
 use super::super::frontend::{Frontend, MinimalFrontend, RustylineFrontend, Surface};
@@ -362,7 +362,7 @@ fn source_profile(path: &str, shell: &mut Shell) {
 }
 
 fn source_profile_inner(path: &str, shell: &mut Shell) -> Result<(), String> {
-    match evaluate_startup_file(path, shell)? {
+    match evaluate_startup_file(path, shell, None)? {
         None | Some(Value::Unit) => Ok(()),
         Some(v) => Err(format!(
             "{path}: profile must return (); got {} — configuration belongs in the rc file",
@@ -397,7 +397,7 @@ fn source_rc(path: &str, shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>)
 /// Evaluate the rc file and check its contract: a configuration map.
 /// `Ok(None)` when `exit` escaped the file before it produced one.
 fn rc_config(path: &str, shell: &mut Shell) -> Result<Option<Map>, String> {
-    match evaluate_startup_file(path, shell)? {
+    match evaluate_startup_file(path, shell, Some(("rc", rc_field_ty)))? {
         None => Ok(None),
         Some(Value::Map(pairs)) => Ok(Some(pairs)),
         Some(other) => Err(format!(
@@ -442,11 +442,21 @@ fn run_startup(path: &str, block: Value, shell: &mut Shell) -> Result<(), String
 /// The shared core: read, typecheck, and evaluate one startup file,
 /// returning its value for the caller's contract check.  `Ok(None)` means
 /// `exit` escaped the file — sourcing stops with no value to check.
+///
+/// `contract`, when given, additionally checks the file's returned literal
+/// map against a field schema (see [`ral_core::typecheck::check_return_schema`])
+/// — the rc file's top-level keys — with the same fail-closed, boot-survives
+/// treatment as any other type error: the login profiles pass `None`, having
+/// no such contract of their own.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:config-read] reads an rc/profile file during session boot; not turn-time model I/O"
 )]
-fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>, String> {
+fn evaluate_startup_file(
+    path: &str,
+    shell: &mut Shell,
+    contract: Option<(&'static str, ral_core::typecheck::FieldSchema)>,
+) -> Result<Option<Value>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let src = ral_core::source::normalize_source_text(src);
     // The check always runs (it writes the annotations the evaluator reads —
@@ -462,8 +472,9 @@ fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>,
     // the file defines outlives this boot, and its spans have to keep naming
     // the file for the whole session.
     let file = shell.sources().next_id();
-    let comp = match ral_core::compile_and_typecheck(&src, shell.session_schemes(), file, path) {
-        ral_core::CompileOutcome::Compiled(annotated) => std::sync::Arc::new(annotated),
+    let annotated = match ral_core::compile_and_typecheck(&src, shell.session_schemes(), file, path)
+    {
+        ral_core::CompileOutcome::Compiled(annotated) => annotated,
         ral_core::CompileOutcome::Parse(e) => return Err(format!("{path}: {e}")),
         ral_core::CompileOutcome::Types(errs) => {
             eprint!(
@@ -473,6 +484,18 @@ fn evaluate_startup_file(path: &str, shell: &mut Shell) -> Result<Option<Value>,
             return Err(format!("{path}: skipped due to type errors"));
         }
     };
+    if let Some((form, schema)) = contract {
+        let errs =
+            ral_core::typecheck::check_return_schema(&annotated, shell.session_schemes(), form, schema);
+        if !errs.is_empty() {
+            eprint!(
+                "{}",
+                diagnostic::format_type_errors_ariadne(path, &src, &errs)
+            );
+            return Err(format!("{path}: skipped due to type errors"));
+        }
+    }
+    let comp = std::sync::Arc::new(annotated);
     // Evaluate under the same guarded pipeline `use`/plugin loading share:
     // `evaluate_checked` owns the cycle and depth guards, and registers the
     // text under the id compiled against just above, so a runtime error
@@ -541,5 +564,21 @@ mod tests {
         let (_dir, path) = startup_file("return ()\n");
         let err = rc_config(&path, &mut booted_shell()).unwrap_err();
         assert!(err.contains("rc file must return a map; got Unit"), "{err}");
+    }
+
+    /// A malformed literal rc key is a type error, caught before the file
+    /// runs at all — not merely reported and skipped per-key at apply time.
+    #[test]
+    fn rc_bad_literal_field_is_a_type_error() {
+        let (_dir, path) = startup_file("return [edit_mode: 42]\n");
+        let err = rc_config(&path, &mut booted_shell()).unwrap_err();
+        assert!(err.contains("skipped due to type errors"), "{err}");
+    }
+
+    /// A well-typed literal rc still sources cleanly through the same path.
+    #[test]
+    fn rc_well_typed_literal_field_sources_cleanly() {
+        let (_dir, path) = startup_file("return [edit_mode: 'vi']\n");
+        assert!(rc_config(&path, &mut booted_shell()).is_ok());
     }
 }
