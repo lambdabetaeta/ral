@@ -114,6 +114,16 @@ field type of the row with the map's element `α` and **closes the tail** (`ρ �
   into a map position closes its row; the record view, with its tail, is not
   recoverable downstream.
 
+## Order is not data
+
+One carrier, one order: `Map` is an `imbl::OrdMap` (`core/src/types/map.rs`), so
+both views iterate **sorted by key** and the order a literal was written in is
+not observable. That is what lets `values_equal` settle map equality with a
+pointwise zip and makes `Value::PartialEq` order-independent for free — and it
+is why neither view can carry a sequence. Data that must keep an order is a
+list; data needing an order *and* a type per key is neither, and ral has no
+third carrier for it.
+
 ## Why both, not one
 
 Neither type subsumes the other, so collapsing to one loses something real.

@@ -70,9 +70,15 @@ fn build_load_plugin(runtime: Arc<Mutex<PluginRuntime>>) -> BuiltinEntry {
                     diagnostic::cmd_error("load-plugin", "missing plugin name");
                     return Ok(Value::Unit);
                 };
-                if let Err(Break::Error(e)) =
-                    super::plugin::load::load_plugin(&name, None, mooring, shell, &runtime)
-                {
+                // No options: `load-plugin` takes a name alone, so a plugin
+                // loaded through it stands on its own defaults.
+                if let Err(Break::Error(e)) = super::plugin::load::load_plugin(
+                    &name,
+                    &ral_core::types::Map::new(),
+                    mooring,
+                    shell,
+                    &runtime,
+                ) {
                     diagnostic::cmd_error("load-plugin", &e.message);
                 }
                 Ok(Value::Unit)

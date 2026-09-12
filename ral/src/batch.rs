@@ -132,6 +132,7 @@ pub(crate) fn run_source(
             ral_core::typecheck(
                 top,
                 ral_core::SessionSchemes::from_schemes(PRELUDE.schemes(), check_table.clone()),
+                None,
             )
         };
 

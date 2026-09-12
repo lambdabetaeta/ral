@@ -1,9 +1,8 @@
 //! Type synthesis for the CBPV pair: `infer_val` yields a `Ty`, `infer_comp` a
 //! `CompTy`, mutually recursive through thunks.
 
-use super::builtins::{
-    BuiltinDiagnostic, FieldSchema, fail_status_is_zero_literal, plugin_entry_field_ty,
-};
+use super::ReturnContract;
+use super::builtins::{BuiltinDiagnostic, FieldSchema, fail_status_is_zero_literal};
 use super::env::{InferCtx, TyEnv};
 use super::error::{CompDiff, PinFailure, Reason, StdinFeed, TypeErrorKind};
 use super::generalize::{generalize, instantiate};
@@ -148,14 +147,17 @@ fn unalias_statement_shape(part: &Comp) -> Result<Option<&str>, &'static str> {
 /// statement (§3.5).  Returns each `Define` phrase's generalised per-name
 /// schemes, parallel to `top.phrases` and empty for every other phrase —
 /// `annotate::annotate_toplevel` writes it straight onto the rebuilt
-/// `Phrase::Define`.
+/// `Phrase::Define`.  `contract`, when the caller's form imposes one, holds
+/// the last phrase's literal `return [k: v, …]` to its schema as that map is
+/// inferred.
 pub(crate) fn infer_toplevel(
     ctx: &mut InferCtx,
     env: &mut TyEnv,
     top: &Toplevel,
+    contract: Option<ReturnContract>,
 ) -> Vec<Vec<(String, Scheme)>> {
     let mut inferencer = Inferencer { ctx, env };
-    inferencer.infer_phrases(&top.phrases)
+    inferencer.infer_phrases(&top.phrases, contract)
 }
 
 /// Every `Name` an `IrPattern` binds, in pattern order — the phrase-level
@@ -680,10 +682,32 @@ impl Inferencer<'_> {
         }
     }
 
-    /// Check a map literal's entries against a per-key `schema`: every value is
-    /// inferred, and a literal key the schema knows also pins its value's type.
-    /// Unknown, spread, and dynamic keys stay runtime-dispatched.  Shared by
-    /// `within` and `grant` in `typecheck/scope.rs` and by rc plugin entries.
+    /// Hold one entry's inferred value type to what the form's schema expects
+    /// of `key`.  A key no schema knows — and every computed or spread key,
+    /// which never reaches here — stays runtime-dispatched.
+    fn pin_field(&mut self, contract: Option<ReturnContract>, key: &str, actual: &Ty) {
+        let Some((form, schema)) = contract else {
+            return;
+        };
+        let Some(expected) = schema(key, &mut self.ctx.unifier) else {
+            return;
+        };
+        self.ctx.unify_ty(
+            actual,
+            &expected,
+            Reason::OptionField {
+                form,
+                key: key.to_string(),
+            },
+        );
+    }
+
+    /// Check an options map's entries against a per-key `schema`: every value
+    /// is inferred, and a literal key the schema knows also pins its value's
+    /// type.  Unknown, spread, and dynamic keys stay runtime-dispatched.  The
+    /// options map of `within` and `grant` in `typecheck/scope.rs`, whose own
+    /// type nobody reads; a program's *return* map is held to its form by
+    /// [`Self::infer_map_val`], which builds that type too.
     pub(super) fn check_map_entry_fields(
         &mut self,
         entries: &[ValMapEntry],
@@ -695,46 +719,13 @@ impl Inferencer<'_> {
                 ValMapEntry::Entry(Val::String(k), v) => (Some(k.as_str()), v),
                 ValMapEntry::Entry(_, v) | ValMapEntry::Spread(v) => (None, v),
             };
-            let expected = key.and_then(|k| schema(k, &mut self.ctx.unifier));
             self.with_span(val.span, |this| {
                 let actual = this.infer_val(&val.item);
-                if let (Some(key), Some(expected)) = (key, expected) {
-                    this.ctx.unify_ty(
-                        &actual,
-                        &expected,
-                        Reason::OptionField {
-                            form,
-                            key: key.to_string(),
-                        },
-                    );
+                if let Some(key) = key {
+                    this.pin_field(Some((form, schema)), key, &actual);
                 }
             });
         }
-    }
-
-    /// An rc `plugins:` list.  Each literal-map entry is checked against the
-    /// plugin-entry schema, with no cross-entry unification, so entries of
-    /// mixed shape coexist.
-    fn infer_plugins_list(&mut self, elems: &[ValListElem]) -> Ty {
-        for elem in elems {
-            self.with_span(elem.slot().span, |this| match elem {
-                ValListElem::Single(v) => match &v.item {
-                    Val::Map(entries) => {
-                        this.check_map_entry_fields(entries, "plugin entry", plugin_entry_field_ty);
-                    }
-                    value => {
-                        let _ = this.infer_val(value);
-                    }
-                },
-                ValListElem::Spread(v) => {
-                    let spread_ty = this.infer_val(&v.item);
-                    let inner = this.ctx.unifier.fresh_ty();
-                    this.ctx
-                        .unify_ty(&spread_ty, &Ty::List(Box::new(inner)), Reason::ListSpread);
-                }
-            });
-        }
-        Ty::List(Box::new(self.ctx.unifier.fresh_ty()))
     }
 
     /// Instantiate `scheme`, strip its outer `Thunk`, and apply the body to
@@ -1065,14 +1056,19 @@ impl Inferencer<'_> {
 
     /// [`infer_toplevel`]'s walk: one phrase at a time, each under its own
     /// span, threading the extended `TyEnv` from one phrase to the next.
-    fn infer_phrases(&mut self, phrases: &[Spanned<Phrase>]) -> Vec<Vec<(String, Scheme)>> {
+    fn infer_phrases(
+        &mut self,
+        phrases: &[Spanned<Phrase>],
+        contract: Option<ReturnContract>,
+    ) -> Vec<Vec<(String, Scheme)>> {
         let tail_index = phrases.len().saturating_sub(1);
         phrases
             .iter()
             .enumerate()
             .map(|(index, phrase)| {
+                let is_tail = index == tail_index;
                 self.with_span(phrase.span, |this| {
-                    this.infer_phrase(&phrase.item, index == tail_index)
+                    this.infer_phrase(&phrase.item, is_tail, contract.filter(|_| is_tail))
                 })
             })
             .collect()
@@ -1082,8 +1078,14 @@ impl Inferencer<'_> {
     /// every `Run`'s value is held to the discarded shape, tail included —
     /// its bytes are never captured into its own report — but the tail's
     /// arrow arity is additionally read, so S3's η-expansion can rebuild it
-    /// if it resolved to `Fun`.
-    fn infer_phrase(&mut self, phrase: &Phrase, is_tail: bool) -> Vec<(String, Scheme)> {
+    /// if it resolved to `Fun`.  `contract` reaches the tail alone, and holds
+    /// its returned literal map to the form's schema.
+    fn infer_phrase(
+        &mut self,
+        phrase: &Phrase,
+        is_tail: bool,
+        contract: Option<ReturnContract>,
+    ) -> Vec<(String, Scheme)> {
         match phrase {
             Phrase::Define { pattern, comp, .. } => {
                 let inner_ty = self.infer_comp(comp);
@@ -1134,7 +1136,7 @@ impl Inferencer<'_> {
                 let cty = if alias_already_typed {
                     super::builtins::pure(Ty::Unit)
                 } else {
-                    self.infer_comp(comp)
+                    self.infer_comp_under_contract(comp, contract)
                 };
                 if is_tail {
                     // The run's value is reported (S3's η-expansion may
@@ -1152,7 +1154,10 @@ impl Inferencer<'_> {
         }
     }
 
-    fn infer_map_val(&mut self, entries: &[ValMapEntry]) -> Ty {
+    /// A map literal, with each literal-keyed entry pinned to what
+    /// `contract`'s schema expects of that key.  `None` is the ordinary map:
+    /// no form speaks about its keys.
+    fn infer_map_val(&mut self, entries: &[ValMapEntry], contract: Option<ReturnContract>) -> Ty {
         let all_literal_keys = entries.iter().all(|entry| match entry {
             ValMapEntry::Entry(Val::String(_), _) | ValMapEntry::Spread(_) => true,
             ValMapEntry::Entry(_, _) => false,
@@ -1163,18 +1168,12 @@ impl Inferencer<'_> {
             let mut field_entries = Vec::new();
             for entry in entries {
                 match entry {
-                    ValMapEntry::Entry(
-                        Val::String(key),
-                        Spanned {
-                            span,
-                            item: Val::List(elems),
-                        },
-                    ) if key == "plugins" => {
-                        let ty = self.with_span(*span, |this| this.infer_plugins_list(elems));
-                        field_entries.push((key.clone(), ty));
-                    }
                     ValMapEntry::Entry(Val::String(key), value) => {
-                        let ty = self.with_span(value.span, |this| this.infer_val(&value.item));
+                        let ty = self.with_span(value.span, |this| {
+                            let ty = this.infer_val(&value.item);
+                            this.pin_field(contract, key, &ty);
+                            ty
+                        });
                         field_entries.push((key.clone(), ty));
                     }
                     ValMapEntry::Spread(value) => {
@@ -1229,6 +1228,9 @@ impl Inferencer<'_> {
                         self.ctx.unify_ty(&key_ty, &Ty::String, Reason::MapKey);
                         self.with_span(value.span, |this| {
                             let value_ty = this.infer_val(&value.item);
+                            if let Val::String(key) = key {
+                                this.pin_field(contract, key, &value_ty);
+                            }
                             this.ctx.unify_ty(&value_ty, &elem, Reason::MapElem);
                         });
                     }
@@ -1319,7 +1321,7 @@ impl Inferencer<'_> {
                 }
                 Ty::List(Box::new(elem))
             }
-            Val::Map(entries) => self.infer_map_val(entries),
+            Val::Map(entries) => self.infer_map_val(entries, None),
             Val::Variant { label, payload } => {
                 // Construction is open: `` `ok 5 `` gets a fresh row tail.  The
                 // label keeps its backtick so unification reads it as a tag —
@@ -1641,11 +1643,28 @@ impl Inferencer<'_> {
     }
 
     pub(super) fn infer_comp(&mut self, comp: &Comp) -> CompTy {
+        self.infer_comp_under_contract(comp, None)
+    }
+
+    /// [`Self::infer_comp`], under the form's return contract when `comp` is
+    /// exactly the literal `return [k: v, …]` that contract speaks about: the
+    /// schema pins each field as the map is inferred, so the contract rides
+    /// the one inference of it rather than a second one that could disagree.
+    /// Anything else the return could be carries no literal to hold, and is
+    /// inferred as it always is.
+    fn infer_comp_under_contract(
+        &mut self,
+        comp: &Comp,
+        contract: Option<ReturnContract>,
+    ) -> CompTy {
         if let Some(span) = comp.span {
             self.ctx.pos = Some(span);
         }
 
         let cty = match &comp.item {
+            CompKind::Return(Val::Map(entries)) if contract.is_some() => {
+                CompTy::pure(self.infer_map_val(entries, contract))
+            }
             CompKind::Return(value) => CompTy::pure(self.infer_val(value)),
             CompKind::Lam { param, body } => self.infer_binding_value(Some(param), body),
             CompKind::Force(value) => {

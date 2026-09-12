@@ -201,7 +201,7 @@ pub(crate) fn evaluate_no_authority(
     let mooring = Mooring::adrift();
     shell
         .with_capabilities(Capabilities::deny_all(), |sh| {
-            ral_core::builtins::modules::evaluate_source(&mooring, sh, source, display)
+            ral_core::builtins::modules::evaluate_source(&mooring, sh, source, display, None)
         })
         .map_err(|e| match e {
             Break::Error(err) => format!("{label} {display}: {}", err.message),

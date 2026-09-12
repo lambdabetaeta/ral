@@ -3743,15 +3743,15 @@ The recognized fields are:
 | `bell: Bool` | Enable or disable the audible line-editor bell; default `false`. |
 | `surface: String` | `minimal`, `readline`, or `structural`; default `readline`. |
 | `recursion_limit: Int` | A positive function-call recursion limit; default `100_000`. |
-| `plugins: List` | Plugins to load before the first prompt; see below. |
+| `plugins: Map` | Maps each plugin name to its options map; loaded before the first prompt; see below. |
 | `startup: Block` | A zero-argument block run once after the map is applied. |
 | `theme: Map` | `value_prefix: String` and `value_color: String`. The colour is one of `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or `none`. |
 
 Unknown top-level RC keys are ignored for forward compatibility. An unknown
-key inside `theme` or an RC plugin entry produces a warning. Every recognized
-field is shape-checked without stringification or coercion: a wrong type or
-invalid value produces a diagnostic naming the field and expected shape, while
-the remaining top-level fields still apply.
+key inside `theme` produces a warning. Every recognized field is
+shape-checked without stringification or coercion: a wrong type or invalid
+value produces a diagnostic naming the field and expected shape, while the
+remaining top-level fields still apply.
 
 The prompt body may return a value, whose display form becomes the prompt. If
 it returns `Unit`, its captured standard output becomes the prompt, with one
@@ -3847,16 +3847,20 @@ file:
 ```ral
 return [
     plugins: [
-        [plugin: 'autosuggestion'],
-        [plugin: 'fzf-files', options: [key: 'ctrl-t']],
+        autosuggestion: [:],
+        fzf-files:      [key: 'ctrl-t'],
     ],
 ]
 ```
 
-Each RC plugin entry requires `plugin: String`; `options`, when present, must
-be a map. `unload-plugin name` removes that plugin's hooks, keybindings, and
-aliases. Loading a duplicate plugin name or unloading a name that is not
-loaded is an error.
+Each key in `plugins:` is a plugin name or a path to a plugin file; a bare
+hyphenated name needs no quoting, but a path must be quoted. Each value is
+that plugin's options map, forwarded verbatim to the plugin's top-level block
+as its single argument; `[:]` is the empty map, for a plugin taking no
+options. A plugin whose value is not a map is reported by name and skipped;
+the other plugins still load. `unload-plugin name` removes that plugin's
+hooks, keybindings, and aliases. Loading a duplicate plugin name or unloading
+a name that is not loaded is an error.
 
 Plugin aliases occupy the alias namespace. A collision with an existing alias
 is a load error. A lexical or native command with the same name is permitted,

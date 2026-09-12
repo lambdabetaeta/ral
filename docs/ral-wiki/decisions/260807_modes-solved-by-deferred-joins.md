@@ -247,7 +247,6 @@ not there. It also tightens existing programs and churns goldens. That is its
 own decision, to be taken in the vocabulary this one creates; the constraint
 language supports either by swapping the emission.
 
-Two neighbours stay queued behind as well: the checker's re-parsing of
+One neighbour stays queued behind as well: the checker's re-parsing of
 `Exec("alias", …)` IR inside `infer_seq_with_alias_bindings`, which wants a
-dedicated IR node rather than `alias_statement_shape`; and `infer_map_val`'s
-`"plugins"` special case, already promised to the rc static-schema layer.
+dedicated IR node rather than `alias_statement_shape`.

@@ -193,8 +193,8 @@ unload-plugin 'fzf-files'
 
 `load-plugin` takes only a name — there is no way to pass per-plugin
 options through it. A plugin that needs non-default options is
-loaded through `~/.ralrc`'s `plugins:` list (§9), whose `options:`
-field is forwarded to the plugin's top-level block.
+loaded through `~/.ralrc`'s `plugins:` map (§9), whose value for that
+plugin is forwarded to the plugin's top-level block.
 
 ## 5 Hooks
 
@@ -332,7 +332,7 @@ aliases: [
 ]
 ```
 
-## 9 Prelude helpers
+## 8 Prelude helpers
 
 The `_ed-*` family is direct builtins (see §3); plugins call them by
 name with no prelude indirection. `load-plugin` and `unload-plugin`
@@ -343,33 +343,35 @@ code does reach for one genuine prelude helper:
 elem   x items   -- membership test
 ```
 
-## 10 `~/.ralrc`
+## 9 `~/.ralrc`
 
-The config map (SPEC §15.3) accepts an optional `plugins` list.  Each
-entry is a map `[plugin: Str, options?: Map]`:
+The config map (SPEC §15.3) accepts an optional `plugins` map, from
+plugin name (or path) to that plugin's options map:
 
 ```
 return [
     env: [EDITOR: 'nvim'],
     plugins: [
-        [plugin: 'syntax-highlight'],
-        [plugin: 'fzf-files',      options: [key: 'ctrl-t']],
-        [plugin: 'fzf-cd',         options: [key: 'alt-c']],
-        [plugin: 'fzf-history',    options: [key: 'ctrl-r']],
-        [plugin: 'fzf-completion'],
+        syntax-highlight: [:],
+        fzf-files:        [key: 'ctrl-t'],
+        fzf-cd:           [key: 'alt-c'],
+        fzf-history:      [key: 'ctrl-r'],
+        fzf-completion:   [:],
     ],
 ]
 ```
 
-`options` is forwarded verbatim to the plugin's top-level block as
-its single argument.  Omit `options:` for plugins that take no
-configuration (or pass `[:]` explicitly).  Unknown top-level keys in
-an entry are warned and ignored.
+A bare hyphenated plugin name needs no quoting; a path does
+(`'/path/to/p.ral': [:]`). Each value is forwarded verbatim to the
+plugin's top-level block as its single argument; `[:]` is the empty
+map, for a plugin taking no options. A value that is not a map is
+reported by name and skipped; the other plugins still load.
 
-Plugins are loaded in list order after the ralrc evaluates. This is
-the only path by which a plugin receives non-default options — a
-`load-plugin` call in the ralrc body (see below) always loads with
-`[:]`. For conditional loading with default options, call
+Plugins load in alphabetical order of plugin name after the ralrc
+evaluates — ral maps are sorted by key, so the written order does not
+matter. This is the only path by which a plugin receives non-default
+options — a `load-plugin` call in the ralrc body (see below) always
+loads with `[:]`. For conditional loading with default options, call
 `load-plugin` directly in the body before the final `return`:
 
 ```
@@ -397,9 +399,9 @@ return { |options|
 Plugins that need no configuration return the manifest map directly
 without a wrapping block.
 
-## 11 Examples
+## 10 Examples
 
-### 11.1 CTRL-T — insert files at cursor
+### 10.1 CTRL-T — insert files at cursor
 
 Ported from fzf's `key-bindings.zsh`. Reads `$FZF_CTRL_T_COMMAND`,
 `$FZF_CTRL_T_OPTS`, `$FZF_DEFAULT_OPTS`, `$FZF_DEFAULT_OPTS_FILE` (its
@@ -457,7 +459,7 @@ return { |options|
 }
 ```
 
-### 11.2 ALT-C — cd to selected directory
+### 10.2 ALT-C — cd to selected directory
 
 Ported the same way as 11.1, walking directories instead of files and
 selecting a single pick (`+m`). Uses `_ed-push` + `_ed-accept` to
@@ -518,7 +520,7 @@ return { |options|
 }
 ```
 
-### 11.3 CTRL-R — history search
+### 10.3 CTRL-R — history search
 
 Ported from fzf's `key-bindings.zsh`. History entries flow
 NUL-separated (`--read0`/`--print0`) so multi-line commands survive
@@ -582,7 +584,7 @@ return { |options|
 }
 ```
 
-### 11.4 TAB — `**`-trigger completion
+### 10.4 TAB — `**`-trigger completion
 
 Ported from fzf's `completion.zsh`. Binds `tab` with a `guard` regex
 so that plain tab still falls through to ral's built-in completer;
@@ -667,7 +669,7 @@ there), `_list-complete` and `_kill-complete` (feed a candidate list
 or `ps` output to plain `fzf`), and the host-list readers
 `_cfg-hosts` / `_known-hosts` / `_etc-hosts` / `_hosts`.
 
-### 11.5 Syntax highlight (sketch)
+### 10.5 Syntax highlight (sketch)
 
 ```
 let _handler = { |ev|
@@ -685,7 +687,7 @@ return [
 ]
 ```
 
-## 12 Future extensions
+## 11 Future extensions
 
 The following appear in earlier design notes but are not yet
 implemented. They are collected here as candidates for future

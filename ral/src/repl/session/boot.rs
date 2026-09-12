@@ -443,11 +443,11 @@ fn run_startup(path: &str, block: Value, shell: &mut Shell) -> Result<(), String
 /// returning its value for the caller's contract check.  `Ok(None)` means
 /// `exit` escaped the file — sourcing stops with no value to check.
 ///
-/// `contract`, when given, additionally checks the file's returned literal
-/// map against a field schema (see [`ral_core::typecheck::check_return_schema`])
-/// — the rc file's top-level keys — with the same fail-closed, boot-survives
-/// treatment as any other type error: the login profiles pass `None`, having
-/// no such contract of their own.
+/// `contract`, when given, additionally holds the file's returned literal
+/// map to a field schema — the rc file's top-level keys — in the same check
+/// as the rest of the file, so a breach is reported and skipped exactly like
+/// any other type error: the login profiles pass `None`, having no such
+/// contract of their own.
 #[allow(
     clippy::disallowed_methods,
     reason = "[silent:config-read] reads an rc/profile file during session boot; not turn-time model I/O"
@@ -455,7 +455,7 @@ fn run_startup(path: &str, block: Value, shell: &mut Shell) -> Result<(), String
 fn evaluate_startup_file(
     path: &str,
     shell: &mut Shell,
-    contract: Option<(&'static str, ral_core::typecheck::FieldSchema)>,
+    contract: Option<ral_core::typecheck::ReturnContract>,
 ) -> Result<Option<Value>, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let src = ral_core::source::normalize_source_text(src);
@@ -472,29 +472,18 @@ fn evaluate_startup_file(
     // the file defines outlives this boot, and its spans have to keep naming
     // the file for the whole session.
     let file = shell.sources().next_id();
-    let annotated = match ral_core::compile_and_typecheck(&src, shell.session_schemes(), file, path)
-    {
-        ral_core::CompileOutcome::Compiled(annotated) => annotated,
-        ral_core::CompileOutcome::Parse(e) => return Err(format!("{path}: {e}")),
-        ral_core::CompileOutcome::Types(errs) => {
-            eprint!(
-                "{}",
-                diagnostic::format_type_errors_ariadne(path, &src, &errs)
-            );
-            return Err(format!("{path}: skipped due to type errors"));
-        }
-    };
-    if let Some((form, schema)) = contract {
-        let errs =
-            ral_core::typecheck::check_return_schema(&annotated, shell.session_schemes(), form, schema);
-        if !errs.is_empty() {
-            eprint!(
-                "{}",
-                diagnostic::format_type_errors_ariadne(path, &src, &errs)
-            );
-            return Err(format!("{path}: skipped due to type errors"));
-        }
-    }
+    let annotated =
+        match ral_core::compile_and_typecheck(&src, shell.session_schemes(), file, path, contract) {
+            ral_core::CompileOutcome::Compiled(annotated) => annotated,
+            ral_core::CompileOutcome::Parse(e) => return Err(format!("{path}: {e}")),
+            ral_core::CompileOutcome::Types(errs) => {
+                eprint!(
+                    "{}",
+                    diagnostic::format_type_errors_ariadne(path, &src, &errs)
+                );
+                return Err(format!("{path}: skipped due to type errors"));
+            }
+        };
     let comp = std::sync::Arc::new(annotated);
     // Evaluate under the same guarded pipeline `use`/plugin loading share:
     // `evaluate_checked` owns the cycle and depth guards, and registers the

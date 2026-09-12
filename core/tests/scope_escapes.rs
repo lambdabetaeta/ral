@@ -64,6 +64,7 @@ fn statically_rejected(source: &str) -> bool {
             common::prelude_schemes(),
             HostSurface::default().builtin_table(),
         ),
+        None,
     )
     .is_err()
 }

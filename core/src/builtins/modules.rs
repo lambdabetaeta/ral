@@ -9,10 +9,9 @@
 //!
 //! [`evaluate_checked`]/[`evaluate_source`] are the sibling door for every
 //! *other* runtime load: [`crate::capability::load_capabilities_from_str`]
-//! calls [`evaluate_source`]; the plugin loader calls
-//! [`evaluate_source_checked`], its manifest-schema sibling; the REPL's rc
-//! loader, which renders type errors itself, calls [`evaluate_checked`]
-//! with an already-checked `Toplevel`.
+//! and the plugin loader call [`evaluate_source`], the plugin loader with
+//! its manifest contract; the REPL's rc loader, which renders type errors
+//! itself, calls [`evaluate_checked`] with an already-checked `Toplevel`.
 
 use crate::evaluator::{Mode, Ran};
 use crate::ir::Toplevel;
@@ -77,47 +76,22 @@ pub fn evaluate_checked(
 /// Parse, elaborate, check, and evaluate `source` under `virtual_path`.
 ///
 /// The path is virtual: the caller owns the filesystem read; this only
-/// names the registered source and keys the cycle stack.
+/// names the registered source and keys the cycle stack.  `contract` is the
+/// loading form's hold on `source`'s own returned literal map — the plugin
+/// loader's door, for a manifest's fields — held in the same check as the
+/// rest of the file.
 ///
 /// # Errors
-/// Returns `Err` if `source` fails to compile, or for any error from
-/// [`evaluate_checked`].
+/// Returns `Err` if `source` fails to compile, breaks `contract`, or for any
+/// error from [`evaluate_checked`].
 pub fn evaluate_source(
     mooring: &Mooring,
     shell: &mut Shell,
     source: &str,
     virtual_path: &str,
+    contract: Option<crate::typecheck::ReturnContract>,
 ) -> Settled<Value> {
-    let top = check_source(source, virtual_path, shell)?;
-    evaluate_checked(mooring, shell, &top, source, virtual_path)
-}
-
-/// Like [`evaluate_source`], but also schema-checked.
-///
-/// Checks `source`'s returned literal map against `schema` (see
-/// [`crate::typecheck::check_return_schema`]) before running it — the
-/// plugin loader's door, for a manifest's fields.
-///
-/// # Errors
-/// Returns `Err` if `source` fails to compile, fails `schema`, or for any
-/// error from [`evaluate_checked`].
-pub fn evaluate_source_checked(
-    mooring: &Mooring,
-    shell: &mut Shell,
-    source: &str,
-    virtual_path: &str,
-    form: &'static str,
-    schema: crate::typecheck::FieldSchema,
-) -> Settled<Value> {
-    let top = check_source(source, virtual_path, shell)?;
-    let errs = crate::typecheck::check_return_schema(&top, shell.session_schemes(), form, schema);
-    if !errs.is_empty() {
-        return Err(sig(errs
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n")));
-    }
+    let top = check_source(source, virtual_path, shell, contract)?;
     evaluate_checked(mooring, shell, &top, source, virtual_path)
 }
 
@@ -141,7 +115,7 @@ fn compile_toplevel(source_text: &str, virtual_path: &str, shell: &mut Shell) ->
         .collect();
     let top = crate::elaborator::elaborate(&ast, bindings, virtual_path)
         .map_err(|e| sig(e.to_string()))?;
-    let top = crate::typecheck::typecheck(&top, shell.session_schemes()).map_err(|errs| {
+    let top = crate::typecheck::typecheck(&top, shell.session_schemes(), None).map_err(|errs| {
         sig(errs
             .iter()
             .map(ToString::to_string)
@@ -243,10 +217,17 @@ fn check_source(
     source: &str,
     virtual_path: &str,
     shell: &mut Shell,
+    contract: Option<crate::typecheck::ReturnContract>,
 ) -> Settled<std::sync::Arc<Toplevel>> {
     let file = shell.session.sources.next_id();
-    let top = crate::compile_and_typecheck(source, shell.session_schemes(), file, virtual_path)
-        .into_comp_or_message()
+    let top = crate::compile_and_typecheck(
+        source,
+        shell.session_schemes(),
+        file,
+        virtual_path,
+        contract,
+    )
+    .into_comp_or_message()
         .map(std::sync::Arc::new)
         .map_err(sig)?;
     if shell.local.bindings.armed() {

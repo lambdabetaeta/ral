@@ -1303,7 +1303,7 @@ mod tests {
         let top =
             crate::elaborator::elaborate(&ast, std::collections::HashSet::default(), "<test>")
                 .expect("elaborate");
-        crate::typecheck::typecheck(&top, crate::typecheck::SessionSchemes::default())
+        crate::typecheck::typecheck(&top, crate::typecheck::SessionSchemes::default(), None)
             .expect("typecheck")
     }
 

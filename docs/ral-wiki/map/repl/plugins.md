@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4bed97a
-generated_at_date: 2026-09-12
+generated_at_commit: da423d0d
+generated_at_date: 2026-09-13
 covers_paths: [ral/src/repl/plugin.rs, ral/src/repl/plugin/, ral/src/repl/keybinding.rs, ral/src/repl/host_handlers.rs]
 ---
 
@@ -117,9 +117,11 @@ The frontend-neutral key vocabulary lives in `plugin/router.rs`:
 crossterm's against it; `Keymap` (`Emacs` / `Vi`) reduces rustyline's
 `EditMode`. **Keybinding dispatch is one ordered router**: `KeyRouter` — held
 on the runtime, rebuilt by `keybindings_changed` whenever the plugin list
-changes — flattens every binding in load order (manifest order within a
-plugin), and `resolve` returns the first entry whose chord matches and whose
-`guard` regex (matched against the text left of the cursor) allows.
+changes — flattens every binding in load order (plugin name order, an rc's
+`plugins:` being a key-sorted map; then manifest order within a plugin), and
+`resolve` returns the first entry whose
+chord matches and whose `guard` regex (matched against the text left of the
+cursor) allows.
 `Resolution::Claimed` names the owning plugin and binding index;
 `Resolution::Default` is the editor's built-in tail, which each backend
 realises natively (rustyline's per-chord `RouterKeyHandler` returns `None`,
@@ -142,12 +144,16 @@ once, so the frontends cannot disagree.
   their handler values having no one fixed shape to pin.
 - `plugin/load.rs` — resolves a plugin under `~/.config/ral/plugins/` or
   `RAL_PATH`, typechecks and evaluates it through
-  `modules::evaluate_source_checked` — the same load as `evaluate_source`,
-  plus `ral_core::typecheck::check_return_schema` against
-  `manifest::manifest_field_ty` — instantiates a parameterised plugin block
-  through a framed hook run, registers its hooks into the shell's hook table
-  (`register_plugin_hooks`), installs alias bindings, and records it
-  (retaining the file source on the `LoadedPlugin`). The schema check only
+  `modules::evaluate_source` under the return contract
+  `("plugin manifest", manifest::manifest_field_ty)`, held against a literal
+  manifest return inside that one check — instantiates a parameterised
+  plugin block through a framed hook run, registers its hooks into the
+  shell's hook table (`register_plugin_hooks`), installs alias bindings, and
+  records it (retaining the file source on the `LoadedPlugin`). Options
+  arrive as a `Map`, not a `Value` that might not be one: the rc's own
+  `plugins:` entry is where a non-map value is caught and named, and
+  `load-plugin`, which takes a name alone, passes the empty map. The
+  contract only
   sees a literal `return [...]`; a parameterised plugin's manifest is the
   *factory block's own* return, computed once the hook run above applies
   `options`, and stays on `LoadedPlugin::parse`'s runtime check alone.

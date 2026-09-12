@@ -7,7 +7,7 @@
 #   chpwd hook   record each directory change in the zoxide database
 #
 # Load in rc:
-#   plugins: [[plugin: "zoxide", options: [key: "alt-z"]]]
+#   plugins: [zoxide: [key: "alt-z"]]
 #
 # Options:
 #   key   keybinding for the interactive picker (default "alt-z")

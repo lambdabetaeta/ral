@@ -70,6 +70,11 @@ return [
     #     la: { |args| ls -lha ...$args },
     # ],
 
+    # plugins: [
+    #     zoxide:         [key: 'alt-z'],  # plugin name (or path) => its options
+    #     autosuggestion: [:],             # [:] — no options, the plugin's own defaults
+    # ],
+
     # startup: {
     #     fortune
     # },
@@ -141,13 +146,12 @@ pub(crate) fn apply_rc_config(
 
 /// Schema for the rc top-level map's scalar-typed keys.
 ///
-/// Checked statically against a literal rc return by `check_return_schema`
-/// — a first pass, deliberately partial: `prompt:`/`aliases:`/`bindings:`
-/// hold handler or heterogeneous values, and `plugins:` already gets its
-/// own static check elsewhere (`infer_map_val` routes it to
-/// `infer_plugins_list`), so none of those are pinned here. `apply_rc_key`'s
-/// own per-key check below is what still catches all of them, and every
-/// key here besides.
+/// The rc's [`ReturnContract`](ral_core::typecheck::ReturnContract), held
+/// against a literal rc return as it is checked — deliberately partial:
+/// `prompt:`/`aliases:`/`bindings:`/`plugins:` hold handler values, or one
+/// type per key rather than one across the key, and no single `Ty` pins
+/// either. `apply_rc_key`'s own per-key check below is what still catches
+/// all of them, and every key here besides.
 pub(super) fn rc_field_ty(key: &str, u: &mut ral_core::typecheck::Unifier) -> Option<ral_core::typecheck::Ty> {
     use ral_core::typecheck::Ty;
     match key {
@@ -322,17 +326,23 @@ fn apply_rc_key(
             Ok(())
         }
         "plugins" => {
-            let Value::List(entries) = val else {
+            let Value::Map(entries) = val else {
                 return Err(Error::new(
                     format!(
-                        "rc 'plugins' must be a list of plugin entries; got {}",
+                        "rc 'plugins' must be a map from plugin name to its options, \
+                         e.g. [zoxide: [key: 'alt-z'], autosuggestion: [:]]; got {}",
                         val.type_name()
                     ),
                     1,
                 ));
             };
-            for entry in entries {
-                load_rc_plugin(entry, shell, runtime);
+            for (name, options) in entries {
+                if let Err(err) = load_rc_plugin(&name, options, shell, runtime) {
+                    eprint!(
+                        "{}",
+                        ral_core::diagnostic::format_runtime_error_auto(shell.sources(), &err, None)
+                    );
+                }
             }
             Ok(())
         }
@@ -355,82 +365,28 @@ fn apply_rc_key(
     }
 }
 
-/// Load a single plugin entry from the RC `plugins` list.
-///
-/// Each entry is a map `[plugin: Str, options?: Map]`.  Unknown top-level
-/// keys are warned and ignored so future extensions (enabled, when, …) can
-/// slot in without breaking parsers.
-fn load_rc_plugin(entry: Value, shell: &mut Shell, runtime: &Arc<Mutex<PluginRuntime>>) {
-    if let Err(err) = parse_and_load_rc_plugin(entry, shell, runtime) {
-        eprint!(
-            "{}",
-            ral_core::diagnostic::format_runtime_error_auto(shell.sources(), &err, None)
-        );
-    }
-}
-
-/// Shape-check an rc plugin entry, dispatch to the plugin loader, and
-/// return the load error (if any) — the Result lets each field check
-/// short-circuit with `?` instead of repeating the render boilerplate per key.
-fn parse_and_load_rc_plugin(
-    entry: Value,
+/// Load one rc `plugins:` entry: the key names the plugin (or its path),
+/// the value is the options map, forwarded verbatim to the plugin's
+/// top-level block.
+fn load_rc_plugin(
+    name: &str,
+    options: Value,
     shell: &mut Shell,
     runtime: &Arc<Mutex<PluginRuntime>>,
 ) -> Result<(), Error> {
-    let Value::Map(pairs) = entry else {
+    let Value::Map(options) = options else {
         return Err(Error::new(
             format!(
-                "plugin entry must be a map [plugin: 'name', options: [...]]; got {}",
-                entry.type_name()
+                "rc plugin '{name}': the value under a plugin name is its options map; got {}. \
+                 Write `{name}: [:]` if it takes no options.",
+                options.type_name()
             ),
             1,
         ));
     };
-    let mut name: Option<String> = None;
-    let mut options: Option<Value> = None;
-    for (k, v) in pairs {
-        match (k.as_str(), v) {
-            ("plugin", Value::String(s)) => name = Some(s),
-            ("plugin", v) => {
-                return Err(Error::new(
-                    format!(
-                        "plugin entry 'plugin' must be a string; got {}",
-                        v.type_name()
-                    ),
-                    1,
-                ));
-            }
-            ("options", v @ Value::Map(_)) => options = Some(v),
-            ("options", v) => {
-                return Err(Error::new(
-                    format!(
-                        "plugin entry 'options' must be a map; got {}",
-                        v.type_name()
-                    ),
-                    1,
-                ));
-            }
-            (other, _) => ral_core::diagnostic::shell_warning(&format!(
-                "ral: plugin entry: unknown key '{other}', ignoring"
-            )),
-        }
-    }
-    let name = name.ok_or_else(|| {
-        Error::new(
-            "plugin entry missing required 'plugin' key; \
-             expected [plugin: 'name', options: [...]]",
-            1,
-        )
-    })?;
     // rc loading runs at session bring-up, with no run in hand, so the
     // plugin file evaluates moored adrift.
-    match super::plugin::load::load_plugin(
-        &name,
-        options.as_ref(),
-        &Mooring::adrift(),
-        shell,
-        runtime,
-    ) {
+    match super::plugin::load::load_plugin(name, &options, &Mooring::adrift(), shell, runtime) {
         Err(Break::Error(e)) => Err(e.context(format!("plugin '{name}'"))),
         _ => Ok(()),
     }
@@ -523,142 +479,57 @@ mod tests {
         (shell, runtime)
     }
 
-    /// Typecheck `src` against the baked prelude; return the errors.
-    fn typecheck_src(src: &str) -> Vec<ral_core::TypeError> {
-        let ast = ral_core::syntax::parser::parse(src).unwrap();
-        let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
-            .expect("elaborate");
-        let schemes = ral_core::SessionSchemes::from_schemes(
-            crate::PRELUDE.schemes(),
-            ral_core::HostSurface::default().builtin_table(),
-        );
-        ral_core::typecheck(&comp, schemes)
-            .err()
-            .unwrap_or_default()
-    }
-
-    /// Mixed-shape `plugins:` entries (some with `options:`, some without)
-    /// typecheck cleanly thanks to the per-entry validation hook.
-    #[test]
-    fn mixed_shape_plugins_list_typechecks() {
-        let src = "return [plugins: [\n\
-            [plugin: 'autosuggestion'],\n\
-            [plugin: 'fzf-files', options: [key: 'ctrl-t']],\n\
-            [plugin: 'fzf-history', options: [key: 'ctrl-r']],\n\
-        ]]\n";
-        let errs = typecheck_src(src);
-        assert!(errs.is_empty(), "unexpected type errors: {errs:?}");
-    }
-
-    /// `plugin:` value must be a String.
-    #[test]
-    fn plugin_entry_bad_plugin_field_fails_typecheck() {
-        let errs = typecheck_src("return [plugins: [[plugin: 42]]]\n");
-        assert!(
-            !errs.is_empty(),
-            "expected type error for non-String plugin field"
-        );
-    }
-
-    /// `options:` value must be a Map.
-    #[test]
-    fn plugin_entry_bad_options_field_fails_typecheck() {
-        let errs = typecheck_src("return [plugins: [[plugin: 'x', options: 'not-a-map']]]\n");
-        assert!(
-            !errs.is_empty(),
-            "expected type error for non-Map options field"
-        );
-    }
-
-    /// A `plugins` entry of the form `[plugin: <path>, options: [key: val]]`
-    /// loads the file and forwards the options map as the block's sole arg.
-    #[test]
-    fn rc_plugin_entry_forwards_options() {
+    /// Write `plugin` to a temp file, load it from an rc whose sole
+    /// `plugins:` entry gives it `options`, and return the loaded plugin's
+    /// manifest name — `None` when the load was rejected.
+    fn loaded_plugin_name(plugin: &str, options: &str) -> Option<String> {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("echo-key.ral");
-        // Plugin that echoes an option back as its manifest name.  Using
-        // a no-op keybinding keeps the manifest minimal and valid.
-        std::fs::write(
-            &path,
-            r"return { |options|
-    let k = get $options key 'default'
-    return [
-        name: $k,
-    ]
-}
-",
-        )
-        .unwrap();
-
+        let path = tmp.path().join("plugin.ral");
+        std::fs::write(&path, plugin).unwrap();
         let rc_src = format!(
-            "return [plugins: [[plugin: '{}', options: [key: 'from-rc']]]]\n",
+            "return [plugins: ['{}': {options}]]\n",
             path.to_string_lossy()
         );
         let (_shell, runtime) = apply_rc_with_runtime(&rc_src);
         let rt = runtime.lock().unwrap();
-        let plugin_count = rt.plugins.len();
-        let first_name = rt.plugins[0].name.clone();
-        drop(rt);
-        assert_eq!(plugin_count, 1);
-        assert_eq!(first_name, "from-rc");
+        rt.plugins.first().map(|p| p.name.clone())
     }
 
-    /// Omitting `options:` loads with an empty map; the plugin's own
-    /// defaults apply.
+    /// The value under a plugin name is its options map, forwarded verbatim
+    /// as the manifest block's sole argument.  `[:]` forwards an empty map,
+    /// so the plugin's own defaults stand.
     #[test]
-    fn rc_plugin_entry_without_options_uses_defaults() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("echo-key.ral");
-        std::fs::write(
-            &path,
-            r"return { |options|
+    fn rc_plugin_options_are_forwarded() {
+        // Echoes an option back as its manifest name, so the name the
+        // runtime records reports what the block received.
+        let plugin = r"return { |options|
     let k = get $options key 'fallback'
     return [name: $k]
 }
-",
-        )
-        .unwrap();
-
-        let rc_src = format!(
-            "return [plugins: [[plugin: '{}']]]\n",
-            path.to_string_lossy()
+";
+        assert_eq!(
+            loaded_plugin_name(plugin, "[key: 'from-rc']").as_deref(),
+            Some("from-rc")
         );
-        let (_shell, runtime) = apply_rc_with_runtime(&rc_src);
-        let rt = runtime.lock().unwrap();
-        let plugin_count = rt.plugins.len();
-        let first_name = rt.plugins[0].name.clone();
-        drop(rt);
-        assert_eq!(plugin_count, 1);
-        assert_eq!(first_name, "fallback");
-    }
-
-    /// Malformed rc plugin entries (non-map, missing `plugin:`) emit a
-    /// diagnostic but do not panic and leave the runtime plugin list empty.
-    #[test]
-    fn rc_plugin_entry_malformed_is_rejected() {
-        // Old list form — rejected wholesale.
-        let (_, runtime) = apply_rc_with_runtime("return [plugins: [['foo', 'bar']]]\n");
-        assert!(runtime.lock().unwrap().plugins.is_empty());
-
-        // Map missing 'plugin:' — rejected.
-        let (_, runtime) = apply_rc_with_runtime("return [plugins: [[options: [key: 'x']]]]\n");
-        assert!(runtime.lock().unwrap().plugins.is_empty());
+        assert_eq!(
+            loaded_plugin_name(plugin, "[:]").as_deref(),
+            Some("fallback")
+        );
     }
 
     /// A plugin manifest's `name:` field with the wrong literal type is a
     /// type error caught before the manifest is ever parsed as a value —
     /// not merely a runtime rejection once the map comes back.
     #[test]
-    fn rc_plugin_entry_bad_manifest_name_is_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("bad-name.ral");
-        std::fs::write(&path, "return [name: 42]\n").unwrap();
+    fn rc_plugin_bad_manifest_name_is_rejected() {
+        assert_eq!(loaded_plugin_name("return [name: 42]\n", "[:]"), None);
+    }
 
-        let rc_src = format!(
-            "return [plugins: [[plugin: '{}']]]\n",
-            path.to_string_lossy()
-        );
-        let (_shell, runtime) = apply_rc_with_runtime(&rc_src);
+    /// The value under a plugin name is its options map and nothing else:
+    /// anything but a map is reported and that one plugin skipped.
+    #[test]
+    fn rc_plugin_non_map_options_is_rejected() {
+        let (_, runtime) = apply_rc_with_runtime("return [plugins: [zoxide: 'alt-z']]\n");
         assert!(runtime.lock().unwrap().plugins.is_empty());
     }
 
@@ -860,7 +731,7 @@ mod tests {
         let ast = ral_core::syntax::parser::parse(src).unwrap();
         let comp = ral_core::elaborator::elaborate(&ast, std::collections::HashSet::default(), "")
             .expect("elaborate");
-        ral_core::typecheck(&comp, shell.session_schemes())
+        ral_core::typecheck(&comp, shell.session_schemes(), None)
             .err()
             .unwrap_or_default()
     }

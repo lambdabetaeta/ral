@@ -1,6 +1,6 @@
 ---
-generated_at_commit: 4bed97a
-generated_at_date: 2026-09-12
+generated_at_commit: da423d0d
+generated_at_date: 2026-09-13
 covers_paths: [ral/src/repl.rs, ral/src/repl/session.rs, ral/src/repl/session/, ral/src/repl/exec.rs, ral/src/repl/prompt.rs, ral/src/repl/config.rs, ral/src/repl/theme.rs, ral/src/repl/errfmt.rs, ral/src/repl/cursor.rs, ral/src/repl/worksheet.rs]
 ---
 
@@ -71,16 +71,18 @@ before `tcsetpgrp`, so `ral &` does not seize the terminal from a parent
 shell's current job. An rc file goes through `compile_and_typecheck` against
 the live session, against the `FileId` `evaluate_checked` registers its text
 with, so an alias or function it defines keeps naming the rc for the whole
-session. Both failing `CompileOutcome` arms — `Parse` and `Types` — are
-*reported and skipped*: the file has no runnable annotation, while the boot
-always survives
-([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]). A
-successful compile gets one more static pass before it runs:
-`ral_core::typecheck::check_return_schema` checks the rc's own returned
-literal map against `config.rs::rc_field_ty` — the same static, spanned
-treatment `within`/`grant` options get, reused for a program's own return
-value — and a schema failure is reported and skipped exactly like a `Types`
-failure, the whole rc unapplied rather than only the offending key. It only
+session. It compiles under a **return contract**
+(`ral_core::typecheck::ReturnContract`): `("rc", config.rs::rc_field_ty)`,
+which holds the rc's own returned literal map to that schema — the same
+static, spanned treatment `within`/`grant` options get, extended to a
+program's own return value. The contract is part of the one inference, not a
+pass after it: each field is pinned as the map is inferred, so there is no
+second reading of the return to disagree with the first. Both failing
+`CompileOutcome` arms — `Parse` and `Types`, a broken contract among the
+latter — are *reported and skipped*: the file has no runnable annotation,
+while the boot always survives
+([[decisions/260603_unconditional-mode-pass|unconditional-mode-pass]]), the
+whole rc unapplied rather than only the offending key. The contract only
 sees a literal `return [...]`; a *computed* rc return (a bound variable, a
 call) is invisible to it, and stays on `config.rs`'s own per-key runtime
 check below, which still applies the keys around a bad one.

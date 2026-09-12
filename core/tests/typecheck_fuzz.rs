@@ -32,6 +32,7 @@ fn raw_errors(src: &str) -> Vec<TypeError> {
             common::prelude_schemes(),
             ral_core::HostSurface::default().builtin_table(),
         ),
+        None,
     )
     .err()
     .unwrap_or_default()

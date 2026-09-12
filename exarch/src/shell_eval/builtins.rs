@@ -62,6 +62,7 @@ pub fn install_agent_library(mooring: &Mooring, shell: &mut Shell) -> Settled<Va
         shell,
         AGENT_SOURCE,
         "<exarch:agent>",
+        None,
     )
     .map_err(|e| match e {
         Break::Error(err) => sig(format!("exarch agent library: {}", err.message)),
@@ -1310,6 +1311,7 @@ mod tests {
             shell.session_schemes(),
             ral_core::source::FileId::DUMMY,
             "",
+            None,
         ) {
             ral_core::CompileOutcome::Compiled(_) => {}
             ral_core::CompileOutcome::Parse(e) => panic!("expected a clean parse, got: {e}"),
@@ -1338,6 +1340,7 @@ mod tests {
             shell.session_schemes(),
             ral_core::source::FileId::DUMMY,
             "",
+            None,
         ) {
             ral_core::CompileOutcome::Compiled(_) => {}
             ral_core::CompileOutcome::Parse(e) => panic!("expected a clean parse, got: {e}"),

@@ -25,6 +25,7 @@ fn errors_against(src: &str, surface: &ral_core::HostSurface) -> Vec<TypeError> 
     typecheck(
         &comp,
         ral_core::SessionSchemes::from_schemes(common::prelude_schemes(), surface.builtin_table()),
+        None,
     )
     .err()
     .unwrap_or_default()
@@ -1652,6 +1653,7 @@ fn annotated(src: &str) -> Toplevel {
             common::prelude_schemes(),
             ral_core::HostSurface::default().builtin_table(),
         ),
+        None,
     )
     .unwrap_or_else(|errs| panic!("expected no errors in {src:?}, got: {errs:?}"))
 }
@@ -2757,6 +2759,7 @@ fn toplevel_errors(src: &str) -> Vec<TypeError> {
             common::prelude_schemes(),
             ral_core::HostSurface::default().builtin_table(),
         ),
+        None,
     )
     .err()
     .unwrap_or_default()
@@ -2769,6 +2772,7 @@ fn toplevel_ok(src: &str) -> Toplevel {
             common::prelude_schemes(),
             ral_core::HostSurface::default().builtin_table(),
         ),
+        None,
     )
     .unwrap_or_else(|errs| {
         let msgs: Vec<String> = errs.iter().map(|e| e.kind.render_message()).collect();
@@ -2963,7 +2967,7 @@ fn toplevel_partial_application_eta_expands_to_thunked_lambda() {
     );
 }
 
-// ─── check_return_schema: the rc/manifest literal-return vet ─────────────────
+// ─── The return contract: the rc/manifest literal-return vet ─────────────────
 
 fn test_field_ty(key: &str, _u: &mut ral_core::typecheck::Unifier) -> Option<Ty> {
     match key {
@@ -2973,16 +2977,19 @@ fn test_field_ty(key: &str, _u: &mut ral_core::typecheck::Unifier) -> Option<Ty>
 }
 
 fn schema_errors(src: &str) -> Vec<TypeError> {
-    let top = annotated(src);
-    ral_core::typecheck::check_return_schema(
+    let ast = parse(src).unwrap_or_else(|e| panic!("parse error in {src:?}: {e:?}"));
+    let top = elaborate(&ast, std::collections::HashSet::default(), "")
+        .unwrap_or_else(|e| panic!("elaborate error in {src:?}: {e:?}"));
+    typecheck(
         &top,
         ral_core::SessionSchemes::from_schemes(
             common::prelude_schemes(),
             ral_core::HostSurface::default().builtin_table(),
         ),
-        "test",
-        test_field_ty,
+        Some(("test", test_field_ty)),
     )
+    .err()
+    .unwrap_or_default()
 }
 
 #[test]
@@ -2997,9 +3004,9 @@ fn return_schema_accepts_a_correctly_typed_literal_field() {
     assert!(errs.is_empty(), "expected no schema errors, got: {errs:?}");
 }
 
-/// The return value is a bound variable, not a literal map: nothing for
-/// `check_return_schema` to see, so it must not fire at all — not even to
-/// (wrongly) reject the map `m` happens to hold.
+/// The return value is a bound variable, not a literal map: nothing for the
+/// contract to hold, so it must not fire at all — not even to (wrongly)
+/// reject the map `m` happens to hold.
 #[test]
 fn return_schema_skips_a_computed_return_value() {
     let errs = schema_errors("let m = [n: \"x\"]\nreturn m");
@@ -3010,8 +3017,9 @@ fn return_schema_skips_a_computed_return_value() {
 }
 
 /// `$x` is bound by an earlier top-level `let` — a separate `Phrase::Define`
-/// from the final `return`'s own phrase — and `check_return_schema` must
-/// resolve it too, not misreport it as unbound.
+/// from the final `return`'s own phrase — and the contract must resolve it
+/// too, not misreport it as unbound.  It is inference's own environment now,
+/// so there is nothing left to re-seed.
 #[test]
 fn return_schema_resolves_an_earlier_top_level_let() {
     let errs = schema_errors("let x = 1\nreturn [n: $x]");

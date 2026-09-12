@@ -114,11 +114,11 @@ fn rc_bad_literal_key_fails_the_whole_file() {
     );
 }
 
-/// The same mistake through a *computed* rc return: `check_return_schema`
-/// cannot see past the bound variable, so `apply_rc_key`'s own runtime
-/// check is what still catches it — reporting the bad key by name and
-/// applying the keys around it, exactly as before this file grew a static
-/// schema for the literal case.
+/// The same mistake through a *computed* rc return: the rc's return
+/// contract cannot see past the bound variable, so `apply_rc_key`'s own
+/// runtime check is what still catches it — reporting the bad key by name
+/// and applying the keys around it, exactly as before this file grew a
+/// static schema for the literal case.
 #[test]
 fn rc_computed_bad_key_is_reported_and_the_rest_still_applies() {
     let (_dir, env) = rc_home(
@@ -152,7 +152,7 @@ fn rc_plugin_installs_an_alias_and_unload_removes_it() {
     )
     .unwrap();
     let (_dir, env) = rc_home(&format!(
-        "return [plugins: [[plugin: '{}']]]",
+        "return [plugins: ['{}': [:]]]",
         manifest.display()
     ));
 
@@ -166,6 +166,42 @@ fn rc_plugin_installs_an_alias_and_unload_removes_it() {
     assert!(
         out.stderr.contains("hail: command not found"),
         "unload must take the alias with it: {}",
+        out.stderr
+    );
+}
+
+/// Two plugins whose options have nothing in common: one type per key is
+/// what a record is for, so the rc's static contract must admit them.  The
+/// guard belongs on the boot path because that contract runs nowhere else.
+#[test]
+fn rc_plugins_take_differently_shaped_options() {
+    let plug = tempfile::tempdir().unwrap();
+    for alias in ["ping-alpha", "ping-beta"] {
+        std::fs::write(
+            plug.path().join(format!("{alias}.ral")),
+            format!(
+                "return {{ |options| return [name: '{alias}', \
+                 aliases: [{alias}: {{ |args| echo {alias} }}]] }}"
+            ),
+        )
+        .unwrap();
+    }
+    let (_dir, env) = rc_home(&format!(
+        "return [plugins: ['{}': [key: 'ctrl-t'], '{}': [depth: 3, quiet: true]]]",
+        plug.path().join("ping-alpha.ral").display(),
+        plug.path().join("ping-beta.ral").display(),
+    ));
+
+    let out = repl(&["-i"], &env, "ping-alpha\nping-beta\n");
+    assert!(
+        !out.stderr.contains("skipped due to type errors"),
+        "the rc must survive its own contract check: {}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("ping-alpha") && out.stdout.contains("ping-beta"),
+        "both plugins must load: {}{}",
+        out.stdout,
         out.stderr
     );
 }

@@ -108,7 +108,7 @@ plugins-check:
         name=$(basename "$f" .ral)
         dir=$(mktemp -d)
         mkdir -p "$dir/ral"
-        printf "return [plugins: [[plugin: '%s']]]" "$name" > "$dir/ral/rc"
+        printf "return [plugins: ['%s': [:]]]" "$name" > "$dir/ral/rc"
         out=$(echo 'echo ok' | XDG_CONFIG_HOME="$dir" RAL_PATH="{{justfile_directory()}}/plugins" cargo run -p ral --quiet -- -i 2>&1)
         if echo "$out" | grep -q "ral: plugin '$name':"; then
             echo "plugins-check: $name failed to load"

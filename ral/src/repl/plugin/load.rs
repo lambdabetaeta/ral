@@ -12,7 +12,7 @@
 
 use ral_core::protocol::Program;
 use ral_core::source::Span;
-use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Mooring, Settled};
+use ral_core::types::{Break, DefaultPolicy, Error, HookName, HookSig, Map, Mooring, Settled};
 use ral_core::{RequestedTerminalAccess, RunReport, Shell, Value};
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +20,8 @@ use super::super::errfmt::plugin_warning;
 use super::manifest::{LoadedPlugin, ManifestHandlers, manifest_field_ty};
 use super::{PluginRuntime, framed_run_request, load_err, lock};
 
-/// Load a plugin by name (or path) with an optional options map.
+/// Load a plugin by name (or path) with its options map — empty for a
+/// plugin configured by nothing but its own defaults.
 ///
 /// 1. Resolve the path (search `~/.config/ral/plugins/`, `RAL_PATH`, literal).
 /// 2. Evaluate the plugin file with host authority.
@@ -30,21 +31,11 @@ use super::{PluginRuntime, framed_run_request, load_err, lock};
 /// 6. Push the plugin record into the runtime, set the keybinding-dirty flag.
 pub(crate) fn load_plugin(
     name_or_path: &str,
-    options: Option<&Value>,
+    options: &Map,
     mooring: &Mooring,
     shell: &mut Shell,
     runtime: &Arc<Mutex<PluginRuntime>>,
 ) -> Settled<()> {
-    if let Some(opts) = options
-        && !matches!(opts, Value::Map(_))
-    {
-        return Err(load_err(format!(
-            "plugin '{name_or_path}': options must be a Map, got {}",
-            opts.type_name()
-        ))
-        .into());
-    }
-
     check_not_loaded(name_or_path, runtime)?;
 
     let path = resolve_plugin_path(name_or_path, shell.env_overrides())?;
@@ -61,13 +52,12 @@ pub(crate) fn load_plugin(
     // top-level helper bindings are discarded, since the manifest is the
     // file's *return value*, not its bindings.
     let value = shell.in_fresh_scope(|shell| {
-        ral_core::builtins::modules::evaluate_source_checked(
+        ral_core::builtins::modules::evaluate_source(
             mooring,
             shell,
             &source,
             &path,
-            "plugin manifest",
-            manifest_field_ty,
+            Some(("plugin manifest", manifest_field_ty)),
         )
     })?;
     let module = instantiate(value, options, name_or_path, shell)?;
@@ -242,14 +232,8 @@ fn install_bindings(
 ///
 /// Apply the options map to a parameterised plugin block to yield its
 /// manifest.  If the plugin is already a manifest map, a non-empty options
-/// map is a load-time error; an absent or empty options map is fine.
-fn instantiate(
-    val: Value,
-    options: Option<&Value>,
-    name: &str,
-    shell: &mut Shell,
-) -> Settled<Value> {
-    let empty = Value::Map(ral_core::Map::new());
+/// map is a load-time error; an empty one is fine.
+fn instantiate(val: Value, options: &Map, name: &str, shell: &mut Shell) -> Settled<Value> {
     match val {
         val @ Value::Thunk(_) => {
             let factory_name = HookName::plugin(name.to_string(), "factory");
@@ -263,7 +247,7 @@ fn instantiate(
             ) {
                 return Err(Break::Error(load_err(format!("plugin '{name}': {e}"))));
             }
-            let arg = options.cloned().unwrap_or(empty);
+            let arg = Value::Map(options.clone());
             let fo_arg = match ral_core::serial::FOValue::try_from(&arg) {
                 Ok(fo) => fo,
                 Err(e) => {
@@ -293,12 +277,10 @@ fn instantiate(
                 }
             }
         }
-        _ if matches!(options, Some(Value::Map(e)) if !e.is_empty()) => {
-            Err(Break::Error(load_err(format!(
-                "plugin '{name}' takes no configuration; \
-                 remove 'options:' from the rc entry"
-            ))))
-        }
+        _ if !options.is_empty() => Err(Break::Error(load_err(format!(
+            "plugin '{name}' takes no configuration; \
+             its entry in the rc's plugins map wants the empty options map `[:]`"
+        )))),
         val => Ok(val),
     }
 }

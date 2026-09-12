@@ -130,11 +130,16 @@ impl CompileOutcome {
 /// same source's display name, which the elaborator bakes into every
 /// `$SCRIPT` in the body: self-location is lexical, fixed at elaboration,
 /// never read at eval time.
+///
+/// `contract` is the form's hold on `source`'s own returned literal map —
+/// an rc file's top-level keys, a plugin manifest's fields — checked in the
+/// same pass as everything else; `None` for a program no form speaks about.
 pub fn compile_and_typecheck(
     source: &str,
     schemes: SessionSchemes,
     file: source::FileId,
     name: &str,
+    contract: Option<typecheck::ReturnContract>,
 ) -> CompileOutcome {
     let ast = match parse_with(source, file) {
         Ok(a) => a,
@@ -148,7 +153,7 @@ pub fn compile_and_typecheck(
         Ok(comp) => comp,
         Err(e) => return CompileOutcome::Parse(e),
     };
-    match typecheck(&comp, schemes) {
+    match typecheck(&comp, schemes, contract) {
         Ok(annotated) => CompileOutcome::Compiled(annotated),
         Err(errs) => CompileOutcome::Types(errs),
     }

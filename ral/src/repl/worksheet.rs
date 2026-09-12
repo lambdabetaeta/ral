@@ -91,6 +91,7 @@ impl Worksheet {
             shell.session_schemes(),
             ral_core::source::FileId::DUMMY,
             "",
+            None,
         ) {
             ral_core::CompileOutcome::Compiled(top) => bind_effects(&top),
             _ => return,

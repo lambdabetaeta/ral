@@ -962,17 +962,9 @@ pub(in crate::typecheck) fn lines_step_ty(u: &mut Unifier) -> Ty {
 ///
 /// `None` for a key leaves that entry runtime-dispatched: still inferred for its
 /// side-effects, but unified against nothing. `pub`, not `pub(crate)`: a host
-/// crate's own rc/manifest schema (`check_return_schema`) is one of these too.
+/// crate's own rc/manifest schema — half of a
+/// [`ReturnContract`](super::ReturnContract) — is one of these too.
 pub type FieldSchema = fn(&str, &mut Unifier) -> Option<Ty>;
-
-/// Schema for rc plugin entries `[plugin: Str, options: Map]`.
-pub(crate) fn plugin_entry_field_ty(key: &str, u: &mut Unifier) -> Option<Ty> {
-    match key {
-        "plugin" => Some(Ty::String),
-        "options" => Some(Ty::Map(Box::new(u.fresh_ty()))),
-        _ => None,
-    }
-}
 
 /// Detect the literal `fail [status: 0, …]` shape, so the nonzero-status rule
 /// `builtins::misc::builtin_fail` enforces at runtime can be diagnosed at

@@ -71,8 +71,9 @@ pub(super) struct ManifestHandlers {
 
 /// Schema for the manifest map's one scalar-typed field.
 ///
-/// Checked statically against a literal manifest return by
-/// `check_return_schema`. `hooks:`, `keybindings:`, and `aliases:` hold
+/// The plugin loader's [`ReturnContract`](ral_core::typecheck::ReturnContract),
+/// held against a literal manifest return as it is checked. `hooks:`,
+/// `keybindings:`, and `aliases:` hold
 /// handler values of varying shape, validated at load instead, by
 /// `parse_hooks`/`parse_keybindings`/`parse_aliases` below; `capabilities:`
 /// is rejected outright rather than type-checked, so it has no schema entry

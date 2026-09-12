@@ -699,7 +699,7 @@ mod tests {
         let ast = crate::parse(src).expect("parse");
         let top = crate::elaborate(&ast, HashSet::default(), "").expect("elaborate");
         let annotated =
-            crate::typecheck(&top, crate::SessionSchemes::default()).expect("typecheck");
+            crate::typecheck(&top, crate::SessionSchemes::default(), None).expect("typecheck");
         let [phrase] = annotated.phrases.as_slice() else {
             panic!("expected one phrase, got {:?}", annotated.phrases);
         };

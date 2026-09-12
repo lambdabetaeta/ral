@@ -623,7 +623,7 @@ pub(crate) fn compile_run(
 
     #[cfg(debug_assertions)]
     let t_tc = std::time::Instant::now();
-    let outcome = compile_and_typecheck(src, schemes, file, name);
+    let outcome = compile_and_typecheck(src, schemes, file, name, None);
     crate::dbg_trace!(
         "shell",
         "compile_and_typecheck: {n_bindings} bindings, {} src bytes in {:?}",

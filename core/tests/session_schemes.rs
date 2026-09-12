@@ -64,7 +64,7 @@ fn run(shell: &mut Shell, src: &str) -> Settled<Value> {
 /// Check `src` against the live session without evaluating it — the
 /// errors a run would surface before running.
 fn check_errors(shell: &Shell, src: &str) -> Vec<TypeError> {
-    match compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY, "") {
+    match compile_and_typecheck(src, shell.session_schemes(), FileId::DUMMY, "", None) {
         CompileOutcome::Compiled(_) => Vec::new(),
         CompileOutcome::Parse(e) => panic!("parse: {src:?}: {e}"),
         CompileOutcome::Types(errs) => errs,
