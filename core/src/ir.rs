@@ -11,9 +11,9 @@ use crate::path::tilde::TildePath;
 use crate::source::Spanned;
 use crate::syntax::ast::{BinaryOp, Pattern, RedirectMode};
 
-/// A [`crate::syntax::ast::Pattern`] whose map-pattern defaults are already
-/// elaborated to computations: no parser syntax survives elaboration.
-pub type IrPattern = Pattern<Arc<Comp>>;
+/// A [`crate::syntax::ast::Pattern`] as elaboration hands it to the rest of
+/// the IR — the same shape, under the IR's own name.
+pub type IrPattern = Pattern;
 pub(crate) type Param = IrPattern;
 
 // ── Values ──────────────────────────────────────────────────────────────
@@ -190,11 +190,10 @@ impl Toplevel {
 fn walk_phrase<'a>(phrase: &'a Phrase, out: &mut Vec<&'a str>) {
     match phrase {
         Phrase::Define {
-            pattern,
+            pattern: _,
             comp,
             schemes: _,
         } => {
-            walk_pattern_defaults(pattern, out);
             walk_comp(comp, out);
         }
         Phrase::Run(comp) => walk_comp(comp, out),
@@ -262,17 +261,15 @@ pub(crate) fn referenced_names(comp: &Comp) -> Vec<&str> {
 
 fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
     match &comp.item {
-        CompKind::Lam { param, body } => {
-            walk_pattern_defaults(param, out);
+        CompKind::Lam { param: _, body } => {
             walk_comp(body, out);
         }
         CompKind::Bind {
             comp,
-            pattern,
+            pattern: _,
             rest,
         } => {
             walk_comp(comp, out);
-            walk_pattern_defaults(pattern, out);
             walk_comp(rest, out);
         }
         CompKind::App { head, args } => {
@@ -329,7 +326,6 @@ fn walk_comp<'a>(comp: &'a Comp, out: &mut Vec<&'a str>) {
         CompKind::Case { scrutinee, arms } => {
             walk_val(&scrutinee.item, out);
             for arm in arms {
-                walk_pattern_defaults(&arm.pattern, out);
                 walk_comp(arm.body.comp(), out);
             }
         }
@@ -408,28 +404,6 @@ fn walk_redirects<'a>(redirects: &'a [RedirectV], out: &mut Vec<&'a str>) {
         match &redirect.target {
             ValRedirectTarget::File(v) => walk_val(v, out),
             ValRedirectTarget::Fd(_) => {}
-        }
-    }
-}
-
-/// Map-pattern defaults are the only sub-position of an [`IrPattern`] that
-/// can reference a name; the pattern's own names are bound, not referenced.
-/// Recurses so a nested destructuring's defaults are found too.
-fn walk_pattern_defaults<'a>(pattern: &'a IrPattern, out: &mut Vec<&'a str>) {
-    match pattern {
-        IrPattern::Wildcard | IrPattern::Name(_) => {}
-        IrPattern::List { elems, rest: _ } => {
-            for elem in elems {
-                walk_pattern_defaults(elem, out);
-            }
-        }
-        IrPattern::Map(entries) => {
-            for entry in entries {
-                walk_pattern_defaults(&entry.pattern, out);
-                if let Some(default) = &entry.default {
-                    walk_comp(default, out);
-                }
-            }
         }
     }
 }
@@ -695,26 +669,14 @@ mod tests {
     /// superset a bound name over-renewing.
     #[test]
     fn referenced_names_walks_every_variant() {
-        let lam_param = IrPattern::Map(vec![crate::syntax::ast::MapPatternEntry {
-            key: crate::syntax::ast::MapKey::Bare("p".into()),
-            pattern: IrPattern::Name("lam_param_bound".into()),
-            default: Some(Arc::new(Spanned::synthetic(CompKind::Return(var(
-                "r_lam_default",
-            ))))),
-        }]);
+        let lam_param = IrPattern::Name("lam_param_bound".into());
         let lam = Spanned::synthetic(CompKind::Lam {
             param: lam_param,
             body: ret("r_lam_body"),
         });
 
         let bind_pattern = IrPattern::List {
-            elems: vec![IrPattern::Map(vec![crate::syntax::ast::MapPatternEntry {
-                key: crate::syntax::ast::MapKey::Bare("k".into()),
-                pattern: IrPattern::Name("bind_map_bound".into()),
-                default: Some(Arc::new(Spanned::synthetic(CompKind::Return(var(
-                    "r_bind_pattern_default",
-                ))))),
-            }])],
+            elems: vec![IrPattern::Name("bind_map_bound".into())],
             rest: Some("bind_rest_bound".into()),
         };
         let bind = Spanned::synthetic(CompKind::Bind {
@@ -797,13 +759,7 @@ mod tests {
             scrutinee: Spanned::synthetic(var("r_case_scrutinee")),
             arms: vec![CaseArm {
                 tag: Spanned::synthetic("some".into()),
-                pattern: IrPattern::Map(vec![crate::syntax::ast::MapPatternEntry {
-                    key: crate::syntax::ast::MapKey::Bare("k".into()),
-                    pattern: IrPattern::Name("case_arm_bound".into()),
-                    default: Some(Arc::new(Spanned::synthetic(CompKind::Return(var(
-                        "r_case_arm_default",
-                    ))))),
-                }]),
+                pattern: IrPattern::Name("case_arm_bound".into()),
                 body: ArmBody::Inline(ret("r_case_arm_body")),
             }],
         });
@@ -903,9 +859,7 @@ mod tests {
         let expected = [
             "r_force",
             "r_return",
-            "r_lam_default",
             "r_lam_body",
-            "r_bind_pattern_default",
             "r_bind_comp",
             "r_bind_rest",
             "r_app_head",
@@ -929,7 +883,6 @@ mod tests {
             "r_if_then",
             "r_if_else",
             "r_case_scrutinee",
-            "r_case_arm_default",
             "r_case_arm_body",
             "r_try_body",
             "r_try_handler",

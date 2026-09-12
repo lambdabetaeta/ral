@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c1bb993b
+generated_at_commit: a3ff030d
 generated_at_date: 2026-09-12
 covers_paths: [core/src/ir.rs]
 ---
@@ -91,9 +91,10 @@ since the checker runs before every evaluation.
 unexpanded, for a diagnostic raised before there is a `HOME` to expand it
 against.
 
-`IrPattern = Pattern<Arc<Comp>>` — the same `Pattern` shape as the AST, but
-map-pattern defaults are pre-elaborated computations, so no parser syntax leaks
-through ([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
+`IrPattern = Pattern` — the same `Pattern` shape the AST uses, under the IR's
+own name: a pattern binds names, never carries a computation, so there is no
+parser syntax for elaboration to strip out
+([[invariants/ir-pure-cbpv|ir-pure-cbpv]]).
 
 `referenced_names` (`pub(crate)`) collects a compiled program's variable and
 command-head names in one exhaustive, wildcard-free walk — the use-observation

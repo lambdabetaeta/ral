@@ -337,7 +337,7 @@ impl Machine {
             unreachable!("a Terminal::Lambda's closure is always arrow-shaped (S3 eta-expansion)")
         };
         let arg = args.remove(0);
-        let env2 = match pattern::bind_pattern(param, &arg, &[], env, mooring, shell) {
+        let env2 = match pattern::bind_pattern(param, &arg, &[], env, shell) {
             Ok(e) => e,
             Err(b) => return Focus::Halt(b),
         };
@@ -600,9 +600,7 @@ impl Machine {
                 Err(e) => Focus::Halt(Break::Error(e)),
             },
 
-            CompKind::Case { scrutinee, arms } => {
-                Self::step_case(scrutinee, arms, &env, mooring, shell)
-            }
+            CompKind::Case { scrutinee, arms } => Self::step_case(scrutinee, arms, &env, shell),
 
             CompKind::App { head, args } => 'arm: {
                 if let Err(b) = crate::process::check(mooring) {
@@ -826,7 +824,6 @@ impl Machine {
         scrutinee: &crate::source::Spanned<Val>,
         arms: &[CaseArm],
         env: &Env,
-        mooring: &Mooring,
         shell: &mut Shell,
     ) -> Focus {
         let (label, payload) = match close(&scrutinee.item, env) {
@@ -857,7 +854,7 @@ impl Machine {
             )));
         };
         let payload = payload.map_or(Value::Unit, |p| *p);
-        match pattern::bind_pattern(&arm.pattern, &payload, &[], env.clone(), mooring, shell) {
+        match pattern::bind_pattern(&arm.pattern, &payload, &[], env.clone(), shell) {
             Ok(env2) => Focus::Eval(Closure {
                 comp: Arc::clone(arm.body.comp()),
                 env: env2,
@@ -953,7 +950,7 @@ impl Machine {
                 let CompKind::Bind { pattern, rest, .. } = &bind.item else {
                     unreachable!("a To frame's `bind` is always a Bind comp")
                 };
-                match pattern::bind_pattern(pattern, &v, &[], env, mooring, shell) {
+                match pattern::bind_pattern(pattern, &v, &[], env, shell) {
                     Ok(env2) => Focus::Eval(Closure {
                         comp: Arc::clone(rest),
                         env: env2,
@@ -1344,7 +1341,7 @@ mod tests {
                         mooring,
                         shell,
                     )?;
-                    env = pattern::bind_pattern(pattern, &v, &[], env, mooring, shell)?;
+                    env = pattern::bind_pattern(pattern, &v, &[], env, shell)?;
                     value = Ok(Value::Unit);
                 }
             }

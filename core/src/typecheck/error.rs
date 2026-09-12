@@ -27,11 +27,19 @@ pub enum CompDiff {
 /// them in their own words.
 #[derive(Debug, Clone)]
 pub enum PinFailure {
-    /// The arm and the head disagree about where their payload lives.
+    /// The arm and the head disagree about where their payload lives. Only
+    /// reachable reinterpreting an existing handler — a fresh name's head is
+    /// `Bytes`, and `Value Unit` subsumes into that, so it never reaches a
+    /// bare route clash.
     Route(RouteMismatch),
     /// The head is captured from stdout, so WF-2 makes the arm's value
     /// `Unit` — and this arm returns something else.
-    ByteHeadReturnsValue(Ty),
+    ByteHeadReturnsValue {
+        actual: Ty,
+        /// Whether the head is an existing handler this arm reinterprets,
+        /// rather than a fresh name that behaves like an external program.
+        reinterprets: bool,
+    },
 }
 
 /// Why the inferencer demanded that two types agree.

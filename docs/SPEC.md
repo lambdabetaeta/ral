@@ -662,16 +662,20 @@ A static key can be a bare name or a quoted string. A computed key uses a
 string value such as `$key`. Any computed key that is not a `String` is an
 error. Keys are unique in the resulting value and iterate in sorted order.
 
-A duplicate explicit key produces a warning. The last explicit entry wins.
-Map spreading has these priority rules:
-
-1. Every explicit entry wins over every spread entry, regardless of position.
-2. If spread entries conflict with each other, the first spread entry wins.
+A bracketed literal is a record if it opens with `:` or contains a
+`key: value` entry; otherwise it is a list. `[:]` is that marker's degenerate
+case — nothing follows the `:`. Without the marker, a literal built entirely
+from spreads has no entry to settle its shape and falls to list, so the
+marker is also how a pure record merge is written:
 
 ```ral
-let defaults = [host: 'localhost', port: 80]
-let server = [...$defaults, port: 8080]
+let given = [host: 'prod']
+let merged = [:, ...$given, ...$defaults]
 ```
+
+Every explicit entry wins over every spread entry, regardless of position. If
+spread entries conflict with each other, the first spread entry wins. A
+duplicate explicit key produces a warning; the last explicit entry wins.
 
 Spreading a value that is not a record or map is an error. Spreading does not
 change the source value.
@@ -824,7 +828,6 @@ patterns.
 | `[first, second]` | Bind a list of exactly that length. |
 | `[first, ...rest]` | Bind the first item and bind the remaining list to `rest`. |
 | `[host: h, port: p]` | Read named fields from a map or record. |
-| `[port: p = 8080]` | Use `8080` when `port` is absent. |
 
 Patterns can be nested.
 
@@ -837,16 +840,8 @@ One pattern cannot bind the same name twice. ral reports this as a parse
 error, including when the repeated name is nested or used as a list tail.
 
 A list pattern without `...rest` must match the complete list. It is an error
-if the list has too few or too many items. A map pattern requires every field
-that has no default. Extra map fields are allowed.
-
-A default is evaluated only when its field is absent. It uses the lexical
-scope of the pattern.
-
-```ral
-let default-port = { return 8080 }
-let [host: host, port: port = !{default-port}] = [host: 'localhost']
-```
+if the list has too few or too many items. A map pattern requires every
+field it names. Extra map fields are allowed.
 
 A pattern either binds every name or binds none of them. If any nested part
 does not match, ral reports an error and leaves the scope unchanged. `try` can
@@ -4235,6 +4230,7 @@ list          ::= "[" list-items? "]"
 list-items    ::= list-item ("," list-item)* ","?
 list-item     ::= atom | "..." atom
 map           ::= "[:]"
+                | "[:," map-entry ("," map-entry)* ","? "]"
                 | "[" map-entry ("," map-entry)* ","? "]"
 map-entry     ::= map-key ":" atom | "..." atom
 map-key       ::= identifier | quoted-string | variable | tag-key
@@ -4247,7 +4243,7 @@ pattern-list  ::= pattern ("," pattern)* ("," "..." identifier)?
                 | "..." identifier
 map-pattern   ::= "[" map-pattern-entry
                   ("," map-pattern-entry)* ","? "]"
-map-pattern-entry ::= static-key ":" pattern ("=" atom)?
+map-pattern-entry ::= static-key ":" pattern
 static-key    ::= identifier | quoted-string | tag-key
 
 redirects     ::= redirect*
@@ -4289,8 +4285,7 @@ The parser curries a multi-parameter block:
 ```
 
 Each pattern binds all its names simultaneously and may not bind one name more
-than once. A list rest pattern is terminal. A map-pattern default is evaluated
-only when its field is absent.
+than once. A list rest pattern is terminal.
 
 The `?` continuation admits at most one newline before `?` and none after it.
 `|` admits newlines on either side.

@@ -142,6 +142,68 @@ fn rc_plugin_installs_an_alias_and_unload_removes_it() {
     );
 }
 
+// ── The head pin admits `Value Unit ⊑ Bytes` ────────────────────────────────
+
+/// An alias body ending in a value-routed, `Unit`-returning builtin (`cd`)
+/// installs under a fresh name with no trailing byte-write: the head pin
+/// (`pin_arm_to_head`) now shares the arm-join's subsumption instance,
+/// `Value Unit ⊑ Bytes`, rather than demanding the arm write a byte itself.
+#[test]
+fn an_alias_ending_in_cd_installs_with_no_trailing_write() {
+    let (dir, env) = rc_home("return [aliases: [gohome: { |args| cd ~ }]]");
+    let marker = env[1].1.join("it-worked");
+    let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
+    assert!(
+        !out.stderr.contains("ralrc: alias"),
+        "an alias ending in `cd` must install; stderr was:\n{}",
+        out.stderr
+    );
+    assert!(
+        marker.exists(),
+        "the alias must actually have run `cd ~`, landing `touch` in $HOME"
+    );
+    drop(dir);
+}
+
+/// The same, where the arm is an `if` whose branches are *both* ground
+/// `Value` (so the join lands on the value side, per `conclude_value_side`)
+/// before the whole arm pins to the head's `Bytes` route.
+#[test]
+fn an_alias_whose_if_join_is_all_value_still_installs() {
+    let (dir, env) = rc_home(
+        "return [aliases: [gohome: { |args| \
+             if !{is-empty $args} { cd ~ } else { cd ~ } }]]",
+    );
+    let marker = env[1].1.join("it-worked");
+    let out = repl(&["-i"], &env, "gohome\ntouch it-worked\n");
+    assert!(
+        !out.stderr.contains("ralrc: alias"),
+        "an if/else of two `cd`s must install; stderr was:\n{}",
+        out.stderr
+    );
+    assert!(
+        marker.exists(),
+        "the alias must actually have run `cd ~`, landing `touch` in $HOME"
+    );
+    drop(dir);
+}
+
+/// An arm that genuinely returns a payload — a `String`, under a head with
+/// no prior handler — is still rejected: the subsumption only ever admits
+/// `Value Unit`, never a value that survives to the boundary.
+#[test]
+fn an_alias_returning_a_string_is_still_rejected() {
+    let (_dir, env) = rc_home("return [aliases: [greet: { |args| \"hi\" }]]");
+    let out = repl(&["-i"], &env, "echo ok\n");
+    assert!(
+        out.stderr.contains("ralrc:")
+            && out.stderr.contains("greet")
+            && out.stderr.contains("String"),
+        "a value-returning arm over a fresh name must still fail; stderr was:\n{}",
+        out.stderr
+    );
+}
+
 // ── `-s` beats `-i` ────────────────────────────────────────────────────────
 
 /// `-s` forces stdin to be read as a batch script even under `-i`.  The two

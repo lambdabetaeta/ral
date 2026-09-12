@@ -248,6 +248,13 @@ pub(super) fn wire_stderr(
                         .try_clone_to_owned()
                         .map_err(|e| pipe_err(&e))?;
                     crate::process::StdioSpec::from_owned_handle(owned)
+                } else if let crate::io::Sink::Pipe { writer, .. } = &shell.io.stdout {
+                    // A pipeline stage's downstream is a real handle, not one
+                    // `Stdio::piped()` allocates at spawn, so it can be cloned
+                    // the same way a stdout file target is above.
+                    crate::process::StdioSpec::from_pipe_writer(
+                        writer.try_clone().map_err(|e| pipe_err(&e))?,
+                    )
                 } else {
                     // Every remaining sink pumps child.stdout through a pipe
                     // that `Stdio::piped()` allocates only at spawn, so stderr

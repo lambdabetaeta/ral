@@ -1,5 +1,5 @@
 ---
-generated_at_commit: c1bb993b
+generated_at_commit: a3ff030d
 generated_at_date: 2026-09-12
 covers_paths: [core/src/evaluator.rs, core/src/evaluator/]
 ---
@@ -32,9 +32,9 @@ crate-private.** Two reach outside the module:
   closed value meeting arguments (`Machine::applying` sets the first state).
   A host reaches it only through the run door's hook-program arm or the
   in-frame builtin wrapper (a native applying a user function — collection
-  combinators, hook dispatch, pattern defaults — runs a *nested* machine on
-  the host stack, capped by `NESTED_MACHINE_LIMIT`), so an unframed reduction
-  is unconstructable.
+  combinators, hook dispatch — runs a *nested* machine on the host stack,
+  capped by `NESTED_MACHINE_LIMIT`), so an unframed reduction is
+  unconstructable.
 
 The result surface is `Settled<Value>` carrying `Escape` / `BodyResult`.
 A tail call binds its argument into the closure's environment and puts the body
@@ -102,7 +102,7 @@ Internals:
   The handler-stack mechanics live in [[internals/handler-dispatch|handler-dispatch]].
 - `pattern.rs` — matching: `bind_pattern`/`bind_pattern_staged` destructure a
   `Value` against a compiled `IrPattern` (wildcard, name, list with optional
-  `...rest`, map with pre-elaborated defaults) and fold the result straight
+  `...rest`, map by key) and fold the result straight
   into an `Env`. Without a `...rest` tail a list pattern must cover the value
   exactly — a longer list errors rather than silently dropping its extra
   elements. A mismatch is a located runtime error with an `expected … got …`

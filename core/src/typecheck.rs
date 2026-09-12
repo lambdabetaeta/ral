@@ -240,9 +240,10 @@ pub(crate) fn catch_all_route_ok(body: &Comp, schemes: SessionSchemes) -> Result
         PayloadRoute::Bytes
     ) && inferencer.ctx.unifier.unify_ty(&value, &Ty::Unit).is_err()
     {
-        return Err(PinFailure::ByteHeadReturnsValue(
-            inferencer.ctx.unifier.apply_ty(&value),
-        ));
+        return Err(PinFailure::ByteHeadReturnsValue {
+            actual: inferencer.ctx.unifier.apply_ty(&value),
+            reinterprets: true,
+        });
     }
     Ok(())
 }

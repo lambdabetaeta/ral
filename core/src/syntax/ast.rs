@@ -185,11 +185,8 @@ pub enum Head {
 /// Binding pattern, shared by `let` and lambda parameters. There is no
 /// alternative to fall through to, so a shape mismatch at bind time is an
 /// error rather than a failure to match.
-///
-/// `D` is the shape of map-pattern defaults: surface [`Ast`] from the parser,
-/// an already-elaborated computation in [`crate::ir::IrPattern`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Pattern<D = Ast> {
+pub enum Pattern {
     /// `_` — discard the value.
     Wildcard,
     Name(String),
@@ -198,17 +195,16 @@ pub enum Pattern<D = Ast> {
         elems: Vec<Self>,
         rest: Option<String>,
     },
-    /// `[key: pat = default, …]`
-    Map(Vec<MapPatternEntry<D>>),
+    /// `[key: pat, …]`
+    Map(Vec<MapPatternEntry>),
 }
 
-/// One entry of a [`Pattern::Map`]: a static key, the sub-pattern bound to that
-/// field, and a default that fires when the key is absent.
+/// One entry of a [`Pattern::Map`]: a static key and the sub-pattern bound to
+/// that field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MapPatternEntry<D = Ast> {
+pub struct MapPatternEntry {
     pub(crate) key: MapKey,
-    pub(crate) pattern: Pattern<D>,
-    pub(crate) default: Option<D>,
+    pub(crate) pattern: Pattern,
 }
 
 /// Lambda parameter.
@@ -503,12 +499,12 @@ impl WordLiteral {
     }
 }
 
-impl<D> Pattern<D> {
+impl Pattern {
     /// The first name this pattern binds twice, if any. A pattern binds all
     /// its names at once, so a repeat is an ambiguity, not a shadow — the
     /// parser rejects it at both binder sites (`let` and lambda parameter).
     pub(crate) fn duplicate_name(&self) -> Option<&str> {
-        fn walk<'a, D>(pat: &'a Pattern<D>, seen: &mut HashSet<&'a str>) -> Option<&'a str> {
+        fn walk<'a>(pat: &'a Pattern, seen: &mut HashSet<&'a str>) -> Option<&'a str> {
             match pat {
                 Pattern::Wildcard => None,
                 Pattern::Name(n) => (!seen.insert(n.as_str())).then_some(n.as_str()),

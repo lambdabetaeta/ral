@@ -47,16 +47,17 @@ fmt-check:
 lint $RUSTFLAGS=deny:
     cargo clippy --workspace {{gui}} --all-targets --keep-going
 
-# Never links, so a Unix host can run it. exarch and synod are excluded because
-# rustls -> aws-lc-sys compiles C against Windows system headers; guest-net
-# because it depends on exarch, which brings that tree (fff-search -> git2 ->
-# libgit2-sys) straight back. The poisoned CC makes blake3's build script fall
-# back to its pure-Rust intrinsics instead of hunting for ml64.exe. Real
-# Windows *test execution* still needs .github/workflows/windows.yml.
+# Never links, so a Unix host can run it. `cargo xwin` (rust-cross/cargo-xwin)
+# splats the real MSVC CRT and Windows SDK headers exarch's `rustls ->
+# aws-lc-sys` and `guest-net`'s `fff-search -> git2 -> libgit2-sys` need to
+# actually compile C — no workspace member is excluded. One-time host setup:
+#   brew install llvm lld && cargo install cargo-xwin
+# then put both kegs' bin/ on PATH (they're keg-only). Real Windows *test
+# execution* still needs .github/workflows/windows.yml.
 
 # Cross-check the workspace against the shipping Windows ABI.
-check-windows $RUSTFLAGS=deny $CC_x86_64_pc_windows_msvc='cc-absent-use-blake3-pure-fallback':
-    cargo check --workspace --exclude exarch --exclude synod --exclude guest-net --all-targets --target x86_64-pc-windows-msvc
+check-windows $RUSTFLAGS=deny:
+    cargo xwin check --workspace --all-targets --target x86_64-pc-windows-msvc
 
 # Cross-check the Linux sandbox, which a macOS `lint` never compiles.
 #
@@ -92,6 +93,30 @@ examples-check:
     #!/bin/sh
     set -eu
     for f in examples/*/*.ral; do cargo run -p ral --quiet -- --check "$f"; done
+
+# Drives the REPL load path examples-check can't reach: an rc naming exactly
+# one plugin, a fresh XDG_CONFIG_HOME per plugin so none can mask another's
+# failure, RAL_PATH pointed at this checkout's plugins/. A failing plugin
+# prints `ral: plugin 'NAME': ...` on stderr and the REPL carries on regardless
+# (exit 0), so that line — not the exit status — is the failure signal.
+[unix]
+plugins-check:
+    #!/bin/sh
+    set -eu
+    fail=0
+    for f in plugins/*.ral; do
+        name=$(basename "$f" .ral)
+        dir=$(mktemp -d)
+        mkdir -p "$dir/ral"
+        printf "return [plugins: [[plugin: '%s']]]" "$name" > "$dir/ral/rc"
+        out=$(echo 'echo ok' | XDG_CONFIG_HOME="$dir" RAL_PATH="{{justfile_directory()}}/plugins" cargo run -p ral --quiet -- -i 2>&1)
+        if echo "$out" | grep -q "ral: plugin '$name':"; then
+            echo "plugins-check: $name failed to load"
+            echo "$out" | grep "ral: plugin '$name':"
+            fail=1
+        fi
+    done
+    exit $fail
 
 # The one check that reads both of the window's languages at once: `ts-rs`
 # writes the TypeScript for every type crossing the Tauri seam, and `deno

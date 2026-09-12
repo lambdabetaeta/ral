@@ -136,6 +136,8 @@ just site
 
 step examples-check
 
+step plugins-check
+
 # The window's two languages against each other.  A no-op in linux-box mode,
 # where synod is not built at all — the recipe says so and exits.
 step ui-check

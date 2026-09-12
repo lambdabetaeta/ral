@@ -82,21 +82,37 @@ impl HandlerEntry {
                 use crate::typecheck::{PinFailure, fmt_route, fmt_ty};
                 let msg = match failure {
                     PinFailure::Route(m) => format!(
-                        "{label}: `{name}`'s body and the head it reinterprets disagree \
-                         about where their payload lives — the arm's is {}, the head's is \
-                         {}; a handler must agree with the head it reinterprets, so match \
-                         its route or add a codec",
+                        "{label}: `{name}` is already installed, and this body disagrees \
+                         with it about where the result lives — this body's is {}, the \
+                         existing one's is {}; match the existing route, or add a codec",
                         fmt_route(&m.left),
                         fmt_route(&m.right),
                     ),
-                    PinFailure::ByteHeadReturnsValue(ty) => format!(
-                        "{label}: `{name}`'s payload is its stdout, so an arm installed \
-                         under it has no separate value to return; its return type must be \
-                         Unit, and `{name}`'s body returns {}",
-                        fmt_ty(&ty),
+                    PinFailure::ByteHeadReturnsValue {
+                        actual,
+                        reinterprets: true,
+                    } => format!(
+                        "{label}: `{name}` is already installed, and its result is its \
+                         stdout, so this body has no separate value to return; its return \
+                         type must be Unit, and `{name}`'s body returns {}",
+                        fmt_ty(&actual),
+                    ),
+                    PinFailure::ByteHeadReturnsValue {
+                        actual,
+                        reinterprets: false,
+                    } => format!(
+                        "{label}: `{name}` is not a name ral already handles, so it \
+                         behaves like an external program — its result is what it writes \
+                         to stdout, not what it returns — and `{name}`'s body returns {} \
+                         instead of Unit; write the result out, or capture it inside the \
+                         body with `!{{...}}`",
+                        fmt_ty(&actual),
                     ),
                 };
-                super::coerce::sig(msg)
+                match body.span {
+                    Some(span) => super::coerce::sig_at(msg, span),
+                    None => super::coerce::sig(msg),
+                }
             })?;
         let mut entry = Self::ral_per_name(name, thunk);
         if role.persists_scheme() {

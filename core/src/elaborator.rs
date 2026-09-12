@@ -124,9 +124,7 @@ impl Elaborator {
         pat.collect_names(self.current_scope_mut());
     }
 
-    /// Translate an AST pattern into an [`IrPattern`].  Callers must elaborate
-    /// the pattern *before* its own names enter scope, so a map default like
-    /// `[host: h = $h]` resolves `$h` outward rather than to itself.
+    /// Translate an AST pattern into an [`IrPattern`].
     fn elab_pattern(&mut self, pat: &Pattern) -> IrPattern {
         match pat {
             Pattern::Wildcard => IrPattern::Wildcard,
@@ -151,19 +149,9 @@ impl Elaborator {
             Pattern::Map(entries) => IrPattern::Map(
                 entries
                     .iter()
-                    .map(|entry| {
-                        let pattern = self.elab_pattern(&entry.pattern);
-                        let default = entry.default.as_ref().map(|d| {
-                            // A default is statement-shaped but carries no span
-                            // of its own, so it inherits the pattern's.
-                            let stmt = [Spanned::with_span(self.current_span, d.clone())];
-                            Arc::new(self.stmts_nested(&stmt))
-                        });
-                        MapPatternEntry {
-                            key: entry.key.clone(),
-                            pattern,
-                            default,
-                        }
+                    .map(|entry| MapPatternEntry {
+                        key: entry.key.clone(),
+                        pattern: self.elab_pattern(&entry.pattern),
                     })
                     .collect(),
             ),
@@ -171,11 +159,10 @@ impl Elaborator {
     }
 
     /// A `{ |param| body }` binder together with the statements it scopes: the
-    /// param elaborates *before* its names enter scope, so its defaults resolve
-    /// outward, and the body is then elaborated inside the frame those names
+    /// param elaborates, then the body elaborates inside the frame its names
     /// open.  Both readings of that spelling — the lambda it denotes and the
-    /// `case` arm that is a branch rather than a function — get their scope from
-    /// here, so the ordering is stated once.
+    /// `case` arm that is a branch rather than a function — get their scope
+    /// from here, so it is stated once.
     fn elab_binder_scope(
         &mut self,
         param: &Spanned<ast::Param>,

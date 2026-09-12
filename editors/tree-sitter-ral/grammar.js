@@ -230,8 +230,8 @@ module.exports = grammar({
 
     // Forked only on the bare-word leaf: `_value` is the default (`,` bare),
     // `_value_bracket` is for sites lexed directly inside an open `[...]`
-    // (list/map literal elements, map-entry values, pattern defaults) where
-    // the real lexer instead treats `,` as the element separator.
+    // (list/map literal elements, map-entry values) where the real lexer
+    // instead treats `,` as the element separator.
     _value: $ => choice($.word, $._value_common),
     _value_bracket: $ => choice($.word_bracket, $._value_common),
 
@@ -303,7 +303,7 @@ module.exports = grammar({
       ']',
     ),
 
-    // key: binding optional_default — e.g. [host: h, port: p = 5432].
+    // key: binding — e.g. [host: h, port: p].
     // Keys may be plain identifiers, single-quoted strings, or backtick tags.
     // The binder is its own field (mirroring map_entry's 'value') so a
     // highlight query can target it without also catching an identifier-
@@ -312,7 +312,6 @@ module.exports = grammar({
       field('key', choice($.identifier, $.string_single, $.tag)),
       ':',
       optional(field('pattern', $._pattern)),
-      optional(seq('=', $._value_bracket)),
     ),
 
     // ── Redirects ────────────────────────────────────────────────────────────

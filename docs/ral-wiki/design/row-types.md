@@ -24,6 +24,26 @@ consequences follow:
 - **Structural equality of closed records is order-insensitive:**
   `[a: 1, b: 2] == [b: 2, a: 1]`.
 
+**Explicit beats spread regardless of position, because a row is a chain and
+only one end of it is open.** A row is `Extend(label, type, rest)` ending in
+`Empty` (closed) or `Var(ρ)` (open, the unknown remainder), and
+selection-takes-first means "X beats Y" is "X sits earlier in the chain." An
+explicit entry can always be prepended onto a spread's chain, whatever that
+chain holds and however it ends — so the rule holds regardless of position,
+because position is never in question. The reverse would need the spread's
+fields to come first, i.e. the explicit entry appended after the spread's
+chain: fine if that chain ends in `Empty`, impossible if it ends in `Var(ρ)`,
+since there is no position after the remainder to append into. Making the
+reverse work for open rows needs a presence flag per field (Rémy-style
+`Pre`/`Abs`) — exactly the restriction operator the bullet above says ral does
+not have.
+
+This costs nothing: what a `Pre`/`Abs` flag would buy — "the spread's value
+here, or this default if it lacks one" — is already a second spread,
+`[...$cfg, ...[port: 8080]]`. Spread-versus-spread prepends one whole chain
+onto another, so a duplicate label survives and selection-takes-first
+resolves it. Scoped labels already do that job.
+
 **A `case` closes a variant row, and the syntax is what lets it.** The arms are
 written out at the `case`, so the label set is known when the rule fires: the
 scrutinee's row unifies with exactly that set, and coverage is decided there,

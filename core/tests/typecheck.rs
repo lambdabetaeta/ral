@@ -1200,18 +1200,10 @@ fn caret_cd_is_the_binary_even_under_an_arm_on_a_native_name() {
 //
 // A handler arm (or alias body) for an unknown head `h` defines `h`'s modes:
 // its spec is fully fresh, so the arm pins it, while its value type stays free.
-// Reinterpreting a known head pins the arm's payload route to that head's, and
-// a clash there is a `RouteMismatch`.  Pinning is an install-time property of
-// the arm and the head alone; no pipeline takes part in it.
-
-fn is_route_mismatch(src: &str) -> bool {
-    raw_errors(src).iter().any(|e| {
-        matches!(
-            e.kind,
-            ral_core::typecheck::TypeErrorKind::RouteMismatch { .. }
-        )
-    })
-}
+// A byte-routed head subsumes a `Unit`-valued arm, so a clash surfaces as the
+// WF-2 failure — the arm's value against `Unit` — not as a route mismatch.
+// Pinning is an install-time property of the arm and the head alone; no
+// pipeline takes part in it.
 
 /// A value-returning `within` handler arm over an unseen head is refused at
 /// install (uniform A): the head is an external, byte-routed by construction,
@@ -1221,11 +1213,11 @@ fn is_route_mismatch(src: &str) -> bool {
 fn within_handler_value_arm_over_an_unseen_head_is_refused() {
     has_error(
         r"within [handlers: [foo: { |args| return 3 }]] { foo | from-json }",
-        "payload lives",
+        "couldn't match type Unit",
     );
     has_error(
         r"within [handlers: [foo: { |args| return 3 }]] { foo }",
-        "payload lives",
+        "couldn't match type Unit",
     );
 }
 
@@ -1240,11 +1232,9 @@ fn within_handler_byte_output_arm_ok() {
 /// value-output body is refused at install.
 #[test]
 fn within_handler_for_echo_breaking_its_route_is_rejected() {
-    assert!(
-        is_route_mismatch(
-            r#"within [handlers: [echo: { |args| return "not bytes" }]] { echo hi }"#
-        ),
-        "expected a RouteMismatch pinning the echo arm to its head's byte route"
+    has_error(
+        r#"within [handlers: [echo: { |args| return "not bytes" }]] { echo hi }"#,
+        "couldn't match type Unit",
     );
 }
 
@@ -1295,7 +1285,10 @@ fn alias_byte_output_forwarder_typechecks() {
 /// value to return.
 #[test]
 fn alias_value_output_body_is_refused() {
-    has_error("alias foo { |args| return 3 }\nreturn ()", "payload lives");
+    has_error(
+        "alias foo { |args| return 3 }\nreturn ()",
+        "couldn't match type Unit",
+    );
 }
 
 #[test]
@@ -1304,7 +1297,7 @@ fn alias_value_arm_piped_into_a_decoder_is_refused() {
     // before the pipeline is even considered.
     has_error(
         "alias foo { |args| return 3 }\nfoo | from-json",
-        "payload lives",
+        "couldn't match type Unit",
     );
 }
 
@@ -1344,7 +1337,7 @@ fn catch_all_diverging_or_byte_bodies_are_accepted() {
 fn a_value_arm_over_a_natives_spelling_is_refused_too() {
     has_error(
         r"within [handlers: [upper: { |args| return 42 }]] { upper a }",
-        "payload lives",
+        "couldn't match type Unit",
     );
 }
 
@@ -1500,11 +1493,11 @@ fn an_alias_arm_parses_its_argv_to_get_a_number() {
     }
     has_error(
         r"alias inc { |a| return $[!{int $a[0]} + 1] }; inc 5",
-        "payload lives",
+        "couldn't match type Unit",
     );
     has_error(
         r"alias inc { |a| return $[!{int $a[0]} + 1] }; inc hello",
-        "payload lives",
+        "couldn't match type Unit",
     );
 }
 

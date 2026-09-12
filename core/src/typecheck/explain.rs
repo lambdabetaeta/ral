@@ -408,12 +408,14 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         Reason::MapKey => {
             Some("map keys must be Strings — quote a bare token or convert with `str`".to_string())
         }
-        Reason::ListSpread => Some(
-            "a `...x` spread copies the elements of a \
-             list into this position, so the value \
-             after `...` must itself be a list"
-                .to_string(),
-        ),
+        Reason::ListSpread => list_spread_shape_hint(kind).or_else(|| {
+            Some(
+                "a `...x` spread copies the elements of a \
+                 list into this position, so the value \
+                 after `...` must itself be a list"
+                    .to_string(),
+            )
+        }),
         Reason::ListIndexKey => {
             Some("indexing into a list takes an Integer (the position)".to_string())
         }
@@ -605,6 +607,20 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
         | Reason::CaptureOperand
         | Reason::DecodeOperand => None,
     }
+}
+
+/// A spread that mismatches because the value is a record, not a list —
+/// blaming `[...x]`'s list shape rather than the caller's record. Which side
+/// lands in `expected` is an accident of the call site, so both are checked.
+fn list_spread_shape_hint(kind: &TypeErrorKind) -> Option<String> {
+    let TypeErrorKind::TyMismatch { expected, actual } = kind else {
+        return None;
+    };
+    (matches!(expected, Ty::Record(_)) || matches!(actual, Ty::Record(_))).then(|| {
+        "this is a list literal, and `...` here copies list elements — a record \
+         merge is written as its own literal: `[:, ...a, ...b]`"
+            .to_string()
+    })
 }
 
 /// Help for a `TyMismatch` derived from the expected type's shape, not from

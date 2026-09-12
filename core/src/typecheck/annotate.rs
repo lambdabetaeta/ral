@@ -17,7 +17,6 @@ use crate::ir::{
     ValListElem, ValMapEntry, ValRedirectTarget,
 };
 use crate::source::Spanned;
-use crate::syntax::ast::MapPatternEntry;
 use std::sync::Arc;
 
 /// What a demand-carrying position wants from the node it reaches.
@@ -108,7 +107,7 @@ fn captured_string(body: Comp, ctx: &mut InferCtx) -> CompKind {
 }
 
 /// Rebuild `comp` under `Demand::Discard` — the general recursive walk a
-/// thunked value or a pattern default gets, never a `Bind`/`Define` RHS.
+/// thunked value gets, never a `Bind`/`Define` RHS.
 pub(super) fn annotate(comp: &Comp, ctx: &mut InferCtx) -> Comp {
     annotate_demand(comp, ctx, false, Demand::Discard)
 }
@@ -187,7 +186,7 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -
             };
             let item = CompKind::Bind {
                 comp: annotate_rhs(rhs, ctx, eta, rhs_demand),
-                pattern: Arc::new(annotate_pattern(pattern, ctx)),
+                pattern: Arc::clone(pattern),
                 rest: Arc::new(annotate_demand(rest, ctx, eta, demand)),
             };
             return Spanned::with_span(comp.span, item);
@@ -213,7 +212,7 @@ fn annotate_demand(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) -
                     .iter()
                     .map(|arm| CaseArm {
                         tag: arm.tag.clone(),
-                        pattern: annotate_pattern(&arm.pattern, ctx),
+                        pattern: arm.pattern.clone(),
                         body: arm.body.with_comp(Arc::new(annotate_join_arm(
                             comp,
                             arm.body.comp(),
@@ -285,7 +284,7 @@ fn annotate_plain(comp: &Comp, ctx: &mut InferCtx, eta: bool) -> CompKind {
             }
         }
         CompKind::Lam { param, body } => CompKind::Lam {
-            param: annotate_pattern(param, ctx),
+            param: param.clone(),
             body: Arc::new(annotate_demand(body, ctx, eta, Demand::Discard)),
         },
         CompKind::App { head, args } => CompKind::App {
@@ -394,7 +393,7 @@ fn annotate_scope_val(
                 CompKind::Lam { param, body } => Val::Thunk(Arc::new(Spanned::with_span(
                     inner.span,
                     CompKind::Lam {
-                        param: annotate_pattern(param, ctx),
+                        param: param.clone(),
                         body: arm_body(body, ctx, walk),
                     },
                 ))),
@@ -528,27 +527,6 @@ fn annotate_scope(comp: &Comp, ctx: &mut InferCtx, eta: bool, demand: Demand) ->
     Spanned::with_span(comp.span, item)
 }
 
-/// Map-pattern defaults are the only `Comp` a pattern carries.
-fn annotate_pattern(pattern: &IrPattern, ctx: &mut InferCtx) -> IrPattern {
-    match pattern {
-        IrPattern::Wildcard | IrPattern::Name(_) => pattern.clone(),
-        IrPattern::List { elems, rest } => IrPattern::List {
-            elems: elems.iter().map(|p| annotate_pattern(p, ctx)).collect(),
-            rest: rest.clone(),
-        },
-        IrPattern::Map(entries) => IrPattern::Map(
-            entries
-                .iter()
-                .map(|entry| MapPatternEntry {
-                    key: entry.key.clone(),
-                    pattern: annotate_pattern(&entry.pattern, ctx),
-                    default: entry.default.as_ref().map(|d| Arc::new(annotate(d, ctx))),
-                })
-                .collect(),
-        ),
-    }
-}
-
 /// Rebuild a checked [`Toplevel`]: every phrase's RHS is walked at `eta =
 /// true`, so S3's η-expansion applies throughout — a `Define`'s RHS is read
 /// at `Value` demand; every `Run`, tail included,
@@ -572,7 +550,7 @@ pub(super) fn annotate_toplevel(
         .map(|(index, (phrase, names))| {
             let item = match &phrase.item {
                 Phrase::Define { pattern, comp, .. } => Phrase::Define {
-                    pattern: Arc::new(annotate_pattern(pattern, ctx)),
+                    pattern: Arc::clone(pattern),
                     comp: annotate_value_rhs(comp, ctx, true),
                     schemes: names
                         .into_iter()

@@ -6,7 +6,7 @@
 
 use crate::ir::IrPattern;
 use crate::typecheck::Scheme;
-use crate::types::{Binding, Closure, Env, Error, Mooring, Settled, Shell, Value};
+use crate::types::{Binding, Env, Error, Settled, Shell, Value};
 use std::sync::Arc;
 
 /// Refuse every name a `let` pattern binds that would shadow a PATH command.
@@ -67,10 +67,9 @@ pub(crate) fn bind_pattern(
     value: &Value,
     schemes: &[(String, Arc<Scheme>)],
     env: Env,
-    mooring: &Mooring,
     shell: &mut Shell,
 ) -> Settled<Env> {
-    bind_pattern_staged(pattern, value, schemes, env, mooring, shell, |_, _, _| {})
+    bind_pattern_staged(pattern, value, schemes, env, shell, |_, _, _| {})
 }
 
 /// As [`bind_pattern`], but calls `observe` on each staged `(name, Binding)`
@@ -85,7 +84,6 @@ pub(crate) fn bind_pattern_staged(
     value: &Value,
     schemes: &[(String, Arc<Scheme>)],
     mut env: Env,
-    mooring: &Mooring,
     shell: &mut Shell,
     mut observe: impl FnMut(&str, &Binding, &mut Shell),
 ) -> Settled<Env> {
@@ -104,7 +102,7 @@ pub(crate) fn bind_pattern_staged(
         return Ok(env);
     }
     let mut staged = Vec::new();
-    stage_pattern(pattern, value, schemes, &env, mooring, shell, &mut staged)?;
+    stage_pattern(pattern, value, schemes, &mut staged)?;
     for (name, binding) in staged {
         observe(&name, &binding, shell);
         env.bind(name, binding);
@@ -123,15 +121,11 @@ fn scheme_for(schemes: &[(String, Arc<Scheme>)], name: &str) -> Option<Arc<Schem
 
 /// Recursive worker for [`bind_pattern`]: pushes each binding onto `staged`
 /// rather than installing it, so a caller's environment stays untouched until
-/// the whole pattern has matched.  Map-pattern defaults are the one thing it
-/// does evaluate.
+/// the whole pattern has matched.
 fn stage_pattern(
     pattern: &IrPattern,
     value: &Value,
     schemes: &[(String, Arc<Scheme>)],
-    env: &Env,
-    mooring: &Mooring,
-    shell: &mut Shell,
     staged: &mut Vec<(String, Binding)>,
 ) -> Settled<()> {
     match pattern {
@@ -183,7 +177,7 @@ fn stage_pattern(
                 .into());
             }
             for (i, pat) in elems.iter().enumerate() {
-                stage_pattern(pat, &items[i], schemes, env, mooring, shell, staged)?;
+                stage_pattern(pat, &items[i], schemes, staged)?;
             }
             if let Some(name) = rest {
                 // `imbl::Vector` splits in O(log n) by sharing structure: no element clones.
@@ -209,26 +203,13 @@ fn stage_pattern(
             };
             for entry in entries {
                 let key_label = entry.key.row_label();
-                let val = match (m.get(&key_label), &entry.default) {
-                    (Some(v), _) => v.clone(),
-                    // A default runs as its own closed machine, over the
-                    // environment at the pattern's binding site — never in
-                    // tail position, since its value is bound, not returned.
-                    (None, Some(default_comp)) => {
-                        let closure = Closure {
-                            comp: Arc::clone(default_comp),
-                            env: env.clone(),
-                        };
-                        crate::evaluator::machine::evaluate(closure, mooring, shell)?
-                    }
-                    (None, None) => {
-                        let ks: Vec<&str> = m.keys().map(std::string::String::as_str).collect();
-                        return Err(Error::new(format!("key '{key_label}' not found"), 1)
-                            .with_hint(format!("available: {}", ks.join(", ")))
-                            .into());
-                    }
+                let Some(val) = m.get(&key_label) else {
+                    let ks: Vec<&str> = m.keys().map(std::string::String::as_str).collect();
+                    return Err(Error::new(format!("key '{key_label}' not found"), 1)
+                        .with_hint(format!("available: {}", ks.join(", ")))
+                        .into());
                 };
-                stage_pattern(&entry.pattern, &val, schemes, env, mooring, shell, staged)?;
+                stage_pattern(&entry.pattern, val, schemes, staged)?;
             }
             Ok(())
         }
@@ -238,7 +219,7 @@ fn stage_pattern(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Break, Mooring};
+    use crate::types::Break;
 
     fn list_pat(elems: &[&str], rest: Option<&str>) -> IrPattern {
         IrPattern::List {
@@ -256,14 +237,7 @@ mod tests {
         let mut shell = Shell::new(crate::io::TerminalState::default());
         let pat = list_pat(&["a", "b"], Some("rest"));
         let value = Value::list(vec![Value::String("x".into())]);
-        let result = bind_pattern(
-            &pat,
-            &value,
-            &[],
-            shell.env.clone(),
-            &Mooring::adrift(),
-            &mut shell,
-        );
+        let result = bind_pattern(&pat, &value, &[], shell.env.clone(), &mut shell);
         match result {
             Err(Break::Error(e)) => {
                 assert!(
@@ -287,14 +261,7 @@ mod tests {
             Value::String("y".into()),
             Value::String("z".into()),
         ]);
-        let result = bind_pattern(
-            &pat,
-            &value,
-            &[],
-            shell.env.clone(),
-            &Mooring::adrift(),
-            &mut shell,
-        );
+        let result = bind_pattern(&pat, &value, &[], shell.env.clone(), &mut shell);
         match result {
             Err(Break::Error(e)) => {
                 assert!(
@@ -318,15 +285,7 @@ mod tests {
             Value::String("y".into()),
             Value::String("z".into()),
         ]);
-        let env = bind_pattern(
-            &pat,
-            &value,
-            &[],
-            shell.env.clone(),
-            &Mooring::adrift(),
-            &mut shell,
-        )
-        .expect("binds");
+        let env = bind_pattern(&pat, &value, &[], shell.env.clone(), &mut shell).expect("binds");
         assert_eq!(env.get("a"), Some(&Value::String("x".into())));
         assert_eq!(env.get("b"), Some(&Value::String("y".into())));
         assert_eq!(

@@ -277,12 +277,12 @@ values of one type:
     let flags = [-l, -a]
     ls ...$flags ...$directories
 
-Explicit record fields win over spread fields, wherever they appear.
+An explicit record field wins over a spread field wherever it appears.
 
 Patterns take values apart:
 
     let [first, ...rest] = $ARGS
-    let [host: host, port: port = 8080] = $config
+    let [host: host, port: port] = $config
     let [name: name, address: [city: city]] = $person
 
 A mismatch is a catchable runtime error. `range 1 5` returns `[1, 2, 3, 4]`.

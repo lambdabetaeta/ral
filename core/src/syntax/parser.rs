@@ -853,17 +853,7 @@ impl Parser {
             )?;
             p.expect(&Token::Colon)?;
             let pattern = p.parse_pattern()?;
-            let default = if p.peek().as_plain_word() == Some("=") {
-                p.advance();
-                Some(p.parse_atom()?)
-            } else {
-                None
-            };
-            entries.push(MapPatternEntry {
-                key,
-                pattern,
-                default,
-            });
+            entries.push(MapPatternEntry { key, pattern });
             Ok(SepFlow::Cont)
         })?;
 
@@ -1243,11 +1233,12 @@ impl Parser {
         }
     }
 
-    /// collection = list | map — `[]` is the empty list, `[:]` the empty map.
+    /// collection = list | map — `[]` is the empty list; a literal opening
+    /// with `:` is always a map, `[:]` being its degenerate empty case.
     ///
-    /// A spread belongs to either shape, so the items are read in one pass
-    /// and the first plain one — a `key: value` entry or a bare element —
-    /// settles which literal this is.
+    /// Otherwise a spread belongs to either shape, so the items are read in
+    /// one pass and the first plain one — a `key: value` entry or a bare
+    /// element — settles which literal this is.
     fn parse_collection(&mut self) -> Result<Ast, ParseError> {
         self.expect(&Token::LBracket)?;
 
@@ -1256,12 +1247,19 @@ impl Parser {
             return Ok(Ast::List(vec![]));
         }
 
-        if self.peek() == &Token::Colon
-            && self.tokens.get(self.pos + 1).map(|(t, _)| t) == Some(&Token::RBracket)
-        {
-            self.advance(); // :
-            self.advance(); // ]
-            return Ok(Ast::Map(vec![]));
+        if self.peek() == &Token::Colon {
+            self.advance();
+            if self.peek() == &Token::RBracket {
+                self.advance();
+                return Ok(Ast::Map(vec![]));
+            }
+            self.expect(&Token::Comma)?;
+            let mut items = Vec::new();
+            self.parse_separated_until(&Token::RBracket, "collection", |p| {
+                items.push(p.parse_collection_item()?);
+                Ok(SepFlow::Cont)
+            })?;
+            return Ok(Ast::Map(lower_map_entries(items, /*marked=*/ true)?));
         }
 
         let mut items = Vec::new();
@@ -1274,42 +1272,7 @@ impl Parser {
             .iter()
             .any(|item| matches!(item, CollectionItem::Entry { .. }))
         {
-            // Bare `name` versus tag `` `name ``; a dynamic `$var` key is
-            // unknown until runtime and so votes for neither alphabet.
-            let mut alphabet: Option<bool> = None;
-            let entries = items
-                .into_iter()
-                .map(|item| match item {
-                    CollectionItem::Spread(a) => Ok(MapEntry::Spread(a)),
-                    CollectionItem::Entry {
-                        key: MapKeyForm::Static(key),
-                        key_span,
-                        value,
-                    } => {
-                        check_key_alphabet(
-                            &mut alphabet,
-                            key.is_tag(),
-                            key_span,
-                            "record literal mixes bare and tag keys — pick one alphabet",
-                        )?;
-                        Ok(MapEntry::Entry { key, value })
-                    }
-                    CollectionItem::Entry {
-                        key: MapKeyForm::Deref(name),
-                        value,
-                        ..
-                    } => Ok(MapEntry::Deref { name, value }),
-                    CollectionItem::Elem(a) => Err(ParseError {
-                        message: "this collection has `key: value` entries, so every entry \
-                                  needs a key — or drop the keys to make it a list"
-                            .into(),
-                        span: a.span,
-                        lex_kind: None,
-                        incompleteness: None,
-                    }),
-                })
-                .collect::<Result<_, _>>()?;
-            return Ok(Ast::Map(entries));
+            return Ok(Ast::Map(lower_map_entries(items, /*marked=*/ false)?));
         }
 
         Ok(Ast::List(
@@ -1503,6 +1466,57 @@ enum InfixOp {
     Op(BinaryOp),
     And,
     Or,
+}
+
+/// Lower record-literal items into `MapEntry`s.  `marked` says whether the
+/// literal is a record because it opened with `:` (no entries required) or
+/// because it contains one (a bare element is then the error), which only
+/// changes the diagnostic for [`CollectionItem::Elem`].
+fn lower_map_entries(
+    items: Vec<CollectionItem>,
+    marked: bool,
+) -> Result<Vec<MapEntry>, ParseError> {
+    // Bare `name` versus tag `` `name ``; a dynamic `$var` key is unknown
+    // until runtime and so votes for neither alphabet.
+    let mut alphabet: Option<bool> = None;
+    items
+        .into_iter()
+        .map(|item| match item {
+            CollectionItem::Spread(a) => Ok(MapEntry::Spread(a)),
+            CollectionItem::Entry {
+                key: MapKeyForm::Static(key),
+                key_span,
+                value,
+            } => {
+                check_key_alphabet(
+                    &mut alphabet,
+                    key.is_tag(),
+                    key_span,
+                    "record literal mixes bare and tag keys — pick one alphabet",
+                )?;
+                Ok(MapEntry::Entry { key, value })
+            }
+            CollectionItem::Entry {
+                key: MapKeyForm::Deref(name),
+                value,
+                ..
+            } => Ok(MapEntry::Deref { name, value }),
+            CollectionItem::Elem(a) => Err(ParseError {
+                message: if marked {
+                    "this collection opens with `:`, so it's a record — every item needs \
+                     a `key: value` or a `...` spread"
+                        .into()
+                } else {
+                    "this collection has `key: value` entries, so every entry \
+                              needs a key — or drop the keys to make it a list"
+                        .into()
+                },
+                span: a.span,
+                lex_kind: None,
+                incompleteness: None,
+            }),
+        })
+        .collect()
 }
 
 /// The first key fixes the alphabet and every later one must match, so
@@ -2501,6 +2515,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_marked_record_of_only_spreads() {
+        // `[:, ...a, ...b]` — a record with no entries at all, otherwise
+        // indistinguishable from a list until the leading `:` marks it.
+        let ast = unwrap_stmts(parse("[:, ...$a, ...$b]").unwrap());
+        assert_eq!(
+            ast,
+            vec![Ast::Map(vec![
+                MapEntry::Spread(sp(Ast::Variable("a".into()))),
+                MapEntry::Spread(sp(Ast::Variable("b".into()))),
+            ])]
+        );
+    }
+
+    #[test]
+    fn parse_marked_record_with_entry() {
+        let ast = unwrap_stmts(parse("[:, k: 'v', ...$d]").unwrap());
+        assert_eq!(
+            ast,
+            vec![Ast::Map(vec![
+                MapEntry::Entry {
+                    key: MapKey::Bare("k".into()),
+                    value: sp(Ast::Literal("v".into())),
+                },
+                MapEntry::Spread(sp(Ast::Variable("d".into()))),
+            ])]
+        );
+    }
+
+    #[test]
+    fn parse_marked_record_bare_element_errors() {
+        assert!(parse("[:, 5]").is_err());
+    }
+
+    #[test]
     fn parse_leading_spread_disambiguates_to_map() {
         // The `key: val` pair sits past the spread, where the lookahead has to
         // reach to call this a map.
@@ -2733,7 +2781,6 @@ mod tests {
             Pattern::Map(vec![MapPatternEntry {
                 key: MapKey::Bare("head".into()),
                 pattern: Pattern::Name("h".into()),
-                default: None,
             }])
         );
     }

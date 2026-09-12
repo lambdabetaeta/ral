@@ -1,5 +1,5 @@
 ---
-verified_at_commit: c1bb993b
+verified_at_commit: a3ff030d
 verified_at_date: 2026-09-12
 anchors: [Machine, step_eval, step_return, step_halt, Frame, Focus, Terminal, Closure, Env, run_phrases, Phrase, evaluate, apply, reserve, PipeNode, WireShell, NESTED_MACHINE_LIMIT]
 ---
@@ -104,7 +104,7 @@ decides leases and the PATH-shadow check.
 **Boundaries.** Three things start a fresh machine over the empty stack: a
 run-door phrase, a worker thread (`spawn`/`watch`/`service`), and a pipeline
 stage thread (`runtime/pipeline/thread.rs`). A native that applies a user function — the
-collection combinators, hook dispatch, pattern defaults — runs a *nested*
+collection combinators, hook dispatch — runs a *nested*
 machine on the host stack through `machine::apply`; `NESTED_MACHINE_LIMIT`
 (set by `nested_machines_fit_a_worker_stack` against a 2 MiB thread) caps
 that nesting with a clean error. Natives that need the lexical environment

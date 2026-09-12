@@ -5,7 +5,7 @@
 //! the strongly connected components of that graph become the `LetRec` knots.
 
 use crate::syntax::ast::{
-    Ast, Head, ListElem, MapEntry, Pattern, Redirect, RedirectTarget, ScopeAst, Stmt, Word,
+    Ast, Head, ListElem, MapEntry, Redirect, RedirectTarget, ScopeAst, Stmt, Word,
 };
 use std::collections::HashSet;
 
@@ -66,9 +66,6 @@ impl Ast {
             | Self::Word(Word::Plain(_) | Word::Slash(_) | Word::Tilde(_))
             | Self::Return(None) => {}
             Self::Lambda { param, body } => {
-                param
-                    .item
-                    .collect_default_free_refs(candidates, scopes, out);
                 let mut names = HashSet::new();
                 param.item.collect_names(&mut names);
                 scopes.push(names);
@@ -78,13 +75,10 @@ impl Ast {
             Self::Block(stmts) => {
                 collect_stmts_free_refs(stmts, candidates, scopes, out);
             }
-            Self::Let { pattern, value } => {
-                pattern
-                    .item
-                    .collect_default_free_refs(candidates, scopes, out);
-                value.item.collect_free_refs(candidates, scopes, out);
-            }
-            Self::Return(Some(value)) | Self::Spread(value) | Self::Force(value) => {
+            Self::Let { value, .. }
+            | Self::Return(Some(value))
+            | Self::Spread(value)
+            | Self::Force(value) => {
                 value.item.collect_free_refs(candidates, scopes, out);
             }
             Self::Call {
@@ -167,37 +161,6 @@ impl Ast {
                 }
                 if let Some(e) = else_ {
                     e.item.collect_free_refs(candidates, scopes, out);
-                }
-            }
-        }
-    }
-}
-
-impl Pattern {
-    /// Free references in this pattern's map-entry defaults.  A default is
-    /// evaluated before the pattern's own names bind, so it sees only the
-    /// enclosing scopes — hence the unextended `scopes` the caller passes.
-    fn collect_default_free_refs(
-        &self,
-        candidates: &HashSet<String>,
-        scopes: &mut Vec<HashSet<String>>,
-        out: &mut HashSet<String>,
-    ) {
-        match self {
-            Self::Wildcard | Self::Name(_) => {}
-            Self::List { elems, .. } => {
-                for e in elems {
-                    e.collect_default_free_refs(candidates, scopes, out);
-                }
-            }
-            Self::Map(entries) => {
-                for entry in entries {
-                    if let Some(default) = &entry.default {
-                        default.collect_free_refs(candidates, scopes, out);
-                    }
-                    entry
-                        .pattern
-                        .collect_default_free_refs(candidates, scopes, out);
                 }
             }
         }
@@ -313,25 +276,6 @@ mod tests {
             refs_of("{ |x| { |y| g $x $y } }", &["g", "x", "y"]),
             vec!["g"]
         );
-    }
-
-    #[test]
-    fn map_pattern_default_in_lambda_param_is_free() {
-        // `$g` is evaluated before the parameter's own names bind, so it escapes
-        // the lambda even though the parameter binds a name of its own.
-        assert_eq!(refs_of("{ |[k: d = $g]| return $d }", &["g"]), vec!["g"]);
-    }
-
-    #[test]
-    fn map_pattern_default_in_let_binding_is_free() {
-        let stmts = parse("let [k: d = $g] = $m").expect("parse");
-        let mut out: Vec<String> = stmts[0]
-            .item
-            .free_refs(&candidates(&["g", "m"]))
-            .into_iter()
-            .collect();
-        out.sort_unstable();
-        assert_eq!(out, vec!["g", "m"]);
     }
 
     #[test]

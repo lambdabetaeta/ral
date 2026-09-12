@@ -1,9 +1,17 @@
 //! Error constructors and `Value` → collection coercions.
 
 use super::{Break, Error, List, Map, Value};
+use crate::source::Span;
 
 pub fn sig(message: impl Into<String>) -> Break {
     Break::Error(Error::new(message, 1))
+}
+
+/// A bare signal error, positioned — for a fault the checker can already
+/// place at a span, so the caret needs no help from `evaluator::machine`'s
+/// generic stamp.
+pub(crate) fn sig_at(message: impl Into<String>, span: Span) -> Break {
+    Break::Error(Error::new(message, 1).at_span(span))
 }
 
 pub(crate) fn sig_hint(message: impl Into<String>, hint: impl Into<String>) -> Break {

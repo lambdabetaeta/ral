@@ -94,7 +94,8 @@ structural step — never writing a bare route:
 - the byte side of an arm join (`conclude_byte_side`) unifies each
   non-subsumed arm with `CompTy::bytes()`;
 - the alias/handler arm pin (`pin_arm_to_head`) demands the arm's value be
-  `Unit` in the same breath as the pin that lands on bytes.
+  `Unit` in the same breath as the pin that lands on bytes — subsumed or not,
+  by the same judgment as the join (§"One subsumption instance, two sites").
 
 No live code unifies a route against a detached `Bytes`, so a new decision
 site cannot forget the pairing — it has no way to spell half of it
@@ -138,24 +139,39 @@ forwarding half of a `(route, value)` pair is exactly the shape WF-2 cannot
 police. `fail` is the one free route that is safe by construction: it never
 returns, so no boundary observes it.
 
-## One subsumption instance, at arm joins only
+## One subsumption instance, two sites
 
 `F[Value] Unit` is also `F[Bytes] Unit`. The instance fires at the top of a
 computation type only — it does not descend through `Thunk`, `Fun`, or rows —
 and it is a judgment, not a unification step: `unify_route` demands equality on
-ground routes. The join over the arms of `if`, `?`, `case`, and `try` applies
-it:
+ground routes. `Unifier::bytes_subsumes` is that judgment, called wherever a
+ground `Value Unit` may stand for `Bytes`:
+
+- **the join** over the arms of `if`, `?`, `case`, and `try`
+  (`conclude_byte_side`) — one arm routed `Bytes` pulls every arm through this
+  judgment;
+- **the head pin** (`pin_arm_to_head`) — an alias or `within [handlers: …]`
+  arm installed under a head whose route is `Bytes` (a fresh name, or an
+  existing handler that is itself byte-routed) need not have written a byte
+  itself, so long as its value is `Unit`.
+
+The judgment itself:
 
 - `Value A` beside `Value B` unifies `A` and `B`;
 - `Bytes` beside `Bytes` stays `Bytes`;
 - `Value Unit` beside `Bytes` coerces to the byte side, and the byte side ties
   every arm's value to `Unit`;
 - `Value A` for non-`Unit` `A` beside `Bytes` is a type error, and the explicit
-  spelling is `echo hi | from-string`;
+  spelling is `echo hi | from-string` (a join) or writing the result out (a
+  pin);
 - a wholly open join defers to the generalisation boundary that owns its
   variables, so an arm holding a recursive call is not forced to answer before
   it has one;
 - divergence is neutral until another arm determines the route.
+
+A pin has no sibling arm to defer to, so an open route there simply unifies
+with the head, as it always did; only a *ground* `Value` route reaches the
+subsumption test.
 
 The kernel does not have this instance, and the difference is elaboration
 rather than disagreement. Its two routes have two terminals — `return V` and

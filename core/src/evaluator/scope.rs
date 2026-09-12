@@ -173,12 +173,12 @@ impl WithinScope {
                                     fmt_route(&m.left),
                                     fmt_route(&m.right),
                                 )),
-                                PinFailure::ByteHeadReturnsValue(ty) => sig(format!(
+                                PinFailure::ByteHeadReturnsValue { actual, .. } => sig(format!(
                                     "within handler: catch-all reinterprets every external \
                                      command, whose payload is its stdout, so its body has \
                                      no separate value to return; its return type must be \
                                      Unit, and the body returns {}",
-                                    fmt_ty(&ty),
+                                    fmt_ty(&actual),
                                 )),
                             }
                         },

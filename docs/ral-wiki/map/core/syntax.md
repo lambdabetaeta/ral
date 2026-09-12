@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: a3ff030d
+generated_at_date: 2026-09-12
 covers_paths: [core/src/syntax/]
 ---
 
@@ -28,9 +28,12 @@ sees raw bytes and bare words.
   verb here, not a second name for the byte channel.
 - `parser.rs` — `parse(source) -> Result<Vec<Stmt>, ParseError>`; `parse_with`
   carries a `FileId`. A `||` after a pipe is refused naming `?`. A bracketed
-  literal is read as one list of items and sorted into a list or a map by its
-  first non-spread item, so no token-level lookahead has to skip a spread's
-  nested brackets. The `$[…]` body is a Pratt parser whose operands are
+  literal is a record if it opens with `:` (`[:]`, or the marker `[:, …]`
+  before an all-spread record) or contains a `key: value` entry; otherwise
+  it is a list. Past the optional marker, the items are read in one pass and
+  — absent the marker — the first entry sorts the literal, so no
+  token-level lookahead has to skip a spread's nested brackets. The `$[…]`
+  body is a Pratt parser whose operands are
   `parse_atom`'s atoms, plus `(…)` grouping and the prefixes `-` and `not`;
   an operator in operand position, or two operands with no operator between
   them, each earn an error naming the gap; a bare non-numeral word under

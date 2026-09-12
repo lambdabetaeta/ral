@@ -175,7 +175,6 @@ fn run_phrase_define(
         &v,
         schemes,
         env.clone(),
-        mooring,
         shell,
         |name, binding, shell| {
             if is_session {

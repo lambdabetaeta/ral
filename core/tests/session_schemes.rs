@@ -283,8 +283,10 @@ fn value_output_alias_is_refused_even_seeded_from_a_prior_run() {
     let sh = shell();
     let errs = check_errors(&sh, "alias three { |args| return 3 }\nreturn ()");
     assert!(
-        errs.iter()
-            .any(|e| e.kind.render_message().contains("payload lives")),
+        errs.iter().any(|e| {
+            let m = e.kind.render_message();
+            m.contains("Integer") && m.contains("Unit")
+        }),
         "expected the value-output alias to be refused at install, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())

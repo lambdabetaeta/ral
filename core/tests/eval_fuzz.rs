@@ -464,6 +464,68 @@ fn map_multiple_spreads_explicit_wins() {
 }
 
 #[test]
+fn marked_record_merge_first_spread_wins() {
+    // `[:, ...$given, ...$dflt]` — the record marker admits an all-spread
+    // literal; the first spread's fields win, so defaults go last.
+    let v = must_succeed(
+        "let dflt = [host: 'local', port: 80]\n\
+         let given = [host: 'prod']\n\
+         return [:, ...$given, ...$dflt]",
+    );
+    assert_eq!(v, must_succeed("return [host: 'prod', port: 80]"),);
+}
+
+#[test]
+fn marked_record_single_spread() {
+    let v = must_succeed("let subject = [host: 'local', port: 80]\nreturn [:, ...$subject]");
+    assert_eq!(v, must_succeed("return [host: 'local', port: 80]"));
+}
+
+#[test]
+fn marked_record_still_empty() {
+    assert_eq!(must_succeed("return [:]"), must_succeed("return [:]"));
+    assert_eq!(must_succeed("!{is-empty [:]}"), Value::Bool(true));
+}
+
+#[test]
+fn unmarked_spreads_still_list() {
+    assert_eq!(
+        must_succeed("return [...[1, 2], ...[3, 4]]"),
+        must_succeed("return [1, 2, 3, 4]"),
+    );
+}
+
+#[test]
+fn marked_record_with_explicit_entry_and_spread() {
+    let v = must_succeed("let dflt = [host: 'local', port: 80]\nreturn [:, host: 'x', ...$dflt]");
+    assert_eq!(v, must_succeed("return [host: 'x', port: 80]"));
+}
+
+#[test]
+fn marked_record_merge_over_open_row_in_lambda() {
+    // The real target: a record merge inside a lambda, over a parameter
+    // whose row is open — the classifier alone must make this typecheck.
+    let v = must_succeed(
+        "let dflt = [host: 'local', port: 80]\n\
+         let f = { |g| let [host: hn, port: pn] = [:, ...$g, ...$dflt]; return $pn }\n\
+         return !{f [host: prod]}",
+    );
+    assert_eq!(v, Value::Int(80));
+
+    let v = must_succeed(
+        "let dflt = [host: 'local', port: 80]\n\
+         let f = { |g| let [host: hn, port: pn] = [:, ...$g, ...$dflt]; return $pn }\n\
+         return !{f [host: prod, port: 9000]}",
+    );
+    assert_eq!(v, Value::Int(9000));
+}
+
+#[test]
+fn marked_record_bare_element_errors() {
+    must_fail("[:, 5]");
+}
+
+#[test]
 fn destructure_list_from_non_list() {
     must_fail("let [a, b] = 'hello'");
 }
@@ -1181,8 +1243,8 @@ fn unalias_does_not_remove_a_within_installed_handler() {
 // A computed `within [handlers: $h]` opts map and a runtime-installed alias
 // are invisible to the static check, so their arms' payload routes are pinned
 // to the head's at install instead — the same uniform rule (A), just vetted
-// here rather than during `--check`: every unseen head is byte-routed, so a
-// value-returning arm is refused at install regardless.
+// here rather than during `--check`: every unseen head is byte-routed, so an
+// arm returning anything but `Unit` is refused at install regardless.
 
 /// A computed (non-literal) `within` opts map carrying a value-returning arm
 /// is refused at install (uniform A), vetted here since a computed map is
@@ -1193,8 +1255,8 @@ fn computed_within_value_arm_is_refused_at_install() {
         .expect_err("a value-returning arm cannot be installed under a computed map either");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("payload lives"),
-        "expected the route-clash wording, got: {msg}"
+        msg.contains("Integer") && msg.contains("Unit"),
+        "expected `vet` to name the arm's type against Unit, got: {msg}"
     );
 }
 
@@ -1219,8 +1281,8 @@ fn value_alias_is_refused() {
         eval("alias foo { |args| return 3 }").expect_err("a value-returning alias is refused");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("payload lives"),
-        "expected the route-clash wording, got: {msg}"
+        msg.contains("Integer") && msg.contains("Unit"),
+        "expected the arm's type named against Unit, got: {msg}"
     );
 }
 
@@ -1273,8 +1335,8 @@ fn a_value_arm_under_a_byte_head_is_refused_at_install() {
             .expect_err("a value-returning arm cannot be installed under `echo`");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("where their payload lives"),
-        "expected the route-clash wording from `vet`, got: {msg}"
+        msg.contains("String") && msg.contains("Unit"),
+        "expected `vet` to name the arm's type against Unit, got: {msg}"
     );
 }
 
@@ -2374,54 +2436,6 @@ fn unit_in_map() {
     assert_eq!(
         must_succeed("let m = [done: ()]\nreturn $m[done]"),
         Value::Unit
-    );
-}
-
-// ── map pattern defaults ────────────────────────────────────────────────
-
-#[test]
-fn map_pattern_default_overridden() {
-    assert_eq!(
-        must_succeed(
-            "let f = { |m| let [host: h, port: p = 8080] = $m; return $p }\nreturn !{f [host: localhost, port: 3000]}"
-        ),
-        Value::Int(3000)
-    );
-}
-
-#[test]
-fn map_pattern_default_resolves_outer_lexical_name() {
-    // The map-pattern default is elaborated at the *pattern's* lexical
-    // context, not re-elaborated at assignment time with an empty scope.
-    // The default here forces a block that calls `compute-port`, a name
-    // bound in the surrounding scope.  Under the old re-elaboration with
-    // an empty bindings set, that call resolved to a Head::Bare and was
-    // dispatched through the external-command path — `compute-port` was
-    // invisible to the elaborator's lexical-scope logic.  With defaults
-    // pre-elaborated once at the pattern site, the same name resolves
-    // to a Force(Variable(..)) call.
-    assert_eq!(
-        must_succeed(
-            "let compute-port = { return $[8000 + 80] }\n\
-             let f = { |m| let [host: h, port: p = !{compute-port}] = $m; return $p }\n\
-             return !{f [host: localhost]}"
-        ),
-        Value::Int(8080)
-    );
-}
-
-#[test]
-fn map_pattern_default_typechecks_with_missing_field() {
-    // A pattern entry with a default does not extend the inferred record
-    // row, so a caller may omit that key without a typecheck failure.  The
-    // default supplies the binding at runtime.  Regression for the row
-    // shape decided in typecheck/infer.rs::bind_pattern for Pattern::Map:
-    // required entries extend the row, defaulted entries do not.
-    assert_eq!(
-        must_succeed(
-            "let f = { |m| let [host: h, port: p = 8080] = $m; return $p }\nreturn !{f [host: localhost]}"
-        ),
-        Value::Int(8080)
     );
 }
 

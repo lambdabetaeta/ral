@@ -1046,6 +1046,22 @@ impl Unifier {
         }
     }
 
+    /// Does `(route, value)` land on `Bytes`? WF-2's one subsumption,
+    /// `Value Unit ⊑ Bytes`: a ground `Value` route stands for `Bytes`
+    /// without moving, so long as its value unifies with `Unit`; anything
+    /// else — `Var` or already `Bytes` — must unify with `Bytes` outright,
+    /// and having landed there, its value must be `Unit` too.
+    ///
+    /// Shared by the head pin (`pin_arm_to_head`) and the arm-result join's
+    /// byte side (`conclude_byte_side`) — one judgement, two call sites.
+    pub(crate) fn bytes_subsumes(&mut self, route: PayloadRoute, value: &Ty) -> bool {
+        if matches!(self.resolve_route(route), PayloadRoute::Value) {
+            return self.unify_ty(value, &Ty::Unit).is_ok();
+        }
+        self.unify_route(route, PayloadRoute::Bytes).is_ok()
+            && self.unify_ty(value, &Ty::Unit).is_ok()
+    }
+
     /// The spine is width; only a field *type* against the element goes deeper.
     fn unify_map_record(
         &mut self,

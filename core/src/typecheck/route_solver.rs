@@ -209,9 +209,7 @@ impl InferCtx {
         why: &Reason,
     ) -> (PayloadRoute, Ty) {
         for (route, ty) in arms {
-            if matches!(self.unifier.resolve_route(*route), PayloadRoute::Value)
-                && self.unifier.unify_ty(ty, &Ty::Unit).is_ok()
-            {
+            if self.unifier.bytes_subsumes(*route, ty) {
                 continue;
             }
             let arm = CompTy::Return(*route, Box::new(ty.clone()));

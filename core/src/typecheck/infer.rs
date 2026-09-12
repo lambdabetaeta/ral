@@ -261,22 +261,27 @@ impl Inferencer<'_> {
                 }
             }
             IrPattern::Map(entries) => {
-                // Only entries without a default shape the row: a defaulted
-                // field may be absent, with the default supplying the binding.
-                let tail = self.ctx.unifier.fresh_row_var();
-                let mut row = Row::Var(tail);
-                let mut field_tys = Vec::with_capacity(entries.len());
-                for entry in entries.iter().rev() {
-                    let field_ty = self.ctx.unifier.fresh_ty();
-                    field_tys.push(field_ty.clone());
-                    if entry.default.is_none() {
-                        row = Row::Extend(entry.key.row_label(), Box::new(field_ty), Box::new(row));
-                    }
-                }
-                field_tys.reverse();
+                let tail = Row::Var(self.ctx.unifier.fresh_row_var());
+                let field_tys: Vec<Ty> = entries
+                    .iter()
+                    .map(|_| self.ctx.unifier.fresh_ty())
+                    .collect();
+                // A row nests tail-inward, so the first entry is wrapped last.
+                let row =
+                    entries
+                        .iter()
+                        .zip(&field_tys)
+                        .rev()
+                        .fold(tail, |row, (entry, field_ty)| {
+                            Row::Extend(
+                                entry.key.row_label(),
+                                Box::new(field_ty.clone()),
+                                Box::new(row),
+                            )
+                        });
                 self.ctx
                     .unify_ty(ty, &Ty::Record(row), Reason::RecordPattern);
-                for (entry, field_ty) in entries.iter().zip(field_tys.iter()) {
+                for (entry, field_ty) in entries.iter().zip(&field_tys) {
                     self.bind_pattern(&entry.pattern, field_ty, mode);
                 }
             }
@@ -757,7 +762,7 @@ impl Inferencer<'_> {
                     expected: m.left,
                     actual: m.right,
                 },
-                PinFailure::ByteHeadReturnsValue(actual) => TypeErrorKind::CompTyMismatch {
+                PinFailure::ByteHeadReturnsValue { actual, .. } => TypeErrorKind::CompTyMismatch {
                     expected: CompTy::bytes(),
                     actual: CompTy::Return(PayloadRoute::Bytes, Box::new(actual.clone())),
                     diffs: vec![CompDiff::ReturnType {
@@ -773,17 +778,19 @@ impl Inferencer<'_> {
         super::generalize::generalize(&mut self.ctx.unifier, self.env, &thunk_ty)
     }
 
-    /// Head `name`'s payload route: a handler scheme in scope — a user arm's or a
-    /// base frame's — pins to its own; any other name is the external command of
-    /// that spelling, whose OS signature is `List String -> Bytes`, so an arm
-    /// reinterpreting it inherits the byte route rather than declaring one.
-    fn head_pipe_route(&mut self, name: &str) -> PayloadRoute {
+    /// Head `name`'s payload route, and whether it came from a handler
+    /// already in scope: a user arm's or a base frame's scheme pins to its
+    /// own route, and reinterprets it; any other name is the external
+    /// command of that spelling, whose OS signature is `List String ->
+    /// Bytes`, so an arm over it inherits the byte route rather than
+    /// declaring one, and reinterprets nothing.
+    fn head_pipe_route(&mut self, name: &str) -> (PayloadRoute, bool) {
         match self.env.lookup_handler(name).cloned() {
             Some(handler) => {
                 let cty = self.instantiate_comp(&handler.scheme);
-                self.comp_route(&cty)
+                (self.comp_route(&cty), true)
             }
-            None => PayloadRoute::Bytes,
+            None => (PayloadRoute::Bytes, false),
         }
     }
 
@@ -800,7 +807,10 @@ impl Inferencer<'_> {
     /// Unify the arm's payload route against head `name`'s.  A pin that
     /// lands on the byte side lands on [`CompTy::bytes`] — WF-2 admits no
     /// other byte-routed computation — so the arm's value unifies with
-    /// `Unit` in the same breath, never left to a sibling grounding.
+    /// `Unit` in the same breath, never left to a sibling grounding.  A head
+    /// pinned to `Bytes` admits the arm-join's own subsumption,
+    /// `Value Unit ⊑ Bytes` ([`Unifier::bytes_subsumes`]): an arm the
+    /// checker already routed `Value` need not have written a byte itself.
     ///
     /// The only failures are a route clash and a byte-routed arm that still
     /// returns something, both returned rather than reported so
@@ -809,7 +819,17 @@ impl Inferencer<'_> {
     pub(super) fn pin_arm_to_head(&mut self, name: &str, arm: &CompTy) -> Result<(), PinFailure> {
         let body = self.alias_arm_body(arm);
         let (value, route) = self.extract_return(&body);
-        let head = self.head_pipe_route(name);
+        let (head, reinterprets) = self.head_pipe_route(name);
+        if matches!(self.ctx.unifier.resolve_route(head), PayloadRoute::Bytes) {
+            return if self.ctx.unifier.bytes_subsumes(route, &value) {
+                Ok(())
+            } else {
+                Err(PinFailure::ByteHeadReturnsValue {
+                    actual: self.ctx.unifier.apply_ty(&value),
+                    reinterprets,
+                })
+            };
+        }
         self.ctx
             .unifier
             .unify_route(route, head)
@@ -817,9 +837,10 @@ impl Inferencer<'_> {
         if matches!(self.ctx.unifier.resolve_route(route), PayloadRoute::Bytes)
             && self.ctx.unifier.unify_ty(&value, &Ty::Unit).is_err()
         {
-            return Err(PinFailure::ByteHeadReturnsValue(
-                self.ctx.unifier.apply_ty(&value),
-            ));
+            return Err(PinFailure::ByteHeadReturnsValue {
+                actual: self.ctx.unifier.apply_ty(&value),
+                reinterprets,
+            });
         }
         Ok(())
     }

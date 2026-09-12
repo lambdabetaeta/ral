@@ -13,7 +13,6 @@
 
 "|"   @operator   ; pipe
 "?"   @operator   ; failure chain
-"&"   @operator   ; background
 
 "="   @operator   ; let binding
 

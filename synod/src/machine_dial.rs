@@ -51,7 +51,7 @@ impl Dial for MachineDial {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
