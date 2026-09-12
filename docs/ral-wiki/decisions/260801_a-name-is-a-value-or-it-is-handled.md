@@ -1,5 +1,5 @@
 ---
-status: active
+status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the arity partition (native vs. base frame), no-install-time-admission, and every consequence for natives and base frames stand. What resolves otherwise: `^name` no longer reaches an installed base-frame arm at all — it joins the path-head class, skipping the handler stack entirely, so `^echo` is `/bin/echo` and `^detach` is not found.'
 ---
 
 # A name is a value or it is handled
@@ -117,6 +117,14 @@ Interception is lexical shadowing, and `^name` is the escape hatch: `^clear`
 still reaches the ncurses binary, while `^detach` and `^echo` reach their base
 frames rather than a `PATH` binary of that name — accepted.
 
+> **2026-09-11.** `^detach` and `^echo` no longer reach their base frames.
+> [[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
+> rules the other way: `^name` joins the path-head class, skipping the
+> handler stack — run frames and base frames alike — so `^echo` is `/bin/echo`
+> and `^detach` is not found. This section's first leg is unaffected:
+> resolution order is still the only arbiter, and no install path admits or
+> refuses a name.
+
 ### 5. The manifest is a boot manifest
 
 `CORE_BUILTINS` and the host sets seed the base env scope, the base frames, the
@@ -201,6 +209,9 @@ exhaustive),
 [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]] (amends
 §1: the manifest is authored as two rather than partitioned by arity, and this
 page's arity reading becomes a consequence rather than the classifier),
+[[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
+(supersedes §4's `^detach`/`^echo`-reach-their-base-frames sentence: `^name`
+joins the path-head class instead, reaching neither),
 [[invariants/fixed-arity|fixed-arity]] (the invariant this makes structural),
 [[design/builtins|builtins]], [[design/name-resolution|name-resolution]],
 [[internals/builtins-registry|builtins-registry]],

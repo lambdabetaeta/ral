@@ -1,5 +1,5 @@
 ---
-status: active
+status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the deletion of `ArgSig::Optional`, the flip of `cd`/`fg`/`bg`/`disown` to natives, and every consequence of that (T0050, the route pin losing its subject) stand. What resolves otherwise: `^cd` no longer reaches an installed arm at all — `^name` joins the path-head class, so `^cd` is a `PATH` lookup like any other `^name`, reaching no handler.'
 ---
 
 # No value has an optional argument
@@ -57,14 +57,24 @@ the special case does not relocate, it is answered by something already general.
 base env scope instead of the base layer of the handler stack. They gain `$cd`
 and `$fg` value forms; a handler no longer intercepts the bare name, since
 resolution reaches the env first; `^cd` still reaches an installed arm, exactly
-as `^jobs` does today. `echo` and `detach` — genuinely open argv — are the
-only base frames left.
+as `^jobs` does today.
+
+> **2026-09-11.** `^cd` (and `^jobs`) no longer reaches an installed arm.
+> [[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
+> makes `^name` uniformly the path-head arm, so it skips every handler
+> regardless of whether the bare name is a native or a base frame; an arm
+> over a native's spelling is simply unreachable from any bare head, dead by
+> construction and reported by `explain`, not by `^`.
+
+`echo` and `detach` — genuinely open argv — are the only base frames left.
 
 ### 3. The break is the removal of the ability to opt back in
 
 The break is stronger than a changed default. After the flip,
 bare-`cd`-goes-home is not a default a user may restore: no handler intercepts
-the bare head — only `^cd` reaches one — and no value can have an optional
+the bare head — only `^cd` reaches one (superseded:
+[[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
+makes `^cd` the `PATH` binary instead) — and no value can have an optional
 argument, that being the thesis. What a user gets is `let go-home = { cd ~ }`,
 or both behaviours under two names. Never both under one.
 
@@ -99,10 +109,12 @@ today.
 That loss is required, not merely acceptable. The pin exists so that an arm
 standing in for a head agrees with the head about which of a computation's two
 products a pipe reads. After the flip the bare head resolves to the native, so
-an installed `cd` arm is reachable only through `^cd` and no longer stands for
-`cd` anywhere a pipe route matters; pinning it to the native's `Sig` route would
-be a category error — asserting agreement with a head it can never be. The
-check does not relocate: its subject ceases to exist.
+an installed `cd` arm is reachable only through `^cd` (superseded:
+[[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
+— it is reachable through nothing, `^cd` included) and no longer stands for
+`cd` anywhere a pipe route matters; pinning it to the native's `Sig` route
+would be a category error — asserting agreement with a head it can never be.
+The check does not relocate: its subject ceases to exist.
 
 ## Alternatives considered
 
@@ -154,6 +166,9 @@ eliminators — `await` is its `fg`, `cancel` its kill.
 [[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]
 (amended: `cd` and the REPL's `fg`/`bg`/`disown` move from its base-frame list
 to its native list, and its "variadic or optional" arity reads "an open argv"),
+[[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
+(supersedes every "`^cd` still reaches an installed arm" reading above: `^name`
+joins the path-head class and reaches none),
 [[invariants/fixed-arity|fixed-arity]] (the invariant this makes exhaustive),
 [[invariants/optionality-via-variants|optionality-via-variants]] (where an
 absent argument goes instead — into the value, as an open variant),

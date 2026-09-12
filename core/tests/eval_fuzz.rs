@@ -1215,7 +1215,8 @@ fn computed_within_byte_arm_runs() {
 /// computed handler map, above).
 #[test]
 fn value_alias_is_refused() {
-    let err = eval("alias foo { |args| return 3 }").expect_err("a value-returning alias is refused");
+    let err =
+        eval("alias foo { |args| return 3 }").expect_err("a value-returning alias is refused");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("payload lives"),

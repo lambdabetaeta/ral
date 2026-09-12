@@ -440,9 +440,8 @@ fn walk_pattern_defaults<'a>(pattern: &'a IrPattern, out: &mut Vec<&'a str>) {
 ///
 /// The annotation pass writes it, from the checker's route, over elaboration's
 /// placeholder — so no route reaches the evaluator.  `Unit` is therefore a
-/// promise about the final stage that the fold checks rather than assumes: a
-/// head the checker could not resolve is typed as an external, and a `source`
-/// can falsify that.
+/// promise about the final stage that the fold checks (`machine::
+/// bytes_promise_broken`) rather than assumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PipeYield {
     Last,

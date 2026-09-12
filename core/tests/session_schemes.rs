@@ -259,8 +259,7 @@ fn alias_visible_to_next_run() {
     );
     let errs = check_errors(&sh, "return $three");
     assert!(
-        errs
-            .iter()
+        errs.iter()
             .any(|e| e.kind.render_message().contains("handler entry")),
         "expected the persisted alias scheme to reject `$three` as a handler entry, got: {:?}",
         errs.iter()
@@ -284,8 +283,7 @@ fn value_output_alias_is_refused_even_seeded_from_a_prior_run() {
     let sh = shell();
     let errs = check_errors(&sh, "alias three { |args| return 3 }\nreturn ()");
     assert!(
-        errs
-            .iter()
+        errs.iter()
             .any(|e| e.kind.render_message().contains("payload lives")),
         "expected the value-output alias to be refused at install, got: {:?}",
         errs.iter()

@@ -100,26 +100,25 @@ No live code unifies a route against a detached `Bytes`, so a new decision
 site cannot forget the pairing — it has no way to spell half of it
 ([[decisions/260809_pipes-are-positional-byte-wires|pipes-are-positional-byte-wires]]).
 
-### At run time WF-2 is a promise, not a fact
+### At run time WF-2 is a checked promise, not an assumed fact
 
 Not every head is checked. A bare name that resolves to nothing the checker can
 see is typed as an external command — `Inferencer::exec_comp_ty`'s last arm,
-mirroring the runtime's own `env → handlers → PATH` order. That mirror holds
-only while the two environments agree, and `source` is exactly what makes them
-differ: it installs its bindings *while the run is under way*, long after the
-whole run was checked, so a name the checker read as an external can resolve to
-a block returning an `Int`. WF-2 then fails of a derivation the checker
-accepted.
+mirroring the runtime's own `env → handlers → PATH` order — and every arm that
+reinterprets such a name is pinned to the same byte route at install, uniformly
+([[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]).
+No known producer can still make the checker's route and the run's outcome
+disagree: the one that could, `source` installing a binding *while the run was
+already under way*, long after the whole unit had been checked, is gone.
 
-So the byte route is a promise the run must keep rather than an invariant it
-may assume, and it is cashed in exactly two places — `Frame::Capture`, which
-reads the buffer as the value, and `PipeYield::Unit`, which declines to carry
-the last stage's value home. Both check that the value really is `Unit`
-(`machine::bytes_promise_broken`) and fail with a diagnostic naming what came
-back and pointing at `use`, which hands a file's names over as values where the
-checker can see them. Neither asserts, and neither drops the value in silence:
-the first would abort the process, the second would lose the answer the user
-asked for.
+The route is still cashed as a promise the run checks rather than an invariant
+it assumes, at exactly two places — `Frame::Capture`, which reads the buffer as
+the value, and `PipeYield::Unit`, which declines to carry the last stage's
+value home. Both check that the value really is `Unit`
+(`machine::bytes_promise_broken`) and fail rather than assert or drop the value
+in silence: the first would abort the process, the second would lose the
+answer the user asked for. A failure here now names a checker/runtime
+divergence with no known cause, not a mistake in the script.
 
 ## Where a route variable may live
 

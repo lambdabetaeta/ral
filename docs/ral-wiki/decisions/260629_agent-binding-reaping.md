@@ -1,5 +1,5 @@
 ---
-status: active
+status: 'superseded in part by [[decisions/260911_an-external-is-a-byte-operation]] — the ledger, the single-writer argument, the install chokepoint, and the pruning/pinning mechanism all stand. What resolves otherwise: `source`, one of the three renewal seams, is deleted, and with it `classify_command`''s `Resolution::Env` dispatch-time renewal and `BindingLedger::renew_one` — two seams remain, not three.'
 ---
 
 # Exarch leases agent scratch bindings; ral bindings do not expire
@@ -146,6 +146,14 @@ set**, read off the compiled IR at three seams sharing one exhaustive walker,
    lookup-time one, so `Env::get` stays untouched and constraint 9 (zero cost
    on the pure-lookup path) holds exactly.
 
+> **2026-09-11.** Seam 3 is gone.
+> [[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
+> deletes `source`, the only way a bound head could resolve to a name the
+> elaborator's bound set never saw; a bound head otherwise compiles to an
+> `App`, never an `Exec`, so `Resolution::Env`'s renewal touch had no
+> remaining name to renew. It is deleted along with `BindingLedger::renew_one`,
+> which existed only to serve it — two seams remain, not three.
+
 The walker matches every `CompKind` and `Val` variant exhaustively — no
 wildcard arm — so a new IR shape is a compile error here rather than a
 silently unharvested reference, and it over-approximates by design: a name in
@@ -230,14 +238,14 @@ below is this page's own rewrite):
 0. **This rewrite** — no code, wiki only.
 1. **`BindingLedger` on `LocalState`.** The data shapes (`BindingLease`,
    `BindingPruneNotice`, `BindingLedger`), `arm`/`armed`/`tick`/`note_install`/
-   `renew`/`renew_one`, and `Shell::arm_binding_lease` — plus the
-   single-writer verification this whole unlocked design leans on, documented
-   in the module.
+   `renew`/`renew_one` (`renew_one` since deleted with seam 3 — see above),
+   and `Shell::arm_binding_lease` — plus the single-writer verification this
+   whole unlocked design leans on, documented in the module.
 2. **The install chokepoint** — `Shell::install_scope_binding` and the four
    evaluator writers routed through it.
 3. **Use observation** — `ir::referenced_names`'s exhaustive walk, the tick in
    `run_source_turn`, and renewal after `compile_turn`, in `check_source`, and
-   at `Resolution::Env`.
+   at `Resolution::Env` (this last site since deleted — see above).
 4. **The prune verb** — `pins_running_work` plus `Shell::prune_idle_bindings`:
    guards, the sweep, adoption, notices paired with the checkpoint.
 5. **exarch wiring** — the 256-idle-call constant, arming at the two shell
@@ -356,4 +364,7 @@ See also [[decisions/260616_unify-turn-evaluation|unify-turn-evaluation]],
 [[decisions/260617_long-running-work|long-running-work]],
 [[decisions/260615_no-core-repr-leak-into-exarch|no-core-repr-leak-into-exarch]],
 [[decisions/260705_session-ledger|session-ledger]],
+[[decisions/260911_an-external-is-a-byte-operation|an-external-is-a-byte-operation]]
+(deletes `source`, the seam-3 producer, so the renewal walk narrows to two
+seams),
 [[map/core/shell-state|shell-state]], and [[map/exarch/agent|agent]].

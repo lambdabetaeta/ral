@@ -171,9 +171,11 @@ fn abandon_capture(bytes: &[u8], error: Error, span: Option<Span>, shell: &mut S
 }
 
 /// WF-2 makes a byte-routed computation's value `Unit`, so a byte-routed
-/// position that meets a value met a head the checker could not see: an
-/// unresolved bare name is typed as an external, and a `source` installs the
-/// real binding only once the run is under way.  Both places the route is
+/// position that meets a value means the checker and the machine disagreed
+/// about what the head resolves to.  Uniform A
+/// (`docs/ral-wiki/decisions/260911_an-external-is-a-byte-operation.md`)
+/// refuses every known producer of that disagreement statically, so nothing
+/// in a well-typed program should reach here.  Both places the route is
 /// cashed — [`Frame::Capture`] and [`crate::ir::PipeYield::Unit`] — keep the
 /// promise here rather than assume it.
 pub(crate) fn bytes_promise_broken(v: &Value) -> Error {
@@ -185,11 +187,12 @@ pub(crate) fn bytes_promise_broken(v: &Value) -> Error {
         ),
         1,
     )
-    .with_hint(
-        "ral checks a whole script before running it, so a name unknown then is read as an \
-         external command — did a `source` in this same script define this one? `use` hands a \
-         file's names back as values: `let lib = use 'lib.ral'`, then `!$lib[name]`",
-    )
+    .with_hint(format!(
+        "ral typed this command as one that writes its result, but at run time it returned {}; \
+         every way for that to happen should have been refused when the handler was installed — \
+         please report this, with the script that produced it",
+        v.type_name()
+    ))
 }
 
 fn capture_overflowed() -> Error {

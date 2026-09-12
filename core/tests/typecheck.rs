@@ -1166,7 +1166,9 @@ fn control_op_audit_in_value_position_errors() {
 /// `r`, not the arm, so arithmetic on the result typechecks.
 #[test]
 fn within_handler_for_native_installs_but_bare_head_still_resolves_the_native() {
-    ok(r"within [handlers: [length: { |xs| echo hi }]] { let r = !{length [1, 2, 3]}; return $[$r + 1] }");
+    ok(
+        r"within [handlers: [length: { |xs| echo hi }]] { let r = !{length [1, 2, 3]}; return $[$r + 1] }",
+    );
 }
 
 /// `^length` is the binary: it skips the env, every native, and the handler
@@ -1300,7 +1302,10 @@ fn alias_value_output_body_is_refused() {
 fn alias_value_arm_piped_into_a_decoder_is_refused() {
     // Piping into a decoder does not rescue it — the install itself fails,
     // before the pipeline is even considered.
-    has_error("alias foo { |args| return 3 }\nfoo | from-json", "payload lives");
+    has_error(
+        "alias foo { |args| return 3 }\nfoo | from-json",
+        "payload lives",
+    );
 }
 
 /// An alias over an existing alias resolves the head's route from the prior

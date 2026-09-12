@@ -35,9 +35,10 @@ use crate::ir::{Comp, Phrase, Toplevel};
 /// The seed of a run's check, read off the live session by
 /// `Shell::session_schemes`.
 ///
-/// A binding with no scheme came from an unchecked path — a `source`d file, a
-/// plugin — and is bound at one fresh monomorphic type variable: generalising
-/// it to `∀a. a` would let it stand in for any type at all, unsoundly.
+/// A binding with no scheme came from `Shell::set_var` — a host seed var, an
+/// rc's `env:`/`prompt:` key — and is bound at one fresh monomorphic type
+/// variable: generalising it to `∀a. a` would let it stand in for any type at
+/// all, unsoundly.
 #[derive(Debug, Clone)]
 pub struct SessionSchemes {
     pub(crate) bindings: Vec<(String, Option<Scheme>)>,
@@ -234,8 +235,10 @@ pub(crate) fn catch_all_route_ok(body: &Comp, schemes: SessionSchemes) -> Result
         .unifier
         .unify_route(route, PayloadRoute::Bytes)
         .map_err(PinFailure::Route)?;
-    if matches!(inferencer.ctx.unifier.resolve_route(route), PayloadRoute::Bytes)
-        && inferencer.ctx.unifier.unify_ty(&value, &Ty::Unit).is_err()
+    if matches!(
+        inferencer.ctx.unifier.resolve_route(route),
+        PayloadRoute::Bytes
+    ) && inferencer.ctx.unifier.unify_ty(&value, &Ty::Unit).is_err()
     {
         return Err(PinFailure::ByteHeadReturnsValue(
             inferencer.ctx.unifier.apply_ty(&value),
