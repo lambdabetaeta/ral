@@ -63,16 +63,11 @@ pub(super) fn lock(m: &Arc<Mutex<PluginRuntime>>) -> MutexGuard<'_, PluginRuntim
     m.lock_ignore_poison()
 }
 
-/// A plugin-load failure.  The message carries no surface tag: the display
-/// site that reports it (`cmd_error`, the ralrc loader) owns the prefix,
-/// so it appears exactly once.  Shared by the loader and the manifest
-/// parser.
+/// A plugin load or unload failure.  The message carries no surface tag: the
+/// display site that reports it (`cmd_error`, the ralrc loader) owns the
+/// prefix, so it appears exactly once.  Shared by the loader, the unloader,
+/// and the manifest parser.
 pub(super) fn load_err(msg: impl std::fmt::Display) -> ral_core::types::Error {
-    ral_core::types::Error::new(msg.to_string(), 1)
-}
-
-/// An unload failure; untagged for the same reason as [`load_err`].
-pub(super) fn unload_err(msg: impl std::fmt::Display) -> ral_core::types::Error {
     ral_core::types::Error::new(msg.to_string(), 1)
 }
 

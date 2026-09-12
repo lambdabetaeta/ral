@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use super::super::errfmt::plugin_warning;
 use super::manifest::{LoadedPlugin, ManifestHandlers};
-use super::{PluginRuntime, framed_run_request, load_err, lock, unload_err};
+use super::{PluginRuntime, framed_run_request, load_err, lock};
 
 /// Load a plugin by name (or path) with an optional options map.
 ///
@@ -176,7 +176,7 @@ pub(crate) fn unload_plugin(
         .plugins
         .iter()
         .position(|p| p.name == name)
-        .ok_or_else(|| unload_err(format!("plugin '{name}' is not loaded")))?;
+        .ok_or_else(|| load_err(format!("plugin '{name}' is not loaded")))?;
     let plugin = rt.plugins.remove(idx);
     drop(rt);
     shell.remove_plugin_hooks(&plugin.name);
