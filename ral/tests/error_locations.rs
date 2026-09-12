@@ -48,7 +48,7 @@ fn an_rc_alias_faults_against_the_rc_file() {
     std::fs::create_dir_all(dir.join("ral")).unwrap();
     std::fs::write(
         dir.join("ral").join("rc"),
-        "[\n  aliases: [ boom: { |args| $undefined_name } ]\n]\n",
+        "[\n  aliases: [ boom: { |args| echo $undefined_name } ]\n]\n",
     )
     .unwrap();
     let stderr = repl_stderr(&dir, &[], "boom\n");

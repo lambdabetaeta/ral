@@ -231,8 +231,8 @@ fn an_in_shell_argv_is_gated_by_nothing() {
     for src in [
         "echo [a: 1]",
         r"let f = { |x| return $x }; echo $f [1, 2]",
-        r"alias mycmd { |args| ^echo ...$args }; mycmd [a: 1]",
-        r"within [handlers: [mycmd: { |args| ^echo ...$args }]] { mycmd [a: 1] }",
+        r"alias mycmd { |args| echo ...$args }; mycmd [a: 1]",
+        r"within [handlers: [mycmd: { |args| echo ...$args }]] { mycmd [a: 1] }",
     ] {
         assert!(static_codes(src).is_empty(), "{src:?} must typecheck");
     }
@@ -240,23 +240,23 @@ fn an_in_shell_argv_is_gated_by_nothing() {
 
 // ── `echo` is a base frame ────────────────────────────────────────────────────
 
-/// `^echo` reaches the frame rather than a `PATH` binary — and the frame is
-/// what proves it: a lambda has a text form here, where an external would
-/// refuse it outright.
+/// `^echo` is the path-head arm too (ruling 2): the operating system's `echo`,
+/// not this frame — so a lambda argument is refused at the exec boundary
+/// exactly as any other external's is, statically, since its type is concrete.
 #[test]
-fn caret_echo_reaches_the_frame_not_a_path_binary() {
-    assert_eq!(
-        printed(r"let f = { |x| return $x }; ^echo $f"),
-        "<|x| block>\n"
-    );
+fn caret_echo_is_the_path_binary_and_refuses_a_lambda() {
+    let src = r"let f = { |x| return $x }; ^echo $f";
+    assert_eq!(static_codes(src), ["T0057"], "{src:?}");
 }
 
 /// Being a frame rather than a value, `echo` can be stacked on: a handler under
-/// its name intercepts the bare head.
+/// its name intercepts the bare head.  Self-masking (bare `echo` inside the
+/// arm, not `^echo` — ruling 2 makes that the binary) is what reaches the
+/// frame underneath.
 #[test]
 fn a_handler_stacked_on_echo_intercepts_the_bare_name() {
     assert_eq!(
-        printed(r"within [handlers: [echo: { |args| ^echo 'mocked' ...$args }]] { echo hi there }"),
+        printed(r"within [handlers: [echo: { |args| echo 'mocked' ...$args }]] { echo hi there }"),
         "mocked hi there\n"
     );
 }
@@ -265,7 +265,7 @@ fn a_handler_stacked_on_echo_intercepts_the_bare_name() {
 #[test]
 fn echos_frame_returns_at_the_brace() {
     assert_eq!(
-        printed(r"within [handlers: [echo: { |args| ^echo 'mocked' }]] { echo hi }; echo plain"),
+        printed(r"within [handlers: [echo: { |args| echo 'mocked' }]] { echo hi }; echo plain"),
         "mocked\nplain\n"
     );
 }

@@ -1114,13 +1114,14 @@ let same = $f 3     # apply f explicitly
 ```
 
 `^name` is valid only at the start of a command. Its operand must be a plain
-name, not a path. The caret skips user bindings, prelude functions, and
-builtins. It still respects named handlers, base handlers, catch-all handlers,
-and active capabilities.
+name, not a path. The caret skips user bindings, prelude functions, builtins,
+and the entire handler stack — named handlers, base handlers, and catch-all
+handlers alike — and executes the external command of that name, subject to
+active capabilities. It is, in this respect, the same as a path head such as
+`./tool` or `/usr/bin/tool`.
 
-For example, `^echo` still reaches a user handler for `echo`, or ral's base
-`echo` handler when no user handler matches. Use an exact path to bypass all
-handlers.
+For example, `^echo` is the operating system's `echo`, not ral's — a handler
+for `echo`, and ral's own base `echo` handler, are both skipped.
 
 The bare names `within`, `grant`, `try`, `guard`, and `audit` are reserved
 control forms. A caret form such as `^try` uses caret lookup instead.
@@ -1154,9 +1155,9 @@ declares, and supports partial application and higher-order use. A base handler 
 value. It is reached in command position only, so `$echo` is an error.
 
 A named handler may share a name with a binding or builtin. The ordinary bare
-name still selects the binding. `^name` skips the binding and reaches the
-handler. A named handler for a base handler such as `echo` already has higher
-priority, so it does not need a caret.
+name still selects the binding. `^name` is the external command `name`: it
+skips bindings, natives, and every handler, base frames included — `^echo` is
+the operating system's `echo`, not ral's.
 
 ### 6.4. Handlers and aliases
 
@@ -1896,7 +1897,7 @@ within [env: [MODE: 'test']] {
 within [
     dir: 'project',
     env: [MODE: 'test', RETRIES: 3],
-    handlers: [deploy: { |args| return [mock: true, args: $args] }],
+    handlers: [deploy: { |args| to-json [mock: true, args: $args] }],
     handler: { |name args|
         fail [status: 127, message: "unexpected command: $name"]
     },
@@ -1961,7 +1962,6 @@ A named handler reinterprets one command name:
 within [handlers: [
     git: { |args|
         echo "git called with: $args"
-        return ()
     },
 ]] {
     git status
@@ -1972,7 +1972,7 @@ Every value in `handlers` must be a unary lambda `{ |args| ... }`. It receives t
 
 The singular `handler` field is a catch-all and must be a binary lambda `{ |name args| ... }`. It receives the command name as a `String` and its argument list as a `List String`.
 
-A bare block, non-lambda value, or lambda with the wrong number of parameters is rejected when the frame is installed. A named handler must also preserve the command head's payload route when that head already has one. A head whose payload is captured from standard output — every external command, for instance — admits only arms whose payload is too, and such an arm returns `Unit`. A handler may change what a command writes, and what it returns where the head's payload is a returned value, but not where the payload lives; use an explicit codec when conversion is intended.
+A bare block, non-lambda value, or lambda with the wrong number of parameters is rejected when the frame is installed. A handler reinterprets a command, not a value binding, so it must preserve the command head's payload route: an external — every name that is not itself already a handler, natives included — has its payload route fixed at `List String → Bytes` by the operating system's own command interface, so a named handler (and the catch-all alike) over such a head must emit bytes, not return a value, and returns `Unit`. Reinterpreting a head that is itself already a handler (an alias over an alias, say) preserves that handler's own route instead. A handler may change what a command writes, but not where the payload lives; use an explicit codec when conversion is intended.
 
 Handlers are command operations, not first-class names. They are invoked in command position and cannot be fetched with `$name`.
 
@@ -1988,7 +1988,7 @@ A bare command head is resolved in this order:
 
 Named handlers are searched in a complete innermost-first pass before catch-alls. Therefore any named handler, even in an outer frame, outranks every catch-all. Base commands likewise outrank catch-alls. A named handler can intercept a base command because named run frames are checked first.
 
-A lexical binding still wins over every handler. Installing a handler under an already-bound name is allowed, but a normal bare call will not reach it. The explicit head `^name` skips the lexical environment while still consulting named handlers, base commands, and catch-alls. A path head such as `./tool` or `/usr/bin/tool` skips handlers entirely and executes that path.
+A lexical binding still wins over every handler. Installing a handler under an already-bound name is allowed, but a normal bare call will not reach it. The explicit head `^name`, like a path head such as `./tool` or `/usr/bin/tool`, skips handlers entirely and executes the external of that name.
 
 Aliases use the same named-handler stack but persist beyond a `within` block until removed or replaced. Scoped handler frames themselves are removed when their `within` ends.
 
@@ -3331,16 +3331,18 @@ try {
 changing global process state:
 
 ```ral
-within [handlers: [fetch-clock: { |args| return '12:00' }]] {
+within [handlers: [fetch-clock: { |args| echo '12:00' }]] {
     assert-equal 'clock' '12:00' !{fetch-clock}
 }
 ```
 
-The handler receives the command's argument list, a `List String`.
-Per-name handlers follow the ordinary command-dispatch rules, including inside
-byte pipelines. Returned values are composed by ordinary application and bind,
-so tests should mock those functions as values rather than pretending they are
-byte command channels.
+The handler receives the command's argument list, a `List String`. Per-name
+handlers follow the ordinary command-dispatch rules, including inside byte
+pipelines. A handler stands in for a command, and a command's payload is its
+stdout, so a mock must be a *faithful* one: it writes what the real command
+would write, and the test decodes it the same way a real caller would —
+`!{fetch-clock}` captures the mock's line, and a decoder such as `from-json`
+reads a mock that emits structured output.
 
 `audit` is the execution-observation testing surface. It can assert the
 observation sequence, statuses, raw output, capability denials, and source
@@ -3882,9 +3884,10 @@ aliases. Loading a duplicate plugin name or unloading a name that is not
 loaded is an error.
 
 Plugin aliases occupy the alias namespace. A collision with an existing alias
-is a load error. A lexical or native command with the same name is permitted;
-ordinary name resolution decides which bare head wins, and `^name` reaches the
-alias while skipping lexical and native lookup.
+is a load error. A lexical or native command with the same name is permitted,
+but the alias underneath it is then unreachable: a bare head hits the lexical
+binding or native first, and `^name` is the external of that spelling, not the
+alias. `explain name` still reports it, under `shadows:`.
 
 ### 15.6. Hook and keybinding events
 

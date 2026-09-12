@@ -75,12 +75,20 @@ impl Inferencer<'_> {
 
                 ValMapEntry::Entry(
                     Val::String(key),
-                    Spanned {
+                    value @ Spanned {
                         item: Val::Thunk(comp),
                         ..
                     },
                 ) if key == "handler" => {
-                    let _ = self.with_scope(|this| this.infer_comp(comp));
+                    self.with_span(value.span, |this| {
+                        let cty = this.infer_catch_all(comp);
+                        let arm_return = this.alias_arm_body(&cty);
+                        this.ctx.unify_comp_ty(
+                            &CompTy::bytes(),
+                            &arm_return,
+                            Reason::CatchAllRoutePin,
+                        );
+                    });
                 }
 
                 entry => {

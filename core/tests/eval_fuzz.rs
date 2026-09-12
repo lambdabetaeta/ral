@@ -1080,12 +1080,15 @@ fn grant_fs_write_denies_external_redirect() {
 
 // ── within handler nesting ───────────────────────────────────────────────
 
+/// Every arm is byte-routed now (uniform A), so which one answered is a
+/// run-time content question, not a static type one: capture the winner —
+/// `let r = cmd; return $r` — and read its decoded text.
 #[test]
 fn within_handler_inner_shadows_outer_same_name() {
     // Innermost per-name handler wins when both frames name the same command.
     assert_eq!(
         must_succeed(
-            "within [handlers: [cmd: { |args| echo outer; return 'outer' }]] { within [handlers: [cmd: { |args| echo inner; return 'inner' }]] { cmd } }"
+            "within [handlers: [cmd: { |args| echo outer }]] { within [handlers: [cmd: { |args| echo inner }]] { let r = cmd; return $r } }"
         ),
         Value::String("inner".into())
     );
@@ -1096,7 +1099,7 @@ fn within_handler_outer_fires_when_inner_does_not_match() {
     // Inner frame has no entry for cmd2; outer frame fires.
     assert_eq!(
         must_succeed(
-            "within [handlers: [cmd2: { |args| echo outer; return 'outer' }]] { within [handlers: [cmd1: { |args| echo inner; return 'inner' }]] { cmd2 } }"
+            "within [handlers: [cmd2: { |args| echo outer }]] { within [handlers: [cmd1: { |args| echo inner }]] { let r = cmd2; return $r } }"
         ),
         Value::String("outer".into())
     );
@@ -1108,7 +1111,7 @@ fn outer_per_name_beats_inner_catch_all() {
     // `other` is preferred over an inner frame's catch-all.
     assert_eq!(
         must_succeed(
-            "within [handlers: [other: { |args| echo outer; return 'outer' }]] { within [handler: { |n _a| return 'catch' }] { other } }"
+            "within [handlers: [other: { |args| echo outer }]] { within [handler: { |n _a| echo catch }] { let r = other; return $r } }"
         ),
         Value::String("outer".into())
     );
@@ -1117,8 +1120,10 @@ fn outer_per_name_beats_inner_catch_all() {
 #[test]
 fn within_catch_all_skips_builtins() {
     // Catch-all handler must NOT intercept builtins — they are language-internal.
+    // The catch-all's own body only needs to install (uniform A pins it to
+    // `F[Bytes] Unit`); it never runs here, since `length` is a builtin.
     assert_eq!(
-        must_succeed("within [handler: { |n _a| return 'caught' }] { length [1, 2, 3] }"),
+        must_succeed("within [handler: { |n _a| echo caught }] { length [1, 2, 3] }"),
         Value::Int(3)
     );
 }
@@ -1131,9 +1136,43 @@ fn alias_inside_within_shadows_within_per_name() {
     // the alias under the within and the within's entry won.
     assert_eq!(
         must_succeed(
-            "within [handlers: [foo: { |args| echo A; return 'A' }]] { alias foo { |args| echo B; return 'B' }; foo }"
+            "within [handlers: [foo: { |args| echo A }]] { alias foo { |args| echo B }; let r = foo; return $r }"
         ),
         Value::String("B".into())
+    );
+}
+
+/// Last-pushed alias shadows earlier alias at run time — moved from
+/// `typecheck.rs::alias_last_pushed_shadows_earlier`, which can no longer
+/// distinguish the two arms statically: every arm is byte-routed alike
+/// (uniform A), so which one answered is a content question.
+#[test]
+fn alias_last_pushed_shadows_earlier_at_runtime() {
+    assert_eq!(
+        must_succeed(
+            "alias greet { |args| echo hi }; alias greet { |args| echo 42 }; let r = greet; return $r"
+        ),
+        Value::String("42".into())
+    );
+}
+
+/// `unalias` removes only a static `alias` binding, not a
+/// `within [handlers:]`-installed frame (`removable_by_unalias` excludes it)
+/// — moved from `typecheck.rs::unalias_removes_only_static_alias_binding`,
+/// which can no longer distinguish "still installed" from "fell through to
+/// an unrelated external" statically now that both decode to `String` alike.
+///
+/// The `unalias` refuses, as it does for any name no run frame holds
+/// (`detach.rs::unalias_detach_refuses_because_no_run_frame_holds_it`); the
+/// `attempt` keeps that refusal from ending the block, so the surviving
+/// handler is what the returned value witnesses.
+#[test]
+fn unalias_does_not_remove_a_within_installed_handler() {
+    assert_eq!(
+        must_succeed(
+            "within [handlers: [greet: { |args| echo 41 }]] { attempt { unalias greet }; let r = greet; return $r }"
+        ),
+        Value::String("41".into())
     );
 }
 
@@ -1141,18 +1180,21 @@ fn alias_inside_within_shadows_within_per_name() {
 //
 // A computed `within [handlers: $h]` opts map and a runtime-installed alias
 // are invisible to the static check, so their arms' payload routes are pinned
-// to the head's at install instead.  An unknown head's route is fresh, so the
-// arm defines it and a value-returning arm installs and runs; a known head
-// whose route disagrees is the clash rejected there.
+// to the head's at install instead — the same uniform rule (A), just vetted
+// here rather than during `--check`: every unseen head is byte-routed, so a
+// value-returning arm is refused at install regardless.
 
 /// A computed (non-literal) `within` opts map carrying a value-returning arm
-/// defines the unknown head's route, so it installs and runs, yielding the
-/// arm's value.
+/// is refused at install (uniform A), vetted here since a computed map is
+/// invisible to the static check.
 #[test]
-fn computed_within_value_arm_runs() {
-    assert_eq!(
-        must_succeed("let h = [foo: { |args| return 3 }]; within [handlers: $h] { foo }"),
-        Value::Int(3)
+fn computed_within_value_arm_is_refused_at_install() {
+    let err = eval("let h = [foo: { |args| return 3 }]; within [handlers: $h] { foo }")
+        .expect_err("a value-returning arm cannot be installed under a computed map either");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("payload lives"),
+        "expected the route-clash wording, got: {msg}"
     );
 }
 
@@ -1167,11 +1209,54 @@ fn computed_within_byte_arm_runs() {
     );
 }
 
-/// A runtime-installed value-returning alias defines the unknown head's route,
-/// so the install guard in `Shell::install_alias` accepts it.
+/// A runtime-installed value-returning alias is refused too: uniform A pins
+/// every user arm to `F[Bytes] Unit`, whether the arm is caught by the
+/// ordinary static check (a literal `alias`) or vetted only at install (a
+/// computed handler map, above).
 #[test]
-fn value_alias_installs() {
-    assert_eq!(must_succeed("alias foo { |args| return 3 }"), Value::Unit);
+fn value_alias_is_refused() {
+    let err = eval("alias foo { |args| return 3 }").expect_err("a value-returning alias is refused");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("payload lives"),
+        "expected the route-clash wording, got: {msg}"
+    );
+}
+
+/// A-3: the computed catch-all is vetted at install too, symmetric with a
+/// computed per-name arm above — a literal catch-all is caught statically
+/// (A-2), a computed one only here.
+#[test]
+fn computed_value_catch_all_is_refused_at_install() {
+    let err = eval("let k = { |n a| return 'x' }; within [handler: $k] { zzz }")
+        .expect_err("a value-returning computed catch-all is refused");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("payload lives"),
+        "expected the route-clash wording, got: {msg}"
+    );
+}
+
+/// A-8's own invariant, pinned: the checker and the runtime agree on `^name`.
+/// Statically (`typecheck.rs::caret_reaches_the_external_in_lockstep_with_the_runtime`),
+/// `!{^cat …}` types as `String` — `^cat` is external, not the `cat` arm. At
+/// run time, `echo hi | ^cat` reaches the bundled `cat` (cross-platform) and
+/// prints `hi`, while `echo hi | cat` reaches the arm and prints
+/// `handler-cat` — the same head, resolved two different ways by one spelling.
+#[test]
+fn caret_reaches_the_external_in_lockstep_with_the_runtime() {
+    assert_eq!(
+        must_succeed(
+            "within [handlers: [cat: { |args| echo handler-cat }]] { let r = echo hi | ^cat; return $r }"
+        ),
+        Value::String("hi".into())
+    );
+    assert_eq!(
+        must_succeed(
+            "within [handlers: [cat: { |args| echo handler-cat }]] { let r = echo hi | cat; return $r }"
+        ),
+        Value::String("handler-cat".into())
+    );
 }
 
 /// `vet` is the install path, and a computed handler map is the only way to
@@ -1215,11 +1300,13 @@ fn an_open_route_arm_under_a_byte_head_is_refused_at_install() {
 /// The arm `install_alias` vets is a live value, so its body is annotated IR —
 /// `Capture` nodes included — and the guard's `alias_arm_scheme` re-infers it.
 /// A byte-payload `let` inside the arm therefore installs only if inference is
-/// defined on `Capture`, and agrees with the first pass that it is a `String`.
+/// defined on `Capture`, and agrees with the first pass that it is a `String`
+/// — the arm re-emits it rather than returning it, since every arm is
+/// byte-routed now (uniform A).
 #[test]
 fn alias_arm_with_a_captured_byte_payload_installs() {
     assert_eq!(
-        must_succeed("alias foo { |args| let u = echo hi; return $u }; foo"),
+        must_succeed("alias foo { |args| let u = echo hi; echo $u }; let r = foo; return $r"),
         Value::String("hi".into())
     );
 }
@@ -1409,11 +1496,11 @@ fn tco_deep_recursion() {
 #[test]
 fn tco_within_handler_non_tail() {
     // handler called NOT in tail position must execute, not escape as TailCall.
+    // Captured and decoded to String (uniform A): the arm is byte-routed, not
+    // value-returning.
     assert_eq!(
-        must_succeed(
-            "within [handlers: [cmd: { |args| echo 6; return 6 }]] { let y = cmd; return $y }"
-        ),
-        Value::Int(6)
+        must_succeed("within [handlers: [cmd: { |args| echo 6 }]] { let y = cmd; return $y }"),
+        Value::String("6".into())
     );
 }
 

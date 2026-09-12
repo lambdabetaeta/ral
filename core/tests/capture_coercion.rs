@@ -86,11 +86,11 @@ fn an_alias_cannot_stand_in_for_the_coercion() {
     let mut shell = fresh_shell();
     ok(
         &mut shell,
-        "alias __decode-captured { |_| return 42 }\nreturn ()",
+        "alias __decode-captured { |_| echo 42 }\nreturn ()",
     );
     assert_eq!(
-        ok(&mut shell, "__decode-captured anything"),
-        Value::Int(42),
+        ok(&mut shell, "let r = __decode-captured anything\nreturn $r"),
+        Value::String("42".into()),
         "the alias must really be installed and dispatchable, or this test proves nothing"
     );
     assert_eq!(
@@ -100,13 +100,13 @@ fn an_alias_cannot_stand_in_for_the_coercion() {
 }
 
 /// The blanking case, which is worse than the wrong-type one: an alias that
-/// returns the empty string once emptied every captured binding in scope.
+/// emits the empty string once emptied every captured binding in scope.
 #[test]
 fn an_alias_cannot_blank_a_captured_binding() {
     let mut shell = fresh_shell();
     ok(
         &mut shell,
-        "alias __decode-captured { |_| return \"\" }\nreturn ()",
+        "alias __decode-captured { |_| echo \"\" }\nreturn ()",
     );
     assert_eq!(
         ok(&mut shell, "let greeting = echo hello\nreturn $greeting"),
@@ -119,13 +119,13 @@ fn an_alias_cannot_blank_a_captured_binding() {
 #[test]
 fn a_handler_frame_cannot_stand_in_for_the_coercion() {
     let mut shell = fresh_shell();
-    let frame = "within [handlers: [__decode-captured: { |_| return 42 }]]";
+    let frame = "within [handlers: [__decode-captured: { |_| echo 42 }]]";
     assert_eq!(
         ok(
             &mut shell,
-            &format!("{frame} {{ __decode-captured anything }}")
+            &format!("{frame} {{ let r = __decode-captured anything\n return $r }}")
         ),
-        Value::Int(42),
+        Value::String("42".into()),
         "the frame must really intercept the name, or this test proves nothing"
     );
     assert_eq!(

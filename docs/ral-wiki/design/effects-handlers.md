@@ -9,8 +9,10 @@ ral takes the smallest on both: a restricted, continuation-free fragment.
 ral installs effect handlers over a dynamic frame stack with
 `within [handlers: [name: handler], handler: fallback] { body }`. A handler maps
 an operation name to a lambda; the catch-all `handler:` applies when no per-name
-entry matches. Handlers intercept **external commands only** — lexical bindings,
-builtins, and the prelude are not shell aliases and cannot be overridden.
+entry matches. Handlers intercept **external commands only**, and only at the
+*bare* head — lexical bindings, builtins, and the prelude are not shell aliases
+and cannot be overridden, and `^name`, like a path head, skips the handler
+stack too and reaches the external binary directly.
 
 A per-name handler (and every alias) must be a **unary lambda** `{ |args| … }`,
 applied to the intercepted command's argument list; the catch-all must be a
@@ -18,6 +20,17 @@ applied to the intercepted command's argument list; the catch-all must be a
 argument list. The calling convention is fixed by the surface position, not the
 value's runtime shape: a bare block `{ … }`, a non-lambda value, or a lambda of
 the wrong arity is rejected at install time.
+
+**A handler reinterprets an operation; it cannot re-declare its type.** Every
+name a handler installs over already has the OS's own signature, `List String →
+Bytes` — a handler substitutes a new body for that operation, not a new type.
+So every user handler arm, per-name or catch-all alike, has exactly one type,
+`List String → F[Bytes] Unit`: the command world is argv in, bytes out,
+uniformly. A value-returning, variable-arity command is therefore not
+expressible; that capability belongs to the value world instead, as a binding
+of fixed arity taking a list — `let f = { |xs| … }; f [a, b, c]`. A name is a
+value or it is handled; if it is handled, it is a command, and a command
+writes.
 
 ral's handlers are the **tail-resumptive fragment** of algebraic-effect handlers,
 along three axes — the first two recorded in

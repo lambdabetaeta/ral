@@ -1,6 +1,6 @@
 ---
-generated_at_commit: d9abfb52
-generated_at_date: 2026-09-11
+generated_at_commit: d4af249c
+generated_at_date: 2026-09-12
 covers_paths: [core/src/runtime.rs, core/src/runtime/]
 ---
 
@@ -24,8 +24,8 @@ recursion is irreducible; the evaluator reaches it at
   handler stack's base layer, run by `run_base_frame` with the argv slice
   ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]],
   [[decisions/260812_argv-is-a-list-of-strings|argv-is-a-list-of-strings]]).
-  `^name` skips the env, and therefore every native, but still consults
-  handlers; a path-bearing head skips handlers too. **Grant admission is an
+  `^name` and a path-bearing head are the external directly, consulting
+  neither the env nor the handler stack. **Grant admission is an
   external-command property**: only the `External` arm consults
   `capability::admits_head` before any argument evaluates, refusing the head
   outright; the env, base, and handler arms pass through. Handler and alias

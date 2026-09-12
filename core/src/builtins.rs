@@ -397,7 +397,7 @@ builtin_registry! {
 static CORE_BASE_FRAMES_ARR: [BuiltinEntry; 1] = [BuiltinEntry::base_frame(
     Cow::Borrowed("echo"),
     scheme::echo,
-    "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, and `^echo` reaches this frame rather than a PATH binary.",
+    "echo <args...>  — write one line: every argument in its text form (what `str` gives, so a list or a map prints as it looks), joined by single spaces, with a trailing newline. It takes an argv rather than arguments, so there is no `$echo` to hold: a handler stacked on `echo` intercepts it, but `^echo` skips this frame — it is the operating system's `echo`, not ral's.",
     BuiltinBody::Static(codecs::builtin_echo),
 )];
 pub(crate) static CORE_BASE_FRAMES: &[BuiltinEntry] = &CORE_BASE_FRAMES_ARR;

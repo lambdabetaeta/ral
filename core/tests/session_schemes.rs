@@ -238,16 +238,17 @@ fn pattern_binds_generalise_their_own_scheme() {
 
 // ─── (7) alias visibility ────────────────────────────────────────────────────
 
-/// `alias three { |args| echo 3; return 3 }` is visible to the next run's
-/// check: the arm preserves `three`'s external byte-output mode while its
-/// scheme records the `Int` value type, so `$[!{three} + 0]` typechecks
-/// (the scheme says `Int`), while `three` alone is clean too.  After
-/// `unalias three` the name falls back to external typing — a `String`
-/// result — so the same arithmetic probe now clashes.
+/// `alias three { |args| echo 3 }` is visible to the next run's check: the
+/// arm's handler scheme persists, so `three` alone is clean and `$three`
+/// (first-classing a handler) is a static error — every arm is byte-routed
+/// alike now (uniform A), so which persists is no longer an *Int-vs-String*
+/// distinction, only a *handler-or-not* one. After `unalias three` the name
+/// falls back to external typing, so `$three` is an unbound reference —
+/// clean again, but for the opposite reason.
 #[test]
 fn alias_visible_to_next_run() {
     let mut sh = shell();
-    run(&mut sh, "alias three { |args| echo 3; return 3 }").unwrap();
+    run(&mut sh, "alias three { |args| echo 3 }").unwrap();
     assert!(
         check_errors(&sh, "three").is_empty(),
         "expected the alias used alone to be clean, got: {:?}",
@@ -256,42 +257,37 @@ fn alias_visible_to_next_run() {
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
+    let errs = check_errors(&sh, "return $three");
     assert!(
-        check_errors(&sh, "return $[!{three} + 0]").is_empty(),
-        "expected the alias's recorded Int value type to admit `+ 0`, got: {:?}",
-        check_errors(&sh, "return $[!{three} + 0]")
+        errs
             .iter()
-            .map(|e| e.kind.render_message())
-            .collect::<Vec<_>>()
-    );
-    run(&mut sh, "unalias three").unwrap();
-    let errs = check_errors(&sh, "return $[!{three} + 0]");
-    assert!(
-        !errs.is_empty(),
-        "expected `three` to fall back to external `String` typing after unalias, \
-         making `+ 0` a clash; got no error"
-    );
-}
-
-/// A value-output alias body defines the unknown head's modes, so the
-/// definition draws no error at the next run's check; piping the alias into
-/// a decoder is an ordinary byte wire too — `three` writes nothing,
-/// so `from-json` reads EOF.
-#[test]
-fn value_output_alias_piped_into_decoder_is_accepted() {
-    let sh = shell();
-    let errs = check_errors(&sh, "alias three { |args| return 3 }\nreturn ()");
-    assert!(
-        errs.is_empty(),
-        "expected no error defining a value-output alias, got: {:?}",
+            .any(|e| e.kind.render_message().contains("handler entry")),
+        "expected the persisted alias scheme to reject `$three` as a handler entry, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
     );
-    let errs = check_errors(&sh, "alias three { |args| return 3 }\nthree | from-json");
+    run(&mut sh, "unalias three").unwrap();
     assert!(
-        errs.is_empty(),
-        "expected the value-output alias piped into from-json to typecheck, got: {:?}",
+        check_errors(&sh, "return $three").is_empty(),
+        "expected `three` to fall back to an ordinary external name after unalias, \
+         so `$three` is merely unbound, not a handler entry"
+    );
+}
+
+/// A value-output alias body is refused at the next run's check too — the
+/// arm is byte-routed by construction (uniform A), so its being a *previous*
+/// run's alias, seeded fresh into this run's session schemes, changes
+/// nothing about that.
+#[test]
+fn value_output_alias_is_refused_even_seeded_from_a_prior_run() {
+    let sh = shell();
+    let errs = check_errors(&sh, "alias three { |args| return 3 }\nreturn ()");
+    assert!(
+        errs
+            .iter()
+            .any(|e| e.kind.render_message().contains("payload lives")),
+        "expected the value-output alias to be refused at install, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()
@@ -378,6 +374,39 @@ fn recursive_binding_is_usable_next_run() {
     assert!(
         errs.is_empty(),
         "a recursive binding must stay usable across the run boundary, got: {:?}",
+        errs.iter()
+            .map(|e| e.kind.render_message())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─── (10) a scheme-less `set_var` binding is bound, not dropped ─────────────
+
+/// `set_var` installs a binding with no scheme at all — the untyped sibling
+/// of `bind_value`, the way a host seeds `RAL_PROMPT` and other raw vars.
+/// Seeded into the next check at a fresh monomorphic variable rather than
+/// dropped, the name still resolves at a command head through the ordinary
+/// binding path (`exec_comp_ty`'s first arm), so it can take a lambda
+/// argument no external command could — proof the call is a value
+/// application, not argv rendering of an unresolved external name.
+#[test]
+fn set_var_block_is_bound_and_usable_as_a_command_head() {
+    let mut sh = shell();
+    run(&mut sh, "let sv_source = { |x| return $x }").unwrap();
+    let block = sh
+        .scope_lookup("sv_source")
+        .cloned()
+        .expect("sv_source must be bound");
+    sh.set_var("sv_head".into(), block);
+    assert!(
+        scheme_of(&sh, "sv_head").is_none(),
+        "set_var must install no scheme"
+    );
+    let errs = check_errors(&sh, "sv_head $sv_source");
+    assert!(
+        errs.is_empty(),
+        "expected a scheme-less binding to resolve at a command head, taking \
+         a lambda argument no external command could, got: {:?}",
         errs.iter()
             .map(|e| e.kind.render_message())
             .collect::<Vec<_>>()

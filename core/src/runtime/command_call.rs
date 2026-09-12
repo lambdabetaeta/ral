@@ -1,8 +1,7 @@
 //! Command dispatch: resolve a head, then run the arm.
 //!
-//! Order is env → handlers → external; `^name` skips env, so it skips every
-//! value builtin (a native is an env hit), but still consults handlers —
-//! run frames and the base layer alike; a path head skips handlers too.
+//! Order is env → handlers → external for a bare name; `^name` and a path
+//! head are the external directly, consulting neither the env nor the stack.
 //! `evaluator::machine`'s `Exec` rule is the entry that classifies and runs
 //! every arm; pipeline staging and `command::detach` reach
 //! `resolve_command_word`/`classify_command` and `machine::apply_handler`
@@ -43,25 +42,6 @@ pub(crate) fn resolve(name: &str, env: &Env, shell: &Shell) -> Resolution {
     if let Some(value) = env.get(name) {
         return Resolution::Env(value.clone());
     }
-    resolve_handler_then_external(name, shell)
-}
-
-/// Resolve a [`CommandWord`]: `^name` skips env but still consults handlers;
-/// a path-bearing head skips handlers too.
-pub(crate) fn resolve_command_word(head: &CommandWord, env: &Env, shell: &Shell) -> Resolution {
-    let name = head.name();
-    match name {
-        CommandName::Path(_) | CommandName::TildePath(_) => {
-            Resolution::External(CommandIdentity::resolve(name.clone(), &shell.context))
-        }
-        CommandName::Bare(s) => match head {
-            CommandWord::Name(_) => resolve(s, env, shell),
-            CommandWord::External(_) => resolve_handler_then_external(s, shell),
-        },
-    }
-}
-
-fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
     match shell.lookup_handler(name) {
         Some(HandlerLookup::Frame(entry, depth)) => Resolution::Handler { entry, depth },
         Some(HandlerLookup::Base(entry)) => Resolution::Base(entry),
@@ -69,6 +49,18 @@ fn resolve_handler_then_external(name: &str, shell: &Shell) -> Resolution {
             CommandName::Bare(name.to_string()),
             &shell.context,
         )),
+    }
+}
+
+/// Resolve a [`CommandWord`]: a bare name goes through [`resolve`]; `^name`
+/// and a path head are the external directly, consulting neither the env nor
+/// the handler stack.
+pub(crate) fn resolve_command_word(head: &CommandWord, env: &Env, shell: &Shell) -> Resolution {
+    match head {
+        CommandWord::Name(CommandName::Bare(s)) => resolve(s, env, shell),
+        CommandWord::External(name) | CommandWord::Name(name) => {
+            Resolution::External(CommandIdentity::resolve(name.clone(), &shell.context))
+        }
     }
 }
 

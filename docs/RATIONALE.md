@@ -215,8 +215,9 @@ context uses stack frames where later re-exposure is actually needed.
 `within [handlers: [git: H], handler: K] { body }` installs interpretations for
 the dynamic extent of `body`. Resolution is env-first, so a lexical binding, a
 native, or a prelude function retains its ordinary meaning at a bare head even
-where a handler of the same name is installed; only a name which reaches the
-open command interface, or an explicit `^name`, is handled.
+where a handler of the same name is installed; only a bare name which reaches
+the open command interface is handled. `^name` is the binary: like a path
+head, it skips the handler stack entirely.
 
 Handlers in `ral` are deliberately restricted:
 

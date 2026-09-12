@@ -14,5 +14,6 @@ caught foo x y
 intercepted nonexistent-command
 builtin runs normally
 handler-cat
+hi
 env=scoped
 within tests done

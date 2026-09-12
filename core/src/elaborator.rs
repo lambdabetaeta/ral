@@ -1272,8 +1272,8 @@ mod tests {
         let CompKind::Exec(e) = &comp.item else {
             panic!("expected exec, got {:?}", comp.item);
         };
-        let external_only = matches!(e.head, CommandWord::External(_));
-        (e.head.name(), &e.args, external_only)
+        let caret = matches!(e.head, CommandWord::External(_));
+        (e.head.name(), &e.args, caret)
     }
 
     /// Strip spans so assertions match on shape alone.  Only lists and maps
@@ -1371,7 +1371,7 @@ mod tests {
     fn external_name_head_elaborates_to_external_exec() {
         let ast = parse("^git status").expect("parse");
         let comp = elaborate_one(&ast, HashSet::new(), "");
-        let (name, args, external_only) = expect_exec_name(&comp);
+        let (name, args, caret) = expect_exec_name(&comp);
         assert_eq!(name, &CommandName::Bare("git".into()));
         assert_eq!(
             arg_items(args),
@@ -1379,7 +1379,7 @@ mod tests {
                 "status".into()
             )))]
         );
-        assert!(external_only);
+        assert!(caret);
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! `explain <name>` resolves one name to what documents it, the type it
 //! carries, and where the shell would find it.  A local binding shadows every
 //! other resolution at runtime, so it owns the name outright; below it,
-//! `explain` names the frame that would actually run — alias before handler,
-//! handler before the builtin manifest.
+//! `explain` names the frame that would actually run, in bare-head order:
+//! prelude, then a native (the builtin manifest's value half), then the
+//! handler stack (alias before handler before a base frame), then `PATH`.
 
 mod common;
 
@@ -130,11 +131,13 @@ fn explain_names_an_alias_before_the_handler_arm() {
     );
 }
 
-/// A handler stacked under a native's name is what runs, so `explain` reports
-/// `handler` — while the doc arm still answers off the builtin manifest.
-/// Probing the manifest first would have `explain` name code that never runs.
+/// A handler stacked under a native's name is dead: the bare head hits the
+/// native first (`^` reaches the binary, not the arm — ruling 2), so
+/// `explain` reports `builtin`, with the shadowed arm named under
+/// `shadows:` — the discoverability a dead arm needs, in the tool built for
+/// "what runs here."
 #[test]
-fn explain_prefers_a_handler_over_the_builtin_manifest() {
+fn explain_reports_the_builtin_over_a_dead_handler() {
     let mut sh = shell();
 
     let (result, bare) = run_capture(&mut sh, "explain length");
@@ -146,12 +149,12 @@ fn explain_prefers_a_handler_over_the_builtin_manifest() {
 
     let (result, out) = run_capture(
         &mut sh,
-        "within [handlers: [length: { |a| return 0 }]] { explain length }",
+        "within [handlers: [length: { |a| echo 0 }]] { explain length }",
     );
     result.unwrap();
     assert!(
-        out.contains("length: handler") && !out.contains("length: builtin"),
-        "the handler frame is what runs, got:\n{out}"
+        out.contains("length: builtin") && out.contains("shadows: handler"),
+        "the native is what runs, with the dead arm named as shadowed, got:\n{out}"
     );
     assert!(
         out.contains("number of elements"),

@@ -72,10 +72,10 @@ within [handler: { |name args| echo caught $name }] {
     echo 'builtin runs normally'
 }
 
-# Containment: ^name does NOT escape within [handlers:]
+# ^name is the binary: it escapes the handler.
 within [handlers: [cat: { |args| echo 'handler-cat' }]] {
-    # Even ^cat triggers the handler (containment property)
-    ^cat anything
+    cat
+    echo hi | ^cat
 }
 
 # Combined keys

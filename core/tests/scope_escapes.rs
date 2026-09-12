@@ -572,7 +572,7 @@ fn panic_builtin(
 static PANIC_BUILTIN_ARR: [ral_core::types::BuiltinEntry; 1] =
     [ral_core::types::BuiltinEntry::new(
         std::borrow::Cow::Borrowed("__test-panic"),
-        ral_core::typecheck::builtins::scheme::pure_string,
+        ral_core::typecheck::builtins::scheme::diverges,
         "__test-panic  — test-only: raise a Rust panic.",
         ral_core::types::BuiltinBody::Static(panic_builtin),
     )];

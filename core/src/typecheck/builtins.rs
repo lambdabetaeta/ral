@@ -886,6 +886,22 @@ pub mod scheme {
             )),
         )
     }
+
+    /// `∀α ρ. F[ρ] α` — nullary and divergent like [`fail`]/[`exit`].
+    ///
+    /// For a host builtin that never returns (a test-only Rust panic trigger,
+    /// say): its route and value join whatever the context needs rather than
+    /// forcing one on it.
+    pub fn diverges(u: &mut Unifier) -> Scheme {
+        let av = u.fresh_tyvar();
+        let rv = u.fresh_routevar();
+        mk_scheme(
+            &[av],
+            &[rv],
+            &[],
+            thunk(CompTy::Return(PayloadRoute::Var(rv), Box::new(Ty::Var(av)))),
+        )
+    }
 }
 
 /// A value builtin's first-class polytype: the type a `$name` reference holds.

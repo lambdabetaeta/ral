@@ -641,9 +641,8 @@ pub struct Exec {
 pub(crate) enum CommandWord {
     /// Resolved at evaluation time: env, then handlers, then PATH.
     Name(CommandName),
-    /// `^name` — skips the env, and so skips every native, but still
-    /// resolves through handlers, so an enclosing `within [handlers:]` frame
-    /// still contains it.  The bypass is on the lookup, not on the frame.
+    /// `^name` — like a path head, the external of that spelling directly:
+    /// skips the env, every native, and the handler stack alike.
     External(CommandName),
 }
 

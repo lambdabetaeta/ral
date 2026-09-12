@@ -774,25 +774,24 @@ impl Inferencer<'_> {
         super::generalize::generalize(&mut self.ctx.unifier, self.env, &thunk_ty)
     }
 
-    /// Head `name`'s known payload route, from the handler scheme in scope for
-    /// it — a user arm's, or a base frame's, the two being one thing here.  A
-    /// plain native pins to nothing — only `^name` reaches an arm under it —
-    /// and an unknown head or non-`Return` scheme gets a fresh route, leaving
-    /// the grounding obligation to whoever settles it.
+    /// Head `name`'s payload route: a handler scheme in scope — a user arm's or a
+    /// base frame's — pins to its own; any other name is the external command of
+    /// that spelling, whose OS signature is `List String -> Bytes`, so an arm
+    /// reinterpreting it inherits the byte route rather than declaring one.
     fn head_pipe_route(&mut self, name: &str) -> PayloadRoute {
         match self.env.lookup_handler(name).cloned() {
             Some(handler) => {
                 let cty = self.instantiate_comp(&handler.scheme);
                 self.comp_route(&cty)
             }
-            None => self.ctx.unifier.fresh_route(),
+            None => PayloadRoute::Bytes,
         }
     }
 
     /// Peel an alias arm's leading `Fun` arrows: the calling convention forces
     /// the arm on the argv list, so the head's payload route lives on the
     /// body's `Return`, past the parameter arrow.
-    fn alias_arm_body(&mut self, cty: &CompTy) -> CompTy {
+    pub(super) fn alias_arm_body(&mut self, cty: &CompTy) -> CompTy {
         match self.ctx.unifier.resolve_comp_ty(cty) {
             CompTy::Fun(_, body) => self.alias_arm_body(&body),
             resolved => resolved,
@@ -894,6 +893,25 @@ impl Inferencer<'_> {
         }
     }
 
+    /// The catch-all convention: `Fun(String, Fun(List String, body))`. The
+    /// name is bound `String`; the argv layer and body reuse
+    /// [`Self::infer_handler_comp`], so the shape is exactly a per-name arm
+    /// nested one level under the name.
+    pub(super) fn infer_catch_all(&mut self, comp: &Comp) -> CompTy {
+        let (name_param, rest) = match &comp.item {
+            CompKind::Lam { param, body } => (Some(param), body.as_ref()),
+            // arity is vetted elsewhere; infer the body for its errors
+            _ => (None, comp),
+        };
+        self.with_scope(|this| {
+            if let Some(name_param) = name_param {
+                this.bind_pattern(name_param, &Ty::String, BindMode::Param);
+            }
+            let body_cty = this.infer_handler_comp(rest);
+            CompTy::Fun(Box::new(Ty::String), Box::new(body_cty))
+        })
+    }
+
     fn infer_not(&mut self, val: &Val) -> Ty {
         let ty = self.infer_val(val);
         self.ctx.unify_ty(&ty, &Ty::Bool, Reason::NotOperand);
@@ -911,21 +929,23 @@ impl Inferencer<'_> {
         }
     }
 
-    /// A command head's type, by the lookup order the runtime uses — binding,
-    /// value builtin, handler, external.  A binding hit is final, and a
-    /// pristine native reaches here only through the rule table, the bindings
-    /// harvest walking user scopes alone.
+    /// A bare command head's type, by the lookup order the runtime uses —
+    /// binding, value builtin, handler, external.  A binding hit is final, and
+    /// a pristine native reaches here only through the rule table, the
+    /// bindings harvest walking user scopes alone.  `^name` and a path head
+    /// never reach this rule — they are the external directly
+    /// (`external_exec_comp_ty`), consulting neither the env nor the stack.
     ///
     /// The four arms are ral's two worlds in order.  The first two are lambda
     /// calculus: arguments by application, at an arity the head's own type
     /// declares, so `...` has no argv to spread into and is refused.  The last
     /// two take an argv, and `...` is exactly its notation.
-    fn exec_comp_ty(&mut self, name: &str, args: &crate::ir::Args, external_only: bool) -> CompTy {
-        if !external_only && let Some(scheme) = self.env.lookup_binding(name).cloned() {
+    fn exec_comp_ty(&mut self, name: &str, args: &crate::ir::Args) -> CompTy {
+        if let Some(scheme) = self.env.lookup_binding(name).cloned() {
             return self.apply_scheme(&scheme, args);
         }
 
-        if !external_only && let Some(entry) = self.env.builtins.value(name) {
+        if let Some(entry) = self.env.builtins.value(name) {
             return self.apply_builtin(&entry, name, args);
         }
 
@@ -1712,16 +1732,11 @@ impl Inferencer<'_> {
                 self.apply_args(head_ty, args)
             }
             CompKind::Exec(e) => match &e.head {
-                CommandWord::Name(CommandName::Bare(name)) => {
-                    self.exec_comp_ty(name, &e.args, false)
+                CommandWord::Name(CommandName::Bare(name)) => self.exec_comp_ty(name, &e.args),
+                CommandWord::External(name)
+                | CommandWord::Name(name @ (CommandName::Path(_) | CommandName::TildePath(_))) => {
+                    self.external_exec_comp_ty(&name.written(), &e.args)
                 }
-                CommandWord::External(CommandName::Bare(name)) => {
-                    self.exec_comp_ty(name, &e.args, true)
-                }
-                CommandWord::Name(path @ (CommandName::Path(_) | CommandName::TildePath(_)))
-                | CommandWord::External(
-                    path @ (CommandName::Path(_) | CommandName::TildePath(_)),
-                ) => self.external_exec_comp_ty(&path.written(), &e.args),
             },
             CompKind::Pipeline { stages, .. } => self.infer_pipeline(comp, stages),
             CompKind::Binary(op, lhs, rhs) => CompTy::pure(self.infer_binary(*op, lhs, rhs)),

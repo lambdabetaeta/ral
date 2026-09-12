@@ -542,6 +542,13 @@ pub(super) fn hint(kind: &TypeErrorKind, reason: Option<&Reason>) -> Option<Stri
                   payload route; match the existing head's route or add a codec"
                 .to_string(),
         }),
+        Reason::CatchAllRoutePin => Some(
+            "the catch-all `handler:` stands in for every external command in \
+             this block, and an external's payload is its stdout — so its arm \
+             must emit bytes, not return a value; write the result out, or \
+             handle specific names with `handlers: [name: …]`"
+                .to_string(),
+        ),
         Reason::ListElem => Some(
             "a list is homogeneous — every element has the one type — so this \
              element must be what its neighbours are; give it their shape, or make \

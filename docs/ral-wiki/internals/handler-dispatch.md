@@ -1,6 +1,6 @@
 ---
-verified_at_commit: b554b2c3
-verified_at_date: 2026-08-26
+verified_at_commit: d4af249c
+verified_at_date: 2026-09-12
 anchors: [HandlerStack, lookup, HandlerLookup, install_base, strip_matched, restore_matched, apply_handler, render_handler_args, Frame::Unmask, WithinUndo]
 ---
 
@@ -15,8 +15,9 @@ that realises it, in `HandlerStack` (`types/handler.rs`) and the dispatch in
 Resolution is env → handlers → external, so a lexical binding — the prelude and
 the [[design/builtins|natives]] among them — wins at a bare head, and the
 handler stack is consulted for every other name. Shadowing, not admission, is
-the interception discipline: a handler installs under any name, and `^name`,
-which skips the env by definition, reaches it
+the interception discipline: a handler installs under any name and intercepts
+it at the bare head only; `^name`, like a path head, skips the env and the
+handler stack alike and reaches the external command directly
 ([[decisions/260801_a-name-is-a-value-or-it-is-handled|a-name-is-a-value-or-it-is-handled]]).
 
 **The stack has two layers.** Above are the *run frames* pushed by `within` and

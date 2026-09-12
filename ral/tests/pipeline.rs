@@ -169,16 +169,23 @@ fn pipeline_stage_caret_external_only_bypasses_builtin() {
 }
 
 #[test]
-fn pipeline_stage_caret_still_fires_per_name_handler() {
-    // command_call::run_call's rule: per-name handlers fire unconditionally;
-    // ^name bypasses binding lookup but does NOT escape an explicit
-    // per-name handler frame.  Pipeline-stage classification must agree
-    // with the single-command path — otherwise `^cat X | cat` would
-    // bypass the handler when the same call outside a pipeline would
-    // honor it.  Locked in via the shared resolve_command_word.
+fn pipeline_stage_caret_escapes_per_name_handler() {
+    // ^name is the path-head arm too (ruling 2): it escapes a per-name
+    // handler frame exactly as a bare path head does.  Pipeline-stage
+    // classification must agree with the single-command path — the bundled
+    // `cat` is what `echo hi | ^cat` reaches, cross-platform, while a bare
+    // `cat` in the same block still honors the arm.  Locked in via the
+    // shared resolve_command_word.
     let o = run(
         "within [handlers: [cat: { |args| /bin/echo via-handler }]] \
-            { ^cat IGNORED | cat }",
+            { echo hi | ^cat }",
+    );
+    assert_eq!(o.status, 0, "stderr: {}", o.stderr);
+    assert_eq!(o.stdout.trim(), "hi");
+
+    let o = run(
+        "within [handlers: [cat: { |args| /bin/echo via-handler }]] \
+            { echo hi | cat }",
     );
     assert_eq!(o.status, 0, "stderr: {}", o.stderr);
     assert_eq!(o.stdout.trim(), "via-handler");

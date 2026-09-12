@@ -1166,17 +1166,30 @@ fn control_op_audit_in_value_position_errors() {
 /// `r`, not the arm, so arithmetic on the result typechecks.
 #[test]
 fn within_handler_for_native_installs_but_bare_head_still_resolves_the_native() {
-    ok(
-        r#"within [handlers: [length: { |xs| return "hi" }]] { let r = !{length [1, 2, 3]}; return $[$r + 1] }"#,
+    ok(r"within [handlers: [length: { |xs| echo hi }]] { let r = !{length [1, 2, 3]}; return $[$r + 1] }");
+}
+
+/// `^length` is the binary: it skips the env, every native, and the handler
+/// stack alike (ruling 2), so the `length` arm below is dead — installed but
+/// unreachable from any bare head or `^`. The binary's stdout captures as
+/// `String`, clashing with the arithmetic the native's `Int` scheme would
+/// have permitted.
+#[test]
+fn caret_is_the_binary_even_under_an_arm_on_a_native_name() {
+    has_error(
+        r"within [handlers: [length: { |xs| echo mocked }]] { let r = !{^length hello}; return $[$r + 0] }",
+        "couldn't match",
     );
 }
 
-/// `^length` skips the env and reaches the arm: its `String` return clashes
-/// with arithmetic the native's `Int` scheme would have permitted.
+/// The static half of `top_level_vs_block.rs::a_cd_handler_is_shadowed_at_the_bare_head`:
+/// `^cd` is the path-head arm too (ruling 2), dead under this `cd` arm, so its
+/// capture is `String`, clashing with arithmetic — platform-independent,
+/// unlike actually spawning whatever `^cd` resolves to on `PATH`.
 #[test]
-fn caret_reaches_a_handler_stacked_on_a_native_name() {
+fn caret_cd_is_the_binary_even_under_an_arm_on_a_native_name() {
     has_error(
-        r#"within [handlers: [length: { |xs| return "mocked" }]] { let r = !{^length hello}; return $[$r + 0] }"#,
+        r"within [handlers: [cd: { |args| echo intercepted }]] { let r = !{^cd x}; return $[$r + 0] }",
         "couldn't match",
     );
 }
@@ -1198,15 +1211,20 @@ fn is_route_mismatch(src: &str) -> bool {
     })
 }
 
-/// A value-output `within` handler arm defines an unknown head's modes, so a
-/// standalone use typechecks; the mismatch is a connection-point property,
-/// surfacing only when the head's `∅` output feeds a byte consumer.
+/// A value-returning `within` handler arm over an unseen head is refused at
+/// install (uniform A): the head is an external, byte-routed by construction,
+/// so the arm has no separate value to return — piped into a decoder or bare
+/// alike.
 #[test]
-fn within_handler_value_arm_pipes_into_a_decoder_freely() {
-    // The arm defines the unknown head's route, and feeding a decoder says
-    // nothing about it: `from-json` reads the byte channel, which is empty.
-    ok(r"within [handlers: [foo: { |args| return 3 }]] { foo | from-json }");
-    ok(r"within [handlers: [foo: { |args| return 3 }]] { foo }");
+fn within_handler_value_arm_over_an_unseen_head_is_refused() {
+    has_error(
+        r"within [handlers: [foo: { |args| return 3 }]] { foo | from-json }",
+        "payload lives",
+    );
+    has_error(
+        r"within [handlers: [foo: { |args| return 3 }]] { foo }",
+        "payload lives",
+    );
 }
 
 /// A byte-output `within` handler arm defines the unknown head as
@@ -1270,18 +1288,19 @@ fn alias_byte_output_forwarder_typechecks() {
     ok(r"alias myecho { |a| /bin/echo ...$a }; myecho hi");
 }
 
-/// A value-returning alias body defines the unknown head's route, so the
-/// definition typechecks on its own.
+/// A value-returning alias body is refused at install (uniform A): `foo` is
+/// an external, byte-routed by construction, so the arm has no separate
+/// value to return.
 #[test]
-fn alias_value_output_body_typechecks() {
-    ok("alias foo { |args| return 3 }\nreturn ()");
+fn alias_value_output_body_is_refused() {
+    has_error("alias foo { |args| return 3 }\nreturn ()", "payload lives");
 }
 
 #[test]
-fn alias_value_arm_piped_into_a_decoder_is_accepted() {
-    // The alias binds for the following statements, and piping it into a
-    // decoder is an ordinary byte edge: `from-json` reads EOF.
-    ok("alias foo { |args| return 3 }\nfoo | from-json");
+fn alias_value_arm_piped_into_a_decoder_is_refused() {
+    // Piping into a decoder does not rescue it — the install itself fails,
+    // before the pipeline is even considered.
+    has_error("alias foo { |args| return 3 }\nfoo | from-json", "payload lives");
 }
 
 /// An alias over an existing alias resolves the head's route from the prior
@@ -1291,12 +1310,45 @@ fn alias_over_route_preserving_alias_typechecks() {
     ok(r"alias one { |args| echo one }; alias two { |args| one }; two");
 }
 
-/// The catch-all `handler: { comp }` names no specific head, so the
-/// route-preservation rule does not constrain it — a value-returning
-/// catch-all arm is not rejected.
+/// The catch-all `handler:` reinterprets every external name in its extent,
+/// each already byte-routed, so its body is pinned to `F[Bytes] Unit` too
+/// (A-2) — a value-returning catch-all arm is refused.
 #[test]
-fn catch_all_handler_arm_is_not_route_pinned() {
-    ok(r"within [handler: { |n a| return 'x' }] { return () }");
+fn catch_all_handler_value_arm_is_refused() {
+    has_error(
+        r"within [handler: { |n a| return 'x' }] { return () }",
+        "couldn't match",
+    );
+}
+
+/// `fail` is route- and value-polymorphic (`∀α ρ. … → F[ρ] α`), so a
+/// `fail`-bodied catch-all still installs under uniform A — the SPEC §9.1
+/// example.  Its dual, an `echo`-bodied catch-all, installs for the ordinary
+/// reason: it is byte-routed already.
+#[test]
+fn catch_all_diverging_or_byte_bodies_are_accepted() {
+    ok(r"within [handler: { |n a| fail [status: 1] }] { zzz }");
+    ok(r"within [handler: { |n a| echo caught }] { zzz }");
+}
+
+/// Uniform A has no native carve-out: a value arm over a native's spelling is
+/// refused exactly as one over any other unseen name is, `^` not being
+/// involved at all here (the bare head installs the arm; A-1 forces `Bytes`
+/// on any name without a handler already in scope, natives included).
+#[test]
+fn a_value_arm_over_a_natives_spelling_is_refused_too() {
+    has_error(
+        r"within [handlers: [upper: { |args| return 42 }]] { upper a }",
+        "payload lives",
+    );
+}
+
+/// The value-world replacements uniform A leaves in place: a binding of a
+/// variable number of *values* (not an argv), and a fixed-arity binding.
+#[test]
+fn value_world_spellings_still_typecheck() {
+    ok(r"let three = { |xs| length $xs }; three [a, b, c]");
+    ok(r"let inc = { |n| $[!{int $n} + 1] }; inc 5");
 }
 
 #[test]
@@ -1306,12 +1358,24 @@ fn local_binding_beats_handler() {
     );
 }
 
+/// `^cat` is external (ruling 2): it skips the local binding *and* the `cat`
+/// handler alike, so its stdout captures as `String`, clashing with `+ 0`.
 #[test]
-fn caret_skips_binding_but_not_handler() {
+fn caret_skips_bindings_and_handlers() {
     has_error(
-        r#"within [handlers: [cat: { |args| return "mocked" }]] { let r = !{^cat nope}; return $[$r + 0] }"#,
+        r"within [handlers: [cat: { |args| echo mocked }]] { let r = !{^cat nope}; return $[$r + 0] }",
         "couldn't match",
     );
+}
+
+/// A-8's own invariant, pinned statically: `^cat` is the external, so
+/// capturing it decodes to `String` regardless of the `cat` arm stacked over
+/// the bare name. Twin of
+/// `eval_fuzz.rs::caret_reaches_the_external_in_lockstep_with_the_runtime`,
+/// which pins the same agreement at run time.
+#[test]
+fn caret_reaches_the_external_in_lockstep_with_the_runtime() {
+    ok(r"within [handlers: [cat: { |args| echo handler-cat }]] { let r = !{^cat x}; return $r }");
 }
 
 /// Handler-body argument mismatch surfaces statically.
@@ -1364,36 +1428,36 @@ fn within_env_and_dir_still_typecheck() {
 // the static handler-call rule. The handler's return type is still pinned.
 
 /// An args-ignoring alias binds in `TyEnv`:
-/// `alias greet { |args| return "hi" }; greet` typechecks without error.
-/// If the body returned an Int, using the result in a String context
-/// (e.g. `str_concat "x" (greet)`) would be a type error; here we verify
-/// the positive case and probe the inferred type by checking that using
-/// the result in Int arithmetic IS a type error (because it's a String,
-/// not an Int).
+/// `alias greet { |args| echo hi }; greet` typechecks without error.  Its
+/// arm is byte-routed (uniform A), so a capture of it decodes to `String`;
+/// probe the binding by checking that Int arithmetic on the capture errors
+/// (it would not, were the alias binding absent and the call falling
+/// through to the external dispatcher instead).
 #[test]
 fn alias_ignoring_args_binds_in_tyenv() {
-    // Positive: the seq typechecks.  The arm is byte-output (`echo`),
-    // preserving the head's `F[μ, Bytes]` spec, while its value type stays
-    // String — a handler reinterprets a head without retyping its modes.
-    ok(r#"alias greet { |args| echo hi; return "hi" }; greet"#);
-    // Probe: the result is String, so using it in Int arithmetic is a type
-    // error.  This would NOT error if the alias binding were absent (the
-    // call would fall through to the external dispatcher and get a fresh
-    // type variable).
+    // Positive: the seq typechecks.  A handler reinterprets a head without
+    // retyping its modes — every arm is `F[Bytes] Unit` alike.
+    ok(r"alias greet { |args| echo hi }; greet");
+    // Probe: capturing the alias decodes to String, so using it in Int
+    // arithmetic is a type error.
     has_error(
-        r#"let r = !{ alias greet { |args| echo hi; return "hi" }; greet }; return $[$r + 0]"#,
+        r"let r = !{ alias greet { |args| echo hi }; greet }; return $[$r + 0]",
         "couldn't match",
     );
     has_error(
-        r#"let r = !{ alias greet { |args| echo hi; return "hi" }; greet extra args }; return $[$r + 0]"#,
+        r"let r = !{ alias greet { |args| echo hi }; greet extra args }; return $[$r + 0]",
         "couldn't match",
     );
 }
 
+/// `$greet` cannot reify a handler entry as a value — a handler is a name in
+/// the command world, not the value world (`260801`) — and a byte arm makes
+/// that the whole point: the arm typechecks fine on its own, so the error
+/// below is about `$greet`'s first-class-ness, not its payload route.
 #[test]
 fn value_lookup_does_not_reify_aliases_or_command_only_builtins() {
     has_error(
-        r#"alias greet { |args| return "hi" }; let f = $greet; return $f"#,
+        r"alias greet { |args| echo hi }; let f = $greet; return $f",
         "handler entry",
     );
     has_error("let f = $echo; return $f", "builtin command");
@@ -1415,6 +1479,12 @@ fn alias_parameter_receives_argv_list() {
 /// a `String`, and an arm that wants a number parses one.  Arithmetic straight
 /// on an element is an error at the arm, which no call site can repair —
 /// whatever was written, the arm consumes the rendering.
+///
+/// Uniform A withdraws the capability this test used to pin: parsing the
+/// argv and *returning* the parsed number is no longer expressible at all —
+/// an alias arm is byte-routed regardless, so the parsed-and-well-typed arm
+/// below is refused at install now, whether or not the text parses. The
+/// value-world replacement is a binding: `let inc = { |n| $[!{int $n} + 1] }`.
 #[test]
 fn an_alias_arm_parses_its_argv_to_get_a_number() {
     for call in ["inc 5", "inc hello"] {
@@ -1423,32 +1493,26 @@ fn an_alias_arm_parses_its_argv_to_get_a_number() {
             "couldn't match",
         );
     }
-    // Parsed, the arm is well-typed, and takes either spelling: whether the
-    // text is a number is `int`'s refusal to make at run time, not a type error.
-    ok(r"alias inc { |a| return $[!{int $a[0]} + 1] }; inc 5");
-    ok(r"alias inc { |a| return $[!{int $a[0]} + 1] }; inc hello");
+    has_error(
+        r"alias inc { |a| return $[!{int $a[0]} + 1] }; inc 5",
+        "payload lives",
+    );
+    has_error(
+        r"alias inc { |a| return $[!{int $a[0]} + 1] }; inc hello",
+        "payload lives",
+    );
 }
 
 /// Last-pushed alias shadows earlier alias at typecheck: the second
-/// `alias greet` re-binds in `TyEnv` (last-pushed wins).  The final `greet`
-/// should see the second alias's Int return type.
+/// `alias greet` re-binds in `TyEnv` (last-pushed wins), and re-binding a
+/// second byte-routed arm over the first does not error.
+///
+/// Which alias actually answers a call is no longer a *type* distinction —
+/// every arm is byte-routed alike (uniform A) — so that observation moves to
+/// run time: `eval_fuzz.rs::alias_last_pushed_shadows_earlier_at_runtime`.
 #[test]
 fn alias_last_pushed_shadows_earlier() {
-    // Both aliases registered; the second one (returning Int) should win.
-    // Positive: Int arithmetic on the second alias's return value is fine
-    // (verifies the second binding actually wins and returns Int).
-    ok(
-        r#"alias greet { |args| echo hi; return "hi" }; alias greet { |args| echo 42; return 42 }; let r = !{greet}; return $[$r + 0]"#,
-    );
-    // Negative: if only the first alias (String) won, the Int arithmetic
-    // would error.  Since the second wins (Int), arithmetic succeeds — and
-    // using the result as if it were a List would be an error.
-    // Use `return $[$r + 0]` vs `return $[$r + true]` (Bool vs Int mismatch)
-    // to confirm the type is pinned to Int, not a free variable.
-    has_error(
-        r#"alias greet { |args| echo hi; return "hi" }; alias greet { |args| echo 42; return 42 }; let r = !{greet}; return $[$r + true]"#,
-        "couldn't match",
-    );
+    ok(r"alias greet { |args| echo hi }; alias greet { |args| echo 42 }; greet");
 }
 
 /// Alias inside a conditional does NOT leak to subsequent Seq statements.
@@ -1468,12 +1532,13 @@ fn alias_inside_conditional_does_not_leak() {
 /// statements, including an intermediate `let` and the final expression.
 #[test]
 fn alias_binding_visible_to_all_subsequent_statements() {
-    // `r` is bound to the result of `greet` (String); the final `greet` also
-    // sees the binding.  Both should typecheck without error.
-    ok(r#"alias greet { |args| echo hi; return "hi" }; let r = !{greet}; greet"#);
+    // `r` is bound to the captured, decoded result of `greet` (String); the
+    // final `greet` also sees the binding.  Both should typecheck without
+    // error.
+    ok(r"alias greet { |args| echo hi }; let r = !{greet}; greet");
     // Verify `r` really has String type by checking arithmetic on it errors.
     has_error(
-        r#"let _ = !{ alias greet { |args| echo hi; return "hi" }; let r = !{greet}; return $[$r + 0] }; return ()"#,
+        r"let _ = !{ alias greet { |args| echo hi }; let r = !{greet}; return $[$r + 0] }; return ()",
         "couldn't match",
     );
 }
@@ -1486,10 +1551,10 @@ fn alias_binding_visible_to_all_subsequent_statements() {
 #[test]
 fn alias_ir_shape_round_trips() {
     // Canonical alias shape: recognised and bound.
-    ok("alias g { |args| echo 42; return 42 }; return $[!{g} + 1]");
+    ok("alias g { |args| echo 42 }; g");
 
     // Unalias recognised.
-    ok("alias g { |args| echo 42; return 42 }; unalias g; g");
+    ok("alias g { |args| echo 42 }; unalias g; g");
 
     // Spread in alias position is a static error (would silently
     // fall through to external exec without the explicit check).
@@ -1502,14 +1567,20 @@ fn alias_ir_shape_round_trips() {
     has_error("unalias g; unalias", "malformed unalias");
 }
 
+/// `unalias` removes only a static `alias` binding: after it, a bare `greet`
+/// falls through to the external dispatcher.
+///
+/// The companion case — a `within [handlers:]`-installed frame survives an
+/// `unalias` that names it, since only an alias frame is
+/// `removable_by_unalias` — used to be visible statically too (the arm's own
+/// value type flowed through), but every arm decodes to `String` alike now
+/// (uniform A), so that half moves to run time:
+/// `eval_fuzz.rs::unalias_does_not_remove_a_within_installed_handler`.
 #[test]
 fn unalias_removes_only_static_alias_binding() {
     has_error(
-        r"alias greet { |args| echo 41; return 41 }; unalias greet; let r = !{greet}; return $[$r + 0]",
+        r"alias greet { |args| echo 41 }; unalias greet; let r = !{greet}; return $[$r + 0]",
         "couldn't match",
-    );
-    ok(
-        r"within [handlers: [greet: { |args| echo 41; return 41 }]] { unalias greet; let r = !{greet}; return $[$r + 1] }",
     );
 }
 
@@ -2574,9 +2645,17 @@ fn a_spread_of_unrenderable_elements_is_left_to_the_run() {
 fn an_in_shell_argv_refuses_nothing() {
     ok("echo [a: 1]");
     ok("let f = { |x| return $x }; echo $f [1, 2] !{str 3}");
-    ok(r"let f = { |x| return $x }; ^echo $f");
-    ok(r"alias mycmd { |args| ^echo ...$args }; mycmd [a: 1]");
-    ok(r"within [handlers: [mycmd: { |args| ^echo ...$args }]] { mycmd [a: 1] }");
+    ok(r"alias mycmd { |args| echo ...$args }; mycmd [a: 1]");
+    ok(r"within [handlers: [mycmd: { |args| echo ...$args }]] { mycmd [a: 1] }");
+}
+
+/// `^echo` is the path-head arm too (ruling 2): its argv crosses the same
+/// exec boundary a `PATH` binary's does, so a block argument is refused there
+/// exactly as `/bin/echo $f` already is — no in-shell exemption survives `^`.
+/// Twin of `argv_convention.rs::caret_echo_is_the_path_binary_and_refuses_a_lambda`.
+#[test]
+fn caret_echo_is_exec_gated_like_any_path_binary() {
+    has_error(r"let f = { |x| return $x }; ^echo $f", "cannot pass");
 }
 
 // ─── Row termination and duplicate-key semantics ──────────────────────────────
@@ -2824,7 +2903,7 @@ fn toplevel_rec_group_members_generalise_independently() {
 #[test]
 fn toplevel_alias_scheme_visible_until_unalias() {
     let errs = toplevel_errors(
-        "alias foo { |args| return 3 }\n\
+        "alias foo { |args| echo 3 }\n\
          let f = $foo\n\
          unalias foo\n\
          let g = $foo\n\

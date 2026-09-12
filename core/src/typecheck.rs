@@ -36,7 +36,8 @@ use crate::ir::{Comp, Phrase, Toplevel};
 /// `Shell::session_schemes`.
 ///
 /// A binding with no scheme came from an unchecked path — a `source`d file, a
-/// plugin — and infers at a fresh variable per use site.
+/// plugin — and is bound at one fresh monomorphic type variable: generalising
+/// it to `∀a. a` would let it stand in for any type at all, unsoundly.
 #[derive(Debug, Clone)]
 pub struct SessionSchemes {
     pub(crate) bindings: Vec<(String, Option<Scheme>)>,
@@ -94,9 +95,8 @@ fn seed_env(env: &mut TyEnv, schemes: SessionSchemes, u: &mut Unifier) {
         env.bind_handler(name, scheme, false);
     }
     for (name, scheme) in schemes.bindings {
-        if let Some(scheme) = scheme {
-            env.bind(name, scheme);
-        }
+        let scheme = scheme.unwrap_or_else(|| Scheme::mono(u.fresh_ty()));
+        env.bind(name, scheme);
     }
     for (name, scheme) in schemes.aliases {
         env.bind_handler(name, scheme, true);
@@ -208,6 +208,40 @@ pub(crate) fn alias_arm_scheme(
         "alias-arm scheme must leave no variable free",
     );
     Ok(scheme)
+}
+
+/// The computed catch-all's route vet — `within [handler: $k]`, where the
+/// arm is a runtime value with no literal thunk for the checker to have
+/// already pinned via [`infer::Inferencer::infer_catch_all`]. Closed against
+/// its own unifier, the way [`alias_arm_scheme`] is; no scheme persists, a
+/// catch-all frame not outliving its run.
+///
+/// # Errors
+/// The body's route disagrees with `Bytes`, or it still returns a value.
+pub(crate) fn catch_all_route_ok(body: &Comp, schemes: SessionSchemes) -> Result<(), PinFailure> {
+    let mut ctx = InferCtx::new();
+    let mut env = TyEnv::new();
+    seed_env(&mut env, schemes, &mut ctx.unifier);
+    let mut inferencer = infer::Inferencer {
+        ctx: &mut ctx,
+        env: &mut env,
+    };
+    let cty = inferencer.infer_catch_all(body);
+    let arm_body = inferencer.alias_arm_body(&cty);
+    let (value, route) = inferencer.extract_return(&arm_body);
+    inferencer
+        .ctx
+        .unifier
+        .unify_route(route, PayloadRoute::Bytes)
+        .map_err(PinFailure::Route)?;
+    if matches!(inferencer.ctx.unifier.resolve_route(route), PayloadRoute::Bytes)
+        && inferencer.ctx.unifier.unify_ty(&value, &Ty::Unit).is_err()
+    {
+        return Err(PinFailure::ByteHeadReturnsValue(
+            inferencer.ctx.unifier.apply_ty(&value),
+        ));
+    }
+    Ok(())
 }
 
 /// The scheme for a value binding (`Shell::bind_value`, `Shell::register_hook`),

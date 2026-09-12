@@ -271,12 +271,12 @@ Should you wish for a service that runs *after* the session is over, use `detach
 
     within [dir: #'src'#] { grep-files ##'#TODO'## }
     let h = defer { within [env: [LOG_LEVEL: #'debug'#]] { convert-all } }
-    within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| #'offline stub'# }]] { fetch-all }
-    let all_blocked = { |name args| echo "blocked: $name ...$args" }
-    within [handler: $all_blocked ] { run-all }
-    within [handlers: [ curl: { |args| echo "network blocked" } ] ] { !$job }
+    within [ env : [ API_KEY : #''# ], handlers: [curl: { |args| echo #'offline stub'# }]] { fetch-all }
+    let all_stubbed = { |name args| echo "stubbed: $name ...$args" }
+    within [handler: $all_stubbed ] { run-all }
+    within [handlers: [ curl: { |args| echo "stubbed" } ] ] { !$job }
 
-A per-command `handlers:` entry is a one-arg function receiving argvs. The catch-all `handler:` is a two-arg function that intercepts EVERY external command.
+A per-command `handlers:` entry is a one-arg function receiving argvs. The catch-all `handler:` is a two-arg function that intercepts EVERY external command. A handler stands in for a bare command name and writes what the command would write; `^name` runs the binary regardless. A handler is a stub, not a sandbox.
 
 Use `within` instead of `cd`. Paths in results are relative to the `within` directory, so consume them under the same `within`. `env:` values must be scalars. 
 

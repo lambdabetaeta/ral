@@ -147,8 +147,9 @@ for each of ral's two existing mechanisms**
   ([[internals/handler-dispatch|handler-dispatch]]).
 
 Interception is therefore lexical shadowing rather than admission: a binding
-under a native's name shadows it, a handler under any name installs, and
-`^name` — which skips the env — reaches the handler
+under a native's name shadows it, a handler under any name installs and
+intercepts at the bare head, and `^name` — like a path head — skips both and
+reaches the external directly
 ([[design/name-resolution|resolution]]).
 
 See also [[design/syscalls-are-effects|syscalls-are-effects]] (builtins are the pure fragment — not every kernel call is an effect),

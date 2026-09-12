@@ -13,7 +13,10 @@ formal catalog to `docs/SPEC.md` §14.
 This is a taxonomy of *placement*, not the dispatch order — a head resolves
 env → handlers → external, and which of those three a layer below is reached
 through is which half of the manifest holds it
-([[map/core/runtime|runtime]]). From most reserved to most peripheral:
+([[map/core/runtime|runtime]]). `^name` and a path head (`./tool`,
+`/usr/bin/tool`) are not a fourth layer: both skip the env and the handler
+stack alike and land on the external tier directly, whatever else installs
+under that spelling. From most reserved to most peripheral:
 
 - **Control operators** — `within`, `grant`, `try`, `guard`, `audit` (with the
   syntactic `if` / `case` / `?`). Grammar arms carried as dedicated IR nodes, not

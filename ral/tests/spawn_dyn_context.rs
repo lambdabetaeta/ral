@@ -72,19 +72,19 @@ fn spawn_inherits_within_dir() {
 }
 
 // A named handler must fire inside `par`-spawned concurrent blocks.
-// The arm preserves `mycmd`'s external byte-output mode (it `echo`s) and
-// surfaces its result as a par output value, since par's workers buffer
-// stdout independently and the test checks the collected return values.
+// `mycmd`'s arm is byte-routed (uniform A), and `par`'s own callback must be
+// value-routed (it collects return values, not captured stdout), so the
+// lambda captures `mycmd`'s decoded output and returns that.
 #[test]
 fn par_inherits_within_handlers() {
     let out = run(
         "ral_spawn_dyn",
-        r#"
-        within [handlers: [mycmd: { |args| echo handled; return "handled" }]] {
-            let res = par { |x| mycmd $x } [a, b] 0
+        r"
+        within [handlers: [mycmd: { |args| echo handled }]] {
+            let res = par { |x| let r = mycmd $x; return $r } [a, b] 0
             echo ...$res
         }
-    "#,
+    ",
     );
     assert_eq!(out.status, 0, "stderr: {}", out.stderr);
     assert!(

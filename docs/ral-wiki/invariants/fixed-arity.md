@@ -58,11 +58,12 @@ diagnostic); under-application is nobody's until the value is dropped.
 
 **That split is the interception rule too.** A table entry is a native seeded
 into the base env scope, which resolution reaches before the handler stack, so
-no installed handler intercepts it under its bare name — only `^name`, which
-skips the env by definition, reaches one. A base-frame row *is* a frame at the
-bottom of that stack, so a user frame stacks above it and every bare call
-arrives there first. Handleability is therefore nothing an entry states about
-itself; it is which half of the manifest holds it.
+no installed handler intercepts it under its bare name, and none reaches it at
+all — `^name` resolves to the external command, skipping the handler stack
+entirely. A base-frame row *is* a frame at the bottom of that stack, so a user
+frame stacks above it and every bare call arrives there first. Handleability is
+therefore nothing an entry states about itself; it is which half of the
+manifest holds it.
 
 **A spread is the notation of an argv.** `...$xs` splices a list into an argv,
 so it may be written only where an argv exists: a command, an external, a base

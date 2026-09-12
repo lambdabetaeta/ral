@@ -314,9 +314,11 @@ impl fmt::Display for Where {
 /// first is what runs, the rest are shadowed.  That tail is the whole answer
 /// `which` cannot give — a PATH binary this name will never reach.
 ///
-/// Probes handlers before the manifest — the reverse of
-/// `command_call::resolve`'s env-first order — so a handler under a native's
-/// name reports as `handler` though only `^name` reaches it.
+/// Bare-head order (`command_call::resolve`'s): local, prelude, the value
+/// half of the manifest (a native — the env hit), then the handler stack, then
+/// `PATH`.  A native's own arm is unreachable from any bare head or `^` (A-1′),
+/// so it reports as `builtin`, and an arm stacked over it reports separately,
+/// under `shadows:`.
 fn locate_all(name: &str, scope: &Env, shell: &Shell) -> Vec<Where> {
     let mut sites = Vec::new();
     if scope.session_binding(name).is_some() {
@@ -325,9 +327,12 @@ fn locate_all(name: &str, scope: &Env, shell: &Shell) -> Vec<Where> {
     if scope.prelude_binding(name).is_some() {
         sites.push(Where::Prelude);
     }
-    // An alias is a handler frame too, so it must be named before the stack
-    // answers generically; a base frame is one the stack carries below every
-    // run frame, which is what tells it from a handler stacked over it.
+    if shell.session.builtins.value(name).is_some() {
+        sites.push(Where::Builtin);
+    }
+    // An alias is a handler frame too, so it must be named before a bare base
+    // frame answers generically; the stack's winner is `BaseFrame` only when
+    // nothing shadows it, which is what tells it from an arm stacked over one.
     let stacked = if shell.has_alias(name) {
         Some(Where::Alias)
     } else {
@@ -336,11 +341,12 @@ fn locate_all(name: &str, scope: &Env, shell: &Shell) -> Vec<Where> {
             HandlerLookup::Base(..) => Where::BaseFrame,
         })
     };
-    // A base frame is a manifest row seen through the stack, so naming it off
-    // the manifest as well would report one frame as two.
     let seen_as_frame = matches!(stacked, Some(Where::BaseFrame));
     sites.extend(stacked);
-    if !seen_as_frame && shell.lookup_builtin(name).is_some() {
+    // An arm stacked over a base frame shadows it in the stack's own lookup,
+    // which returns only the winner — so the frame underneath is named here,
+    // by its own argv-half manifest row, independently of the stack's answer.
+    if !seen_as_frame && shell.session.builtins.base_frames().any(|e| e.name == name) {
         sites.push(Where::Builtin);
     }
     if let Some(path) = shell.locate_command(name) {

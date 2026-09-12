@@ -268,13 +268,17 @@ fn cd_refuses_the_empty_path_and_stays_put() {
 
 /// `cd` is a native, so the env answers its bare head before any handler
 /// frame: a `cd` handler installs, sits shadowed, and the directory really
-/// moves.  `^cd` skips the env and is where that handler answers.
+/// moves. `^cd` is the path-head arm too now (ruling 2) — a `PATH` lookup for
+/// a `cd` binary, platform-dependent and no longer this test's concern; the
+/// static half of that (an external's `String` capture, at `^cd` under this
+/// same arm) is pinned instead in
+/// `typecheck.rs::caret_cd_is_the_binary_even_under_an_arm_on_a_native_name`.
 #[test]
-fn a_cd_handler_is_shadowed_at_the_bare_head_and_answers_under_caret() {
+fn a_cd_handler_is_shadowed_at_the_bare_head() {
     let mut shell = fresh_shell();
     let tmp = std::env::temp_dir();
     let tmp_disp = display_no_trailing_sep(&tmp);
-    let handler = "[handlers: [cd: { |args| return intercepted }]]";
+    let handler = "[handlers: [cd: { |args| echo intercepted }]]";
 
     let moved = top_level(
         &mut shell,
@@ -289,15 +293,6 @@ fn a_cd_handler_is_shadowed_at_the_bare_head_and_answers_under_caret() {
     assert!(
         got == tmp_disp || got == canon,
         "the shadowed handler must not divert the move: expected {tmp_disp:?} or {canon:?}, got {got:?}"
-    );
-
-    assert_eq!(
-        top_level(
-            &mut shell,
-            &format!("within {handler} {{ ^cd '{tmp_disp}' }}")
-        )
-        .expect("`^cd` reaches the handler frame"),
-        Value::String("intercepted".into()),
     );
 }
 

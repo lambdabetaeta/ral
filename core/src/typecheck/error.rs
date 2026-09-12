@@ -58,6 +58,9 @@ pub enum Reason {
     ReturnShape,
     /// An arm's payload route against that of the head it reinterprets.
     HandlerRoutePin,
+    /// The catch-all `handler:` body against `F[Bytes] Unit` — it reinterprets
+    /// every external name in its extent, each already byte-routed.
+    CatchAllRoutePin,
     IfCond,
     IfBranches,
     /// The `if` branches' values, where both branches already route `Value`.

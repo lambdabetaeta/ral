@@ -1494,19 +1494,19 @@ mod tests {
 
     // ── `service`'s mandatory description ────────────────────────────────
 
-    /// Run `src` as one capturing top-level run on a shell the caller dressed.
-    /// Panics on a static failure — every source here is expected to compile.
-    fn run_source(shell: &mut Shell, src: &str) -> Settled<Value> {
+    /// The one `RunRequest` a capturing top-level test run needs, dressed
+    /// only by its source and worker cap.
+    fn request(src: &str, worker_cap: Option<usize>) -> crate::RunRequest<'_> {
         use crate::protocol::{Program, Run};
-        use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
-        let req = RunRequest {
+        use crate::{RequestedTerminalAccess, RunIo, RunRequest, RunStdin};
+        RunRequest {
             run: Run {
                 program: Program::Source(src.into()),
                 script_name: "<test>".into(),
                 caps: GrantStack::root(),
                 wall: None,
                 deferred_lease: None,
-                worker_cap: None,
+                worker_cap,
                 io: RunIo::Capture,
                 terminal: RequestedTerminalAccess::Denied,
                 stdin: RunStdin::Empty,
@@ -1517,39 +1517,37 @@ mod tests {
             desk: None,
             fork: None,
             lifecycle: Box::new(()),
-        };
-        match shell.run(req) {
-            RunReport::Ran { ending, .. } => ending.into_result(),
+        }
+    }
+
+    /// [`run_source`], also returning the bytes the run wrote to its captured
+    /// stdout. Panics on a static failure — every source here is expected to
+    /// compile.
+    fn run_captured(shell: &mut Shell, src: &str) -> (Settled<Value>, Vec<u8>) {
+        use crate::RunReport;
+        match shell.run(request(src, None)) {
+            RunReport::Ran {
+                ending, captured, ..
+            } => (
+                ending.into_result(),
+                captured.map(|c| c.stdout).unwrap_or_default(),
+            ),
             RunReport::Static { .. } => {
                 panic!("well-formed source must run, not fail statically: {src:?}")
             }
         }
     }
 
+    /// Run `src` as one capturing top-level run on a shell the caller dressed.
+    /// Panics on a static failure — every source here is expected to compile.
+    fn run_source(shell: &mut Shell, src: &str) -> Settled<Value> {
+        run_captured(shell, src).0
+    }
+
     /// [`run_source`], with a `worker_cap` the source runs under.
     fn run_source_capped(shell: &mut Shell, src: &str, worker_cap: usize) -> Settled<Value> {
-        use crate::protocol::{Program, Run};
-        use crate::{RequestedTerminalAccess, RunIo, RunReport, RunRequest, RunStdin};
-        let req = RunRequest {
-            run: Run {
-                program: Program::Source(src.into()),
-                script_name: "<test>".into(),
-                caps: GrantStack::root(),
-                wall: None,
-                deferred_lease: None,
-                worker_cap: Some(worker_cap),
-                io: RunIo::Capture,
-                terminal: RequestedTerminalAccess::Denied,
-                stdin: RunStdin::Empty,
-                trail: None,
-            },
-            surface: None,
-            deferred: None,
-            desk: None,
-            fork: None,
-            lifecycle: Box::new(()),
-        };
-        match shell.run(req) {
+        use crate::RunReport;
+        match shell.run(request(src, Some(worker_cap))) {
             RunReport::Ran { ending, .. } => ending.into_result(),
             RunReport::Static { .. } => {
                 panic!("well-formed source must run, not fail statically: {src:?}")
@@ -1703,32 +1701,37 @@ mod tests {
     }
 
     /// A head a handler intercepts runs that handler, per name and by catch-all
-    /// alike, and its value is the `detach`'s.  The zero budget adds that an
-    /// intercepted call spends no birth.
+    /// alike, birthing nothing: the zero budget is the witness.  The arm is a
+    /// command, so what reached it is read off what it wrote — the argv after
+    /// the head, and the head's own name for a catch-all — and its value is
+    /// `Unit`, which is what an intercepted `detach` reports.
     #[cfg(unix)]
     #[test]
     fn detach_runs_a_handler_that_intercepts_its_head() {
         let mut shell = detach_test_shell(0);
-        let by_name = run_source(
+        let (by_name, out) = run_captured(
             &mut shell,
-            r#"within [handlers: [my-server: { |args| $args }]] { detach "a server" my-server up now }"#,
-        )
-        .expect("a per-name handler runs in place of the birth");
+            r#"within [handlers: [my-server: { |args| echo ...$args }]] { detach "a server" my-server up now }"#,
+        );
         assert_eq!(
-            by_name,
-            Value::list(vec![
-                Value::String("up".into()),
-                Value::String("now".into())
-            ]),
+            by_name.expect("a per-name handler runs in place of the birth"),
+            Value::Unit
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "up now\n",
             "the handler receives the argv after the head, as an ordinary call would"
         );
 
-        let catch_all = run_source(
+        let (catch_all, out) = run_captured(
             &mut shell,
-            r#"within [handler: { |n _a| $n }] { detach "a server" my-server }"#,
-        )
-        .expect("a catch-all handler intercepts the head too");
-        assert_eq!(catch_all, Value::String("my-server".into()));
+            r#"within [handler: { |n _a| echo $n }] { detach "a server" my-server }"#,
+        );
+        assert_eq!(
+            catch_all.expect("a catch-all handler intercepts the head too"),
+            Value::Unit
+        );
+        assert_eq!(String::from_utf8_lossy(&out), "my-server\n");
     }
 
     /// A base frame's name runs the frame in place of a birth, so it spends no
